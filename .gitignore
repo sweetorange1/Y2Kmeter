@@ -1,0 +1,61 @@
+# Build directories
+/cmake-build-*/
+/out/
+/dist/
+
+# IDE configurations
+/.vs/
+/.idea/
+
+# Temporary files
+/_filterstate.*
+/color.txt
+
+# Test directories
+/pngtest/
+
+# Large binary files
+/grid_plugin.zip
+
+# OS-specific files
+/desktop.ini
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# CMake build artifacts
+CMakeCache.txt
+cmake_install.cmake
+CMakeFiles/
+Makefile
+*.cmake
+
+# Compiled objects and libraries
+*.o
+*.a
+*.so
+*.dll
+*.lib
+*.exe
+
+# Debug and release builds
+Debug/
+Release/
+*.pdb
+*.idb
+
+# JUCE specific build artifacts
+JUCE/
+JUCEArtwork/
+
+# macOS specific
+.DS_Store
+
+# Windows specific
+Thumbs.db
+
+# Backup files
+*~
+*.bak
+*.backup

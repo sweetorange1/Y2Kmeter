@@ -1,0 +1,9 @@
+// Windows Application Icon resource for Y2Kmeter_Standalone
+//   - Linked separately into Y2Kmeter_Standalone target (Windows only),
+//     coexisting with JUCE-generated Y2Kmeter_resources.rc (VERSION_INFO).
+//   - Resource ID 1 is what Windows Explorer prefers for EXE file icon.
+//   - Icon path is relative to this .rc file location (assets/).
+//
+// Note: rc.exe accepts C-style comments.
+
+1 ICON "icon.ico"
