@@ -215,6 +215,15 @@ public:
                            const juce::Drawable* icon, const juce::Colour* textColour) override;
     juce::Font getPopupMenuFont() override;
 
+    // Popup 菜单条目理想尺寸：按实际文字宽度 + 左右内边距计算，避免
+    //   ComboBox 弹出的下拉菜单宽度只等于 ComboBox 本身宽度而把长文本
+    //   截断（例如 "Horizontal Bar(T)" / "Horizontal Bar(B)"）。
+    //   JUCE 内部会取 max(comboBoxWidth, maxItemIdealWidth)，所以只会把
+    //   popup 变宽，不会影响 ComboBox 自身或其他未使用该 item 的菜单。
+    void getIdealPopupMenuItemSize(const juce::String& text, bool isSeparator,
+                                   int standardMenuItemHeight,
+                                   int& idealWidth, int& idealHeight) override;
+
     // ---- ComboBox（Pink XP 像素风）----
     //   · 灰粉凸起框体 + 右侧"▼"箭头按钮凹陷（被按下时）
     //   · 文字颜色 / 字体与 Label 统一，和主题同色系

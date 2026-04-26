@@ -785,3 +785,435 @@ void DynamicsCrestModule::paintContent(juce::Graphics& g, juce::Rectangle<int> c
                plot.getX() + 2, plot.getBottom() - 12, 120, 12,
                juce::Justification::centredLeft, false);
 }
+
+// ==========================================================
+// VuMeterModule —— 指针式模拟 VU 表
+//
+// 视觉差异化：
+//   · 采用**半圆扇形表盘 + 双指针**的经典模拟 VU 表造型，区别于项目里
+//     其他基于方块柱 / 数字读数 / 示波器曲线的模块
+//   · 圆心位于表盘底部中点，扇形跨度约 140° (左下 -> 正上 -> 右下)
+//   · 左指针 (L) = pink400；右指针 (R) = pink700
+//   · 刻度：-20 / -10 / -7 / -5 / -3 / 0 / +3 VU
+//   · 右上角 LED 圆灯：dim / 绿 (有信号) / 红 (>= -3 dBFS 危险)
+//
+// 数据来源：AnalyserHub::Kind::Loudness → 复用已算好的 RMS L/R
+//         → 无任何新增的音频线程分析计算量
+// ==========================================================
+VuMeterModule::VuMeterModule(AnalyserHub& h)
+    : ModulePanel(ModuleType::vuMeter), hub(h)
+{
+    // 订阅 Oscilloscope —— 复用 Waveform 模块用的同一份 2048 样本原始波形，
+    //   这是目前后端最"快"的电平数据源（每 33ms 帧到达时里面就有最新样本）。
+    //   不订阅 Loudness：它的 rmsL/R 只在 400ms 块边界刷新一次，滞后严重。
+    //   → 后端音频线程零新增计算。
+    hub.retain(AnalyserHub::Kind::Oscilloscope);
+    hub.addFrameListener(this);
+
+    setMinSize(96, 80);
+    setDefaultSize(320, 224);
+    setTitleText("VU Meter");
+
+    // 启动 60Hz 自有 Timer 做补帧插值。按真实 dt 把 displayed 连续推进到 target，
+    // 视觉上是丝滑扫动。
+    lastTickMs = juce::Time::getMillisecondCounterHiRes();
+    startTimerHz(60);
+}
+
+VuMeterModule::~VuMeterModule()
+{
+    stopTimer();
+    hub.removeFrameListener(this);
+    hub.release(AnalyserHub::Kind::Oscilloscope);
+}
+
+void VuMeterModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
+{
+    if (! frame.has (AnalyserHub::Kind::Oscilloscope)) return;
+
+    // 从 oscL/R 尾部（即最新的一段样本）取 ~20ms 窗口算瞬时 RMS
+    //   · 波形缓冲是 2048 样本、"时间从旧到新"，末尾就是最近的样本
+    //   · 采样率通过 AudioProcessor 拿不到最方便的引用，这里用启发式估计：
+    //     典型 44.1/48 kHz → 20ms ≈ 880/960 样本；我们取 960 作为上限，
+    //     若实际 sr 偏低（比如 44.1k）窗口略超 20ms 也无碍。
+    const int bufLen = (int) frame.oscL.size(); // = 2048
+    if (bufLen <= 0) return;
+
+    constexpr int windowSamples = 960; // ≈ 20ms @ 48kHz，≈ 21.8ms @ 44.1kHz
+    const int n = juce::jmin(bufLen, windowSamples);
+    const int startIdx = bufLen - n; // 从末尾向前 n 个样本
+
+    double sumSqL = 0.0;
+    double sumSqR = 0.0;
+    for (int i = startIdx; i < bufLen; ++i)
+    {
+        const float sL = frame.oscL[(size_t) i];
+        const float sR = frame.oscR[(size_t) i];
+        sumSqL += (double) sL * (double) sL;
+        sumSqR += (double) sR * (double) sR;
+    }
+    const double meanSqL = sumSqL / (double) n;
+    const double meanSqR = sumSqR / (double) n;
+
+    // 线性 RMS → dBFS；低于门限（接近数字底噪）直接报 -144 让指针回到左端
+    auto msToDb = [](double meanSq) -> float
+    {
+        if (meanSq <= 1.0e-10) return -144.0f;
+        return (float)(10.0 * std::log10(meanSq));
+    };
+    targetL = msToDb(meanSqL);
+    targetR = msToDb(meanSqR);
+}
+
+void VuMeterModule::timerCallback()
+{
+    // 按真实 dt（毫秒）推进 —— 不假设 60Hz 准确
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    double dtMs = nowMs - lastTickMs;
+    lastTickMs  = nowMs;
+    if (dtMs < 0.0)   dtMs = 16.0;
+    if (dtMs > 100.0) dtMs = 100.0;
+    const float dt = (float) dtMs;
+
+    // 非对称弹道：上升 τ=tauRiseMs（抓瞬态），下降 τ=tauFallMs（模拟 VU 回落）。
+    //   · 连续瞬态情形：每个瞬态都通过上升项立刻把指针抬到新高，之间的回落
+    //     按 fall 时间常数执行 —— 指针不会被锁死在顶端，会"踩着节拍"往上
+    //     走，节拍停的瞬间也会继续按 fall 缓慢下行。
+    //   · 静音（target -> -144）时：由下降项主导，指针平缓归位。
+    const float aUp   = 1.0f - std::exp(-dt / tauRiseMs);
+    const float aDown = 1.0f - std::exp(-dt / tauFallMs);
+
+    auto smoothOne = [&](float& disp, float tgt)
+    {
+        if (! std::isfinite(disp)) disp = -144.0f;
+        if (! std::isfinite(tgt))  tgt  = -144.0f;
+        const float a = (tgt > disp) ? aUp : aDown;
+        disp += a * (tgt - disp);
+    };
+    smoothOne(displayedL, targetL);
+    smoothOne(displayedR, targetR);
+
+    // LED 跟随（基于 displayed 的单声道合成），非对称：上升立即跟、下降快速衰减
+    const float monoNow = currentMonoDbfs();
+    if (monoNow > ledLevelDb)
+    {
+        ledLevelDb = monoNow;
+    }
+    else
+    {
+        constexpr float tauLedMs = 150.0f; // 略快于指针回落
+        const float aLed = 1.0f - std::exp(-dt / tauLedMs);
+        ledLevelDb += aLed * (monoNow - ledLevelDb);
+    }
+
+    // 脉动相位（~0.9 秒一圈）
+    constexpr float omegaRadPerMs = juce::MathConstants<float>::twoPi / 900.0f;
+    pulsePhase += omegaRadPerMs * dt;
+    if (pulsePhase > juce::MathConstants<float>::twoPi)
+        pulsePhase -= juce::MathConstants<float>::twoPi;
+
+    repaint();
+}
+
+float VuMeterModule::currentMonoDbfs() const noexcept
+{
+    // 把 displayed L/R dBFS 转线性功率、平均、再转 dBFS
+    //   等价于 10*log10((10^(L/10) + 10^(R/10)) / 2)
+    auto dbToPower = [](float db) -> float
+    {
+        if (db <= -143.0f || ! std::isfinite(db)) return 0.0f;
+        return std::pow(10.0f, db * 0.1f);
+    };
+    const float pL = dbToPower(displayedL);
+    const float pR = dbToPower(displayedR);
+    const float pAvg = (pL + pR) * 0.5f;
+    return (pAvg > 1.0e-14f) ? 10.0f * std::log10(pAvg) : -144.0f;
+}
+
+float VuMeterModule::vuToAngle(float valueDb) const noexcept
+{
+    // 指针扫过 0°~180° 的上半圆（水平左 → 水平右）
+    const float leftRad  = -juce::MathConstants<float>::halfPi;   // -90°
+    const float rightRad = +juce::MathConstants<float>::halfPi;   // +90°
+
+    // dBFS 线性映射到 [0,1] —— 表盘上的 dB 刻度是等距线性的，符合
+    //   "-60 / -40 / -20 / -6 / 0" 这些整数 dB 在表盘上的常规感知。
+    const float t = juce::jlimit(0.0f, 1.0f,
+                                 juce::jmap(valueDb, minDisplayDb, maxDisplayDb, 0.0f, 1.0f));
+    return juce::jmap(t, 0.0f, 1.0f, leftRad, rightRad);
+}
+
+void VuMeterModule::drawDial(juce::Graphics& g,
+                             juce::Rectangle<int> dialArea,
+                             juce::Point<float>&  outPivot,
+                             float&               outRadius) const
+{
+    // 注意：sunken 卡片背景（pink50）已由 paintContent 在外层统一绘制，
+    //   这里不再重复 drawSunken，避免出现双层凹陷边框。
+    //   dialArea 即 sunken 卡片的整体区域，我们只需从中留出一点边距
+    //   供圆弧/刻度/文字使用即可。
+    auto inner = dialArea.reduced(10);
+    if (inner.getWidth() < 20 || inner.getHeight() < 20) return;
+
+    // 圆心 = 内框底边中点（半圆 0°-180° 以底边水平为直径）
+    //   · 指针从水平左(-90°) 扫到水平右(+90°)，所以圆心必须在底边上
+    //   · cy 稍微上移 2px，给底部的圆心轴 + 描边留一点边距
+    const float cx = (float) inner.getCentreX();
+    const float cy = (float) inner.getBottom() - 2.0f;
+
+    // 半径约束：
+    //   · 横向 —— 半圆直径 = 2R，所以 R <= width/2
+    //   · 纵向 —— 半圆高度 = R，所以 R <= height
+    //   再各留 4px 呼吸空间防止贴到 drawSunken 内沿
+    const float R = juce::jmin((float) inner.getWidth()  * 0.5f - 4.0f,
+                                (float) inner.getHeight()        - 4.0f);
+    if (R < 10.0f) return;
+
+    outPivot  = { cx, cy };
+    outRadius = R;
+
+    // 表盘深色前景统一用主题 ink（在浅粉底上有良好对比度）
+    const juce::Colour inkCol = PinkXP::ink;
+
+    // ---- 弧形主刻度轨（0°~180° 上半圆） ----
+    juce::Path arc;
+    const float leftRad  = -juce::MathConstants<float>::halfPi;
+    const float rightRad = +juce::MathConstants<float>::halfPi;
+    // JUCE addCentredArc 的角度 0 = 12 点方向、顺时针为正
+    arc.addCentredArc(cx, cy, R, R, 0.0f, leftRad, rightRad, true);
+    g.setColour(inkCol.withAlpha(0.85f));
+    g.strokePath(arc, juce::PathStrokeType(1.8f));
+
+    // ---- 内弧（红色警戒段：warnDbfs 到 0 dBFS） ----
+    juce::Path arcRed;
+    const float redStart = vuToAngle(warnDbfs);
+    arcRed.addCentredArc(cx, cy, R, R, 0.0f, redStart, rightRad, true);
+    g.setColour(juce::Colour(0xffd21f3a).withAlpha(0.9f));
+    g.strokePath(arcRed, juce::PathStrokeType(3.0f));
+
+    // ---- 刻度与数字（dBFS，-25 .. +3 均匀等距） ----
+    //   线性映射（vuToAngle 用 jmap），所以每个整数 dB 在表盘上间隔均等。
+    //   策略：-25 .. +3 共 28 dB
+    //     · 每 1 dB 画一个微刻度（短刻度）
+    //     · 每 5 dB + 关键整数位（-3/0/+3）画长刻度并带数字标签
+    struct Tick { float db; const char* label; bool major; };
+    static const Tick ticks[] = {
+        { -25.0f, "-25", true  },
+        { -24.0f, nullptr,false},
+        { -23.0f, nullptr,false},
+        { -22.0f, nullptr,false},
+        { -21.0f, nullptr,false},
+        { -20.0f, "-20", true  },
+        { -19.0f, nullptr,false},
+        { -18.0f, nullptr,false},
+        { -17.0f, nullptr,false},
+        { -16.0f, nullptr,false},
+        { -15.0f, "-15", true  },
+        { -14.0f, nullptr,false},
+        { -13.0f, nullptr,false},
+        { -12.0f, nullptr,false},
+        { -11.0f, nullptr,false},
+        { -10.0f, "-10", true  },
+        {  -9.0f, nullptr,false},
+        {  -8.0f, nullptr,false},
+        {  -7.0f, nullptr,false},
+        {  -6.0f, nullptr,false},
+        {  -5.0f,  "-5", true  },
+        {  -4.0f, nullptr,false},
+        {  -3.0f,  "-3", true  },
+        {  -2.0f, nullptr,false},
+        {  -1.0f, nullptr,false},
+        {   0.0f,   "0", true  },
+        {  +1.0f, nullptr,false},
+        {  +2.0f, nullptr,false},
+        {  +3.0f,  "+3", true  },
+    };
+
+    g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::bold));
+    for (const auto& t : ticks)
+    {
+        const float ang = vuToAngle(t.db);
+        const float sinA = std::sin(ang);
+        const float cosA = std::cos(ang);
+        // 刻度线从半径 R 向内延伸 (长刻度 7px，短刻度 4px)
+        const float tickLen = t.major ? 7.0f : 4.0f;
+        const float x1 = cx + sinA * R;
+        const float y1 = cy - cosA * R;
+        const float x2 = cx + sinA * (R - tickLen);
+        const float y2 = cy - cosA * (R - tickLen);
+
+        // 红色警戒段：达到 warnDbfs 开始变红
+        const bool red = t.db >= warnDbfs;
+        g.setColour(red ? juce::Colour(0xffb61325) : inkCol);
+        g.drawLine(x1, y1, x2, y2, t.major ? 1.8f : 1.2f);
+
+        // 数字标签 (贴在刻度外侧内圈 R-14)
+        if (t.label != nullptr)
+        {
+            const float tx = cx + sinA * (R - 16.0f);
+            const float ty = cy - cosA * (R - 16.0f);
+            juce::Rectangle<float> labRect (tx - 12.0f, ty - 6.0f, 24.0f, 12.0f);
+            g.setColour(red ? juce::Colour(0xffb61325) : inkCol);
+            g.drawText(t.label, labRect, juce::Justification::centred, false);
+        }
+    }
+
+    // ---- 表盘面文字 "dBFS" ----
+    {
+        g.setColour(inkCol.withAlpha(0.75f));
+        g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
+        // 圆心在底边之上一点，"dBFS" 放在圆心偏上
+        const float ly = cy - R * 0.42f;
+        g.drawText("dBFS", juce::Rectangle<float>(cx - 30.0f, ly - 8.0f, 60.0f, 16.0f),
+                   juce::Justification::centred, false);
+    }
+
+    // ---- 圆心轴 (主题色小凸起 + ink 描边) ----
+    g.setColour(PinkXP::pink300);
+    g.fillEllipse(cx - 5.0f, cy - 5.0f, 10.0f, 10.0f);
+    g.setColour(inkCol);
+    g.drawEllipse(cx - 5.0f, cy - 5.0f, 10.0f, 10.0f, 1.2f);
+}
+
+void VuMeterModule::drawNeedle(juce::Graphics& g,
+                               juce::Point<float> pivot,
+                               float              radius,
+                               float              vuDb,
+                               juce::Colour       colour,
+                               float              thickness) const
+{
+    const float ang = vuToAngle(vuDb);
+    const float sinA = std::sin(ang);
+    const float cosA = std::cos(ang);
+
+    // 指针尖端：稍短于表盘弧线 (R - 12)，避免盖住刻度数字
+    const float tipR = radius - 10.0f;
+    // 指针根部：圆心后方伸出一点 (配重效果)
+    const float tailR = 8.0f;
+
+    const float x1 = pivot.x - sinA * tailR;
+    const float y1 = pivot.y + cosA * tailR;
+    const float x2 = pivot.x + sinA * tipR;
+    const float y2 = pivot.y - cosA * tipR;
+
+    // 阴影 (在指针下方偏移 1.5 px 画一根半透明深色)
+    g.setColour(juce::Colour(0xff2a1a08).withAlpha(0.35f));
+    g.drawLine(x1 + 1.0f, y1 + 1.5f, x2 + 1.0f, y2 + 1.5f, thickness);
+
+    // 指针本体
+    g.setColour(colour);
+    g.drawLine(x1, y1, x2, y2, thickness);
+
+    // 指针尖端小圆点
+    g.setColour(colour.darker(0.2f));
+    g.fillEllipse(x2 - 1.5f, y2 - 1.5f, 3.0f, 3.0f);
+}
+
+void VuMeterModule::drawLed(juce::Graphics& g, juce::Rectangle<int> ledArea) const
+{
+    if (ledArea.getWidth() < 6 || ledArea.getHeight() < 6) return;
+
+    const int sz = juce::jmin(ledArea.getWidth(), ledArea.getHeight());
+    auto square = juce::Rectangle<int>(ledArea.getRight() - sz,
+                                        ledArea.getY(),
+                                        sz, sz).reduced(2);
+
+    const float cx = (float) square.getCentreX();
+    const float cy = (float) square.getCentreY();
+    const float r  = (float) square.getWidth() * 0.5f - 1.0f;
+
+    // 状态判定（使用 onFrame 里维护的实时 ledLevelDb — peak-follower，
+    //   基于 currentMonoDbfs，和指针视觉同步）
+    //   · ledLevelDb < -60 dBFS → 视为无信号（暗灭，不发光）
+    //   · ledLevelDb >= warnDbfs → 危险（红灯 + 快速脉动），和表盘红色段一致
+    //   · 否则                    → 绿灯（慢速呼吸）
+    const bool hasSignal = ledLevelDb > minDisplayDb;
+    const bool danger    = ledLevelDb >= warnDbfs;
+
+    juce::Colour coreCol, glowCol;
+    float pulse = 0.5f;
+
+    if (! hasSignal)
+    {
+        // 无信号：不亮 —— 用一个非常暗的灰色，且无晕光
+        coreCol = juce::Colour(0xff2a2a2a);
+        glowCol = juce::Colour(0x00000000);
+    }
+    else if (danger)
+    {
+        // 危险：红色 + 快速脉动 (每帧 2× 加速)
+        const float phaseFast = pulsePhase * 2.0f;
+        pulse = 0.55f + 0.45f * std::sin(phaseFast);
+        coreCol = juce::Colour(0xffff2040).interpolatedWith(juce::Colour(0xffffc0c8), 0.15f * pulse);
+        glowCol = juce::Colour(0xffff2040).withAlpha(0.45f + 0.45f * pulse);
+    }
+    else
+    {
+        // 正常：绿色 + 慢速呼吸
+        pulse = 0.6f + 0.4f * std::sin(pulsePhase);
+        coreCol = juce::Colour(0xff30d86a).interpolatedWith(juce::Colour(0xffc8ffd4), 0.15f * pulse);
+        glowCol = juce::Colour(0xff30d86a).withAlpha(0.35f + 0.45f * pulse);
+    }
+
+    // 不使用外围泛光 —— 仅画 LED 本体 + 高光 + 描边
+    juce::ignoreUnused(glowCol);
+
+    // LED 本体
+    g.setColour(coreCol);
+    g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+
+    // 高光（仅在有信号时显示，凸显球面立体感）
+    if (hasSignal)
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.55f));
+        g.fillEllipse(cx - r * 0.6f, cy - r * 0.75f,
+                      r * 0.6f,      r * 0.5f);
+    }
+
+    // 外圈金属边 (统一用主题 ink)
+    g.setColour(PinkXP::ink);
+    g.drawEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f, 1.2f);
+}
+
+void VuMeterModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
+{
+    // 外层面板背景：统一用主题 btnFace，保证和其它模块留白风格一致
+    g.setColour(PinkXP::btnFace);
+    g.fillRect(content);
+
+    // 参照 PhaseModule / PhaseCorrelation：只留很小的边距，直接把整块内容
+    //   下沉成一个 sunken 卡片（底色为当前主题浅色 pink50），不再在模块边框
+    //   上独占一条 LED band。这样模块外边框跟 Phase 模块一致的紧凑效果。
+    auto area = content.reduced(6);
+    if (area.getWidth() < 40 || area.getHeight() < 40) return;
+
+    PinkXP::drawSunken(g, area, PinkXP::pink50);
+
+    // 表盘区域 = sunken 卡片内部（再减去一点内描边余量，和 drawDial 保持一致）
+    auto dialArea = area;
+
+    // 画表盘 (获取圆心 + 半径)
+    juce::Point<float> pivot;
+    float radius = 0.0f;
+    drawDial(g, dialArea, pivot, radius);
+
+    if (radius > 10.0f)
+    {
+        // 指针和 LED 共用的"单声道总电平"（dBFS）
+        const float monoDb = currentMonoDbfs();
+
+        // 单一指针（总电平），主题粉色系 pink600，稍粗一点
+        drawNeedle(g, pivot, radius, monoDb, PinkXP::pink600, 2.2f);
+    }
+
+    // ---- LED 信号灯：放到表盘旁边（sunken 卡片内的右上角空白） ----
+    //   VU 表盘是 0°~180° 的上半圆，所以卡片的左上角和右上角天然是空白，
+    //   把 LED 塞在右上角可避免和指针/刻度重叠，也不再占用模块边框。
+    const int ledSz = juce::jlimit(10, 18,
+                                    juce::jmin(area.getWidth(), area.getHeight()) / 12);
+    // 相对 sunken 内沿再缩 6px，给 drawSunken 的阴影/内描边一点呼吸
+    auto ledArea = juce::Rectangle<int>(area.getRight() - ledSz - 6,
+                                         area.getY()      + 6,
+                                         ledSz, ledSz);
+    drawLed(g, ledArea);
+}

@@ -113,6 +113,8 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::dynamicsDr:        return "dynamics_dr";
         case ModuleType::dynamicsCrest:     return "dynamics_crest";
         case ModuleType::waveform:          return "waveform";
+        case ModuleType::vuMeter:           return "vu_meter";
+        case ModuleType::spectrogram:       return "spectrogram";
     }
     return "eq";
 }
@@ -138,6 +140,8 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "dynamics_dr",        ModuleType::dynamicsDr },
         { "dynamics_crest",     ModuleType::dynamicsCrest },
         { "waveform",           ModuleType::waveform },
+        { "vu_meter",           ModuleType::vuMeter },
+        { "spectrogram",        ModuleType::spectrogram },
     };
     for (auto& p : kv)
         if (s == p.k)
@@ -327,12 +331,12 @@ ModuleWorkspace::ModuleWorkspace()
     //   · 样式与音频源下拉完全一致：显式挂 PinkXP LookAndFeel，ComboBox 箭头 + 条目
     //     颜色跟随主题；nothing-selected 文本作为占位，选中后触发 onLayoutPresetChanged
     layoutPresetBox.clear (juce::dontSendNotification);
-    layoutPresetBox.setTextWhenNothingSelected ("Layout");
+    layoutPresetBox.setTextWhenNothingSelected ("preasent");
     layoutPresetBox.setTooltip ("Choose a layout preset");
-    layoutPresetBox.addItem ("Preset 1  Default",             (int) LayoutPreset::defaultGrid);
-    layoutPresetBox.addItem ("Preset 2  Horizontal Bar",      (int) LayoutPreset::horizontalFull);
-    layoutPresetBox.addItem ("Preset 3  Horizontal Bar (Bottom)", (int) LayoutPreset::horizontalBottom);
-    layoutPresetBox.addItem ("Preset 4  Tiled",               (int) LayoutPreset::tiled);
+    layoutPresetBox.addItem ("Default",             (int) LayoutPreset::defaultGrid);
+    layoutPresetBox.addItem ("Horizontal Bar(T)",      (int) LayoutPreset::horizontalFull);
+    layoutPresetBox.addItem ("Horizontal Bar(B)", (int) LayoutPreset::horizontalBottom);
+    layoutPresetBox.addItem ("Tiled",               (int) LayoutPreset::tiled);
     layoutPresetBox.setLookAndFeel (&getPinkXPLookAndFeel());
     layoutPresetBox.onChange = [this]()
     {
@@ -353,6 +357,67 @@ ModuleWorkspace::ModuleWorkspace()
         });
     };
     addAndMakeVisible (layoutPresetBox);
+
+    // 布局预设 Save/Load 按钮（紧邻 layoutPresetBox 左侧）
+    //   · 按钮样式跟随全局 LookAndFeel（与 gridBtn / fpsBtn 一致，像素化 TextButton）
+    //   · 点击 Save：弹 FileChooser 让用户选择"另存为"位置，默认后缀 .settings；
+    //               选定后通过 onSavePresetRequested 把 File 传给外层去复制。
+    //   · 点击 Load：弹 FileChooser 让用户挑选之前保存的 .settings 文件；选定后
+    //               通过 onLoadPresetRequested 把 File 传给外层去覆盖当前 settings
+    //               并触发重启。
+    //   · 用 std::shared_ptr<juce::FileChooser> 持有（launchAsync 要求 chooser 生命
+    //     周期覆盖到回调触发；lambda 捕获 shared_ptr 保证不析构）。
+    savePresetBtn.setButtonText ("Save");
+    savePresetBtn.setTooltip    ("Save current settings (layout + theme + window) as a preset file");
+    savePresetBtn.onClick = [this]()
+    {
+        auto chooser = std::make_shared<juce::FileChooser> (
+            "Save current settings as preset",
+            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                .getChildFile (juce::String (JucePlugin_Name) + ".settings"),
+            "*.settings");
+
+        const auto flags = juce::FileBrowserComponent::saveMode
+                         | juce::FileBrowserComponent::canSelectFiles
+                         | juce::FileBrowserComponent::warnAboutOverwriting;
+
+        juce::Component::SafePointer<ModuleWorkspace> safe (this);
+        chooser->launchAsync (flags, [safe, chooser](const juce::FileChooser& fc)
+        {
+            if (safe == nullptr) return;
+            auto result = fc.getResult();
+            if (result == juce::File{}) return;                 // 用户取消
+            if (result.getFileExtension().isEmpty())
+                result = result.withFileExtension ("settings");  // 补全后缀
+            if (safe->onSavePresetRequested)
+                safe->onSavePresetRequested (result);
+        });
+    };
+    addAndMakeVisible (savePresetBtn);
+
+    loadPresetBtn.setButtonText ("Load");
+    loadPresetBtn.setTooltip    ("Load a previously saved preset file (reloads the app)");
+    loadPresetBtn.onClick = [this]()
+    {
+        auto chooser = std::make_shared<juce::FileChooser> (
+            "Load preset",
+            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+            "*.settings");
+
+        const auto flags = juce::FileBrowserComponent::openMode
+                         | juce::FileBrowserComponent::canSelectFiles;
+
+        juce::Component::SafePointer<ModuleWorkspace> safe (this);
+        chooser->launchAsync (flags, [safe, chooser](const juce::FileChooser& fc)
+        {
+            if (safe == nullptr) return;
+            const auto result = fc.getResult();
+            if (result == juce::File{} || ! result.existsAsFile()) return;   // 用户取消/无效
+            if (safe->onLoadPresetRequested)
+                safe->onLoadPresetRequested (result);
+        });
+    };
+    addAndMakeVisible (loadPresetBtn);
 
     // 订阅主题变更：切换主题后 PinkXP::ink 已改变，但 Label 的 textColour
     //   是缓存值（JUCE Label 用存储的 Colour 绘制），必须显式刷新，否则
@@ -747,8 +812,11 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
     //   hover 某项，用 EQ 作为稳妥兜底（不影响菜单摆位计算）。
     const auto  prevSize     = getDefaultSizeForType (hoverPreviewActive ? hoverPreviewType
                                                                          : ModuleType::eq);
-    const int   prevW        = prevSize.x;
-    const int   prevH        = prevSize.y;
+    // 自动缩小：窗口过小时把预览框夹到 canvas 的实际尺寸，保持和真实插入
+    //   路径（showMenuAsync lambda 中）的"模块不越过下方控制区"逻辑一致，
+    //   用户看到的 ghost 与最终放下来的模块大小相符。
+    const int   prevW        = juce::jmin (prevSize.x, juce::jmax (1, canvas.getWidth()));
+    const int   prevH        = juce::jmin (prevSize.y, juce::jmax (1, canvas.getHeight()));
 
     juce::Rectangle<int> previewBoxLocal; // workspace 本地坐标系下的预览框
     bool previewOnRight = true;           // 预览框在鼠标的右下（true）或左下（false）
@@ -870,10 +938,19 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
         if (panel == nullptr) return;
 
         // 使用该模块自己声明的 default 大小
-        const int w = juce::jmax(panel->getMinWidth(),  panel->getDefaultWidth());
-        const int h = juce::jmax(panel->getMinHeight(), panel->getDefaultHeight());
+        int w = juce::jmax(panel->getMinWidth(),  panel->getDefaultWidth());
+        int h = juce::jmax(panel->getMinHeight(), panel->getDefaultHeight());
 
         auto canvas = getCanvasArea();
+
+        // 自动缩小：当窗口被用户调到很小、default 尺寸装不进 canvas 时，
+        //   把 w/h 夹到 canvas 的实际可用宽高，避免模块溢出 canvas 下边界
+        //   覆盖底部控制区（toolbar：Hide/Source/FPS/ThemeBar 等）。
+        //   · 下限仍由 minW/minH 保证，极端窄窗口下模块可能比 canvas 还小但
+        //     不会比模块自身最小尺寸小，这是我们能接受的视觉降级（总好过遮挡）。
+        w = juce::jmax (panel->getMinWidth(),  juce::jmin (w, canvas.getWidth()));
+        h = juce::jmax (panel->getMinHeight(), juce::jmin (h, canvas.getHeight()));
+
         int x = placePos.x;
         int y = placePos.y;
         x = juce::jlimit(canvas.getX(), juce::jmax(canvas.getX(), canvas.getRight()  - w), x);
@@ -1012,9 +1089,11 @@ void ModuleWorkspace::setAddMenuHoverPreview (bool active, ModuleType t)
     // 预览框的脏区 = 基于 hoverPreviewPos 的"当前/前一 hover 类型默认尺寸"矩形，
     //   稍加 expand 以防边框阴影被裁
     const auto sz = getDefaultSizeForType (hoverPreviewActive ? hoverPreviewType : prevType);
-    const int w = sz.x;
-    const int h = sz.y;
     auto canvas = getCanvasArea();
+    // 同 paintOverChildren / showAddMenu lambda 的"自动缩小"策略，
+    //   保证脏区矩形与真正的预览 / 插入尺寸一致，避免 hover 切换时残影。
+    const int w = juce::jmin (sz.x, juce::jmax (1, canvas.getWidth()));
+    const int h = juce::jmin (sz.y, juce::jmax (1, canvas.getHeight()));
     int x = hoverPreviewPos.x;
     int y = hoverPreviewPos.y;
     x = juce::jlimit (canvas.getX(), juce::jmax (canvas.getX(), canvas.getRight()  - w), x);
@@ -1514,9 +1593,12 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
 
     // 计算预览框位置 + 尺寸（落点已在 showAddMenu 中记录）
     const auto sz = getDefaultSizeForType (hoverPreviewType);
-    const int w = sz.x;
-    const int h = sz.y;
     auto canvas = getCanvasArea();
+    // 自动缩小：窗口过小装不下 default 时，把预览夹到 canvas 尺寸，
+    //   与 showMenuAsync 插入 lambda 中的"不越过下方控制区"逻辑保持一致，
+    //   用户看到的 ghost 与真实放下来的模块大小完全相符。
+    const int w = juce::jmin (sz.x, juce::jmax (1, canvas.getWidth()));
+    const int h = juce::jmin (sz.y, juce::jmax (1, canvas.getHeight()));
     int x = hoverPreviewPos.x;
     int y = hoverPreviewPos.y;
     // 以触发位置为左上角，夹紧到 canvas 内
@@ -1650,11 +1732,25 @@ void ModuleWorkspace::resized()
             toolbarDividerXLayout = tb.removeFromRight (1).getX();
             tb.removeFromRight (4);
 
-            // 布局预设下拉框：与音频源下拉同高，宽度略窄（文字更短）
+            // 布局预设下拉框：与音频源下拉同高。
+            //   · 弹出菜单的宽度由 PinkXPLookAndFeel::getIdealPopupMenuItemSize
+            //     按实际文字宽度自适应撑开，所以这里 ComboBox 本体保持紧凑即可。
             constexpr int layoutBoxW = 150;
             auto layoutArea = tb.removeFromRight (layoutBoxW);
             layoutPresetBox.setBounds (layoutArea.withSizeKeepingCentre (layoutBoxW, btnH));
             layoutPresetBox.setVisible (true);
+
+            // 紧邻下拉框左侧：Save / Load 两个按钮（与 gridBtn 同宽高，间距与
+            //   按钮区其他分组一致；不再额外加分隔线，避免 toolbar 太挤）
+            tb.removeFromRight (4); // 与下拉框之间的视觉间距
+            auto saveArea = tb.removeFromRight (btnW);
+            savePresetBtn.setBounds (saveArea.withSizeKeepingCentre (btnW, btnH));
+            savePresetBtn.setVisible (true);
+
+            tb.removeFromRight (4); // 两按钮之间的间距
+            auto loadArea = tb.removeFromRight (btnW);
+            loadPresetBtn.setBounds (loadArea.withSizeKeepingCentre (btnW, btnH));
+            loadPresetBtn.setVisible (true);
 
             tb.removeFromRight (6); // 与主题栏之间的视觉间距
         }
@@ -1662,6 +1758,8 @@ void ModuleWorkspace::resized()
         {
             // 隐藏态：不占宽 + 分隔线不画
             layoutPresetBox.setVisible (false);
+            savePresetBtn.setVisible  (false);
+            loadPresetBtn.setVisible  (false);
             toolbarDividerXLayout = -1;
         }
 
@@ -1682,6 +1780,8 @@ void ModuleWorkspace::resized()
         fpsLabel.setVisible (false);
         gridBtn.setVisible  (false);
         layoutPresetBox.setVisible (false);
+        savePresetBtn.setVisible   (false);
+        loadPresetBtn.setVisible   (false);
         toolbarDividerX0 = -1;
         toolbarDividerX1 = -1;
         toolbarDividerX2 = -1;
@@ -1863,6 +1963,8 @@ void ModuleWorkspace::setLayoutPresetUiVisible (bool shouldBeVisible)
     if (! shouldBeVisible)
     {
         layoutPresetBox.setVisible (false);
+        savePresetBtn.setVisible   (false);
+        loadPresetBtn.setVisible   (false);
         // 让分隔线 Layout 自动不画（drawDivider 会在 x<0 时跳过）
         toolbarDividerXLayout = -1;
     }
@@ -1992,41 +2094,64 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
     juce::ValueTree tree(kLayoutRoot);
     // 全局开关：网格叠加层可见性（toolbar 上 Grid 按钮）
     tree.setProperty ("gridVisible", gridOverlayVisible, nullptr);
-    for (auto* m : modules)
+
+    // ==============================================================
+    // 按 JUCE 真实 z-order 混合写入（模块 + 拼豆贴画）
+    //   · getChildren() 返回顺序：index 0 = 最底层，index N-1 = 最顶层。
+    //     ModulePanel::mouseDown 会 toFront(true) 把自己移到 child 列表末尾；
+    //     PerlerImageLayer 被点击聚焦时也会 toFront(true)。因此 getChildren()
+    //     的顺序就是当前屏幕上真实可见的叠放顺序。
+    //   · 遍历时同时识别 ModulePanel 和 PerlerImageLayer，把对应的 <Module>
+    //     / <Perler> 节点按 z-order 追加 —— 加载时按此顺序重建，依次
+    //     addAndMakeVisible（每次新加入的组件自然在最前），于是恢复出的
+    //     child 序列和保存时完全一致，层级关系（某张图片压在某模块下）得以保留。
+    //   · 其他 chrome 子组件（hideBtn / layoutPresetBox / themeBar / fpsBtn 等）
+    //     在此跳过，因为它们不参与持久化。
+    // ==============================================================
+    for (auto* child : getChildren())
     {
-        if (m == nullptr) continue;
-        juce::ValueTree node(kLayoutModule);
-        node.setProperty(kPropType, moduleTypeToString(m->getModuleType()), nullptr);
-        node.setProperty(kPropId,   m->getModuleId(),                       nullptr);
-        const auto b = m->getBounds();
-        node.setProperty(kPropX, b.getX(),      nullptr);
-        node.setProperty(kPropY, b.getY(),      nullptr);
-        node.setProperty(kPropW, b.getWidth(),  nullptr);
-        node.setProperty(kPropH, b.getHeight(), nullptr);
-        tree.appendChild(node, nullptr);
+        if (child == nullptr) continue;
+
+        // 模块节点
+        if (auto* m = dynamic_cast<ModulePanel*> (child))
+        {
+            juce::ValueTree node(kLayoutModule);
+            node.setProperty(kPropType, moduleTypeToString(m->getModuleType()), nullptr);
+            node.setProperty(kPropId,   m->getModuleId(),                       nullptr);
+            const auto b = m->getBounds();
+            node.setProperty(kPropX, b.getX(),      nullptr);
+            node.setProperty(kPropY, b.getY(),      nullptr);
+            node.setProperty(kPropW, b.getWidth(),  nullptr);
+            node.setProperty(kPropH, b.getHeight(), nullptr);
+            tree.appendChild(node, nullptr);
+            continue;
+        }
+
+        // 拼豆贴画节点：通过 layer 反查 perlerImages 索引
+        if (auto* layer = dynamic_cast<PerlerImageLayer*> (child))
+        {
+            const int idx = perlerLayers.indexOf (layer);
+            if (idx < 0) continue;
+            auto* pimg = perlerImages.getUnchecked (idx);
+            if (pimg == nullptr || pimg->sourcePath.isEmpty()) continue;
+
+            juce::ValueTree node (kLayoutPerler);
+            node.setProperty (kPropPath,     pimg->sourcePath,   nullptr);
+            node.setProperty (kPropX,        pimg->topLeft.x,    nullptr);
+            node.setProperty (kPropY,        pimg->topLeft.y,    nullptr);
+            node.setProperty (kPropCellsW,   pimg->cellsW,       nullptr);
+            node.setProperty (kPropCellsH,   pimg->cellsH,       nullptr);
+            node.setProperty (kPropCellSize, pimg->cellSize,     nullptr);
+            if (pimg->perlerBeadsMode)
+                node.setProperty (kPropPerlerBeads, true, nullptr);
+            if (std::abs (pimg->opacity - 1.0f) > 1.0e-4f)
+                node.setProperty (kPropOpacity, (double) pimg->opacity, nullptr);
+            tree.appendChild (node, nullptr);
+            continue;
+        }
+        // 其他 chrome 子组件（按钮 / 下拉 / themeBar / 浮层等）不持久化
     }
 
-    // 拼豆贴画：仅持久化有源路径的图片（无路径无法重建）
-    //   · 保存源图路径 + 位置 + 网格数 + cellSize
-    //   · 下次加载时按此 4 个字段重新 buildPerlerImageFixed 量化
-    for (auto* pimg : perlerImages)
-    {
-        if (pimg == nullptr || pimg->sourcePath.isEmpty()) continue;
-        juce::ValueTree node (kLayoutPerler);
-        node.setProperty (kPropPath,     pimg->sourcePath,   nullptr);
-        node.setProperty (kPropX,        pimg->topLeft.x,    nullptr);
-        node.setProperty (kPropY,        pimg->topLeft.y,    nullptr);
-        node.setProperty (kPropCellsW,   pimg->cellsW,       nullptr);
-        node.setProperty (kPropCellsH,   pimg->cellsH,       nullptr);
-        node.setProperty (kPropCellSize, pimg->cellSize,     nullptr);
-        // "PerlerBeads" 圆环渲染模式 flag（新版新增；旧存档无此字段时默认 false）
-        if (pimg->perlerBeadsMode)
-            node.setProperty (kPropPerlerBeads, true, nullptr);
-        // opacity：仅 ≠ 1.0 时写入（默认值兼容旧存档，不额外增加体积）
-        if (std::abs (pimg->opacity - 1.0f) > 1.0e-4f)
-            node.setProperty (kPropOpacity, (double) pimg->opacity, nullptr);
-        tree.appendChild (node, nullptr);
-    }
     return tree;
 }
 

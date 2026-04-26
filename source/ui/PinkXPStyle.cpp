@@ -976,6 +976,34 @@ juce::Font PinkXPLookAndFeel::getPopupMenuFont()
     return PinkXP::getFont(12.0f, juce::Font::bold);
 }
 
+// Popup 菜单条目理想尺寸：
+//   drawPopupMenuItem 中 textArea 的左右内边距为：
+//     - area.reduced(8, 0) 左右各 8px
+//     - textArea.removeFromLeft(14) 再吃掉 14px（tick / icon 占位）
+//     - 右侧若 hasSubMenu 还会 removeFromRight(12)
+//   所以这里预留 8 + 14 + 8(右侧余量) = 30px 给 padding，并用
+//   getPopupMenuFont() 的实际宽度测量文字像素宽，再 +2 作为小量余量。
+void PinkXPLookAndFeel::getIdealPopupMenuItemSize(const juce::String& text, bool isSeparator,
+                                                  int standardMenuItemHeight,
+                                                  int& idealWidth, int& idealHeight)
+{
+    if (isSeparator)
+    {
+        idealWidth  = 50;
+        idealHeight = (standardMenuItemHeight > 0 ? standardMenuItemHeight : 10) / 10 + 4;
+        return;
+    }
+
+    const auto font     = getPopupMenuFont();
+    const int  textPx   = juce::GlyphArrangement::getStringWidthInt (font, text);
+    constexpr int hPad  = 8 + 14 + 8;   // 见上方注释：与 drawPopupMenuItem 保持一致
+
+    idealWidth  = textPx + hPad + 2;
+    idealHeight = (standardMenuItemHeight > 0)
+                      ? standardMenuItemHeight
+                      : juce::roundToInt (font.getHeight() * 1.3f);
+}
+
 // ==========================================================
 // ComboBox —— Pink XP 像素风
 //   · 整体框体沿用 drawRaised（按下时 drawPressed），与按钮/面板风格一致

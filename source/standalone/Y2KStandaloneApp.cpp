@@ -210,6 +210,18 @@ public:
                         handleAudioSourceChanged (sourceId, isLoopback);
                     };
 
+                    // 预设 Save/Load —— 由 ModuleWorkspace 的 Save/Load 按钮触发，
+                    //   Editor 透传过来。真正的 settings 文件读写只能在 Standalone App
+                    //   这边做（PropertiesFile 的 storage 参数归这里持有）。
+                    y2kEditor->onSaveSettingsRequested = [this](juce::File dest)
+                    {
+                        handleExportSettings (dest);
+                    };
+                    y2kEditor->onLoadSettingsRequested = [this](juce::File src)
+                    {
+                        handleImportSettings (src);
+                    };
+
                     // 监听 AudioDeviceManager 变化（包括外部 Options 面板、
                     //   热插拔等）→ 自动刷新下拉框内容与选中项
                     if (pluginHolder != nullptr)
@@ -253,12 +265,11 @@ public:
     void shutdown() override
     {
         // -2) 先把所有可持久化的 UI/音频状态写入 settings
-        //     顺序：窗口 bounds → chrome → audio source
-        //     注意：必须在 Editor / pluginHolder 析构之前读取它们
-        //     · plugin state（EQ/布局 XML）已在 systemRequestedQuit() 中 save 过一次，
-        //       这里不再重复，避免用户点关闭后出现一次额外的磁盘 IO / XML 序列化卡顿
-        saveMainWindowBounds();
-        saveUiAndAudioState();
+        //     persistAllSettings 带幂等守卫：若 systemRequestedQuit 已经跑过一次，
+        //     这里就是 no-op；否则（例如直接 quit 路径）兜底保存一次。
+        //     绝对不能在这里只 sanitize 不 save —— 否则会把上一次写好的 filterState
+        //     擦掉却没人补写，导致下次启动恢复到默认布局。
+        persistAllSettings();
 
         // -1) 停掉 Loopback 采集线程（若在跑）
         stopLoopbackCapture();
@@ -295,14 +306,11 @@ public:
         //   以及可能的 Loopback 线程 join。把这些耗时放到 shutdown() 里慢慢做，
         //   但在 user 点击的这一刻先把窗口 hide，让感官上 0 延迟。
 
-        // 1) 先取当前窗口 bounds 并落盘（一定要在 setVisible(false) 之前，
-        //    否则某些 Win 版本上 hide 后 getBounds 会变成 minimized 的值）
-        saveMainWindowBounds();
-        saveUiAndAudioState();
-
-        // 2) 保存 plugin state（EQ/布局 XML） —— 只在这里调一次
-        if (pluginHolder != nullptr && pluginHolder->processor != nullptr)
-            pluginHolder->savePluginState();
+        // 1) 一次性把所有持久化项写入 settings（带幂等守卫）——
+        //    顺序：sanitize 清 → 窗口 bounds → UI/音频 → plugin state → 立刻刷盘。
+        //    必须在 setVisible(false) 之前，否则某些 Win 版本上 hide 后
+        //    getBounds 会变成 minimized 的值。
+        persistAllSettings();
 
         // 3) 立刻把窗口隐藏 / 移出 alwaysOnTop，让用户感觉关闭是瞬时的
         if (mainWindow != nullptr)
@@ -397,10 +405,189 @@ private:
 
         const auto b = mainWindow->getBounds();
         auto& s = getUserSettings();
+        // 先显式 remove，再 setValue —— 等价于"用当前值覆盖"，彻底剔除任何
+        //   由老版本留下的同名脏值（例如 Win32 下极少数情况下 PropertyFile
+        //   把同一 key 写成了格式错误的字符串，再读时会得到 0）。
+        s.removeValue ("window.x");
+        s.removeValue ("window.y");
+        s.removeValue ("window.w");
+        s.removeValue ("window.h");
         s.setValue ("window.x", b.getX());
         s.setValue ("window.y", b.getY());
         s.setValue ("window.w", b.getWidth());
         s.setValue ("window.h", b.getHeight());
+    }
+
+    // ----------------------------------------------------
+    // 清洗 settings：删除已被本版本淘汰的老 key + 清空本版本管理的所有 key，
+    //   然后由 saveUiAndAudioState / savePluginState / saveMainWindowBounds
+    //   用当前值重写一遍。这样每次关闭得到的 settings 都是一份干净的"本版本
+    //   标准快照"，不会被老版本可能留下的脏数据 / 格式变更 / 残留字段影响。
+    //
+    //   注：JUCE 内部 StandalonePluginHolder 维护的 "audioSetup" 等字段是
+    //   该框架自行管理的，我们**不碰**，避免重置用户的音频设备选择。
+    // ----------------------------------------------------
+    void sanitizeLegacySettings()
+    {
+        auto& s = getUserSettings();
+
+        // ---- 1) 清除任何本版本已经不再使用（但可能在老版本存在）的旧 key ----
+        //        将来版本如果需要淘汰新的 key，在下面追加 s.removeValue("...") 即可。
+        //        MSVC 不支持零长度数组，所以这里用直列 removeValue 语句的形式（即
+        //        使目前没有需要清的老 key，也不会产生任何运行时开销 —— PropertyFile
+        //        对不存在的 key 调 removeValue 是 no-op）。
+        //        示例：
+        //          s.removeValue ("ui.oldFoo");
+        //          s.removeValue ("audio.oldBar");
+        // （本版本暂无需要淘汰的老 key）
+
+        // ---- 2) 清除本版本管理的 key —— 随后会由保存函数写入最新值 ----
+        const char* const managedKeys[] = {
+            "settings.schemaVersion",
+            "window.x", "window.y", "window.w", "window.h",
+            "ui.chromeVisible",
+            "ui.alwaysOnTop",
+            "ui.themeId",
+            "audio.sourceId",
+            "filterState"     // 插件状态（EQ/布局 XML）— 保证用当前值重写
+        };
+        for (auto* k : managedKeys)
+            s.removeValue (k);
+
+        // ---- 3) 写入本版本 schema 标记（未来可据此识别老存档，做迁移/丢弃）
+        s.setValue ("settings.schemaVersion", 1);
+    }
+
+    // ----------------------------------------------------
+    // 把所有需要持久化的设置一次性落盘。带"已执行过"守卫 —— 无论走
+    // systemRequestedQuit（用户点 ×）还是 shutdown（JUCE 应用退出）
+    // 还是两条都走，本函数里的完整序列只会发生一次，保证：
+    //   sanitize（清掉所有本版本管理的 key + 可能的老版本脏数据）
+    //     → 窗口 bounds / UI / 音频源 / 主题 重写
+    //     → plugin state（EQ/布局 XML）重写
+    //     → 立刻 saveIfNeeded 刷盘
+    // 是一组"原子的覆盖写入"，绝不会出现"sanitize 跑了两次却只 save 一次
+    // filterState"这种中间态 —— 那正是上个版本导致"每次重开回到默认状态"的 bug。
+    // ----------------------------------------------------
+    void persistAllSettings()
+    {
+        if (alreadyPersisted) return;
+        alreadyPersisted = true;
+
+        flushCurrentStateToDisk();
+    }
+
+    // 不带幂等守卫的"立刻把当前运行时状态刷到磁盘" —— 用于 Save 预设等需要
+    // 在程序仍在运行时把 settings 文件拷贝出去的场景。调完后用户还可以继续
+    // 操作，随后的正常关闭路径仍能再刷一次。
+    void flushCurrentStateToDisk()
+    {
+        sanitizeLegacySettings();
+        saveMainWindowBounds();
+        saveUiAndAudioState();
+
+        if (pluginHolder != nullptr && pluginHolder->processor != nullptr)
+            pluginHolder->savePluginState();
+
+        appProperties.saveIfNeeded();
+    }
+
+    // ----------------------------------------------------
+    // 预设导出：把当前 settings 文件"另存为"到用户指定路径
+    //   · 完全静默 —— 不弹任何 AlertWindow（用户要求）。
+    //   · 失败时仅通过 DBG 输出日志；成功时不做任何可见反馈。
+    //   · 步骤：先把当前运行时状态刷到物理文件 → File::copyFileTo。
+    // ----------------------------------------------------
+    void handleExportSettings (juce::File dest)
+    {
+        if (dest == juce::File{}) return;
+
+        // 1) 先把当前运行时状态全部落到 PropertiesFile 的物理文件，
+        //    保证导出快照包含用户所有未落盘的最新修改
+        flushCurrentStateToDisk();
+
+        // 2) 拿到 PropertiesFile 的实际磁盘文件
+        auto* props = appProperties.getUserSettings();
+        const juce::File src = (props != nullptr ? props->getFile() : juce::File{});
+        if (src == juce::File{} || ! src.existsAsFile())
+        {
+            DBG ("handleExportSettings: settings file does not exist on disk yet");
+            return;
+        }
+
+        // 3) 复制到目标路径（父目录不存在则自动创建；同名覆盖由 FileChooser
+        //    的 warnAboutOverwriting 确认过，这里直接覆盖）
+        dest.getParentDirectory().createDirectory();
+        const bool ok = src.copyFileTo (dest);
+        if (! ok)
+            DBG ("handleExportSettings: copy failed → " + dest.getFullPathName());
+    }
+
+    // ----------------------------------------------------
+    // 预设导入：把用户指定的 .settings 文件覆盖当前 settings 并"自动重启"
+    //   · 完全静默 —— 不弹任何 AlertWindow（用户要求）。
+    //   · 采用"物理覆盖 + 自重启"方案：settings 里涉及的 runtime 状态
+    //     （主题、布局 XML、窗口 bounds、chrome、alwaysOnTop、音频源、
+    //      FPS 等）在 initialise() 里散落着十几条恢复路径，运行时热重载
+    //     复杂且容易遗漏，直接"启动新实例 → quit 旧实例"最可靠 ——
+    //     语义等价于"干净首次打开此 settings"。
+    //   · 自重启实现：juce::Process::openDocument(currentExecutableFile, "")
+    //     在 Windows 下走 ShellExecute，启动的新进程完全独立于当前进程，
+    //     父进程 quit 后新进程照常存活。macOS/Linux 下 openDocument 同样
+    //     是"后台启动、不阻塞、不继承生命周期"，跨平台一致。
+    //   · 为防止 shutdown 里的 flushCurrentStateToDisk 把刚导入的文件
+    //     又用"当前内存运行时状态"覆盖掉，复制完成后立即把
+    //     alreadyPersisted=true，锁死 persistAllSettings 成 no-op。
+    // ----------------------------------------------------
+    void handleImportSettings (juce::File src)
+    {
+        if (src == juce::File{} || ! src.existsAsFile())
+        {
+            DBG ("handleImportSettings: selected file does not exist");
+            return;
+        }
+
+        auto* props = appProperties.getUserSettings();
+        const juce::File dest = (props != nullptr ? props->getFile() : juce::File{});
+        if (dest == juce::File{})
+        {
+            DBG ("handleImportSettings: cannot locate settings file on disk");
+            return;
+        }
+
+        // 用户选中的就是当前 settings 文件本身 —— 无需任何动作，也不重启
+        if (src == dest)
+        {
+            DBG ("handleImportSettings: selected file is the current settings; nothing to do");
+            return;
+        }
+
+        // 1) 先把 PropertiesFile 内存中的 pending save 刷一次（此时写入的
+        //    还是"旧"的 key/value 到旧 dest 路径）—— 确保 needsToSave 被清零，
+        //    后续我们要做的物理覆盖不会被 PropertiesFile 的析构 flush 抢跑。
+        props->saveIfNeeded();
+
+        // 2) 物理覆盖 settings 文件
+        const bool ok = src.copyFileTo (dest);
+        if (! ok)
+        {
+            DBG ("handleImportSettings: overwrite failed → " + dest.getFullPathName());
+            return;
+        }
+
+        // 3) 锁死 persistAllSettings / 任何后续 flushCurrentStateToDisk ——
+        //    不让关闭路径把当前内存运行时状态再写回去覆盖刚导入的文件。
+        alreadyPersisted = true;
+
+        // 4) 启动一个新的自己（独立进程），然后 quit 当前进程 ——
+        //    新进程在 initialise() 里走完整的 settings 恢复路径。
+        const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        if (exe.existsAsFile())
+            juce::Process::openDocument (exe.getFullPathName(), {});
+        else
+            DBG ("handleImportSettings: cannot locate current executable; restart manually");
+
+        juce::JUCEApplication::quit();
     }
 
     // 关闭前保存 UI（chrome 可见性 + 固定置顶状态）与音频源（上次选择的 sourceId）
@@ -770,6 +957,12 @@ private:
     //   · Loopback 运行期间 = true（避免 AnalyserHub 被两路线程并发 push 引发 UAF）
     //   · 其他时间 = false
     bool                                            holderCallbackDetached = false;
+
+    // 关闭流程可能有两个入口都会走到 save：systemRequestedQuit → shutdown。
+    // persistAllSettings 必须恰好跑一次，否则第二次会在第一次 save 好的
+    // 基础上再 sanitize 一遍 filterState，而 pluginHolder 可能已经被析构
+    // → 没人把 filterState 写回，settings 里就只剩空值，下次启动回到默认布局。
+    bool                                            alreadyPersisted = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Y2KStandaloneApp)
 };

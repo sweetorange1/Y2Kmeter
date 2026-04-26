@@ -59,6 +59,19 @@ public:
     std::function<void(const juce::String& sourceId, bool isLoopback)> onAudioSourceChanged;
 
     // ======================================================
+    // 预设 Save/Load 透传回调（由 ModuleWorkspace 的 Save/Load 按钮触发）
+    //   · Editor 本身不处理 settings 文件读写 —— 仅把 workspace 的
+    //     onSavePresetRequested/onLoadPresetRequested 转发到这两个回调。
+    //   · Standalone App 在 createEditor 后订阅这两个回调来真正执行：
+    //       save  = 把当前 PropertiesFile 物理文件另存到用户选定路径
+    //       load  = 把选定文件覆盖到 PropertiesFile 物理位置并重启 App
+    //   · VST3/AU 插件模式下 workspace 的预设 UI 已被隐藏，这两个回调
+    //     不会被触发；Standalone App 订阅与否对插件模式无副作用。
+    // ======================================================
+    std::function<void(juce::File dest)> onSaveSettingsRequested;
+    std::function<void(juce::File src)>  onLoadSettingsRequested;
+
+    // ======================================================
     // 持久化辅助接口（Standalone App 在 save/restore 时使用）
     //   · chrome（顶部标题栏 + 底部 Toolbar）可见性
     //   · alwaysOnTop（抬头右侧"固定"按钮的当前状态）

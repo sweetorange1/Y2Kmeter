@@ -11,6 +11,7 @@
 #include "source/ui/modules/DynamicsModule.h"
 #include "source/ui/modules/FineSplitModules.h"
 #include "source/ui/modules/WaveformModule.h"
+#include "source/ui/modules/SpectrogramModule.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -228,6 +229,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::lufsRealtime,
         ModuleType::truePeak,
 
+        // 模拟 VU 指针表（复用 Loudness 路的 RMS L/R，后端零新增计算）
+        ModuleType::vuMeter,
+
         ModuleType::oscilloscope,
         ModuleType::oscilloscopeLeft,
         ModuleType::oscilloscopeRight,
@@ -244,7 +248,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::dynamicsCrest,
 
         // 持续滚动瀑布波形（复用 Oscilloscope 原始样本，后端零新增计算）
-        ModuleType::waveform
+        ModuleType::waveform,
+
+        // 实时频谱瀑布图（复用 Spectrum 路的 FFT 幅度，后端零新增计算）
+        ModuleType::spectrogram
     });
     addAndMakeVisible(*workspace);
 
@@ -276,6 +283,20 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     workspace->onLayoutPresetChanged = [this](ModuleWorkspace::LayoutPreset preset)
     {
         applyLayoutPreset ((int) preset);
+    };
+
+    // 4.05b) 预设 Save/Load —— 仅做透传：workspace 已经弹完 FileChooser，
+    //        Editor 没有 settings 文件的写入能力（PropertiesFile 归 Standalone App
+    //        持有），所以把 File 原样转发给外层订阅者（Y2KStandaloneApp）。
+    //        外层未订阅时 onSave/LoadSettingsRequested 为空回调 → 点击按钮无效
+    //        但不崩溃（VST3/AU 插件模式下即使按钮被误显也安全）。
+    workspace->onSavePresetRequested = [this](juce::File dest)
+    {
+        if (onSaveSettingsRequested) onSaveSettingsRequested (dest);
+    };
+    workspace->onLoadPresetRequested = [this](juce::File src)
+    {
+        if (onLoadSettingsRequested) onLoadSettingsRequested (src);
     };
 
     // 4.1) chrome 可见性变化 → 隐藏/显示顶部 TitleBar
@@ -588,11 +609,75 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
                                                    : juce::Rectangle<int> (1280, 720);
         const int screenW = userArea.getWidth();
 
-        // 固定高度 250 像素（用户需求）
+        // ------------------------------------------------------------
+        // 目标高度自动对齐到 8px 网格整数倍 canvas：
+        //   期望高度 kHorizontalStripHeight = 250，但 Editor 内 = Y2K 标题栏(26) +
+        //   workspace；workspace 内 = canvas + 底部 toolbar(36)。因此：
+        //       canvas.height = targetH - 26 - 36 = targetH - 62
+        //   250 - 62 = 188，188 % 8 = 4 → canvas 不是整格，7 个等分模块
+        //   floor 到 8 倍数后底部会留 4px 空白。
+        //
+        //   这里不想硬编码"26+36"这类依赖 ModuleWorkspace 内部常量的数值，
+        //   改为"先试探一次布局，读取实际 canvas 高度，反推 overheadH"——
+        //   这样无论未来 chrome/toolbar 高度怎么变都能自洽。
+        //     1) 先按期望高度 setSize，触发 resized() → workspace 拿到 canvas
+        //     2) overheadH = targetH - canvas.getHeight()（Editor 里非 canvas 的部分）
+        //     3) 调整 targetH 使 (targetH - overheadH) 是 8 的倍数，并尽量靠近 250
+        // ------------------------------------------------------------
         constexpr int kHorizontalStripHeight = 250;
-        const int targetH = kHorizontalStripHeight;
+        int targetH = kHorizontalStripHeight;
 
-        // 需要放开 Editor 自身的 resizeLimits（默认上限 1600），否则 setSize 会被夹回
+        // 关键前置：先把 resizeLimits 放到一个足够宽松的区间，确保后面的
+        //   试探 setSize(screenW, 250) 不会被夹回（Editor 默认
+        //   setResizeLimits(640, 420, 1600, 1100)：高度下限 420、宽度上限 1600）。
+        //   如果试探被夹，probeCanvasH 会变成夹后 Editor 高度对应的 canvas，
+        //   反推出来的 overheadH 是错的 → 最终 canvas 高度不是 8 的倍数 →
+        //   模块 floor 后底部留 4~6px 空白。
+        //   · 下限给一个极小值（例如 kHorizontalStripHeight 本身 250），
+        //     上限至少覆盖 screenW × 1200（单屏宽 × 超出极限的高度）。
+        if (auto* cbc0 = getConstrainer())
+        {
+            setResizeLimits (juce::jmin (cbc0->getMinimumWidth(),  screenW),
+                             juce::jmin (cbc0->getMinimumHeight(), kHorizontalStripHeight),
+                             juce::jmax (cbc0->getMaximumWidth(),  screenW),
+                             juce::jmax (cbc0->getMaximumHeight(), 1200));
+        }
+
+        // 第 1 步：试探布局，让 workspace 计算出当前 chrome 状态下的 canvas 高。
+        //   · Standalone 模式（top != this）：直接对顶层窗口 setBounds，
+        //     这样 probe 反推的 overhead 天然包含"ResizableBorder 4px 上下边框"
+        //     （setResizable(true, false) 下 DocumentWindow 会给 content 挖上下各 4px，
+        //     setBoundsInset 压缩 Editor 高度 8px）。若 probe 只对 Editor setSize，
+        //     反推的 overheadH 少算这 8px，最终 top->setBounds 走的才是"扣边框"路径，
+        //     真实 canvas 比预期少 8px → 模块底部出现 8px 空白。
+        //   · 插件模式（top == this）：无法搬动顶层窗口，直接 setSize。
+        if (top == this)
+        {
+            setSize (screenW, targetH);
+        }
+        else
+        {
+            top->setBounds (userArea.getX(), userArea.getY(), screenW, targetH);
+        }
+
+        // 第 2 步：根据试探结果反推"顶层窗口高度里不属于 canvas 的那部分"。
+        //   probeContainerH 是 probe 时真正被我们"占用"的高度：
+        //     · standalone：top 的 height（=250，不被 border 吃掉，因为 border 从
+        //       top 高度里内扣分给 Editor）
+        //     · 插件：Editor 自身 height（=250）
+        const int probeContainerH = (top == this) ? getHeight() : top->getHeight();
+        const int probeCanvasH    = workspace->getCanvasArea().getHeight();
+        const int overheadH       = probeContainerH - probeCanvasH;
+
+        // 第 3 步：取最接近 250-overheadH 的"8 的倍数"作为期望 canvas 高，
+        //          再加回 overheadH 得到对齐后的 targetH
+        constexpr int kGridForH = 8;
+        const int desiredCanvasRaw = kHorizontalStripHeight - overheadH;
+        const int desiredCanvasH   = juce::jmax (kGridForH,
+                                                 ((desiredCanvasRaw + kGridForH / 2) / kGridForH) * kGridForH);
+        targetH = desiredCanvasH + overheadH;
+
+        // 第 4 步：按最终 targetH 锁定 resizeLimits（上下限收紧到 screenW × targetH）
         if (auto* cbc = getConstrainer())
         {
             setResizeLimits (juce::jmin (cbc->getMinimumWidth(),  screenW),
@@ -620,7 +705,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         //   此时按横向等分的方式铺默认 7 个模块。
         static const ModuleType horizOrder[] = {
             ModuleType::eq,
-            ModuleType::loudness,
+            ModuleType::spectrogram,
             ModuleType::oscilloscope,
             ModuleType::spectrum,
             ModuleType::phase,
@@ -632,18 +717,57 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         //   后者包含底部 toolbarHeight（36px）与 chrome 控件区。
         const auto canvas = workspace->getCanvasArea();
         const int count    = (int) (sizeof (horizOrder) / sizeof (horizOrder[0]));
-        const int slotW    = juce::jmax (1,  canvas.getWidth()  / count);
-        const int slotH    = juce::jmax (80, canvas.getHeight());
 
+        // ============================================================
+        // 网格对齐：必须与 ModuleWorkspace::gridSize 保持一致（8 像素）。
+        //   原实现直接用 canvas.getWidth()/count 作为 slotW，不是 8 的倍数，
+        //   canvas 原点也未必对齐 8；模块落点和大小都偏离网格。
+        //   → 一旦用户之后拖动/缩放任意模块，snapToGrid 会把它吸附到最近
+        //     的 8 像素位，立刻与相邻模块拉开空隙或错位，"密排列"被破坏。
+        //
+        //   修复思路：
+        //     1) 起点 x0/y0 按 gridSize 向上取整，保证第一个模块左上角在网格上。
+        //     2) 可用宽度 usableW 从 canvas.getRight() 向下取整到 gridSize
+        //        的倍数后，减去 x0；高度 slotH 同理。
+        //     3) 把 usableW 切成 count 份，每份都是 gridSize 的整倍数：
+        //        · baseCells = usableW / gridSize / count 个小格
+        //        · 剩余 leftoverCells 分摊到前若干个模块各 +1 小格。
+        //        这样 7 个模块宽度之和 == usableW，全部在网格上且密排无缝。
+        // ============================================================
+        constexpr int kGrid = 8;
+        auto ceilToGrid  = [kGrid] (int v) { return ((v + kGrid - 1) / kGrid) * kGrid; };
+        auto floorToGrid = [kGrid] (int v) { return (v / kGrid) * kGrid; };
+
+        const int x0 = ceilToGrid  (canvas.getX());
+        const int y0 = ceilToGrid  (canvas.getY());
+        const int xR = floorToGrid (canvas.getRight());
+        const int yB = floorToGrid (canvas.getBottom());
+
+        const int usableW = juce::jmax (kGrid * count, xR - x0);
+        const int usableH = juce::jmax (kGrid,         yB - y0);
+
+        const int totalCells    = usableW / kGrid;              // 小格数量（8px/格）
+        const int baseCells     = totalCells / count;           // 每个模块的基础格数
+        const int leftoverCells = totalCells - baseCells * count; // 需要 +1 格的模块数量
+
+        const int slotH = juce::jmax (80, usableH);             // 高度占满 canvas 的整网格
+
+        int curX = x0;
         for (int i = 0; i < count; ++i)
         {
             auto panel = createModule (horizOrder[i]);
             if (panel == nullptr) continue;
 
+            // 前 leftoverCells 个模块多拿一格 gridSize，消化 usableW 不能整除 count 的余数
+            const int cellsForThis = baseCells + (i < leftoverCells ? 1 : 0);
+            const int slotW        = cellsForThis * kGrid;
+
             const int w = juce::jmax (panel->getMinWidth(),  slotW);
             const int h = juce::jmax (panel->getMinHeight(), slotH);
-            panel->setBounds (canvas.getX() + i * slotW, canvas.getY(), w, h);
+            panel->setBounds (curX, y0, w, h);
             workspace->addModule (std::move (panel), /*autoPosition*/ false);
+
+            curX += slotW;
         }
     }
     else if (presetId == 4)
@@ -765,6 +889,12 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
 
         case ModuleType::waveform:
             return std::make_unique<WaveformModule>(processor.getAnalyserHub());
+
+        case ModuleType::vuMeter:
+            return std::make_unique<VuMeterModule>(processor.getAnalyserHub());
+
+        case ModuleType::spectrogram:
+            return std::make_unique<SpectrogramModule>(processor.getAnalyserHub());
 
         default:
             jassertfalse; // 暂未实现

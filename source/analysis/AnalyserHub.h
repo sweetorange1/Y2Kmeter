@@ -322,6 +322,16 @@ public:
     static constexpr int spectrumBins           = 160;
     static constexpr int spectrumMagSize        = 1 << 10; // = fftSize / 2 = 1024
 
+    // ======================================================
+    // 多分辨率 FFT（双路）：
+    //   · 主路（原有）：fftSize=2048，Δf≈23.4Hz @48k，低延迟、覆盖全频
+    //   · 低频路（新增）：fftSize=8192，Δf≈5.86Hz @48k，高分辨率、只取 0~500Hz 左右
+    // 供 UI 合并接口 getSpectrumMagnitudesBlended() / FrameSnapshot.spectrumMagLo 使用。
+    // ======================================================
+    static constexpr int spectrumMagSizeLo      = 1 << 12; // = fftSizeLo / 2 = 4096
+    // 切换点：低频路与主路交叉频率；UI 侧在此频率附近做一个八度的平滑交叉淡化
+    static constexpr float spectrumXoverHz      = 500.0f;
+
     enum class Kind : int
     {
         Oscilloscope = 0,  // 2×2048 样本环形缓冲
@@ -371,6 +381,8 @@ public:
         // Spectrum：1024 个高精度 mag（线性）+ 160 个粗粒度归一化 specData
         std::array<float, spectrumMagSize>  spectrumMag  {};
         std::array<float, spectrumBins>     spectrumData {};
+        // 低频路高分辨率幅度（4096 bin；仅前 ~spectrumXoverHz 段有效）
+        std::array<float, spectrumMagSizeLo> spectrumMagLo {};
 
         // Loudness / Phase / Dynamics 的快照
         LoudnessMeter::Snapshot      loudness {};
@@ -416,6 +428,27 @@ public:
     // （未做对数/平滑，供 SpectrumModule 自行处理）
     void getSpectrumMagnitudes(juce::Array<float>& dest);
 
+    // 低频路高分辨率幅度快照：返回 fftSizeLo/2 = 4096 个原始幅度值
+    //   注意：虽然返回了全部 4096 bin，但由于低频 FFT 延迟较大、
+    //   且高频段主路的 23Hz 分辨率完全够用，UI 侧应只使用前 ~spectrumXoverHz 的 bin。
+    void getSpectrumMagnitudesLo(juce::Array<float>& dest);
+
+    // ======================================================
+    // 合并（对数频率轴）幅度快照 —— 推荐 UI 频谱/瀑布图直接使用。
+    //
+    //   内部按 numPoints 个等对数间隔的频率中心 f_i，在 [fMin, fMax] 之间采样：
+    //     · f_i < spectrumXoverHz（八度内交叉淡化）         → 从 magDataLo 取
+    //     · f_i > spectrumXoverHz（八度内交叉淡化）         → 从 magData   取
+    //     · 在过渡带里：两路按能量域线性交叉，避免拼接断崖
+    //   返回的 dest[i] 是"以 f_i 为中心的那一段频率"的最大线性幅度（保峰）。
+    //
+    //   该接口不改变现有 getSpectrumMagnitudes 的语义，老模块可逐步迁移。
+    // ======================================================
+    void getSpectrumMagnitudesBlended (juce::Array<float>& dest,
+                                       int   numPoints,
+                                       float fMin,
+                                       float fMax);
+
     // 响度：返回当前 LoudnessMeter 快照
     LoudnessMeter::Snapshot getLoudnessSnapshot();
 
@@ -448,6 +481,9 @@ private:
     // ---- 内部常量 ----
     static constexpr int fftOrder = 11;
     static constexpr int fftSize  = 1 << fftOrder;
+    // 低频路：8192 点 FFT
+    static constexpr int fftOrderLo = 13;
+    static constexpr int fftSizeLo  = 1 << fftOrderLo;
 
     // ---- 示波器（立体声环形缓冲）----
     void pushSamplesToOscilloscope(const float* left, const float* right, int numSamples);
@@ -470,6 +506,17 @@ private:
     // 高精度 FFT 幅度缓冲（供 SpectrumModule）
     std::array<float, spectrumMagSize> magData {};
     int fftFifoIndex = 0;
+
+    // ---- 低频路 FFT（8192 点，高频率分辨率）----
+    //   与主路共享 specLock；同一循环里并行喂 FIFO；
+    //   为了降低 CPU，低频 FFT 用 75% overlap（hop = fftSizeLo/4 = 2048）。
+    juce::dsp::FFT fftLo { fftOrderLo };
+    juce::dsp::WindowingFunction<float> windowLo { fftSizeLo,
+        juce::dsp::WindowingFunction<float>::hann };
+    std::array<float, fftSizeLo>     fftFifoLo {};
+    std::array<float, fftSizeLo * 2> fftDataLo {};
+    std::array<float, spectrumMagSizeLo> magDataLo {};
+    int fftFifoIndexLo = 0;
 
     // ---- 响度计 ----
     LoudnessMeter loudnessMeter;

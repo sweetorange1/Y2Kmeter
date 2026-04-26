@@ -147,6 +147,8 @@ target_sources(Y2Kmeter PRIVATE
   source/ui/modules/FineSplitModules.cpp
   source/ui/modules/WaveformModule.h
   source/ui/modules/WaveformModule.cpp
+  source/ui/modules/SpectrogramModule.h
+  source/ui/modules/SpectrogramModule.cpp
 
   # === Standalone 自定义入口（仅 Standalone 构建时启用，内部已用宏保护）===
   source/standalone/Y2KStandaloneApp.cpp

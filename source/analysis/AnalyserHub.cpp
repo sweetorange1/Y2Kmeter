@@ -64,6 +64,8 @@ public:
                          sizeof (float) * frame->spectrumMag .size());
             std::memcpy (frame->spectrumData.data(), owner.specData.data(),
                          sizeof (float) * frame->spectrumData.size());
+            std::memcpy (frame->spectrumMagLo.data(), owner.magDataLo.data(),
+                         sizeof (float) * frame->spectrumMagLo.size());
         }
 
         if (frame->has (Kind::Loudness))
@@ -138,6 +140,12 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
         specData.fill(0.0f);
         magData.fill(0.0f);
         fftFifoIndex = 0;
+
+        // 低频路
+        fftFifoLo.fill(0.0f);
+        fftDataLo.fill(0.0f);
+        magDataLo.fill(0.0f);
+        fftFifoIndexLo = 0;
     }
 
     // 响度计初始化
@@ -280,54 +288,93 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
     //   个样本攒满时才触发，一次 pushStereo 最多触发 1~2 次，UI 等待时间完全可接受。
     const juce::SpinLock::ScopedLockType sl(specLock);
 
+    // 低频路的 hop（75% overlap）：每 fftSizeLo/4 样本跑一次 FFT，
+    // 兼顾"更新速度"与"CPU 成本"。
+    constexpr int hopLo = fftSizeLo / 4;
+
     for (int i = 0; i < numSamples; ++i)
     {
         // 混合为 mid（L+R）/2
         const float mid = (left[i] + right[i]) * 0.5f;
         const float s   = juce::jlimit(-1.0f, 1.0f, mid);
 
+        // ---------- 主路（2048）：非重叠，攒满就跑 ----------
         fftFifo[(size_t) fftFifoIndex] = s;
         ++fftFifoIndex;
 
-        if (fftFifoIndex < fftSize)
+        if (fftFifoIndex >= fftSize)
+        {
+            // 执行 FFT
+            std::fill(fftData.begin(), fftData.end(), 0.0f);
+            std::copy(fftFifo.begin(), fftFifo.end(), fftData.begin());
+            window.multiplyWithWindowingTable(fftData.data(), fftSize);
+            fft.performFrequencyOnlyForwardTransform(fftData.data());
+
+            const int maxBin = fftSize / 2;
+
+            // 1) 拷贝高精度幅度数组（供 SpectrumModule 使用）
+            //    将幅度归一化到 [0,1]（用 FFT 大小归一 + 汉宁窗补偿）
+            //    简化做法：除以 fftSize/2 作为粗略归一化，后续 UI 自己转 dB
+            {
+                const float invMax = 2.0f / (float) fftSize;
+                for (int iBin = 0; iBin < maxBin; ++iBin)
+                    magData[(size_t) iBin] = fftData[(size_t) iBin] * invMax;
+            }
+
+            // 2) 像素 EQ 用的粗粒度平滑频谱（保留原有逻辑）
+            for (int iBin = 0; iBin < spectrumBins; ++iBin)
+            {
+                const float norm  = (float) iBin / (float) juce::jmax(1, spectrumBins - 1);
+                const float skew  = std::pow(norm, 2.3f);
+                const int   fBin  = juce::jlimit(0, maxBin - 1,
+                                        (int) std::round(skew * (float)(maxBin - 1)));
+
+                const float mag    = fftData[(size_t) fBin];
+                const float db     = juce::Decibels::gainToDecibels(juce::jmax(1.0e-6f, mag));
+                const float mapped = juce::jlimit(0.0f, 1.0f,
+                                        juce::jmap(db, -50.0f, 50.0f, 0.0f, 1.0f));
+
+                const float prev  = specData[(size_t) iBin];
+                const float alpha = (mapped > prev) ? 0.6f : 0.15f;
+                specData[(size_t) iBin] = prev + alpha * (mapped - prev);
+            }
+
+            fftFifoIndex = 0;
+        }
+
+        // ---------- 低频路（8192）：环形缓冲 + 75% overlap ----------
+        //   存入当前写位置，再把"写位置"前进。当写位置每次跨过 hopLo 的整数倍时，
+        //   就把"从 writePos 往回看的 fftSizeLo 个样本"打包跑一次 FFT。
+        //   数据从最老到最新的排列为：fftFifoLo[writePos..end] + fftFifoLo[0..writePos-1]
+        fftFifoLo[(size_t) fftFifoIndexLo] = s;
+        fftFifoIndexLo = (fftFifoIndexLo + 1) % fftSizeLo;
+
+        // 每 hopLo 个样本触发一次
+        //   注意：initial 填充期（累计样本 < fftSizeLo）也会跑，但 FIFO 的零值部分
+        //   等价于补零，幅度只会偏小不会炸。实际运行几秒后就 warm-up 完毕。
+        if ((fftFifoIndexLo % hopLo) != 0)
             continue;
 
-        // 执行 FFT
-        std::fill(fftData.begin(), fftData.end(), 0.0f);
-        std::copy(fftFifo.begin(), fftFifo.end(), fftData.begin());
-        window.multiplyWithWindowingTable(fftData.data(), fftSize);
-        fft.performFrequencyOnlyForwardTransform(fftData.data());
+        // 将环形 FIFO 展平到 fftDataLo（时序：oldest → newest）
+        const int firstChunk = fftSizeLo - fftFifoIndexLo;
+        std::memcpy (fftDataLo.data(),              fftFifoLo.data() + fftFifoIndexLo,
+                     (size_t) firstChunk * sizeof (float));
+        if (fftFifoIndexLo > 0)
+            std::memcpy (fftDataLo.data() + firstChunk, fftFifoLo.data(),
+                         (size_t) fftFifoIndexLo * sizeof (float));
+        // fftDataLo 后半段（fftSizeLo .. fftSizeLo*2）用作 FFT 内部缓冲，填 0
+        std::fill (fftDataLo.begin() + fftSizeLo, fftDataLo.end(), 0.0f);
 
-        const int maxBin = fftSize / 2;
+        windowLo.multiplyWithWindowingTable(fftDataLo.data(), fftSizeLo);
+        fftLo.performFrequencyOnlyForwardTransform(fftDataLo.data());
 
-        // 1) 拷贝高精度幅度数组（供 SpectrumModule 使用）
-        //    将幅度归一化到 [0,1]（用 FFT 大小归一 + 汉宁窗补偿）
-        //    简化做法：除以 fftSize/2 作为粗略归一化，后续 UI 自己转 dB
+        // 归一化（与主路保持一致的公式：2 / fftSize）
         {
-            const float invMax = 2.0f / (float) fftSize;
-            for (int iBin = 0; iBin < maxBin; ++iBin)
-                magData[(size_t) iBin] = fftData[(size_t) iBin] * invMax;
+            const int   maxBinLo = fftSizeLo / 2;
+            const float invMaxLo = 2.0f / (float) fftSizeLo;
+            for (int iBin = 0; iBin < maxBinLo; ++iBin)
+                magDataLo[(size_t) iBin] = fftDataLo[(size_t) iBin] * invMaxLo;
         }
-
-        // 2) 像素 EQ 用的粗粒度平滑频谱（保留原有逻辑）
-        for (int iBin = 0; iBin < spectrumBins; ++iBin)
-        {
-            const float norm  = (float) iBin / (float) juce::jmax(1, spectrumBins - 1);
-            const float skew  = std::pow(norm, 2.3f);
-            const int   fBin  = juce::jlimit(0, maxBin - 1,
-                                    (int) std::round(skew * (float)(maxBin - 1)));
-
-            const float mag    = fftData[(size_t) fBin];
-            const float db     = juce::Decibels::gainToDecibels(juce::jmax(1.0e-6f, mag));
-            const float mapped = juce::jlimit(0.0f, 1.0f,
-                                    juce::jmap(db, -50.0f, 50.0f, 0.0f, 1.0f));
-
-            const float prev  = specData[(size_t) iBin];
-            const float alpha = (mapped > prev) ? 0.6f : 0.15f;
-            specData[(size_t) iBin] = prev + alpha * (mapped - prev);
-        }
-
-        fftFifoIndex = 0;
     }
 }
 
@@ -354,6 +401,125 @@ void AnalyserHub::getSpectrumMagnitudes(juce::Array<float>& dest)
     const auto us = (juce::int64) (juce::Time::highResolutionTicksToSeconds(t1 - t0) * 1.0e6);
     perfSnapCount.fetch_add(1,  std::memory_order_relaxed);
     perfSnapTotalUs.fetch_add(us, std::memory_order_relaxed);
+}
+
+// ==========================================================
+// 低频路高精度幅度快照（4096 bin）
+// ==========================================================
+void AnalyserHub::getSpectrumMagnitudesLo(juce::Array<float>& dest)
+{
+    dest.resize(spectrumMagSizeLo);
+    const juce::SpinLock::ScopedLockType sl(specLock);
+    for (int i = 0; i < spectrumMagSizeLo; ++i)
+        dest.set(i, magDataLo[(size_t) i]);
+}
+
+// ==========================================================
+// 合并（对数频率轴）幅度快照 —— Hub 内部完成双路拼接
+//
+//   核心做法：
+//     1) 在 [fMin, fMax] 上以 log10 均匀采样 numPoints 个中心频率 f_i；
+//     2) 对每个 f_i 算出它对应的"覆盖频率带宽"（相邻两个采样点的几何平均之差）；
+//     3) 根据 f_i 所在频段，从主路 magData（1024 bin，Δf≈23Hz @48k）
+//        或低频路 magDataLo（4096 bin，Δf≈5.86Hz @48k）取"带宽内最大幅度"；
+//     4) 在过渡带内（以 spectrumXoverHz 为中心、±半八度），
+//        对两路按能量线性交叉淡化（power-preserving crossfade）拼合；
+//     5) 低频路超出其有效频段（> ~2×spectrumXoverHz）时强制只用主路，
+//        避免取到低通之外的 bin。
+// ==========================================================
+void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
+                                                int   numPoints,
+                                                float fMin,
+                                                float fMax)
+{
+    numPoints = juce::jmax (2, numPoints);
+    dest.resize (numPoints);
+
+    const double sr      = (cachedSampleRate > 0.0) ? cachedSampleRate : 48000.0;
+    const double nyquist = sr * 0.5;
+
+    const double fLo2 = juce::jmax (1.0, (double) fMin);
+    const double fHi2 = juce::jmin (nyquist, (double) fMax);
+    if (fHi2 <= fLo2) { for (int i = 0; i < numPoints; ++i) dest.set (i, 0.0f); return; }
+
+    const double logMin = std::log10 (fLo2);
+    const double logMax = std::log10 (fHi2);
+
+    // 主路 / 低频路的 "Hz → bin" 因子
+    const double hzToBinHi = (double) (spectrumMagSize   - 1) / nyquist;
+    const double hzToBinLo = (double) (spectrumMagSizeLo - 1) / nyquist;
+
+    // 过渡带（对数中心 = spectrumXoverHz，±0.5 八度 → ratio = sqrt(2)）
+    const double xover     = (double) spectrumXoverHz;
+    const double xoverLo   = xover / std::sqrt (2.0);   // ~354 Hz
+    const double xoverHi   = xover * std::sqrt (2.0);   // ~707 Hz
+    // 低频路 FFT 低通之外禁用（取 2× xover 作为硬上限兜底）
+    const double loHardMax = xover * 2.0;
+
+    const juce::SpinLock::ScopedLockType sl (specLock);
+
+    auto peakInRange = [] (const float* buf, int bufN, int binLo, int binHi) noexcept
+    {
+        binLo = juce::jlimit (0, bufN - 1, binLo);
+        binHi = juce::jlimit (0, bufN - 1, binHi);
+        if (binHi < binLo) std::swap (binLo, binHi);
+        float m = 0.0f;
+        for (int b = binLo; b <= binHi; ++b)
+        {
+            const float v = std::abs (buf[b]);
+            if (std::isfinite (v) && v > m) m = v;
+        }
+        return m;
+    };
+
+    for (int i = 0; i < numPoints; ++i)
+    {
+        // 以点 i 为中心的频率带宽 [f0, f1]（几何平均法）
+        const double t   = (double) i / (double) (numPoints - 1);
+        const double f   = std::pow (10.0, logMin + t * (logMax - logMin));
+
+        const double tPrev = (double) (i - 1) / (double) (numPoints - 1);
+        const double tNext = (double) (i + 1) / (double) (numPoints - 1);
+        const double fPrev = (i == 0)               ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
+        const double fNext = (i == numPoints - 1)   ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
+        const double f0    = std::sqrt (fPrev * f);
+        const double f1    = std::sqrt (f * fNext);
+
+        // ---- 主路取值 ----
+        const int binHiLo  = (int) std::floor (f0 * hzToBinHi);
+        const int binHiUp  = (int) std::ceil  (f1 * hzToBinHi);
+        const float magHi  = peakInRange (magData.data(), spectrumMagSize, binHiLo, binHiUp);
+
+        // ---- 低频路取值（只在有效频段内查询）----
+        float magLo = 0.0f;
+        if (f < loHardMax)
+        {
+            const int binLoLo = (int) std::floor (f0 * hzToBinLo);
+            const int binLoUp = (int) std::ceil  (f1 * hzToBinLo);
+            magLo = peakInRange (magDataLo.data(), spectrumMagSizeLo, binLoLo, binLoUp);
+        }
+
+        // ---- 交叉淡化（频率在 [xoverLo, xoverHi] 的八度内）----
+        //   w = 0 → 纯低频路；w = 1 → 纯主路
+        float w;
+        if      (f <= xoverLo) w = 0.0f;
+        else if (f >= xoverHi) w = 1.0f;
+        else
+        {
+            const double u = (std::log (f) - std::log (xoverLo))
+                           / (std::log (xoverHi) - std::log (xoverLo));
+            // 等功率（cos²/sin²）交叉：w²(Hi) + (1-w)²(Lo) 之和在能量域平滑
+            w = (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * u));
+        }
+
+        // 能量域线性混合后再开方（避免两峰重合时幅度偏高）
+        const float eHi = magHi * magHi;
+        const float eLo = magLo * magLo;
+        const float eMix = w * eHi + (1.0f - w) * eLo;
+        const float out  = std::sqrt (juce::jmax (0.0f, eMix));
+
+        dest.set (i, out);
+    }
 }
 
 // ==========================================================

@@ -25,6 +25,8 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::dynamicsDr:        return "Dynamics DR";
         case ModuleType::dynamicsCrest:     return "Dynamics Crest";
         case ModuleType::waveform:          return "Waveform";
+        case ModuleType::vuMeter:           return "VU Meter";
+        case ModuleType::spectrogram:       return "Spectrogram";
 
         default:                            return "Module";
     }

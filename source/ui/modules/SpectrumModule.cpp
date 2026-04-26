@@ -114,18 +114,23 @@ void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
 }
 
 // ----------------------------------------------------------
-// onFrame —— Hub 分发器回调（从 FrameSnapshot 拏高精度幅度）
+// onFrame —— Hub 分发器回调（从 Hub 拿已经 "双路合并" 的幅度）
 // ----------------------------------------------------------
 void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
     if (! isShowing()) return;
     if (! frame.has (AnalyserHub::Kind::Spectrum)) return;
 
-    // Phase F 优化：std::array → juce::Array 改 memcpy 批量拷贝
-    const int magN = (int) frame.spectrumMag.size();
-    rawMags.resize(magN);
-    std::memcpy (rawMags.getRawDataPointer(), frame.spectrumMag.data(),
-                 (size_t) magN * sizeof (float));
+    // 使用 Hub 的双路合并接口：低频走 8192 点（Δf≈5.9Hz），高频走 2048 点（Δf≈23Hz），
+    // 在 500Hz 附近做等功率交叉淡化。UI 侧零额外重采样，直接拿到"每列一个线性幅度"。
+    //
+    // 关于 frame：
+    //   ·frame.spectrumMag / spectrumMagLo 仍然保留（其他模块可能用），本模块不再使用；
+    //   · blended 接口走 Hub 内部锁，成本极低（N 次查表 + 一次 cos 交叉）。
+    constexpr int N = 256;
+    hub.getSpectrumMagnitudesBlended (rawMags, N,
+                                      minFreqHz,
+                                      juce::jmin (maxFreqHz, (float) (hub.getSampleRate() * 0.5)));
 
     const auto now = juce::Time::getCurrentTime();
     const float deltaMs = (float)(now - lastTickTime).inMilliseconds();
@@ -157,17 +162,22 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 }
 
 // ----------------------------------------------------------
-// rebuildDisplay —— 1024 bin → N 列 dB 值（对数频率，Slope 可选）
+// rebuildDisplay —— 已合并的 N 列线性幅度 → N 列 dBFS 值（Slope 可选）
+//
+//   变更说明：
+//     旧实现里本函数把 1024 bin 的 FFT 幅度**在 UI 侧**按对数频率轴重采样到 N=256 列，
+//     并且费大力气处理"低频一个 bin 覆盖多列 → 阶梯/平滑"。
+//     现在 Hub 已直接返回 N 列对数频率轴上的合并线性幅度（低频路 8192FFT + 高频路 2048FFT），
+//     本函数只需：
+//       1) 线性 → dB；
+//       2) 可选 Slope 补偿；
+//       3) 上升快 / 下降慢平滑；
+//       4) 末端轻量 3 列模糊磨圆拐点。
 // ----------------------------------------------------------
 void SpectrumModule::rebuildDisplay()
 {
-    const int magN = rawMags.size();
-    if (magN <= 1) return;
-
-    // 列数根据画布宽度取（最后 paintContent 前已被 resized），但这里为了解耦：
-    //   1. 用 AnalyserHub::spectrumMagSize 的一半作为初始 N（足够密）
-    //   2. paintContent 里会按 canvas 宽度再做线性采样
-    const int N = 256;
+    const int N = rawMags.size();
+    if (N <= 1) return;
 
     if ((int) smoothedDb.size() != N)
     {
@@ -176,96 +186,37 @@ void SpectrumModule::rebuildDisplay()
         peakHoldMs .assign(N, 0.0f);
     }
 
-    const double sampleRate = hub.getSampleRate();
-    const double nyquist    = sampleRate * 0.5;
-    const double fMin       = (double) minFreqHz;
-    const double fMax       = juce::jmin((double) maxFreqHz, nyquist);
-    const double logMin     = std::log10(fMin);
-    const double logMax     = std::log10(fMax);
-
-    // ----------------------------------------------------------
-    //  关键修复：消除低频阶梯的根源
-    //
-    //  之前写法：binF 直接 round 到最近邻 bin，再加 ±1 bin 的小窗口平均。
-    //    在对数坐标下 20~200Hz 挤占屏幕左侧 ~40%（N≈100 列），
-    //    而 48kHz/2048 FFT 的 bin 间距仅 23Hz → 这 100 列里有大段连续列
-    //    全部取到同一个 bin 的幅度（例如 20~43Hz 全落在 bin 1），
-    //    输出就是"N 列级台阶方波"，后续 Catmull-Rom 再怎么磨圆拐角，
-    //    台阶的水平段依然存在 → 视觉仍呈阶梯状。
-    //
-    //  新做法：
-    //    1) binF 不再 round：取 floor 得到 b0，b0+1 得到 b1，frac 小数部分
-    //       做 **dB 域线性插值**（dB 域插值比线性幅度插值听感更贴近对数感知）
-    //    2) 为避免"同一 bin 内列值完全相同"的阶梯，引入 **log-frequency 邻域加权**：
-    //       对 b0, b1 两个 bin 做先 dB 再线性混合（权重 = 1-frac / frac）
-    //    3) bin 间距 < 一列宽度时（高频段 N 列 > bin 数）用抗锯齿均值；
-    //       bin 间距 > 一列宽度时（低频段）用 dB 域线性插值
-    // ----------------------------------------------------------
-    const double binsPerLogDecade = (double)(magN - 1) / nyquist; // Hz→bin 换算因子
+    const double fMin   = (double) minFreqHz;
+    const double fMax   = juce::jmin ((double) maxFreqHz, hub.getSampleRate() * 0.5);
+    const double logMin = std::log10 (fMin);
+    const double logMax = std::log10 (fMax);
 
     for (int col = 0; col < N; ++col)
     {
-        // 对数频率 → 浮点 bin 坐标
-        const double t    = (double) col / (double) juce::jmax(1, N - 1);
-        const double f    = std::pow(10.0, logMin + t * (logMax - logMin));
-        const double binF = f * binsPerLogDecade;
-
-        // 该列覆盖的频率带宽（屏幕上"一列"所对应的 Hz 范围），用于决定是插值还是求平均
-        const double tNext = (double)(col + 1) / (double) juce::jmax(1, N - 1);
-        const double fNext = std::pow(10.0, logMin + tNext * (logMax - logMin));
-        const double binFNext = fNext * binsPerLogDecade;
-        const double binSpan  = binFNext - binF; // 一列覆盖多少个 bin
-
-        float db;
-        if (binSpan >= 1.0)
-        {
-            // 高频：一列覆盖多个 bin → 取最大值（突出频率成分，避免均值把峰拉低）
-            //   同时在 dB 域做能量加权，避免单个小峰被整列拉高
-            const int b0 = juce::jlimit(0, magN - 1, (int) std::floor(binF));
-            const int b1 = juce::jlimit(0, magN - 1, (int) std::ceil (binFNext));
-            float maxMag = 0.0f;
-            for (int k = b0; k <= b1; ++k)
-            {
-                const float v = std::abs(rawMags.getUnchecked(k));
-                if (std::isfinite(v) && v > maxMag) maxMag = v;
-            }
-            db = juce::Decibels::gainToDecibels(juce::jmax(1.0e-7f, maxMag));
-        }
-        else
-        {
-            // 低频：一列覆盖 < 1 个 bin → dB 域线性插值（核心修复点）
-            //   先把 b0 / b1 转到 dB，再按 frac 做插值
-            //   这让 20~43Hz 区间的数十个列拿到**连续变化**的 dB 值
-            const int   b0   = juce::jlimit(0, magN - 1, (int) std::floor(binF));
-            const int   b1   = juce::jlimit(0, magN - 1, b0 + 1);
-            const float frac = (float)(binF - (double) b0);
-
-            const float m0 = std::abs(rawMags.getUnchecked(b0));
-            const float m1 = std::abs(rawMags.getUnchecked(b1));
-            const float db0 = juce::Decibels::gainToDecibels(juce::jmax(1.0e-7f, m0));
-            const float db1 = juce::Decibels::gainToDecibels(juce::jmax(1.0e-7f, m1));
-            db = db0 * (1.0f - frac) + db1 * frac;
-        }
+        const float mag = std::abs (rawMags.getUnchecked (col));
+        float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
 
         // Slope 补偿：4.5 dB/oct 高频提升（基准 1kHz）
         if (slopeEnabled)
         {
-            const double octaves = std::log2(juce::jmax(20.0, f) / 1000.0);
-            db += (float)(4.5 * octaves);
+            const double t = (double) col / (double) juce::jmax (1, N - 1);
+            const double f = std::pow (10.0, logMin + t * (logMax - logMin));
+            const double octaves = std::log2 (juce::jmax (20.0, f) / 1000.0);
+            db += (float) (4.5 * octaves);
         }
 
         // 平滑：上升快，下降慢
         const float prev  = smoothedDb[(size_t) col];
         const float alpha = (db > prev) ? 0.55f : 0.12f;
         float sm = prev + alpha * (db - prev);
-        sm = juce::jlimit(minDb, maxDb + 12.0f, sm);
+        sm = juce::jlimit (minDb, maxDb + 12.0f, sm);
         smoothedDb[(size_t) col] = sm;
     }
 
     // ----------------------------------------------------------
-    //  额外的列间平滑（一维小核卷积）：彻底消除 dB 插值残留的微小拐点
+    //  额外的列间平滑（一维小核卷积）：磨圆列间拐点
     //   · 仅对已经求好的 smoothedDb 做轻量 [1,2,1]/4 低通，核宽 3 列
-    //   · 跨帧叠加效果有限，纯视觉磨平，完全不影响频率/幅度精度
+    //   · 纯视觉磨平，完全不影响频率/幅度精度
     // ----------------------------------------------------------
     if (N >= 3)
     {

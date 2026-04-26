@@ -33,7 +33,13 @@ enum class ModuleType
     dynamicsCrest,
 
     // 持续滚动瀑布波形（复用 Oscilloscope 原始样本，后端零新增计算）
-    waveform
+    waveform,
+
+    // 模拟 VU 指针表（复用 Loudness 路的 RMS L/R，后端零新增计算）
+    vuMeter,
+
+    // 像素式实时频谱瀑布图（复用 Spectrum 路的 FFT 幅度，后端零新增计算）
+    spectrogram
 };
 
 juce::String getModuleDisplayName(ModuleType t);
@@ -331,6 +337,19 @@ public:
     };
     std::function<void(LayoutPreset)> onLayoutPresetChanged;
 
+    // ======================================================
+    // 预设导出 / 导入回调（Save/Load 按钮触发）
+    //   · onSavePresetRequested(juce::File dest)：用户在 Save 点击后弹出的
+    //     FileChooser 中选定目标文件，Workspace 会把 File 原样回调给外层；
+    //     外层（Y2KStandaloneApp）负责把当前 settings 物理文件复制过去。
+    //   · onLoadPresetRequested(juce::File src)：用户在 Load 点击后弹出的
+    //     FileChooser 中选定源文件，Workspace 会把 File 原样回调给外层；
+    //     外层负责把源文件复制到 settings 物理位置并触发重启以应用。
+    //   · 空 File 表示用户取消了 FileChooser（外层可忽略）。
+    // ======================================================
+    std::function<void(juce::File)> onSavePresetRequested;
+    std::function<void(juce::File)> onLoadPresetRequested;
+
     // 被 ModulePanel 在 drag 过程中调用，更新吸附预览线
     void updateDragPreview(ModulePanel& movingPanel);
     void clearDragPreview();
@@ -493,6 +512,16 @@ private:
     // Grid 与 layoutPresetBox 之间的竖直分割线 x 坐标（-1 = chrome 隐藏态未布局）
     int              toolbarDividerXLayout = -1;
 
+    // 预设 Save/Load 按钮（紧邻 layoutPresetBox 左侧）
+    //   · Save：用户把当前 settings 文件另存为到指定位置（自定义文件名，后缀 .settings）
+    //   · Load：用户选择一个之前 Save 过的 .settings 文件覆盖当前 settings，然后
+    //           由外层（Y2KStandaloneApp）触发重启以应用所有持久化项。
+    //   · 仅在 layoutPresetUiVisible==true（Standalone 模式）时可见。
+    //   · 下拉弹出 FileChooser 后通过 onSavePresetRequested / onLoadPresetRequested
+    //     把选中的 File 传给 Editor → Standalone App 去做真正的复制 / 重载。
+    juce::TextButton savePresetBtn;
+    juce::TextButton loadPresetBtn;
+
     // 添加模块菜单（双击 / 右键空白区）hover 预览状态
     //   · 当用户在 PopupMenu 里悬停在某一模块名上时，在 canvas 的 hoverPreviewPos
     //     处绘制一个半透明的"模块占位框"（标题栏 + 模块名），给用户一个
@@ -541,9 +570,10 @@ private:
     ModuleFactory factory;
     juce::Array<ModuleType> availableTypes {
         ModuleType::eq, ModuleType::loudness, ModuleType::lufsRealtime, ModuleType::truePeak,
+        ModuleType::vuMeter,
         ModuleType::oscilloscope, ModuleType::oscilloscopeLeft, ModuleType::oscilloscopeRight,
         ModuleType::waveform,
-        ModuleType::spectrum,
+        ModuleType::spectrum, ModuleType::spectrogram,
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
         ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest
     };
