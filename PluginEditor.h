@@ -143,6 +143,19 @@ private:
     // 模块工厂（仅 Phase A：支持 EQ；其他类型为 Phase B-D 预留）
     std::unique_ptr<ModulePanel> createModule(ModuleType type);
 
+    // ======================================================
+    // VST3 / AU 等插件模式下的预设 Save/Load 实现
+    //   · Standalone 模式下这两个方法不会被调用（onSave/LoadSettingsRequested 由
+    //     Y2KStandaloneApp 自己订阅做 PropertiesFile 物理拷贝 + 重启）。
+    //   · 插件模式下 Editor 就地处理，不重启宿主；详见构造函数里的说明。
+    //   · saveStateAsSettingsFile：把 Processor::getStateInformation 的 binary
+    //     base64 化成 Standalone 兼容的 <PROPERTIES> XML 写入目标文件；
+    //   · loadStateFromSettingsFile：容错读取三种格式（Standalone .settings、
+    //     裸 PBEQ_State XML、裸 PBEQ_Layout XML），把布局还原到当前 processor。
+    // ======================================================
+    void saveStateAsSettingsFile  (const juce::File& dest);
+    void loadStateFromSettingsFile (const juce::File& src);
+
     // 字体 typeface（每个 Editor 实例持有一份；避免 static 存储期
     // 与插件 DLL 生命周期错配导致宿主卸载插件时崩溃）
     juce::Typeface::Ptr customTypeface;

@@ -304,8 +304,16 @@ public:
     //   · 默认 true（Standalone 模式保持原行为）。
     void setLayoutPresetUiVisible (bool shouldBeVisible);
 
-    // ======================================================
-    // FPS 限制按钮（底部工具栏左下角）
+    // 控制"布局预设 Save / Load"两个按钮的独立可见性（与布局预设下拉互相解耦）。
+    //   · 用于 VST3 / AU 等插件模式：DAW 里我们仍然要让用户能 Save/Load 预设文件
+    //     （与 Standalone 的 .settings 互通），但布局预设下拉因为会改顶层窗口尺寸
+    //     不适合显示。此开关允许在 setLayoutPresetUiVisible(false) 之后再单独
+    //     setSaveLoadUiVisible(true)，让两个按钮贴在 Grid 按钮左侧显示。
+    //   · 默认 true，且布局受 layoutPresetUiVisible 约束（当 layoutPreset 可见时
+    //     两按钮贴在下拉旁；不可见时两按钮独立贴 Grid）。
+    void setSaveLoadUiVisible (bool shouldBeVisible);
+
+
     //   · 点击可在 30 / 60 FPS 之间切换（默认 30）
     //   · 回调由 Editor 订阅，真正修改 AnalyserHub 的 FrameDispatcher 频率
     //   · 旁边显示实时帧率（由 Editor 统计后通过 setMeasuredFps 下发）
@@ -478,6 +486,15 @@ private:
     // 布局预设下拉在底部 toolbar 中的可见性。true = 显示（Standalone 默认）；
     //   false = 插件模式下隐藏整个"布局预设"区（下拉 + Grid 按钮与之间的分隔线）。
     bool                           layoutPresetUiVisible = true;
+
+    // Save/Load 两个按钮的独立可见性（与布局预设下拉解耦）。true = 显示（默认）。
+    //   · Standalone 下两者均 true，按钮紧贴下拉框左侧。
+    //   · VST3/AU 插件模式下，Editor 构造里会 setLayoutPresetUiVisible(false) 隐藏下拉，
+    //     但保留 saveLoadUiVisible=true，让两个按钮独立贴在 Grid 按钮左侧显示 ——
+    //     用于在 DAW 中把当前插件状态另存为 .settings 文件 / 从文件加载布局。
+    bool                           saveLoadUiVisible     = true;
+
+
 
     // 右下角的 Hide/Show 按钮（隐藏白色底框 + 控制区）
     HideChromeButton hideBtn;

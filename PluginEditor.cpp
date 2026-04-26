@@ -65,7 +65,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.1");
+const int versionW = versionFont.getStringWidth ("v1.2");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -106,7 +106,7 @@ const int versionW = versionFont.getStringWidth ("v1.1");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v1.1";
+        const juce::String versionText = "v1.2";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -257,8 +257,28 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
     // 2) 先给编辑器设尺寸 —— 触发 resized() 让 workspace 拿到实际 bounds
     //    这样后续 addModuleByType 走 findNextSlot 时 canvas 不再是 0x0
+    //
+    //   尺寸上限分模式：
+    //     · Standalone：1600×1100 —— 默认预设下的合理上限；切换到"横向铺满"
+    //       类预设时 applyLayoutPreset 会临时把上限抬到屏幕宽度，预设回 1 时
+    //       会再夹回 1600×1100，避免用户手动拖得过大错位。
+    //     · VST3 / AU 插件宿主：8192×8192 —— 远大于常规显示器分辨率。插件模式
+    //       下布局预设下拉被隐藏（不会再有地方动态抬高上限），如果仍用 1600×1100
+    //       会被 JUCE 的 ComponentBoundsConstrainer 死死夹住；用户在 DAW 里
+    //       拉宽窗口到 1600 就拉不动了。给一个足够大的上限让宿主自由 resize。
+    //
+    //   尺寸下限同样分模式：
+    //     · Standalone：640×420 —— 保证伪标题栏 + 底部 toolbar + 至少一行模块
+    //       能完整显示，避免用户误缩到按钮挤压错位。
+    //     · VST3 / AU 插件宿主：320×240 —— 插件模式下不画伪标题栏（chrome 由宿主
+    //       提供），底部 toolbar 里大量 UI 也被隐藏（Source 下拉、布局预设下拉等），
+    //       实际需要的最小可用宽度远小于 Standalone；若仍沿用 640×420，用户在 DAW
+    //       里就会"缩到一半缩不动了"。给到 320×240 让宿主充分自由。
     setResizable(true, true);
-    setResizeLimits(640, 420, 1600, 1100);
+    if (isPluginHost)
+        setResizeLimits(50, 50, 8192, 8192);
+    else
+        setResizeLimits(640, 420, 1600, 1100);
     setSize(960, 640);
 
     // 3) 再装载默认/已保存模块
@@ -413,7 +433,38 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             //   切换预设会改顶层窗口尺寸 / 位置（横向铺满屏幕等），和宿主窗口会打架；
             //   插件下始终使用默认预设即可，无需用户选择。
             workspace->setLayoutPresetUiVisible (false);
+
+            // 但 Save/Load 两个按钮仍然保留 —— 用户依然需要在 DAW 里导入/导出
+            //   预设文件（与 Standalone Save 出的 .settings 互通）。按钮独立贴在
+            //   Grid 左侧显示。
+            workspace->setSaveLoadUiVisible (true);
         }
+
+        // 插件模式下 Save/Load 不经过 Standalone App，直接由 Editor 就地处理：
+        //   · Save：把 Processor::getStateInformation 的数据包装成与 Standalone
+        //     完全兼容的 .settings 文件（<PROPERTIES> 外壳 + base64 编码的
+        //     filterState 条目），Standalone 下一次打开该文件也能正常恢复。
+        //   · Load：容错读取三种格式
+        //       a) Standalone .settings —— 解析 <PROPERTIES> 里 filterState 条目，
+        //          base64 解码 + copyXmlToBinary 反序列化为 MemoryBlock，再喂给
+        //          Processor::setStateInformation；
+        //       b) 裸 PBEQ_State XML（Processor state 原生 XML 形态）；
+        //       c) 裸 PBEQ_Layout XML（仅布局，不含其它）—— 直接灌给 workspace。
+        //     成功后调用 workspace->loadLayoutFromXml 热重载，无需重启宿主。
+        //
+        //   注：插件模式下"主题/窗口尺寸/音频源"等 runtime 状态由 DAW 或 Editor 自身
+        //   管理，Load 过来的 .settings 里的那些 key 在这里被有意忽略；我们只抽取
+        //   和 Processor state 相关的部分 —— 这与"预设 = 模块布局"的用户心智一致。
+        onSaveSettingsRequested = [this](juce::File dest)
+        {
+            if (dest == juce::File{}) return;
+            saveStateAsSettingsFile (dest);
+        };
+        onLoadSettingsRequested = [this](juce::File src)
+        {
+            if (src == juce::File{} || ! src.existsAsFile()) return;
+            loadStateFromSettingsFile (src);
+        };
 
         // 插件模式下不画伪标题栏 / chrome 浮层
         chromeHiddenOverlay.reset();
@@ -902,6 +953,145 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
     }
 }
 
+// ============================================================
+// 插件模式（VST3 / AU / AAX）下的预设 Save —— 把当前 Processor state
+// 打包成一个与 Standalone 完全兼容的 <PROPERTIES> XML 文件
+//
+// 文件结构（与 JUCE PropertiesFile 在磁盘上的 XML 格式对齐）：
+//   <?xml version="1.0" ...?>
+//   <PROPERTIES>
+//     <VALUE name="filterState" val="BASE64(processor state binary)"/>
+//   </PROPERTIES>
+//
+// 这样：
+//   · 用户在 VST3 里 Save 出来的 .settings，Standalone 下次启动时 Load
+//     能原样恢复（Standalone 的 reloadPluginState 会读 filterState）；
+//   · Standalone 里 Save 出来的 .settings，VST3 这边 Load 也能正确解析
+//     （loadStateFromSettingsFile 会识别同样的 <PROPERTIES>/filterState 结构）。
+//
+// 注：插件模式下我们**有意不**写入主题 / 窗口 bounds / 音频源 等 Standalone
+// 专属字段 —— 这些在 VST3 场景下的语义与 Standalone 完全不同（窗口由宿主管、
+// 主题由插件内独立持久化）。如果用户用 VST3 存的文件里缺这些键，Standalone
+// 首次 Load 时会按其默认值兜底，不会报错。
+// ============================================================
+void Y2KmeterAudioProcessorEditor::saveStateAsSettingsFile (const juce::File& dest)
+{
+    // 1) 先把"当前 workspace 的实时布局"回写到 Processor，保证 getStateInformation
+    //    拿到的是用户眼睛看到的最新状态（onLayoutChanged 是异步节流的，不能指望
+    //    点击 Save 的那一瞬间刚好已经被刷到 Processor）
+    if (workspace != nullptr)
+        processor.setSavedLayoutXml (workspace->saveLayoutAsXml());
+
+    // 2) 导出 Processor state（内部是 XML 的二进制化形式）
+    juce::MemoryBlock stateBlock;
+    processor.getStateInformation (stateBlock);
+
+    // 3) 构造 <PROPERTIES> 根节点 + 一个 filterState VALUE 子节点（base64）
+    juce::XmlElement props ("PROPERTIES");
+    auto* v = props.createNewChildElement ("VALUE");
+    v->setAttribute ("name", "filterState");
+    v->setAttribute ("val",  stateBlock.toBase64Encoding());
+
+    // 4) 原子化写入目标文件（先写 TempFile，成功后 rename；避免半截文件）
+    dest.getParentDirectory().createDirectory();
+    juce::TemporaryFile tmp (dest);
+    if (! props.writeTo (tmp.getFile()))
+    {
+        DBG ("saveStateAsSettingsFile: write temp failed");
+        return;
+    }
+    if (! tmp.overwriteTargetFileWithTemporary())
+    {
+        DBG ("saveStateAsSettingsFile: replace failed → " + dest.getFullPathName());
+    }
+}
+
+// ============================================================
+// 插件模式下的预设 Load —— 把用户选择的 .settings 文件解析出 Processor state
+// 并就地热重载（不重启宿主）。容错三种来源：
+//   a) Standalone / 本 Save 写出的 <PROPERTIES> + filterState (base64) 结构；
+//   b) 裸 <PBEQ_State ...> XML（即 Processor::getStateInformation 的原生 XML 形态）；
+//   c) 裸 <PBEQ_Layout ...> XML（仅包含布局，无其他元信息）。
+// 优先级 a > b > c。任一成功即可。
+// ============================================================
+void Y2KmeterAudioProcessorEditor::loadStateFromSettingsFile (const juce::File& src)
+{
+    if (! src.existsAsFile()) return;
+
+    auto xml = juce::parseXML (src);
+    if (xml == nullptr)
+    {
+        DBG ("loadStateFromSettingsFile: not a valid XML → " + src.getFullPathName());
+        return;
+    }
+
+    // ---- 分支 a：<PROPERTIES> 外壳，含 filterState base64 -------
+    if (xml->hasTagName ("PROPERTIES"))
+    {
+        // 在 VALUE 子节点里找 name="filterState" 的那一个
+        const juce::XmlElement* filterVal = nullptr;
+        for (auto* child : xml->getChildWithTagNameIterator ("VALUE"))
+        {
+            if (child != nullptr && child->getStringAttribute ("name") == "filterState")
+            {
+                filterVal = child;
+                break;
+            }
+        }
+        if (filterVal != nullptr)
+        {
+            const auto b64 = filterVal->getStringAttribute ("val");
+            juce::MemoryBlock block;
+            if (block.fromBase64Encoding (b64) && block.getSize() > 0)
+            {
+                // 反序列化回 Processor —— 内部会更新 savedLayoutXml
+                processor.setStateInformation (block.getData(), (int) block.getSize());
+                // 立刻把新布局灌到 workspace（不用等宿主再开关一次 Editor）
+                if (workspace != nullptr)
+                {
+                    const auto layoutXml = processor.getSavedLayoutXml();
+                    if (layoutXml.isNotEmpty())
+                        workspace->loadLayoutFromXml (layoutXml);
+                }
+                return;
+            }
+        }
+        DBG ("loadStateFromSettingsFile: <PROPERTIES> without valid filterState");
+        // 不 return，允许继续尝试把整文件当作其它格式（极少见）
+    }
+
+    // ---- 分支 b：裸 PBEQ_State XML -------
+    if (xml->hasTagName ("PBEQ_State"))
+    {
+        juce::MemoryBlock block;
+        juce::AudioProcessor::copyXmlToBinary (*xml, block);
+        if (block.getSize() > 0)
+        {
+            processor.setStateInformation (block.getData(), (int) block.getSize());
+            if (workspace != nullptr)
+            {
+                const auto layoutXml = processor.getSavedLayoutXml();
+                if (layoutXml.isNotEmpty())
+                    workspace->loadLayoutFromXml (layoutXml);
+            }
+            return;
+        }
+    }
+
+    // ---- 分支 c：裸 PBEQ_Layout XML -------
+    if (xml->hasTagName ("PBEQ_Layout"))
+    {
+        const auto layoutXml = xml->toString (juce::XmlElement::TextFormat{}.singleLine());
+        // 同步写回 Processor 以便下次 getStateInformation 能拿到
+        processor.setSavedLayoutXml (layoutXml);
+        if (workspace != nullptr)
+            workspace->loadLayoutFromXml (layoutXml);
+        return;
+    }
+
+    DBG ("loadStateFromSettingsFile: unknown root tag = " + xml->getTagName());
+}
+
 // ----------------------------------------------------------
 // 绘制：方案乙（完全铺满）
 //   · 顶部 TitleBar（26px，Pink XP 风格抬头；含 Logo + 标题文字 + 右侧 × 按钮）
@@ -947,7 +1137,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v1.1";
+        const juce::String versionText = "v1.2";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);

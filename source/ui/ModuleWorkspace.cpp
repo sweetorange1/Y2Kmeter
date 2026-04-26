@@ -1723,15 +1723,29 @@ void ModuleWorkspace::resized()
         gridBtn.setVisible (true);
 
         // 5c) 紧邻 Grid 左侧：与 Grid 之间用一条竖直分割线隔开，再放布局预设下拉
-        //   · 仅 Standalone 下显示（插件宿主模式由 Editor 调
+        //   · 布局预设下拉仅 Standalone 下显示（插件宿主模式由 Editor 调
         //     setLayoutPresetUiVisible(false) 关闭，因为切换预设涉及
         //     改顶层窗口尺寸/位置，和宿主窗口会打架）。
-        if (layoutPresetUiVisible)
+        //   · Save/Load 两个按钮由独立开关 saveLoadUiVisible 控制：
+        //     Standalone 与 VST3 插件模式下都显示（VST3 下虽然没有布局预设下拉，
+        //     两按钮仍然独立贴在 Grid 左侧，用于导入导出 .settings 预设文件）。
+        const bool layoutVisible   = layoutPresetUiVisible;
+        const bool saveLoadVisible = saveLoadUiVisible;
+
+        if (layoutVisible || saveLoadVisible)
         {
+            // 分隔线：Grid 与右侧下一块（Save/Load 或布局预设）之间
             tb.removeFromRight (4);
             toolbarDividerXLayout = tb.removeFromRight (1).getX();
             tb.removeFromRight (4);
+        }
+        else
+        {
+            toolbarDividerXLayout = -1;
+        }
 
+        if (layoutVisible)
+        {
             // 布局预设下拉框：与音频源下拉同高。
             //   · 弹出菜单的宽度由 PinkXPLookAndFeel::getIdealPopupMenuItemSize
             //     按实际文字宽度自适应撑开，所以这里 ComboBox 本体保持紧凑即可。
@@ -1739,10 +1753,17 @@ void ModuleWorkspace::resized()
             auto layoutArea = tb.removeFromRight (layoutBoxW);
             layoutPresetBox.setBounds (layoutArea.withSizeKeepingCentre (layoutBoxW, btnH));
             layoutPresetBox.setVisible (true);
+        }
+        else
+        {
+            layoutPresetBox.setVisible (false);
+        }
 
-            // 紧邻下拉框左侧：Save / Load 两个按钮（与 gridBtn 同宽高，间距与
-            //   按钮区其他分组一致；不再额外加分隔线，避免 toolbar 太挤）
-            tb.removeFromRight (4); // 与下拉框之间的视觉间距
+        if (saveLoadVisible)
+        {
+            // Save / Load 两个按钮（与 gridBtn 同宽高），贴在布局预设下拉左侧
+            //   若下拉不可见，则两按钮直接贴在 Grid 分隔线左侧。
+            tb.removeFromRight (4); // 与上一块之间的视觉间距
             auto saveArea = tb.removeFromRight (btnW);
             savePresetBtn.setBounds (saveArea.withSizeKeepingCentre (btnW, btnH));
             savePresetBtn.setVisible (true);
@@ -1756,11 +1777,11 @@ void ModuleWorkspace::resized()
         }
         else
         {
-            // 隐藏态：不占宽 + 分隔线不画
-            layoutPresetBox.setVisible (false);
-            savePresetBtn.setVisible  (false);
-            loadPresetBtn.setVisible  (false);
-            toolbarDividerXLayout = -1;
+            savePresetBtn.setVisible (false);
+            loadPresetBtn.setVisible (false);
+            // 若下拉可见但 Save/Load 不可见，补一点收尾间距让视觉整齐
+            if (layoutVisible)
+                tb.removeFromRight (6);
         }
 
         fpsBtn.setVisible   (true);
@@ -1963,10 +1984,30 @@ void ModuleWorkspace::setLayoutPresetUiVisible (bool shouldBeVisible)
     if (! shouldBeVisible)
     {
         layoutPresetBox.setVisible (false);
-        savePresetBtn.setVisible   (false);
-        loadPresetBtn.setVisible   (false);
+        // 注意：Save/Load 按钮的显隐由独立开关 saveLoadUiVisible 决定，
+        //       这里不再一起强制隐藏 —— VST3 插件模式下允许"隐藏下拉但保留 Save/Load"。
+        // 若 saveLoadUiVisible 也是 false，resized() 分支会负责真正隐藏两按钮。
         // 让分隔线 Layout 自动不画（drawDivider 会在 x<0 时跳过）
-        toolbarDividerXLayout = -1;
+        if (! saveLoadUiVisible)
+            toolbarDividerXLayout = -1;
+    }
+
+    resized();
+    repaint();
+}
+
+void ModuleWorkspace::setSaveLoadUiVisible (bool shouldBeVisible)
+{
+    if (saveLoadUiVisible == shouldBeVisible) return;
+    saveLoadUiVisible = shouldBeVisible;
+
+    if (! shouldBeVisible)
+    {
+        savePresetBtn.setVisible (false);
+        loadPresetBtn.setVisible (false);
+        // 若布局预设下拉也是隐藏态，此时分隔线也不需要
+        if (! layoutPresetUiVisible)
+            toolbarDividerXLayout = -1;
     }
 
     resized();
