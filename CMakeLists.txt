@@ -149,8 +149,11 @@ target_sources(Y2Kmeter PRIVATE
   source/ui/modules/WaveformModule.cpp
   source/ui/modules/SpectrogramModule.h
   source/ui/modules/SpectrogramModule.cpp
+  source/ui/modules/TamagotchiModule.h
+  source/ui/modules/TamagotchiModule.cpp
 
   # === Standalone 自定义入口（仅 Standalone 构建时启用，内部已用宏保护）===
+
   source/standalone/Y2KStandaloneApp.cpp
   source/standalone/WasapiLoopbackCapture.h
   source/standalone/WasapiLoopbackCapture.cpp

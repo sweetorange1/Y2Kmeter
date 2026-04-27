@@ -12,6 +12,7 @@
 #include "source/ui/modules/FineSplitModules.h"
 #include "source/ui/modules/WaveformModule.h"
 #include "source/ui/modules/SpectrogramModule.h"
+#include "source/ui/modules/TamagotchiModule.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -251,8 +252,12 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::waveform,
 
         // 实时频谱瀑布图（复用 Spectrum 路的 FFT 幅度，后端零新增计算）
-        ModuleType::spectrogram
+        ModuleType::spectrogram,
+
+        // 独立小宠物模块（右键/双击空白区添加）
+        ModuleType::tamagotchi
     });
+
     addAndMakeVisible(*workspace);
 
     // 2) 先给编辑器设尺寸 —— 触发 resized() 让 workspace 拿到实际 bounds
@@ -947,9 +952,13 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
         case ModuleType::spectrogram:
             return std::make_unique<SpectrogramModule>(processor.getAnalyserHub());
 
+        case ModuleType::tamagotchi:
+            return std::make_unique<TamagotchiModule>();
+
         default:
             jassertfalse; // 暂未实现
             return nullptr;
+
     }
 }
 

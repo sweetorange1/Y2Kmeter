@@ -27,8 +27,10 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::waveform:          return "Waveform";
         case ModuleType::vuMeter:           return "VU Meter";
         case ModuleType::spectrogram:       return "Spectrogram";
+        case ModuleType::tamagotchi:        return "Tamagotchi";
 
         default:                            return "Module";
+
     }
 }
 

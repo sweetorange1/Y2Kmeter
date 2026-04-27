@@ -39,7 +39,10 @@ enum class ModuleType
     vuMeter,
 
     // 像素式实时频谱瀑布图（复用 Spectrum 路的 FFT 幅度，后端零新增计算）
-    spectrogram
+    spectrogram,
+
+    // Tamagotchi 小宠物模块（独立模块，不走拖图逻辑）
+    tamagotchi
 };
 
 juce::String getModuleDisplayName(ModuleType t);
@@ -591,7 +594,9 @@ private:
         ModuleType::oscilloscope, ModuleType::oscilloscopeLeft, ModuleType::oscilloscopeRight,
         ModuleType::waveform,
         ModuleType::spectrum, ModuleType::spectrogram,
+        ModuleType::tamagotchi,
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
+
         ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest
     };
 
@@ -648,6 +653,8 @@ private:
         //   · 同时作用于像素贴画模式与 PerlerBeads 圆环模式
         //   · 序列化到 XML（属性名 perlerOpacity）；兼容旧档默认回退 1.0
         float          opacity = 1.0f;
+
+
 
         juce::Rectangle<int> getBounds() const noexcept
         {
@@ -801,6 +808,8 @@ private:
                                  const juce::Point<int>* topLeftOverride = nullptr,
                                  int forcedCellSize = 0);
 
+
+
     // 对指定图片重新按新格子数量化（缩放手柄松开时调用）
     //   · 优先用 sourcePath 重新加载原图重量化；源图不可用则基于当前 pixelImage 降级量化
     void rebuildPerlerImage (int idx, int newCellsW, int newCellsH);
@@ -818,6 +827,8 @@ private:
 
     // 键盘：监听 Delete 删除聚焦图片
     bool keyPressed (const juce::KeyPress& key) override;
+
+
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ModuleWorkspace)
 };

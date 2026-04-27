@@ -1,5 +1,6 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/modules/TamagotchiModule.h"
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
@@ -9,7 +10,20 @@
 // ==========================================================
 namespace
 {
+    void clearTamagotchiFocusVisuals (juce::OwnedArray<ModulePanel>& modules)
+    {
+        for (auto* m : modules)
+        {
+            if (m == nullptr || m->getModuleType() != ModuleType::tamagotchi)
+                continue;
+
+            if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
+                tamagotchi->setFocusVisual (false);
+        }
+    }
+
     class FpsMiniLookAndFeel : public PinkXPLookAndFeel
+
     {
     public:
         juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override
@@ -115,7 +129,9 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::waveform:          return "waveform";
         case ModuleType::vuMeter:           return "vu_meter";
         case ModuleType::spectrogram:       return "spectrogram";
+        case ModuleType::tamagotchi:        return "tamagotchi";
     }
+
     return "eq";
 }
 
@@ -142,6 +158,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "waveform",           ModuleType::waveform },
         { "vu_meter",           ModuleType::vuMeter },
         { "spectrogram",        ModuleType::spectrogram },
+        { "tamagotchi",         ModuleType::tamagotchi },
     };
     for (auto& p : kv)
         if (s == p.k)
@@ -210,6 +227,7 @@ public:
             g.setOpacity (alpha);
             g.drawImageAt (img->pixelImage, img->topLeft.x, img->topLeft.y);
         }
+
     }
 
     // --------------------------------------------------------
@@ -652,6 +670,8 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     //   · 仅在 focusedPerlerIdx 有效时执行 repaint，避免无聚焦时的无谓刷新
     panel.onBroughtToFront = [this](ModulePanel&)
     {
+        clearTamagotchiFocusVisuals (modules);
+
         if (focusedPerlerIdx >= 0)
         {
             const int oldFocus = focusedPerlerIdx;
@@ -669,6 +689,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
             repaint();
         }
     };
+
 }
 
 ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool autoPosition)
@@ -1110,6 +1131,8 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
     // 仅在画布内的空白处响应（点到子模块上时事件会被子组件吞掉，不会走到这里）
     if (! getCanvasArea().contains(e.getPosition()))
         return;
+
+    clearTamagotchiFocusVisuals (modules);
 
     // 事件来源区分：workspace 原生 / layer 转发
     //   · layer 转发过来的事件指向图片 / 装饰区域，此时右键不应弹"添加模块"菜单；
@@ -2189,6 +2212,7 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
                 node.setProperty (kPropOpacity, (double) pimg->opacity, nullptr);
             tree.appendChild (node, nullptr);
             continue;
+
         }
         // 其他 chrome 子组件（按钮 / 下拉 / themeBar / 浮层等）不持久化
     }
@@ -2261,6 +2285,7 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
                 last->opacity = juce::jlimit (0.0f, 1.0f, op);
             }
             continue;
+
         }
 
         if (! node.hasType(kLayoutModule)) continue;
@@ -2800,10 +2825,13 @@ juce::Image ModuleWorkspace::buildPerlerImage (const juce::Image& source,
     return outImage;
 }
 
+
+
 // ----------------------------------------------------------
 // 从文件加载图片并加入 perlerImages（失败返回 false）
 // ----------------------------------------------------------
 bool ModuleWorkspace::addPerlerImageFromFile (const juce::File& file,
+
                                               juce::Point<int> dropCanvasPos,
                                               int fixedCellsW,
                                               int fixedCellsH,
@@ -2865,6 +2893,7 @@ bool ModuleWorkspace::addPerlerImageFromFile (const juce::File& file,
         cellsH = fixedCellsH;
     }
     else
+
     {
         pixel = buildPerlerImage (src, cellSize, maxCellsOnLongSide, cellsW, cellsH);
 
@@ -3145,6 +3174,7 @@ void ModuleWorkspace::mouseDrag (const juce::MouseEvent& e)
         if (isCorner)
         {
             // ====== 功能1：角落 handle → 按起始矩形的宽高比等比缩放 ======
+
             const bool left = (h == ResizeHandle::topLeft   || h == ResizeHandle::bottomLeft);
             const bool top  = (h == ResizeHandle::topLeft   || h == ResizeHandle::topRight);
 
