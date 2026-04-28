@@ -31,6 +31,13 @@ public:
     void setFocusVisual (bool shouldFocus);
     void setSignalLevel01 (float level01) noexcept;
 
+    juce::String getRoleName() const noexcept;
+    float getHunger() const noexcept;
+    float getHealth() const noexcept;
+    void restorePersistentState (const juce::String& savedRoleName,
+                                 float savedHunger,
+                                 float savedHealth);
+
 private:
 
     enum class Edge { none, right, bottom, bottomRight };
@@ -68,7 +75,6 @@ private:
         fall = 27,
         dazeThenWalkLeft = 28,
         lookLeft = 29,
-        // 你给的描述里 29 有多朝向子态；当前资源编号只到 33，先以 30..33 对齐已有编号
         moveLeft = 30,
         yell = 31,
         runAwayLeft = 32,
@@ -77,10 +83,31 @@ private:
 
     enum class MotionMode
     {
+        egg,
+        hatching,
+        toilet,
         patrol,
         startledIntro,
         falling,
-        landingFall
+        landingFall,
+        drowsy,
+        sleeping,
+        eating,
+        hungry,
+        starving,
+        sick,
+        criticalSick,
+        dead
+    };
+
+    enum class PatrolAction
+    {
+        lookLeftSlow,
+        lookRightSlow,
+        moveLeftFast,
+        moveRightFast,
+        talk,
+        jumpFight
     };
 
     void timerCallback() override;
@@ -90,18 +117,36 @@ private:
     int chooseNextAnimByState() const;
     void stepOneFrame();
     void stepWander();
+    bool shouldUseRightVariantForAnim (int animId) const;
+    const juce::Array<juce::Image>& getFramesForAnim (int animId) const;
+    const juce::Array<juce::Image>& getRightFramesForAnim (int animId) const;
+    bool hasRightVariantFrames (int animId) const;
+
     void updateNeeds();
+    MotionMode evaluateAutoMotionMode() const;
+    void switchMotionMode (MotionMode newMode);
     void onAnimationFinished();
     int randomAnimFrom (std::initializer_list<int> ids) const;
+    void beginPatrolCycle();
+    void beginPatrolAction (PatrolAction action);
+    void stepPatrolAction();
+    void stepJumpFight();
     void drawPixelBar (juce::Graphics& g,
                        juce::Rectangle<int> area,
                        float value01,
                        juce::Colour fill,
                        juce::StringRef label) const;
+
     juce::Rectangle<int> getHudBounds() const;
     juce::Rectangle<int> getTestButtonBounds (int idx) const;
+    juce::Rectangle<int> getStateModeComboBounds() const;
+    juce::Rectangle<int> getAnimTriggerComboBounds() const;
     int hitTestButton (juce::Point<int> pos) const;
     void applyTestButton (int idx);
+
+    void refreshDebugAnimTriggerItems();
+    void applyForcedMotionMode();
+    void triggerDebugAnimationById (int triggerId);
 
     bool hasAnimation (int animId) const;
 
@@ -116,7 +161,9 @@ private:
 
     juce::String roleName;
     std::array<juce::Array<juce::Image>, 33> animFrames;
+    std::array<juce::Array<juce::Image>, 33> animFramesRight;
     juce::Array<int> availableAnimIds;
+
     int currentAnimId = 1;
     int currentFrameIdx = 0;
 
@@ -125,7 +172,6 @@ private:
 
     // 动作/移动状态机
     MotionMode motionMode = MotionMode::patrol;
-    bool patrolMoveLeft = true;
     bool hasPetPosition = false;
 
     // 宠物位置（以当前帧左上角为基准）
@@ -140,13 +186,75 @@ private:
     float gravityPxPerTick2 = 0.28f;
     juce::Rectangle<int> lastLocalBounds;
 
-    // Tamagotchi 需求数值（0..100）
-    float signalLevel01 = 0.0f;
-    float hunger = 25.0f;
-    float health = 90.0f;
+    // eating 状态（饥饿增长时）：每 4 秒轮播 10/11/12/13，并左右随机小幅走动
+    static constexpr int eatingSwitchTicks = 80;
+    int eatingAnimTicksRemaining = 0;
+    int eatingCurrentAnimId = (int) PetAnim::runLeftToFood;
+    float eatingMoveDir = 1.0f; // -1 left, +1 right
+    float eatingMoveSpeedPxPerTick = 0.9f;
+    int eatingMoveRetargetTicksRemaining = 0;
+    bool eatingMirrorX = false;
+    static constexpr int eatingLowSignalHoldTicks = 60;
+    int eatingLowSignalTicksRemaining = 0;
 
-    // 顶部像素风 HUD 区域高度（条和文字绘制区域）
-    static constexpr int hudHeight = 34;
+    // 静音计时（20Hz）
+    int silentTicks = 0;
+    static constexpr int hungerDecaySilentDelayTicks = 1200;
+    static constexpr int drowsySilentTicks = 400;
+    static constexpr int sleepSilentTicks = 800;
+
+    // patrol 行为节拍（20Hz）
+    static constexpr int ticksPerSecond = 20;
+    static constexpr int patrolCycleTicks = 6 * ticksPerSecond;
+    static constexpr int patrolFastMoveTicks = 4 * ticksPerSecond;
+
+    PatrolAction currentPatrolAction = PatrolAction::lookLeftSlow;
+    int patrolActionTicksRemaining = 0;
+    int patrolCooldownTicksRemaining = patrolCycleTicks;
+    int patrolLockedAnimId = 0;
+    bool patrolFaceLeft = true;
+    bool patrolMirrorX = false;
+    float patrolActionMoveDir = 0.0f; // -1 left, +1 right
+    float patrolActionSpeedPxPerTick = 0.0f;
+
+    // 说话动作（头顶单行文本）
+    bool showSpeechBubble = false;
+    juce::String currentSpeechText;
+
+    // 蛋状态资源：新建模块随机蛋样式；孵化时播放前4帧
+    juce::Array<juce::Image> eggFrames;
+    int eggStyleId = 1;
+
+    // 测试下拉框：状态机强制 + 动画触发
+    juce::ComboBox stateModeCombo;
+    juce::ComboBox animTriggerCombo;
+    bool forceMotionModeEnabled = false;
+    MotionMode forcedMotionMode = MotionMode::patrol;
+
+    // fight 跳跃动作（2 秒内快速上下两次）
+    bool jumpFightActive = false;
+    int jumpFightTick = 0;
+    float jumpFightBaseY = 0.0f;
+    static constexpr int jumpFightTotalTicks = 2 * ticksPerSecond;
+    static constexpr int jumpFightCount = 2;
+    static constexpr float jumpFightAmplitudePx = 6.0f;
+
+    // Tamagotchi 需求数值（0..100）
+
+    float signalLevel01 = 0.0f;
+    float hunger = 75.0f;
+    float health = 75.0f;
+
+    float hungerDeltaPerSecond = 0.0f;
+
+    // toilet 状态：当饥饿值从 50 连续增长到 100 时触发，持续 6 秒
+    bool hungerRiseFrom50Tracking = false;
+    bool toiletTriggerPending = false;
+    static constexpr int toiletDurationTicks = 120;
+    int toiletTicksRemaining = 0;
+
+    // 顶部像素风 HUD 区域高度（条、测试按钮、调试下拉框）
+    static constexpr int hudHeight = 64;
 
     // 测试按钮（+H/-H/+HP/-HP）
     static constexpr int testButtonCount = 4;

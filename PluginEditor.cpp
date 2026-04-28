@@ -66,7 +66,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.2");
+const int versionW = versionFont.getStringWidth ("v1.5.0");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -107,7 +107,7 @@ const int versionW = versionFont.getStringWidth ("v1.2");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v1.2";
+        const juce::String versionText = "v1.5.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1146,7 +1146,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v1.2";
+        const juce::String versionText = "v1.5.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1782,12 +1782,48 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
 {
     if (workspace == nullptr) return;
 
+    float signal01 = 0.0f;
+    if (auto frame = processor.getAnalyserHub().getLatestFrame())
+    {
+        if (frame->has (AnalyserHub::Kind::Loudness))
+        {
+            const float rmsDb = juce::jmax (frame->loudness.rmsL, frame->loudness.rmsR);
+            signal01 = juce::jlimit (0.0f, 1.0f, juce::Decibels::decibelsToGain (rmsDb, -144.0f));
+        }
+        else if (frame->has (AnalyserHub::Kind::Dynamics))
+        {
+            const float rmsDb = juce::jmax (frame->dynamics.rmsL, frame->dynamics.rmsR);
+            signal01 = juce::jlimit (0.0f, 1.0f, juce::Decibels::decibelsToGain (rmsDb, -144.0f));
+        }
+        else if (frame->has (AnalyserHub::Kind::Oscilloscope))
+        {
+            double sumSqL = 0.0;
+            double sumSqR = 0.0;
+            for (int i = 0; i < AnalyserHub::oscilloscopeBufferSize; ++i)
+            {
+                const double l = (double) frame->oscL[(size_t) i];
+                const double r = (double) frame->oscR[(size_t) i];
+                sumSqL += l * l;
+                sumSqR += r * r;
+            }
+
+            const double invN = 1.0 / (double) AnalyserHub::oscilloscopeBufferSize;
+            const float rmsLinear = (float) std::sqrt (juce::jmax (0.0, juce::jmax (sumSqL * invN, sumSqR * invN)));
+            signal01 = juce::jlimit (0.0f, 1.0f, rmsLinear);
+        }
+    }
+
     const float cpu01 = (float) processor.getCpuLoad();
     const int n = workspace->getNumModules();
     for (int i = 0; i < n; ++i)
     {
         if (auto* m = workspace->getModule (i))
+        {
             m->setCpuLoad (cpu01);
+
+            if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
+                tamagotchi->setSignalLevel01 (signal01);
+        }
     }
 
     // FPS 统计：每秒更新一次显示（使用高精度时戳防止 wall-clock 跨日问题）

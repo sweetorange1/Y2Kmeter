@@ -2152,6 +2152,9 @@ static const juce::Identifier kPropCellsH   ("cellsH");
 static const juce::Identifier kPropCellSize ("cellSize");
 static const juce::Identifier kPropPerlerBeads ("perlerBeads");
 static const juce::Identifier kPropOpacity  ("perlerOpacity");
+static const juce::Identifier kPropTamaRoleName ("tamaRoleName");
+static const juce::Identifier kPropTamaHunger   ("tamaHunger");
+static const juce::Identifier kPropTamaHealth   ("tamaHealth");
 
 juce::ValueTree ModuleWorkspace::saveLayoutTree() const
 {
@@ -2187,8 +2190,20 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
             node.setProperty(kPropY, b.getY(),      nullptr);
             node.setProperty(kPropW, b.getWidth(),  nullptr);
             node.setProperty(kPropH, b.getHeight(), nullptr);
+
+            if (m->getModuleType() == ModuleType::tamagotchi)
+            {
+                if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
+                {
+                    node.setProperty (kPropTamaRoleName, tamagotchi->getRoleName(), nullptr);
+                    node.setProperty (kPropTamaHunger, (double) tamagotchi->getHunger(), nullptr);
+                    node.setProperty (kPropTamaHealth, (double) tamagotchi->getHealth(), nullptr);
+                }
+            }
+
             tree.appendChild(node, nullptr);
             continue;
+
         }
 
         // 拼豆贴画节点：通过 layer 反查 perlerImages 索引
@@ -2315,7 +2330,20 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
         hookPanel(*raw);
         raw->setBounds({ x, y, w, h });
 
+        if (type == ModuleType::tamagotchi)
+        {
+            if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (raw))
+            {
+                const auto savedRole = node.getProperty (kPropTamaRoleName).toString();
+                const float savedHunger = (float) (double) node.getProperty (kPropTamaHunger, 75.0);
+                const float savedHealth = (float) (double) node.getProperty (kPropTamaHealth, 75.0);
+                tamagotchi->restorePersistentState (savedRole, savedHunger, savedHealth);
+
+            }
+        }
+
         modules.add(panel.release());
+
     }
 
     nextIdCounter = juce::jmax(nextIdCounter, maxId + 1);

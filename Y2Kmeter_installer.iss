@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "1.2.0"
+#define MyAppVersion   "1.5.0"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -39,7 +39,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 关键：升级安装时自动关闭占用中的 Y2Kmeter.exe，避免"旧文件未被新文件覆盖"
 ;   · CloseApplications=force     安装/卸载开始前强制关闭匹配到的进程
 ;   · RestartApplications=no      安装完成后不自动重启（用户可自行在 [Run] 中勾选启动）
-; 结合 [InstallDelete] 强制先删除旧 EXE，确保 1.1.x → 1.2.0 升级一定覆盖成功。
+; 结合 [InstallDelete] 强制先删除旧 EXE，确保 1.1.x → 1.5.0 升级一定覆盖成功。
 ; -----------------------------------------------------------------------
 CloseApplications=force
 CloseApplicationsFilter=*.exe,*.dll
