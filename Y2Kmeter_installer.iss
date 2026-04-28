@@ -61,6 +61,8 @@ Name: "vst3";       Description: "VST3 Plugin";                   Types: full cu
 [InstallDelete]
 ; Standalone：删除旧 EXE（若存在）
 Type: files; Name: "{app}\{#MyAppExeName}"; Components: standalone
+; Standalone：删除旧 Tamagotchi 动画资源目录（若存在）
+Type: filesandordirs; Name: "{app}\assets\Tamagotchi"; Components: standalone
 ; VST3：删除旧 bundle 目录（若存在），用户选择的目录由 [Code] 段 GetVst3Dir 决定
 Type: filesandordirs; Name: "{code:GetVst3Dir}\{#MyPluginBundle}"; Components: vst3
 
@@ -74,10 +76,22 @@ Source: "cmake-build-release\Y2Kmeter_artefacts\Release\Standalone\{#MyAppExeNam
     Flags: ignoreversion; \
     Components: standalone
 
+; Standalone Tamagotchi 动画资源（递归复制）
+Source: "assets\Tamagotchi\*"; \
+    DestDir: "{app}\assets\Tamagotchi"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: standalone
+
 ; VST3（整个 .vst3 bundle 目录递归复制）
 ; DestDir 走 [Code] 段 GetVst3Dir —— 用户在独立向导页里选择的路径
 Source: "cmake-build-release\Y2Kmeter_artefacts\Release\VST3\{#MyPluginBundle}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: vst3
+
+; VST3 Tamagotchi 动画资源（放入 bundle 根目录，供运行时向上回溯查找）
+Source: "assets\Tamagotchi\*"; \
+    DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}\assets\Tamagotchi"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: vst3
 
