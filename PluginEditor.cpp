@@ -488,6 +488,13 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
 
+    // 兜底：若曾为 Tamagotchi 临时保活 Loudness，析构前配平 release。
+    if (tamagotchiSignalRetained)
+    {
+        processor.getAnalyserHub().release (AnalyserHub::Kind::Loudness);
+        tamagotchiSignalRetained = false;
+    }
+
     // 取消订阅帧分发（在 stopFrameDispatcher 之前取消，更严谨）
     if (fpsListener != nullptr)
     {
@@ -1782,49 +1789,67 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
 {
     if (workspace == nullptr) return;
 
-    float signal01 = 0.0f;
-    if (auto frame = processor.getAnalyserHub().getLatestFrame())
-    {
-        if (frame->has (AnalyserHub::Kind::Loudness))
-        {
-            const float rmsDb = juce::jmax (frame->loudness.rmsL, frame->loudness.rmsR);
-            signal01 = juce::jlimit (0.0f, 1.0f, juce::Decibels::decibelsToGain (rmsDb, -144.0f));
-        }
-        else if (frame->has (AnalyserHub::Kind::Dynamics))
-        {
-            const float rmsDb = juce::jmax (frame->dynamics.rmsL, frame->dynamics.rmsR);
-            signal01 = juce::jlimit (0.0f, 1.0f, juce::Decibels::decibelsToGain (rmsDb, -144.0f));
-        }
-        else if (frame->has (AnalyserHub::Kind::Oscilloscope))
-        {
-            double sumSqL = 0.0;
-            double sumSqR = 0.0;
-            for (int i = 0; i < AnalyserHub::oscilloscopeBufferSize; ++i)
-            {
-                const double l = (double) frame->oscL[(size_t) i];
-                const double r = (double) frame->oscR[(size_t) i];
-                sumSqL += l * l;
-                sumSqR += r * r;
-            }
+    // 仅当存在 Tamagotchi 模块时，才保活/计算对应的音频信号。
+    const int n = workspace->getNumModules();
+    juce::Array<TamagotchiModule*> tamagotchiModules;
+    tamagotchiModules.ensureStorageAllocated (n);
 
-            const double invN = 1.0 / (double) AnalyserHub::oscilloscopeBufferSize;
-            const float rmsLinear = (float) std::sqrt (juce::jmax (0.0, juce::jmax (sumSqL * invN, sumSqR * invN)));
-            signal01 = juce::jlimit (0.0f, 1.0f, rmsLinear);
+    for (int i = 0; i < n; ++i)
+        if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (workspace->getModule (i)))
+            tamagotchiModules.add (tamagotchi);
+
+    const bool hasTamagotchi = ! tamagotchiModules.isEmpty();
+    if (hasTamagotchi != tamagotchiSignalRetained)
+    {
+        if (hasTamagotchi)
+            processor.getAnalyserHub().retain (AnalyserHub::Kind::Loudness);
+        else
+            processor.getAnalyserHub().release (AnalyserHub::Kind::Loudness);
+
+        tamagotchiSignalRetained = hasTamagotchi;
+    }
+
+    float signal01 = 0.0f;
+    if (hasTamagotchi)
+    {
+        if (auto frame = processor.getAnalyserHub().getLatestFrame())
+        {
+            if (frame->has (AnalyserHub::Kind::Loudness))
+            {
+                const float rmsDb = juce::jmax (frame->loudness.rmsL, frame->loudness.rmsR);
+                signal01 = juce::jlimit (0.0f, 1.0f, juce::Decibels::decibelsToGain (rmsDb, -144.0f));
+            }
+            else if (frame->has (AnalyserHub::Kind::Dynamics))
+            {
+                const float rmsDb = juce::jmax (frame->dynamics.rmsL, frame->dynamics.rmsR);
+                signal01 = juce::jlimit (0.0f, 1.0f, juce::Decibels::decibelsToGain (rmsDb, -144.0f));
+            }
+            else if (frame->has (AnalyserHub::Kind::Oscilloscope))
+            {
+                double sumSqL = 0.0;
+                double sumSqR = 0.0;
+                for (int i = 0; i < AnalyserHub::oscilloscopeBufferSize; ++i)
+                {
+                    const double l = (double) frame->oscL[(size_t) i];
+                    const double r = (double) frame->oscR[(size_t) i];
+                    sumSqL += l * l;
+                    sumSqR += r * r;
+                }
+
+                const double invN = 1.0 / (double) AnalyserHub::oscilloscopeBufferSize;
+                const float rmsLinear = (float) std::sqrt (juce::jmax (0.0, juce::jmax (sumSqL * invN, sumSqR * invN)));
+                signal01 = juce::jlimit (0.0f, 1.0f, rmsLinear);
+            }
         }
     }
 
     const float cpu01 = (float) processor.getCpuLoad();
-    const int n = workspace->getNumModules();
     for (int i = 0; i < n; ++i)
-    {
         if (auto* m = workspace->getModule (i))
-        {
             m->setCpuLoad (cpu01);
 
-            if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
-                tamagotchi->setSignalLevel01 (signal01);
-        }
-    }
+    for (auto* tamagotchi : tamagotchiModules)
+        tamagotchi->setSignalLevel01 (signal01);
 
     // FPS 统计：每秒更新一次显示（使用高精度时戳防止 wall-clock 跨日问题）
     const double nowMs   = juce::Time::getMillisecondCounterHiRes();

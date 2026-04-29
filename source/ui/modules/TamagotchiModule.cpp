@@ -351,48 +351,14 @@ TamagotchiModule::TamagotchiModule()
     loadRandomRoleAnimations();
     refreshDebugAnimTriggerItems();
 
-    if (isShowing())
-        startTimerHz (20); // 闲逛更新 20Hz；动画每 20 tick（约 1 秒）切帧
+    currentVisualHz = getTargetVisualHzForMode (motionMode);
+    currentTickDtSec = 1.0f / (float) juce::jmax (1, currentVisualHz);
+    startTimerHz (currentVisualHz);
 }
 
 TamagotchiModule::~TamagotchiModule()
 {
     stopTimer();
-}
-
-void TamagotchiModule::visibilityChanged()
-{
-    if (isShowing())
-    {
-        startTimerHz (20);
-        if (pendingVisualRepaint)
-        {
-            pendingVisualRepaint = false;
-            repaint();
-        }
-    }
-    else
-    {
-        stopTimer();
-    }
-}
-
-void TamagotchiModule::requestVisualRepaint()
-{
-    if (inTimerCallbackUpdate)
-    {
-        pendingVisualRepaint = true;
-        return;
-    }
-
-    if (! isVisuallyActiveInWorkspace())
-    {
-        pendingVisualRepaint = true;
-        return;
-    }
-
-    pendingVisualRepaint = false;
-    repaint();
 }
 
 void TamagotchiModule::setFocusVisual (bool shouldFocus)
@@ -742,7 +708,18 @@ void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
 
 void TamagotchiModule::timerCallback()
 {
-    inTimerCallbackUpdate = true;
+    const int targetHz = getTargetVisualHzForMode (forceMotionModeEnabled ? forcedMotionMode
+                                                                            : evaluateAutoMotionMode());
+
+    if (targetHz != currentVisualHz)
+    {
+        currentVisualHz = targetHz;
+        currentTickDtSec = 1.0f / (float) juce::jmax (1, currentVisualHz);
+        startTimerHz (currentVisualHz);
+
+        if (currentVisualHz >= ticksPerSecond)
+            flushVisualRepaintQueue (true);
+    }
 
     updateNeeds();
 
@@ -753,16 +730,15 @@ void TamagotchiModule::timerCallback()
 
     stepWander();
 
-    ++frameTickCounter;
-    if (frameTickCounter >= ticksPerSecond)
+    frameAccumSec += currentTickDtSec;
+    constexpr float animFrameIntervalSec = 1.0f;
+    if (frameAccumSec >= animFrameIntervalSec)
     {
-        frameTickCounter = 0;
+        frameAccumSec = std::fmod (frameAccumSec, animFrameIntervalSec);
         stepOneFrame();
     }
 
-    inTimerCallbackUpdate = false;
-    if (pendingVisualRepaint)
-        requestVisualRepaint();
+    flushVisualRepaintQueue (false);
 }
 
 bool TamagotchiModule::loadRandomRoleAnimations()
@@ -865,10 +841,20 @@ void TamagotchiModule::chooseNextAnimation()
 
 void TamagotchiModule::stepOneFrame()
 {
+    const auto oldMode = motionMode;
+    const int oldAnimId = currentAnimId;
+    const int oldFrameIdx = currentFrameIdx;
+    const bool oldBubbleVisible = showSpeechBubble;
+    const auto oldBubbleText = currentSpeechText;
+    const auto oldFrame = getCurrentFrame();
+    const auto oldPetBounds = getPetVisualBoundsFor (oldFrame, petPos, oldBubbleVisible, oldBubbleText, oldMode);
+
     if (motionMode == MotionMode::egg)
     {
         currentFrameIdx = 0;
-        requestVisualRepaint();
+
+        if (oldFrameIdx != currentFrameIdx)
+            enqueuePetDirtyRepaint (oldPetBounds.getUnion (getCurrentPetVisualBounds()));
         return;
     }
 
@@ -877,15 +863,23 @@ void TamagotchiModule::stepOneFrame()
         if (eggFrames.size() < 4)
         {
             onAnimationFinished();
-            requestVisualRepaint();
-            return;
+        }
+        else
+        {
+            ++currentFrameIdx;
+            if (currentFrameIdx >= 4)
+                onAnimationFinished();
         }
 
-        ++currentFrameIdx;
-        if (currentFrameIdx >= 4)
-            onAnimationFinished();
-
-        requestVisualRepaint();
+        const auto newPetBounds = getCurrentPetVisualBounds();
+        const bool changed = oldMode != motionMode
+                          || oldAnimId != currentAnimId
+                          || oldFrameIdx != currentFrameIdx
+                          || oldBubbleVisible != showSpeechBubble
+                          || oldBubbleText != currentSpeechText
+                          || oldPetBounds != newPetBounds;
+        if (changed)
+            enqueuePetDirtyRepaint (oldPetBounds.getUnion (newPetBounds));
         return;
     }
 
@@ -912,7 +906,15 @@ void TamagotchiModule::stepOneFrame()
     if (currentFrameIdx >= frames->size())
         onAnimationFinished();
 
-    requestVisualRepaint();
+    const auto newPetBounds = getCurrentPetVisualBounds();
+    const bool changed = oldMode != motionMode
+                      || oldAnimId != currentAnimId
+                      || oldFrameIdx != currentFrameIdx
+                      || oldBubbleVisible != showSpeechBubble
+                      || oldBubbleText != currentSpeechText
+                      || oldPetBounds != newPetBounds;
+    if (changed)
+        enqueuePetDirtyRepaint (oldPetBounds.getUnion (newPetBounds));
 }
 
 int TamagotchiModule::randomAnimFrom (std::initializer_list<int> ids) const
@@ -1172,15 +1174,17 @@ void TamagotchiModule::setSignalLevel01 (float level01) noexcept
 
 void TamagotchiModule::updateNeeds()
 {
-    // 20Hz tick；按“每秒速率 / 20”累计
-    constexpr float dt = 1.0f / 20.0f;
+    // 使用当前 tick 时长，保证动态刷新率下需求变化仍按真实时间推进
+    const float dt = currentTickDtSec;
 
     const float growthBaseRate = 1.2f;
     const float growthGainK = 12.0f;
     const float quietDecayRate = 0.8f;
     const float prevHunger = hunger;
+    const float prevHealth = health;
 
     const bool hasSignal = signalLevel01 > 0.02f;
+
     if (hasSignal)
         silentTicks = 0;
     else
@@ -1248,6 +1252,9 @@ void TamagotchiModule::updateNeeds()
             toiletTriggerPending = true;
         }
     }
+
+    if (std::abs (hunger - prevHunger) >= 0.1f || std::abs (health - prevHealth) >= 0.1f)
+        repaint (getHudBounds());
 }
 
 void TamagotchiModule::drawPixelBar (juce::Graphics& g,
@@ -1484,6 +1491,12 @@ void TamagotchiModule::switchMotionMode (MotionMode newMode)
     if (motionMode == newMode)
         return;
 
+    const auto oldMode = motionMode;
+    const bool oldBubbleVisible = showSpeechBubble;
+    const auto oldBubbleText = currentSpeechText;
+    const auto oldFrame = getCurrentFrame();
+    const auto oldPetBounds = getPetVisualBoundsFor (oldFrame, petPos, oldBubbleVisible, oldBubbleText, oldMode);
+
     motionMode = newMode;
 
     showSpeechBubble = false;
@@ -1495,6 +1508,7 @@ void TamagotchiModule::switchMotionMode (MotionMode newMode)
     eatingLowSignalTicksRemaining = 0;
 
     switch (motionMode)
+
     {
         case MotionMode::egg:
             currentFrameIdx = 0;
@@ -1571,6 +1585,8 @@ void TamagotchiModule::switchMotionMode (MotionMode newMode)
             forceAnimation ((int) PetAnim::death);
             break;
     }
+
+    enqueuePetDirtyRepaint (oldPetBounds.getUnion (getCurrentPetVisualBounds()));
 }
 
 void TamagotchiModule::applyForcedMotionMode()
@@ -1579,6 +1595,7 @@ void TamagotchiModule::applyForcedMotionMode()
         return;
 
     switchMotionMode (forcedMotionMode);
+    flushVisualRepaintQueue (true);
 }
 
 void TamagotchiModule::triggerDebugAnimationById (int triggerId)
@@ -1602,14 +1619,16 @@ void TamagotchiModule::triggerDebugAnimationById (int triggerId)
         if (forcedMotionMode == MotionMode::egg && triggerId == dbgEggIdle)
         {
             currentFrameIdx = 0;
-            repaint();
+            enqueuePetDirtyRepaint (getCurrentPetVisualBounds());
+            flushVisualRepaintQueue (true);
             return;
         }
 
         if (forcedMotionMode == MotionMode::hatching && triggerId == dbgEggHatching)
         {
             currentFrameIdx = 0;
-            repaint();
+            enqueuePetDirtyRepaint (getCurrentPetVisualBounds());
+            flushVisualRepaintQueue (true);
             return;
         }
     }
@@ -1618,7 +1637,10 @@ void TamagotchiModule::triggerDebugAnimationById (int triggerId)
     if (! hasAnimation (safeId))
         return;
 
+    const auto oldPetBounds = getCurrentPetVisualBounds();
+
     if (safeId == (int) PetAnim::fight)
+
     {
         jumpFightActive = true;
         jumpFightTick = 0;
@@ -1644,6 +1666,8 @@ void TamagotchiModule::triggerDebugAnimationById (int triggerId)
     }
 
     forceAnimation (safeId, true);
+    enqueuePetDirtyRepaint (oldPetBounds.getUnion (getCurrentPetVisualBounds()));
+    flushVisualRepaintQueue (true);
 }
 
 int TamagotchiModule::hitTestButton (juce::Point<int> pos) const
@@ -1698,7 +1722,121 @@ juce::Image TamagotchiModule::getCurrentFrame() const
     return frames.getReference (frameIdx);
 }
 
+juce::Rectangle<int> TamagotchiModule::getPetVisualBoundsFor (const juce::Image& frame,
+                                                              juce::Point<float> pos,
+                                                              bool bubbleVisible,
+                                                              const juce::String& bubbleText,
+                                                              MotionMode mode) const
+{
+    if (frame.isNull())
+        return {};
+
+    auto bounds = juce::Rectangle<int> ((int) std::floor (pos.x),
+                                        (int) std::floor (pos.y),
+                                        frame.getWidth(),
+                                        frame.getHeight());
+
+    if (mode == MotionMode::patrol && bubbleVisible && bubbleText.isNotEmpty())
+    {
+        const auto bubbleFont = PinkXP::getFont (8.5f, juce::Font::plain);
+        const int bubblePaddingX = 6;
+        const int bubblePaddingY = 3;
+        const int bubbleMinW = 36;
+        const int bubbleMaxW = juce::jmax (bubbleMinW, getWidth() - 6);
+        const int maxTextW = juce::jmax (16, bubbleMaxW - bubblePaddingX * 2);
+        const int singleLineW = juce::jmax (16, bubbleFont.getStringWidth (bubbleText));
+        const int textW = juce::jlimit (16, maxTextW, singleLineW);
+
+        juce::AttributedString bubbleTextLayout;
+        bubbleTextLayout.setJustification (juce::Justification::centred);
+        bubbleTextLayout.setWordWrap (juce::AttributedString::WordWrap::byWord);
+        bubbleTextLayout.append (bubbleText, bubbleFont, PinkXP::ink);
+
+        juce::TextLayout textLayout;
+        textLayout.createLayout (bubbleTextLayout, (float) textW);
+
+        const int textH = juce::jmax ((int) std::ceil (bubbleFont.getHeight()), (int) std::ceil (textLayout.getHeight()));
+        const int bubbleW = juce::jlimit (bubbleMinW, bubbleMaxW, textW + bubblePaddingX * 2);
+        const int bubbleH = juce::jmax (14, textH + bubblePaddingY * 2);
+
+        auto bubble = juce::Rectangle<int> ((int) std::round (pos.x) + frame.getWidth() / 2 - bubbleW / 2,
+                                            (int) std::round (pos.y) - bubbleH - 4,
+                                            bubbleW,
+                                            bubbleH);
+        bubble = bubble.withX (juce::jlimit (0, juce::jmax (0, getWidth() - bubble.getWidth()), bubble.getX()));
+        bubble = bubble.withY (juce::jlimit (0, juce::jmax (0, getHeight() - bubble.getHeight()), bubble.getY()));
+
+        bounds = bounds.getUnion (bubble);
+    }
+
+    return bounds.getIntersection (getLocalBounds());
+}
+
+juce::Rectangle<int> TamagotchiModule::getCurrentPetVisualBounds() const
+{
+    return getPetVisualBoundsFor (getCurrentFrame(), petPos, showSpeechBubble, currentSpeechText, motionMode);
+}
+
+int TamagotchiModule::getTargetVisualHzForMode (MotionMode mode) const noexcept
+{
+    switch (mode)
+    {
+        case MotionMode::patrol:
+        case MotionMode::startledIntro:
+        case MotionMode::falling:
+        case MotionMode::landingFall:
+        case MotionMode::hatching:
+        case MotionMode::eating:
+            return 20;
+
+        case MotionMode::drowsy:
+        case MotionMode::hungry:
+        case MotionMode::starving:
+        case MotionMode::sick:
+        case MotionMode::criticalSick:
+        case MotionMode::toilet:
+            return 10;
+
+        case MotionMode::egg:
+        case MotionMode::sleeping:
+        case MotionMode::dead:
+            return 5;
+    }
+
+    return 10;
+}
+
+void TamagotchiModule::enqueuePetDirtyRepaint (juce::Rectangle<int> area)
+{
+    area = area.getIntersection (getLocalBounds());
+    if (area.isEmpty())
+        return;
+
+    if (hasQueuedPetDirty)
+        queuedPetDirtyBounds = queuedPetDirtyBounds.getUnion (area);
+    else
+        queuedPetDirtyBounds = area;
+
+    hasQueuedPetDirty = true;
+}
+
+void TamagotchiModule::flushVisualRepaintQueue (bool forceNow)
+{
+    juce::ignoreUnused (forceNow);
+
+    if (! hasQueuedPetDirty)
+        return;
+
+    const auto dirty = queuedPetDirtyBounds.getIntersection (getLocalBounds());
+    hasQueuedPetDirty = false;
+    queuedPetDirtyBounds = {};
+
+    if (! dirty.isEmpty())
+        repaint (dirty);
+}
+
 void TamagotchiModule::beginPatrolCycle()
+
 {
     currentPatrolAction = PatrolAction::lookLeftSlow;
     patrolActionTicksRemaining = 0;
@@ -1986,6 +2124,15 @@ void TamagotchiModule::restorePersistentState (const juce::String& savedRoleName
 void TamagotchiModule::stepWander()
 
 {
+    const auto oldMode = motionMode;
+    const int oldAnimId = currentAnimId;
+    const int oldFrameIdx = currentFrameIdx;
+    const auto oldPos = petPos;
+    const bool oldBubbleVisible = showSpeechBubble;
+    const auto oldBubbleText = currentSpeechText;
+    const auto oldFrame = getCurrentFrame();
+    const auto oldPetBounds = getPetVisualBoundsFor (oldFrame, oldPos, oldBubbleVisible, oldBubbleText, oldMode);
+
     const auto frame = getCurrentFrame();
     if (frame.isNull())
         return;
@@ -2058,14 +2205,14 @@ void TamagotchiModule::stepWander()
 
             if (--eatingAnimTicksRemaining <= 0)
             {
-                const int oldAnimId = eatingCurrentAnimId;
+                const int oldEatingAnimId = eatingCurrentAnimId;
                 for (int attempt = 0; attempt < 4; ++attempt)
                 {
                     eatingCurrentAnimId = randomAnimFrom ({ (int) PetAnim::runLeftToFood,
                                                             (int) PetAnim::runLeftToHate,
                                                             (int) PetAnim::runLeftToLike,
                                                             (int) PetAnim::eatLeft });
-                    if (eatingCurrentAnimId != oldAnimId)
+                    if (eatingCurrentAnimId != oldEatingAnimId)
                         break;
                 }
 
@@ -2117,7 +2264,18 @@ void TamagotchiModule::stepWander()
     petPos.x = juce::jlimit (minX, maxX, petGroundAnchorX - halfW);
     petPos.y = juce::jlimit ((float) playArea.getY(), floorY, petPos.y);
 
-    requestVisualRepaint();
+    const auto newPetBounds = getCurrentPetVisualBounds();
+    const bool moved = std::abs (petPos.x - oldPos.x) > 0.01f || std::abs (petPos.y - oldPos.y) > 0.01f;
+    const bool changed = moved
+                      || oldMode != motionMode
+                      || oldAnimId != currentAnimId
+                      || oldFrameIdx != currentFrameIdx
+                      || oldBubbleVisible != showSpeechBubble
+                      || oldBubbleText != currentSpeechText
+                      || oldPetBounds != newPetBounds;
+
+    if (changed)
+        enqueuePetDirtyRepaint (oldPetBounds.getUnion (newPetBounds));
 }
 
 juce::Rectangle<int> TamagotchiModule::getFocusBounds() const
