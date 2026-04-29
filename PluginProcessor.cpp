@@ -2,6 +2,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/standalone/AudioDumpRecorder.h"
 
 // ==========================================================
 // Y2KmeterAudioProcessor
@@ -64,8 +65,26 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     const int totalIn  = getTotalNumInputChannels();
     const int totalOut = getTotalNumOutputChannels();
 
+    if (wrapperType == wrapperType_Standalone)
+    {
+        auto& dump = AudioDumpRecorder::instance();
+        dump.configureFromEnvironment();
+        if (dump.isEnabled())
+        {
+            const float* L = (totalIn >= 1 ? buffer.getReadPointer (0) : nullptr);
+            const float* R = (totalIn >= 2 ? buffer.getReadPointer (1) : L);
+            if (L != nullptr && R != nullptr)
+                dump.push (AudioDumpRecorder::Route::microphone,
+                           L,
+                           R,
+                           buffer.getNumSamples(),
+                           getSampleRate());
+        }
+    }
+
     // 1) 先采分析：UI 不可见时跳过
     if (analysisActive.load(std::memory_order_relaxed))
+
     {
         if (totalIn >= 2)
         {

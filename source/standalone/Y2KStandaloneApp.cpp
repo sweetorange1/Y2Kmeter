@@ -44,6 +44,10 @@
 // WASAPI Loopback 采集器（捕捉系统混音输出）
 #include "WasapiLoopbackCapture.h"
 
+// macOS 桌面音频采集器（ScreenCaptureKit）
+#include "MacDesktopAudioCapture.h"
+#include "AudioDumpRecorder.h"
+
 namespace y2k
 {
 
@@ -118,8 +122,28 @@ public:
     // --------------------------------------------------
     void initialise (const juce::String&) override
     {
+        AudioDumpRecorder::instance().configureFromEnvironment();
+
+        {
+            auto& dump = AudioDumpRecorder::instance();
+            if (dump.isEnabled())
+            {
+                const auto dir = dump.getSessionDirectory();
+                if (dir != juce::File())
+                {
+                    const auto logFile = dir.getChildFile ("runtime.log");
+                    runtimeFileLogger.reset (new juce::FileLogger (logFile,
+                                                                    "Y2Kmeter runtime log",
+                                                                    0));
+                    juce::Logger::setCurrentLogger (runtimeFileLogger.get());
+                    juce::Logger::writeToLog ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
+                }
+            }
+        }
+
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
+
             appProperties.getUserSettings(),   // 设置持久化
             false,                             // takeOwnershipOfSettings
             juce::String{},                    // preferredDefaultDeviceName
@@ -170,7 +194,11 @@ public:
             PinkXP::applyTheme (targetId);
         }
 
+        // 1.16) 读取上次命中的虚拟回环设备名（非 Windows 下 Output 模式优先复用）
+        lastVirtualLoopbackInputName = getUserSettings().getValue ("audio.virtualLoopbackInputName", {});
+
         // 1.2) 关键：在 createEditor 之前把上一次保存的 plugin state 恢复到 Processor。
+
         //      StandalonePluginHolder::reloadPluginState() 会读 settings 里的 "filterState"
         //      并调 processor->setStateInformation() → 反序列化 savedLayoutXml。
         //      只有这样 Editor 构造里的 loadInitialModules() 才能读到 savedLayoutXml，
@@ -227,9 +255,14 @@ public:
                     if (pluginHolder != nullptr)
                         pluginHolder->deviceManager.addChangeListener (this);
 
-                    // 4.1) 恢复上次的 audio source（默认 "loopback:default"）
-                    const auto savedSource = getUserSettings()
+                    // 4.1) 恢复上次的 audio source。
+                    //      不在这里预先过滤 loopback：
+                    //      · 让下拉框始终保留 Output 语义选项（尤其是 macOS）；
+                    //      · 真正切换时由 handleAudioSourceChanged 内部判定可用性，
+                    //        不可用则静默回退到 Microphone。
+                    auto savedSource = getUserSettings()
                         .getValue ("audio.sourceId", "loopback:default");
+
                     const bool savedLoopback = savedSource.startsWith ("loopback");
                     handleAudioSourceChanged (savedSource, savedLoopback);
                     syncDropdownToCurrentDevice (*y2kEditor);
@@ -271,10 +304,14 @@ public:
         //     擦掉却没人补写，导致下次启动恢复到默认布局。
         persistAllSettings();
 
-        // -1) 停掉 Loopback 采集线程（若在跑）
+        // -1) 停掉 Loopback / mac 桌面采集线程（若在跑）
         stopLoopbackCapture();
+        stopMacDesktopAudioCapture();
+
+        AudioDumpRecorder::instance().flushSummary();
 
         // 0) 先取消对 AudioDeviceManager 的监听（它可能比 this 先析构）
+
         if (pluginHolder != nullptr)
             pluginHolder->deviceManager.removeChangeListener (this);
         cachedEditor = nullptr;
@@ -295,6 +332,9 @@ public:
 
         // 4) 停止音频 + 销毁 processor
         pluginHolder = nullptr;
+
+        juce::Logger::setCurrentLogger (nullptr);
+        runtimeFileLogger.reset();
 
         appProperties.saveIfNeeded();
     }
@@ -604,8 +644,10 @@ private:
 
         // getCurrentSourceId 已经封装了 loopback vs mic 的判定
         s.setValue ("audio.sourceId", getCurrentSourceId());
+        s.setValue ("audio.virtualLoopbackInputName", lastVirtualLoopbackInputName);
 
         // 保存当前 UI 主题（PinkXP ThemeId，存整数枚举值）——下次启动时由
+
         //   initialise() 里的 1.15) 分支读取并 applyTheme 恢复。
         //   · 主题在运行时被 ThemeSwatchBar::mouseDown → PinkXP::applyTheme 修改；
         //     这里只是在退出前快照一次 gCurrentThemeId。
@@ -613,16 +655,94 @@ private:
     }
 
     // ----------------------------------------------------
-    // 音频源下拉：只暴露两个"语义化"的选项，避免把 N 个后端 × M 块物理设备的
+    // 音频源下拉：只暴露语义化选项，避免把 N 个后端 × M 块物理设备的
     // 笛卡尔积全部罗列出来造成困扰。
     //
-    //   1) Microphone Input      —— 系统当前默认的输入设备（麦克风/声卡输入）
+    //   1) Microphone            —— 系统当前默认输入设备
     //                              sourceId = "input:default"
-    //   2) System Output (Loopback) —— 系统默认渲染端点的混音输出（WASAPI loopback）
+    //   2) Output                —— 系统输出回环（Windows: WASAPI；
+    //                              macOS/Linux: 虚拟回环输入设备）
     //                              sourceId = "loopback:default"
     //
-    // 切换逻辑见 handleAudioSourceChanged()。
+    // 非 Windows 下也始终展示 Output；
+    // 若系统当前没有可用虚拟回环输入设备，用户选择后会在切换逻辑里
+    // 自动回退到 Microphone（不阻断 UI 入口）。
     // ----------------------------------------------------
+    juce::String findPreferredVirtualLoopbackInputName() const
+    {
+       #if JUCE_WINDOWS
+        return {};
+       #else
+        if (pluginHolder == nullptr) return {};
+        auto& adm = pluginHolder->deviceManager;
+
+        juce::StringArray inputNames;
+        if (auto* type = adm.getCurrentDeviceTypeObject())
+        {
+            type->scanForDevices();
+            inputNames = type->getDeviceNames (true /*wantInputNames*/);
+        }
+        if (inputNames.isEmpty())
+            return {};
+
+        auto hasInputName = [&inputNames] (const juce::String& name)
+        {
+            for (const auto& n : inputNames)
+                if (n == name)
+                    return true;
+            return false;
+        };
+
+        // 1) 优先复用上一次成功命中的设备
+        if (lastVirtualLoopbackInputName.isNotEmpty() && hasInputName (lastVirtualLoopbackInputName))
+            return lastVirtualLoopbackInputName;
+
+        // 2) 按主流软件常见虚拟回环设备关键词匹配（BlackHole/Loopback/Background Music/...）
+        const juce::StringArray preferredKeywords {
+            "blackhole", "loopback", "soundflower", "monitor", "vb-cable", "cable output", "ishowu",
+            "background music", "sound siphon", "audiomovers", "virtual"
+        };
+
+        for (const auto& name : inputNames)
+            for (const auto& key : preferredKeywords)
+                if (name.containsIgnoreCase (key))
+                    return name;
+
+        // 3) 兜底：挑一个"不像物理麦克风"的输入，提升无关键词场景下的可用性
+        const juce::StringArray likelyPhysicalMicKeywords {
+            "microphone", "mic", "built-in", "macbook", "airpods", "headset", "webcam", "camera", "line in",
+            "内建", "麦克风", "耳机", "摄像"
+        };
+
+        for (const auto& name : inputNames)
+        {
+            bool looksPhysicalMic = false;
+            for (const auto& k : likelyPhysicalMicKeywords)
+            {
+                if (name.containsIgnoreCase (k))
+                {
+                    looksPhysicalMic = true;
+                    break;
+                }
+            }
+
+            if (! looksPhysicalMic)
+                return name;
+        }
+
+        return {};
+       #endif
+    }
+
+    bool hasAnyVirtualLoopbackInputDevice() const
+    {
+       #if JUCE_WINDOWS
+        return true; // Windows 始终可尝试 WASAPI loopback
+       #else
+        return findPreferredVirtualLoopbackInputName().isNotEmpty();
+       #endif
+    }
+
     void populateAudioSources (Y2KmeterAudioProcessorEditor& editor)
     {
         juce::Array<Y2KmeterAudioProcessorEditor::AudioSourceEntry> items;
@@ -632,10 +752,17 @@ private:
                      "input:default",
                      false });
 
-        // 选项 2：系统输出回环（扬声器/耳机里正在播放的一切）
+       #if JUCE_WINDOWS
+        // 选项 2：系统输出回环（WASAPI）
         items.add ({ "Output",
                      "loopback:default",
                      true });
+       #else
+        // macOS / Linux：始终展示 Output，具体可用性在切换时判定并回退
+        items.add ({ "Output",
+                     "loopback:default",
+                     true });
+       #endif
 
         editor.setAudioSourceItems (items, getCurrentSourceId());
     }
@@ -643,7 +770,8 @@ private:
     // 拼装"当前正在使用的音频源"的 sourceId（只会返回两种语义化值之一）
     juce::String getCurrentSourceId() const
     {
-        if (loopbackActive.load (std::memory_order_acquire))
+        if (loopbackActive.load (std::memory_order_acquire)
+            || virtualLoopbackInputActive.load (std::memory_order_acquire))
             return "loopback:default";
 
         return "input:default";
@@ -664,6 +792,7 @@ private:
 
         if (isLoopback)
         {
+           #if JUCE_WINDOWS
             // 1) 先停硬件输入 → AudioDeviceManager 把输入通道清零
             //    （保留输出设备不变；setAudioDeviceSetup 的 err 我们不强求成功）
             disableHardwareInput();
@@ -690,11 +819,117 @@ private:
 
             DBG ("[Y2K] WASAPI Loopback capture started.");
             return;
+           #else
+            // macOS：优先使用 ScreenCaptureKit 直接采集系统输出音频（不依赖 BlackHole）。
+            // Linux：暂不支持直接系统输出采集，继续使用虚拟回环输入设备方案。
+            stopLoopbackCapture();
+
+           #if JUCE_MAC
+            if (startMacDesktopAudioCapture())
+            {
+                DBG ("[Y2K] macOS desktop audio capture started.");
+                return;
+            }
+
+            juce::AlertWindow::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle ("System Output capture unavailable")
+                    .withMessage (juce::String ("Failed to start macOS desktop audio capture:\n")
+                                    + (macDesktopCapture != nullptr ? macDesktopCapture->getLastError() : juce::String ("(unknown)"))
+                                    + "\n\nFalling back to Microphone.")
+                    .withButton ("OK"),
+                nullptr);
+
+            enableDefaultInput();
+            if (cachedEditor != nullptr)
+                syncDropdownToCurrentDevice (*cachedEditor);
+            return;
+           #else
+            // Linux：仍通过虚拟回环输入设备实现 Output。
+            if (enablePreferredVirtualLoopbackInput())
+            {
+                DBG ("[Y2K] Virtual loopback input enabled.");
+                return;
+            }
+
+            juce::AlertWindow::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle ("System Loopback unavailable")
+                    .withMessage (
+                        "A virtual loopback input device exists, but failed to open.\n\n"
+                        "Please verify your loopback app routing and audio permissions, then try again.\n\n"
+                        "Falling back to Microphone.")
+                    .withButton ("OK"),
+                nullptr);
+
+            enableDefaultInput();
+            if (cachedEditor != nullptr)
+                syncDropdownToCurrentDevice (*cachedEditor);
+            return;
+           #endif
+           #endif
+
         }
 
         // "Microphone Input" → 先停 Loopback，再启用默认输入设备
         stopLoopbackCapture();
+        stopMacDesktopAudioCapture();
+        virtualLoopbackInputActive.store (false, std::memory_order_release);
         enableDefaultInput();
+
+    }
+
+    // ----------------------------------------------------
+    // 非 Windows 下的 "Output" 回退方案：选择虚拟回环输入设备
+    //   典型设备名关键词：BlackHole / Loopback / Soundflower / Monitor / VB-Cable。
+    // ----------------------------------------------------
+    bool enablePreferredVirtualLoopbackInput()
+    {
+        if (pluginHolder == nullptr) return false;
+        auto& adm = pluginHolder->deviceManager;
+
+        attachHolderCallback();
+
+        const juce::String picked = findPreferredVirtualLoopbackInputName();
+        if (picked.isEmpty())
+            return false;
+
+        juce::AudioDeviceManager::AudioDeviceSetup setup;
+        adm.getAudioDeviceSetup (setup);
+        setup.inputDeviceName         = picked;
+        setup.useDefaultInputChannels = false;
+        setup.inputChannels.clear();
+        setup.inputChannels.setRange (0, 2, true);   // 先尝试 stereo
+
+        auto err = adm.setAudioDeviceSetup (setup, true);
+        if (err.isNotEmpty())
+        {
+            setup.inputChannels.clear();
+            setup.inputChannels.setRange (0, 1, true); // mono 兜底
+            err = adm.setAudioDeviceSetup (setup, true);
+        }
+        if (err.isNotEmpty())
+        {
+            setup.useDefaultInputChannels = true;       // 再兜底交给系统
+            setup.inputChannels.clear();
+            err = adm.setAudioDeviceSetup (setup, true);
+        }
+        if (err.isNotEmpty())
+        {
+            DBG (juce::String ("[Y2K] Failed to enable virtual loopback input: ") + err);
+            return false;
+        }
+
+        pluginHolder->shouldMuteInput.setValue (false);
+        pluginHolder->muteInput.store (false);
+
+        lastVirtualLoopbackInputName = picked;
+        virtualLoopbackInputActive.store (true, std::memory_order_release);
+
+        DBG (juce::String ("[Y2K] Virtual loopback input device = ") + picked);
+        return true;
     }
 
     // ----------------------------------------------------
@@ -707,6 +942,7 @@ private:
     //   · 通道 bitmask 先试 stereo；若物理设备只有 1 路输入则退化回 mono。
     // ----------------------------------------------------
     void enableDefaultInput()
+
     {
         if (pluginHolder == nullptr) return;
         auto& adm = pluginHolder->deviceManager;
@@ -785,7 +1021,11 @@ private:
         pluginHolder->shouldMuteInput.setValue (false);
         pluginHolder->muteInput.store (false);
 
+        // 切回默认输入后清理虚拟回环状态
+        virtualLoopbackInputActive.store (false, std::memory_order_release);
+
         // 4) 调试日志 —— 确认 active input channels > 0
+
         if (auto* dev = adm.getCurrentAudioDevice())
         {
             const int nin = dev->getActiveInputChannels().countNumberOfSetBits();
@@ -863,6 +1103,8 @@ private:
         auto* y2kProc = dynamic_cast<Y2KmeterAudioProcessor*> (pluginHolder->processor.get());
         if (y2kProc == nullptr) return false;
 
+        captureTargetProcessor.store (y2kProc, std::memory_order_release);
+
         // 关键：先彻底断开 pluginHolder 对 deviceManager 的 audio callback，
         //       确保 loopback 运行期间只有采集线程在 push AnalyserHub，杜绝并发 UAF
         detachHolderCallback();
@@ -873,24 +1115,27 @@ private:
         // 采集到的数据 → 直接喂给 processor 的 AnalyserHub
         //   · onAudio 全部在 loopback 采集线程里执行，不会与任何 JUCE audio callback 并发
         //   · 因此 prepare() 与 pushStereo() 串行调用，deque 的 push/pop 不会跟读并发
-        loopback->onAudio = [y2kProc, this] (const float* L, const float* R, int n, double sr)
+        loopback->onAudio = [this] (const float* L, const float* R, int n, double sr)
         {
+            auto* proc = captureTargetProcessor.load (std::memory_order_acquire);
+            if (proc == nullptr) return;
+
             // 采样率变化 → 重新 prepare（内部会 clear 所有 deque，现在无并发线程，安全）
             const double cached = loopbackLastSampleRate.load (std::memory_order_acquire);
             if (std::abs (cached - sr) > 0.5)
             {
                 const int blk = juce::jmax (64, (int) (sr * 0.01));
-                y2kProc->getAnalyserHub().prepare (sr, blk);
+                proc->getAnalyserHub().prepare (sr, blk);
                 loopbackLastSampleRate.store (sr, std::memory_order_release);
             }
 
-            if (! y2kProc->isAnalysisActive()) return;
+            if (! proc->isAnalysisActive()) return;
 
             // 度量 Loopback 路径的 CPU 占比（否则 processBlock 不跑，UI CPU 一直 0）
             const double t0 = juce::Time::getMillisecondCounterHiRes();
-            y2kProc->getAnalyserHub().pushStereo (L, R, n);
+            proc->getAnalyserHub().pushStereo (L, R, n);
             const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - t0;
-            y2kProc->registerLoopbackRenderTime (elapsedMs, n, sr);
+            proc->registerLoopbackRenderTime (elapsedMs, n, sr);
         };
 
         if (! loopback->start())
@@ -906,8 +1151,13 @@ private:
 
     void stopLoopbackCapture()
     {
+        captureTargetProcessor.store (nullptr, std::memory_order_release);
+
         if (loopback != nullptr)
+        {
+            loopback->onAudio = {};
             loopback->stop();   // 同步 join 采集线程，确保返回后不再有回调
+        }
         loopbackActive.store (false, std::memory_order_release);
         loopbackLastSampleRate.store (0.0, std::memory_order_release);
 
@@ -917,7 +1167,83 @@ private:
         attachHolderCallback();
     }
 
+    bool startMacDesktopAudioCapture()
+    {
+       #if JUCE_MAC
+        if (pluginHolder == nullptr || pluginHolder->processor == nullptr)
+            return false;
+
+        if (macDesktopCapture == nullptr)
+            macDesktopCapture = std::make_unique<MacDesktopAudioCapture>();
+
+        auto* y2kProc = dynamic_cast<Y2KmeterAudioProcessor*> (pluginHolder->processor.get());
+        if (y2kProc == nullptr) return false;
+
+        captureTargetProcessor.store (y2kProc, std::memory_order_release);
+
+        detachHolderCallback();
+        loopbackLastSampleRate.store (0.0, std::memory_order_release);
+
+        macDesktopCapture->onAudio = [this] (const float* L, const float* R, int n, double sr)
+        {
+            auto* proc = captureTargetProcessor.load (std::memory_order_acquire);
+            if (proc == nullptr) return;
+
+            const double cached = loopbackLastSampleRate.load (std::memory_order_acquire);
+            if (std::abs (cached - sr) > 0.5)
+            {
+                const int blk = juce::jmax (64, (int) (sr * 0.01));
+                proc->getAnalyserHub().prepare (sr, blk);
+                loopbackLastSampleRate.store (sr, std::memory_order_release);
+            }
+
+            auto& dump = AudioDumpRecorder::instance();
+            if (dump.isEnabled())
+                dump.push (AudioDumpRecorder::Route::output, L, R, n, sr);
+
+            if (! proc->isAnalysisActive()) return;
+
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            proc->getAnalyserHub().pushStereo (L, R, n);
+
+            const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - t0;
+            proc->registerLoopbackRenderTime (elapsedMs, n, sr);
+
+        };
+
+        if (! macDesktopCapture->start())
+        {
+            attachHolderCallback();
+            return false;
+        }
+
+        loopbackActive.store (true, std::memory_order_release);
+        virtualLoopbackInputActive.store (false, std::memory_order_release);
+        return true;
+       #else
+        return false;
+       #endif
+    }
+
+    void stopMacDesktopAudioCapture()
+    {
+       #if JUCE_MAC
+        captureTargetProcessor.store (nullptr, std::memory_order_release);
+
+        if (macDesktopCapture != nullptr)
+        {
+            macDesktopCapture->onAudio = {};
+            macDesktopCapture->stop();
+        }
+
+        loopbackActive.store (false, std::memory_order_release);
+        loopbackLastSampleRate.store (0.0, std::memory_order_release);
+        attachHolderCallback();
+       #endif
+    }
+
     // 根据 AudioDeviceManager 当前状态，把下拉框选择回到"真实正在使用的输入设备"
+
     void syncDropdownToCurrentDevice (Y2KmeterAudioProcessorEditor& editor)
     {
         // 重新 populate 一次（它会以 getCurrentSourceId() 做 selected），
@@ -943,6 +1269,7 @@ private:
     // 独立持有 editor —— 与 DocumentWindow 解耦生命周期，
     // 以便在 delete 之前显式调用 processor->editorBeingDeleted()。
     std::unique_ptr<juce::AudioProcessorEditor>     pluginEditor;
+    std::unique_ptr<juce::FileLogger>               runtimeFileLogger;
 
     // 裸指针缓存 —— 指向 pluginEditor.get() 动态转型后的具体类型
     //   · 用于 ChangeListener 回调里刷新下拉框；不拥有生命周期
@@ -952,6 +1279,14 @@ private:
     std::unique_ptr<WasapiLoopbackCapture>          loopback;
     std::atomic<bool>                               loopbackActive { false };
     std::atomic<double>                             loopbackLastSampleRate { 0.0 };
+    std::atomic<Y2KmeterAudioProcessor*>            captureTargetProcessor { nullptr };
+
+    // macOS：基于 ScreenCaptureKit 的桌面音频采集（不依赖 BlackHole）
+    std::unique_ptr<MacDesktopAudioCapture>         macDesktopCapture;
+
+    // 非 Windows 的 "Output" 语义通过虚拟回环输入设备实现（BlackHole/Loopback/...）
+    std::atomic<bool>                               virtualLoopbackInputActive { false };
+    juce::String                                    lastVirtualLoopbackInputName;
 
     // 标记 pluginHolder 当前是否已从 deviceManager 的 audio callback 列表里摘除
     //   · Loopback 运行期间 = true（避免 AnalyserHub 被两路线程并发 push 引发 UAF）

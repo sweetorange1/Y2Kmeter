@@ -65,9 +65,9 @@ public:
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
-        const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.5.0");
-        const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
+        const int nameW    = juce::GlyphArrangement::getStringWidthInt (nameFont, "Y2Kmeter");
+        const int versionW = juce::GlyphArrangement::getStringWidthInt (versionFont, "v1.5.0");
+        const int urlW     = juce::GlyphArrangement::getStringWidthInt (urlFont, "iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
         cachedTitleTextW = nameW + gap1 + versionW + gap2 + urlW;
@@ -114,9 +114,9 @@ const int versionW = versionFont.getStringWidth ("v1.5.0");
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth (versionText);
-        const int urlW     = urlFont.getStringWidth (urlText);
+        const int nameW    = juce::GlyphArrangement::getStringWidthInt (nameFont, nameText);
+        const int versionW = juce::GlyphArrangement::getStringWidthInt (versionFont, versionText);
+        const int urlW     = juce::GlyphArrangement::getStringWidthInt (urlFont, urlText);
 
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1153,9 +1153,9 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth (versionText);
-        const int urlW     = urlFont.getStringWidth (urlText);
+        const int nameW    = juce::GlyphArrangement::getStringWidthInt (nameFont, nameText);
+        const int versionW = juce::GlyphArrangement::getStringWidthInt (versionFont, versionText);
+        const int urlW     = juce::GlyphArrangement::getStringWidthInt (urlFont, urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
         constexpr int gap2 = 10;  // version ↔ url 之间

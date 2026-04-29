@@ -22,6 +22,14 @@ namespace PinkXP
     void initCustomTypeface(juce::Typeface::Ptr ptr)
     {
         gTypeface = ptr;
+
+        // 让所有走 JUCE 默认字体路径的控件（未显式 setFont 的 Label/Menu 等）
+        // 也统一使用自定义 Typeface，避免不同平台回退到系统字体导致风格不一致。
+        juce::LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypeface (ptr);
+
+        // 主界面实际使用的是 PinkXPLookAndFeel，需同步注入同一 Typeface；
+        // 否则会出现“弹窗字体已变更，但主界面仍回退系统字体”的不一致。
+        getPinkXPLookAndFeel().setDefaultSansSerifTypeface (ptr);
     }
 
     juce::Typeface::Ptr loadActiveTypeface()
@@ -36,13 +44,14 @@ namespace PinkXP
     {
         if (gTypeface != nullptr)
         {
-            juce::Font f(gTypeface);
-            f.setHeight(height);
-            if (styleFlags & juce::Font::bold)   f.setBold(true);
-            if (styleFlags & juce::Font::italic) f.setItalic(true);
+            juce::Font f (juce::FontOptions (height).withTypeface (gTypeface));
+
+            // 使用单一自定义 Typeface 兜底所有样式，避免在 bold/italic 场景
+            // 回退到系统字体而造成界面文本混用不同字形。
+            juce::ignoreUnused(styleFlags);
             return f;
         }
-        return juce::Font(height, styleFlags);
+        return juce::Font (juce::FontOptions (height, styleFlags));
     }
 
     // 通用字体：高度 >= 8 时做 1.5x 放大（UI 主字号），极小字 (<8) 保持原样
@@ -974,6 +983,15 @@ void PinkXPLookAndFeel::drawPopupMenuItem(juce::Graphics& g, const juce::Rectang
 juce::Font PinkXPLookAndFeel::getPopupMenuFont()
 {
     return PinkXP::getFont(12.0f, juce::Font::bold);
+}
+
+juce::Typeface::Ptr PinkXPLookAndFeel::getTypefaceForFont (const juce::Font& f)
+{
+    juce::ignoreUnused (f);
+    if (auto tf = PinkXP::loadActiveTypeface())
+        return tf;
+
+    return juce::LookAndFeel_V4::getTypefaceForFont (f);
 }
 
 // Popup 菜单条目理想尺寸：

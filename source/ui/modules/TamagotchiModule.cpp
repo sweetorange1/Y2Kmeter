@@ -439,7 +439,7 @@ void TamagotchiModule::paint (juce::Graphics& g)
             const int bubbleMinW = 36;
             const int bubbleMaxW = juce::jmax (bubbleMinW, getWidth() - 6);
             const int maxTextW = juce::jmax (16, bubbleMaxW - bubblePaddingX * 2);
-            const int singleLineW = juce::jmax (16, bubbleFont.getStringWidth (currentSpeechText));
+            const int singleLineW = juce::jmax (16, juce::GlyphArrangement::getStringWidthInt (bubbleFont, currentSpeechText));
             const int textW = juce::jlimit (16, maxTextW, singleLineW);
 
             juce::AttributedString bubbleText;

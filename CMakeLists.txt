@@ -17,7 +17,11 @@ endif()
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
 
-project(Y2Kmeter VERSION 1.5.0 LANGUAGES CXX)
+project(Y2Kmeter VERSION 1.5.0 LANGUAGES C CXX)
+
+if (APPLE)
+  enable_language(OBJCXX)
+endif()
 
 # 当外部环境设置了 CMAKE_GENERATOR_PLATFORM 但未设置 CMAKE_GENERATOR 时，
 # CMake 在 VS CustomBuild 阶段会反复打印警告。
@@ -44,6 +48,76 @@ FetchContent_MakeAvailable(juce)
 
 # add_subdirectory(grid_plugin)
 
+# 图标资源：统一以 assets/icon.ico 为源。
+#   · Windows Standalone 仍使用 app_icon.rc 直接嵌入 .ico
+#   · macOS 通过 JUCE 的 ICON_BIG/ICON_SMALL（png）配置 app bundle 图标
+set(Y2KM_RES_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
+file(MAKE_DIRECTORY "${Y2KM_RES_DIR}")
+
+set(Y2KM_ICON_ICO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
+set(Y2KM_ICON_PNG_DST "${Y2KM_RES_DIR}/icon.png")
+if (NOT EXISTS "${Y2KM_ICON_ICO_SRC}")
+  message(FATAL_ERROR "缺少图标资源：${Y2KM_ICON_ICO_SRC}")
+endif()
+
+set(Y2KM_ICON_PLUGIN_ARGS)
+if (APPLE)
+  execute_process(
+    COMMAND /usr/bin/sips -s format png "${Y2KM_ICON_ICO_SRC}" --out "${Y2KM_ICON_PNG_DST}"
+    RESULT_VARIABLE Y2KM_ICON_CONVERT_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if (NOT Y2KM_ICON_CONVERT_RESULT EQUAL 0)
+    message(FATAL_ERROR "无法将 ${Y2KM_ICON_ICO_SRC} 转换为 PNG（sips 失败）")
+  endif()
+
+  # 额外生成标准 macOS 多分辨率 Icon.icns，避免仅依赖 JUCE 的图标管线导致 Dock 图标缺失。
+  set(Y2KM_ICONSET_DIR "${Y2KM_RES_DIR}/Icon.iconset")
+  set(Y2KM_ICON_ICNS_DST "${Y2KM_RES_DIR}/Icon.icns")
+  file(REMOVE_RECURSE "${Y2KM_ICONSET_DIR}")
+  file(MAKE_DIRECTORY "${Y2KM_ICONSET_DIR}")
+
+  foreach(_sz 16 32 128 256 512)
+    math(EXPR _sz2 "${_sz} * 2")
+
+    execute_process(
+      COMMAND /usr/bin/sips -z ${_sz} ${_sz} "${Y2KM_ICON_PNG_DST}" --out "${Y2KM_ICONSET_DIR}/icon_${_sz}x${_sz}.png"
+      RESULT_VARIABLE Y2KM_ICONSET_RESIZE_RESULT
+      OUTPUT_QUIET
+      ERROR_QUIET
+    )
+    if (NOT Y2KM_ICONSET_RESIZE_RESULT EQUAL 0)
+      message(FATAL_ERROR "生成 icon_${_sz}x${_sz}.png 失败")
+    endif()
+
+    execute_process(
+      COMMAND /usr/bin/sips -z ${_sz2} ${_sz2} "${Y2KM_ICON_PNG_DST}" --out "${Y2KM_ICONSET_DIR}/icon_${_sz}x${_sz}@2x.png"
+      RESULT_VARIABLE Y2KM_ICONSET_RESIZE2_RESULT
+      OUTPUT_QUIET
+      ERROR_QUIET
+    )
+    if (NOT Y2KM_ICONSET_RESIZE2_RESULT EQUAL 0)
+      message(FATAL_ERROR "生成 icon_${_sz}x${_sz}@2x.png 失败")
+    endif()
+  endforeach()
+
+  execute_process(
+    COMMAND /usr/bin/iconutil -c icns "${Y2KM_ICONSET_DIR}" -o "${Y2KM_ICON_ICNS_DST}"
+    RESULT_VARIABLE Y2KM_ICONUTIL_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if (NOT Y2KM_ICONUTIL_RESULT EQUAL 0)
+    message(FATAL_ERROR "生成 ${Y2KM_ICON_ICNS_DST} 失败（iconutil）")
+  endif()
+
+  list(APPEND Y2KM_ICON_PLUGIN_ARGS
+    ICON_BIG "${Y2KM_ICON_PNG_DST}"
+    ICON_SMALL "${Y2KM_ICON_PNG_DST}"
+  )
+endif()
+
 juce_add_plugin(
 Y2Kmeter
         PRODUCT_NAME "Y2Kmeter"
@@ -57,6 +131,7 @@ Y2Kmeter
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
         FORMATS VST3 Standalone
+        ${Y2KM_ICON_PLUGIN_ARGS}
         # 本插件是纯分析表（EQ 分析仪 / LUFS / 示波器 / 频谱 / 相位 / 动态等），
         # 对应 VST3 SDK 的 Analyzer 类别，让 DAW 的 FX 分类浏览器正确归类。
         VST3_CATEGORIES "Analyzer" "Fx"
@@ -98,6 +173,8 @@ juce_add_binary_data(Y2Kmeter_BinaryData
 target_compile_definitions(Y2Kmeter
   PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_PLUGINHOST_ARA=0
+    JUCE_PLUGINHOST_LV2=0
     # 关闭 JUCE 默认的 StandaloneFilterApp / StandaloneFilterWindow，
     # 转而使用我们自定义的 source/standalone/Y2KStandaloneApp.cpp（无边框 Y2K 外壳）
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
@@ -157,7 +234,16 @@ target_sources(Y2Kmeter PRIVATE
   source/standalone/Y2KStandaloneApp.cpp
   source/standalone/WasapiLoopbackCapture.h
   source/standalone/WasapiLoopbackCapture.cpp
+  source/standalone/AudioDumpRecorder.h
+  source/standalone/AudioDumpRecorder.cpp
 )
+
+if (APPLE)
+  target_sources(Y2Kmeter PRIVATE
+    source/standalone/MacDesktopAudioCapture.h
+    source/standalone/MacDesktopAudioCapture.mm
+  )
+endif()
 
 target_include_directories(Y2Kmeter PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -171,6 +257,15 @@ target_link_libraries(Y2Kmeter PRIVATE Y2Kmeter_BinaryData juce::juce_audio_util
 #                      减少 loopback 丢帧；未启用 loopback 时不会调用，纯开销 0）
 if (WIN32)
   target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt)
+endif()
+
+if (APPLE)
+  target_link_libraries(Y2Kmeter PRIVATE
+    "-framework ScreenCaptureKit"
+    "-framework AVFoundation"
+    "-framework CoreMedia"
+    "-framework Foundation"
+  )
 endif()
 
 # ==========================================================
@@ -201,5 +296,12 @@ endif()
 if (WIN32 AND TARGET Y2Kmeter_Standalone)
   target_sources(Y2Kmeter_Standalone PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.rc"
+  )
+endif()
+
+if (APPLE AND TARGET Y2Kmeter_Standalone)
+  # 显式绑定 Dock 图标，避免仅靠生成流程隐式注入导致部分构建产物图标缺失。
+  set_target_properties(Y2Kmeter_Standalone PROPERTIES
+    MACOSX_BUNDLE_ICON_FILE "Icon.icns"
   )
 endif()

@@ -162,8 +162,8 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
                          + juce::String (cpuPercent, 1)
                          + "%";
 
-    // 系统默认字体，10pt，bold（覆盖 LookAndFeel 的粉色 XP 字体）
-    g.setFont (juce::Font (10.0f, juce::Font::bold));
+    // 使用 PinkXP 字体，10pt，bold（与全局 Silkscreen 统一）
+    g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
 
     // 先画一层 65% 黑色阴影（文字下方 1px），保证在亮红不够醒目的背景上也能读
     g.setColour (juce::Colours::black.withAlpha (0.65f));

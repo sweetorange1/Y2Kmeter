@@ -357,6 +357,7 @@ void SpectrogramModule::paintContent (juce::Graphics& g, juce::Rectangle<int> co
 
     juce::Graphics::ScopedSaveState ss (g);
     g.reduceClipRegion (plot);
+    g.setImageResamplingQuality (juce::Graphics::lowResamplingQuality);
 
     const int cw = plot.getWidth();
     const int ch = plot.getHeight();
@@ -367,7 +368,7 @@ void SpectrogramModule::paintContent (juce::Graphics& g, juce::Rectangle<int> co
     const int rightW = writeCol;                   // image 右半段的像素列数
 
     // 屏幕上两段的像素宽（整除分配，避免余数像素条）
-    const int sxSplit = cx + (int) ((juce::int64) leftW * cw / cols);
+    const int sxSplit = cx + (int) std::lround ((double) leftW * (double) cw / (double) cols);
 
     if (leftW > 0)
     {
@@ -398,7 +399,7 @@ void SpectrogramModule::ensureImage()
         || imageBuf.getWidth()  != cols
         || imageBuf.getHeight() != rows)
     {
-        imageBuf = juce::Image (juce::Image::RGB, cols, rows, true);
+        imageBuf = juce::Image (juce::Image::ARGB, cols, rows, true);
         redrawFullImage();   // 尺寸变化：把现有 grid 全量刷回 image
     }
 }
@@ -430,14 +431,13 @@ void SpectrogramModule::writeLatestColumnToImage()
     // onFrame 里 pushColumn 刚让 writeCol 环形 +1，所以"刚写入的"列是 writeCol-1
     const int justWrittenCol = (writeCol - 1 + cols) % cols;
 
-    juce::Image::BitmapData bmp (imageBuf, juce::Image::BitmapData::writeOnly);
+    juce::Image::BitmapData bmp (imageBuf, juce::Image::BitmapData::readWrite);
 
     for (int r = 0; r < rows; ++r)
     {
-        auto* row = (juce::PixelRGB*) bmp.getLinePointer (r);
         const float t01 = at (r, justWrittenCol);
         const auto col  = intensityToColour (t01);
-        row[justWrittenCol].setARGB (255, col.getRed(), col.getGreen(), col.getBlue());
+        bmp.setPixelColour (justWrittenCol, r, col);
     }
 }
 

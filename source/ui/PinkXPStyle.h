@@ -215,6 +215,11 @@ public:
                            const juce::Drawable* icon, const juce::Colour* textColour) override;
     juce::Font getPopupMenuFont() override;
 
+    // 全局字体兜底：任何通过 LookAndFeel 请求 Typeface 的控件都优先使用
+    // PinkXP 当前激活的自定义字体（Silkscreen）。这能覆盖未显式 setFont 的
+    // 组件路径，避免“局部生效、整体回退系统字体”。
+    juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override;
+
     // Popup 菜单条目理想尺寸：按实际文字宽度 + 左右内边距计算，避免
     //   ComboBox 弹出的下拉菜单宽度只等于 ComboBox 本身宽度而把长文本
     //   截断（例如 "Horizontal Bar(T)" / "Horizontal Bar(B)"）。
