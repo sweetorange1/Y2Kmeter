@@ -21,6 +21,7 @@ public:
 
     void paint (juce::Graphics& g) override;
     void resized() override;
+    void visibilityChanged() override;
 
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
@@ -111,6 +112,7 @@ private:
     };
 
     void timerCallback() override;
+    void requestVisualRepaint();
 
     bool loadRandomRoleAnimations();
     void chooseNextAnimation();
@@ -169,6 +171,8 @@ private:
 
     // 动画节拍：20 tick ≈ 1 秒切 1 帧
     int frameTickCounter = 0;
+    bool inTimerCallbackUpdate = false;
+    bool pendingVisualRepaint = false;
 
     // 动作/移动状态机
     MotionMode motionMode = MotionMode::patrol;

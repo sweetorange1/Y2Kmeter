@@ -73,6 +73,11 @@ public:
                                      int   numSamples,
                                      double sampleRate) noexcept;
 
+    // ---- 全局性能计数器控制 ----
+    juce::File exportPerfCountersNow();
+    void setPerfAutoExportEnabled(bool enabled) noexcept;
+    bool isPerfAutoExportEnabled() const noexcept;
+
     // ---- Phase E —— UI 布局持久化（Processor 作为唯一 state owner）----
     // 由 Editor 在 workspace->onLayoutChanged 里写回；Editor 启动时读取并装载。
     juce::String getSavedLayoutXml() const;

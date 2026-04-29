@@ -351,7 +351,8 @@ TamagotchiModule::TamagotchiModule()
     loadRandomRoleAnimations();
     refreshDebugAnimTriggerItems();
 
-    startTimerHz (20); // 闲逛更新 20Hz；动画每 20 tick（约 1 秒）切帧
+    if (isShowing())
+        startTimerHz (20); // 闲逛更新 20Hz；动画每 20 tick（约 1 秒）切帧
 }
 
 TamagotchiModule::~TamagotchiModule()
@@ -359,7 +360,43 @@ TamagotchiModule::~TamagotchiModule()
     stopTimer();
 }
 
+void TamagotchiModule::visibilityChanged()
+{
+    if (isShowing())
+    {
+        startTimerHz (20);
+        if (pendingVisualRepaint)
+        {
+            pendingVisualRepaint = false;
+            repaint();
+        }
+    }
+    else
+    {
+        stopTimer();
+    }
+}
+
+void TamagotchiModule::requestVisualRepaint()
+{
+    if (inTimerCallbackUpdate)
+    {
+        pendingVisualRepaint = true;
+        return;
+    }
+
+    if (! isVisuallyActiveInWorkspace())
+    {
+        pendingVisualRepaint = true;
+        return;
+    }
+
+    pendingVisualRepaint = false;
+    repaint();
+}
+
 void TamagotchiModule::setFocusVisual (bool shouldFocus)
+
 {
     if (focused == shouldFocus)
         return;
@@ -705,6 +742,8 @@ void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
 
 void TamagotchiModule::timerCallback()
 {
+    inTimerCallbackUpdate = true;
+
     updateNeeds();
 
     if (forceMotionModeEnabled)
@@ -720,6 +759,10 @@ void TamagotchiModule::timerCallback()
         frameTickCounter = 0;
         stepOneFrame();
     }
+
+    inTimerCallbackUpdate = false;
+    if (pendingVisualRepaint)
+        requestVisualRepaint();
 }
 
 bool TamagotchiModule::loadRandomRoleAnimations()
@@ -825,7 +868,7 @@ void TamagotchiModule::stepOneFrame()
     if (motionMode == MotionMode::egg)
     {
         currentFrameIdx = 0;
-        repaint();
+        requestVisualRepaint();
         return;
     }
 
@@ -834,7 +877,7 @@ void TamagotchiModule::stepOneFrame()
         if (eggFrames.size() < 4)
         {
             onAnimationFinished();
-            repaint();
+            requestVisualRepaint();
             return;
         }
 
@@ -842,7 +885,7 @@ void TamagotchiModule::stepOneFrame()
         if (currentFrameIdx >= 4)
             onAnimationFinished();
 
-        repaint();
+        requestVisualRepaint();
         return;
     }
 
@@ -869,7 +912,7 @@ void TamagotchiModule::stepOneFrame()
     if (currentFrameIdx >= frames->size())
         onAnimationFinished();
 
-    repaint();
+    requestVisualRepaint();
 }
 
 int TamagotchiModule::randomAnimFrom (std::initializer_list<int> ids) const
@@ -2074,7 +2117,7 @@ void TamagotchiModule::stepWander()
     petPos.x = juce::jlimit (minX, maxX, petGroundAnchorX - halfW);
     petPos.y = juce::jlimit ((float) playArea.getY(), floorY, petPos.y);
 
-    repaint();
+    requestVisualRepaint();
 }
 
 juce::Rectangle<int> TamagotchiModule::getFocusBounds() const

@@ -17,7 +17,7 @@ endif()
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
 
-project(Y2Kmeter VERSION 1.5.0 LANGUAGES CXX)
+project(Y2Kmeter VERSION 1.6.0 LANGUAGES CXX)
 
 # 当外部环境设置了 CMAKE_GENERATOR_PLATFORM 但未设置 CMAKE_GENERATOR 时，
 # CMake 在 VS CustomBuild 阶段会反复打印警告。
@@ -52,7 +52,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 1.5.0
+        VERSION 1.6.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -122,7 +122,12 @@ target_sources(Y2Kmeter PRIVATE
   source/analysis/PhaseCorrelator.cpp
   source/analysis/DynamicRangeMeter.cpp
 
+  # === 性能计数系统 ===
+  source/perf/PerformanceCounterSystem.h
+  source/perf/PerformanceCounterSystem.cpp
+
   # === 模块化 UI 框架 ===
+
   source/ui/PinkXPStyle.h
   source/ui/PinkXPStyle.cpp
   source/ui/ModulePanel.h

@@ -54,6 +54,14 @@ private:
     void drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawWaveform  (juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawXY        (juce::Graphics& g, juce::Rectangle<int> canvas, bool rotate45) const;
+    juce::Path buildWaveformPath(const juce::Array<float>& samples,
+                                 juce::Rectangle<int> inner,
+                                 float yCenter,
+                                 float halfHeight) const;
+
+    void rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds);
+    void drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const;
+    void invalidateStaticLayer();
 
     // 顶部工具栏布局
     juce::Rectangle<int> getToolbarBounds (juce::Rectangle<int> content) const;
@@ -71,6 +79,10 @@ private:
     // 快照（UI 线程独占使用）
     juce::Array<float> snapshotL;
     juce::Array<float> snapshotR;
+
+    juce::Image staticLayer;
+    juce::Rectangle<int> staticLayerContentBounds;
+    int themeSubToken = -1;
 
     // 顶部工具栏按钮
     juce::TextButton btnWave   { "Wave"   };

@@ -37,6 +37,7 @@
 #include "../../PluginEditor.h"
 #include "../../PluginProcessor.h"
 #include "../analysis/AnalyserHub.h"
+#include "../perf/PerformanceCounterSystem.h"
 
 // 主题持久化：从 settings 读取/写回 PinkXP 全局主题 id
 #include "../ui/PinkXPStyle.h"
@@ -659,6 +660,12 @@ private:
     void handleAudioSourceChanged (const juce::String& sourceId, bool isLoopback)
     {
         DBG (juce::String ("[Y2K] Audio source changed -> ") + sourceId);
+
+        y2k::perf::PerformanceCounterSystem::instance().recordEvent(
+            y2k::perf::FunctionId::lowFreqAudioSourceSwitch,
+            y2k::perf::Partition::dataCommunication,
+            y2k::perf::ThreadRole::ui,
+            1);
 
         if (pluginHolder == nullptr) return;
 
