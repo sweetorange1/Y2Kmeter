@@ -90,6 +90,16 @@ private:
                    juce::Rectangle<int> scaleArea,
                    bool isLUFS) const;
 
+    void drawMeterBarStaticLayer(juce::Graphics& g,
+                                 juce::Rectangle<int> barArea,
+                                 bool isLUFS) const;
+
+    static int firstVisibleRowForValue(float value, int numRows, bool isLUFS) noexcept;
+
+    void rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds);
+    void drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const;
+    void invalidateStaticLayer();
+
     // dBFS / LUFS 值 → 柱高比例 [0,1]
     static float valueToNorm(float val, bool isLUFS) noexcept;
 
@@ -109,6 +119,10 @@ private:
 
     // 布局缓存（在 layoutContent 中计算，在 paintContent 中使用）
     juce::Rectangle<int> areaM, areaS, areaI, areaL, areaR, areaScale;
+
+    juce::Image staticLayer;
+    juce::Rectangle<int> staticLayerContentBounds;
+    int themeSubToken = -1;
 
     static constexpr int cellSize  = 6;
     static constexpr int cellGap   = 1;

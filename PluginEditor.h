@@ -228,5 +228,9 @@ private:
     juce::int64              lastFrameCounterSample = 0;
     double                   lastFpsTimeMs          = 0.0;
 
+    // Tamagotchi 信号保活：仅当工作区存在 Tamagotchi 模块时，
+    // 才临时 retain(Loudness) 以驱动孵化/行为状态机；无 Tamagotchi 时立刻 release。
+    bool tamagotchiSignalRetained = false;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };

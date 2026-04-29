@@ -1,5 +1,6 @@
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
+#include "source/perf/PerformanceCounterSystem.h"
 
 // ==========================================================
 // Phase F —— FrameDispatcher 内部实现类
@@ -23,6 +24,11 @@ public:
 
     void timerCallback() override
     {
+        y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::ui, "UI-FrameDispatcher");
+        y2k::perf::ScopedPerfTimer frameTimer(y2k::perf::FunctionId::uiFrameDispatcher,
+                                              y2k::perf::Partition::uiRendering,
+                                              y2k::perf::ThreadRole::ui);
+
         // 1) 组装活跃 mask
         juce::uint32 mask = 0;
         for (int i = 0; i < (int) Kind::NumKinds; ++i)
@@ -33,14 +39,27 @@ public:
             return; // 所有路都无人订阅 —— 不生成帧
 
         auto frame = std::make_shared<FrameSnapshot>();
+        y2k::perf::PerformanceCounterSystem::instance().recordMemoryAlloc(sizeof(FrameSnapshot));
         frame->activeMask = mask;
+
+        y2k::perf::ScopedPerfTimer assembleTimer(y2k::perf::FunctionId::uiFrameAssemble,
+                                                 y2k::perf::Partition::uiRendering,
+                                                 y2k::perf::ThreadRole::ui);
 
         // 2) 按需填充各路数据
         if (frame->has (Kind::Oscilloscope))
         {
+            const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
+            const juce::SpinLock::ScopedLockType sl (owner.oscLock);
+            const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+            y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+                y2k::perf::FunctionId::lockOsc,
+                y2k::perf::Partition::dataCommunication,
+                y2k::perf::ThreadRole::ui,
+                0,
+                lockNs - waitStart);
             // Phase F 优化：直接对 frame->oscL/oscR 的 std::array 做分段 memcpy，
             //   省掉"getOscilloscopeSnapshot → juce::Array → std::array"这一层中转。
-            const juce::SpinLock::ScopedLockType sl (owner.oscLock);
             const int bufSize    = oscilloscopeBufferSize;
             const int firstChunk = bufSize - owner.oscWritePos;
             std::memcpy (frame->oscL.data(),              owner.oscBufL.data() + owner.oscWritePos,
@@ -59,7 +78,15 @@ public:
         if (frame->has (Kind::Spectrum))
         {
             // Phase F 优化：直接 memcpy（尺寸 + 类型都与 std::array 内部缓冲一致）
+            const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
             const juce::SpinLock::ScopedLockType sl (owner.specLock);
+            const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+            y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+                y2k::perf::FunctionId::lockSpec,
+                y2k::perf::Partition::dataCommunication,
+                y2k::perf::ThreadRole::ui,
+                0,
+                lockNs - waitStart);
             std::memcpy (frame->spectrumMag .data(), owner.magData .data(),
                          sizeof (float) * frame->spectrumMag .size());
             std::memcpy (frame->spectrumData.data(), owner.specData.data(),
@@ -79,22 +106,87 @@ public:
 
         // 3) 原子发布到 latestFrame
         {
+            const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
             const juce::SpinLock::ScopedLockType sl (owner.latestFrameLock);
+            const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+            y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+                y2k::perf::FunctionId::lockLatestFrame,
+                y2k::perf::Partition::dataCommunication,
+                y2k::perf::ThreadRole::ui,
+                0,
+                lockNs - waitStart);
             owner.latestFrame = frame;
         }
+
+        y2k::perf::PerformanceCounterSystem::instance().recordEvent(
+            y2k::perf::FunctionId::dataPublishLatestFrame,
+            y2k::perf::Partition::dataCommunication,
+            y2k::perf::ThreadRole::ui,
+            1);
 
         // 4) 通知所有监听器（UI 线程）
         //    拷贝一份 vector 避免在回调里触发 add/remove 导致迭代失效
         std::vector<FrameListener*> localCopy;
         {
+            const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
             const juce::ScopedLock sl (owner.frameListenersLock);
+            const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+            y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+                y2k::perf::FunctionId::lockFrameListeners,
+                y2k::perf::Partition::dataCommunication,
+                y2k::perf::ThreadRole::ui,
+                0,
+                lockNs - waitStart);
             localCopy = owner.frameListeners;
         }
+
+        y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+            y2k::perf::FunctionId::dataListenerListCopy,
+            y2k::perf::Partition::dataCommunication,
+            y2k::perf::ThreadRole::ui,
+            0,
+            0);
+
+        std::vector<FrameListener*> activeListeners;
+        activeListeners.reserve(localCopy.size());
         for (auto* lst : localCopy)
         {
-            if (lst != nullptr)
-                lst->onFrame (*frame);
+            if (lst == nullptr)
+                continue;
+
+            bool active = true;
+            if (auto* comp = dynamic_cast<juce::Component*>(lst))
+            {
+                if (! comp->isShowing() || comp->getWidth() <= 0 || comp->getHeight() <= 0)
+                {
+                    active = false;
+                }
+                else if (auto* p = comp->getParentComponent())
+                {
+                    if (comp->getBounds().getIntersection(p->getLocalBounds()).isEmpty())
+                        active = false;
+                }
+            }
+
+            if (active)
+                activeListeners.push_back(lst);
         }
+
+        y2k::perf::PerformanceCounterSystem::instance().recordFrameListenerCount((int) activeListeners.size());
+        y2k::perf::PerformanceCounterSystem::instance().recordEvent(
+            y2k::perf::FunctionId::uiFrameListenerFanout,
+            y2k::perf::Partition::uiRendering,
+            y2k::perf::ThreadRole::ui,
+            (juce::int64) activeListeners.size());
+        for (auto* lst : activeListeners)
+        {
+            y2k::perf::ScopedPerfTimer onFrameTimer(y2k::perf::FunctionId::uiOnFrameDispatch,
+                                                    y2k::perf::Partition::uiRendering,
+                                                    y2k::perf::ThreadRole::ui);
+            lst->onFrame (*frame);
+        }
+
+        y2k::perf::PerformanceCounterSystem::instance().recordMemoryFree(sizeof(FrameSnapshot));
     }
 
 private:
@@ -135,7 +227,9 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
     // 频谱缓冲清零
     {
         const juce::SpinLock::ScopedLockType sl(specLock);
+
         fftFifo.fill(0.0f);
+
         fftData.fill(0.0f);
         specData.fill(0.0f);
         magData.fill(0.0f);
@@ -166,6 +260,11 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
     if (left == nullptr || right == nullptr || numSamples <= 0)
         return;
 
+    y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::audio, "Audio-AnalyserHub");
+    y2k::perf::ScopedPerfTimer pushTimer(y2k::perf::FunctionId::analyserPushTotal,
+                                         y2k::perf::Partition::audioAnalysis,
+                                         y2k::perf::ThreadRole::audio);
+
     const auto t0 = juce::Time::getHighResolutionTicks();
 
     // Phase F 按需计算：只跑被订阅（refCount > 0）的那几路。
@@ -180,9 +279,30 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
 
     if (wantOsc)      pushSamplesToOscilloscope(left, right, numSamples);
     if (wantSpec)     pushSamplesToSpectrum    (left, right, numSamples);
-    if (wantLoud)     loudnessMeter.pushStereo (left, right, numSamples);
-    if (wantPhase)    phaseCorrelator.pushStereo(left, right, numSamples);
-    if (wantDynamics) dynamicsMeter.pushStereo (left, right, numSamples);
+
+    if (wantLoud)
+    {
+        y2k::perf::ScopedPerfTimer t(y2k::perf::FunctionId::analyserLoudness,
+                                     y2k::perf::Partition::audioAnalysis,
+                                     y2k::perf::ThreadRole::audio);
+        loudnessMeter.pushStereo (left, right, numSamples);
+    }
+
+    if (wantPhase)
+    {
+        y2k::perf::ScopedPerfTimer t(y2k::perf::FunctionId::analyserPhase,
+                                     y2k::perf::Partition::audioAnalysis,
+                                     y2k::perf::ThreadRole::audio);
+        phaseCorrelator.pushStereo(left, right, numSamples);
+    }
+
+    if (wantDynamics)
+    {
+        y2k::perf::ScopedPerfTimer t(y2k::perf::FunctionId::analyserDynamics,
+                                     y2k::perf::Partition::audioAnalysis,
+                                     y2k::perf::ThreadRole::audio);
+        dynamicsMeter.pushStereo (left, right, numSamples);
+    }
 
     const auto t1 = juce::Time::getHighResolutionTicks();
     const auto us = (juce::int64) (juce::Time::highResolutionTicksToSeconds(t1 - t0) * 1.0e6);
@@ -228,7 +348,19 @@ bool AnalyserHub::isActive(Kind kind) const noexcept
 // ==========================================================
 void AnalyserHub::pushSamplesToOscilloscope(const float* left, const float* right, int numSamples)
 {
+    y2k::perf::ScopedPerfTimer stageTimer(y2k::perf::FunctionId::analyserOscilloscope,
+                                          y2k::perf::Partition::audioAnalysis,
+                                          y2k::perf::ThreadRole::audio);
+    const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
     const juce::SpinLock::ScopedLockType sl(oscLock);
+    const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+    stageTimer.addLockWait(lockNs - waitStart);
+    y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+        y2k::perf::FunctionId::lockOsc,
+        y2k::perf::Partition::dataCommunication,
+        y2k::perf::ThreadRole::audio,
+        0,
+        lockNs - waitStart);
 
     // Phase F 优化：逐样本循环 → 分段 memcpy
     //   若 numSamples 跨越环形缓冲末尾，最多只需要两次 memcpy 就能写完整块。
@@ -278,6 +410,9 @@ void AnalyserHub::getOscilloscopeSnapshot(juce::Array<float>& destL,
 // ==========================================================
 void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, int numSamples)
 {
+    y2k::perf::ScopedPerfTimer stageTimer(y2k::perf::FunctionId::analyserSpectrum,
+                                          y2k::perf::Partition::audioAnalysis,
+                                          y2k::perf::ThreadRole::audio);
     // Phase F 优化：之前是"每个样本都 trylock / 不成就 continue 丢样本"，
     //   导致：
     //     1) 每样本一次 lock/unlock 开销非常贵（48kHz × stereo → 一秒 96000 次上锁）；
@@ -286,9 +421,19 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
     //   改造：外层一次 scopedLock，内部紧凑 FIFO；FFT 仍在持锁期间执行，
     //   这段时间 UI 侧 getSpectrumMagnitudes 会短暂自旋，但因为 FFT 只在 fftSize
     //   个样本攒满时才触发，一次 pushStereo 最多触发 1~2 次，UI 等待时间完全可接受。
+    const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
     const juce::SpinLock::ScopedLockType sl(specLock);
+    const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+    stageTimer.addLockWait(lockNs - waitStart);
+    y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+        y2k::perf::FunctionId::lockSpec,
+        y2k::perf::Partition::dataCommunication,
+        y2k::perf::ThreadRole::audio,
+        0,
+        lockNs - waitStart);
 
     // 低频路的 hop（75% overlap）：每 fftSizeLo/4 样本跑一次 FFT，
+
     // 兼顾"更新速度"与"CPU 成本"。
     constexpr int hopLo = fftSizeLo / 4;
 
@@ -605,6 +750,11 @@ void AnalyserHub::removeFrameListener (FrameListener* listener)
 std::shared_ptr<const AnalyserHub::FrameSnapshot> AnalyserHub::getLatestFrame() const noexcept
 {
     const juce::SpinLock::ScopedLockType sl (latestFrameLock);
+    y2k::perf::PerformanceCounterSystem::instance().recordEvent(
+        y2k::perf::FunctionId::dataGetLatestFrame,
+        y2k::perf::Partition::dataCommunication,
+        y2k::perf::ThreadRole::unknown,
+        1);
     return latestFrame; // 返回共享副本，调用方可自由持有
 }
 

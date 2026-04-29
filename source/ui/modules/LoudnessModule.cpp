@@ -17,6 +17,11 @@ LoudnessModule::LoudnessModule(AnalyserHub& h)
     setMinSize(64, 64);
     setDefaultSize(320, 256); // loudness 5×4 大格
 
+    themeSubToken = PinkXP::subscribeThemeChanged([this]()
+    {
+        invalidateStaticLayer();
+        repaint();
+    });
     // 初始化标签
     barM.label = "M";
     barS.label = "S";
@@ -29,6 +34,12 @@ LoudnessModule::LoudnessModule(AnalyserHub& h)
 
 LoudnessModule::~LoudnessModule()
 {
+    if (themeSubToken >= 0)
+    {
+        PinkXP::unsubscribeThemeChanged(themeSubToken);
+        themeSubToken = -1;
+    }
+
     // Phase F：先解绑 FrameListener（避免在析构过程中再被回调）
     hub.removeFrameListener(this);
     hub.release(AnalyserHub::Kind::Loudness);
@@ -120,7 +131,8 @@ void LoudnessModule::drawMeterBar(juce::Graphics& g,
     const int colW = juce::jmax(1, inner.getWidth() - 4);
     const int offsetX = inner.getX() + (inner.getWidth() - colW) / 2;
 
-    for (int row = 0; row < numRows; ++row)
+    const int firstRow = firstVisibleRowForValue(bar.smoothed, numRows, isLUFS);
+    for (int row = firstRow; row < numRows; ++row)
     {
         const int y = offsetY + row * step;
         const bool lit = (numRows - 1 - row) < litRows;
@@ -229,6 +241,9 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     g.setColour(PinkXP::btnFace);
     g.fillRect(contentBounds);
 
+    rebuildStaticLayerIfNeeded(contentBounds);
+    drawStaticLayer(g, contentBounds);
+
     // 绘制 5 条柱
     drawMeterBar(g, areaM, barM, true);
     drawMeterBar(g, areaS, barS, true);
@@ -295,4 +310,115 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         g.drawVerticalLine(sepX, (float)contentBounds.getY() + 6,
                            (float)contentBounds.getBottom() - 6);
     }
+}
+
+void LoudnessModule::drawMeterBarStaticLayer(juce::Graphics& g,
+                                             juce::Rectangle<int> barArea,
+                                             bool isLUFS) const
+{
+    PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
+
+    const int padding = 3;
+    auto inner = barArea.reduced(padding);
+    if (inner.getWidth() <= 0 || inner.getHeight() <= 0) return;
+
+    const int step = cellSize + cellGap;
+    const int numRows = juce::jmax(1, (inner.getHeight() + cellGap) / step);
+
+    const int totalH = numRows * step - cellGap;
+    const int offsetY = inner.getY() + (inner.getHeight() - totalH) / 2;
+    const int colW = juce::jmax(1, inner.getWidth() - 4);
+    const int offsetX = inner.getX() + (inner.getWidth() - colW) / 2;
+
+    for (int row = 0; row < numRows; ++row)
+    {
+        const int y = offsetY + row * step;
+        const float rowNorm = 1.0f - (float)row / (float)juce::jmax(1, numRows - 1);
+        const float rowDb   = juce::jmap(rowNorm, -60.0f, 0.0f);
+        const auto base = isLUFS ? lufsToColour(rowDb) : dbToColour(rowDb);
+        g.setColour(base.withAlpha(0.12f));
+        g.fillRect(offsetX, y, colW, cellSize);
+    }
+}
+
+int LoudnessModule::firstVisibleRowForValue(float value, int numRows, bool isLUFS) noexcept
+{
+    const float norm = valueToNorm(value, isLUFS);
+    const int litRows = (int) std::round(norm * (float) numRows);
+    const int tailRows = juce::jmax(6, litRows + 8);
+    return juce::jmax(0, numRows - tailRows);
+}
+
+void LoudnessModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
+{
+    if (contentBounds.isEmpty())
+    {
+        staticLayer = juce::Image();
+        staticLayerContentBounds = {};
+        return;
+    }
+
+    if (staticLayer.isValid()
+        && staticLayerContentBounds == contentBounds
+        && staticLayer.getWidth() == contentBounds.getWidth()
+        && staticLayer.getHeight() == contentBounds.getHeight())
+    {
+        return;
+    }
+
+    staticLayer = juce::Image(juce::Image::ARGB,
+                              contentBounds.getWidth(),
+                              contentBounds.getHeight(),
+                              true);
+    staticLayerContentBounds = contentBounds;
+
+    juce::Graphics sg(staticLayer);
+    sg.setColour(PinkXP::btnFace);
+    sg.fillRect(staticLayer.getBounds());
+
+    auto area = juce::Rectangle<int>(0, 0, contentBounds.getWidth(), contentBounds.getHeight()).reduced(6);
+    auto staticAreaScale = area.removeFromRight(30);
+    area.removeFromRight(4);
+    area.removeFromBottom(labelH + readoutH);
+
+    const int barCount = 5;
+    const int gap = 4;
+    const int barW = (area.getWidth() - gap * (barCount - 1)) / barCount;
+
+    auto makeBar = [&](int idx) -> juce::Rectangle<int>
+    {
+        return juce::Rectangle<int>(
+            area.getX() + idx * (barW + gap),
+            area.getY(),
+            barW,
+            area.getHeight());
+    };
+
+    const auto staticAreaM = makeBar(0);
+    const auto staticAreaS = makeBar(1);
+    const auto staticAreaI = makeBar(2);
+    const auto staticAreaL = makeBar(3);
+    const auto staticAreaR = makeBar(4);
+
+    drawMeterBarStaticLayer(sg, staticAreaM, true);
+    drawMeterBarStaticLayer(sg, staticAreaS, true);
+    drawMeterBarStaticLayer(sg, staticAreaI, true);
+    drawMeterBarStaticLayer(sg, staticAreaL, false);
+    drawMeterBarStaticLayer(sg, staticAreaR, false);
+
+    drawScale(sg, staticAreaScale, true);
+}
+
+void LoudnessModule::drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const
+{
+    if (! staticLayer.isValid() || contentBounds.isEmpty())
+        return;
+
+    g.drawImageAt(staticLayer, contentBounds.getX(), contentBounds.getY());
+}
+
+void LoudnessModule::invalidateStaticLayer()
+{
+    staticLayer = juce::Image();
+    staticLayerContentBounds = {};
 }

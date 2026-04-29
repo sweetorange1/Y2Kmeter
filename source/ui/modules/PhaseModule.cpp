@@ -17,10 +17,22 @@ PhaseModule::PhaseModule(AnalyserHub& h)
 
     setMinSize(64, 64);
     setDefaultSize(320, 192); // phase 5×3 大格
+
+    themeSubToken = PinkXP::subscribeThemeChanged([this]()
+    {
+        invalidateStaticLayer();
+        repaint();
+    });
 }
 
 PhaseModule::~PhaseModule()
 {
+    if (themeSubToken >= 0)
+    {
+        PinkXP::unsubscribeThemeChanged(themeSubToken);
+        themeSubToken = -1;
+    }
+
     // Phase F：先解绑 FrameListener
     hub.removeFrameListener(this);
     hub.release(AnalyserHub::Kind::Phase);
@@ -88,6 +100,9 @@ void PhaseModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
     g.setColour(PinkXP::btnFace);
     g.fillRect(content);
 
+    rebuildStaticLayerIfNeeded(content);
+    drawStaticLayer(g, content);
+
     drawGonio     (g, areaGonio);
     drawCorrDial  (g, areaDial);
     drawWidthBar  (g, areaWidth);
@@ -150,7 +165,10 @@ void PhaseModule::drawGonio(juce::Graphics& g, juce::Rectangle<int> area) const
     const int N = juce::jmin(oscL.size(), oscR.size());
     if (N <= 1) return;
 
-    for (int i = 0; i < N; i += 2)
+    const int targetPoints = juce::jmax(96, inner.getWidth() * 2);
+    const int stride = juce::jmax(1, N / targetPoints);
+
+    for (int i = 0; i < N; i += stride)
     {
         const float L = oscL.getUnchecked(i);
         const float Rs = oscR.getUnchecked(i);
@@ -163,6 +181,8 @@ void PhaseModule::drawGonio(juce::Graphics& g, juce::Rectangle<int> area) const
 
         const float px = cx + S * R;
         const float py = cy - M * R;
+        if (! inner.toFloat().expanded(1.0f).contains(px, py))
+            continue;
 
         const float alpha = 0.2f + 0.6f * ((float) i / (float) juce::jmax(1, N - 1));
         g.setColour(PinkXP::pink500.withAlpha(alpha));
@@ -391,4 +411,106 @@ void PhaseModule::drawBalanceBar(juce::Graphics& g, juce::Rectangle<int> area) c
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
     g.drawText(txt, barArea.withTrimmedRight(4),
                juce::Justification::centredRight, false);
+}
+
+void PhaseModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
+{
+    if (contentBounds.isEmpty())
+    {
+        staticLayer = juce::Image();
+        staticLayerContentBounds = {};
+        return;
+    }
+
+    if (staticLayer.isValid()
+        && staticLayerContentBounds == contentBounds
+        && staticLayer.getWidth() == contentBounds.getWidth()
+        && staticLayer.getHeight() == contentBounds.getHeight())
+    {
+        return;
+    }
+
+    staticLayer = juce::Image(juce::Image::ARGB,
+                              contentBounds.getWidth(),
+                              contentBounds.getHeight(),
+                              true);
+    staticLayerContentBounds = contentBounds;
+
+    juce::Graphics sg(staticLayer);
+    sg.setColour(PinkXP::btnFace);
+    sg.fillRect(staticLayer.getBounds());
+
+    auto localContent = juce::Rectangle<int>(0, 0, contentBounds.getWidth(), contentBounds.getHeight());
+    const int barH    = 20;
+    const int barGap  = 2;
+    const int footer  = barH * 2 + barGap;
+
+    auto upper = localContent.withTrimmedBottom(footer + 6);
+    auto lower = localContent.withTop(upper.getBottom() + 6);
+
+    const int gonioSize = juce::jmin(upper.getWidth() * 5 / 9, upper.getHeight());
+    const auto staticAreaGonio = upper.withWidth(gonioSize);
+    const auto staticAreaDial  = upper.withTrimmedLeft(gonioSize + 8);
+    const auto staticAreaWidth = lower.withHeight(barH);
+    const auto staticAreaBalance = lower.withTrimmedTop(barH + barGap).withHeight(barH);
+
+    PinkXP::drawSunken(sg, staticAreaGonio, PinkXP::content);
+
+    auto inner = staticAreaGonio.reduced(6);
+    if (inner.getWidth() > 4 && inner.getHeight() > 4)
+    {
+        const float cx = (float) inner.getCentreX();
+        const float cy = (float) inner.getCentreY();
+        const float R  = (float) juce::jmin(inner.getWidth(), inner.getHeight()) * 0.48f;
+
+        juce::Path diamond;
+        diamond.startNewSubPath(cx,       cy - R);
+        diamond.lineTo         (cx + R,   cy);
+        diamond.lineTo         (cx,       cy + R);
+        diamond.lineTo         (cx - R,   cy);
+        diamond.closeSubPath();
+        sg.setColour(PinkXP::pink300.withAlpha(0.55f));
+        sg.strokePath(diamond, juce::PathStrokeType(1.0f));
+
+        sg.setColour(PinkXP::pink300.withAlpha(0.5f));
+        sg.drawHorizontalLine((int) cy, (float)(cx - R), (float)(cx + R));
+        sg.drawVerticalLine  ((int) cx, (float)(cy - R), (float)(cy + R));
+
+        sg.setColour(PinkXP::pink200.withAlpha(0.6f));
+        for (int d = 0; d < (int) R; d += 5)
+        {
+            sg.fillRect((int)(cx - R + d),     (int)(cy - R + d),     2, 2);
+            sg.fillRect((int)(cx + R - d - 2), (int)(cy - R + d),     2, 2);
+        }
+
+        sg.setColour(PinkXP::ink.withAlpha(0.85f));
+        sg.setFont(PinkXP::getAxisFont(9.0f, juce::Font::bold));
+        sg.drawText("M", juce::Rectangle<int>((int) cx - 10, (int)(cy - R) - 12, 20, 12),
+                    juce::Justification::centred, false);
+        sg.drawText("S", juce::Rectangle<int>((int)(cx + R) + 2, (int) cy - 6, 12, 12),
+                    juce::Justification::centredLeft, false);
+        sg.setColour(PinkXP::ink.withAlpha(0.55f));
+        sg.drawText("L", juce::Rectangle<int>((int)(cx - R) - 12, (int)(cy - R) - 12, 12, 12),
+                    juce::Justification::centredRight, false);
+        sg.drawText("R", juce::Rectangle<int>((int)(cx + R), (int)(cy - R) - 12, 12, 12),
+                    juce::Justification::centredLeft, false);
+    }
+
+    PinkXP::drawSunken(sg, staticAreaDial, PinkXP::content);
+    PinkXP::drawSunken(sg, staticAreaWidth.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
+    PinkXP::drawSunken(sg, staticAreaBalance.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
+}
+
+void PhaseModule::drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const
+{
+    if (! staticLayer.isValid() || contentBounds.isEmpty())
+        return;
+
+    g.drawImageAt(staticLayer, contentBounds.getX(), contentBounds.getY());
+}
+
+void PhaseModule::invalidateStaticLayer()
+{
+    staticLayer = juce::Image();
+    staticLayerContentBounds = {};
 }

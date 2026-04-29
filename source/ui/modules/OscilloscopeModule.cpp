@@ -18,6 +18,11 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
     setMinSize(64, 64);
     setDefaultSize(384, 256); // oscilloscope 6×4 大格
 
+    themeSubToken = PinkXP::subscribeThemeChanged([this]()
+    {
+        invalidateStaticLayer();
+        repaint();
+    });
     auto setupModeBtn = [this](juce::TextButton& b)
     {
         b.setClickingTogglesState(true);
@@ -41,6 +46,12 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
 
 OscilloscopeModule::~OscilloscopeModule()
 {
+    if (themeSubToken >= 0)
+    {
+        PinkXP::unsubscribeThemeChanged(themeSubToken);
+        themeSubToken = -1;
+    }
+
     hub.removeFrameListener(this);
     hub.release(AnalyserHub::Kind::Oscilloscope);
 }
@@ -50,6 +61,7 @@ void OscilloscopeModule::setDisplayMode(DisplayMode m)
     if (displayMode == m) return;
     displayMode = m;
     refreshModeButtons();
+    invalidateStaticLayer();
     repaint();
 }
 
@@ -123,10 +135,11 @@ void OscilloscopeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> co
     g.setColour(PinkXP::btnFace);
     g.fillRect(contentBounds);
 
+    rebuildStaticLayerIfNeeded(contentBounds);
+    drawStaticLayer(g, contentBounds);
+
     // 画布区域（凹陷）
     auto canvas = getCanvasBounds(contentBounds);
-    drawBackground(g, canvas);
-
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
@@ -197,32 +210,12 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
     auto inner = canvas.reduced(4);
     if (inner.getWidth() <= 0 || inner.getHeight() <= 0) return;
 
-    const float w  = (float) inner.getWidth();
     const float h  = (float) inner.getHeight();
     const float cy = (float) inner.getCentreY();
     const float halfH = h * 0.45f;
 
-    auto buildPath = [&](const juce::Array<float>& samples) -> juce::Path
-    {
-        juce::Path path;
-        const int len = samples.size();
-        if (len <= 1) return path;
-
-        const float xStep = w / (float)(len - 1);
-        for (int i = 0; i < len; ++i)
-        {
-            const float raw = samples.getUnchecked(i);
-            const float s   = std::isfinite(raw) ? juce::jlimit(-1.0f, 1.0f, raw) : 0.0f;
-            const float x   = (float) inner.getX() + (float) i * xStep;
-            const float y   = cy - s * halfH;
-            if (i == 0) path.startNewSubPath(x, y);
-            else        path.lineTo(x, y);
-        }
-        return path;
-    };
-
     // L 声道：浅粉描边（先淡描 glow，再实线）
-    auto pathL = buildPath(snapshotL);
+    auto pathL = buildWaveformPath(snapshotL, inner, cy, halfH);
     g.setColour(PinkXP::pink300.withAlpha(0.35f));
     g.strokePath(pathL, juce::PathStrokeType(3.0f));
     g.setColour(PinkXP::pink400);
@@ -231,7 +224,7 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
     // R 声道：深粉描边
     if (snapshotR.size() == N)
     {
-        auto pathR = buildPath(snapshotR);
+        auto pathR = buildWaveformPath(snapshotR, inner, cy, halfH);
         g.setColour(PinkXP::pink500.withAlpha(0.35f));
         g.strokePath(pathR, juce::PathStrokeType(3.0f));
         g.setColour(PinkXP::pink600);
@@ -272,8 +265,11 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     g.setColour(PinkXP::pink300.withAlpha(0.45f));
     g.drawEllipse(cx - radius, cy - radius, radius * 2.0f, radius * 2.0f, 1.0f);
 
-    // 点绘：每 2 样本取 1，节省绘制，颜色用轨迹衰减
-    for (int i = 0; i < N; i += 2)
+    const int targetPoints = juce::jmax(96, inner.getWidth() * 2);
+    const int stride = juce::jmax(1, N / targetPoints);
+
+    // 点绘：按可视宽度降采样，颜色用轨迹衰减
+    for (int i = 0; i < N; i += stride)
     {
         const float rawL = snapshotL.getUnchecked(i);
         const float rawR = snapshotR.getUnchecked(i);
@@ -298,6 +294,9 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
             py = cy - ry * radius;
         }
 
+        if (! inner.toFloat().expanded(1.0f).contains(px, py))
+            continue;
+
         // 越新的点（i 越大）越亮
         const float alpha = 0.25f + 0.6f * ((float) i / (float) juce::jmax(1, N - 1));
         g.setColour(PinkXP::pink500.withAlpha(alpha));
@@ -310,4 +309,98 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     const juce::String hint = rotate45 ? "M/S" : "X=L  Y=R";
     g.drawText(hint, canvas.getX() + 4, canvas.getBottom() - 14,
                80, 12, juce::Justification::centredLeft, false);
+}
+
+juce::Path OscilloscopeModule::buildWaveformPath(const juce::Array<float>& samples,
+                                                 juce::Rectangle<int> inner,
+                                                 float yCenter,
+                                                 float halfHeight) const
+{
+    juce::Path path;
+    const int len = samples.size();
+    if (len <= 1 || inner.getWidth() <= 1)
+        return path;
+
+    const int targetPoints = juce::jmax(64, inner.getWidth() * 2);
+    const int stride = juce::jmax(1, len / targetPoints);
+
+    bool started = false;
+    for (int i = 0; i < len; i += stride)
+    {
+        const float raw = samples.getUnchecked(i);
+        const float s = std::isfinite(raw) ? juce::jlimit(-1.0f, 1.0f, raw) : 0.0f;
+        const float norm = (float) i / (float) juce::jmax(1, len - 1);
+        const float x = (float) inner.getX() + norm * (float) inner.getWidth();
+        const float y = yCenter - s * halfHeight;
+        if (! started)
+        {
+            path.startNewSubPath(x, y);
+            started = true;
+        }
+        else
+        {
+            path.lineTo(x, y);
+        }
+    }
+
+    if ((len - 1) % stride != 0)
+    {
+        const float raw = samples.getUnchecked(len - 1);
+        const float s = std::isfinite(raw) ? juce::jlimit(-1.0f, 1.0f, raw) : 0.0f;
+        const float x = (float) inner.getRight();
+        const float y = yCenter - s * halfHeight;
+        if (! started)
+            path.startNewSubPath(x, y);
+        else
+            path.lineTo(x, y);
+    }
+
+    return path;
+}
+
+void OscilloscopeModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
+{
+    if (contentBounds.isEmpty())
+    {
+        staticLayer = juce::Image();
+        staticLayerContentBounds = {};
+        return;
+    }
+
+    if (staticLayer.isValid()
+        && staticLayerContentBounds == contentBounds
+        && staticLayer.getWidth() == contentBounds.getWidth()
+        && staticLayer.getHeight() == contentBounds.getHeight())
+    {
+        return;
+    }
+
+    staticLayer = juce::Image(juce::Image::ARGB,
+                              contentBounds.getWidth(),
+                              contentBounds.getHeight(),
+                              true);
+    staticLayerContentBounds = contentBounds;
+
+    juce::Graphics sg(staticLayer);
+    sg.setColour(PinkXP::btnFace);
+    sg.fillRect(staticLayer.getBounds());
+
+    auto canvas = getCanvasBounds(juce::Rectangle<int>(0, 0,
+                                                       contentBounds.getWidth(),
+                                                       contentBounds.getHeight()));
+    drawBackground(sg, canvas);
+}
+
+void OscilloscopeModule::drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const
+{
+    if (! staticLayer.isValid() || contentBounds.isEmpty())
+        return;
+
+    g.drawImageAt(staticLayer, contentBounds.getX(), contentBounds.getY());
+}
+
+void OscilloscopeModule::invalidateStaticLayer()
+{
+    staticLayer = juce::Image();
+    staticLayerContentBounds = {};
 }

@@ -128,6 +128,13 @@ public:
     //   改变足够大时会触发右下角小字区域的局部 repaint。
     void setCpuLoad (float load01) noexcept;
 
+    // 统一拦截模块 repaint 请求（用于性能计数）
+    void repaint();
+    void repaint(juce::Rectangle<int> area);
+
+    // 模块是否处于"可见且在父容器可视区域内"状态（用于 onFrame/重绘裁剪）
+    bool isVisuallyActiveInWorkspace() const noexcept;
+
     void setMinSize(int w, int h) noexcept { minW = w; minH = h; }
     int  getMinWidth()  const noexcept { return minW; }
     int  getMinHeight() const noexcept { return minH; }
@@ -206,6 +213,10 @@ private:
     // 右下角 CPU 小字（单位：%，已从 [0..1] 乘 100）
     float cpuPercent = 0.0f;
     juce::Rectangle<int> getCpuLabelBounds() const;
+
+    bool pendingFullRepaint = false;
+    bool pendingAreaRepaint = false;
+    juce::Rectangle<int> pendingRepaintArea;
 
     enum class DragMode { none, move, resize };
     DragMode dragMode = DragMode::none;

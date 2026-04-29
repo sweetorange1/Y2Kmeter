@@ -46,6 +46,10 @@ private:
     void drawWidthBar(juce::Graphics& g, juce::Rectangle<int> area) const;
     void drawBalanceBar(juce::Graphics& g, juce::Rectangle<int> area) const;
 
+    void rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds);
+    void drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const;
+    void invalidateStaticLayer();
+
     // ---- 成员 ----
     AnalyserHub& hub;
 
@@ -61,6 +65,10 @@ private:
     juce::Rectangle<int> areaDial;
     juce::Rectangle<int> areaWidth;
     juce::Rectangle<int> areaBalance;
+
+    juce::Image staticLayer;
+    juce::Rectangle<int> staticLayerContentBounds;
+    int themeSubToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PhaseModule)
 };

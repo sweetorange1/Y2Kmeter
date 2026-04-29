@@ -113,6 +113,7 @@ private:
     void timerCallback() override;
 
     bool loadRandomRoleAnimations();
+
     void chooseNextAnimation();
     int chooseNextAnimByState() const;
     void stepOneFrame();
@@ -153,6 +154,15 @@ private:
     void forceAnimation (int animId, bool restartFrame = true);
 
     juce::Image getCurrentFrame() const;
+    juce::Rectangle<int> getPetVisualBoundsFor (const juce::Image& frame,
+                                                juce::Point<float> pos,
+                                                bool bubbleVisible,
+                                                const juce::String& bubbleText,
+                                                MotionMode mode) const;
+    juce::Rectangle<int> getCurrentPetVisualBounds() const;
+    int getTargetVisualHzForMode (MotionMode mode) const noexcept;
+    void enqueuePetDirtyRepaint (juce::Rectangle<int> area);
+    void flushVisualRepaintQueue (bool forceNow);
 
     juce::Rectangle<int> getDeleteButtonBounds() const;
     juce::Rectangle<int> getFocusBounds() const;
@@ -167,8 +177,14 @@ private:
     int currentAnimId = 1;
     int currentFrameIdx = 0;
 
-    // 动画节拍：20 tick ≈ 1 秒切 1 帧
-    int frameTickCounter = 0;
+    // 动画节拍：20Hz 下约每 1 秒切 1 帧；动态刷新率下使用时间累积
+    float frameAccumSec = 0.0f;
+
+    int currentVisualHz = 20;
+    float currentTickDtSec = 1.0f / 20.0f;
+
+    bool hasQueuedPetDirty = false;
+    juce::Rectangle<int> queuedPetDirtyBounds;
 
     // 动作/移动状态机
     MotionMode motionMode = MotionMode::patrol;
