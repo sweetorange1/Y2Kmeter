@@ -2,6 +2,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/perf/PerformanceCounterSystem.h"
 #include "source/standalone/AudioDumpRecorder.h"
 
 // ==========================================================
