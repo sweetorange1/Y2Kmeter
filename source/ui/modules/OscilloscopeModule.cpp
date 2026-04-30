@@ -21,6 +21,7 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
         invalidateStaticLayer();
+        invalidateDynamicLayer();
         repaint();
     });
     auto setupModeBtn = [this](juce::TextButton& b)
@@ -62,6 +63,7 @@ void OscilloscopeModule::setDisplayMode(DisplayMode m)
     displayMode = m;
     refreshModeButtons();
     invalidateStaticLayer();
+    invalidateDynamicLayer();
     repaint();
 }
 
@@ -70,6 +72,8 @@ void OscilloscopeModule::setFrozen(bool b)
     if (frozen == b) return;
     frozen = b;
     btnFreeze.setToggleState(frozen, juce::dontSendNotification);
+    invalidateDynamicLayer(); // 冻结状态右上角红点 + FROZEN 文本需要重绘
+    repaint();
 }
 
 void OscilloscopeModule::refreshModeButtons()
@@ -95,6 +99,10 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         snapshotR.resize(n);
         std::memcpy (snapshotL.getRawDataPointer(), frame.oscL.data(), (size_t) n * sizeof (float));
         std::memcpy (snapshotR.getRawDataPointer(), frame.oscR.data(), (size_t) n * sizeof (float));
+
+        // 方案 A：只有数据真正变化才标脏动态层，避免每帧 4 次 strokePath
+        if (snapshotChangedSinceLastDraw())
+            dynamicLayerDirty = true;
     }
 
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
@@ -151,24 +159,12 @@ void OscilloscopeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> co
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
-    switch (displayMode)
-    {
-        case DisplayMode::waveform:  drawWaveform(g, canvas);        break;
-        case DisplayMode::xy:        drawXY(g, canvas, false);       break;
-        case DisplayMode::lissajous: drawXY(g, canvas, true);        break;
-    }
-
-    // 冻结标记（右上角小红点）
-    if (frozen)
-    {
-        auto dot = juce::Rectangle<int>(canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
-        g.setColour(juce::Colour(0xffec4d85));
-        g.fillEllipse(dot.toFloat());
-        g.setColour(PinkXP::ink);
-        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
-                   42, 12, juce::Justification::centredRight, false);
-    }
+    // 方案 A：动态层缓存
+    //   · 只有尺寸变化 / 模式变化 / 冻结状态变化 / snapshot 有新数据时才重绘动态层
+    //   · 否则直接 drawImageAt，避开 4 次 strokePath 与上千次 fillRect
+    redrawDynamicLayerIfNeeded(canvas);
+    if (dynamicLayer.isValid())
+        g.drawImageAt(dynamicLayer, canvas.getX(), canvas.getY());
 }
 
 // ----------------------------------------------------------
@@ -210,7 +206,7 @@ void OscilloscopeModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> 
 // ----------------------------------------------------------
 // Waveform 模式：时域 L（粉色）+ R（深粉）叠加
 // ----------------------------------------------------------
-void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> canvas) const
+void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> canvas)
 {
     const int N = snapshotL.size();
     if (N <= 1) return;
@@ -257,7 +253,7 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
 // ----------------------------------------------------------
 // XY / Lissajous 模式：散点云
 // ----------------------------------------------------------
-void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, bool rotate45) const
+void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, bool rotate45)
 {
     const int N = juce::jmin(snapshotL.size(), snapshotR.size());
     if (N <= 1) return;
@@ -276,7 +272,17 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     const int targetPoints = juce::jmax(96, inner.getWidth() * 2);
     const int stride = juce::jmax(1, N / targetPoints);
 
-    // 点绘：按可视宽度降采样，颜色用轨迹衰减
+    // 方案 C：按 alpha 分桶，合并 setColour + fillRect 调用
+    //   原本每个点都要 setColour + fillRect，600px 宽画布 ~1200 次状态切换；
+    //   按 8 档 alpha 把点汇总到 RectangleList，一次 fillRectList 提交 → 最多 8 次状态切换。
+    constexpr int kAlphaBuckets = 8;
+    juce::RectangleList<float> buckets[kAlphaBuckets];
+    for (int b = 0; b < kAlphaBuckets; ++b)
+        buckets[b].ensureStorageAllocated(targetPoints / kAlphaBuckets + 8);
+
+    const float denom = (float) juce::jmax(1, N - 1);
+    const juce::Rectangle<float> innerF = inner.toFloat().expanded(1.0f);
+
     for (int i = 0; i < N; i += stride)
     {
         const float rawL = snapshotL.getUnchecked(i);
@@ -284,13 +290,12 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
         if (! std::isfinite(rawL) || ! std::isfinite(rawR))
             continue;
 
-        float lx = juce::jlimit(-1.0f, 1.0f, rawL);
-        float ry = juce::jlimit(-1.0f, 1.0f, rawR);
+        const float lx = juce::jlimit(-1.0f, 1.0f, rawL);
+        const float ry = juce::jlimit(-1.0f, 1.0f, rawR);
 
         float px, py;
         if (rotate45)
         {
-            // Mid/Side = L+R / L-R ，旋转 45°
             const float mid  = (lx + ry) * 0.7071067f;
             const float side = (lx - ry) * 0.7071067f;
             px = cx + side * radius;
@@ -302,13 +307,23 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
             py = cy - ry * radius;
         }
 
-        if (! inner.toFloat().expanded(1.0f).contains(px, py))
+        if (! innerF.contains(px, py))
             continue;
 
-        // 越新的点（i 越大）越亮
-        const float alpha = 0.25f + 0.6f * ((float) i / (float) juce::jmax(1, N - 1));
-        g.setColour(PinkXP::pink500.withAlpha(alpha));
-        g.fillRect(px - 0.5f, py - 0.5f, 2.0f, 2.0f);
+        // 越新的点（i 越大）越亮 —— 0.25f ~ 0.85f 之间映射到 8 档桶
+        const float normAlpha = (float) i / denom;               // 0..1
+        int bucket = (int) (normAlpha * (float) kAlphaBuckets);
+        bucket = juce::jlimit(0, kAlphaBuckets - 1, bucket);
+
+        buckets[bucket].addWithoutMerging({ px - 0.5f, py - 0.5f, 2.0f, 2.0f });
+    }
+
+    for (int b = 0; b < kAlphaBuckets; ++b)
+    {
+        if (buckets[b].isEmpty()) continue;
+        const float bucketAlpha = 0.25f + 0.6f * (((float) b + 0.5f) / (float) kAlphaBuckets);
+        g.setColour(PinkXP::pink500.withAlpha(bucketAlpha));
+        g.fillRectList(buckets[b]);
     }
 
     // 左下角模式说明
@@ -411,4 +426,124 @@ void OscilloscopeModule::invalidateStaticLayer()
 {
     staticLayer = juce::Image();
     staticLayerContentBounds = {};
+}
+
+// ----------------------------------------------------------
+// 方案 A：动态波形 / XY 点图缓存层
+// ----------------------------------------------------------
+void OscilloscopeModule::invalidateDynamicLayer()
+{
+    dynamicLayer = juce::Image();
+    dynamicLayerCanvasBounds = {};
+    dynamicLayerDirty = true;
+    lastDrawnSampleCount = -1;
+}
+
+bool OscilloscopeModule::snapshotChangedSinceLastDraw() const noexcept
+{
+    const int n = snapshotL.size();
+    if (n != lastDrawnSampleCount)
+        return true;
+    if (n <= 0)
+        return false;
+
+    // 取 6 个代表点（首、1/4、1/2、3/4、末 L + 末 R）做快速指纹
+    const int i0 = 0;
+    const int i1 = juce::jlimit(0, n - 1, n / 4);
+    const int i2 = juce::jlimit(0, n - 1, n / 2);
+    const int i3 = juce::jlimit(0, n - 1, (3 * n) / 4);
+    const int i4 = n - 1;
+
+    const float f0 = snapshotL.getUnchecked(i0);
+    const float f1 = snapshotL.getUnchecked(i1);
+    const float f2 = snapshotL.getUnchecked(i2);
+    const float f3 = snapshotL.getUnchecked(i3);
+    const float f4 = snapshotL.getUnchecked(i4);
+    const float f5 = (snapshotR.size() > i4) ? snapshotR.getUnchecked(i4) : 0.0f;
+
+    return f0 != lastDrawnFingerprint[0]
+        || f1 != lastDrawnFingerprint[1]
+        || f2 != lastDrawnFingerprint[2]
+        || f3 != lastDrawnFingerprint[3]
+        || f4 != lastDrawnFingerprint[4]
+        || f5 != lastDrawnFingerprint[5];
+}
+
+void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
+{
+    if (canvas.getWidth() <= 0 || canvas.getHeight() <= 0)
+    {
+        invalidateDynamicLayer();
+        return;
+    }
+
+    const bool sizeChanged = (! dynamicLayer.isValid())
+                          || dynamicLayer.getWidth()  != canvas.getWidth()
+                          || dynamicLayer.getHeight() != canvas.getHeight();
+
+    const bool modeChanged   = (lastDrawnMode   != displayMode);
+    const bool frozenChanged = (lastDrawnFrozen != frozen);
+
+    if (sizeChanged)
+    {
+        dynamicLayer = juce::Image(juce::Image::ARGB,
+                                   canvas.getWidth(),
+                                   canvas.getHeight(),
+                                   true);
+        dynamicLayerDirty = true;
+    }
+
+    if (modeChanged || frozenChanged)
+        dynamicLayerDirty = true;
+
+    dynamicLayerCanvasBounds = canvas;
+
+    if (! dynamicLayerDirty)
+        return;
+
+    // 清空整张动态层（ARGB 透明底），再在 "局部 canvas 坐标系" 里重绘波形
+    dynamicLayer.clear(dynamicLayer.getBounds(), juce::Colours::transparentBlack);
+
+    juce::Graphics dg(dynamicLayer);
+    const juce::Rectangle<int> localCanvas(0, 0, canvas.getWidth(), canvas.getHeight());
+
+    switch (displayMode)
+    {
+        case DisplayMode::waveform:  drawWaveform(dg, localCanvas);        break;
+        case DisplayMode::xy:        drawXY      (dg, localCanvas, false); break;
+        case DisplayMode::lissajous: drawXY      (dg, localCanvas, true);  break;
+    }
+
+    // 冻结标记（右上角小红点 + "FROZEN"）也画进动态层
+    if (frozen)
+    {
+        auto dot = juce::Rectangle<int>(localCanvas.getRight() - 12, localCanvas.getY() + 6, 8, 8);
+        dg.setColour(juce::Colour(0xffec4d85));
+        dg.fillEllipse(dot.toFloat());
+        dg.setColour(PinkXP::ink);
+        dg.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+        dg.drawText("FROZEN", localCanvas.getRight() - 60, localCanvas.getY() + 4,
+                    42, 12, juce::Justification::centredRight, false);
+    }
+
+    // 更新指纹 / 状态缓存
+    lastDrawnSampleCount = snapshotL.size();
+    if (lastDrawnSampleCount > 0)
+    {
+        const int n = lastDrawnSampleCount;
+        const int i1 = juce::jlimit(0, n - 1, n / 4);
+        const int i2 = juce::jlimit(0, n - 1, n / 2);
+        const int i3 = juce::jlimit(0, n - 1, (3 * n) / 4);
+        lastDrawnFingerprint[0] = snapshotL.getUnchecked(0);
+        lastDrawnFingerprint[1] = snapshotL.getUnchecked(i1);
+        lastDrawnFingerprint[2] = snapshotL.getUnchecked(i2);
+        lastDrawnFingerprint[3] = snapshotL.getUnchecked(i3);
+        lastDrawnFingerprint[4] = snapshotL.getUnchecked(n - 1);
+        lastDrawnFingerprint[5] = (snapshotR.size() > 0)
+                                    ? snapshotR.getUnchecked(snapshotR.size() - 1)
+                                    : 0.0f;
+    }
+    lastDrawnMode     = displayMode;
+    lastDrawnFrozen   = frozen;
+    dynamicLayerDirty = false;
 }
