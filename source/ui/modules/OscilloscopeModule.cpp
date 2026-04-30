@@ -84,7 +84,7 @@ void OscilloscopeModule::refreshModeButtons()
 // ----------------------------------------------------------
 void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
-    if (! isShowing()) return;
+    if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Oscilloscope)) return;
 
     if (! frozen)
@@ -96,6 +96,14 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         std::memcpy (snapshotL.getRawDataPointer(), frame.oscL.data(), (size_t) n * sizeof (float));
         std::memcpy (snapshotR.getRawDataPointer(), frame.oscR.data(), (size_t) n * sizeof (float));
     }
+
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const float scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 15.0 * (double) juce::jmin (2.0f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
     repaint();
 }
 

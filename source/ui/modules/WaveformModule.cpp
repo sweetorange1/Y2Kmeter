@@ -164,6 +164,7 @@ void WaveformModule::setFrozen (bool b)
     if (frozen == b) return;
     frozen = b;
     btnFreeze.setToggleState (frozen, juce::dontSendNotification);
+    repaint();
 }
 
 // ----------------------------------------------------------
@@ -171,21 +172,19 @@ void WaveformModule::setFrozen (bool b)
 // ----------------------------------------------------------
 void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
-    if (! isShowing()) return;
+    if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Oscilloscope)) return;
 
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
     const double deltaMs = nowMs - lastFrameTimeMs;
     lastFrameTimeMs = nowMs;
 
-    if (frozen) { repaint(); return; }
+    if (frozen)
+        return;
 
     // 列缓冲尚未建立（首次 layout 还没跑）— 跳过
     if (columnHistory.empty() || samplesPerColumn <= 0.0f)
-    {
-        repaint();
         return;
-    }
 
     // 估算自上帧以来应追加多少个新样本
     //   · sampleRate × (Δt / 1000)
@@ -193,15 +192,24 @@ void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     //   · 快照本身是"最近 N 个样本"的环形快照（时间从旧到新），
     //     所以 append 时从末尾取最新的 numToAppend 个
     const int snapshotLen = (int) frame.oscL.size();
-    if (snapshotLen <= 0) { repaint(); return; }
+    if (snapshotLen <= 0)
+        return;
 
     int numToAppend = (int) std::lround (cachedSampleRate * deltaMs / 1000.0);
     numToAppend = juce::jlimit (0, snapshotLen, numToAppend);
-    if (numToAppend > 0)
-        pushHistorySamples (frame.oscL.data(), frame.oscR.data(),
-                            snapshotLen, numToAppend);
+    if (numToAppend <= 0)
+        return;
 
-    repaint();
+    pushHistorySamples (frame.oscL.data(), frame.oscR.data(),
+                        snapshotLen, numToAppend);
+
+    const float scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (2.0f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
+    repaint (getCanvasBounds (getContentBounds()));
 }
 
 // ----------------------------------------------------------

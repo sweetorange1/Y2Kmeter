@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <juce_opengl/juce_opengl.h>
 #include "PluginProcessor.h"
 #include "BinaryData.h"
 
@@ -140,6 +141,9 @@ private:
     //   避免 N 个模块各自每帧查一次 getCpuLoad()。
     void timerCallback() override;
 
+    // 根据实际 FPS 与宿主模式动态调整 FrameDispatcher 频率。
+    void applyAdaptiveFrameRate (float measuredFps);
+
     // 模块工厂（仅 Phase A：支持 EQ；其他类型为 Phase B-D 预留）
     std::unique_ptr<ModulePanel> createModule(ModuleType type);
 
@@ -228,9 +232,25 @@ private:
     juce::int64              lastFrameCounterSample = 0;
     double                   lastFpsTimeMs          = 0.0;
 
+    // 自适应 FPS 调度状态
+    int                      userRequestedFpsLimit  = 30;
+    int                      adaptiveDispatchHz     = 30;
+    int                      adaptiveRecoverTicks   = 0;
+
     // Tamagotchi 信号保活：仅当工作区存在 Tamagotchi 模块时，
     // 才临时 retain(Loudness) 以驱动孵化/行为状态机；无 Tamagotchi 时立刻 release。
     bool tamagotchiSignalRetained = false;
+
+    // —— GPU 合成层（统一迁移绘制到 GPU，Standalone + VST3 共用）——
+    //   · 在 Editor 构造末尾 attachTo(*this)，析构最开始 detach()。
+    //   · attach 后 JUCE 会把所有子组件的 paint() 命令翻译成 OpenGL 批次，
+    //     底层把软光栅的 fillCGRect / drawGlyphs / fillPath 全部交给 GPU 执行。
+    //   · 插件宿主（VST3/AU）下也安全：JUCE 会为 Editor 的顶层 NSView/HWND 自动
+    //     创建一个子 GL 子层，不会影响宿主窗口其余部分；DAW 卸载 Editor 时
+    //     detach 会清理 GL 资源。
+    //   · 本成员**必须**在类的末尾（所有子组件之后）声明，保证析构时最先执行
+    //     （反向声明顺序），而我们在 ~Editor 起始处已显式 detach 一次兜底。
+    juce::OpenGLContext openGLContext;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };

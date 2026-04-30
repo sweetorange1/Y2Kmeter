@@ -83,6 +83,15 @@ struct MacDesktopAudioCapture::Impl
     double unhealthyDurationSec = 0.0;
     double forcedModeRemainSec = 0.0;
     double fullScanRemainSec = 0.8;
+    double fullScanCooldownSec = 0.0;
+    double fullScanProbeElapsedSec = 0.0;
+    double coldStartRemainSec = 2.0;
+    double dispatchElapsedSec = 0.0;
+    double fallbackRetryCooldownSec = 0.0;
+    double noPayloadElapsedSec = 0.0;
+    std::vector<float> pendingDispatchL;
+    std::vector<float> pendingDispatchR;
+    double pendingDispatchSampleRate = 48000.0;
 
     DecodeMode decodeMode = DecodeMode::autoSelect;
     DecodePath stableSelectedPath = DecodePath::interleavedFloat32;
@@ -143,8 +152,11 @@ struct MacDesktopAudioCapture::Impl
 
     void logAsbdIfNeeded (const AudioStreamBasicDescription& asbd, double durationSec)
     {
+        const bool suspicious = isSuspiciousFormat (asbd);
+        const double periodSec = coldStartRemainSec > 0.0 ? 1.0 : 5.0;
+
         asbdLogElapsedSec += durationSec;
-        if (asbdLogElapsedSec < 1.0)
+        if (! suspicious && asbdLogElapsedSec < periodSec)
             return;
 
         asbdLogElapsedSec = 0.0;
@@ -155,7 +167,7 @@ struct MacDesktopAudioCapture::Impl
                                + " bytesPerFrame=" + juce::String ((int) asbd.mBytesPerFrame)
                                + " channels=" + juce::String ((int) asbd.mChannelsPerFrame)
                                + " sampleRate=" + juce::String (asbd.mSampleRate, 1)
-                               + (isSuspiciousFormat (asbd) ? " suspicious=1" : " suspicious=0");
+                               + (suspicious ? " suspicious=1" : " suspicious=0");
         juce::Logger::writeToLog (msg);
     }
 
@@ -780,8 +792,11 @@ struct MacDesktopAudioCapture::Impl
                              const juce::Array<CandidateResult>& candidates,
                              bool suspicious)
     {
+        const bool urgent = suspicious || selectedStats.pathologicalDc || selectedStats.clipRatio > 0.08;
+        const double periodSec = coldStartRemainSec > 0.0 ? 1.0 : 5.0;
+
         monitorLogElapsedSec += durationSec;
-        if (monitorLogElapsedSec < 1.0)
+        if (! urgent && monitorLogElapsedSec < periodSec)
             return;
 
         monitorLogElapsedSec = 0.0;
@@ -844,9 +859,36 @@ struct MacDesktopAudioCapture::Impl
         const double sampleRate = asbd.mSampleRate > 1.0 ? asbd.mSampleRate : 48000.0;
         const double durationSec = (sampleRate > 1.0) ? ((double) numSamples / sampleRate) : 0.0;
 
+        if (coldStartRemainSec > 0.0)
+            coldStartRemainSec = juce::jmax (0.0, coldStartRemainSec - durationSec);
+
+        if (fallbackRetryCooldownSec > 0.0)
+            fallbackRetryCooldownSec = juce::jmax (0.0, fallbackRetryCooldownSec - durationSec);
+
         logAsbdIfNeeded (asbd, durationSec);
 
         const bool suspicious = isSuspiciousFormat (asbd);
+
+        if (owner->onAudio == nullptr)
+        {
+            noPayloadElapsedSec += durationSec;
+
+            if (decodeMode != DecodeMode::autoSelect)
+            {
+                forcedModeRemainSec = juce::jmax (0.0, forcedModeRemainSec - durationSec);
+                if (forcedModeRemainSec <= 0.0)
+                {
+                    decodeMode = DecodeMode::autoSelect;
+                    fullScanRemainSec = 0.0;
+                    fullScanCooldownSec = juce::jmax (fullScanCooldownSec, 1.0);
+                    pendingSelectedWindows = 0;
+                }
+            }
+
+            return;
+        }
+
+        noPayloadElapsedSec = 0.0;
 
         if (decodeMode != DecodeMode::autoSelect && forcedModeRemainSec > 0.0)
         {
@@ -856,6 +898,7 @@ struct MacDesktopAudioCapture::Impl
                 decodeMode = DecodeMode::autoSelect;
                 forcedModeRemainSec = 0.0;
                 fullScanRemainSec = 0.8;
+                fullScanCooldownSec = 0.0;
                 pendingSelectedWindows = 0;
                 juce::Logger::writeToLog ("[MacDesktopAudioCapture] fallback force mode expired, back to autoSelect");
             }
@@ -872,16 +915,62 @@ struct MacDesktopAudioCapture::Impl
             candidates.add (std::move (c));
         };
 
+        // 稳态快路径下，先轻量探测一次，如果连首选路径都拿不到有效 frame，
+        // 就直接跳过本轮（不再触发全量评估），等系统给出真正有内容的窗口。
+        // 这是"不该算就不算"的最小保护：持续静音/空缓冲不会被放大成 CPU 尖峰。
+        if (decodeMode == DecodeMode::autoSelect
+            && stablePathReady
+            && fullScanRemainSec <= 0.0
+            && fallbackRetryCooldownSec > 0.0)
+        {
+            CandidateResult probe;
+            probe.path = stableSelectedPath;
+            probe.ok = decodeSampleBufferWithPath (sampleBuffer, asbd, numSamples,
+                                                   probe.path, probe.L, probe.R, &probe.info);
+
+            const bool probeEmpty = (! probe.ok)
+                                  || probe.info.effectiveFrames <= 0
+                                  || probe.info.numBuffers == 0
+                                  || (probe.info.buffer0Bytes == 0 && probe.info.buffer1Bytes == 0);
+
+            if (probeEmpty)
+                return;
+        }
+
         bool runFullEvaluation = false;
         if (decodeMode == DecodeMode::autoSelect)
         {
             if (! stablePathReady)
                 runFullEvaluation = true;
 
+            if (fullScanCooldownSec > 0.0)
+                fullScanCooldownSec = juce::jmax (0.0, fullScanCooldownSec - durationSec);
+
             if (fullScanRemainSec > 0.0)
             {
                 runFullEvaluation = true;
                 fullScanRemainSec = juce::jmax (0.0, fullScanRemainSec - durationSec);
+
+                if (fullScanRemainSec <= 0.0)
+                    fullScanCooldownSec = juce::jmax (fullScanCooldownSec, 4.0);
+            }
+            else
+            {
+                fullScanProbeElapsedSec += durationSec;
+
+                // 冷启动阶段优先全量评估，尽快收敛到稳定解码路径。
+                if (coldStartRemainSec > 0.0)
+                {
+                    fullScanRemainSec = 0.3;
+                    runFullEvaluation = true;
+                }
+                // 稳态阶段改为低频探测：每8秒给一次短窗口，且要求不在cooldown。
+                else if (fullScanCooldownSec <= 0.0 && fullScanProbeElapsedSec >= 8.0 && ! suspicious)
+                {
+                    fullScanProbeElapsedSec = 0.0;
+                    fullScanRemainSec = 0.12;
+                    runFullEvaluation = true;
+                }
             }
         }
 
@@ -896,7 +985,7 @@ struct MacDesktopAudioCapture::Impl
             {
                 candidates.clear();
                 runFullEvaluation = true;
-                fullScanRemainSec = 1.0;
+                fullScanRemainSec = 0.25;
             }
         }
 
@@ -1009,20 +1098,31 @@ struct MacDesktopAudioCapture::Impl
         if (decodeMode == DecodeMode::autoSelect && ! runFullEvaluation)
         {
             if (selected.stats.pathologicalDc || selected.stats.clipRatio > 0.08)
-                fullScanRemainSec = 1.0;
+            {
+                fullScanRemainSec = 0.25;
+                fullScanCooldownSec = 0.0;
+            }
         }
 
-        if (selected.stats.lowLevel)
+        const bool hasPayload = selected.info.effectiveFrames > 0
+                             && selected.info.numBuffers > 0
+                             && (selected.info.buffer0Bytes > 0 || selected.info.buffer1Bytes > 0);
+
+        // 空缓冲或 numBuffers=0 的窗口不参与健康检查：这类窗口本身就没有真实音频内容，
+        // 如果累计进 unhealthyDurationSec 会把"静音/空闲"误判成"解码坏了"，导致反复 fallback。
+        if (selected.stats.lowLevel && hasPayload)
             unhealthyDurationSec += durationSec;
         else
-            unhealthyDurationSec = 0.0;
+            unhealthyDurationSec = juce::jmax (0.0, unhealthyDurationSec - durationSec * 0.5);
 
-        if (unhealthyDurationSec >= 1.0)
+        // fallback 防抖：冷却期内不再触发，避免 autoSelect <-> force* 抖动。冷却时间从 2.5s 提到 4s。
+        if (unhealthyDurationSec >= 1.0 && fallbackRetryCooldownSec <= 0.0 && hasPayload)
         {
             const DecodePath backup = fallbackBackupPath (lastSelectedPath);
 
             decodeMode = isFloatPath (backup) ? DecodeMode::forceFloat : DecodeMode::forceInteger;
             forcedModeRemainSec = 2.0;
+            fallbackRetryCooldownSec = 4.0;
             unhealthyDurationSec = 0.0;
 
             juce::Logger::writeToLog ("[MacDesktopAudioCapture] health check failed for 1s (peak<=2/32768 && rms<-85dBFS), switch to backup path="
@@ -1033,17 +1133,36 @@ struct MacDesktopAudioCapture::Impl
 
         if (owner->onAudio)
         {
-            std::vector<float> outL = selected.L;
-            std::vector<float> outR = selected.R;
-
-            const int n = juce::jmin ((int) outL.size(), (int) outR.size());
-            for (int i = 0; i < n; ++i)
+            const int n = juce::jmin ((int) selected.L.size(), (int) selected.R.size());
+            if (n > 0)
             {
-                outL[(size_t) i] = protectOutputSample (outL[(size_t) i]);
-                outR[(size_t) i] = protectOutputSample (outR[(size_t) i]);
-            }
+                pendingDispatchL.reserve (pendingDispatchL.size() + (size_t) n);
+                pendingDispatchR.reserve (pendingDispatchR.size() + (size_t) n);
 
-            owner->onAudio (outL.data(), outR.data(), n, sampleRate);
+                for (int i = 0; i < n; ++i)
+                {
+                    pendingDispatchL.push_back (protectOutputSample (selected.L[(size_t) i]));
+                    pendingDispatchR.push_back (protectOutputSample (selected.R[(size_t) i]));
+                }
+
+                pendingDispatchSampleRate = sampleRate;
+                dispatchElapsedSec += durationSec;
+
+                const bool urgentDispatch = selected.stats.pathologicalDc || selected.stats.clipRatio > 0.08;
+                const bool timeReady = dispatchElapsedSec >= 0.010;
+                const bool blockReady = pendingDispatchL.size() >= (size_t) 2048;
+
+                if (urgentDispatch || timeReady || blockReady)
+                {
+                    const int dispatchN = juce::jmin ((int) pendingDispatchL.size(), (int) pendingDispatchR.size());
+                    if (dispatchN > 0)
+                        owner->onAudio (pendingDispatchL.data(), pendingDispatchR.data(), dispatchN, pendingDispatchSampleRate);
+
+                    pendingDispatchL.clear();
+                    pendingDispatchR.clear();
+                    dispatchElapsedSec = 0.0;
+                }
+            }
         }
     }
 
@@ -1131,13 +1250,18 @@ struct MacDesktopAudioCapture::Impl
                                                                  exceptingWindows:@[]];
 
                 SCStreamConfiguration* config = [SCStreamConfiguration new];
-                // 仅采集系统音频；旧版 SDK 上无 capturesVideo 属性，
-                // 通过额外注册一个 screen 输出（回调内直接忽略）来避免系统层反复打印
-                // "stream output NOT found"。
+                // 仅采集系统音频：优先显式关闭视频流，降低系统消息量与无效调度。
                 config.capturesAudio = YES;
                 config.excludesCurrentProcessAudio = NO;
                 config.sampleRate = 48000;
                 config.channelCount = 2;
+
+                bool needScreenOutputCompatibility = true;
+                if ([config respondsToSelector:@selector(setCapturesVideo:)])
+                {
+                    [config setValue:@(NO) forKey:@"capturesVideo"];
+                    needScreenOutputCompatibility = false;
+                }
 
                 stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
                 output = [Y2KSCStreamAudioOutput new];
@@ -1161,13 +1285,15 @@ struct MacDesktopAudioCapture::Impl
                     return;
                 }
 
-                // 某些系统会在未注册 screen 输出时持续打印
-                // "stream output NOT found. Dropping frame"，这里注册后在回调中忽略即可。
-                NSError* addScreenOutputError = nil;
-                [stream addStreamOutput:output
-                                   type:SCStreamOutputTypeScreen
-                     sampleHandlerQueue:queue
-                                  error:&addScreenOutputError];
+                if (needScreenOutputCompatibility)
+                {
+                    // 旧系统/旧SDK缺少capturesVideo时，保留兼容分支，避免反复"stream output NOT found"日志。
+                    NSError* addScreenOutputError = nil;
+                    [stream addStreamOutput:output
+                                       type:SCStreamOutputTypeScreen
+                         sampleHandlerQueue:queue
+                                      error:&addScreenOutputError];
+                }
 
                 [stream startCaptureWithCompletionHandler:^ (NSError* startError)
                 {
@@ -1199,6 +1325,16 @@ struct MacDesktopAudioCapture::Impl
                 stopCapture();
                 return false;
             }
+
+            coldStartRemainSec = 2.0;
+            asbdLogElapsedSec = 0.0;
+            monitorLogElapsedSec = 0.0;
+            fullScanProbeElapsedSec = 0.0;
+            fallbackRetryCooldownSec = 0.0;
+            noPayloadElapsedSec = 0.0;
+            dispatchElapsedSec = 0.0;
+            pendingDispatchL.clear();
+            pendingDispatchR.clear();
 
             return true;
         }

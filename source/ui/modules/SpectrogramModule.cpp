@@ -359,48 +359,77 @@ void SpectrogramModule::paintContent (juce::Graphics& g, juce::Rectangle<int> co
     g.reduceClipRegion (plot);
     g.setImageResamplingQuality (juce::Graphics::lowResamplingQuality);
 
+    // ===========================================================
+    // 单次 drawImage 贴屏（方案 C 配套改动）
+    //
+    //   imageBuf 是 2*cols 宽的"双拷贝环形瀑布图"，写入时对 c 和 c+cols
+    //   两列同步写，任何时刻截取 [writeCol, writeCol+cols) 的一段都是
+    //   "从老到新"的完整瀑布。
+    //
+    //   这里用 AffineTransform 把这段"子区窗口"映射到屏幕 plot 区：
+    //     1. 缩放：image 源像素尺寸 (cols × rows) → 屏幕目标尺寸 (plot.w × plot.h)
+    //     2. 平移：image 的 writeCol 列要贴到 plot 最左 (plot.x)，
+    //              且要先把 image 的 y=0 贴到 plot.y 顶部
+    //
+    //   与旧实现（两次 g.drawImage(..., sx, sy, sw, sh, ...)）的关键区别：
+    //   · 旧实现每次带 src 矩形 → JUCE 内部 new 临时 SubsectionPixelData →
+    //     OpenGLRendering::CachedImageList 以 ImagePixelData* 为键频繁失效 →
+    //     每帧 glDeleteTextures + glTexImage2D 重传全图。
+    //   · 新实现：始终把整张 imageBuf 的 ImagePixelData 指针（不变）交给
+    //     CachedImageList，纹理命中缓存，不再销毁/重建。超出 plot 的左右
+    //     多余部分由 reduceClipRegion(plot) 裁掉，结果像素上完全一致。
+    // ===========================================================
     const int cw = plot.getWidth();
     const int ch = plot.getHeight();
-    const int cx = plot.getX();
-    const int cy = plot.getY();
 
-    const int leftW  = cols - writeCol;            // image 左半段的像素列数
-    const int rightW = writeCol;                   // image 右半段的像素列数
+    const float sx = (float) cw / (float) cols;   // 每列源像素 → 屏幕像素宽
+    const float sy = (float) ch / (float) rows;   // 每行源像素 → 屏幕像素高
 
-    // 屏幕上两段的像素宽（整除分配，避免余数像素条）
-    const int sxSplit = cx + (int) std::lround ((double) leftW * (double) cw / (double) cols);
+    // 先在 image 坐标里把 writeCol 移到原点，再缩放到屏幕尺寸，最后平移到 plot
+    const auto xform = juce::AffineTransform::translation (- (float) writeCol, 0.0f)
+                          .scaled (sx, sy)
+                          .translated ((float) plot.getX(), (float) plot.getY());
 
-    if (leftW > 0)
-    {
-        g.drawImage (imageBuf,
-                     cx, cy, sxSplit - cx, ch,          // dst: 屏幕左段
-                     writeCol, 0, leftW, rows,          // src: image[writeCol..cols)
-                     false);
-    }
-    if (rightW > 0)
-    {
-        g.drawImage (imageBuf,
-                     sxSplit, cy, plot.getRight() - sxSplit, ch,  // dst: 屏幕右段
-                     0, 0, rightW, rows,                           // src: image[0..writeCol)
-                     false);
-    }
+    g.drawImageTransformed (imageBuf, xform, false);
 
     drawAxisLabels (g, plot);
 }
 
 // ----------------------------------------------------------
-// 方案 B：离屏 Image 管理
+// 方案 C：双拷贝环形 Image —— 彻底消除每帧 glDeleteTextures / glTexImage2D 抖动
+//
+// 背景（GPU 采样诊断）：
+//   旧实现在 paintContent 里每帧调用两次
+//     g.drawImage (imageBuf, dstX, dstY, dstW, dstH, srcX, srcY, srcW, srcH, false);
+//   这种带 src 矩形的重载会在 JUCE 内部 new 出一个临时的 SubsectionPixelData 包装
+//   对象；而 juce::OpenGLRendering::CachedImageList 把"每个 ImagePixelData 指针"当作
+//   纹理缓存键 —— 临时对象析构 → glDeleteTextures → 下一帧又是新的临时对象 →
+//   glTexImage2D 重传 —— GPU 线程采样里 glDeleteTextures / intelSubmitCommands 堆
+//   到 35% CPU 占用的根本原因。
+//
+// 解决：
+//   · imageBuf 宽度改为 2 * cols（高 rows 不变）。每次写入"最新一列"时，
+//     同时写到第 writeCol 列 和 writeCol+cols 列（双拷贝）。这样任何时候
+//     截取一段长度为 cols、起点为 writeCol 的滑动窗口，都能拿到完整且顺序
+//     正确的"从老到新"瀑布图。
+//   · paintContent 改为只调用一次 drawImage，不带 src 矩形；贴图前用
+//     AffineTransform 把 imageBuf 的 [writeCol .. writeCol+cols) 这段子区
+//     缩放并平移到 plot 区域，再用 reduceClipRegion(plot) 把窗口外多余部分
+//     裁掉。全程使用同一个 imageBuf pixelData 指针，CachedImageList 命中纹理
+//     缓存，纹理不再销毁/重建。
 // ----------------------------------------------------------
 void SpectrogramModule::ensureImage()
 {
     if (rows <= 0 || cols <= 0) return;
 
+    const int desiredW = cols * 2;
+
     if (! imageBuf.isValid()
-        || imageBuf.getWidth()  != cols
+        || imageBuf.getWidth()  != desiredW
         || imageBuf.getHeight() != rows)
     {
-        imageBuf = juce::Image (juce::Image::ARGB, cols, rows, true);
-        redrawFullImage();   // 尺寸变化：把现有 grid 全量刷回 image
+        imageBuf = juce::Image (juce::Image::ARGB, desiredW, rows, true);
+        redrawFullImage();   // 尺寸变化：把现有 grid 全量刷回 image（双拷贝）
     }
 }
 
@@ -413,12 +442,16 @@ void SpectrogramModule::redrawFullImage()
 
     for (int r = 0; r < rows; ++r)
     {
-        auto* row = (juce::PixelRGB*) bmp.getLinePointer (r);
+        auto* row = (juce::PixelARGB*) bmp.getLinePointer (r);
         for (int c = 0; c < cols; ++c)
         {
             const float t01 = at (r, c);
             const auto col  = intensityToColour (t01);
-            row[c].setARGB (255, col.getRed(), col.getGreen(), col.getBlue());
+            const juce::PixelARGB px ((juce::uint8) 255,
+                                       col.getRed(), col.getGreen(), col.getBlue());
+            // 双拷贝：同时写到 c 和 c+cols 两列，形成无缝环形贴图
+            row[c]        = px;
+            row[c + cols] = px;
         }
     }
 }
@@ -431,13 +464,20 @@ void SpectrogramModule::writeLatestColumnToImage()
     // onFrame 里 pushColumn 刚让 writeCol 环形 +1，所以"刚写入的"列是 writeCol-1
     const int justWrittenCol = (writeCol - 1 + cols) % cols;
 
+    // 用 BitmapData::readWrite 直接拿到原始像素指针批量写，避免每像素 setPixelColour
+    // 的函数调用和像素格式转换开销
     juce::Image::BitmapData bmp (imageBuf, juce::Image::BitmapData::readWrite);
 
     for (int r = 0; r < rows; ++r)
     {
+        auto* row = (juce::PixelARGB*) bmp.getLinePointer (r);
         const float t01 = at (r, justWrittenCol);
         const auto col  = intensityToColour (t01);
-        bmp.setPixelColour (justWrittenCol, r, col);
+        const juce::PixelARGB px ((juce::uint8) 255,
+                                   col.getRed(), col.getGreen(), col.getBlue());
+        // 双拷贝：分别写到 image 的 justWrittenCol 和 justWrittenCol+cols 两列
+        row[justWrittenCol]        = px;
+        row[justWrittenCol + cols] = px;
     }
 }
 

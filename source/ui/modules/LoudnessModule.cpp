@@ -65,6 +65,15 @@ void LoudnessModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     barL.update(snap.rmsL,  deltaMs);
     barR.update(snap.rmsR,  deltaMs);
 
+    // 性能优化（阶段1）：节流 repaint。
+    //   Hub 可能以 60~100Hz 回调 onFrame，但响度柱状表 ~30Hz 已足够。
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 20.0 * (double) juce::jmin (1.8f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
     repaint();
 }
 

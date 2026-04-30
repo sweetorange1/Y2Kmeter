@@ -414,6 +414,7 @@ public:
     // 让外部（Editor）可以启停分发器。默认 Hub 构造时就已启动 30Hz Timer。
     void startFrameDispatcher (int hz = 30);
     void stopFrameDispatcher();
+    int  getFrameDispatcherHz() const noexcept { return currentFrameDispatcherHz.load (std::memory_order_relaxed); }
 
     // ---- UI 线程调用（快照拷贝，线程安全）----
 
@@ -554,12 +555,18 @@ private:
     // 注册的 listeners —— 列表只在 UI 线程读写（由 dispatcher 保证）
     std::vector<FrameListener*> frameListeners;
     juce::CriticalSection        frameListenersLock;
+    // listener 列表每帧会 fanout，缓存容量减少 vector 反复扩容
+    int                          frameListenersReserved = 0;
 
     // 最新一帧 —— UI 线程写（dispatcher），任意线程读
     //   注：MSVC C++17 下 std::atomic<std::shared_ptr<T>> 不可用；
     //   改用 SpinLock + shared_ptr swap 实现原子发布。
     std::shared_ptr<const FrameSnapshot> latestFrame;
     mutable juce::SpinLock               latestFrameLock;
+
+    // 当前分发频率（Hz）—— 供 UI 自适应策略查询，避免重复 startTimerHz。
+    //   初值 0 表示尚未启动，首次 startFrameDispatcher 一定会生效。
+    std::atomic<int>                     currentFrameDispatcherHz { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AnalyserHub)
 };

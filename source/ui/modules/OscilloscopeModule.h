@@ -80,6 +80,8 @@ private:
     juce::Array<float> snapshotL;
     juce::Array<float> snapshotR;
 
+    double lastRepaintMs = 0.0;
+
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
     int themeSubToken = -1;

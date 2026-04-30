@@ -147,8 +147,12 @@ public:
             0,
             0);
 
+        if (localCopy.empty())
+            return;
+
         std::vector<FrameListener*> activeListeners;
-        activeListeners.reserve(localCopy.size());
+        activeListeners.reserve ((size_t) juce::jmax (owner.frameListenersReserved,
+                                                      (int) localCopy.size()));
         for (auto* lst : localCopy)
         {
             if (lst == nullptr)
@@ -731,6 +735,7 @@ void AnalyserHub::addFrameListener (FrameListener* listener)
     for (auto* l : frameListeners)
         if (l == listener) return;
     frameListeners.push_back (listener);
+    frameListenersReserved = juce::jmax (frameListenersReserved, (int) frameListeners.size());
 }
 
 void AnalyserHub::removeFrameListener (FrameListener* listener)
@@ -742,6 +747,8 @@ void AnalyserHub::removeFrameListener (FrameListener* listener)
         if (*it == listener)
         {
             frameListeners.erase (it);
+            if ((int) frameListeners.size() < frameListenersReserved / 2)
+                frameListenersReserved = (int) frameListeners.size();
             return;
         }
     }
@@ -761,12 +768,21 @@ std::shared_ptr<const AnalyserHub::FrameSnapshot> AnalyserHub::getLatestFrame() 
 void AnalyserHub::startFrameDispatcher (int hz)
 {
     // 必须在 UI 线程（juce::Timer 要求）
-    if (frameDispatcher != nullptr)
-        frameDispatcher->startTimerHz (hz);
+    if (frameDispatcher == nullptr)
+        return;
+
+    const int safeHz = juce::jlimit (8, 120, hz);
+    const int curHz  = currentFrameDispatcherHz.load (std::memory_order_relaxed);
+    if (curHz == safeHz)
+        return;
+
+    frameDispatcher->startTimerHz (safeHz);
+    currentFrameDispatcherHz.store (safeHz, std::memory_order_relaxed);
 }
 
 void AnalyserHub::stopFrameDispatcher()
 {
     if (frameDispatcher != nullptr)
         frameDispatcher->stopTimer();
+    currentFrameDispatcherHz.store (0, std::memory_order_relaxed);
 }

@@ -46,6 +46,13 @@ ModulePanel::ModulePanel(ModuleType type)
     setWantsKeyboardFocus(false);
     // 让整个面板接收鼠标事件（包括内容区边缘），子组件也能正常接收
     setInterceptsMouseClicks(true, true);
+
+    // 性能优化（阶段1）：
+    //   面板的 paint() 在第一行就用 PinkXP::drawRaised 填满了整块 face 底色，
+    //   即面板对外是完全不透明的。告知 JUCE setOpaque(true)，可以省掉父容器
+    //   为我们这块区域再刷一层背景，减少一次全区 fillRect 开销。
+    //   子组件（各模块内容）内部该怎么重绘不受影响。
+    setOpaque (true);
 }
 
 ModulePanel::~ModulePanel() = default;

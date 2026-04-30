@@ -572,10 +572,12 @@ private:
     //      FPS 等）在 initialise() 里散落着十几条恢复路径，运行时热重载
     //     复杂且容易遗漏，直接"启动新实例 → quit 旧实例"最可靠 ——
     //     语义等价于"干净首次打开此 settings"。
-    //   · 自重启实现：juce::Process::openDocument(currentExecutableFile, "")
-    //     在 Windows 下走 ShellExecute，启动的新进程完全独立于当前进程，
-    //     父进程 quit 后新进程照常存活。macOS/Linux 下 openDocument 同样
-    //     是"后台启动、不阻塞、不继承生命周期"，跨平台一致。
+    //   · 自重启实现：Windows 下走 juce::Process::openDocument(exePath)
+    //     → ShellExecute，启动的新进程完全独立于当前进程；macOS 下走
+    //     /usr/bin/open -n /path/to/Y2Kmeter.app（ChildProcess 派生
+    //     短命 helper），让 launchd 接管新进程，避免把 Mach-O 可执行文件
+    //     直接交给 NSWorkspace 而被 fallback 到 Terminal.app 里显示终端窗口。
+    //     父进程 quit 后新进程照常存活，跨平台行为一致。
     //   · 为防止 shutdown 里的 flushCurrentStateToDisk 把刚导入的文件
     //     又用"当前内存运行时状态"覆盖掉，复制完成后立即把
     //     alreadyPersisted=true，锁死 persistAllSettings 成 no-op。
@@ -622,11 +624,56 @@ private:
 
         // 4) 启动一个新的自己（独立进程），然后 quit 当前进程 ——
         //    新进程在 initialise() 里走完整的 settings 恢复路径。
+        //
+        //    【macOS 特别注意】
+        //    currentExecutableFile 在 macOS 下指向的是 app bundle 内部的
+        //    Mach-O 可执行文件：.../Y2Kmeter.app/Contents/MacOS/Y2Kmeter
+        //    直接把这条路径交给 juce::Process::openDocument() —— 其底层
+        //    在 macOS 走 NSWorkspace openFile: / LaunchServices —— 会因为
+        //    目标是"裸 Mach-O、不是已注册 bundle"而 fallback 到 Terminal.app
+        //    里跑命令行，界面上就会突然弹出一个 Terminal 窗口。
+        //    正确做法是把路径上翻两层到 .app bundle 本体，再交给
+        //    NSWorkspace 启动（命令行等价物：open -n /path/to/Y2Kmeter.app）。
+        //    这样新进程独立、没有 TTY 父进程，也不会弹终端。
         const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+
+       #if JUCE_MAC
+        // 向上翻找最近的一个 .app 目录（通常就是两级父目录：
+        //   Y2Kmeter.app/Contents/MacOS/Y2Kmeter  →  Y2Kmeter.app）
+        juce::File appBundle = exe;
+        for (int i = 0; i < 6 && appBundle != juce::File{}; ++i)
+        {
+            if (appBundle.getFileExtension().equalsIgnoreCase (".app"))
+                break;
+            appBundle = appBundle.getParentDirectory();
+        }
+
+        if (appBundle != juce::File{} && appBundle.getFileExtension().equalsIgnoreCase (".app"))
+        {
+            // 用 `open -n` 启动 .app bundle：
+            //   · -n  强制新建一个新实例，避免 LaunchServices 把请求合并到
+            //         当前还没来得及 quit 的进程上
+            //   · 不传 -W/-g，保持"启动后立刻返回、后台独立进程"语义
+            //   · ChildProcess 派生一个短命 helper 去 exec open(1)，helper
+            //     退出后 .app 进程已经被 launchd 接管，完全脱离我们的生命周期
+            juce::StringArray args;
+            args.add ("/usr/bin/open");
+            args.add ("-n");
+            args.add (appBundle.getFullPathName());
+            juce::ChildProcess proc;
+            if (! proc.start (args))
+                DBG ("handleImportSettings: /usr/bin/open failed; restart manually");
+        }
+        else
+        {
+            DBG ("handleImportSettings: cannot locate .app bundle; restart manually");
+        }
+       #else
         if (exe.existsAsFile())
             juce::Process::openDocument (exe.getFullPathName(), {});
         else
             DBG ("handleImportSettings: cannot locate current executable; restart manually");
+       #endif
 
         juce::JUCEApplication::quit();
     }

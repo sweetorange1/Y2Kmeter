@@ -118,7 +118,7 @@ void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
 // ----------------------------------------------------------
 void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
-    if (! isShowing()) return;
+    if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Spectrum)) return;
 
     // 使用 Hub 的双路合并接口：低频走 8192 点（Δf≈5.9Hz），高频走 2048 点（Δf≈23Hz），
@@ -158,6 +158,13 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const float scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (1.8f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
     repaint();
 }
 

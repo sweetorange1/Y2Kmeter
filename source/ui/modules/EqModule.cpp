@@ -70,6 +70,16 @@ void EqModule::PixelEqGraph::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
+    // 性能优化（阶段1）：节流 repaint。
+    //   Hub 以 60~100Hz 回调 onFrame，但像素 EQ 图肉眼 ~30Hz 已足够，
+    //   在高 DPI 屏幕上每帧全量重绘像素网格开销较大。
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 20.0 * (double) juce::jmin (1.8f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
     repaint();
 }
 
