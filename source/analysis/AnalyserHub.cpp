@@ -137,8 +137,12 @@ public:
                 y2k::perf::ThreadRole::ui,
                 0,
                 lockNs - waitStart);
-            localCopy = owner.frameListeners;
+        localCopy = owner.frameListeners;
         }
+
+        // 空 listener 列表直接返回，避免后续 reserve/活跳 component 检查等无谓开销。
+        if (localCopy.empty())
+            return;
 
         y2k::perf::PerformanceCounterSystem::instance().recordDuration(
             y2k::perf::FunctionId::dataListenerListCopy,
@@ -148,7 +152,9 @@ public:
             0);
 
         std::vector<FrameListener*> activeListeners;
-        activeListeners.reserve(localCopy.size());
+        // 用 reserved 水位避免反复扩容；push后不会 shrink 回去。
+        activeListeners.reserve ((size_t) juce::jmax (owner.frameListenersReserved,
+                                                       (int) localCopy.size()));
         for (auto* lst : localCopy)
         {
             if (lst == nullptr)
@@ -731,6 +737,7 @@ void AnalyserHub::addFrameListener (FrameListener* listener)
     for (auto* l : frameListeners)
         if (l == listener) return;
     frameListeners.push_back (listener);
+    frameListenersReserved = juce::jmax (frameListenersReserved, (int) frameListeners.size());
 }
 
 void AnalyserHub::removeFrameListener (FrameListener* listener)
@@ -742,6 +749,9 @@ void AnalyserHub::removeFrameListener (FrameListener* listener)
         if (*it == listener)
         {
             frameListeners.erase (it);
+            // 容量下降到一半以下再缩水位，避免抖动；reserve 仍归 vector 管。
+            if ((int) frameListeners.size() < frameListenersReserved / 2)
+                frameListenersReserved = (int) frameListeners.size();
             return;
         }
     }
@@ -761,12 +771,22 @@ std::shared_ptr<const AnalyserHub::FrameSnapshot> AnalyserHub::getLatestFrame() 
 void AnalyserHub::startFrameDispatcher (int hz)
 {
     // 必须在 UI 线程（juce::Timer 要求）
-    if (frameDispatcher != nullptr)
-        frameDispatcher->startTimerHz (hz);
+    if (frameDispatcher == nullptr)
+        return;
+
+    // 限定合理范围，相同频率直接 return 避免重复 startTimerHz 抖动。
+    const int safeHz = juce::jlimit (8, 120, hz);
+    const int curHz  = currentFrameDispatcherHz.load (std::memory_order_relaxed);
+    if (curHz == safeHz)
+        return;
+
+    frameDispatcher->startTimerHz (safeHz);
+    currentFrameDispatcherHz.store (safeHz, std::memory_order_relaxed);
 }
 
 void AnalyserHub::stopFrameDispatcher()
 {
     if (frameDispatcher != nullptr)
         frameDispatcher->stopTimer();
+    currentFrameDispatcherHz.store (0, std::memory_order_relaxed);
 }

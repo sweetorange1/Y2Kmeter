@@ -415,6 +415,13 @@ public:
     void startFrameDispatcher (int hz = 30);
     void stopFrameDispatcher();
 
+    // 查询当前分发频率（Hz）；0 表示尚未启动。
+    //   · 供 Editor 端的自适应帧率策略避免重复 startTimerHz 同频。
+    int  getFrameDispatcherHz() const noexcept
+    {
+        return currentFrameDispatcherHz.load (std::memory_order_relaxed);
+    }
+
     // ---- UI 线程调用（快照拷贝，线程安全）----
 
     // 示波器：返回 L/R 各 oscilloscopeBufferSize 个采样（时间从旧到新）
@@ -554,12 +561,19 @@ private:
     // 注册的 listeners —— 列表只在 UI 线程读写（由 dispatcher 保证）
     std::vector<FrameListener*> frameListeners;
     juce::CriticalSection        frameListenersLock;
+    // fanout 时拷贝列表所需的目标容量（滚动水位）。
+    //   · 在 add/remove Listener 时更新，避免 fanout 每帧 vector::reserve 重分配。
+    int                          frameListenersReserved = 0;
 
     // 最新一帧 —— UI 线程写（dispatcher），任意线程读
     //   注：MSVC C++17 下 std::atomic<std::shared_ptr<T>> 不可用；
     //   改用 SpinLock + shared_ptr swap 实现原子发布。
     std::shared_ptr<const FrameSnapshot> latestFrame;
     mutable juce::SpinLock               latestFrameLock;
+
+    // 当前分发频率（Hz）—— 供 UI 自适应策略查询，避免重复 startTimerHz。
+    //   初值 0 表示尚未启动，首次 startFrameDispatcher 一定会生效。
+    std::atomic<int>                     currentFrameDispatcherHz { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AnalyserHub)
 };

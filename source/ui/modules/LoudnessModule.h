@@ -129,5 +129,9 @@ private:
     static constexpr int labelH    = 14;  // 底部标签高度
     static constexpr int readoutH  = 14;  // 底部数字读数高度
 
+    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    //   Hub 以 60~100Hz 回调，但响度柱状表 ~30Hz 已足够肉眼分辨。
+    double lastRepaintMs = 0.0;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessModule)
 };

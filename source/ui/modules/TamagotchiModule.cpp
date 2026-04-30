@@ -275,6 +275,22 @@ TamagotchiModule::TamagotchiModule()
     setDefaultSize (128, 128);
     setMinSize (minW, minH);
 
+    // ---- 拖影 / focus 残留 修复（最终版）----
+    //
+    // 本模块 paint() 有大量非完整覆盖的区域（playArea 空白、focus rect 外的
+    // 非聚焦帧、精灵透明通道）—— 必须声明为 non-opaque，让 JUCE 在每次
+    // dirty repaint 时安排父组件（ModuleWorkspace）先重绘相同区域的底色（
+    // content.withAlpha(0.70f) 透出桌面），再把本组件 paint 叠上来。
+    //
+    // 但 JUCE 的 repaint(localRect) 对 non-opaque 子组件并不会自动追质到根，
+    // 当父组件也 non-opaque（ModuleWorkspace 本身就是）时，旧像素仍会留在
+    // 缓冲中。解决方式：所有从本类发起的重绘均通过 repaintSelfAndParent()
+    // 统一送出，其内部同时 getParentComponent()->repaint(parentRect) + repaint(rect)，
+    // 来确保底色真的被重新绘制。
+    //
+    // 注：这会覆盖 ModulePanel 构造器默认的 setOpaque(true)。
+    setOpaque (false);
+
     currentPatrolAction = PatrolAction::lookLeftSlow;
     patrolActionTicksRemaining = 0;
     patrolCooldownTicksRemaining = patrolCycleTicks;
@@ -380,7 +396,7 @@ void TamagotchiModule::setFocusVisual (bool shouldFocus)
 
     stateModeCombo.setVisible (false);
     animTriggerCombo.setVisible (false);
-    repaint();
+    repaintSelfAndParent();
 }
 
 void TamagotchiModule::paint (juce::Graphics& g)
@@ -562,6 +578,30 @@ void TamagotchiModule::resized()
         && grewByHeightOnly
         && motionMode != MotionMode::egg
         && motionMode != MotionMode::hatching
+        // ---- 修复"拖动高度时动画卡住" ----
+        //
+        // 原问题：用户持续向下拖动 resize 时，每一次 mouseDrag 都会 setBounds →
+        //        resized 被调用。若此处无下面三项保护，则每个 drag tick 都会
+        //        switchMotionMode(startledIntro)。
+        //        · 第一次拖动时 motionMode 是 patrol → 切到 startledIntro，合理。
+        //        · startledIntro 播完会自动过渡到 falling；但若此时用户仍在拖动、
+        //          高度又一次增大，resized 再次触发，旧逻辑没有排除 falling，
+        //          于是 switchMotionMode 从 falling 切回 startledIntro →
+        //          forceAnimation(startled, restartFrame=true) → currentFrameIdx=0。
+        //        · 同理，刚切到 landingFall 又会被打回 startledIntro。
+        //        · 动画帧节律是 1 秒 1 帧（animFrameIntervalSec=1.0f），若每次 drag
+        //          tick（最密集 60Hz）都重置 currentFrameIdx，则角色**永远卡在
+        //          startledIntro 的第 0 帧**无法前进 → 视觉上"卡住"。
+        //
+        // 修复：仅当 motionMode **不在**瞬时状态链（startledIntro/falling/landingFall）
+        //       时才触发一次 startledIntro。这样：
+        //         · 初次拖动：patrol → startledIntro（正常触发）
+        //         · 后续持续拖动：已在 startledIntro/falling/landingFall → 不再打断
+        //         · 播完 landingFall 后若仍在拖动且高度又变大 → patrol 结束后再次
+        //           触发 startledIntro，形成"每一轮摔倒结束才再摔一次"的合理节奏
+        && motionMode != MotionMode::startledIntro
+        && motionMode != MotionMode::falling
+        && motionMode != MotionMode::landingFall
         && hasAnimation ((int) PetAnim::startled))
     {
         idleTicksRemaining = 0;
@@ -583,7 +623,7 @@ void TamagotchiModule::mouseMove (const juce::MouseEvent& e)
     if (hoveredDel != deleteBtnHovered)
     {
         deleteBtnHovered = hoveredDel;
-        repaint (getDeleteButtonBounds());
+        repaintSelfAndParent (getDeleteButtonBounds());
     }
 
     if (! hoveredDel)
@@ -600,7 +640,7 @@ void TamagotchiModule::mouseExit (const juce::MouseEvent& e)
     hoveredTestButton = -1;
     if (dragMode == DragMode::none)
         setMouseCursor (juce::MouseCursor::NormalCursor);
-    repaint (getDeleteButtonBounds());
+    repaintSelfAndParent (getDeleteButtonBounds());
 }
 
 void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
@@ -615,7 +655,7 @@ void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
     if (getDeleteButtonBounds().contains (pos))
     {
         deleteBtnPressed = true;
-        repaint (getDeleteButtonBounds());
+        repaintSelfAndParent (getDeleteButtonBounds());
         return;
     }
 
@@ -634,7 +674,7 @@ void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
     dragStartMouse = e.getEventRelativeTo (getParentComponent()).getPosition();
     dragStartBounds = getBounds();
     setMouseCursor (juce::MouseCursor::DraggingHandCursor);
-    repaint();
+    repaintSelfAndParent();
 }
 
 void TamagotchiModule::mouseDrag (const juce::MouseEvent& e)
@@ -687,7 +727,7 @@ void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
     {
         deleteBtnPressed = false;
         const bool stillOnDel = getDeleteButtonBounds().contains (e.getPosition());
-        repaint (getDeleteButtonBounds());
+        repaintSelfAndParent (getDeleteButtonBounds());
 
         if (stillOnDel && onCloseClicked)
             onCloseClicked (*this);
@@ -780,7 +820,7 @@ bool TamagotchiModule::loadRandomRoleAnimations()
                 if (! hasEggFrames)
                     beginPatrolCycle();
                 hasPetPosition = false;
-                repaint();
+                repaintSelfAndParent();
                 return true;
             }
         }
@@ -816,7 +856,7 @@ bool TamagotchiModule::loadRandomRoleAnimations()
         beginPatrolCycle();
     hasPetPosition = false;
 
-    repaint();
+    repaintSelfAndParent();
     return true;
 
 }
@@ -1254,7 +1294,7 @@ void TamagotchiModule::updateNeeds()
     }
 
     if (std::abs (hunger - prevHunger) >= 0.1f || std::abs (health - prevHealth) >= 0.1f)
-        repaint (getHudBounds());
+        repaintSelfAndParent (getHudBounds());
 }
 
 void TamagotchiModule::drawPixelBar (juce::Graphics& g,
@@ -1692,7 +1732,7 @@ void TamagotchiModule::applyTestButton (int idx)
 
     hunger = juce::jlimit (0.0f, 100.0f, hunger);
     health = juce::jlimit (0.0f, 100.0f, health);
-    repaint (getHudBounds());
+    repaintSelfAndParent (getHudBounds());
 }
 
 juce::Image TamagotchiModule::getCurrentFrame() const
@@ -1820,6 +1860,31 @@ void TamagotchiModule::enqueuePetDirtyRepaint (juce::Rectangle<int> area)
     hasQueuedPetDirty = true;
 }
 
+// ---- non-opaque 正确重绘：先让父组件 repaint 对应区域，再 repaint 本组件 ----
+// 组件是 non-opaque（背景需要透出 workspace 半透明 content + 桌面），
+// 必须让父组件先把底色画一遍再把本组件叠上去，否则旧像素残留形成拖影或
+// focus/delete 的残留。JUCE 对嵌套 non-opaque 链路的 repaint 不会自动追到根，
+// 所以在这里显式转换坐标并调父组件 repaint()。
+void TamagotchiModule::repaintSelfAndParent (juce::Rectangle<int> localRect)
+{
+    localRect = localRect.getIntersection (getLocalBounds());
+    if (localRect.isEmpty())
+        return;
+
+    if (auto* parent = getParentComponent())
+    {
+        const auto parentRect = localRect + getBounds().getTopLeft();
+        parent->repaint (parentRect);
+    }
+
+    repaint (localRect);
+}
+
+void TamagotchiModule::repaintSelfAndParent()
+{
+    repaintSelfAndParent (getLocalBounds());
+}
+
 void TamagotchiModule::flushVisualRepaintQueue (bool forceNow)
 {
     juce::ignoreUnused (forceNow);
@@ -1832,7 +1897,7 @@ void TamagotchiModule::flushVisualRepaintQueue (bool forceNow)
     queuedPetDirtyBounds = {};
 
     if (! dirty.isEmpty())
-        repaint (dirty);
+        repaintSelfAndParent (dirty);
 }
 
 void TamagotchiModule::beginPatrolCycle()
@@ -2083,7 +2148,7 @@ void TamagotchiModule::restorePersistentState (const juce::String& savedRoleName
     if (savedRoleName.isEmpty())
     {
         // 新建模块：保留构造阶段已初始化的随机角色与蛋状态，仅恢复数值
-        repaint();
+        repaintSelfAndParent();
         return;
     }
 
@@ -2108,7 +2173,7 @@ void TamagotchiModule::restorePersistentState (const juce::String& savedRoleName
                     hasPetPosition = false;
                     motionMode = MotionMode::patrol;
                     beginPatrolCycle();
-                    repaint();
+                    repaintSelfAndParent();
                     return;
                 }
                 break;
@@ -2118,7 +2183,7 @@ void TamagotchiModule::restorePersistentState (const juce::String& savedRoleName
 
     // 如果找不到历史角色，保留当前随机角色，仅恢复数值
     beginPatrolCycle();
-    repaint();
+    repaintSelfAndParent();
 }
 
 void TamagotchiModule::stepWander()

@@ -46,6 +46,17 @@ ModulePanel::ModulePanel(ModuleType type)
     setWantsKeyboardFocus(false);
     // 让整个面板接收鼠标事件（包括内容区边缘），子组件也能正常接收
     setInterceptsMouseClicks(true, true);
+
+    // 性能优化（阶段1）：
+    //   面板的 paint() 在第一行就用 PinkXP::drawRaised 填满了整块 face 底色，
+    //   即面板对外是完全不透明的。告知 JUCE setOpaque(true)，可以省掉父容器
+    //   为我们这块区域再刷一层背景，减少一次全区 fillRect 开销。
+    //   子组件（各模块内容）内部该怎么重绘不受影响。
+    //
+    //   【例外】某些模块（如 TamagotchiModule）在构造时会显式 setOpaque(false)
+    //   覆盖这里的默认值，以获得"透背景叠加"的效果；那类模块必须用自己的
+    //   repaintSelfAndParent 机制来避免拖影，属于 per-module 决策。
+    setOpaque (true);
 }
 
 ModulePanel::~ModulePanel() = default;
@@ -181,14 +192,17 @@ void ModulePanel::paint(juce::Graphics& g)
         y2k::perf::ThreadRole::ui,
         paintEndNs - paintStartNs,
         0);
-
-    pendingFullRepaint = false;
-    pendingAreaRepaint = false;
-    pendingRepaintArea = {};
 }
 
 void ModulePanel::paintOverChildren(juce::Graphics& g)
 {
+    // 重绘合并标记在这里统一清理：
+    // 某些模块（如 Tamagotchi）会重写 paint()，导致 ModulePanel::paint() 不一定执行；
+    // 若仅在 paint() 里清理，pendingFullRepaint 可能长期为 true，后续 repaint 全被合并掉。
+    pendingFullRepaint = false;
+    pendingAreaRepaint = false;
+    pendingRepaintArea = {};
+
     // 右下角 CPU 占用提示文字：暂时屏蔽（不再做视觉展示，但保留
     //   setCpuLoad / getCpuLabelBounds 等 API，方便后续测试时重新开启）
     juce::ignoreUnused (g);

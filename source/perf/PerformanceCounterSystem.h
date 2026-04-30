@@ -7,6 +7,10 @@
 #include <limits>
 #include <thread>
 
+#ifndef Y2K_ENABLE_PERF_COUNTERS
+#define Y2K_ENABLE_PERF_COUNTERS 1
+#endif
+
 namespace y2k::perf
 {
 
@@ -193,24 +197,35 @@ public:
                     ThreadRole role) noexcept
         : function(fn),
           part(partition),
-          threadRole(role),
-          startNs(PerformanceCounterSystem::nowNs())
+          threadRole(role)
     {
+#if Y2K_ENABLE_PERF_COUNTERS
+        startNs = PerformanceCounterSystem::nowNs();
+#endif
     }
 
     ~ScopedPerfTimer()
     {
+#if Y2K_ENABLE_PERF_COUNTERS
         const auto endNs = PerformanceCounterSystem::nowNs();
         PerformanceCounterSystem::instance().recordDuration(function, part, threadRole, endNs - startNs, lockWaitNs);
+#endif
     }
 
-    void addLockWait(juce::int64 ns) noexcept { lockWaitNs += ns; }
+    void addLockWait(juce::int64 ns) noexcept
+    {
+#if Y2K_ENABLE_PERF_COUNTERS
+        lockWaitNs += ns;
+#else
+        juce::ignoreUnused(ns);
+#endif
+    }
 
 private:
     FunctionId function;
     Partition  part;
     ThreadRole threadRole;
-    juce::int64 startNs;
+    juce::int64 startNs = 0;
     juce::int64 lockWaitNs = 0;
 };
 
@@ -222,21 +237,26 @@ public:
                           ThreadRole role) noexcept
         : function(fn),
           part(partition),
-          threadRole(role),
-          waitStart(PerformanceCounterSystem::nowNs())
+          threadRole(role)
     {
+#if Y2K_ENABLE_PERF_COUNTERS
+        waitStart = PerformanceCounterSystem::nowNs();
+#endif
     }
 
     template <typename LockType>
     void lock(LockType& lockObj) noexcept
     {
         lockObj.enter();
+#if Y2K_ENABLE_PERF_COUNTERS
         lockAcquired = PerformanceCounterSystem::nowNs();
         lockAcquiredValid = true;
+#endif
     }
 
     ~ScopedLockWaitMeasure()
     {
+#if Y2K_ENABLE_PERF_COUNTERS
         if (! lockAcquiredValid)
             return;
 
@@ -244,14 +264,22 @@ public:
         const auto waitNs = juce::jmax<juce::int64>(0, lockAcquired - waitStart);
         const auto holdNs = juce::jmax<juce::int64>(0, unlockNs - lockAcquired);
         PerformanceCounterSystem::instance().recordDuration(function, part, threadRole, holdNs, waitNs);
+#endif
     }
 
-    void markAcquired() noexcept { lockAcquiredValid = true; }
+    void markAcquired() noexcept
+    {
+#if Y2K_ENABLE_PERF_COUNTERS
+        lockAcquiredValid = true;
+#endif
+    }
 
     void setLockAcquiredNow() noexcept
     {
+#if Y2K_ENABLE_PERF_COUNTERS
         lockAcquired = PerformanceCounterSystem::nowNs();
         lockAcquiredValid = true;
+#endif
     }
 
 private:

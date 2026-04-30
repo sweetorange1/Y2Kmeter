@@ -52,8 +52,8 @@ private:
 
     // ---- 各模式绘制 ----
     void drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const;
-    void drawWaveform  (juce::Graphics& g, juce::Rectangle<int> canvas) const;
-    void drawXY        (juce::Graphics& g, juce::Rectangle<int> canvas, bool rotate45) const;
+    void drawWaveform  (juce::Graphics& g, juce::Rectangle<int> canvas);
+    void drawXY        (juce::Graphics& g, juce::Rectangle<int> canvas, bool rotate45);
     juce::Path buildWaveformPath(const juce::Array<float>& samples,
                                  juce::Rectangle<int> inner,
                                  float yCenter,
@@ -62,6 +62,13 @@ private:
     void rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds);
     void drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const;
     void invalidateStaticLayer();
+
+    // 方案 A：动态波形 / XY 点图缓存层
+    //   · 只有数据变化（snapshot 有新内容）或尺寸变化时才重绘
+    //   · paintContent 只做一次 drawImageAt，把 4 次 strokePath 的成本摊到"有新数据的帧"
+    void redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas);
+    void invalidateDynamicLayer();
+    bool snapshotChangedSinceLastDraw() const noexcept;
 
     // 顶部工具栏布局
     juce::Rectangle<int> getToolbarBounds (juce::Rectangle<int> content) const;
@@ -80,9 +87,23 @@ private:
     juce::Array<float> snapshotL;
     juce::Array<float> snapshotR;
 
+    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    double lastRepaintMs = 0.0;
+
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
     int themeSubToken = -1;
+
+    // 方案 A：动态层缓存
+    juce::Image dynamicLayer;
+    juce::Rectangle<int> dynamicLayerCanvasBounds; // 以 canvas 坐标系存
+    bool        dynamicLayerDirty = true;
+
+    // 粗粒度指纹：采样长度 + 首/中/尾元素 —— 用来判断 snapshot 是否真的变了
+    int   lastDrawnSampleCount = -1;
+    float lastDrawnFingerprint[6] { 0, 0, 0, 0, 0, 0 };
+    DisplayMode lastDrawnMode = DisplayMode::waveform;
+    bool        lastDrawnFrozen = false;
 
     // 顶部工具栏按钮
     juce::TextButton btnWave   { "Wave"   };

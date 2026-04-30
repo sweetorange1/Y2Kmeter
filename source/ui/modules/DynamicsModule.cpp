@@ -63,6 +63,16 @@ void DynamicsModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     crestHist[(size_t) crestHistWrite] = juce::jlimit(0.0f, 40.0f, s.crest);
     crestHistWrite = (crestHistWrite + 1) % crestHistLen;
 
+    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    //   Hub 可能以 60~100Hz 回调 onFrame，但 Dynamics 显示的峰值/DR 数字
+    //   肉眼 ~30Hz 已足够。这里用最小刷新间隔（高DPI适度放大）避免每次都刷。
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 20.0 * (double) juce::jmin (1.8f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
     repaint();
 }
 

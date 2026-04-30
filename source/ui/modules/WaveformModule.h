@@ -103,6 +103,8 @@ private:
     // 上次 onFrame 的系统时间（用于估算该 append 多少新样本）
     double lastFrameTimeMs = 0.0;
     double cachedSampleRate = 0.0;  // 缓存 hub 的采样率（避免每帧查询）
+    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    double lastRepaintMs = 0.0;
 
     // 顶部按钮
     juce::TextButton btnRange3  { "3s"   };

@@ -164,6 +164,8 @@ void WaveformModule::setFrozen (bool b)
     if (frozen == b) return;
     frozen = b;
     btnFreeze.setToggleState (frozen, juce::dontSendNotification);
+    // 冻结态切换时显示层应立即生效（onFrame 在 frozen=true 后会跳过 repaint）
+    repaint();
 }
 
 // ----------------------------------------------------------
@@ -171,21 +173,20 @@ void WaveformModule::setFrozen (bool b)
 // ----------------------------------------------------------
 void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
-    if (! isShowing()) return;
+    if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Oscilloscope)) return;
 
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
     const double deltaMs = nowMs - lastFrameTimeMs;
     lastFrameTimeMs = nowMs;
 
-    if (frozen) { repaint(); return; }
+    // 冻结态不再推数据，也不再强制 repaint（冻结切换时 setFrozen 已触发一次重绘）。
+    if (frozen)
+        return;
 
     // 列缓冲尚未建立（首次 layout 还没跑）— 跳过
     if (columnHistory.empty() || samplesPerColumn <= 0.0f)
-    {
-        repaint();
         return;
-    }
 
     // 估算自上帧以来应追加多少个新样本
     //   · sampleRate × (Δt / 1000)
@@ -193,15 +194,25 @@ void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     //   · 快照本身是"最近 N 个样本"的环形快照（时间从旧到新），
     //     所以 append 时从末尾取最新的 numToAppend 个
     const int snapshotLen = (int) frame.oscL.size();
-    if (snapshotLen <= 0) { repaint(); return; }
+    if (snapshotLen <= 0)
+        return;
 
     int numToAppend = (int) std::lround (cachedSampleRate * deltaMs / 1000.0);
     numToAppend = juce::jlimit (0, snapshotLen, numToAppend);
-    if (numToAppend > 0)
-        pushHistorySamples (frame.oscL.data(), frame.oscR.data(),
-                            snapshotLen, numToAppend);
+    if (numToAppend <= 0)
+        return;
 
-    repaint();
+    pushHistorySamples (frame.oscL.data(), frame.oscR.data(),
+                        snapshotLen, numToAppend);
+
+    // 性能优化（阶段1）：UI 侧 repaint 节流，仅对 canvas 区域重绘（避免整块面板重绘）。
+    const float scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (2.0f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
+    repaint (getCanvasBounds (getContentBounds()));
 }
 
 // ----------------------------------------------------------

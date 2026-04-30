@@ -90,6 +90,9 @@ private:
 
     juce::Time lastTickTime;
 
+    // 性能优化（阶段1）：按 UI 缩放动态限制最短重绘间隔，降低宿主消息线程压力。
+    double lastRepaintMs = 0.0;
+
     // ---- 顶部工具栏 ----
     juce::TextButton btnPeak  { "Peak"  };
     juce::TextButton btnSlope { "Slope" };

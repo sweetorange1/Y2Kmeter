@@ -169,6 +169,15 @@ private:
     Edge detectEdge (juce::Point<int> pos) const;
     void updateCursorFor (Edge e);
 
+    // ---- non-opaque 正确重绘辅助 ----
+    //
+    // 本模块 setOpaque(false)（background 需要透出 ModuleWorkspace 的半透明
+    // content + 桌面），因此 repaint(dirty) 必须先让父组件把底色画一遍，否则
+    // 新帧叠在旧帧上形成拖影，或 focus/delete 旧像素残留。
+    // 下面两个函数同时通知父组件和本组件重绘同一块区域。
+    void repaintSelfAndParent (juce::Rectangle<int> localRect);
+    void repaintSelfAndParent();
+
     juce::String roleName;
     std::array<juce::Array<juce::Image>, 33> animFrames;
     std::array<juce::Array<juce::Image>, 33> animFramesRight;

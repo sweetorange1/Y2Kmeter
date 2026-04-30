@@ -98,6 +98,17 @@ juce_add_binary_data(Y2Kmeter_BinaryData
 target_compile_definitions(Y2Kmeter
   PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
+    # 关闭 JUCE 内置的 ARA / LV2 宿主集成。
+    #   · 本项目既不作为 ARA/LV2 宿主、也不作为 ARA 插件运行，
+    #     保留这些默认开关只会让 juce_audio_processors 多编一批
+    #     我们完全用不到的符号（尤其 ARA 会拖入 ARA SDK 搜索路径）。
+    #   · 跨平台（Win/macOS）都生效：把编译期体积和启动时
+    #     "是否存在这些 runtime 挂载点" 的分支收敛掉。
+    JUCE_PLUGINHOST_ARA=0
+    JUCE_PLUGINHOST_LV2=0
+    # 外网发布版默认关闭性能计数系统（导出 + 运行时统计计算）
+    # 目的是尽可能减少冗余统计开销，把算力留给真实音频/绘制路径。
+    Y2K_ENABLE_PERF_COUNTERS=0
     # 关闭 JUCE 默认的 StandaloneFilterApp / StandaloneFilterWindow，
     # 转而使用我们自定义的 source/standalone/Y2KStandaloneApp.cpp（无边框 Y2K 外壳）
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
@@ -134,6 +145,11 @@ target_sources(Y2Kmeter PRIVATE
   source/ui/ModulePanel.cpp
   source/ui/ModuleWorkspace.h
   source/ui/ModuleWorkspace.cpp
+  # 阶段1 性能改造：统一 UI 帧时钟节拍器（支持自适应降频）
+  #   · 当前不强制接线，各模块仍旧在 AnalyserHub::startFrameDispatcher 的
+  #     驱动下 onFrame 重绘；但源文件先入库，便于后续分阶段迁移。
+  source/ui/UiFrameClock.h
+  source/ui/UiFrameClock.cpp
 
   # === 分析模块 ===
   source/ui/modules/EqModule.h
@@ -168,7 +184,20 @@ target_include_directories(Y2Kmeter PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(Y2Kmeter PRIVATE Y2Kmeter_BinaryData juce::juce_audio_utils juce::juce_dsp)
+target_link_libraries(Y2Kmeter PRIVATE
+  Y2Kmeter_BinaryData
+  juce::juce_audio_utils
+  juce::juce_dsp
+  # GPU 合成层：Editor 里挂 juce::OpenGLContext 后，整个绘制管线会被翻译
+  # 成 GL 批次在 GPU 上执行。
+  #   · Windows：JUCE 为 Editor 的 HWND 创建一个 GL 子窗口，底层走系统 OpenGL
+  #     / 硬件驱动（或 ANGLE 回退到 D3D）。
+  #   · macOS：JUCE 走 NSOpenGLContext，Apple Silicon 下底层走 Metal。
+  #   软光栅路径下的 fillCGRect / drawGlyphs / fillPath / strokePath 等 CPU
+  #   热点消失，主线程只剩 draw 批次组装与提交。Standalone 与 VST3 共用同
+  #   一个 Editor，两种形态都受益。
+  juce::juce_opengl
+)
 
 # Windows 下 WASAPI Loopback 采集（source/standalone/WasapiLoopbackCapture.cpp）所需系统库：
 #   · ole32 / uuid —— CoCreateInstance / IID_IMMDeviceEnumerator 等 COM 符号

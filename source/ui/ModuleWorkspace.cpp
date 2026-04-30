@@ -2052,10 +2052,22 @@ void ModuleWorkspace::setFpsLimit (int hz)
 void ModuleWorkspace::setMeasuredFps (float fps)
 {
     // 显示保留 1 位小数，如 "29.8 fps"；未启动时 fps<=0 显示占位 "-- fps"
+    //
+    // 性能优化（阶段1）：
+    //   Editor 每秒都会调用 setMeasuredFps；即便 fps 数值没有显著变化，
+    //   JUCE Label::setText 仍会触发 Label 整体重绘，进而把 toolbar 一小块
+    //   区域推进父窗口的 dirty region，累计起来就是每秒稳定的"小刷新成本"。
+    //   这里对生成后的文本做一次对比，只有真的变化才写回，避免无意义的重绘。
+    juce::String next;
     if (fps <= 0.0f)
-        fpsLabel.setText ("-- fps", juce::dontSendNotification);
+        next = "-- fps";
     else
-        fpsLabel.setText (juce::String (fps, 1) + " fps", juce::dontSendNotification);
+        next = juce::String (fps, 1) + " fps";
+
+    if (fpsLabel.getText() == next)
+        return;
+
+    fpsLabel.setText (next, juce::dontSendNotification);
 }
 
 // ==========================================================

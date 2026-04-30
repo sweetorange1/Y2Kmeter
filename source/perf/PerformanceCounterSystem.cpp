@@ -98,7 +98,9 @@ juce::int64 PerformanceCounterSystem::nowNs() noexcept
 PerformanceCounterSystem::PerformanceCounterSystem()
 {
     windowStartNs.store(nowNs(), std::memory_order_relaxed);
+#if Y2K_ENABLE_PERF_COUNTERS
     maybeStartWorker();
+#endif
 }
 
 PerformanceCounterSystem::~PerformanceCounterSystem()
@@ -110,9 +112,14 @@ PerformanceCounterSystem::~PerformanceCounterSystem()
 
 void PerformanceCounterSystem::markCurrentThreadRole(ThreadRole role, const char* threadNameHint) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(role, threadNameHint);
+    return;
+#else
     juce::ignoreUnused(threadNameHint);
     gThreadRole = role;
     gThreadRoleMarked = true;
+#endif
 }
 
 void PerformanceCounterSystem::recordDuration(FunctionId fn,
@@ -121,6 +128,10 @@ void PerformanceCounterSystem::recordDuration(FunctionId fn,
                                               juce::int64 durationNs,
                                               juce::int64 lockWaitNs) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(fn, partition, role, durationNs, lockWaitNs);
+    return;
+#else
     if (durationNs < 0) durationNs = 0;
     if (lockWaitNs < 0) lockWaitNs = 0;
 
@@ -153,6 +164,7 @@ void PerformanceCounterSystem::recordDuration(FunctionId fn,
     const auto ri = (size_t) effectiveRole;
     threadStats[ri].totalNs.fetch_add(d, std::memory_order_relaxed);
     threadStats[ri].calls.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 void PerformanceCounterSystem::recordEvent(FunctionId fn,
@@ -160,6 +172,10 @@ void PerformanceCounterSystem::recordEvent(FunctionId fn,
                                            ThreadRole role,
                                            juce::int64 amount) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(fn, partition, role, amount);
+    return;
+#else
     if (amount <= 0)
         return;
 
@@ -174,30 +190,50 @@ void PerformanceCounterSystem::recordEvent(FunctionId fn,
     threadStats[ri].calls.fetch_add((juce::uint64) amount, std::memory_order_relaxed);
 
     juce::ignoreUnused(partition);
+#endif
 }
 
 void PerformanceCounterSystem::recordMemoryAlloc(std::size_t bytes, FunctionId fn) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(bytes, fn);
+    return;
+#else
     memStats.allocCount.fetch_add(1, std::memory_order_relaxed);
     memStats.allocBytes.fetch_add((juce::uint64) bytes, std::memory_order_relaxed);
     recordEvent(fn, Partition::memoryManagement, ThreadRole::unknown, 1);
+#endif
 }
 
 void PerformanceCounterSystem::recordMemoryFree(std::size_t bytes, FunctionId fn) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(bytes, fn);
+    return;
+#else
     memStats.freeCount.fetch_add(1, std::memory_order_relaxed);
     memStats.freeBytes.fetch_add((juce::uint64) bytes, std::memory_order_relaxed);
     recordEvent(fn, Partition::memoryManagement, ThreadRole::unknown, 1);
+#endif
 }
 
 juce::File PerformanceCounterSystem::exportNow()
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    return {};
+#else
     return doExportSnapshot(true);
+#endif
 }
 
 void PerformanceCounterSystem::setAutoExportEnabled(bool enabled) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(enabled);
+    autoExportEnabled.store(false, std::memory_order_relaxed);
+#else
     autoExportEnabled.store(enabled, std::memory_order_relaxed);
+#endif
 }
 
 juce::File PerformanceCounterSystem::doExportSnapshot(bool resetAfterExport)
@@ -718,6 +754,10 @@ const char* PerformanceCounterSystem::threadRoleName(ThreadRole r) noexcept
 
 void PerformanceCounterSystem::recordUiModulePaint(int moduleTypeId, juce::int64 durationNs) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(moduleTypeId, durationNs);
+    return;
+#else
     if (durationNs < 0) durationNs = 0;
     if (moduleTypeId < 0 || moduleTypeId >= (int) uiModulePaintStats.size())
         moduleTypeId = 63;
@@ -736,44 +776,69 @@ void PerformanceCounterSystem::recordUiModulePaint(int moduleTypeId, juce::int64
     while (d > curMax && ! s.maxNs.compare_exchange_weak(curMax, d,
                                                          std::memory_order_relaxed,
                                                          std::memory_order_relaxed)) {}
+#endif
 }
 
 void PerformanceCounterSystem::recordUiRepaintRequest(int moduleTypeId) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(moduleTypeId);
+    return;
+#else
     if (moduleTypeId < 0 || moduleTypeId >= (int) uiModulePaintStats.size())
         moduleTypeId = 63;
 
     uiModulePaintStats[(size_t) moduleTypeId].repaintCount.fetch_add(1, std::memory_order_relaxed);
     recordEvent(FunctionId::uiRepaintRequest, Partition::uiRendering, ThreadRole::ui, 1);
+#endif
 }
 
 void PerformanceCounterSystem::recordUiRepaintSkippedInvisible(int moduleTypeId) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(moduleTypeId);
+    return;
+#else
     if (moduleTypeId < 0 || moduleTypeId >= (int) uiModulePaintStats.size())
         moduleTypeId = 63;
 
     uiModulePaintStats[(size_t) moduleTypeId].repaintSkippedInvisible.fetch_add(1, std::memory_order_relaxed);
     recordEvent(FunctionId::uiRepaintSkippedInvisible, Partition::uiRendering, ThreadRole::ui, 1);
+#endif
 }
 
 void PerformanceCounterSystem::recordUiRepaintCoalesced(int moduleTypeId) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(moduleTypeId);
+    return;
+#else
     if (moduleTypeId < 0 || moduleTypeId >= (int) uiModulePaintStats.size())
         moduleTypeId = 63;
 
     uiModulePaintStats[(size_t) moduleTypeId].repaintCoalesced.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 void PerformanceCounterSystem::recordUiRepaintDroppedOffscreen(int moduleTypeId) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(moduleTypeId);
+    return;
+#else
     if (moduleTypeId < 0 || moduleTypeId >= (int) uiModulePaintStats.size())
         moduleTypeId = 63;
 
     uiModulePaintStats[(size_t) moduleTypeId].repaintDroppedOffscreen.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 void PerformanceCounterSystem::recordUiDirtyAreaSample(int moduleTypeId, double ratio01) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(moduleTypeId, ratio01);
+    return;
+#else
     if (moduleTypeId < 0 || moduleTypeId >= (int) uiModulePaintStats.size())
         moduleTypeId = 63;
 
@@ -788,10 +853,15 @@ void PerformanceCounterSystem::recordUiDirtyAreaSample(int moduleTypeId, double 
     while (! s.dirtyAreaRatioSum.compare_exchange_weak(cur, cur + ratio01,
                                                        std::memory_order_relaxed,
                                                        std::memory_order_relaxed)) {}
+#endif
 }
 
 void PerformanceCounterSystem::recordFrameListenerCount(int listenerCount) noexcept
 {
+#if !Y2K_ENABLE_PERF_COUNTERS
+    juce::ignoreUnused(listenerCount);
+    return;
+#else
     if (listenerCount < 0)
         listenerCount = 0;
 
@@ -812,6 +882,7 @@ void PerformanceCounterSystem::recordFrameListenerCount(int listenerCount) noexc
 
     const int bucket = juce::jlimit(0, 128, listenerCount);
     s.histogram[(size_t) bucket].fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 } // namespace y2k::perf

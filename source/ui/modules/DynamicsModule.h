@@ -107,5 +107,10 @@ private:
     juce::Rectangle<int> areaDr;
     juce::Rectangle<int> areaCrest;
 
+    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    //   Hub 可能以 60~100Hz 回调 onFrame，但 Dynamics 显示的峰值/DR 数字
+    //   肉眼 ~30Hz 已足够。用最小刷新间隔（高 DPI 适度放大）避免每次都刷。
+    double lastRepaintMs = 0.0;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DynamicsModule)
 };

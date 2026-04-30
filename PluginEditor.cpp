@@ -385,7 +385,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // 4.3) FPS 限制按钮切换 → 修改 AnalyserHub 的 FrameDispatcher 频率
     workspace->onFpsLimitChanged = [this](int hz)
     {
-        processor.getAnalyserHub().startFrameDispatcher (hz);
+        // 记录用户期望值，并用自适应策略换算出当前实际下发的 hz。
+        userRequestedFpsLimit = juce::jlimit (15, 120, hz);
+        adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
+                                             : userRequestedFpsLimit;
+        adaptiveRecoverTicks  = 0;
+
+        processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
         // 立即重置统计起点，避免切换后站显示跨区间的均值
         frameCounter.store (0, std::memory_order_relaxed);
         lastFrameCounterSample = 0;
@@ -413,7 +419,11 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
     // Phase F：启动全局 FrameDispatcher（默认 30Hz 统一滚 UI 分发、模块后续订阅）
     //   模块构造中的 retain() 已经让 refCounts 就绪，这里开 Timer 即可开始工作。
-    processor.getAnalyserHub().startFrameDispatcher (workspace->getFpsLimit());
+    userRequestedFpsLimit = juce::jlimit (15, 120, workspace->getFpsLimit());
+    adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
+                                         : userRequestedFpsLimit;
+    adaptiveRecoverTicks  = 0;
+    processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
 
     // 订阅帧分发，以计算实际 FPS（内部辅助类，避免 header 对 AnalyserHub 的硬依赖）
     fpsListener = std::make_unique<FpsFrameListener> (*this);
@@ -481,10 +491,49 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         // 触发一次重排：workspace 在插件模式下从 y=0 起铺满整个 Editor
         resized();
     }
+
+    // ==================================================================
+    // GPU 合成层挂载（Standalone + VST3 共用此入口）
+    //
+    //   · attachTo(*this) 之后，本 Editor 及其所有子组件（workspace、各
+    //     ModulePanel、chromeHiddenOverlay）的 paint() 命令都会被 JUCE 翻译
+    //     成 OpenGL 批次在 GPU 上执行。软光栅路径（CoreGraphicsContext::
+    //     fillCGRect / drawGlyphs / fillPath / strokePath）彻底绕开，主线程
+    //     只剩 draw 命令组装与提交，CPU 负载大幅下降。
+    //
+    //   · setContinuousRepainting(false)：**关键**。默认为 true 时，GL 上下文
+    //     会按屏幕刷新率不停重绘，等于强制 60~120Hz，不受我们 FrameDispatcher
+    //     的 adaptiveDispatchHz 控制。设为 false 后只在子组件调用 repaint()
+    //     时才触发一次 GL 重绘，和现有的节流/脏区策略完美配合。
+    //
+    //   · setComponentPaintingEnabled(true) 是默认值，显式写出来只是强调
+    //     "让 GL 上下文负责普通 JUCE 组件的 paint"，不是手动 glDraw。
+    //
+    //   · 插件宿主（VST3/AU）场景：
+    //       - macOS：JUCE 为 Editor 顶层 NSView 创建一个 NSOpenGLContext 子层，
+    //         宿主窗口其余部分不受影响。ProTools/Logic/Cubase/Live 等主流 DAW 均支持。
+    //       - Windows：JUCE 为 HWND 创建一个子 GL 子窗口，同理。
+    //     极少数老版 ProTools/AU-Hosts 对子 GL 上下文兼容性差；若将来发现某宿主
+    //     花屏/黑屏，可在此处加 isPluginHost 保护把插件模式下回退到软光栅。
+    //     当前按"两种模式都走 GPU"的需求开启。
+    //
+    //   · 析构顺序：openGLContext 声明在 Editor 类末尾 → 成员反向析构会最先析构
+    //     GL 上下文（JUCE 会自动 detach），但为了防止 GL 资源释放时 child
+    //     components 已被部分销毁的 UB，~Editor 起始处仍显式 detach() 一次兜底。
+    // ==================================================================
+    openGLContext.setContinuousRepainting (false);
+    openGLContext.setComponentPaintingEnabled (true);
+    openGLContext.attachTo (*this);
 }
 
 Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
 {
+    // -1) 最先 detach GPU 上下文，确保随后 workspace / chromeHiddenOverlay 等
+    //     子组件析构时，GL 资源（Texture/VBO/FBO）已经从上下文解绑。
+    //     若依赖成员反向析构顺序隐式 detach，会触发"GL 资源释放时子组件已部分销毁"的
+    //     未定义行为（JUCE GL context 在析构里会 flush 队列，需要组件树依然完整）。
+    openGLContext.detach();
+
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
 
@@ -1861,9 +1910,92 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
         const float fps = (float) (diff * 1000.0 / deltaMs);
 
         workspace->setMeasuredFps (fps);
+        applyAdaptiveFrameRate (fps);
 
         lastFrameCounterSample = cur;
         lastFpsTimeMs          = nowMs;
+    }
+}
+
+// ==========================================================
+// applyAdaptiveFrameRate —— 根据测得 FPS 动态下调 / 回升 FrameDispatcher
+//   · 插件宿主更容易受 UI 消息循环节流，上限 48Hz，分档降帧；持续 4 tick
+    //   达标才回升。
+//   · Standalone 贴近用户设定，低于 60% 下调，持续 2 tick 达标即回升。
+//   · 只在目标值真变化或当前 Hub hz 不一致时才调 startFrameDispatcher，
+//     双保险避免频繁 startTimerHz。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float measuredFps)
+{
+    auto& hub = processor.getAnalyserHub();
+
+    const int requested = juce::jlimit (15, 120, userRequestedFpsLimit);
+    int targetHz = adaptiveDispatchHz;
+
+    // 插件宿主里更容易受 UI 消息循环节流，优先保证稳定感而非硬追目标帧。
+    if (isPluginHost)
+    {
+        const int requestedCap = juce::jmin (48, requested);
+
+        if (measuredFps < (float) requestedCap * 0.50f)
+        {
+            targetHz = juce::jmax (15, requestedCap - 16);
+            adaptiveRecoverTicks = 0;
+        }
+        else if (measuredFps < (float) requestedCap * 0.65f)
+        {
+            targetHz = juce::jmax (16, requestedCap - 10);
+            adaptiveRecoverTicks = 0;
+        }
+        else if (measuredFps < (float) requestedCap * 0.80f)
+        {
+            targetHz = juce::jmax (18, requestedCap - 6);
+            adaptiveRecoverTicks = 0;
+        }
+        else if (measuredFps > (float) requestedCap * 0.96f)
+        {
+            ++adaptiveRecoverTicks;
+            if (adaptiveRecoverTicks >= 4)
+            {
+                targetHz = requestedCap;
+                adaptiveRecoverTicks = 0;
+            }
+        }
+        else
+        {
+            adaptiveRecoverTicks = 0;
+        }
+    }
+    else
+    {
+        // standalone 优先贴近用户设定，但在重负载瞬间允许轻微降帧。
+        if (measuredFps < (float) requested * 0.60f)
+        {
+            targetHz = juce::jmax (20, requested - 6);
+            adaptiveRecoverTicks = 0;
+        }
+        else if (measuredFps > (float) requested * 0.94f)
+        {
+            ++adaptiveRecoverTicks;
+            if (adaptiveRecoverTicks >= 2)
+            {
+                targetHz = requested;
+                adaptiveRecoverTicks = 0;
+            }
+        }
+        else
+        {
+            adaptiveRecoverTicks = 0;
+        }
+    }
+
+    const int maxAllowedHz = isPluginHost ? juce::jmin (48, requested) : requested;
+    targetHz = juce::jlimit (15, maxAllowedHz, targetHz);
+
+    if (targetHz != adaptiveDispatchHz || hub.getFrameDispatcherHz() != targetHz)
+    {
+        adaptiveDispatchHz = targetHz;
+        hub.startFrameDispatcher (adaptiveDispatchHz);
     }
 }
 

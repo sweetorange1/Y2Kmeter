@@ -875,6 +875,64 @@ void VuMeterModule::timerCallback()
     if (dtMs > 100.0) dtMs = 100.0;
     const float dt = (float) dtMs;
 
+    // ======================================================================
+    // 防御性 pull 兜底：
+    //
+    //   主路径依赖 AnalyserHub::FrameDispatcher 的 fanout 调用 VuMeterModule::
+    //   onFrame —— 但 Hub 的 fanout 里有个 `if (!comp->isShowing() ...) skip` 的
+    //   活跃检查（见 AnalyserHub.cpp 里对 FrameListener 做 dynamic_cast<Component*>
+    //   后调 isShowing 的那段）。在以下场景会触发跳过：
+    //
+    //     · 插件宿主挂起 / 隐藏 Editor 窗口瞬间 isShowing()=false；
+    //     · 切换布局预设 / 新建模块 的一两帧里组件尺寸为 0；
+    //     · workspace 子组件 hierarchy 在重排中间态 isShowing() 暂短为 false；
+    //     · OpenGLContext attachTo 初始化的首帧 Component 仍未 showing；
+    //
+    //   以上任何一种瞬间出现，VU 的 onFrame 都拿不到新的 frame 数据，targetL/R
+    //   保持 -144，而 60Hz Timer 的 smoothOne 让 displayedL/R 也收敛到 -144，
+    //   指针就"贴死在 -20"（minDisplayDb）并很难恢复。
+    //
+    //   修复：每个 60Hz tick 主动 hub.getLatestFrame() 拉一次最新帧，自己重算
+    //   targetL/R。这一路和 onFrame push 路径完全独立，即便 fanout 出于任何
+    //   原因跳过本模块，Pull 路径仍能把数据灌进来。
+    //
+    //   成本：每帧一次 SpinLock + shared_ptr 拷贝（Hub::getLatestFrame 内部已
+    //   做原子发布），在 60Hz 下开销可忽略。
+    // ======================================================================
+    if (auto frame = hub.getLatestFrame())
+    {
+        if (frame->has (AnalyserHub::Kind::Oscilloscope))
+        {
+            const int bufLen = (int) frame->oscL.size(); // 2048
+            if (bufLen > 0)
+            {
+                constexpr int windowSamples = 960; // ≈ 20ms @ 48kHz
+                const int n = juce::jmin (bufLen, windowSamples);
+                const int startIdx = bufLen - n;
+
+                double sumSqL = 0.0;
+                double sumSqR = 0.0;
+                for (int i = startIdx; i < bufLen; ++i)
+                {
+                    const float sL = frame->oscL[(size_t) i];
+                    const float sR = frame->oscR[(size_t) i];
+                    sumSqL += (double) sL * (double) sL;
+                    sumSqR += (double) sR * (double) sR;
+                }
+                const double meanSqL = sumSqL / (double) n;
+                const double meanSqR = sumSqR / (double) n;
+
+                auto msToDb = [](double ms) -> float
+                {
+                    if (ms <= 1.0e-10) return -144.0f;
+                    return (float) (10.0 * std::log10 (ms));
+                };
+                targetL = msToDb (meanSqL);
+                targetR = msToDb (meanSqR);
+            }
+        }
+    }
+
     // 非对称弹道：上升 τ=tauRiseMs（抓瞬态），下降 τ=tauFallMs（模拟 VU 回落）。
     //   · 连续瞬态情形：每个瞬态都通过上升项立刻把指针抬到新高，之间的回落
     //     按 fall 时间常数执行 —— 指针不会被锁死在顶端，会"踩着节拍"往上

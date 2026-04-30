@@ -69,6 +69,17 @@ void PhaseModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         smoothedBalance = smooth(smoothedBalance, snap.balance,     0.25f);
     }
 
+    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    //   Hub 可能以 60~100Hz 回调 onFrame，但本模块的 paint 成本较重
+    //   （Lissajous 点云 + 相关/宽度/平衡三条仪表），在高 DPI 屏幕上会显著吃 CPU。
+    //   这里用一个最小刷新间隔（高 DPI 适度放大），避免"数据一来就刷"。
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
+    const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (1.8f, scale);
+    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    lastRepaintMs = nowMs;
     repaint();
 }
 

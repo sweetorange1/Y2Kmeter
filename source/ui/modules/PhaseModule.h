@@ -70,5 +70,10 @@ private:
     juce::Rectangle<int> staticLayerContentBounds;
     int themeSubToken = -1;
 
+    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    //   onFrame 可能以 60~100Hz 频率被 Hub 回调，本模块绘制成本较高（点云 + 3 条仪表），
+    //   对 UI 来说 30Hz 已足够；用 lastRepaintMs 做最小刷新间隔节流。
+    double lastRepaintMs = 0.0;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PhaseModule)
 };
