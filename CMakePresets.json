@@ -1,10 +1,29 @@
 {
   "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
   "configurePresets": [
+    {
+      "name": "msvc",
+      "displayName": "MSVC (Visual Studio 2026)",
+      "description": "Normal multi-config MSVC build with Debug/Release/RelWithDebInfo/MinSizeRel.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "binaryDir": "${sourceDir}/build/msvc",
+      "cacheVariables": {
+        "FETCHCONTENT_SOURCE_DIR_JUCE": "${sourceDir}/build/_deps/juce-src"
+      }
+    },
     {
       "name": "clangd-msvc",
       "displayName": "clangd index database (MSVC + Ninja)",
-      "description": "Generates build-clangd/compile_commands.json for clangd without touching the normal build directory.",
+      "description": "Generates build-clangd/compile_commands.json for clangd without touching the normal MSVC build directory.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-clangd",
       "cacheVariables": {
@@ -16,7 +35,32 @@
   ],
   "buildPresets": [
     {
+      "name": "msvc-debug",
+      "displayName": "MSVC Debug",
+      "configurePreset": "msvc",
+      "configuration": "Debug"
+    },
+    {
+      "name": "msvc-release",
+      "displayName": "MSVC Release",
+      "configurePreset": "msvc",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc-relwithdebinfo",
+      "displayName": "MSVC RelWithDebInfo",
+      "configurePreset": "msvc",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "msvc-minsizerel",
+      "displayName": "MSVC MinSizeRel",
+      "configurePreset": "msvc",
+      "configuration": "MinSizeRel"
+    },
+    {
       "name": "clangd-msvc",
+      "displayName": "clangd index database (MSVC + Ninja)",
       "configurePreset": "clangd-msvc"
     }
   ]
