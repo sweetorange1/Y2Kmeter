@@ -133,8 +133,10 @@ void ModulePanel::setCpuLoad (float load01) noexcept
 // ----------------------------------------------------------
 void ModulePanel::paint(juce::Graphics& g)
 {
+#if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::ui, "UI-ModulePaint");
     const auto paintStartNs = y2k::perf::PerformanceCounterSystem::nowNs();
+#endif
 
     const auto bounds = getLocalBounds();
 
@@ -173,6 +175,7 @@ void ModulePanel::paint(juce::Graphics& g)
     // 注意：CPU 小字放到 paintOverChildren() 里绘制，确保处在所有子组件之上
     // （例如 EQ 模块把 PixelEqGraph 覆盖了整个内容区，paint() 绘制的文字会被遮挡）
 
+#if Y2K_ENABLE_PERF_COUNTERS
     const auto paintEndNs = y2k::perf::PerformanceCounterSystem::nowNs();
     y2k::perf::PerformanceCounterSystem::instance().recordUiModulePaint((int) moduleType,
                                                                          paintEndNs - paintStartNs);
@@ -192,6 +195,7 @@ void ModulePanel::paint(juce::Graphics& g)
         y2k::perf::ThreadRole::ui,
         paintEndNs - paintStartNs,
         0);
+#endif
 }
 
 void ModulePanel::paintOverChildren(juce::Graphics& g)
@@ -251,18 +255,24 @@ void ModulePanel::repaint()
 {
     if (! isVisuallyActiveInWorkspace())
     {
+#if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintSkippedInvisible((int) moduleType);
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintDroppedOffscreen((int) moduleType);
+#endif
         return;
     }
 
     if (pendingFullRepaint)
     {
+#if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
+#endif
         return;
     }
 
+#if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintRequest((int) moduleType);
+#endif
     pendingFullRepaint = true;
     pendingAreaRepaint = false;
     pendingRepaintArea = getLocalBounds();
@@ -273,8 +283,10 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
 {
     if (! isVisuallyActiveInWorkspace())
     {
+#if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintSkippedInvisible((int) moduleType);
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintDroppedOffscreen((int) moduleType);
+#endif
         return;
     }
 
@@ -287,19 +299,25 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
 
     if (pendingFullRepaint)
     {
+#if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
+#endif
         return;
     }
 
     if (pendingAreaRepaint)
     {
         pendingRepaintArea = pendingRepaintArea.getUnion(area);
+#if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
+#endif
         juce::Component::repaint(area);
         return;
     }
 
+#if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintRequest((int) moduleType);
+#endif
     pendingAreaRepaint = true;
     pendingRepaintArea = area;
     juce::Component::repaint(area);

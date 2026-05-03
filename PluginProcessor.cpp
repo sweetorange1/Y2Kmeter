@@ -55,10 +55,12 @@ void Y2KmeterAudioProcessor::releaseResources() {}
 void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
                                           juce::MidiBuffer&)
 {
+#if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::audio, "Audio-ProcessBlock");
     y2k::perf::ScopedPerfTimer perfTimer(y2k::perf::FunctionId::processBlockTotal,
                                          y2k::perf::Partition::audioAnalysis,
                                          y2k::perf::ThreadRole::audio);
+#endif
 
     // CPU 负载采样：包住整个 processBlock 的有效工作范围。
     // AudioProcessLoadMeasurer 是无锁的，安全在音频线程调用。
@@ -117,11 +119,13 @@ AnalyserHub& Y2KmeterAudioProcessor::getAnalyserHub() noexcept
 void Y2KmeterAudioProcessor::setAnalysisActive(bool shouldBeActive) noexcept
 {
     analysisActive.store(shouldBeActive, std::memory_order_relaxed);
+#if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().recordEvent(
         y2k::perf::FunctionId::lowFreqThemeOrUiStateChange,
         y2k::perf::Partition::dataCommunication,
         y2k::perf::ThreadRole::unknown,
         1);
+#endif
 }
 
 bool Y2KmeterAudioProcessor::isAnalysisActive() const noexcept
@@ -160,22 +164,34 @@ void Y2KmeterAudioProcessor::registerLoopbackRenderTime (double millisecondsTake
 
 juce::File Y2KmeterAudioProcessor::exportPerfCountersNow()
 {
+#if Y2K_ENABLE_PERF_COUNTERS
     return y2k::perf::PerformanceCounterSystem::instance().exportNow();
+#else
+    return {};
+#endif
 }
 
 void Y2KmeterAudioProcessor::setPerfAutoExportEnabled(bool enabled) noexcept
 {
+#if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().setAutoExportEnabled(enabled);
     y2k::perf::PerformanceCounterSystem::instance().recordEvent(
         y2k::perf::FunctionId::lowFreqThemeOrUiStateChange,
         y2k::perf::Partition::dataCommunication,
         y2k::perf::ThreadRole::unknown,
         1);
+#else
+    juce::ignoreUnused(enabled);
+#endif
 }
 
 bool Y2KmeterAudioProcessor::isPerfAutoExportEnabled() const noexcept
 {
+#if Y2K_ENABLE_PERF_COUNTERS
     return y2k::perf::PerformanceCounterSystem::instance().isAutoExportEnabled();
+#else
+    return false;
+#endif
 }
 
 double Y2KmeterAudioProcessor::getCurrentSampleRate() const noexcept
