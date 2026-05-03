@@ -1,0 +1,23 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "clangd-msvc",
+      "displayName": "clangd index database (MSVC + Ninja)",
+      "description": "Generates build-clangd/compile_commands.json for clangd without touching the normal build directory.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-clangd",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "FETCHCONTENT_SOURCE_DIR_JUCE": "${sourceDir}/build/_deps/juce-src"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "clangd-msvc",
+      "configurePreset": "clangd-msvc"
+    }
+  ]
+}

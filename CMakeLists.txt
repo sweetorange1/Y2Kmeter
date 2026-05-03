@@ -17,7 +17,12 @@ endif()
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
 
-project(Y2Kmeter VERSION 1.6.0 LANGUAGES CXX)
+project(Y2Kmeter VERSION 1.6.0 LANGUAGES C CXX)
+
+# 让 Ninja/Makefile 生成 compile_commands.json，供 clangd 精确读取
+# include path、宏定义和 JUCE 生成头路径。Visual Studio 生成器会忽略该文件生成，
+# 所以仓库里额外提供了 clangd-msvc preset 使用 Ninja。
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 当外部环境设置了 CMAKE_GENERATOR_PLATFORM 但未设置 CMAKE_GENERATOR 时，
 # CMake 在 VS CustomBuild 阶段会反复打印警告。
@@ -30,7 +35,7 @@ if (DEFINED ENV{CMAKE_GENERATOR_PLATFORM} AND NOT DEFINED ENV{CMAKE_GENERATOR})
   )
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17)  
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -217,10 +222,21 @@ endif()
 #   · 仅在 MSVC 下生效；其它工具链完全不受影响
 # ==========================================================
 if (MSVC)
+  target_compile_options(Y2Kmeter PRIVATE /MP)
+
   target_compile_options(Y2Kmeter PRIVATE
     $<$<CONFIG:Debug>:/Z7>
     $<$<CONFIG:RelWithDebInfo>:/Z7>
   )
+
+  target_compile_options(Y2Kmeter PRIVATE
+    $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /Gy /Gw>
+  )
+
+  target_link_options(Y2Kmeter PRIVATE
+    $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>
+  )
+
 endif()
 
 # ==========================================================

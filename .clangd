@@ -1,0 +1,19 @@
+CompileFlags:
+  CompilationDatabase: build-clangd
+  Compiler: clang-cl
+  Add:
+    - --target=i686-pc-windows-msvc
+    - /imsvcD:/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.50.35717/include
+    - /imsvcD:/Microsoft Visual Studio/18/BuildTools/VC/Auxiliary/VS/include
+    - /imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/ucrt
+    - /imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/um
+    - /imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/shared
+    - /imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/winrt
+    - /imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/cppwinrt
+
+Index:
+  Background: Build
+
+Diagnostics:
+  ClangTidy:
+    Add: []
