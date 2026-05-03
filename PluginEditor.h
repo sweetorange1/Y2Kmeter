@@ -162,6 +162,10 @@ private:
     void saveStateAsSettingsFile  (const juce::File& dest);
     void loadStateFromSettingsFile (const juce::File& src);
 
+    // 桌面背景缓存：drawDesktop() 较重，主题/尺寸变化时重建一次，paint() 只贴图。
+    void invalidateDesktopCache() noexcept;
+    void rebuildDesktopCacheIfNeeded();
+
     // 字体 typeface（每个 Editor 实例持有一份；避免 static 存储期
     // 与插件 DLL 生命周期错配导致宿主卸载插件时崩溃）
     juce::Typeface::Ptr customTypeface;
@@ -169,6 +173,10 @@ private:
     // Logo 图片（从 BinaryData::logo_png 解码并缓存到实例成员；
     // 不使用 ImageCache 以避免跨 DLL 卸载时的悬垂引用）
     juce::Image logoImage;
+
+    juce::Image desktopCacheImage;
+    juce::Rectangle<int> desktopCacheBounds;
+    bool desktopCacheDirty = true;
 
     Y2KmeterAudioProcessor& processor;
 

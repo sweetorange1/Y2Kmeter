@@ -113,7 +113,7 @@ target_compile_definitions(Y2Kmeter
     JUCE_PLUGINHOST_LV2=0
     # 外网发布版默认关闭性能计数系统（导出 + 运行时统计计算）
     # 目的是尽可能减少冗余统计开销，把算力留给真实音频/绘制路径。
-    Y2K_ENABLE_PERF_COUNTERS=1
+    Y2K_ENABLE_PERF_COUNTERS=0
     # 关闭 JUCE 默认的 StandaloneFilterApp / StandaloneFilterWindow，
     # 转而使用我们自定义的 source/standalone/Y2KStandaloneApp.cpp（无边框 Y2K 外壳）
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1

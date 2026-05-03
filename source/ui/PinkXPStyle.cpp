@@ -128,9 +128,9 @@ namespace PinkXP
 
     void drawDesktop(juce::Graphics& g, juce::Rectangle<int> r)
     {
-        y2k::perf::ScopedPerfTimer desktopTimer(y2k::perf::FunctionId::uiDrawDesktop,
-                                                y2k::perf::Partition::uiRendering,
-                                                y2k::perf::ThreadRole::ui);
+        // y2k::perf::ScopedPerfTimer desktopTimer(y2k::perf::FunctionId::uiDrawDesktop,
+        //                                         y2k::perf::Partition::uiRendering,
+        //                                         y2k::perf::ThreadRole::ui);
 
         // 1) 底色
         g.setColour(desktop);

@@ -403,6 +403,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     {
         if (auto* lnf = dynamic_cast<juce::LookAndFeel_V4*>(&getLookAndFeel()))
             juce::ignoreUnused(lnf);
+        invalidateDesktopCache();
         repaint();
     });
 
@@ -527,7 +528,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
     // Temporary profiling hook: with Y2K_ENABLE_PERF_COUNTERS=1 this writes
     // perf snapshots every 60 seconds to %APPDATA%/Y2Kmeter/perf_counters.
-    processor.setPerfAutoExportEnabled (true);
+    // processor.setPerfAutoExportEnabled (true);
 }
 
 Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
@@ -1161,6 +1162,38 @@ void Y2KmeterAudioProcessorEditor::loadStateFromSettingsFile (const juce::File& 
     DBG ("loadStateFromSettingsFile: unknown root tag = " + xml->getTagName());
 }
 
+void Y2KmeterAudioProcessorEditor::invalidateDesktopCache() noexcept
+{
+    desktopCacheDirty = true;
+}
+
+void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
+{
+    const auto bounds = getLocalBounds();
+    if (bounds.isEmpty())
+    {
+        desktopCacheImage = {};
+        desktopCacheBounds = {};
+        desktopCacheDirty = false;
+        return;
+    }
+
+    if (! desktopCacheDirty
+        && desktopCacheImage.isValid()
+        && desktopCacheBounds == bounds)
+        return;
+
+    desktopCacheImage = juce::Image (juce::Image::RGB,
+                                     bounds.getWidth(),
+                                     bounds.getHeight(),
+                                     true);
+    desktopCacheBounds = bounds;
+    desktopCacheDirty = false;
+
+    juce::Graphics cacheGraphics (desktopCacheImage);
+    PinkXP::drawDesktop (cacheGraphics, desktopCacheImage.getBounds());
+}
+
 // ----------------------------------------------------------
 // 绘制：方案乙（完全铺满）
 //   · 顶部 TitleBar（26px，Pink XP 风格抬头；含 Logo + 标题文字 + 右侧 × 按钮）
@@ -1177,9 +1210,16 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const auto wsBounds = workspace->getBounds();
         if (! wsBounds.isEmpty())
         {
+            rebuildDesktopCacheIfNeeded();
+
             juce::Graphics::ScopedSaveState save (g);
             g.reduceClipRegion (wsBounds);
-            PinkXP::drawDesktop (g, getLocalBounds());
+
+            if (desktopCacheImage.isValid())
+                g.drawImageAt (desktopCacheImage, 0, 0);
+            else
+                PinkXP::drawDesktop (g, getLocalBounds());
+
             PinkXP::drawLogo    (g, wsBounds, logoImage);
         }
     }
@@ -1313,6 +1353,8 @@ const juce::String versionText = "v1.6";
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::resized()
 {
+    invalidateDesktopCache();
+
     auto r = getLocalBounds();
     // chrome 可见时顶部让给 TitleBar；chrome 隐藏时让 workspace 占满整个窗口，
     //   浮层 overlay 作为"最底层 child"铺在顶部 titleBarHeight 区域，会被模块自然遮挡。
