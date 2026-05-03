@@ -702,6 +702,7 @@ const char* PerformanceCounterSystem::functionName(FunctionId fn) noexcept
         case FunctionId::uiFrameAssemble: return "uiFrameAssemble";
         case FunctionId::uiOnFrameDispatch: return "uiOnFrameDispatch";
         case FunctionId::uiModulePanelPaint: return "uiModulePanelPaint";
+        case FunctionId::uiDrawDesktop: return "uiDrawDesktop";
         case FunctionId::uiRepaintRequest: return "uiRepaintRequest";
         case FunctionId::uiRepaintSkippedInvisible: return "uiRepaintSkippedInvisible";
         case FunctionId::uiFrameListenerFanout: return "uiFrameListenerFanout";

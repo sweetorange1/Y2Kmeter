@@ -524,6 +524,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     openGLContext.setContinuousRepainting (false);
     openGLContext.setComponentPaintingEnabled (true);
     openGLContext.attachTo (*this);
+
+    // Temporary profiling hook: with Y2K_ENABLE_PERF_COUNTERS=1 this writes
+    // perf snapshots every 60 seconds to %APPDATA%/Y2Kmeter/perf_counters.
+    processor.setPerfAutoExportEnabled (true);
 }
 
 Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
