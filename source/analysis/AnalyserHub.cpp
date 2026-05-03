@@ -262,22 +262,25 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
         oscWritePos = 0;
     }
 
-    // 频谱缓冲清零
+    // 频谱工作缓冲清零（prepare 与音频 push 串行调用）
+    fftFifo.fill(0.0f);
+    fftData.fill(0.0f);
+    specDataWork.fill(0.0f);
+    magDataWork.fill(0.0f);
+    fftFifoIndex = 0;
+
+    // 低频路工作缓冲
+    fftFifoLo.fill(0.0f);
+    fftDataLo.fill(0.0f);
+    magDataLoWork.fill(0.0f);
+    fftFifoIndexLo = 0;
+
+    // 发布给 UI 的频谱快照清零
     {
         const juce::SpinLock::ScopedLockType sl(specLock);
-
-        fftFifo.fill(0.0f);
-
-        fftData.fill(0.0f);
         specData.fill(0.0f);
         magData.fill(0.0f);
-        fftFifoIndex = 0;
-
-        // 低频路
-        fftFifoLo.fill(0.0f);
-        fftDataLo.fill(0.0f);
         magDataLo.fill(0.0f);
-        fftFifoIndexLo = 0;
     }
 
     // 响度计初始化
@@ -467,33 +470,34 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
                                           y2k::perf::Partition::audioAnalysis,
                                           y2k::perf::ThreadRole::audio);
 #endif
-    // Phase F 优化：之前是"每个样本都 trylock / 不成就 continue 丢样本"，
-    //   导致：
-    //     1) 每样本一次 lock/unlock 开销非常贵（48kHz × stereo → 一秒 96000 次上锁）；
-    //     2) UI 在 getSpectrumMagnitudes 里拿 scopedLock 的几十微秒期间，
-    //        音频线程会把这段时间的所有样本直接丢掉 → 频谱实际比真实信号少一截。
-    //   改造：外层一次 scopedLock，内部紧凑 FIFO；FFT 仍在持锁期间执行，
-    //   这段时间 UI 侧 getSpectrumMagnitudes 会短暂自旋，但因为 FFT 只在 fftSize
-    //   个样本攒满时才触发，一次 pushStereo 最多触发 1~2 次，UI 等待时间完全可接受。
-#if Y2K_ENABLE_PERF_COUNTERS
-    const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
-#endif
-    const juce::SpinLock::ScopedLockType sl(specLock);
-#if Y2K_ENABLE_PERF_COUNTERS
-    const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
-    stageTimer.addLockWait(lockNs - waitStart);
-    y2k::perf::PerformanceCounterSystem::instance().recordDuration(
-        y2k::perf::FunctionId::lockSpec,
-        y2k::perf::Partition::dataCommunication,
-        y2k::perf::ThreadRole::audio,
-        0,
-        lockNs - waitStart);
-#endif
+    // 频谱 DSP 状态只由音频线程写；specLock 只包住发布给 UI 的快照拷贝。
+    // 这样 UI 读快照不会等 FFT，音频线程也不会因 UI 的频谱合成计算而自旋。
 
     // 低频路的 hop（75% overlap）：每 fftSizeLo/4 样本跑一次 FFT，
-
     // 兼顾"更新速度"与"CPU 成本"。
     constexpr int hopLo = fftSizeLo / 4;
+
+    auto publishUnderSpecLock = [&] (auto&& publish)
+    {
+#if Y2K_ENABLE_PERF_COUNTERS
+        const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
+#endif
+        const juce::SpinLock::ScopedLockType sl (specLock);
+#if Y2K_ENABLE_PERF_COUNTERS
+        const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+        stageTimer.addLockWait(lockNs - waitStart);
+        y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+            y2k::perf::FunctionId::lockSpec,
+            y2k::perf::Partition::dataCommunication,
+            y2k::perf::ThreadRole::audio,
+            0,
+            lockNs - waitStart);
+#endif
+        publish();
+    };
+
+    bool publishHi = false;
+    bool publishLo = false;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -521,7 +525,7 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
             {
                 const float invMax = 2.0f / (float) fftSize;
                 for (int iBin = 0; iBin < maxBin; ++iBin)
-                    magData[(size_t) iBin] = fftData[(size_t) iBin] * invMax;
+                    magDataWork[(size_t) iBin] = fftData[(size_t) iBin] * invMax;
             }
 
             // 2) 像素 EQ 用的粗粒度平滑频谱（保留原有逻辑）
@@ -537,12 +541,13 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
                 const float mapped = juce::jlimit(0.0f, 1.0f,
                                         juce::jmap(db, -50.0f, 50.0f, 0.0f, 1.0f));
 
-                const float prev  = specData[(size_t) iBin];
+                const float prev  = specDataWork[(size_t) iBin];
                 const float alpha = (mapped > prev) ? 0.6f : 0.15f;
-                specData[(size_t) iBin] = prev + alpha * (mapped - prev);
+                specDataWork[(size_t) iBin] = prev + alpha * (mapped - prev);
             }
 
             fftFifoIndex = 0;
+            publishHi = true;
         }
 
         // ---------- 低频路（8192）：环形缓冲 + 75% overlap ----------
@@ -576,17 +581,42 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
             const int   maxBinLo = fftSizeLo / 2;
             const float invMaxLo = 2.0f / (float) fftSizeLo;
             for (int iBin = 0; iBin < maxBinLo; ++iBin)
-                magDataLo[(size_t) iBin] = fftDataLo[(size_t) iBin] * invMaxLo;
+                magDataLoWork[(size_t) iBin] = fftDataLo[(size_t) iBin] * invMaxLo;
         }
+
+        publishLo = true;
+    }
+
+    if (publishHi || publishLo)
+    {
+        publishUnderSpecLock ([&]
+        {
+            if (publishHi)
+            {
+                std::memcpy (magData.data(), magDataWork.data(),
+                             sizeof (float) * magData.size());
+                std::memcpy (specData.data(), specDataWork.data(),
+                             sizeof (float) * specData.size());
+            }
+
+            if (publishLo)
+            {
+                std::memcpy (magDataLo.data(), magDataLoWork.data(),
+                             sizeof (float) * magDataLo.size());
+            }
+        });
     }
 }
 
 void AnalyserHub::getSpectrumSnapshot(juce::Array<float>& dest)
 {
     dest.resize(spectrumBins);
-    const juce::SpinLock::ScopedLockType sl(specLock);
-    for (int i = 0; i < spectrumBins; ++i)
-        dest.set(i, specData[(size_t) i]);
+
+    {
+        const juce::SpinLock::ScopedLockType sl (specLock);
+        std::memcpy (dest.getRawDataPointer(), specData.data(),
+                     sizeof (float) * (size_t) spectrumBins);
+    }
 }
 
 void AnalyserHub::getSpectrumMagnitudes(juce::Array<float>& dest)
@@ -597,9 +627,9 @@ void AnalyserHub::getSpectrumMagnitudes(juce::Array<float>& dest)
 
     dest.resize(spectrumMagSize);
     {
-        const juce::SpinLock::ScopedLockType sl(specLock);
-        for (int i = 0; i < spectrumMagSize; ++i)
-            dest.set(i, magData[(size_t) i]);
+        const juce::SpinLock::ScopedLockType sl (specLock);
+        std::memcpy (dest.getRawDataPointer(), magData.data(),
+                     sizeof (float) * (size_t) spectrumMagSize);
     }
 
 #if Y2K_ENABLE_PERF_COUNTERS
@@ -616,9 +646,12 @@ void AnalyserHub::getSpectrumMagnitudes(juce::Array<float>& dest)
 void AnalyserHub::getSpectrumMagnitudesLo(juce::Array<float>& dest)
 {
     dest.resize(spectrumMagSizeLo);
-    const juce::SpinLock::ScopedLockType sl(specLock);
-    for (int i = 0; i < spectrumMagSizeLo; ++i)
-        dest.set(i, magDataLo[(size_t) i]);
+
+    {
+        const juce::SpinLock::ScopedLockType sl (specLock);
+        std::memcpy (dest.getRawDataPointer(), magDataLo.data(),
+                     sizeof (float) * (size_t) spectrumMagSizeLo);
+    }
 }
 
 // ==========================================================
@@ -647,7 +680,23 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
 
     const double fLo2 = juce::jmax (1.0, (double) fMin);
     const double fHi2 = juce::jmin (nyquist, (double) fMax);
-    if (fHi2 <= fLo2) { for (int i = 0; i < numPoints; ++i) dest.set (i, 0.0f); return; }
+    if (fHi2 <= fLo2)
+    {
+        auto* outData = dest.getRawDataPointer();
+        std::fill (outData, outData + numPoints, 0.0f);
+        return;
+    }
+
+    std::array<float, spectrumMagSize>   magHiSnapshot;
+    std::array<float, spectrumMagSizeLo> magLoSnapshot;
+
+    {
+        const juce::SpinLock::ScopedLockType sl (specLock);
+        std::memcpy (magHiSnapshot.data(), magData.data(),
+                     sizeof (float) * magHiSnapshot.size());
+        std::memcpy (magLoSnapshot.data(), magDataLo.data(),
+                     sizeof (float) * magLoSnapshot.size());
+    }
 
     const double logMin = std::log10 (fLo2);
     const double logMax = std::log10 (fHi2);
@@ -662,8 +711,7 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
     const double xoverHi   = xover * std::sqrt (2.0);   // ~707 Hz
     // 低频路 FFT 低通之外禁用（取 2× xover 作为硬上限兜底）
     const double loHardMax = xover * 2.0;
-
-    const juce::SpinLock::ScopedLockType sl (specLock);
+    auto* outData = dest.getRawDataPointer();
 
     auto peakInRange = [] (const float* buf, int bufN, int binLo, int binHi) noexcept
     {
@@ -695,7 +743,7 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         // ---- 主路取值 ----
         const int binHiLo  = (int) std::floor (f0 * hzToBinHi);
         const int binHiUp  = (int) std::ceil  (f1 * hzToBinHi);
-        const float magHi  = peakInRange (magData.data(), spectrumMagSize, binHiLo, binHiUp);
+        const float magHi  = peakInRange (magHiSnapshot.data(), spectrumMagSize, binHiLo, binHiUp);
 
         // ---- 低频路取值（只在有效频段内查询）----
         float magLo = 0.0f;
@@ -703,7 +751,7 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         {
             const int binLoLo = (int) std::floor (f0 * hzToBinLo);
             const int binLoUp = (int) std::ceil  (f1 * hzToBinLo);
-            magLo = peakInRange (magDataLo.data(), spectrumMagSizeLo, binLoLo, binLoUp);
+            magLo = peakInRange (magLoSnapshot.data(), spectrumMagSizeLo, binLoLo, binLoUp);
         }
 
         // ---- 交叉淡化（频率在 [xoverLo, xoverHi] 的八度内）----
@@ -725,7 +773,7 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         const float eMix = w * eHi + (1.0f - w) * eLo;
         const float out  = std::sqrt (juce::jmax (0.0f, eMix));
 
-        dest.set (i, out);
+        outData[i] = out;
     }
 }
 
