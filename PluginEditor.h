@@ -246,9 +246,11 @@ private:
     //   · userRequestedFpsLimit —— workspace 顶部 FPS 切换按钮设定的目标上限
     //   · adaptiveDispatchHz    —— 当前让 AnalyserHub 实际跑的频率（自适应降降升升的目标值）
     //   · adaptiveRecoverTicks  —— 测标持续达标后的连续计数，避免单帧抖动回升
+    //   · adaptiveDropTicks     —— 测标持续低迷后的连续计数，避免一次纹理上传/窗口抖动直接降档
     int                      userRequestedFpsLimit  = 30;
     int                      adaptiveDispatchHz     = 30;
     int                      adaptiveRecoverTicks   = 0;
+    int                      adaptiveDropTicks      = 0;
 
     // Tamagotchi 信号保活：仅当工作区存在 Tamagotchi 模块时，
     // 才临时 retain(Loudness) 以驱动孵化/行为状态机；无 Tamagotchi 时立刻 release。

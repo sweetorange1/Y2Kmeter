@@ -390,6 +390,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
                                              : userRequestedFpsLimit;
         adaptiveRecoverTicks  = 0;
+        adaptiveDropTicks     = 0;
 
         processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
         // 立即重置统计起点，避免切换后站显示跨区间的均值
@@ -424,6 +425,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
                                          : userRequestedFpsLimit;
     adaptiveRecoverTicks  = 0;
+    adaptiveDropTicks     = 0;
     processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
 
     // 订阅帧分发，以计算实际 FPS（内部辅助类，避免 header 对 AnalyserHub 的硬依赖）
@@ -1171,7 +1173,7 @@ void Y2KmeterAudioProcessorEditor::invalidateDesktopCache() noexcept
 
 void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
 {
-    const auto bounds = getLocalBounds();
+    const auto bounds = workspace != nullptr ? workspace->getBounds() : getLocalBounds();
     if (bounds.isEmpty())
     {
         desktopCacheImage = {};
@@ -1193,7 +1195,10 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
     desktopCacheDirty = false;
 
     juce::Graphics cacheGraphics (desktopCacheImage);
-    PinkXP::drawDesktop (cacheGraphics, desktopCacheImage.getBounds());
+    cacheGraphics.addTransform (juce::AffineTransform::translation ((float) -bounds.getX(),
+                                                                    (float) -bounds.getY()));
+    PinkXP::drawDesktop (cacheGraphics, bounds);
+    PinkXP::drawLogo    (cacheGraphics, bounds, logoImage);
 }
 
 // ----------------------------------------------------------
@@ -1217,12 +1222,13 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
             juce::Graphics::ScopedSaveState save (g);
             g.reduceClipRegion (wsBounds);
 
-            if (desktopCacheImage.isValid())
-                g.drawImageAt (desktopCacheImage, 0, 0);
+            if (desktopCacheImage.isValid() && desktopCacheBounds == wsBounds)
+                g.drawImageAt (desktopCacheImage, wsBounds.getX(), wsBounds.getY());
             else
+            {
                 PinkXP::drawDesktop (g, getLocalBounds());
-
-            PinkXP::drawLogo    (g, wsBounds, logoImage);
+                PinkXP::drawLogo    (g, wsBounds, logoImage);
+            }
         }
     }
 
@@ -1978,66 +1984,86 @@ void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float measuredFps)
     auto& hub = processor.getAnalyserHub();
 
     const int requested = juce::jlimit (15, 120, userRequestedFpsLimit);
-    int targetHz = adaptiveDispatchHz;
+    const int maxAllowedHz = isPluginHost ? juce::jmin (48, requested) : requested;
+    const int currentHz = juce::jlimit (15, maxAllowedHz, adaptiveDispatchHz);
+    int targetHz = currentHz;
 
     // 插件宿主里更容易受 UI 消息循环节流，优先保证稳定感而非硬追目标帧。
     if (isPluginHost)
     {
-        const int requestedCap = juce::jmin (48, requested);
+        int requestedDropHz = currentHz;
+        if (measuredFps < (float) currentHz * 0.55f)
+        {
+            requestedDropHz = juce::jmax (15, currentHz - 12);
+        }
+        else if (measuredFps < (float) currentHz * 0.70f)
+        {
+            requestedDropHz = juce::jmax (16, currentHz - 8);
+        }
+        else if (measuredFps < (float) currentHz * 0.84f)
+        {
+            requestedDropHz = juce::jmax (18, currentHz - 4);
+        }
 
-        if (measuredFps < (float) requestedCap * 0.50f)
+        if (requestedDropHz < currentHz)
         {
-            targetHz = juce::jmax (15, requestedCap - 16);
             adaptiveRecoverTicks = 0;
+            if (++adaptiveDropTicks >= 3)
+            {
+                targetHz = requestedDropHz;
+                adaptiveDropTicks = 0;
+            }
         }
-        else if (measuredFps < (float) requestedCap * 0.65f)
+        else if (currentHz < maxAllowedHz && measuredFps >= (float) currentHz * 0.92f)
         {
-            targetHz = juce::jmax (16, requestedCap - 10);
-            adaptiveRecoverTicks = 0;
-        }
-        else if (measuredFps < (float) requestedCap * 0.80f)
-        {
-            targetHz = juce::jmax (18, requestedCap - 6);
-            adaptiveRecoverTicks = 0;
-        }
-        else if (measuredFps > (float) requestedCap * 0.96f)
-        {
+            adaptiveDropTicks = 0;
             ++adaptiveRecoverTicks;
             if (adaptiveRecoverTicks >= 4)
             {
-                targetHz = requestedCap;
+                targetHz = juce::jmin (maxAllowedHz, currentHz + 6);
                 adaptiveRecoverTicks = 0;
             }
         }
         else
         {
+            adaptiveDropTicks = 0;
             adaptiveRecoverTicks = 0;
         }
     }
     else
     {
         // standalone 优先贴近用户设定，但在重负载瞬间允许轻微降帧。
-        if (measuredFps < (float) requested * 0.60f)
+        if (measuredFps < (float) currentHz * 0.70f)
         {
-            targetHz = juce::jmax (20, requested - 6);
             adaptiveRecoverTicks = 0;
+            if (++adaptiveDropTicks >= 2)
+            {
+                targetHz = juce::jmax (20, currentHz - 6);
+                adaptiveDropTicks = 0;
+            }
         }
-        else if (measuredFps > (float) requested * 0.94f)
+        else if (currentHz < maxAllowedHz && measuredFps >= (float) currentHz * 0.92f)
         {
+            adaptiveDropTicks = 0;
             ++adaptiveRecoverTicks;
             if (adaptiveRecoverTicks >= 2)
             {
-                targetHz = requested;
+                targetHz = juce::jmin (maxAllowedHz, currentHz + 6);
                 adaptiveRecoverTicks = 0;
             }
         }
+        else if (currentHz >= maxAllowedHz)
+        {
+            adaptiveDropTicks = 0;
+            adaptiveRecoverTicks = 0;
+        }
         else
         {
+            adaptiveDropTicks = 0;
             adaptiveRecoverTicks = 0;
         }
     }
 
-    const int maxAllowedHz = isPluginHost ? juce::jmin (48, requested) : requested;
     targetHz = juce::jlimit (15, maxAllowedHz, targetHz);
 
     if (targetHz != adaptiveDispatchHz || hub.getFrameDispatcherHz() != targetHz)
