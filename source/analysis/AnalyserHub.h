@@ -503,6 +503,7 @@ private:
     // ---- 频谱（单声道混合，FFT）----
     void pushSamplesToSpectrum(const float* left, const float* right, int numSamples);
 
+    // 只保护发布给 UI 的频谱快照数组；FFT/FIFO 工作状态由音频线程单写。
     juce::SpinLock specLock;
     juce::dsp::FFT fft { fftOrder };
     juce::dsp::WindowingFunction<float> window { fftSize,
@@ -510,12 +511,14 @@ private:
     std::array<float, fftSize>     fftFifo  {};
     std::array<float, fftSize * 2> fftData  {};
     std::array<float, spectrumBins> specData {};
+    std::array<float, spectrumBins> specDataWork {};
     // 高精度 FFT 幅度缓冲（供 SpectrumModule）
     std::array<float, spectrumMagSize> magData {};
+    std::array<float, spectrumMagSize> magDataWork {};
     int fftFifoIndex = 0;
 
     // ---- 低频路 FFT（8192 点，高频率分辨率）----
-    //   与主路共享 specLock；同一循环里并行喂 FIFO；
+    //   与主路同一循环里并行喂 FIFO；
     //   为了降低 CPU，低频 FFT 用 75% overlap（hop = fftSizeLo/4 = 2048）。
     juce::dsp::FFT fftLo { fftOrderLo };
     juce::dsp::WindowingFunction<float> windowLo { fftSizeLo,
@@ -523,6 +526,7 @@ private:
     std::array<float, fftSizeLo>     fftFifoLo {};
     std::array<float, fftSizeLo * 2> fftDataLo {};
     std::array<float, spectrumMagSizeLo> magDataLo {};
+    std::array<float, spectrumMagSizeLo> magDataLoWork {};
     int fftFifoIndexLo = 0;
 
     // ---- 响度计 ----

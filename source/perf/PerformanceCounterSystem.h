@@ -46,6 +46,7 @@ enum class FunctionId : int
     uiFrameAssemble,
     uiOnFrameDispatch,
     uiModulePanelPaint,
+    uiDrawDesktop,
     uiRepaintRequest,
     uiRepaintSkippedInvisible,
     uiFrameListenerFanout,

@@ -162,6 +162,10 @@ private:
     void saveStateAsSettingsFile  (const juce::File& dest);
     void loadStateFromSettingsFile (const juce::File& src);
 
+    // 桌面背景缓存：drawDesktop() 较重，主题/尺寸变化时重建一次，paint() 只贴图。
+    void invalidateDesktopCache() noexcept;
+    void rebuildDesktopCacheIfNeeded();
+
     // 字体 typeface（每个 Editor 实例持有一份；避免 static 存储期
     // 与插件 DLL 生命周期错配导致宿主卸载插件时崩溃）
     juce::Typeface::Ptr customTypeface;
@@ -169,6 +173,10 @@ private:
     // Logo 图片（从 BinaryData::logo_png 解码并缓存到实例成员；
     // 不使用 ImageCache 以避免跨 DLL 卸载时的悬垂引用）
     juce::Image logoImage;
+
+    juce::Image desktopCacheImage;
+    juce::Rectangle<int> desktopCacheBounds;
+    bool desktopCacheDirty = true;
 
     Y2KmeterAudioProcessor& processor;
 
@@ -238,9 +246,11 @@ private:
     //   · userRequestedFpsLimit —— workspace 顶部 FPS 切换按钮设定的目标上限
     //   · adaptiveDispatchHz    —— 当前让 AnalyserHub 实际跑的频率（自适应降降升升的目标值）
     //   · adaptiveRecoverTicks  —— 测标持续达标后的连续计数，避免单帧抖动回升
+    //   · adaptiveDropTicks     —— 测标持续低迷后的连续计数，避免一次纹理上传/窗口抖动直接降档
     int                      userRequestedFpsLimit  = 30;
     int                      adaptiveDispatchHz     = 30;
     int                      adaptiveRecoverTicks   = 0;
+    int                      adaptiveDropTicks      = 0;
 
     // Tamagotchi 信号保活：仅当工作区存在 Tamagotchi 模块时，
     // 才临时 retain(Loudness) 以驱动孵化/行为状态机；无 Tamagotchi 时立刻 release。

@@ -30,6 +30,15 @@ SpectrumModule::SpectrumModule(AnalyserHub& h)
     addAndMakeVisible(btnPeak);
     addAndMakeVisible(btnSlope);
 
+    rawMags.ensureStorageAllocated (256);
+    smoothedDb .reserve (256);
+    peakDb     .reserve (256);
+    peakHoldMs .reserve (256);
+    blurredDb  .reserve (256);
+    slopeOffsetDb.reserve (256);
+    curvePts     .reserve (256);
+    peakCurvePts .reserve (256);
+
     lastTickTime = juce::Time::getCurrentTime();
 }
 
@@ -192,12 +201,10 @@ void SpectrumModule::rebuildDisplay()
         smoothedDb .assign(N, minDb);
         peakDb     .assign(N, minDb);
         peakHoldMs .assign(N, 0.0f);
+        blurredDb  .assign(N, minDb);
     }
 
-    const double fMin   = (double) minFreqHz;
-    const double fMax   = juce::jmin ((double) maxFreqHz, hub.getSampleRate() * 0.5);
-    const double logMin = std::log10 (fMin);
-    const double logMax = std::log10 (fMax);
+    ensureDisplayCache (N);
 
     for (int col = 0; col < N; ++col)
     {
@@ -205,13 +212,8 @@ void SpectrumModule::rebuildDisplay()
         float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
 
         // Slope 补偿：4.5 dB/oct 高频提升（基准 1kHz）
-        if (slopeEnabled)
-        {
-            const double t = (double) col / (double) juce::jmax (1, N - 1);
-            const double f = std::pow (10.0, logMin + t * (logMax - logMin));
-            const double octaves = std::log2 (juce::jmax (20.0, f) / 1000.0);
-            db += (float) (4.5 * octaves);
-        }
+        if (slopeEnabled && (int) slopeOffsetDb.size() == N)
+            db += slopeOffsetDb[(size_t) col];
 
         // 平滑：上升快，下降慢
         const float prev  = smoothedDb[(size_t) col];
@@ -228,17 +230,50 @@ void SpectrumModule::rebuildDisplay()
     // ----------------------------------------------------------
     if (N >= 3)
     {
-        std::vector<float> blurred (smoothedDb.size());
-        blurred[0]     = smoothedDb[0];
-        blurred[N - 1] = smoothedDb[(size_t)(N - 1)];
+        if ((int) blurredDb.size() != N)
+            blurredDb.assign (N, minDb);
+
+        blurredDb[0]     = smoothedDb[0];
+        blurredDb[N - 1] = smoothedDb[(size_t)(N - 1)];
         for (int i = 1; i < N - 1; ++i)
         {
-            blurred[(size_t) i] = 0.25f * smoothedDb[(size_t)(i - 1)]
-                                + 0.50f * smoothedDb[(size_t) i]
-                                + 0.25f * smoothedDb[(size_t)(i + 1)];
+            blurredDb[(size_t) i] = 0.25f * smoothedDb[(size_t)(i - 1)]
+                                   + 0.50f * smoothedDb[(size_t) i]
+                                   + 0.25f * smoothedDb[(size_t)(i + 1)];
         }
-        smoothedDb.swap(blurred);
+        smoothedDb.swap(blurredDb);
     }
+}
+
+void SpectrumModule::ensureDisplayCache (int numPoints)
+{
+    numPoints = juce::jmax (2, numPoints);
+
+    const double sampleRate = hub.getSampleRate();
+    if (slopeCacheSize == numPoints
+        && std::abs (slopeCacheSampleRate - sampleRate) <= 0.5
+        && (int) slopeOffsetDb.size() == numPoints)
+    {
+        return;
+    }
+
+    slopeOffsetDb.resize ((size_t) numPoints);
+
+    const double fMin   = (double) minFreqHz;
+    const double fMax   = juce::jmin ((double) maxFreqHz, sampleRate * 0.5);
+    const double logMin = std::log10 (fMin);
+    const double logMax = std::log10 (juce::jmax (fMin, fMax));
+
+    for (int col = 0; col < numPoints; ++col)
+    {
+        const double t = (double) col / (double) juce::jmax (1, numPoints - 1);
+        const double f = std::pow (10.0, logMin + t * (logMax - logMin));
+        const double octaves = std::log2 (juce::jmax (20.0, f) / 1000.0);
+        slopeOffsetDb[(size_t) col] = (float) (4.5 * octaves);
+    }
+
+    slopeCacheSize = numPoints;
+    slopeCacheSampleRate = sampleRate;
 }
 
 // ----------------------------------------------------------
@@ -328,8 +363,7 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
 
     // ---------- 先把 N 个采样点映射到像素坐标 ----------
     //   (等距 x；y 由 dbToY 换算)
-    std::vector<juce::Point<float>> pts;
-    pts.reserve ((size_t) N);
+    curvePts.resize ((size_t) N);
     const float x0   = (float) inner.getX();
     const float xLen = (float) inner.getWidth();
     const float invMax = 1.0f / (float) juce::jmax (1, N - 1);
@@ -337,7 +371,7 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
     {
         const float x = x0 + (float) i * invMax * xLen;
         const float y = dbToY (smoothedDb[(size_t) i], canvas);
-        pts.push_back ({ x, y });
+        curvePts[(size_t) i] = { x, y };
     }
 
     // ---------- Catmull-Rom → cubicBezier 构建 Path ----------
@@ -385,38 +419,37 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
     };
 
     // 1) 填充区域（从底部到曲线的 lightly tinted area）
-    juce::Path fill;
-    buildSmoothPath (fill, pts, /*closeToBottom*/ true);
+    fillPath.clear();
+    buildSmoothPath (fillPath, curvePts, /*closeToBottom*/ true);
     g.setColour (PinkXP::pink300.withAlpha (0.25f));
-    g.fillPath (fill);
+    g.fillPath (fillPath);
 
     // 2) 主曲线（双层描边：浅底 + 深顶，视觉厚度）
-    juce::Path curve;
-    buildSmoothPath (curve, pts, /*closeToBottom*/ false);
+    curvePath.clear();
+    buildSmoothPath (curvePath, curvePts, /*closeToBottom*/ false);
     g.setColour (PinkXP::pink500.withAlpha (0.35f));
-    g.strokePath (curve, juce::PathStrokeType (3.0f));
+    g.strokePath (curvePath, juce::PathStrokeType (3.0f));
     g.setColour (PinkXP::pink600);
-    g.strokePath (curve, juce::PathStrokeType (1.4f));
+    g.strokePath (curvePath, juce::PathStrokeType (1.4f));
 
     // 3) 峰值保持（虚线）—— 同样做 Catmull-Rom 平滑
     if (peakHoldEnabled && (int) peakDb.size() == N)
     {
-        std::vector<juce::Point<float>> peakPts;
-        peakPts.reserve ((size_t) N);
+        peakCurvePts.resize ((size_t) N);
         for (int i = 0; i < N; ++i)
         {
             const float x = x0 + (float) i * invMax * xLen;
             const float y = dbToY (peakDb[(size_t) i], canvas);
-            peakPts.push_back ({ x, y });
+            peakCurvePts[(size_t) i] = { x, y };
         }
-        juce::Path peak;
-        buildSmoothPath (peak, peakPts, /*closeToBottom*/ false);
+        peakPath.clear();
+        buildSmoothPath (peakPath, peakCurvePts, /*closeToBottom*/ false);
 
-        juce::Path dashed;
+        dashedPeakPath.clear();
         const float dashes[] = { 3.0f, 3.0f };
-        juce::PathStrokeType (1.2f).createDashedStroke (dashed, peak, dashes, 2);
+        juce::PathStrokeType (1.2f).createDashedStroke (dashedPeakPath, peakPath, dashes, 2);
         g.setColour (PinkXP::pink700.withAlpha (0.75f));
-        g.fillPath (dashed);
+        g.fillPath (dashedPeakPath);
     }
 }
 

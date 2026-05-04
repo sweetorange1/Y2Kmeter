@@ -1,0 +1,112 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "msvc",
+      "displayName": "MSVC (Visual Studio 2026)",
+      "description": "Normal multi-config MSVC build with Debug/Release/RelWithDebInfo/MinSizeRel.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "binaryDir": "${sourceDir}/build/msvc"
+    },
+    {
+      "name": "msvc-pgo-generate",
+      "displayName": "MSVC Release PGO Generate",
+      "description": "Release build instrumented for PGO training. Run the app/plugin in typical scenarios after building this preset.",
+      "inherits": "msvc",
+      "binaryDir": "${sourceDir}/build/msvc-pgo-generate",
+      "cacheVariables": {
+        "Y2K_ENABLE_LTO": "ON",
+        "Y2K_PGO_MODE": "GENERATE",
+        "Y2K_PGO_DATA_DIR": "${sourceDir}/build/pgo/msvc"
+      }
+    },
+    {
+      "name": "msvc-pgo-use",
+      "displayName": "MSVC Release PGO Use",
+      "description": "Release build optimized with profile data collected by msvc-pgo-generate.",
+      "inherits": "msvc",
+      "binaryDir": "${sourceDir}/build/msvc-pgo-use",
+      "cacheVariables": {
+        "Y2K_ENABLE_LTO": "ON",
+        "Y2K_PGO_MODE": "USE",
+        "Y2K_PGO_DATA_DIR": "${sourceDir}/build/pgo/msvc"
+      }
+    },
+    {
+      "name": "clangd-msvc",
+      "displayName": "clangd index database (MSVC + Ninja)",
+      "description": "Generates build-clangd/compile_commands.json for clangd without touching the normal MSVC build directory.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-clangd",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "environment": {
+        "CC": "cl",
+        "CXX": "cl",
+        "PATH": "D:/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64;C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64;$penv{PATH}",
+        "INCLUDE": "D:/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.50.35717/include;D:/Microsoft Visual Studio/18/BuildTools/VC/Auxiliary/VS/include;C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/ucrt;C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/um;C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/shared;C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/winrt;C:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/cppwinrt",
+        "LIB": "D:/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.50.35717/lib/x64;D:/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.50.35717/atlmfc/lib/x64;C:/Program Files (x86)/Windows Kits/10/lib/10.0.26100.0/ucrt/x64;C:/Program Files (x86)/Windows Kits/10/lib/10.0.26100.0/um/x64"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "msvc-debug",
+      "displayName": "MSVC Debug",
+      "configurePreset": "msvc",
+      "configuration": "Debug"
+    },
+    {
+      "name": "msvc-release",
+      "displayName": "MSVC Release",
+      "configurePreset": "msvc",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc-pgo-generate",
+      "displayName": "MSVC Release PGO Generate",
+      "configurePreset": "msvc-pgo-generate",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc-pgo-use",
+      "displayName": "MSVC Release PGO Use",
+      "configurePreset": "msvc-pgo-use",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc-relwithdebinfo",
+      "displayName": "MSVC RelWithDebInfo",
+      "configurePreset": "msvc",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "msvc-minsizerel",
+      "displayName": "MSVC MinSizeRel",
+      "configurePreset": "msvc",
+      "configuration": "MinSizeRel"
+    },
+    {
+      "name": "clangd-msvc",
+      "displayName": "clangd index database (MSVC + Ninja)",
+      "configurePreset": "clangd-msvc"
+    }
+  ]
+}

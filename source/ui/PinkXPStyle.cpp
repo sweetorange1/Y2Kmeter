@@ -1,5 +1,6 @@
 #include "source/ui/PinkXPStyle.h"
 #include "BinaryData.h"
+#include "source/perf/PerformanceCounterSystem.h"
 
 // ==========================================================
 // PinkXPStyle.cpp —— 像素风配色/绘制/LookAndFeel 的实现
@@ -127,6 +128,10 @@ namespace PinkXP
 
     void drawDesktop(juce::Graphics& g, juce::Rectangle<int> r)
     {
+        // y2k::perf::ScopedPerfTimer desktopTimer(y2k::perf::FunctionId::uiDrawDesktop,
+        //                                         y2k::perf::Partition::uiRendering,
+        //                                         y2k::perf::ThreadRole::ui);
+
         // 1) 底色
         g.setColour(desktop);
         g.fillRect(r);

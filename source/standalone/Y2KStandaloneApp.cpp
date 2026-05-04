@@ -661,11 +661,13 @@ private:
     {
         DBG (juce::String ("[Y2K] Audio source changed -> ") + sourceId);
 
+#if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordEvent(
             y2k::perf::FunctionId::lowFreqAudioSourceSwitch,
             y2k::perf::Partition::dataCommunication,
             y2k::perf::ThreadRole::ui,
             1);
+#endif
 
         if (pluginHolder == nullptr) return;
 

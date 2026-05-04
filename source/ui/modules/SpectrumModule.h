@@ -47,6 +47,7 @@ private:
     // ---- 数据处理 ----
     // 把 1024 bin 的线性幅度 → N_cols 列的 dBFS 值（按对数频率+Slope 补偿）
     void rebuildDisplay();
+    void ensureDisplayCache (int numPoints);
 
     // ---- 绘制 ----
     void drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const;
@@ -76,6 +77,20 @@ private:
     // 峰值保持（dB）+ 保持计时
     std::vector<float> peakDb;
     std::vector<float> peakHoldMs;
+
+    // 每帧复用的显示层缓冲，避免 rebuild/paint 中反复分配。
+    std::vector<float> blurredDb;
+    std::vector<float> slopeOffsetDb;
+    int    slopeCacheSize = 0;
+    double slopeCacheSampleRate = 0.0;
+
+    // paintContent 是 const 路径，使用 mutable 缓存承接曲线点数组。
+    mutable std::vector<juce::Point<float>> curvePts;
+    mutable std::vector<juce::Point<float>> peakCurvePts;
+    mutable juce::Path fillPath;
+    mutable juce::Path curvePath;
+    mutable juce::Path peakPath;
+    mutable juce::Path dashedPeakPath;
 
     // 显示参数
     static constexpr float minFreqHz = 20.0f;

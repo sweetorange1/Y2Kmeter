@@ -17,7 +17,12 @@ endif()
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
 
-project(Y2Kmeter VERSION 1.6.0 LANGUAGES CXX)
+project(Y2Kmeter VERSION 1.6.0 LANGUAGES C CXX)
+
+# 让 Ninja/Makefile 生成 compile_commands.json，供 clangd 精确读取
+# include path、宏定义和 JUCE 生成头路径。Visual Studio 生成器会忽略该文件生成，
+# 所以仓库里额外提供了 clangd-msvc preset 使用 Ninja。
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 当外部环境设置了 CMAKE_GENERATOR_PLATFORM 但未设置 CMAKE_GENERATOR 时，
 # CMake 在 VS CustomBuild 阶段会反复打印警告。
@@ -30,17 +35,62 @@ if (DEFINED ENV{CMAKE_GENERATOR_PLATFORM} AND NOT DEFINED ENV{CMAKE_GENERATOR})
   )
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17)  
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ==========================================================
+# Release 性能优化开关
+#   · LTO/IPO：默认启用，只影响 Release / RelWithDebInfo / MinSizeRel。
+#   · PGO：两阶段流程，默认关闭；通过 preset 切换 GENERATE / USE。
+#     1) Y2K_PGO_MODE=GENERATE 构建并运行典型场景，生成 profile 数据。
+#     2) Y2K_PGO_MODE=USE      使用同一份 profile 数据重新构建发布版。
+# ==========================================================
+option(Y2K_ENABLE_LTO "Enable link-time optimization for release builds" ON)
+
+set(Y2K_PGO_MODE "OFF" CACHE STRING "PGO mode: OFF, GENERATE, USE")
+set_property(CACHE Y2K_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
+string(TOUPPER "${Y2K_PGO_MODE}" Y2K_PGO_MODE)
+set(Y2K_PGO_MODE "${Y2K_PGO_MODE}" CACHE STRING "PGO mode: OFF, GENERATE, USE" FORCE)
+
+set(Y2K_PGO_DATA_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH
+    "Directory used to write/read profile-guided optimization data")
+
+set(Y2K_VALID_PGO_MODES OFF GENERATE USE)
+if (NOT Y2K_PGO_MODE IN_LIST Y2K_VALID_PGO_MODES)
+  message(FATAL_ERROR "Y2K_PGO_MODE must be OFF, GENERATE, or USE; got '${Y2K_PGO_MODE}'")
+endif()
+
+if (DEFINED FETCHCONTENT_SOURCE_DIR_JUCE
+    AND NOT FETCHCONTENT_SOURCE_DIR_JUCE STREQUAL ""
+    AND NOT EXISTS "${FETCHCONTENT_SOURCE_DIR_JUCE}/CMakeLists.txt")
+  message(WARNING
+    "FETCHCONTENT_SOURCE_DIR_JUCE='${FETCHCONTENT_SOURCE_DIR_JUCE}' does not look like a JUCE checkout "
+    "(missing CMakeLists.txt). Ignoring this override so FetchContent can populate JUCE.")
+  unset(FETCHCONTENT_SOURCE_DIR_JUCE CACHE)
+  unset(FETCHCONTENT_SOURCE_DIR_JUCE)
+endif()
+
 include(FetchContent)
+
+# clangd 的专用 Ninja 配置需要 compile_commands.json，但 JUCE 默认会在配置期
+# 递归再开一个子 CMake/Ninja 去单独构建 juceaide。Windows 上如果 PATH 里同时有
+# MinGW，这个子配置很容易重新选回 gcc/g++，导致 JUCE 直接以 "MinGW is not
+# supported" 失败。这里改为在当前工具链里直接构建 helper tool，避免递归子配置
+# 的编译器漂移。
+set(JUCE_BUILD_HELPER_TOOLS ON CACHE BOOL
+    "Build JUCE helper tools in the current configure pass" FORCE)
+
 FetchContent_Declare(
         juce
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
         GIT_TAG 8.0.12
 )
 FetchContent_MakeAvailable(juce)
+
+if (TARGET juceaide AND NOT TARGET juce::juceaide)
+  add_executable(juce::juceaide ALIAS juceaide)
+endif()
 
 # add_subdirectory(grid_plugin)
 
@@ -217,11 +267,108 @@ endif()
 #   · 仅在 MSVC 下生效；其它工具链完全不受影响
 # ==========================================================
 if (MSVC)
+  target_compile_options(Y2Kmeter PRIVATE /MP)
+
   target_compile_options(Y2Kmeter PRIVATE
     $<$<CONFIG:Debug>:/Z7>
     $<$<CONFIG:RelWithDebInfo>:/Z7>
   )
+
+  target_compile_options(Y2Kmeter PRIVATE
+    $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /Gy /Gw>
+  )
+
+  target_link_options(Y2Kmeter PRIVATE
+    $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>
+  )
+
 endif()
+
+# ==========================================================
+# LTO / PGO 应用到插件本体与 JUCE 生成的格式 target
+# ==========================================================
+set(Y2K_IPO_SUPPORTED FALSE)
+if (Y2K_ENABLE_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT Y2K_IPO_SUPPORTED OUTPUT Y2K_IPO_ERROR LANGUAGES CXX)
+  if (Y2K_IPO_SUPPORTED)
+    message(STATUS "Y2Kmeter: LTO/IPO enabled for Release, RelWithDebInfo, and MinSizeRel")
+  else()
+    message(WARNING "Y2Kmeter: LTO/IPO requested but not supported by this toolchain: ${Y2K_IPO_ERROR}")
+  endif()
+endif()
+
+function(y2k_apply_release_lto target_name)
+  if (NOT TARGET "${target_name}")
+    return()
+  endif()
+
+  if (Y2K_ENABLE_LTO AND Y2K_IPO_SUPPORTED)
+    set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+    set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL TRUE)
+  endif()
+endfunction()
+
+function(y2k_apply_release_pgo target_name)
+  if (NOT TARGET "${target_name}" OR Y2K_PGO_MODE STREQUAL "OFF")
+    return()
+  endif()
+
+  file(MAKE_DIRECTORY "${Y2K_PGO_DATA_DIR}")
+
+  if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set(_pgd_file "${Y2K_PGO_DATA_DIR}/${target_name}.pgd")
+
+    # MSVC PGO is link-time PGO, so force /GL + /LTCG on the trained Release target.
+    target_compile_options("${target_name}" PRIVATE
+      $<$<CONFIG:Release>:/GL>
+    )
+    target_link_options("${target_name}" PRIVATE
+      $<$<CONFIG:Release>:/LTCG>
+    )
+
+    if (Y2K_PGO_MODE STREQUAL "GENERATE")
+      target_link_options("${target_name}" PRIVATE
+        $<$<CONFIG:Release>:/GENPROFILE:PGD=${_pgd_file}>
+      )
+    elseif (Y2K_PGO_MODE STREQUAL "USE")
+      target_link_options("${target_name}" PRIVATE
+        $<$<CONFIG:Release>:/USEPROFILE:PGD=${_pgd_file}>
+      )
+    endif()
+  elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if (Y2K_PGO_MODE STREQUAL "GENERATE")
+      target_compile_options("${target_name}" PRIVATE
+        $<$<CONFIG:Release>:-fprofile-generate=${Y2K_PGO_DATA_DIR}>
+      )
+      target_link_options("${target_name}" PRIVATE
+        $<$<CONFIG:Release>:-fprofile-generate=${Y2K_PGO_DATA_DIR}>
+      )
+    elseif (Y2K_PGO_MODE STREQUAL "USE")
+      target_compile_options("${target_name}" PRIVATE
+        $<$<CONFIG:Release>:-fprofile-use=${Y2K_PGO_DATA_DIR}>
+        $<$<CONFIG:Release>:-fprofile-correction>
+      )
+      target_link_options("${target_name}" PRIVATE
+        $<$<CONFIG:Release>:-fprofile-use=${Y2K_PGO_DATA_DIR}>
+      )
+    endif()
+  else()
+    message(WARNING
+      "Y2Kmeter: Y2K_PGO_MODE=${Y2K_PGO_MODE} was requested, "
+      "but automatic PGO flags are only configured for MSVC and GNU compilers.")
+  endif()
+endfunction()
+
+foreach(_y2k_target IN ITEMS
+    Y2Kmeter
+    Y2Kmeter_SharedCode
+    Y2Kmeter_VST3
+    Y2Kmeter_Standalone)
+  y2k_apply_release_lto("${_y2k_target}")
+  y2k_apply_release_pgo("${_y2k_target}")
+endforeach()
 
 # ==========================================================
 # Standalone EXE 图标（Windows）
