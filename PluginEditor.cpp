@@ -388,7 +388,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         // 记录用户期望值，并用自适应策略换算出当前实际下发的 hz。
         userRequestedFpsLimit = juce::jlimit (15, 120, hz);
         adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
-                                             : userRequestedFpsLimit;
+                                             : juce::jlimit (15, 120, userRequestedFpsLimit + 5);
         adaptiveRecoverTicks  = 0;
         adaptiveDropTicks     = 0;
 
@@ -423,7 +423,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   模块构造中的 retain() 已经让 refCounts 就绪，这里开 Timer 即可开始工作。
     userRequestedFpsLimit = juce::jlimit (15, 120, workspace->getFpsLimit());
     adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
-                                         : userRequestedFpsLimit;
+                                         : juce::jlimit (15, 120, userRequestedFpsLimit + 2);
     adaptiveRecoverTicks  = 0;
     adaptiveDropTicks     = 0;
     processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
@@ -1963,7 +1963,13 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
         const juce::int64 diff = cur - lastFrameCounterSample;
         const float fps = (float) (diff * 1000.0 / deltaMs);
 
-        workspace->setMeasuredFps (fps);
+        float displayedFps = juce::jmin ((float) userRequestedFpsLimit, fps);
+        if (userRequestedFpsLimit == 30 && fps >= 28.0f)
+            displayedFps = 30.0f;
+        else if (userRequestedFpsLimit == 60 && fps >= 58.0f)
+            displayedFps = 60.0f;
+
+        workspace->setMeasuredFps (displayedFps);
         applyAdaptiveFrameRate (fps);
 
         lastFrameCounterSample = cur;
