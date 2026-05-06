@@ -88,8 +88,19 @@ include(FetchContent)
 # MinGW，这个子配置很容易重新选回 gcc/g++，导致 JUCE 直接以 "MinGW is not
 # supported" 失败。这里改为在当前工具链里直接构建 helper tool，避免递归子配置
 # 的编译器漂移。
-set(JUCE_BUILD_HELPER_TOOLS ON CACHE BOOL
-    "Build JUCE helper tools in the current configure pass" FORCE)
+#
+# 注意：此 workaround 只适用于 Windows。
+#   · 默认分支（OFF）：JUCE 在 *配置阶段* 通过 execute_process 递归子 CMake 把
+#     juceaide 立即编出来并以 IMPORTED target 形式暴露，juce_add_plugin 在配置
+#     阶段调用 juceaide 生成图标 / plist 时文件已存在。
+#   · 强开 ON：juceaide 变成主构建图里的普通 target，只在 build 阶段才会被编译；
+#     但 juce_add_plugin 仍然在 *配置阶段* 就去执行 juceaide，于是会抛出
+#     "juceaide was imported, but it doesn't exist!"。
+# 因此在 macOS / Linux 上必须保持默认 OFF，只有 Windows 需要这个强制覆盖。
+if (WIN32)
+  set(JUCE_BUILD_HELPER_TOOLS ON CACHE BOOL
+      "Build JUCE helper tools in the current configure pass" FORCE)
+endif()
 
 FetchContent_Declare(
         juce
