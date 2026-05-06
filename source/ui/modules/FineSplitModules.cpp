@@ -214,19 +214,37 @@ void TruePeakModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Loudness)) return;
 
     const auto& s = frame.loudness;
-    const float prevTpMax  = juce::jmax(tpL,  tpR);
-    const float prevRmsMax = juce::jmax(rmsL, rmsR);
-    prevTp = prevTpMax; prevRms = prevRmsMax;
+    const float prevTpShown = tpDisplay;
+    const float prevRmsMax  = juce::jmax(rmsL, rmsR);
+    prevTp = prevTpShown;
+    prevRms = prevRmsMax;
 
-    tpL  = tpL  + 0.30f * (s.truePeakL - tpL);
-    tpR  = tpR  + 0.30f * (s.truePeakR - tpR);
+    // RMS 维持原有轻平滑
     rmsL = rmsL + 0.12f * (s.rmsL - rmsL);
     rmsR = rmsR + 0.12f * (s.rmsR - rmsR);
 
-    const float tpMax  = juce::jmax(tpL,  tpR);
+    // TP-L/TP-R：短保持 + 自动回落（避免长时间钉在历史最大值）
+    const float tpInstantMax = juce::jmax (s.truePeakL, s.truePeakR);
+    constexpr int holdFrames = 60;      // 约 2.0s @30fps
+    constexpr float fallPerFrameDb = 0.28f; // 约 8.4 dB/s @30fps
+
+    if (tpInstantMax >= tpDisplay - 0.0001f)
+    {
+        tpDisplay = tpInstantMax;
+        tpHoldFrames = holdFrames;
+    }
+    else if (tpHoldFrames > 0)
+    {
+        --tpHoldFrames;
+    }
+    else
+    {
+        tpDisplay = juce::jmax (tpInstantMax, tpDisplay - fallPerFrameDb);
+    }
+
     const float rmsMax = juce::jmax(rmsL, rmsR);
-    if (std::abs(tpMax  - prevTp)  > 0.3f) flashTp  = 1.0f;
-    if (std::abs(rmsMax - prevRms) > 0.3f) flashRms = 1.0f;
+    if (std::abs(tpDisplay - prevTp)  > 0.3f) flashTp  = 1.0f;
+    if (std::abs(rmsMax    - prevRms) > 0.3f) flashRms = 1.0f;
     flashTp  = juce::jmax(0.0f, flashTp  - 0.08f);
     flashRms = juce::jmax(0.0f, flashRms - 0.08f);
 
@@ -247,10 +265,10 @@ void TruePeakModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     area.removeFromTop(4);
 
     auto dbToNorm = [](float d) { return juce::jlimit(0.0f, 1.0f, juce::jmap(d, -40.0f, 0.0f, 0.0f, 1.0f)); };
-    const float tpMax  = juce::jmax(tpL,  tpR);
-    const float rmsMax = juce::jmax(rmsL, rmsR);
-    drawReadout(g, top,  "TP-L / TP-R",   tpMax,  "dBTP", dbToNorm(tpMax),  flashTp,  pulsePhase);
-    drawReadout(g, area, "RMS-L / RMS-R", rmsMax, "dBFS", dbToNorm(rmsMax), flashRms, pulsePhase + 3.0f);
+    const float tpShown = tpDisplay;
+    const float rmsMax  = juce::jmax(rmsL, rmsR);
+    drawReadout(g, top,  "TP-L / TP-R",   tpShown, "dBTP", dbToNorm(tpShown), flashTp,  pulsePhase);
+    drawReadout(g, area, "RMS-L / RMS-R", rmsMax,  "dBFS", dbToNorm(rmsMax),  flashRms, pulsePhase + 3.0f);
 }
 
 OscilloscopeChannelModule::OscilloscopeChannelModule(AnalyserHub& h, bool leftChannel)

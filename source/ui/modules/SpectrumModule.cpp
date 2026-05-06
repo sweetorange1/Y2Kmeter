@@ -378,12 +378,24 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
     const float yTop = (float) inner.getY();
     const float yBot = (float) inner.getBottom();
 
+    // "沉底"判定阈值（像素）：当采样点的 y 到画布底的距离小于该阈值时，视为贴底。
+    //   用像素判据而非 dB 判据：
+    //     1) 与 dbToY 对 minDb 的精确取值无关，天然免疫浮点误差；
+    //     2) 只要视觉上已贴底，就不再让邻点 p3 的切线把本段抬出一个小弧。
+    //   0.75 px ≈ 亚像素级贴底，不会把"刚离开底部一点点"的正常上升误判为沉底。
+    constexpr float floorPixelTol = 0.75f;
+
     auto buildSmoothPath = [&] (juce::Path& path,
                                 const std::vector<juce::Point<float>>& P,
                                 bool closeToBottom)
     {
         const int n = (int) P.size();
         if (n < 2) return;
+
+        auto atFloor = [yBot, floorPixelTol] (const juce::Point<float>& p) noexcept
+        {
+            return (yBot - p.y) <= floorPixelTol;
+        };
 
         if (closeToBottom) path.startNewSubPath (P[0].x, yBot); // fill 版：从底部开始
         else               path.startNewSubPath (P[0]);
@@ -398,11 +410,27 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
             const auto& p2 = P[i + 1];
             const auto& p3 = (i + 2 >= n) ? P[n - 1] : P[i + 2];
 
+            // ---------- 沉底直线段：p1、p2 都贴底 ----------
+            //   Catmull-Rom 在"两端都贴底"的段里，仍会按 p0/p3 的斜率生成控制点，
+            //   导致 p1→p2 间出现向上或向下的小弧（尤其当 p3 是陡升峰时）。
+            //   这种情况下视觉上"就是一条水平底线"，直接 lineTo 到 (p2.x, yBot)
+            //   可完全消除小弧，并让填充路径严格贴画布底沿。
+            if (atFloor (p1) && atFloor (p2))
+            {
+                path.lineTo (p2.x, yBot);
+                continue;
+            }
+
             // Catmull-Rom (tension=0.5) → Bezier 控制点
             const float c1x = p1.x + (p2.x - p0.x) / 6.0f;
             const float c2x = p2.x - (p3.x - p1.x) / 6.0f;
             float c1y       = p1.y + (p2.y - p0.y) / 6.0f;
             float c2y       = p2.y - (p3.y - p1.y) / 6.0f;
+
+            // 若本段的起点或终点贴底，则把对应端的切线分量强制归零，
+            // 避免"从底抬起/跌入底"瞬间由对向邻点造成的鼓包/下凹。
+            if (atFloor (p1)) c1y = p1.y;
+            if (atFloor (p2)) c2y = p2.y;
 
             // 防止过冲到画布外（贝塞尔控制点 y 超出会让曲线短暂跌出可视区）
             c1y = juce::jlimit (yTop, yBot, c1y);

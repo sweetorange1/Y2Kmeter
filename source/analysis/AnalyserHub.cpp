@@ -785,6 +785,11 @@ LoudnessMeter::Snapshot AnalyserHub::getLoudnessSnapshot()
     return loudnessMeter.getSnapshot();
 }
 
+void AnalyserHub::resetLoudness() noexcept
+{
+    loudnessMeter.reset();
+}
+
 // ==========================================================
 // 相位相关快照
 // ==========================================================

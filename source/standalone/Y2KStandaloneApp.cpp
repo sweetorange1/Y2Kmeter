@@ -235,10 +235,11 @@ public:
                     handleAudioSourceChanged (savedSource, savedLoopback);
                     syncDropdownToCurrentDevice (*y2kEditor);
 
-                    // 4.2) 恢复 chrome（标题栏+底部 toolbar）可见性（默认可见）
-                    const bool savedChrome = getUserSettings()
-                        .getBoolValue ("ui.chromeVisible", true);
-                    y2kEditor->setChromeVisible (savedChrome);
+                    // 4.2) 【已移到下面 mainWindow->setVisible(true) 之后】
+                    //      原因：setChromeVisible 走"标准 Hide 路径"需要 editor.isShowing()=true，
+                    //      而此处 mainWindow 还没 setVisible(true)。
+                    //      改到下方统一在窗口可见后执行，确保 Hide 收缩窗口、Show 还原窗口
+                    //      这一对操作在整个生命周期里都走同一条路径，严格幂等。
 
                     // 4.3) 恢复"固定置顶"（pin）按钮状态（默认 true — 首次启动就置顶）
                     //     · 用 setAlwaysOnTopActive 统一接口，内部会显式强推一次
@@ -254,10 +255,29 @@ public:
         }
 
         // 5) 恢复窗口 bounds（若 settings 里有合法记录且落在当前桌面范围内）
+        //    注意：此时持久化的 bounds 始终是"show 态等效尺寸"——
+        //    saveMainWindowBounds 在退出时如果窗口处于 hide 态，会先把尺寸
+        //    反算成 show 态（h+=62, 贴底时 y-=62）再写入，保证重启恢复
+        //    的窗口永远对应"show 态"。随后 setChromeVisible(false) 会用
+        //    标准 Hide 路径在该 show 态尺寸上收缩一次，得到正确的 hide 态。
         if (! restoreMainWindowBounds())
             mainWindow->centreWithSize (mainWindow->getWidth(), mainWindow->getHeight());
 
         mainWindow->setVisible (true);
+
+        // 6) 窗口可见后再应用 chromeVisible —— 此时 editor.isShowing()=true，
+        //    setChromeVisible 会走 canResizeWindow=true 的标准路径：
+        //      · savedChrome=true  → 无操作（workspace 已默认 chromeVisible=true）
+        //      · savedChrome=false → 标准 Hide 路径，基于当前（恢复的 show 态）
+        //        窗口快照 + 收缩 -62，最终得到与"运行时点 Hide"完全相同的 hide 态。
+        //    这样不论用户上次以何种状态退出，首次 Show 都能走主路径幂等还原到
+        //    savedTopBoundsBeforeHide，界面尺寸 100% 一致。
+        if (cachedEditor != nullptr)
+        {
+            const bool savedChrome = getUserSettings()
+                .getBoolValue ("ui.chromeVisible", true);
+            cachedEditor->setChromeVisible (savedChrome);
+        }
     }
 
     // --------------------------------------------------
@@ -392,6 +412,16 @@ private:
     }
 
     // 关闭前保存窗口 bounds 到 settings
+    //
+    // ★ 关键幂等化（2026-05）：持久化的 window.{x,y,w,h} 始终写入"show 态等效尺寸"。
+    //   如果退出时窗口处于 hide 态（chromeVisible=false），先把尺寸反算回 show 态：
+    //     · 贴顶 hide 态（窗口中心位于屏幕上半）：顶边 y 不变，高度 +62 → 底边下移 62
+    //     · 贴底 hide 态（窗口中心位于屏幕下半）：底边不变，顶边 y -= 62，高度 +62
+    //   这样启动时 restoreMainWindowBounds 恢复的永远是"show 态窗口"，随后
+    //   setChromeVisible(savedChrome=false) 会走标准 Hide 路径在该 show 态窗口上
+    //   做一次 -62 收缩，得到与运行时点 Hide 完全等价的 hide 态。
+    //   首次用户点 Show 时即可走主路径直接 setBounds(savedTopBoundsBeforeHide)
+    //   严格幂等回到启动时恢复的 show 态窗口，彻底消除"重开后 Hide→Show 尺寸变化"的 bug。
     void saveMainWindowBounds()
     {
         if (mainWindow == nullptr) return;
@@ -404,7 +434,28 @@ private:
         // systemRequestedQuit() 里做过了
         if (! mainWindow->isVisible()) return;
 
-        const auto b = mainWindow->getBounds();
+        auto b = mainWindow->getBounds();
+
+        // 反算为 show 态等效尺寸：仅当当前处于 hide 态（Editor 的 chromeVisible=false）
+        if (cachedEditor != nullptr && ! cachedEditor->isChromeVisible())
+        {
+            constexpr int kChromeShrink = 26 /*titleBarHeight*/ + 36 /*toolbarHeight*/; // = 62
+
+            // 判断 hide 时窗口是"上半贴顶"还是"下半贴底"：与 onChromeVisibleChanged
+            //   lambda 中 bottomAligned 的判定保持一致（窗口中心 Y vs 屏幕 userArea 中心 Y）
+            const auto& disp   = juce::Desktop::getInstance().getDisplays();
+            const auto* d      = disp.getDisplayForRect (b);
+            const auto userArea = (d != nullptr) ? d->userArea
+                                                  : juce::Rectangle<int> (1280, 720);
+            const bool bottomAligned = (b.getCentreY() > userArea.getCentreY());
+
+            // 反算：上半屏 → 顶边不变，h+=62（底边下移）
+            //      下半屏 → 底边不变，y-=62、h+=62（顶边上移）
+            const int restoredY = bottomAligned ? (b.getY() - kChromeShrink) : b.getY();
+            const int restoredH = b.getHeight() + kChromeShrink;
+            b = { b.getX(), restoredY, b.getWidth(), restoredH };
+        }
+
         auto& s = getUserSettings();
         // 先显式 remove，再 setValue —— 等价于"用当前值覆盖"，彻底剔除任何
         //   由老版本留下的同名脏值（例如 Win32 下极少数情况下 PropertyFile
@@ -897,7 +948,23 @@ private:
 
             // 度量 Loopback 路径的 CPU 占比（否则 processBlock 不跑，UI CPU 一直 0）
             const double t0 = juce::Time::getMillisecondCounterHiRes();
-            y2kProc->getAnalyserHub().pushStereo (L, R, n);
+            const float gainLin = y2kProc->getAnalysisInputGainLinear();
+            if (std::abs (gainLin - 1.0f) < 0.0001f)
+            {
+                y2kProc->getAnalyserHub().pushStereo (L, R, n);
+            }
+            else
+            {
+                juce::HeapBlock<float> tmpL, tmpR;
+                tmpL.malloc ((size_t) n);
+                tmpR.malloc ((size_t) n);
+                for (int i = 0; i < n; ++i)
+                {
+                    tmpL[i] = L[i] * gainLin;
+                    tmpR[i] = R[i] * gainLin;
+                }
+                y2kProc->getAnalyserHub().pushStereo (tmpL.get(), tmpR.get(), n);
+            }
             const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - t0;
             y2kProc->registerLoopbackRenderTime (elapsedMs, n, sr);
         };

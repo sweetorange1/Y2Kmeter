@@ -212,6 +212,10 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
             momentaryWriteCount = 0;
 
             updateSnapshot();
+
+            // True Peak 改为按块统计：发布快照后清零，下一块重新累计。
+            tpL.peak = 0.0f;
+            tpR.peak = 0.0f;
         }
     }
 }

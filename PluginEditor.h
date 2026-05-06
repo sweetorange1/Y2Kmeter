@@ -219,6 +219,28 @@ private:
     bool chromeDim = false;
     bool mouseInsideEditor = false;
 
+    // —— Hide 按钮收缩窗口支持 ——
+    //   点击 Hide 时，把顶层窗口高度收缩掉 titleBarHeight + toolbarHeight(=26+36=62) 像素，
+    //   Show 恢复时反向加回。根据窗口当前在屏幕中的位置（上/下）决定：
+    //     · 位于屏幕上半部 → 顶边固定，高度向下收缩（模块感觉贴屏幕顶）
+    //     · 位于屏幕下半部 → 底边固定，顶边下移 shrink 像素（模块感觉贴屏幕底）
+    //
+    //   幂等化策略（修复反复 Hide→Show 后窗口累积漂移 + 首次 Show 变形）：
+    //     Hide 时把"切换前"的顶层窗口 bounds 和 resizeLimits 完整快照下来；
+    //     Show 时直接把窗口 setBounds 回快照 bounds，绝不基于"当前窗口 ± shrink"
+    //     做浮动计算——避免 DocumentWindow inset、DPI 舍入、constrainer 夹紧等
+    //     多种误差的累积。这样 N 次 Hide→Show 循环的窗口 bounds 严格等于初始值。
+    //
+    //   limits 还原策略：Show 把 savedResizeMin/Max 与 savedTopBoundsBeforeHide
+    //     做 jmin/jmax 融合后再写回，防止 horizontal bar 等"尺寸超出默认 limits"
+    //     的预设在 setResizeLimits 一瞬被 constrainer 反向夹成狭长矩形。
+    bool hasSavedBoundsBeforeHide = false;
+    juce::Rectangle<int> savedTopBoundsBeforeHide; // Hide 前顶层窗口完整 bounds
+    int  savedResizeMinW = 0;
+    int  savedResizeMinH = 0;
+    int  savedResizeMaxW = 0;
+    int  savedResizeMaxH = 0;
+
     // —— 无边框窗口拖拽支持（仅在 Standalone 下起作用，VST3 宿主中无害）——
     //   拖拽只允许从标题栏发起（而不是任意空白区）
     juce::ComponentDragger  windowDragger;

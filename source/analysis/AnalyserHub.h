@@ -459,6 +459,9 @@ public:
     // 响度：返回当前 LoudnessMeter 快照
     LoudnessMeter::Snapshot getLoudnessSnapshot();
 
+    // 音频线程调用：重置 Loudness 相关积分/峰值状态（含 LUFS-I / True Peak）
+    void resetLoudness() noexcept;
+
     // 相位相关快照
     PhaseCorrelator::Snapshot getPhaseSnapshot();
 

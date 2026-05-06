@@ -324,6 +324,50 @@ ModuleWorkspace::ModuleWorkspace()
     fpsBtn.setLookAndFeel (fpsMiniLnf.get());
     addAndMakeVisible (fpsBtn);
 
+    // gain：输入增益按钮（位于 hide 左侧）
+    gainBtn.setButtonText ("gain");
+    gainBtn.setTooltip ("Input gain (-4.0 dB ~ +18.0 dB)");
+    gainBtn.onClick = [this]()
+    {
+        setGainPopupVisible (! gainPopupVisible);
+    };
+    addAndMakeVisible (gainBtn);
+
+    // gain 弹出控制条（默认隐藏）
+    gainSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    gainSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    gainSlider.setRange (-4.0, 18.0, 0.1);
+    gainSlider.setColour (juce::Slider::trackColourId, PinkXP::sel);
+    gainSlider.setColour (juce::Slider::thumbColourId, PinkXP::btnFace);
+    gainSlider.setTextValueSuffix (" dB");
+    gainSlider.setDoubleClickReturnValue (true, 0.0);
+    gainSlider.setValue ((double) inputGainDb, juce::dontSendNotification);
+    gainSlider.onValueChange = [this]()
+    {
+        float db = (float) gainSlider.getValue();
+
+        // 0 dB 吸附：靠近零点时自动吸到 0.0，便于快速回到基准增益
+        constexpr float zeroSnapThresholdDb = 0.30f;
+        if (std::abs (db) <= zeroSnapThresholdDb)
+        {
+            db = 0.0f;
+            if (std::abs ((float) gainSlider.getValue()) > 0.0001f)
+                gainSlider.setValue ((double) db, juce::dontSendNotification);
+        }
+
+        if (std::abs (db - inputGainDb) < 0.0001f)
+            return;
+
+        inputGainDb = db;
+        gainBtn.setTooltip ("Input gain (" + juce::String (inputGainDb, 1) + " dB)");
+        if (onInputGainChanged)
+            onInputGainChanged (inputGainDb);
+
+        notifyLayoutChanged();
+        repaint();
+    };
+    addChildComponent (gainSlider);
+
     fpsLabel.setText ("-- fps", juce::dontSendNotification);
     fpsLabel.setJustificationType (juce::Justification::centredLeft);
     fpsLabel.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
@@ -470,6 +514,14 @@ ModuleWorkspace::ModuleWorkspace()
 
 ModuleWorkspace::~ModuleWorkspace()
 {
+    // 如果析构时 gainPopup 仍处打开态（监听器还挂在 Desktop），必须先摘下来，
+    // 否则后续全局 mouseDown 会回调到已销毁的 this → 崩溃。
+    if (gainPopupListenerAttached)
+    {
+        juce::Desktop::getInstance().removeGlobalMouseListener (&gainPopupDismissListener);
+        gainPopupListenerAttached = false;
+    }
+
     // 显式解绑 LookAndFeel：audioSourceBox 生命周期随本对象，
     // 但 getPinkXPLookAndFeel() 是进程级单例；在某些宿主卸载顺序下
     // （先析构 Component 再释放 LookAndFeel）不解绑也行，但显式解绑
@@ -489,6 +541,64 @@ ModuleWorkspace::~ModuleWorkspace()
         PinkXP::unsubscribeThemeChanged (themeSubToken);
         themeSubToken = -1;
     }
+}
+
+// ----------------------------------------------------------
+// gain 弹出控制条 —— 可见性切换 + 全局点击外部关闭
+// ----------------------------------------------------------
+void ModuleWorkspace::setGainPopupVisible (bool shouldBeVisible)
+{
+    if (gainPopupVisible == shouldBeVisible)
+    {
+        // 即便状态未变，也保底同步一次 slider 的可见性（防御性）
+        gainSlider.setVisible (shouldBeVisible);
+        return;
+    }
+
+    gainPopupVisible = shouldBeVisible;
+    gainSlider.setVisible (shouldBeVisible);
+
+    if (shouldBeVisible)
+    {
+        gainSlider.toFront (false);
+        // 挂全局 MouseListener 用于"点击外部关闭"
+        if (! gainPopupListenerAttached)
+        {
+            juce::Desktop::getInstance().addGlobalMouseListener (&gainPopupDismissListener);
+            gainPopupListenerAttached = true;
+        }
+    }
+    else
+    {
+        if (gainPopupListenerAttached)
+        {
+            juce::Desktop::getInstance().removeGlobalMouseListener (&gainPopupDismissListener);
+            gainPopupListenerAttached = false;
+        }
+    }
+
+    repaint();
+}
+
+void ModuleWorkspace::GainPopupDismissListener::mouseDown (const juce::MouseEvent& e)
+{
+    // popup 已不在显示状态时直接忽略（理论上不会命中：关闭时已 detach）
+    if (! owner.gainPopupVisible)
+        return;
+
+    // 屏蔽"点击 gain 按钮本身"—— 按钮的 onClick 会自己 toggle popup，
+    //   如果这里再关一次 popup，点击按钮就变成"打开 → 立刻关闭"的净效果。
+    const auto gainBtnScreen = owner.gainBtn.getScreenBounds();
+    if (gainBtnScreen.contains (e.getScreenPosition()))
+        return;
+
+    // 落点若在 gainSlider 屏幕矩形内 → 用户正在操作滑块，不关闭
+    const auto sliderScreen = owner.gainSlider.getScreenBounds();
+    if (sliderScreen.contains (e.getScreenPosition()))
+        return;
+
+    // 其余任何位置（画布空白 / 模块 / 其他按钮 / 窗口外）→ 关闭 popup
+    owner.setGainPopupVisible (false);
 }
 
 // ----------------------------------------------------------
@@ -688,6 +798,13 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
             syncPerlerLayerBounds (oldFocus);
             repaint();
         }
+
+        // hideBtn 始终保持在最上层：模块 mouseDown 会调 toFront(true) 把自己
+        // 移到 child 列表末尾（z-order 最顶），此时 hideBtn 会被压在下面。
+        // 这里在模块冒前之后再把 hideBtn 拉回最顶，保证用户无论聚焦哪个模块
+        // （尤其是 chrome 隐藏 + 窗口收缩后重叠在 hideBtn 上的模块）都能看到并
+        // 点到 hideBtn / Show 按钮，避免"找不到 Show 按钮"的尴尬。
+        hideBtn.toFront (false);
     };
 
 }
@@ -1355,7 +1472,10 @@ void ModuleWorkspace::paint(juce::Graphics& g)
         drawDivider (toolbarDividerX0);
         drawDivider (toolbarDividerX1);
         drawDivider (toolbarDividerX2);
+        drawDivider (toolbarDividerX3);
         drawDivider (toolbarDividerXLayout);
+
+
     }
     // else: chrome 隐藏 —— 不画任何背景/工具栏，让 Editor 的桌面底图透过来
 
@@ -1611,6 +1731,48 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
         }
     }
 
+    // gain 弹出控制条：只包含控制条 + 右侧数值，放在 paintOverChildren 确保层级高于模块
+    if (chromeVisible && gainPopupVisible && gainBtn.isVisible() && gainSlider.isVisible())
+    {
+        constexpr int valueW = 56;
+        constexpr int valueGap = 2;
+
+        auto popupBounds = gainSlider.getBounds().expanded (8, 6);
+        popupBounds = popupBounds.withRight (popupBounds.getRight() + valueGap + valueW);
+        popupBounds = popupBounds.withHeight (30).withY (gainBtn.getY() - 34);
+
+        // 不透明底板（覆盖在最上层）
+        PinkXP::drawRaised (g, popupBounds, PinkXP::btnFace);
+
+        auto textArea = popupBounds;
+        textArea.removeFromRight (valueGap);
+        auto valueArea = textArea.removeFromRight (valueW);
+
+        // 0 dB 参考竖线：画在 0dB 对应滑块中心位置（位于滑块下层）
+        {
+            const auto sb = gainSlider.getBounds();
+            const int zeroX = gainSlider.getX() + (int) std::round (gainSlider.getPositionOfValue (0.0)) - 1;
+
+            g.setColour (PinkXP::ink.withAlpha (0.65f));
+            g.fillRect (zeroX, sb.getY() - 2, 1, sb.getHeight() + 4);
+            g.setColour (PinkXP::hl.withAlpha (0.70f));
+            g.fillRect (zeroX + 1, sb.getY() - 2, 1, sb.getHeight() + 4);
+        }
+
+        // 重新绘制 slider，保证轨道与滑块位于最上层且不受底板遮挡
+        {
+            juce::Graphics::ScopedSaveState save (g);
+            g.reduceClipRegion (gainSlider.getBounds().expanded (1));
+            g.setOrigin (gainSlider.getPosition());
+            gainSlider.paintEntireComponent (g, true);
+        }
+
+        // 当前值画在同一块控制条板子的右侧区域
+        g.setColour (PinkXP::ink.withAlpha (0.92f));
+        g.setFont (PinkXP::getFont (10.0f, juce::Font::plain));
+        g.drawText (juce::String (inputGainDb, 1) + " dB", valueArea.translated (-10, 0), juce::Justification::centredRight, false);
+    }
+
     if (! hoverPreviewActive)
         return;
 
@@ -1688,6 +1850,33 @@ void ModuleWorkspace::resized()
         // 1) 最右侧：Hide 按钮
         auto btnArea = tb.removeFromRight(btnW + 4);
         hideBtn.setBounds(btnArea.withSizeKeepingCentre(btnW, btnH));
+
+        // 1.5) Gain 按钮（位于 hide 左侧，二者之间有竖直分割线）
+        tb.removeFromRight (4);
+        toolbarDividerX3 = tb.removeFromRight (1).getX();
+        tb.removeFromRight (4);
+        auto gainBtnArea = tb.removeFromRight (btnW + 4);
+        gainBtn.setBounds (gainBtnArea.withSizeKeepingCentre (btnW, btnH));
+        gainBtn.setVisible (true);
+
+        // gain 弹出控制条的滑条位置（固定在 gain 按钮上方）
+        {
+            constexpr int gainPopupW = 380;
+            const auto toolbar = getToolbarArea();
+            const int popupX = juce::jlimit (toolbar.getX() + 8,
+                                             toolbar.getRight() - gainPopupW - 8,
+                                             gainBtn.getRight() - gainPopupW);
+
+            auto popup = gainBtn.getBounds().withY (gainBtn.getY() - 34).withHeight (30);
+            popup = popup.withWidth (gainPopupW).withX (popupX);
+
+            // 左对齐：左侧仅保留最小内边距；右侧预留紧凑数值区
+            auto sliderArea = popup.reduced (8, 6).withTrimmedRight (58);
+            gainSlider.setBounds (sliderArea);
+            gainSlider.setVisible (gainPopupVisible);
+            if (gainPopupVisible)
+                gainSlider.toFront (false);
+        }
 
         // 2 + 3) Source 区：分隔线 #2 + 音频源下拉 + 前缀标签
         //   · 仅 Standalone 下可见（DAW 插件模式由宿主提供音频，无需选择设备）；
@@ -1822,6 +2011,8 @@ void ModuleWorkspace::resized()
         audioSourceBox.setVisible (false);
         fpsBtn.setVisible   (false);
         fpsLabel.setVisible (false);
+        gainBtn.setVisible  (false);
+        setGainPopupVisible (false);
         gridBtn.setVisible  (false);
         layoutPresetBox.setVisible (false);
         savePresetBtn.setVisible   (false);
@@ -1829,6 +2020,7 @@ void ModuleWorkspace::resized()
         toolbarDividerX0 = -1;
         toolbarDividerX1 = -1;
         toolbarDividerX2 = -1;
+        toolbarDividerX3 = -1;
         toolbarDividerXLayout = -1;
         auto r = getLocalBounds();
         hideBtn.setBounds(r.getRight()  - btnW - btnMargin,
@@ -1844,25 +2036,35 @@ void ModuleWorkspace::resized()
     //     · 只有当模块完全跑到 canvas 右/下侧之外（起点不可见）时才回拉；
     //       部分超出 canvas 的模块保持原坐标不动 —— 等窗口放大后自然可见，
     //       避免"先打开插件 → canvas 暂时小 → 模块被强夹 → 后面窗口放大也不回来"。
+    //
+    // ⚠ Hide/Show 切换保护（2026-05）：
+    //   chromeTransitionActive 为 true 时（Editor 正在做 Hide/Show 过渡），
+    //   canvas 会短暂比最终尺寸更小（Show 时 chromeVisible 先翻转让 canvas 裁
+    //   出 toolbar 的 36px，但窗口高度还未被放大 62px），如果此时 clamp 会把
+    //   模块高度永久夹小。切换结束后 Editor 会再触发一次 resized，clamp 会在
+    //   那时以正确尺寸执行。
     auto canvas = getCanvasArea();
-    for (auto* m : modules)
+    if (! chromeTransitionActive)
     {
-        auto b = m->getBounds();
+        for (auto* m : modules)
+        {
+            auto b = m->getBounds();
 
-        // 1) 尺寸超 canvas：缩到 canvas 内（否则接下来 jlimit 会把 upper < lower，挤到原点）
-        if (b.getWidth()  > canvas.getWidth())  b.setWidth (canvas.getWidth());
-        if (b.getHeight() > canvas.getHeight()) b.setHeight(canvas.getHeight());
+            // 1) 尺寸超 canvas：缩到 canvas 内（否则接下来 jlimit 会把 upper < lower，挤到原点）
+            if (b.getWidth()  > canvas.getWidth())  b.setWidth (canvas.getWidth());
+            if (b.getHeight() > canvas.getHeight()) b.setHeight(canvas.getHeight());
 
-        // 2) 位置：仅在"完全离开 canvas 可视区"时回拉；否则保持用户保存的坐标
-        //    - 左上超出 canvas（负向）   → 拉回到 canvas 左/上边
-        //    - 起点越过 canvas 右/下边缘 → 让起点等于 canvas.right/bottom - size
-        if (b.getX() < canvas.getX())            b.setX (canvas.getX());
-        if (b.getY() < canvas.getY())            b.setY (canvas.getY());
-        if (b.getX() > canvas.getRight()  - 1)   b.setX (canvas.getRight()  - b.getWidth());
-        if (b.getY() > canvas.getBottom() - 1)   b.setY (canvas.getBottom() - b.getHeight());
+            // 2) 位置：仅在"完全离开 canvas 可视区"时回拉；否则保持用户保存的坐标
+            //    - 左上超出 canvas（负向）   → 拉回到 canvas 左/上边
+            //    - 起点越过 canvas 右/下边缘 → 让起点等于 canvas.right/bottom - size
+            if (b.getX() < canvas.getX())            b.setX (canvas.getX());
+            if (b.getY() < canvas.getY())            b.setY (canvas.getY());
+            if (b.getX() > canvas.getRight()  - 1)   b.setX (canvas.getRight()  - b.getWidth());
+            if (b.getY() > canvas.getBottom() - 1)   b.setY (canvas.getBottom() - b.getHeight());
 
-        if (b != m->getBounds())
-            m->setBounds(b);
+            if (b != m->getBounds())
+                m->setBounds(b);
+        }
     }
 
     // ⚠ bug1 三次修复（2026-04-23）：
@@ -1873,9 +2075,9 @@ void ModuleWorkspace::resized()
     //
     //   最终结论：resized() 里**不再**改写任何 perlerImage 的坐标。
     //   其他真正需要 clamp 的路径（addPerlerImageFromFile / mouseDrag /
-    //   rebuildPerlerImage* / shiftAllPerlerImagesY 的调用处）都已各自做好
-    //   边界保护。resized() 只是一个随窗口尺寸抖动频繁触发的钩子，它不应该
-    //   永久改写用户数据——就算图片暂时完全不可见，用户把窗口放大就能重新看到。
+    //   rebuildPerlerImage* 等）都已各自做好边界保护。resized() 只是一个
+    //   随窗口尺寸抖动频繁触发的钩子，它不应该永久改写用户数据——就算图片
+    //   暂时完全不可见，用户把窗口放大就能重新看到。
 
     // 按钮始终保持在最上层（避免被模块窗口遮挡）
     hideBtn.toFront(false);
@@ -1887,6 +2089,11 @@ void ModuleWorkspace::resized()
 void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
 {
     if (chromeVisible == shouldBeVisible) return;
+
+    // 开启 Hide/Show 过渡保护：期间 resized() 末尾的模块 clamp 被跳过，
+    //   避免中间态 canvas 暂时比最终尺寸小导致模块高度被永久夹紧。
+    chromeTransitionActive = true;
+
     chromeVisible = shouldBeVisible;
 
     // 按钮文案 + 空闲透明行为切换
@@ -1896,9 +2103,15 @@ void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
     resized();
     repaint();
 
-    // 通知外部（Editor 会据此把顶部 TitleBar 和 × 按钮切到半透明/不透明）
+    // 通知外部（Editor 会据此把顶部 TitleBar 和 × 按钮切到半透明/不透明，
+    //   并同步调整顶层窗口尺寸/位置）。Editor 的回调内部会再触发若干 resized()，
+    //   但 chromeTransitionActive 仍为 true，模块 bounds 不会被误 clamp。
     if (onChromeVisibleChanged)
         onChromeVisibleChanged (chromeVisible);
+
+    // 过渡结束：关闭保护开关，再跑一次 resized() 让最终态的 clamp（如需要）正常执行。
+    chromeTransitionActive = false;
+    resized();
 }
 
 // ----------------------------------------------------------
@@ -2070,6 +2283,21 @@ void ModuleWorkspace::setMeasuredFps (float fps)
     fpsLabel.setText (next, juce::dontSendNotification);
 }
 
+void ModuleWorkspace::setInputGainDb (float db)
+{
+    const float clamped = juce::jlimit (-4.0f, 18.0f, db);
+    if (std::abs (clamped - inputGainDb) < 0.0001f)
+        return;
+
+    inputGainDb = clamped;
+    gainSlider.setValue ((double) inputGainDb, juce::dontSendNotification);
+    gainBtn.setTooltip ("Input gain (" + juce::String (inputGainDb, 1) + " dB)");
+    if (onInputGainChanged)
+        onInputGainChanged (inputGainDb);
+    notifyLayoutChanged();
+    repaint();
+}
+
 // ==========================================================
 // Phase E —— 吸附预览
 // ==========================================================
@@ -2173,6 +2401,8 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
     juce::ValueTree tree(kLayoutRoot);
     // 全局开关：网格叠加层可见性（toolbar 上 Grid 按钮）
     tree.setProperty ("gridVisible", gridOverlayVisible, nullptr);
+    // 全局分析输入增益（dB）
+    tree.setProperty ("inputGainDb", (double) inputGainDb, nullptr);
 
     // ==============================================================
     // 按 JUCE 真实 z-order 混合写入（模块 + 拼豆贴画）
@@ -2266,6 +2496,10 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
         gridOverlayVisible = (bool) tree.getProperty ("gridVisible");
         gridBtn.setToggleState (gridOverlayVisible, juce::dontSendNotification);
     }
+
+    // 恢复全局：分析输入增益（dB）
+    if (tree.hasProperty ("inputGainDb"))
+        setInputGainDb ((float) (double) tree.getProperty ("inputGainDb", 0.0));
 
     // 清空现有模块 + 拼豆贴画
     for (int i = modules.size(); --i >= 0;)
@@ -2630,9 +2864,15 @@ void HideChromeButton::paintButton(juce::Graphics& g, bool isMouseOver, bool isB
         PinkXP::drawRaised(g, r, isMouseOver ? PinkXP::pink100 : PinkXP::btnFace);
 
     // 按钮文字
-    g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
+    //   字号与 gridBtn / gainBtn / saveBtn 等普通 TextButton 保持一致：
+    //   复用 PinkXPLookAndFeel::getTextButtonFont 的公式
+    //     PinkXP::getFont (min(14, h*0.55), bold)
+    g.setFont(PinkXP::getFont(juce::jmin(14.0f, r.getHeight() * 0.55f),
+                              juce::Font::bold));
     g.setColour(PinkXP::ink);
-    auto textArea = r.reduced(4, 2);
+    // 水平 padding 只留 1px —— "Show" 四个像素字母 + 字符间距比 "Hide" 宽，
+    //   之前 reduced(4, 2) 会在 btnW=52 / font≈12pt 下把 "w" 切掉半像素。
+    auto textArea = r.reduced(1, 2);
     if (isButtonDown) textArea.translate(1, 1);
     g.drawText(getButtonText(), textArea,
                juce::Justification::centred, false);
@@ -3058,24 +3298,6 @@ void ModuleWorkspace::clearPerlerImages()
 int ModuleWorkspace::getNumPerlerImages() const noexcept
 {
     return perlerImages.size();
-}
-
-// ----------------------------------------------------------
-// Bug3：chrome 隐藏/显示时，workspace 自身 y 位移补偿（Editor 调用）
-//   · Editor 已对所有 ModulePanel 做反向平移以保持"屏幕绝对位置不变"，
-//     这里对 perlerImages 做同样的平移，修复"hide 后图片上移"的 bug。
-// ----------------------------------------------------------
-void ModuleWorkspace::shiftAllPerlerImagesY (int dy)
-{
-    if (dy == 0 || perlerImages.isEmpty()) return;
-    for (int i = 0; i < perlerImages.size(); ++i)
-    {
-        auto* img = perlerImages.getUnchecked (i);
-        if (img == nullptr) continue;
-        img->topLeft.y += dy;
-        syncPerlerLayerBounds (i);   // layer 子组件同步跟随
-    }
-    repaint();
 }
 
 // ----------------------------------------------------------

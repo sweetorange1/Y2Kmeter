@@ -66,7 +66,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.6");
+const int versionW = versionFont.getStringWidth ("v1.7");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -107,7 +107,7 @@ const int versionW = versionFont.getStringWidth ("v1.6");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.6";
+const juce::String versionText = "v1.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -327,12 +327,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // 4.1) chrome 可见性变化 → 隐藏/显示顶部 TitleBar
     //     切换时需要 resized() 重新布局（隐藏后 workspace 应占满整个窗口），
     //     并整体 repaint 而不仅仅 repaint 标题栏矩形。
-    //
-    //     注：workspace 在 chrome 可见时从 y=titleBarHeight 开始，chrome 隐藏时从 y=0 开始，
-    //     自身位置有 titleBarHeight 的差值。为了让用户看到的模块视觉位置完全不变，
-    //     我们在切换瞬间对所有模块的相对 y 坐标做反向补偿平移：
-    //       · 切到 hide（workspace 上移 26 px）→ 模块 y += 26，屏幕位置不变
-    //       · 切回 show（workspace 下移 26 px）→ 模块 y -= 26，屏幕位置还原
+    //     模块 y 坐标不做任何补偿，靠 workspace 自身位置变化带动模块整体平移。
     workspace->onChromeVisibleChanged = [this](bool visible)
     {
         const bool toHide = ! visible;           // 本次切换是"进入隐藏态"吗？
@@ -343,31 +338,169 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         pinButtonHovered   = pinButtonPressed   = false;
         minButtonHovered   = minButtonPressed   = false;
 
-        // 平移所有模块相对 workspace 的 y 坐标，保持"屏幕绝对位置"完全不变
-        //   · 向隐藏态切换：workspace 的 top 从 titleBarHeight → 0，模块需要 +titleBarHeight
-        //   · 向显示态切换：workspace 的 top 从 0 → titleBarHeight，模块需要 -titleBarHeight
-        if (workspace != nullptr)
+        // ------------------------------------------------------------
+        // Hide 收缩窗口 / Show 反向展开
+        //   · Hide：窗口高度 -shrink（上半屏顶边固定、下半屏底边固定），
+        //            workspace 占满整窗后，模块屏幕位置自然贴向对应屏幕边。
+        //   · Show：严格还原 Hide 前的完整 bounds 快照（幂等），不做浮动计算。
+        //
+        // 过渡期保护：ModuleWorkspace::setChromeVisible 会开启
+        //   chromeTransitionActive，使过渡期内的 resized() 跳过模块 clamp，
+        //   避免模块高度在中间帧被错误压缩。
+        //
+        // 启动守卫 isShowing()：Standalone App 恢复持久化状态时会调
+        //   setChromeVisible，此时 Editor 还未上屏，不应改窗口尺寸。
+        // ------------------------------------------------------------
+        constexpr int kToolbarHeight = 36; // 与 ModuleWorkspace::toolbarHeight 保持一致
+        const int shrink = titleBarHeight + kToolbarHeight; // 62px
+
+        auto* topComp = getTopLevelComponent();
+        const bool isStandalone = juce::JUCEApplicationBase::isStandaloneApp()
+                                  && topComp != nullptr && topComp != this;
+        // 只在 Standalone 下真正调整顶层窗口尺寸。插件宿主（VST3/AU 等）由 DAW
+        //   管理窗口，插件擅自 setSize 极易与宿主打架（被宿主拉回、视觉抖动）。
+        //   宿主模式下走"不改窗口"兜底路径，chromeDim 已让 Editor::resized 让出
+        //   titleBarHeight 给 workspace，模块会自然跟随 workspace 上移/下移。
+        const bool canResizeWindow = isShowing() && isStandalone && ! isPluginHost;
+
+        // 判断当前窗口处于屏幕"上半"还是"下半"：
+        //   · Hide 路径用"切换前"的位置（当前就是切换前，因为 setBounds 还没执行）
+        //   · Show 路径用"当前"位置（窗口目前仍处在被 Hide 后的收缩态）。
+        //     由于 Hide 时只改了高度和可能的 y，上/下半判断对 Show 仍然一致。
+        bool bottomAligned = false;
+        if (canResizeWindow && topComp != nullptr)
         {
-            const int dy = toHide ? titleBarHeight : -titleBarHeight;
-            const int n = workspace->getNumModules();
-            for (int i = 0; i < n; ++i)
-            {
-                if (auto* m = workspace->getModule (i))
-                {
-                    auto b = m->getBounds();
-                    b.translate (0, dy);
-                    m->setBounds (b);
-                }
-            }
-            // Bug3：对画布上的"拼豆贴画"做同样的 y 补偿，保持视觉位置不变
-            workspace->shiftAllPerlerImagesY (dy);
+            const auto topScreenBounds = (topComp == this) ? getScreenBounds() : topComp->getScreenBounds();
+            const auto* display = juce::Desktop::getInstance()
+                                     .getDisplays()
+                                     .getDisplayForRect (topScreenBounds);
+            const auto userArea = (display != nullptr) ? display->userArea
+                                                        : juce::Rectangle<int> (1280, 720);
+            const int windowCenterY = topScreenBounds.getCentreY();
+            const int screenCenterY = userArea.getCentreY();
+            bottomAligned = (windowCenterY > screenCenterY);
         }
+
+        // 拼豆贴画与模块共享 workspace 坐标系，会随 workspace 原点一起平移，
+        //   因此无需在此处单独补偿。
 
         // 切换 overlay 可见性：仅在 hide 态下显示抬头文字 + 浮动按钮
         if (chromeHiddenOverlay != nullptr)
             chromeHiddenOverlay->setVisible (toHide);
 
-        resized();
+        // ------------------------------------------------------------
+        // 实际收缩 / 展开顶层窗口（仅在 canResizeWindow 时执行）
+        //   先 setBounds（会触发 Editor::resized → workspace 重新布局），
+        //   再 repaint，避免闪烁。
+        //
+        //   幂等化关键：Hide 时快照切换前窗口 bounds + resizeLimits，
+        //     Show 时直接 setBounds 回快照值，不做"当前 ± shrink"浮动计算。
+        //     这样可彻底消除累积偏差（DocumentWindow inset、DPI 舍入、
+        //     bottomAligned 翻转、constrainer 夹紧等），N 次 Hide→Show 循环
+        //     后窗口 bounds 严格等于初始值。
+        // ------------------------------------------------------------
+        if (canResizeWindow)
+        {
+            if (toHide)
+            {
+                // 1) 快照当前完整 bounds + resizeLimits（将在 Show 时原样还原）
+                savedTopBoundsBeforeHide = topComp->getBounds();
+                if (auto* cbc = getConstrainer())
+                {
+                    savedResizeMinW = cbc->getMinimumWidth();
+                    savedResizeMinH = cbc->getMinimumHeight();
+                    savedResizeMaxW = cbc->getMaximumWidth();
+                    savedResizeMaxH = cbc->getMaximumHeight();
+                }
+                hasSavedBoundsBeforeHide = true;
+
+                // 2) 计算 Hide 后的目标 bounds
+                //    · 上半屏：顶边固定，高度 -shrink（底边上移 shrink）
+                //    · 下半屏：底边固定，顶边 +shrink（高度 -shrink）
+                const auto b = savedTopBoundsBeforeHide;
+                const int newY = bottomAligned ? (b.getY() + shrink) : b.getY();
+                const int newH = juce::jmax (1, b.getHeight() - shrink);
+
+                // 3) 放宽 resizeLimits 以让 newH 能被接受（不让 min 夹回）
+                if (getConstrainer() != nullptr)
+                {
+                    setResizeLimits (juce::jmin (savedResizeMinW, b.getWidth()),
+                                     juce::jmin (savedResizeMinH, newH),
+                                     juce::jmax (savedResizeMaxW, b.getWidth()),
+                                     juce::jmax (savedResizeMaxH, b.getHeight()));
+                }
+
+                // 4) 应用收缩后的窗口 bounds
+                topComp->setBounds (b.getX(), newY, b.getWidth(), newH);
+            }
+            else
+            {
+                // Show 路径：严格还原到 Hide 前的快照，绝不基于当前窗口做浮动计算
+                if (hasSavedBoundsBeforeHide)
+                {
+                    // 1) 先放宽 resizeLimits 让快照 bounds 能被接受
+                    if (getConstrainer() != nullptr)
+                    {
+                        setResizeLimits (juce::jmin (savedResizeMinW, savedTopBoundsBeforeHide.getWidth()),
+                                         juce::jmin (savedResizeMinH, savedTopBoundsBeforeHide.getHeight()),
+                                         juce::jmax (savedResizeMaxW, savedTopBoundsBeforeHide.getWidth()),
+                                         juce::jmax (savedResizeMaxH, savedTopBoundsBeforeHide.getHeight()));
+                    }
+
+                    // 2) 直接还原完整 bounds（x/y/w/h 全部等于 Hide 前快照）
+                    topComp->setBounds (savedTopBoundsBeforeHide);
+
+                    // 3) 还原 resizeLimits—— 但必须与刚还原的 bounds 相容，防止
+                    //    ComponentBoundsConstrainer 在 setResizeLimits 内部对当前
+                    //    bounds 重新 check 并夹紧。
+                    //
+                    //    场景：快照的 savedResizeMin/Max 是"Hide 按下那一刻"的
+                    //      值——而 resizeLimits 未持久化，启动后仅恢复模块 XML
+                    //      不会重跑 preset 扩展 limits；一旦 savedTopBoundsBeforeHide
+                    //      来自 horizontal bar 预设（2558×246 这种超出默认 limits
+                    //      的尺寸），直接写回默认 limits（1600×1100）会把它夹
+                    //      成1600×420。
+                    //    解决：min 向下夹到当前宽高、max 向上抬到当前宽高，其
+                    //      余保持快照值。对 default/tiled 等天然在默认 limits 内的
+                    //      预设无影响；对 horizontal bar 则把上限抬到 screenW。
+                    const auto restoredBounds = savedTopBoundsBeforeHide;
+                    setResizeLimits (juce::jmin (savedResizeMinW, restoredBounds.getWidth()),
+                                     juce::jmin (savedResizeMinH, restoredBounds.getHeight()),
+                                     juce::jmax (savedResizeMaxW, restoredBounds.getWidth()),
+                                     juce::jmax (savedResizeMaxH, restoredBounds.getHeight()));
+
+                    hasSavedBoundsBeforeHide = false;
+                }
+                else
+                {
+                    // 防御性路径（当前启动流程下不可达）：
+                    //   Standalone App 在启动时会先 setBounds(show 态)
+                    //   → setChromeVisible(false) 走标准 Hide 路径 → 写入
+                    //   hasSavedBoundsBeforeHide。因此用户首次点 Show 必走主路径。
+                    //   保留此分支是为了防御未来启动流程重构后出现"无快照
+                    //   但需要 Show"的退化情形，避免被 constrainer 夹成狭长矩形。
+                    auto b = topComp->getBounds();
+                    const int newY = bottomAligned ? (b.getY() - shrink) : b.getY();
+                    const int newH = b.getHeight() + shrink;
+
+                    if (auto* cbc = getConstrainer())
+                    {
+                        setResizeLimits (juce::jmin (cbc->getMinimumWidth(),  b.getWidth()),
+                                         juce::jmin (cbc->getMinimumHeight(), newH),
+                                         juce::jmax (cbc->getMaximumWidth(),  b.getWidth()),
+                                         juce::jmax (cbc->getMaximumHeight(), newH));
+                    }
+
+                    topComp->setBounds (b.getX(), newY, b.getWidth(), newH);
+                }
+            }
+        }
+
+        // 非 canResizeWindow 的兜底路径（插件宿主 / 启动恢复）：
+        //   不改窗口尺寸，但仍需让 Editor 根据 chromeDim 重新分配内部区域。
+        if (! canResizeWindow)
+            resized();
+
         repaint();
 
         // 切换后同步 workspace 的 hit-test 挖洞：让 overlay 按钮/文字区的鼠标事件
@@ -398,6 +531,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         lastFrameCounterSample = 0;
         lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
     };
+
+    // 4.4) gain 控制条变化 → 下发到分析输入增益（仅影响分析链，不影响透传输出）
+    workspace->onInputGainChanged = [this](float db)
+    {
+        processor.setAnalysisInputGainDb (db);
+    };
+    workspace->setInputGainDb (processor.getAnalysisInputGainDb());
 
     // 订阅主题变更 → 切主题后刷新全局重绘
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
@@ -1254,7 +1394,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.6";
+const juce::String versionText = "v1.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);

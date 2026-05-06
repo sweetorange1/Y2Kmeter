@@ -4,6 +4,14 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/perf/PerformanceCounterSystem.h"
 
+namespace
+{
+inline float clampGainDb (float db) noexcept
+{
+    return juce::jlimit (-10.0f, 36.0f, db);
+}
+}
+
 // ==========================================================
 // Y2KmeterAudioProcessor
 // ==========================================================
@@ -69,6 +77,10 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 
     juce::ScopedNoDenormals noDenormals;
 
+    // 前置增益变化后，在音频线程安全重置 loudness（含 LUFS-I 积分）
+    if (pendingLoudnessReset.exchange (false, std::memory_order_relaxed))
+        analyserHub->resetLoudness();
+
     const int totalIn  = getTotalNumInputChannels();
     const int totalOut = getTotalNumOutputChannels();
 
@@ -77,17 +89,51 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     {
         if (totalIn >= 2)
         {
-            // 真正的立体声
-            analyserHub->pushStereo(buffer.getReadPointer(0),
-                                    buffer.getReadPointer(1),
-                                    buffer.getNumSamples());
+            const float gainLin = analysisInputGainLin.load (std::memory_order_relaxed);
+
+            if (std::abs (gainLin - 1.0f) < 0.0001f)
+            {
+                // 真正的立体声
+                analyserHub->pushStereo(buffer.getReadPointer(0),
+                                        buffer.getReadPointer(1),
+                                        buffer.getNumSamples());
+            }
+            else
+            {
+                const int n = buffer.getNumSamples();
+                juce::AudioBuffer<float> analysisTemp (2, n);
+                analysisTemp.copyFrom (0, 0, buffer, 0, 0, n);
+                analysisTemp.copyFrom (1, 0, buffer, 1, 0, n);
+                analysisTemp.applyGain (0, 0, n, gainLin);
+                analysisTemp.applyGain (1, 0, n, gainLin);
+
+                analyserHub->pushStereo (analysisTemp.getReadPointer (0),
+                                         analysisTemp.getReadPointer (1),
+                                         n);
+            }
         }
         else if (totalIn == 1)
         {
-            // Mono 降级：L/R 使用同一指针
-            analyserHub->pushStereo(buffer.getReadPointer(0),
-                                    buffer.getReadPointer(0),
-                                    buffer.getNumSamples());
+            const float gainLin = analysisInputGainLin.load (std::memory_order_relaxed);
+            const int n = buffer.getNumSamples();
+
+            if (std::abs (gainLin - 1.0f) < 0.0001f)
+            {
+                // Mono 降级：L/R 使用同一指针
+                analyserHub->pushStereo(buffer.getReadPointer(0),
+                                        buffer.getReadPointer(0),
+                                        n);
+            }
+            else
+            {
+                juce::HeapBlock<float> mono;
+                mono.malloc ((size_t) n);
+                const auto* src = buffer.getReadPointer (0);
+                for (int i = 0; i < n; ++i)
+                    mono[i] = src[i] * gainLin;
+
+                analyserHub->pushStereo (mono.get(), mono.get(), n);
+            }
         }
     }
 
@@ -160,6 +206,30 @@ void Y2KmeterAudioProcessor::registerLoopbackRenderTime (double millisecondsTake
     }
 
     loadMeasurer.registerRenderTime (millisecondsTaken, numSamples);
+}
+
+void Y2KmeterAudioProcessor::setAnalysisInputGainDb (float db) noexcept
+{
+    const float clamped = clampGainDb (db);
+    const float oldDb   = analysisInputGainDb.load (std::memory_order_relaxed);
+
+    analysisInputGainDb.store (clamped, std::memory_order_relaxed);
+    analysisInputGainLin.store (juce::Decibels::decibelsToGain (clamped),
+                                std::memory_order_relaxed);
+
+    // 用户修改前置增益时，请求在音频线程重置 Loudness 积分（LUFS-I 自动归零重算）。
+    if (std::abs (clamped - oldDb) > 0.0001f)
+        pendingLoudnessReset.store (true, std::memory_order_relaxed);
+}
+
+float Y2KmeterAudioProcessor::getAnalysisInputGainDb() const noexcept
+{
+    return analysisInputGainDb.load (std::memory_order_relaxed);
+}
+
+float Y2KmeterAudioProcessor::getAnalysisInputGainLinear() const noexcept
+{
+    return analysisInputGainLin.load (std::memory_order_relaxed);
 }
 
 juce::File Y2KmeterAudioProcessor::exportPerfCountersNow()
@@ -235,6 +305,9 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     //   <Layout>...</Layout>        ← UI 布局
     juce::ValueTree root("PBEQ_State");
     root.setProperty("version", 1, nullptr);
+    root.setProperty("analysisInputGainDb",
+                     (double) analysisInputGainDb.load (std::memory_order_relaxed),
+                     nullptr);
 
     if (savedLayoutXml.isNotEmpty())
     {
@@ -257,6 +330,9 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
 
     const auto root = juce::ValueTree::fromXml(*xml);
     if (! root.isValid() || ! root.hasType("PBEQ_State")) return;
+
+    if (root.hasProperty ("analysisInputGainDb"))
+        setAnalysisInputGainDb ((float) (double) root.getProperty ("analysisInputGainDb", 0.0));
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())

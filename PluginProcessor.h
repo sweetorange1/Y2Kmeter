@@ -73,6 +73,11 @@ public:
                                      int   numSamples,
                                      double sampleRate) noexcept;
 
+    // ---- 分析输入增益（仅作用于分析链路，不改变插件音频透传输出）----
+    void  setAnalysisInputGainDb (float db) noexcept;
+    float getAnalysisInputGainDb() const noexcept;
+    float getAnalysisInputGainLinear() const noexcept;
+
     // ---- 全局性能计数器控制 ----
     juce::File exportPerfCountersNow();
     void setPerfAutoExportEnabled(bool enabled) noexcept;
@@ -106,6 +111,14 @@ private:
     bool   loopbackMeasurerPrimed = false;
     double loopbackLastSampleRate = 0.0;
     int    loopbackLastBlockSize  = 0;
+
+    // 分析输入增益（dB 与线性值原子缓存，供音频线程无锁读取）
+    std::atomic<float> analysisInputGainDb  { 0.0f };
+    std::atomic<float> analysisInputGainLin { 1.0f };
+
+    // 当前置增益发生变化时置位；在音频线程 processBlock 开头消费并 reset loudness，
+    // 以实现 LUFS-I 自动重置（避免跨线程直接触碰 LoudnessMeter 内部状态）。
+    std::atomic<bool>  pendingLoudnessReset { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessor)
 };

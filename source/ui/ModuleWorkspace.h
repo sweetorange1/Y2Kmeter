@@ -281,6 +281,19 @@ public:
     std::function<void(bool visible)> onChromeVisibleChanged;
 
     // ======================================================
+    // Chrome 切换过渡期（transition）控制
+    //   · Editor 在执行 Hide/Show 前调 beginChromeTransition()，切换完成后调 endChromeTransition()
+    //   · 期间 resized() 末尾的"模块越界 clamp"被完全跳过，避免中间态 canvas
+    //     暂时变小（Show 路径：workspace.chromeVisible 先翻转→canvas 裁出 toolbar
+    //     但窗口尺寸还未放大）导致模块高度被永久夹小的 bug。
+    //   · Editor 调完 endChromeTransition 后会主动触发一次 resized()，
+    //     最终态的 clamp（若真的需要）仍会在那时正常执行。
+    // ======================================================
+    void beginChromeTransition() noexcept { chromeTransitionActive = true; }
+    void endChromeTransition()   noexcept { chromeTransitionActive = false; }
+    bool isChromeTransitionActive() const noexcept { return chromeTransitionActive; }
+
+    // ======================================================
     // 音频信号来源下拉框（底部工具栏中部，主题栏与 Hide 之间）
     // ======================================================
     struct AudioSourceItem
@@ -338,6 +351,17 @@ public:
 
     // 用户点击 FPS 按钮切换后的回调
     std::function<void(int hz)> onFpsLimitChanged;
+
+    // ======================================================
+    // 输入增益（toolbar 的 gain 按钮 + 上方弹出控制条）
+    //   · 范围：-10 dB ~ +36 dB，默认 0 dB
+    //   · setInputGainDb 会同步刷新按钮提示与滑条位置
+    // ======================================================
+    void  setInputGainDb (float db);
+    float getInputGainDb() const noexcept { return inputGainDb; }
+
+    // 用户拖动 gain 控制条后的回调（Editor 订阅后下发到处理链）
+    std::function<void(float db)> onInputGainChanged;
 
     // ======================================================
     // 布局预设下拉（toolbar 上 Grid 按钮左侧）
@@ -420,13 +444,6 @@ public:
     // 清空所有拼豆贴画（外部可调用；目前未提供 UI 按钮，保留给未来使用）
     void clearPerlerImages();
     int  getNumPerlerImages() const noexcept;
-
-    // Bug3：chrome 隐藏/显示时，workspace 自身在父 Editor 内的 y 位置会有 titleBarHeight
-    //   的平移差。Editor 已对所有 ModulePanel 做了反向补偿来保持"屏幕绝对位置不变"；
-    //   本方法让 Editor 对 perlerImages 同样做这种反向补偿，修复"hide 后图片上移"的 bug。
-    //   · dy > 0：图片整体在 workspace 坐标系下下移 dy 像素
-    //   · dy < 0：整体上移 |dy| 像素
-    void shiftAllPerlerImagesY (int dy);
 
     // 把索引 idx 对应的 PerlerImageLayer 子组件的 bounds 同步到当前
     //   PerlerImage 的 getBounds()，并 repaint 它自己。任何修改图片
@@ -514,6 +531,11 @@ private:
     HideChromeButton hideBtn;
     bool             chromeVisible = true;
 
+    // Chrome 切换过渡期标志（由 beginChromeTransition/endChromeTransition 设置）
+    //   · true 期间，resized() 末尾的"模块越界 clamp"会被跳过，
+    //     避免 Show 过程中 canvas 暂时比窗口实际尺寸小导致模块被永久夹小。
+    bool             chromeTransitionActive = false;
+
     // FPS 限制按钮 + 实时 FPS 标签（右下角，Hide 按钮左侧）
     juce::TextButton fpsBtn;
     juce::Label      fpsLabel;
@@ -524,6 +546,32 @@ private:
     //   具体类型在 .cpp 里定义（轻量封装 juce::LookAndFeel_V4），这里用 pimpl
     //   前向指针避免把实现细节暴露到头文件。
     std::unique_ptr<juce::LookAndFeel> fpsMiniLnf;
+
+    // 输入增益：gain 按钮（位于 hide 左侧）+ 上方弹出控制条
+    juce::TextButton gainBtn;
+    juce::Slider     gainSlider;
+    bool             gainPopupVisible = false;
+    float            inputGainDb      = 0.0f;
+
+    // ------------------------------------------------------------
+    // gainPopup 全局点击外部关闭监听器
+    //   · popup 打开时 attach 到 juce::Desktop 的全局 MouseListener
+    //   · 任何 mouseDown 若落点不在 gainSlider 的屏幕矩形内即关闭 popup
+    //   · 关闭或析构时 detach，避免悬空回调
+    // ------------------------------------------------------------
+    class GainPopupDismissListener : public juce::MouseListener
+    {
+    public:
+        explicit GainPopupDismissListener (ModuleWorkspace& ownerRef) : owner (ownerRef) {}
+        void mouseDown (const juce::MouseEvent& e) override;
+    private:
+        ModuleWorkspace& owner;
+    };
+    GainPopupDismissListener gainPopupDismissListener { *this };
+    bool gainPopupListenerAttached = false;
+
+    // 切换 popup 可见性（封装：负责 attach/detach 全局监听器 + 同步 gainSlider 可见性）
+    void setGainPopupVisible (bool shouldBeVisible);
 
     // 主题订阅 token：切换主题时重新 setColour(fpsLabel) 以跟随 PinkXP::ink
     //   （暗色主题下 ink 是浅色，必须在主题切换后刷新缓存过的 Label colour，
@@ -597,6 +645,7 @@ private:
     int toolbarDividerX0 = -1; // grid 与 fps 之间
     int toolbarDividerX1 = -1; // fps 与 source 之间
     int toolbarDividerX2 = -1; // source 与 hide 之间
+    int toolbarDividerX3 = -1; // gain 与 hide 之间
 
     ModuleFactory factory;
     juce::Array<ModuleType> availableTypes {

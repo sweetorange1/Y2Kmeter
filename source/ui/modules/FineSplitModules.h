@@ -48,6 +48,10 @@ private:
     float rmsL = -144.0f;
     float rmsR = -144.0f;
 
+    // TP 显示：短保持 + 自动回落
+    float tpDisplay = -144.0f;
+    int   tpHoldFrames = 0;
+
     float pulsePhase = 0.0f;
     float prevTp = -144.0f, prevRms = -144.0f;
     float flashTp = 0.0f,   flashRms = 0.0f;
