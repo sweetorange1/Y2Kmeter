@@ -24,17 +24,15 @@ namespace PinkXP
     {
         gTypeface = ptr;
 
-       #if JUCE_MAC
-        // macOS 专属字体一致性修复：
+        // 全平台字体一致性注入：
         //   让所有走 JUCE 默认字体路径的控件（未显式 setFont 的 Label/Menu 等）
-        //   也统一使用自定义 Typeface，避免 macOS 下回退到系统字体导致风格不一致。
-        //   Windows 下 Silkscreen 已经能被大多数 JUCE 控件正确命中，此处仅限 macOS 注入。
+        //   也统一使用自定义 Typeface。macOS 下若不注入会回退系统字体；Windows
+        //   下同样收益（彻底避免 JUCE 8 新字体栈在某些控件上回退到系统字体）。
         juce::LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypeface (ptr);
 
         // 主界面实际使用的是 PinkXPLookAndFeel，需同步注入同一 Typeface；
         // 否则会出现"弹窗字体已变更，但主界面仍回退系统字体"的不一致。
         getPinkXPLookAndFeel().setDefaultSansSerifTypeface (ptr);
-       #endif
     }
 
     juce::Typeface::Ptr loadActiveTypeface()
@@ -45,17 +43,27 @@ namespace PinkXP
     }
 
     // 内部工厂：按原始 height 生成字体
+    //
+    // 关键说明（JUCE 8 + macOS 字体回退问题修复）：
+    //   旧的 juce::Font(typeface) + setBold/setItalic 路径，在 JUCE 8 的
+    //   新字体栈下会按"family name + bold/italic"再去系统里查字型变体。
+    //   Silkscreen 根本没有 bold/italic 变体，于是 macOS 下就回退到系统字体，
+    //   只有 plain 样式（如抬头 iisaacbeats.cn 那一行）仍能命中自定义 Typeface，
+    //   其余 bold/italic 文本全部变成系统字体——这正是本次字体异常的根因。
+    //
+    //   修复：改用 juce::FontOptions(height).withTypeface(gTypeface)，
+    //   直接锁定 Typeface 实例，不走 family name 再查询的回退路径；
+    //   并忽略 styleFlags（Silkscreen 只有一种字形，bold/italic 仅靠
+    //   调用方做伪粗/伪斜即可，不应触发 Typeface 替换）。
     static juce::Font makeFontRaw(float height, int styleFlags)
     {
         if (gTypeface != nullptr)
         {
-            juce::Font f(gTypeface);
-            f.setHeight(height);
-            if (styleFlags & juce::Font::bold)   f.setBold(true);
-            if (styleFlags & juce::Font::italic) f.setItalic(true);
-            return f;
+            // 单一自定义 Typeface 兜底所有样式，避免 bold/italic 场景回退系统字体
+            juce::ignoreUnused (styleFlags);
+            return juce::Font (juce::FontOptions (height).withTypeface (gTypeface));
         }
-        return juce::Font(height, styleFlags);
+        return juce::Font (juce::FontOptions (height, styleFlags));
     }
 
     // 通用字体：高度 >= 8 时做 1.5x 放大（UI 主字号），极小字 (<8) 保持原样
@@ -993,10 +1001,9 @@ juce::Font PinkXPLookAndFeel::getPopupMenuFont()
     return PinkXP::getFont(12.0f, juce::Font::bold);
 }
 
-#if JUCE_MAC
-// macOS 专属：全局字体兜底。任何通过 LookAndFeel 请求 Typeface 的控件都优先
-// 使用 PinkXP 当前激活的自定义字体（Silkscreen），避免未显式 setFont 的组件
-// 在 macOS 下回退到系统字体造成局部生效、整体回退的混用风格。
+// 全局字体兜底：任何通过 LookAndFeel 请求 Typeface 的控件都优先使用 PinkXP
+// 当前激活的自定义字体（Silkscreen）。这能覆盖未显式 setFont 的组件路径，
+// 避免"局部生效、整体回退系统字体"的混用风格。Windows / macOS 均受益。
 juce::Typeface::Ptr PinkXPLookAndFeel::getTypefaceForFont (const juce::Font& f)
 {
     juce::ignoreUnused (f);
@@ -1004,7 +1011,6 @@ juce::Typeface::Ptr PinkXPLookAndFeel::getTypefaceForFont (const juce::Font& f)
         return tf;
     return juce::LookAndFeel_V4::getTypefaceForFont (f);
 }
-#endif
 
 // Popup 菜单条目理想尺寸：
 //   drawPopupMenuItem 中 textArea 的左右内边距为：
