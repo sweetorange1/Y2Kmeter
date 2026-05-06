@@ -5,6 +5,9 @@
 build
 /build-clangd/
 /compile_commands.json
+# macOS 适配：build_macos_installer.sh 默认使用 build/ 与 build_*/ 作为构建输出目录
+/build/
+/build_*/
 
 # IDE configurations
 /.vs/

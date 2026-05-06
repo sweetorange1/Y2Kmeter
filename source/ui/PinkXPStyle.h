@@ -215,6 +215,12 @@ public:
                            const juce::Drawable* icon, const juce::Colour* textColour) override;
     juce::Font getPopupMenuFont() override;
 
+   #if JUCE_MAC
+    // macOS 专属：全局字体兜底（参见 .cpp 实现注释）。
+    // 在 Windows 构建下不覆写，避免改变现有字体请求路径。
+    juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override;
+   #endif
+
     // Popup 菜单条目理想尺寸：按实际文字宽度 + 左右内边距计算，避免
     //   ComboBox 弹出的下拉菜单宽度只等于 ComboBox 本身宽度而把长文本
     //   截断（例如 "Horizontal Bar(T)" / "Horizontal Bar(B)"）。

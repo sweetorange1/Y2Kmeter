@@ -23,6 +23,18 @@ namespace PinkXP
     void initCustomTypeface(juce::Typeface::Ptr ptr)
     {
         gTypeface = ptr;
+
+       #if JUCE_MAC
+        // macOS 专属字体一致性修复：
+        //   让所有走 JUCE 默认字体路径的控件（未显式 setFont 的 Label/Menu 等）
+        //   也统一使用自定义 Typeface，避免 macOS 下回退到系统字体导致风格不一致。
+        //   Windows 下 Silkscreen 已经能被大多数 JUCE 控件正确命中，此处仅限 macOS 注入。
+        juce::LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypeface (ptr);
+
+        // 主界面实际使用的是 PinkXPLookAndFeel，需同步注入同一 Typeface；
+        // 否则会出现"弹窗字体已变更，但主界面仍回退系统字体"的不一致。
+        getPinkXPLookAndFeel().setDefaultSansSerifTypeface (ptr);
+       #endif
     }
 
     juce::Typeface::Ptr loadActiveTypeface()
@@ -980,6 +992,19 @@ juce::Font PinkXPLookAndFeel::getPopupMenuFont()
 {
     return PinkXP::getFont(12.0f, juce::Font::bold);
 }
+
+#if JUCE_MAC
+// macOS 专属：全局字体兜底。任何通过 LookAndFeel 请求 Typeface 的控件都优先
+// 使用 PinkXP 当前激活的自定义字体（Silkscreen），避免未显式 setFont 的组件
+// 在 macOS 下回退到系统字体造成局部生效、整体回退的混用风格。
+juce::Typeface::Ptr PinkXPLookAndFeel::getTypefaceForFont (const juce::Font& f)
+{
+    juce::ignoreUnused (f);
+    if (auto tf = PinkXP::loadActiveTypeface())
+        return tf;
+    return juce::LookAndFeel_V4::getTypefaceForFont (f);
+}
+#endif
 
 // Popup 菜单条目理想尺寸：
 //   drawPopupMenuItem 中 textArea 的左右内边距为：

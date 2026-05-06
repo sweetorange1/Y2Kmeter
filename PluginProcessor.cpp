@@ -4,6 +4,12 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/perf/PerformanceCounterSystem.h"
 
+// macOS Standalone 专属：音频转储调试器（Windows 构建下此头文件不被编译，
+// 且 CMakeLists 中 AudioDumpRecorder.cpp 仅在 APPLE 分支加入 target_sources）
+#if JUCE_MAC
+ #include "source/standalone/AudioDumpRecorder.h"
+#endif
+
 namespace
 {
 inline float clampGainDb (float db) noexcept
@@ -83,6 +89,30 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 
     const int totalIn  = getTotalNumInputChannels();
     const int totalOut = getTotalNumOutputChannels();
+
+    // ------------------------------------------------------------------
+    // macOS Standalone 调试采样：当 Y2KM_AUDIO_DUMP 系列环境变量开启时，
+    // 把当前 block 的输入通道复制一份落盘。仅编入 macOS 构建，
+    // Windows 下该整段不参与编译，零运行时开销与风险。
+    // ------------------------------------------------------------------
+#if JUCE_MAC
+    if (wrapperType == wrapperType_Standalone)
+    {
+        auto& dump = AudioDumpRecorder::instance();
+        dump.configureFromEnvironment();
+        if (dump.isEnabled())
+        {
+            const float* L = (totalIn >= 1 ? buffer.getReadPointer (0) : nullptr);
+            const float* R = (totalIn >= 2 ? buffer.getReadPointer (1) : L);
+            if (L != nullptr && R != nullptr)
+                dump.push (AudioDumpRecorder::Route::microphone,
+                           L,
+                           R,
+                           buffer.getNumSamples(),
+                           getSampleRate());
+        }
+    }
+#endif
 
     // 1) 先采分析：UI 不可见时跳过
     if (analysisActive.load(std::memory_order_relaxed))

@@ -17,22 +17,11 @@ endif()
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
 
-project(Y2Kmeter VERSION 1.7.0 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 1.5.0 LANGUAGES C CXX)
 
-# ==========================================================
-# macOS 平台：启用 Objective-C++ 语言
-#   · MacDesktopAudioCapture.mm 走 ScreenCaptureKit 做桌面音频采集，
-#     必须经由 Objective-C++ 编译才能解析 @interface / NSObject 等语法。
-#   · 仅在 APPLE 分支启用，不影响 Windows 与 Linux 构建。
-# ==========================================================
 if (APPLE)
   enable_language(OBJCXX)
 endif()
-
-# 让 Ninja/Makefile 生成 compile_commands.json，供 clangd 精确读取
-# include path、宏定义和 JUCE 生成头路径。Visual Studio 生成器会忽略该文件生成，
-# 所以仓库里额外提供了 clangd-msvc preset 使用 Ninja。
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 当外部环境设置了 CMAKE_GENERATOR_PLATFORM 但未设置 CMAKE_GENERATOR 时，
 # CMake 在 VS CustomBuild 阶段会反复打印警告。
@@ -45,52 +34,11 @@ if (DEFINED ENV{CMAKE_GENERATOR_PLATFORM} AND NOT DEFINED ENV{CMAKE_GENERATOR})
   )
 endif()
 
-set(CMAKE_CXX_STANDARD 17)  
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ==========================================================
-# Release 性能优化开关
-#   · LTO/IPO：默认启用，只影响 Release / RelWithDebInfo / MinSizeRel。
-#   · PGO：两阶段流程，默认关闭；通过 preset 切换 GENERATE / USE。
-#     1) Y2K_PGO_MODE=GENERATE 构建并运行典型场景，生成 profile 数据。
-#     2) Y2K_PGO_MODE=USE      使用同一份 profile 数据重新构建发布版。
-# ==========================================================
-option(Y2K_ENABLE_LTO "Enable link-time optimization for release builds" ON)
-
-set(Y2K_PGO_MODE "OFF" CACHE STRING "PGO mode: OFF, GENERATE, USE")
-set_property(CACHE Y2K_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
-string(TOUPPER "${Y2K_PGO_MODE}" Y2K_PGO_MODE)
-set(Y2K_PGO_MODE "${Y2K_PGO_MODE}" CACHE STRING "PGO mode: OFF, GENERATE, USE" FORCE)
-
-set(Y2K_PGO_DATA_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH
-    "Directory used to write/read profile-guided optimization data")
-
-set(Y2K_VALID_PGO_MODES OFF GENERATE USE)
-if (NOT Y2K_PGO_MODE IN_LIST Y2K_VALID_PGO_MODES)
-  message(FATAL_ERROR "Y2K_PGO_MODE must be OFF, GENERATE, or USE; got '${Y2K_PGO_MODE}'")
-endif()
-
-if (DEFINED FETCHCONTENT_SOURCE_DIR_JUCE
-    AND NOT FETCHCONTENT_SOURCE_DIR_JUCE STREQUAL ""
-    AND NOT EXISTS "${FETCHCONTENT_SOURCE_DIR_JUCE}/CMakeLists.txt")
-  message(WARNING
-    "FETCHCONTENT_SOURCE_DIR_JUCE='${FETCHCONTENT_SOURCE_DIR_JUCE}' does not look like a JUCE checkout "
-    "(missing CMakeLists.txt). Ignoring this override so FetchContent can populate JUCE.")
-  unset(FETCHCONTENT_SOURCE_DIR_JUCE CACHE)
-  unset(FETCHCONTENT_SOURCE_DIR_JUCE)
-endif()
-
 include(FetchContent)
-
-# clangd 的专用 Ninja 配置需要 compile_commands.json，但 JUCE 默认会在配置期
-# 递归再开一个子 CMake/Ninja 去单独构建 juceaide。Windows 上如果 PATH 里同时有
-# MinGW，这个子配置很容易重新选回 gcc/g++，导致 JUCE 直接以 "MinGW is not
-# supported" 失败。这里改为在当前工具链里直接构建 helper tool，避免递归子配置
-# 的编译器漂移。
-set(JUCE_BUILD_HELPER_TOOLS ON CACHE BOOL
-    "Build JUCE helper tools in the current configure pass" FORCE)
-
 FetchContent_Declare(
         juce
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
@@ -98,36 +46,31 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(juce)
 
-if (TARGET juceaide AND NOT TARGET juce::juceaide)
-  add_executable(juce::juceaide ALIAS juceaide)
-endif()
-
 # add_subdirectory(grid_plugin)
 
-# ==========================================================
-# macOS 图标流水线（仅 APPLE 分支执行，Windows 无影响）
+# 图标资源：
 #   · Windows Standalone 使用 assets/icon.ico（app_icon.rc 嵌入 EXE）
 #   · macOS 同样以 assets/icon.ico 为源：
-#       1) 先用 sips 把 .ico 解码成中间 PNG
-#       2) 交给 scripts/macos_iconize.m 渲染成 1024×1024 圆角 squircle 模板
+#       1) 先用 sips 把 .ico 解码成中间 PNG（.ico 容器交给 Objective-C
+#          的 NSImage 读取在部分变体上不稳，统一走 sips 规范化）
+#       2) 交给 scripts/macos_iconize.m 渲染成 1024×1024 圆角 squircle
+#          模板（符合 Big Sur+ HIG 应用图标规范）
 #       3) sips 缩多尺寸 → iconutil 打包成 Icon.icns
-#   · 产物仅供 JUCE ICON_BIG/ICON_SMALL 与 Dock/Finder 图标使用。
-# ==========================================================
+set(Y2KM_RES_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
+file(MAKE_DIRECTORY "${Y2KM_RES_DIR}")
+
+set(Y2KM_ICON_ICO_SRC  "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
+set(Y2KM_ICON_PNG_DST  "${Y2KM_RES_DIR}/icon.png")
+if (NOT EXISTS "${Y2KM_ICON_ICO_SRC}")
+  message(FATAL_ERROR "缺少图标资源：${Y2KM_ICON_ICO_SRC}")
+endif()
+
 set(Y2KM_ICON_PLUGIN_ARGS)
 if (APPLE)
-  set(Y2KM_MACOS_RES_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
-  file(MAKE_DIRECTORY "${Y2KM_MACOS_RES_DIR}")
-
-  set(Y2KM_ICON_ICO_SRC  "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
-  set(Y2KM_ICON_PNG_DST  "${Y2KM_MACOS_RES_DIR}/icon.png")
-  if (NOT EXISTS "${Y2KM_ICON_ICO_SRC}")
-    message(FATAL_ERROR "缺少图标资源：${Y2KM_ICON_ICO_SRC}")
-  endif()
-
   # ----------------------------------------------------------------
   # Step 0: 把 icon.ico 解码成 PNG（中间产物，给后续 iconize 用）
   # ----------------------------------------------------------------
-  set(Y2KM_ICON_DECODED_PNG "${Y2KM_MACOS_RES_DIR}/icon_decoded.png")
+  set(Y2KM_ICON_DECODED_PNG "${Y2KM_RES_DIR}/icon_decoded.png")
   execute_process(
     COMMAND /usr/bin/sips -s format png "${Y2KM_ICON_ICO_SRC}" --out "${Y2KM_ICON_DECODED_PNG}"
     RESULT_VARIABLE Y2KM_ICON_DECODE_RESULT
@@ -140,9 +83,11 @@ if (APPLE)
 
   # ----------------------------------------------------------------
   # Step 1: 编译 scripts/macos_iconize.m（Objective-C + CoreGraphics）
+  #   · 仅用系统 framework，不依赖 Swift toolchain
+  #   · 产物放在 build 目录，不污染源码树
   # ----------------------------------------------------------------
   set(Y2KM_ICONIZE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/scripts/macos_iconize.m")
-  set(Y2KM_ICONIZE_BIN "${Y2KM_MACOS_RES_DIR}/macos_iconize")
+  set(Y2KM_ICONIZE_BIN "${Y2KM_RES_DIR}/macos_iconize")
 
   if (NOT EXISTS "${Y2KM_ICONIZE_SRC}")
     message(FATAL_ERROR "缺少工具源码：${Y2KM_ICONIZE_SRC}")
@@ -170,8 +115,11 @@ if (APPLE)
 
   # ----------------------------------------------------------------
   # Step 2: 把解码后的 PNG 渲染成 1024×1024 圆角 squircle 模板
+  #   · 内缩 padding=100、cornerRadius≈content*0.225
+  #   · 不加 drop shadow（保持 logo 原本色彩，避免被投影改氛围）；
+  #     以后若需要可在此行追加 "--shadow"
   # ----------------------------------------------------------------
-  set(Y2KM_ICON_TEMPLATE_PNG "${Y2KM_MACOS_RES_DIR}/icon_macos_template.png")
+  set(Y2KM_ICON_TEMPLATE_PNG "${Y2KM_RES_DIR}/icon_macos_template.png")
   execute_process(
     COMMAND "${Y2KM_ICONIZE_BIN}"
             "${Y2KM_ICON_DECODED_PNG}"
@@ -185,6 +133,9 @@ if (APPLE)
       "运行 macos_iconize 失败：\n${Y2KM_ICONIZE_RUN_STDERR}")
   endif()
 
+  # 给 JUCE 的 ICON_BIG/ICON_SMALL 准备一份 PNG（用圆角模板图，保证
+  # JUCE 任意自动注入场景下拿到的也是圆角版本）；Dock/Finder 主图标
+  # 走下方的 Icon.icns。
   execute_process(
     COMMAND /usr/bin/sips -s format png "${Y2KM_ICON_TEMPLATE_PNG}" --out "${Y2KM_ICON_PNG_DST}"
     RESULT_VARIABLE Y2KM_ICON_CONVERT_RESULT
@@ -198,8 +149,8 @@ if (APPLE)
   # ----------------------------------------------------------------
   # Step 3: 从圆角模板图生成标准 macOS 多分辨率 Icon.icns
   # ----------------------------------------------------------------
-  set(Y2KM_ICONSET_DIR "${Y2KM_MACOS_RES_DIR}/Icon.iconset")
-  set(Y2KM_ICON_ICNS_DST "${Y2KM_MACOS_RES_DIR}/Icon.icns")
+  set(Y2KM_ICONSET_DIR "${Y2KM_RES_DIR}/Icon.iconset")
+  set(Y2KM_ICON_ICNS_DST "${Y2KM_RES_DIR}/Icon.icns")
   file(REMOVE_RECURSE "${Y2KM_ICONSET_DIR}")
   file(MAKE_DIRECTORY "${Y2KM_ICONSET_DIR}")
 
@@ -251,12 +202,11 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 1.7.0
+        VERSION 1.6.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
         FORMATS VST3 Standalone
-        # macOS 下 Y2KM_ICON_PLUGIN_ARGS 展开为 ICON_BIG/ICON_SMALL，其它平台为空，不影响 Windows。
         ${Y2KM_ICON_PLUGIN_ARGS}
         # 本插件是纯分析表（EQ 分析仪 / LUFS / 示波器 / 频谱 / 相位 / 动态等），
         # 对应 VST3 SDK 的 Analyzer 类别，让 DAW 的 FX 分类浏览器正确归类。
@@ -299,17 +249,8 @@ juce_add_binary_data(Y2Kmeter_BinaryData
 target_compile_definitions(Y2Kmeter
   PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
-    # 关闭 JUCE 内置的 ARA / LV2 宿主集成。
-    #   · 本项目既不作为 ARA/LV2 宿主、也不作为 ARA 插件运行，
-    #     保留这些默认开关只会让 juce_audio_processors 多编一批
-    #     我们完全用不到的符号（尤其 ARA 会拖入 ARA SDK 搜索路径）。
-    #   · 跨平台（Win/macOS）都生效：把编译期体积和启动时
-    #     "是否存在这些 runtime 挂载点" 的分支收敛掉。
     JUCE_PLUGINHOST_ARA=0
     JUCE_PLUGINHOST_LV2=0
-    # 外网发布版默认关闭性能计数系统（导出 + 运行时统计计算）
-    # 目的是尽可能减少冗余统计开销，把算力留给真实音频/绘制路径。
-    Y2K_ENABLE_PERF_COUNTERS=0
     # 关闭 JUCE 默认的 StandaloneFilterApp / StandaloneFilterWindow，
     # 转而使用我们自定义的 source/standalone/Y2KStandaloneApp.cpp（无边框 Y2K 外壳）
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
@@ -346,9 +287,6 @@ target_sources(Y2Kmeter PRIVATE
   source/ui/ModulePanel.cpp
   source/ui/ModuleWorkspace.h
   source/ui/ModuleWorkspace.cpp
-  # 阶段1 性能改造：统一 UI 帧时钟节拍器（支持自适应降频）
-  #   · 当前不强制接线，各模块仍旧在 AnalyserHub::startFrameDispatcher 的
-  #     驱动下 onFrame 重绘；但源文件先入库，便于后续分阶段迁移。
   source/ui/UiFrameClock.h
   source/ui/UiFrameClock.cpp
 
@@ -379,20 +317,14 @@ target_sources(Y2Kmeter PRIVATE
   source/standalone/Y2KStandaloneApp.cpp
   source/standalone/WasapiLoopbackCapture.h
   source/standalone/WasapiLoopbackCapture.cpp
+  source/standalone/AudioDumpRecorder.h
+  source/standalone/AudioDumpRecorder.cpp
 )
 
-# ==========================================================
-# macOS 专属源文件：桌面音频采集 + 音频转储调试
-#   · MacDesktopAudioCapture.h/.mm —— ScreenCaptureKit 桌面音频采集
-#   · AudioDumpRecorder.h/.cpp     —— macOS Standalone 调试用音频转储
-#   · Windows 构建中完全不编译这些文件，保持主干零影响。
-# ==========================================================
 if (APPLE)
   target_sources(Y2Kmeter PRIVATE
     source/standalone/MacDesktopAudioCapture.h
     source/standalone/MacDesktopAudioCapture.mm
-    source/standalone/AudioDumpRecorder.h
-    source/standalone/AudioDumpRecorder.cpp
   )
 endif()
 
@@ -404,14 +336,10 @@ target_link_libraries(Y2Kmeter PRIVATE
   Y2Kmeter_BinaryData
   juce::juce_audio_utils
   juce::juce_dsp
-  # GPU 合成层：Editor 里挂 juce::OpenGLContext 后，整个绘制管线会被翻译
-  # 成 GL 批次在 GPU 上执行。
-  #   · Windows：JUCE 为 Editor 的 HWND 创建一个 GL 子窗口，底层走系统 OpenGL
-  #     / 硬件驱动（或 ANGLE 回退到 D3D）。
-  #   · macOS：JUCE 走 NSOpenGLContext，Apple Silicon 下底层走 Metal。
-  #   软光栅路径下的 fillCGRect / drawGlyphs / fillPath / strokePath 等 CPU
-  #   热点消失，主线程只剩 draw 批次组装与提交。Standalone 与 VST3 共用同
-  #   一个 Editor，两种形态都受益。
+  # GPU 合成：给 Editor 挂 juce::OpenGLContext 把整个绘制管线迁到 GPU，
+  # CPU 只组 draw 批次、像素填充/描边/字形全部交 GPU（Apple 侧走 CoreAnimation→Metal，
+  # Windows 侧走 WGL→ANGLE/硬件驱动），软光栅的 fillCGRect/drawGlyphs 热点消失。
+  # Standalone 与 VST3 共用同一个 Editor 类，此依赖两种形态都生效。
   juce::juce_opengl
 )
 
@@ -423,14 +351,6 @@ if (WIN32)
   target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt)
 endif()
 
-# ==========================================================
-# macOS 下 MacDesktopAudioCapture.mm 所需系统 framework
-#   · ScreenCaptureKit —— 桌面 / 系统音频采集入口
-#   · AVFoundation     —— 音频格式描述、设备管理
-#   · CoreMedia        —— CMSampleBuffer / CMFormatDescription
-#   · Foundation       —— NSObject / NSArray / Dispatch 等基础运行时
-#   · 仅 APPLE 分支链接，Windows 不涉及任何变更。
-# ==========================================================
 if (APPLE)
   target_link_libraries(Y2Kmeter PRIVATE
     "-framework ScreenCaptureKit"
@@ -450,108 +370,11 @@ endif()
 #   · 仅在 MSVC 下生效；其它工具链完全不受影响
 # ==========================================================
 if (MSVC)
-  target_compile_options(Y2Kmeter PRIVATE /MP)
-
   target_compile_options(Y2Kmeter PRIVATE
     $<$<CONFIG:Debug>:/Z7>
     $<$<CONFIG:RelWithDebInfo>:/Z7>
   )
-
-  target_compile_options(Y2Kmeter PRIVATE
-    $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /Gy /Gw>
-  )
-
-  target_link_options(Y2Kmeter PRIVATE
-    $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>
-  )
-
 endif()
-
-# ==========================================================
-# LTO / PGO 应用到插件本体与 JUCE 生成的格式 target
-# ==========================================================
-set(Y2K_IPO_SUPPORTED FALSE)
-if (Y2K_ENABLE_LTO)
-  include(CheckIPOSupported)
-  check_ipo_supported(RESULT Y2K_IPO_SUPPORTED OUTPUT Y2K_IPO_ERROR LANGUAGES CXX)
-  if (Y2K_IPO_SUPPORTED)
-    message(STATUS "Y2Kmeter: LTO/IPO enabled for Release, RelWithDebInfo, and MinSizeRel")
-  else()
-    message(WARNING "Y2Kmeter: LTO/IPO requested but not supported by this toolchain: ${Y2K_IPO_ERROR}")
-  endif()
-endif()
-
-function(y2k_apply_release_lto target_name)
-  if (NOT TARGET "${target_name}")
-    return()
-  endif()
-
-  if (Y2K_ENABLE_LTO AND Y2K_IPO_SUPPORTED)
-    set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
-    set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL TRUE)
-  endif()
-endfunction()
-
-function(y2k_apply_release_pgo target_name)
-  if (NOT TARGET "${target_name}" OR Y2K_PGO_MODE STREQUAL "OFF")
-    return()
-  endif()
-
-  file(MAKE_DIRECTORY "${Y2K_PGO_DATA_DIR}")
-
-  if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    set(_pgd_file "${Y2K_PGO_DATA_DIR}/${target_name}.pgd")
-
-    # MSVC PGO is link-time PGO, so force /GL + /LTCG on the trained Release target.
-    target_compile_options("${target_name}" PRIVATE
-      $<$<CONFIG:Release>:/GL>
-    )
-    target_link_options("${target_name}" PRIVATE
-      $<$<CONFIG:Release>:/LTCG>
-    )
-
-    if (Y2K_PGO_MODE STREQUAL "GENERATE")
-      target_link_options("${target_name}" PRIVATE
-        $<$<CONFIG:Release>:/GENPROFILE:PGD=${_pgd_file}>
-      )
-    elseif (Y2K_PGO_MODE STREQUAL "USE")
-      target_link_options("${target_name}" PRIVATE
-        $<$<CONFIG:Release>:/USEPROFILE:PGD=${_pgd_file}>
-      )
-    endif()
-  elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    if (Y2K_PGO_MODE STREQUAL "GENERATE")
-      target_compile_options("${target_name}" PRIVATE
-        $<$<CONFIG:Release>:-fprofile-generate=${Y2K_PGO_DATA_DIR}>
-      )
-      target_link_options("${target_name}" PRIVATE
-        $<$<CONFIG:Release>:-fprofile-generate=${Y2K_PGO_DATA_DIR}>
-      )
-    elseif (Y2K_PGO_MODE STREQUAL "USE")
-      target_compile_options("${target_name}" PRIVATE
-        $<$<CONFIG:Release>:-fprofile-use=${Y2K_PGO_DATA_DIR}>
-        $<$<CONFIG:Release>:-fprofile-correction>
-      )
-      target_link_options("${target_name}" PRIVATE
-        $<$<CONFIG:Release>:-fprofile-use=${Y2K_PGO_DATA_DIR}>
-      )
-    endif()
-  else()
-    message(WARNING
-      "Y2Kmeter: Y2K_PGO_MODE=${Y2K_PGO_MODE} was requested, "
-      "but automatic PGO flags are only configured for MSVC and GNU compilers.")
-  endif()
-endfunction()
-
-foreach(_y2k_target IN ITEMS
-    Y2Kmeter
-    Y2Kmeter_SharedCode
-    Y2Kmeter_VST3
-    Y2Kmeter_Standalone)
-  y2k_apply_release_lto("${_y2k_target}")
-  y2k_apply_release_pgo("${_y2k_target}")
-endforeach()
 
 # ==========================================================
 # Standalone EXE 图标（Windows）
@@ -568,12 +391,8 @@ if (WIN32 AND TARGET Y2Kmeter_Standalone)
   )
 endif()
 
-# ==========================================================
-# Standalone Dock 图标（macOS）
-#   · 显式绑定 Icon.icns，避免仅靠生成流程隐式注入导致部分构建产物图标缺失。
-#   · 仅 APPLE 分支执行，Windows 构建无感知。
-# ==========================================================
 if (APPLE AND TARGET Y2Kmeter_Standalone)
+  # 显式绑定 Dock 图标，避免仅靠生成流程隐式注入导致部分构建产物图标缺失。
   set_target_properties(Y2Kmeter_Standalone PROPERTIES
     MACOSX_BUNDLE_ICON_FILE "Icon.icns"
   )
@@ -581,9 +400,14 @@ endif()
 
 # ==========================================================
 # Tamagotchi 模块的动画 / 蛋资源打包（macOS）
-#   · 运行时查找逻辑（TamagotchiModule.cpp 中的 findTamagotchiSubDir）会优先从
-#     本 bundle 的 Contents/Resources/assets/Tamagotchi 读取，因此构建数 bundle
-#     后需要把源仓库 assets/Tamagotchi 同步进去。
+#   · 源目录：assets/Tamagotchi/（role、role_cut_by_xlsx_40x40、
+#     role_cut_by_xlsx_40x40_fan、egg_38x38 等）总计约 11MB。
+#   · 运行时查找逻辑（TamagotchiModule.cpp 中的 findTamagotchiSubDir）
+#     会优先从"本 bundle 的 Contents/Resources/assets/Tamagotchi"读取。
+#   · 此处在每种插件 bundle 构建完成后，POST_BUILD 把源仓库的
+#     assets/Tamagotchi 同步进 bundle 的 Resources 下；VST3 被宿主加载时
+#     CWD 和 currentApplicationFile 指向宿主，找不到源仓库 assets，
+#     这步是 VST3 / Standalone 分发正常的前提。
 #   · Windows / Linux：暂按源仓库 / 运行目录兜底（Y2Kmeter_installer.iss 另行处理），
 #     这里的 bundle 路径模式只适用于 macOS .app / .vst3。
 # ==========================================================
@@ -595,6 +419,7 @@ if (APPLE)
       return()
     endif()
 
+    # bundle_subpath 例如 "Y2Kmeter.vst3" 或 "Y2Kmeter.app"
     # JUCE 会把产物放在 $<TARGET_BUNDLE_DIR:${tgt}>，指向 bundle 根（.vst3 / .app）
     add_custom_command(TARGET ${tgt} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E rm -rf
