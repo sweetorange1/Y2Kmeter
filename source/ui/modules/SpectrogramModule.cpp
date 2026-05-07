@@ -438,6 +438,18 @@ void SpectrogramModule::redrawFullImage()
     if (! imageBuf.isValid()) return;
     if (rows <= 0 || cols <= 0) return;
 
+    // 见 writeLatestColumnToImage 里的说明：这里也用本地 palette 缓存，
+    //   原本 rows*cols 次 intensityToColour 调用（含 getCurrentTheme() + 分支判断）
+    //   改为一次性预构 256 级 ARGB 表 + 单次下标查找，全量重绘大幅降低 CPU。
+    std::array<juce::PixelARGB, 256> palette;
+    for (int i = 0; i < 256; ++i)
+    {
+        const float t = (float) i * (1.0f / 255.0f);
+        const auto c  = intensityToColour (t);
+        palette[(size_t) i] = juce::PixelARGB ((juce::uint8) 255,
+                                               c.getRed(), c.getGreen(), c.getBlue());
+    }
+
     juce::Image::BitmapData bmp (imageBuf, juce::Image::BitmapData::readWrite);
 
     for (int r = 0; r < rows; ++r)
@@ -446,9 +458,8 @@ void SpectrogramModule::redrawFullImage()
         for (int c = 0; c < cols; ++c)
         {
             const float t01 = at (r, c);
-            const auto col  = intensityToColour (t01);
-            const juce::PixelARGB px ((juce::uint8) 255,
-                                       col.getRed(), col.getGreen(), col.getBlue());
+            const int   idx = juce::jlimit (0, 255, (int) std::lround (t01 * 255.0f));
+            const juce::PixelARGB px = palette[(size_t) idx];
             // 双拷贝：同时写到 c 和 c+cols 两列，形成无缝环形贴图
             row[c]        = px;
             row[c + cols] = px;
@@ -464,17 +475,32 @@ void SpectrogramModule::writeLatestColumnToImage()
     // onFrame 里 pushColumn 刚让 writeCol 环形 +1，所以"刚写入的"列是 writeCol-1
     const int justWrittenCol = (writeCol - 1 + cols) % cols;
 
-    // 用 BitmapData::readWrite 直接拿到原始像素指针批量写，避免每像素 setPixelColour
-    // 的函数调用和像素格式转换开销
-    juce::Image::BitmapData bmp (imageBuf, juce::Image::BitmapData::readWrite);
+    // ----- P1-3：一次性构建 256 级调色板缓存 -----
+    //   · 旧实现里 intensityToColour 内部会 getCurrentTheme() + 多段分支判断，
+    //     rows 次循环就要调 rows 次 → 一张 400×300 Spectrogram 每帧多 400 次
+    //     主题查找。缓存 256 级 ARGB 像素后，后续循环变成单次数组下标查找。
+    //   · 缓存只在本次调用内存在（栈上 256*4=1KB），主题切换后下次调用
+    //     自然会重建，无需额外 invalidate 逻辑。
+    std::array<juce::PixelARGB, 256> palette;
+    for (int i = 0; i < 256; ++i)
+    {
+        const float t = (float) i * (1.0f / 255.0f);
+        const auto c  = intensityToColour (t);
+        palette[(size_t) i] = juce::PixelARGB ((juce::uint8) 255,
+                                               c.getRed(), c.getGreen(), c.getBlue());
+    }
+
+    // ----- P1-3：writeOnly 锁，避免驱动"把整张纹理读回 CPU"的开销 -----
+    //   只写"新列"两处像素，不读任何旧像素；改用 writeOnly 避免 JUCE 的
+    //   CachedImage 在某些后端触发 read-back。
+    juce::Image::BitmapData bmp (imageBuf, juce::Image::BitmapData::writeOnly);
 
     for (int r = 0; r < rows; ++r)
     {
         auto* row = (juce::PixelARGB*) bmp.getLinePointer (r);
         const float t01 = at (r, justWrittenCol);
-        const auto col  = intensityToColour (t01);
-        const juce::PixelARGB px ((juce::uint8) 255,
-                                   col.getRed(), col.getGreen(), col.getBlue());
+        const int   idx = juce::jlimit (0, 255, (int) std::lround (t01 * 255.0f));
+        const juce::PixelARGB px = palette[(size_t) idx];
         // 双拷贝：分别写到 image 的 justWrittenCol 和 justWrittenCol+cols 两列
         row[justWrittenCol]        = px;
         row[justWrittenCol + cols] = px;

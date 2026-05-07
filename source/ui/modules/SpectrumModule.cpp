@@ -130,6 +130,12 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Spectrum)) return;
 
+    // P1-1：分频 repaint —— Spectrum 曲线本身变化不如 Oscilloscope/Waveform 灵敏，
+    //   每 2 个 dispatch tick 才真正 repaint 一次（60Hz→30Hz，30Hz→15Hz）。
+    //   数据内部仍然每 tick 更新（保留峰值保持/下降的时间积分精度），
+    //   仅 repaint 被分频；多实例叠加时 GPU/CPU 开销直接减半。
+    const bool skipRepaintThisTick = ((frame.tickCount % 2ull) != 0ull);
+
     // 使用 Hub 的双路合并接口：低频走 8192 点（Δf≈5.9Hz），高频走 2048 点（Δf≈23Hz），
     // 在 500Hz 附近做等功率交叉淡化。UI 侧零额外重采样，直接拿到"每列一个线性幅度"。
     //
@@ -172,6 +178,10 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
     const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (1.8f, scale);
     if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+        return;
+
+    // P1-1：tick 级分频（见函数开头的 skipRepaintThisTick 注释）
+    if (skipRepaintThisTick)
         return;
 
     lastRepaintMs = nowMs;

@@ -45,6 +45,7 @@ public:
         y2k::perf::PerformanceCounterSystem::instance().recordMemoryAlloc(sizeof(FrameSnapshot));
 #endif
         frame->activeMask = mask;
+        frame->tickCount  = ++dispatchTickCounter; // UI 侧模块自行分频
 
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::ScopedPerfTimer assembleTimer(y2k::perf::FunctionId::uiFrameAssemble,
@@ -229,6 +230,10 @@ public:
 
 private:
     AnalyserHub& owner;
+
+    // 单调递增的 tick 序号，每次 timerCallback 自增 1 并写入 FrameSnapshot，
+    //   供 UI 侧各模块自行分频（如 Spectrum/Spectrogram 每 2 帧实际 repaint 一次）。
+    juce::uint64 dispatchTickCounter = 0;
 };
 
 // ==========================================================
@@ -687,8 +692,12 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         return;
     }
 
-    std::array<float, spectrumMagSize>   magHiSnapshot;
-    std::array<float, spectrumMagSizeLo> magLoSnapshot;
+    // P2-1：UI 线程里的每个 Spectrum/Spectrogram 实例每帧都会调一次本函数，
+    //   两个数组合计 (1024+4096)*4 ≈ 20 KB 的栈分配 * N 实例 * 帧率。
+    //   改为 thread_local 静态缓冲：函数调用零分配，跨实例复用同一块 TLS 内存。
+    //   线程安全性：specLock 保护的只是"拷贝瞬间"，本地 snapshot 仅当前线程自读自写。
+    thread_local std::array<float, spectrumMagSize>   magHiSnapshot;
+    thread_local std::array<float, spectrumMagSizeLo> magLoSnapshot;
 
     {
         const juce::SpinLock::ScopedLockType sl (specLock);

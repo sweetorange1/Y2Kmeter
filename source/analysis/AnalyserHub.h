@@ -374,6 +374,14 @@ public:
         // 本帧"哪些 Kind 的字段是有效的"。bit = 1 << (int) Kind::xxx
         juce::uint32 activeMask = 0;
 
+        // 单调递增的 tick 序号（由 FrameDispatcher 每次 timerCallback 自增 1）。
+        //   · UI 侧各模块可以据此自行分频：例如 Spectrum/Spectrogram 只在
+        //     (tickCount % 2) == 0 时才 repaint，把 60 Hz 分发拆成 30 Hz 实际重绘；
+        //     Waveform/Oscilloscope 等需要丝滑滚动的模块仍保持 60 Hz。
+        //   · 分频选择放在 listener 侧而不是 dispatcher 侧，是因为不同 module
+        //     对刷新率的敏感度差异很大，集中式调度难以普适。
+        juce::uint64 tickCount = 0;
+
         // Oscilloscope：立体声 2048 样本（时间从旧到新）。仅在 activeMask 含 Oscilloscope 时有效。
         std::array<float, oscilloscopeBufferSize> oscL {};
         std::array<float, oscilloscopeBufferSize> oscR {};

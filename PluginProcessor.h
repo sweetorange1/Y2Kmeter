@@ -120,5 +120,15 @@ private:
     // 以实现 LUFS-I 自动重置（避免跨线程直接触碰 LoudnessMeter 内部状态）。
     std::atomic<bool>  pendingLoudnessReset { false };
 
+    // P2-2：预分配的分析增益临时缓冲，避免 processBlock 在 gain ≠ 0dB 时
+    //   频繁的音频线程堆分配（juce::AudioBuffer 构造 / HeapBlock::malloc）。
+    //   · analysisGainBufferStereo 用于立体声路径（1024 帧⨥用，容量不足时
+    //     在 prepareToPlay 里由实际 samplesPerBlock 拓宽；
+    //   · analysisGainBufferMono   用于 mono 降级路径；
+    //   · 两者都只被音频线程读写，不需额外同步。
+    juce::AudioBuffer<float> analysisGainBufferStereo;
+    juce::HeapBlock<float>   analysisGainBufferMono;
+    int                      analysisGainBufferMonoCapacity = 0;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessor)
 };

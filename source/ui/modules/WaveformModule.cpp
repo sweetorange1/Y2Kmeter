@@ -451,8 +451,21 @@ void WaveformModule::drawWaveform (juce::Graphics& g, juce::Rectangle<int> canva
         return columnHistory[(size_t) idx];
     };
 
-    // 预取整行 column，应用 3-tap smoothing；用整数坐标绘制避免亚像素抗锯齿
-    //   注意 JUCE 的 fillRect(int,int,int,int) 是严格整数像素、不做子像素插值
+    // ---------- P1-2 性能优化：颜色分桶 + fillRectList 合批 ----------
+    //   旧实现：每列 1 次 setColour + 1 次 fillRect → 400~600 次 state-change/帧；
+    //   新实现：把 amp∈[0,1] 量化为 kBuckets 段，每桶用一个 RectangleList 累积，
+    //     最后每桶 1 次 setColour + 1 次 fillRectList —— draw call 从 N 降到 ≤ kBuckets。
+    //   kBuckets 取 32 既保留视觉渐变连贯性，又把合批效率拉满；在 macOS legacy
+    //   NSOpenGLContext 上的收益尤其明显（避免大量 state-change 强制 flush）。
+    constexpr int kBuckets = 32;
+    std::array<juce::RectangleList<int>, kBuckets> buckets;
+    std::array<juce::Colour, kBuckets> bucketColours {};
+    for (int b = 0; b < kBuckets; ++b)
+    {
+        const float t = (float) b / (float) (kBuckets - 1);
+        bucketColours[(size_t) b] = mapAmplitudeToColour (t);
+    }
+
     for (int xi = 0; xi < w; ++xi)
     {
         const int k = w - 1 - xi; // xi=0 最左(最旧) ... xi=w-1 最右(最新)
@@ -473,7 +486,6 @@ void WaveformModule::drawWaveform (juce::Graphics& g, juce::Rectangle<int> canva
         //   映射到 [0,1] 时再做一次 sqrt，让低幅度也能看到颜色变化（避免全是 pink100）
         const float ampForColour = juce::jlimit (0.0f, 1.0f,
                                                  std::sqrt (rms * 1.4f + peak * 0.3f));
-        g.setColour (mapAmplitudeToColour (ampForColour));
 
         // 柱条：从 min 到 max 的垂直线段；全部用整数坐标 → 无亚像素抖动
         //   再用 inner.getY() / inner.getBottom() 收紧，避免放大后超出画布
@@ -483,7 +495,17 @@ void WaveformModule::drawWaveform (juce::Graphics& g, juce::Rectangle<int> canva
         const int yMin  = juce::jlimit (iy, iy + ih, juce::jmin (yTopRaw, yBotRaw));
         const int yMax  = juce::jlimit (iy, iy + ih, juce::jmax (yTopRaw, yBotRaw));
         const int hLine = juce::jmax (1, yMax - yMin); // 至少 1 像素
-        g.fillRect (px, yMin, 1, hLine);
+
+        const int bucketIdx = juce::jlimit (0, kBuckets - 1,
+                                            (int) std::round (ampForColour * (float) (kBuckets - 1)));
+        buckets[(size_t) bucketIdx].addWithoutMerging ({ px, yMin, 1, hLine });
+    }
+
+    for (int b = 0; b < kBuckets; ++b)
+    {
+        if (buckets[(size_t) b].isEmpty()) continue;
+        g.setColour (bucketColours[(size_t) b]);
+        g.fillRectList (buckets[(size_t) b]);
     }
 
     // 右侧微弱"新样本高亮"：最近 2px 加一层浅高光，强调"当前"的感觉

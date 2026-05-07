@@ -663,10 +663,23 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   · 析构顺序：openGLContext 声明在 Editor 类末尾 → 成员反向析构会最先析构
     //     GL 上下文（JUCE 会自动 detach），但为了防止 GL 资源释放时 child
     //     components 已被部分销毁的 UB，~Editor 起始处仍显式 detach() 一次兜底。
+    //
+    //   · **macOS 专项关闭**（2026-05 性能修复）：
+    //       Apple 从 10.14 起把 OpenGL 标记为 Deprecated，legacy NSOpenGLContext 在
+    //       Apple Silicon / 新版 Intel GPU 上走的是 Metal 兼容转译层；每次 CPU 端
+    //       修改 juce::Image（Spectrogram 的 imageBuf、Oscilloscope 的 staticLayer/
+    //       dynamicLayer、Editor 的 desktopCacheImage 等）都会触发"纹理失效 →
+    //       整张重新 upload"的隐式同步，多个 SpectrogramModule / SpectrumModule /
+    //       WaveformModule / OscilloscopeModule 叠加时会线性放大到几十 MB/帧的
+    //       带宽，导致明显卡顿。macOS 下 CoreGraphics 本身已有 Metal 后端加速，
+    //       直接走软光栅路径反而更快。
+    //     Windows 侧 WGL + 硬件驱动对小批次 draw / 纹理部分更新优化成熟，保持开启。
     // ==================================================================
+#if ! JUCE_MAC
     openGLContext.setContinuousRepainting (false);
     openGLContext.setComponentPaintingEnabled (true);
     openGLContext.attachTo (*this);
+#endif
 
     // Temporary profiling hook: with Y2K_ENABLE_PERF_COUNTERS=1 this writes
     // perf snapshots every 60 seconds to %APPDATA%/Y2Kmeter/perf_counters.
@@ -681,7 +694,11 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     //     子组件析构时，GL 资源（Texture/VBO/FBO）已经从上下文解绑。
     //     若依赖成员反向析构顺序隐式 detach，会触发"GL 资源释放时子组件已部分销毁"的
     //     未定义行为（JUCE GL context 在析构里会 flush 队列，需要组件树依然完整）。
+    //
+    //   · macOS 下构造里未 attach（见对应 #if ! JUCE_MAC 保护），这里一并跳过 detach。
+#if ! JUCE_MAC
     openGLContext.detach();
+#endif
 
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
@@ -1313,6 +1330,14 @@ void Y2KmeterAudioProcessorEditor::invalidateDesktopCache() noexcept
 
 void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
 {
+#if JUCE_MAC
+    // macOS 上 legacy NSOpenGLContext 对大尺寸 Image 的纹理 upload 有隐式同步开销，
+    // 并且构造里我们已经不再 attach OpenGLContext，软光栅后端 drawDesktop/drawLogo
+    // 已足够快 —— 直接走实时绘制，不维护这张 cache Image。
+    desktopCacheImage = {};
+    desktopCacheBounds = {};
+    desktopCacheDirty = false;
+#else
     const auto bounds = workspace != nullptr ? workspace->getBounds() : getLocalBounds();
     if (bounds.isEmpty())
     {
@@ -1339,6 +1364,7 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
                                                                     (float) -bounds.getY()));
     PinkXP::drawDesktop (cacheGraphics, bounds);
     PinkXP::drawLogo    (cacheGraphics, bounds, logoImage);
+#endif
 }
 
 // ----------------------------------------------------------
@@ -1501,7 +1527,15 @@ const juce::String versionText = "v1.7";
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::resized()
 {
-    invalidateDesktopCache();
+    // 注意：这里**不再**无条件 invalidateDesktopCache()。
+    //   · rebuildDesktopCacheIfNeeded() 内部已经做了 bounds 对比，workspace 尺寸
+    //     真正变化时会自己走重建分支；
+    //   · 模块冒前 / 拖动 / hide-chrome 过渡等场景会触发 Editor::resized()，但
+    //     workspace.getBounds() 通常不变，没必要把整张背景纹理扔掉重传 GPU。
+    //   · 主题切换仍会在 themeSubscribe 回调里显式调用 invalidateDesktopCache()。
+    //   · 这一改动对 Windows 路径无影响（行为等价），对 macOS 能避免每次 resize
+    //     触发整张 workspace 尺寸 RGB Image 重建 + legacy NSOpenGLContext 的同步
+    //     纹理 upload，是 macOS 多模块卡顿的关键修复之一。
 
     auto r = getLocalBounds();
     // chrome 可见时顶部让给 TitleBar；chrome 隐藏时让 workspace 占满整个窗口，

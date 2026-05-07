@@ -62,6 +62,18 @@ void Y2KmeterAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
     // CPU 占用率测量器：重置每个 block 的目标时长（= samplesPerBlock / sampleRate）
     // loadMeasurer 内部会用 start/stop 测出实际耗时 / 目标时长，得出占比。
     loadMeasurer.reset(sampleRate, samplesPerBlock);
+
+    // P2-2：音频线程分析增益临时缓冲预分配，避免每个 block 的
+    //   juce::AudioBuffer 构造 / HeapBlock::malloc 开销。
+    const int cap = juce::jmax (32, samplesPerBlock);
+    analysisGainBufferStereo.setSize (2, cap, /*keepExistingContent=*/ false,
+                                      /*clearExtraSpace=*/ false,
+                                      /*avoidReallocating=*/ false);
+    if (analysisGainBufferMonoCapacity < cap)
+    {
+        analysisGainBufferMono.allocate ((size_t) cap, false);
+        analysisGainBufferMonoCapacity = cap;
+    }
 }
 
 void Y2KmeterAudioProcessor::releaseResources() {}
@@ -131,14 +143,19 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             else
             {
                 const int n = buffer.getNumSamples();
-                juce::AudioBuffer<float> analysisTemp (2, n);
-                analysisTemp.copyFrom (0, 0, buffer, 0, 0, n);
-                analysisTemp.copyFrom (1, 0, buffer, 1, 0, n);
-                analysisTemp.applyGain (0, 0, n, gainLin);
-                analysisTemp.applyGain (1, 0, n, gainLin);
+                // P2-2：用预分配缓冲，避免音频线程构造 juce::AudioBuffer
+                //   触发的堆分配。容量在 prepareToPlay 里按 samplesPerBlock 开足，
+                //   极少见的 n 超容量场景下实时 setSize 只众之一次，不影响稳态。
+                if (analysisGainBufferStereo.getNumSamples() < n)
+                    analysisGainBufferStereo.setSize (2, n, false, false, false);
 
-                analyserHub->pushStereo (analysisTemp.getReadPointer (0),
-                                         analysisTemp.getReadPointer (1),
+                analysisGainBufferStereo.copyFrom (0, 0, buffer, 0, 0, n);
+                analysisGainBufferStereo.copyFrom (1, 0, buffer, 1, 0, n);
+                analysisGainBufferStereo.applyGain (0, 0, n, gainLin);
+                analysisGainBufferStereo.applyGain (1, 0, n, gainLin);
+
+                analyserHub->pushStereo (analysisGainBufferStereo.getReadPointer (0),
+                                         analysisGainBufferStereo.getReadPointer (1),
                                          n);
             }
         }
@@ -156,13 +173,19 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             }
             else
             {
-                juce::HeapBlock<float> mono;
-                mono.malloc ((size_t) n);
-                const auto* src = buffer.getReadPointer (0);
-                for (int i = 0; i < n; ++i)
-                    mono[i] = src[i] * gainLin;
+                // P2-2：用预分配的 mono 缓冲，避免 HeapBlock::malloc 在音频线程的堆分配。
+                if (analysisGainBufferMonoCapacity < n)
+                {
+                    analysisGainBufferMono.allocate ((size_t) n, false);
+                    analysisGainBufferMonoCapacity = n;
+                }
 
-                analyserHub->pushStereo (mono.get(), mono.get(), n);
+                const auto* src = buffer.getReadPointer (0);
+                auto* dst = analysisGainBufferMono.get();
+                for (int i = 0; i < n; ++i)
+                    dst[i] = src[i] * gainLin;
+
+                analyserHub->pushStereo (dst, dst, n);
             }
         }
     }
