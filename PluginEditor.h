@@ -269,8 +269,12 @@ private:
     //   · adaptiveDispatchHz    —— 当前让 AnalyserHub 实际跑的频率（自适应降降升升的目标值）
     //   · adaptiveRecoverTicks  —— 测标持续达标后的连续计数，避免单帧抖动回升
     //   · adaptiveDropTicks     —— 测标持续低迷后的连续计数，避免一次纹理上传/窗口抖动直接降档
-    int                      userRequestedFpsLimit  = 30;
-    int                      adaptiveDispatchHz     = 30;
+    // 默认 FPS 上限从 30 提升到 60：
+    //   · P0~P3 优化后 macOS 多模块场景下也能稳定跑 60 Hz；
+    //   · 新用户首次启动直接获得更丝滑的体验；
+    //   · 用户点 FPS 按钮仍可切回 30（ModuleWorkspace::fpsBtn.onClick 里 30↔60 toggle）。
+    int                      userRequestedFpsLimit  = 60;
+    int                      adaptiveDispatchHz     = 60;
     int                      adaptiveRecoverTicks   = 0;
     int                      adaptiveDropTicks      = 0;
 

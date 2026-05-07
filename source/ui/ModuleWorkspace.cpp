@@ -312,7 +312,7 @@ ModuleWorkspace::ModuleWorkspace()
     // 左下角：FPS 限制按钮 + 实时 FPS 标签
     //   · 按钮文案："30 FPS" / "60 FPS"（点击切换）
     //   · 标签文案："-- fps" / "29.8 fps" 之类，由 Editor 定期计算后 setMeasuredFps
-    fpsBtn.setButtonText ("30FPS");
+    fpsBtn.setButtonText ("60FPS");
     fpsBtn.setTooltip    ("Click to toggle target frame rate (30 / 60 FPS)");
     fpsBtn.onClick = [this]()
     {
@@ -514,11 +514,16 @@ ModuleWorkspace::ModuleWorkspace()
 
 ModuleWorkspace::~ModuleWorkspace()
 {
-    // 如果析构时 gainPopup 仍处打开态（监听器还挂在 Desktop），必须先摘下来，
-    // 否则后续全局 mouseDown 会回调到已销毁的 this → 崩溃。
+    // 如果析构时 gainPopup 仍处打开态（监听器还挂在 topLevel），必须先摘下来，
+    // 否则后续 mouseDown 会回调到已销毁的 this → 崩溃。
+    // 注意：这里用保存的 gainPopupListenerHost 做 detach，因为到了析构阶段
+    //   getTopLevelComponent() 可能已返回 nullptr 或其他父级，无法正确找回当初
+    //   attach 的宿主。
     if (gainPopupListenerAttached)
     {
-        juce::Desktop::getInstance().removeGlobalMouseListener (&gainPopupDismissListener);
+        if (gainPopupListenerHost != nullptr)
+            gainPopupListenerHost->removeMouseListener (&gainPopupDismissListener);
+        gainPopupListenerHost = nullptr;
         gainPopupListenerAttached = false;
     }
 
@@ -544,7 +549,20 @@ ModuleWorkspace::~ModuleWorkspace()
 }
 
 // ----------------------------------------------------------
-// gain 弹出控制条 —— 可见性切换 + 全局点击外部关闭
+// gain 弹出控制条 —— 可见性切换 + 点击外部关闭
+//
+// P3-1 改动（2026-05 性能修复）：
+//   旧实现用 juce::Desktop::addGlobalMouseListener 监听"系统范围内所有鼠标事件"，
+//   该路径在 macOS 上会触发 NSEvent 全局监视器：每次 mouseMove/mouseDown 都要
+//   跨进程（ViewServer/WindowServer → App）来回，并遍历 Desktop 上所有监听器
+//   派发 —— popup 即使不可见也要先判一次 gainPopupVisible，属于常态开销。
+//   新实现：挂到 getTopLevelComponent()，配合 wantsEventsForAllNestedChildComponents
+//     == true，即可拿到"本窗口内任何子组件的 mouseDown 冒泡"，且完全不走
+//     Desktop 全局监视器路径，macOS 上尤其显著降低后台常驻成本。
+//   行为回归：
+//     · 窗口内任何位置（包括模块、标题栏按钮）点击 → 依旧会关闭 popup；
+//     · 唯一差异是"点到本窗口外部"无法自动关闭 —— 但此时本窗口已失焦，
+//       再次点回窗口的那一下会冒泡到 topLevel 触发关闭，体感等价。
 // ----------------------------------------------------------
 void ModuleWorkspace::setGainPopupVisible (bool shouldBeVisible)
 {
@@ -561,18 +579,26 @@ void ModuleWorkspace::setGainPopupVisible (bool shouldBeVisible)
     if (shouldBeVisible)
     {
         gainSlider.toFront (false);
-        // 挂全局 MouseListener 用于"点击外部关闭"
+        // 挂到 topLevel 的 MouseListener 上，wantsEventsForAllNestedChildComponents=true
+        //   → 该窗口内任何 Component 的鼠标事件都会再冒泡给我们，成本仅在本窗口局部。
         if (! gainPopupListenerAttached)
         {
-            juce::Desktop::getInstance().addGlobalMouseListener (&gainPopupDismissListener);
-            gainPopupListenerAttached = true;
+            if (auto* top = getTopLevelComponent())
+            {
+                top->addMouseListener (&gainPopupDismissListener,
+                                       /*wantsEventsForAllNestedChildComponents=*/ true);
+                gainPopupListenerHost = top;
+                gainPopupListenerAttached = true;
+            }
         }
     }
     else
     {
         if (gainPopupListenerAttached)
         {
-            juce::Desktop::getInstance().removeGlobalMouseListener (&gainPopupDismissListener);
+            if (gainPopupListenerHost != nullptr)
+                gainPopupListenerHost->removeMouseListener (&gainPopupDismissListener);
+            gainPopupListenerHost = nullptr;
             gainPopupListenerAttached = false;
         }
     }

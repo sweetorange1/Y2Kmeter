@@ -539,7 +539,7 @@ private:
     // FPS 限制按钮 + 实时 FPS 标签（右下角，Hide 按钮左侧）
     juce::TextButton fpsBtn;
     juce::Label      fpsLabel;
-    int              fpsLimit = 30;  // 默认 30 FPS
+    int              fpsLimit = 60;  // 默认 60 FPS（P0~P3 优化后已可稳定承载）
 
     // FPS 按钮专用的 mini LookAndFeel：仅重写 getTextButtonFont 把"30FPS / 60FPS"
     //   渲染得比全局按钮字号更小一点（52px 宽 + 像素字体下不显挤）。
@@ -569,6 +569,11 @@ private:
     };
     GainPopupDismissListener gainPopupDismissListener { *this };
     bool gainPopupListenerAttached = false;
+
+    // P3-1：记录 popup 打开时挂 MouseListener 的宿主（topLevelComponent）。
+    //   析构 / setGainPopupVisible(false) 里需要用同一个指针 detach，
+    //   不能 getTopLevelComponent() 现查 —— 因为那时父级可能已被拆除。
+    juce::Component::SafePointer<juce::Component> gainPopupListenerHost;
 
     // 切换 popup 可见性（封装：负责 attach/detach 全局监听器 + 同步 gainSlider 可见性）
     void setGainPopupVisible (bool shouldBeVisible);
