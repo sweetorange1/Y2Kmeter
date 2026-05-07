@@ -146,6 +146,23 @@ void OscilloscopeModule::layoutContent(juce::Rectangle<int> contentBounds)
 // ----------------------------------------------------------
 // 绘制
 // ----------------------------------------------------------
+//
+// P5 平台分流：
+//   · Windows：CoreGraphics 不在 JUCE7 默认链路，Path 每帧 rasterize 昂贵
+//              → 保留动态层 Image 缓存（方案 A），dirty 时才重绘。
+//   · macOS：CoreGraphics Path stroke 由系统硬件加速，反而是 Image 像素
+//              合成（软件 blit / 跨 NSWindow 提交）慢 → 跳过 dynamicLayer，
+//              直接把波形/XY 画到屏幕 Graphics，省掉一次 Image 往返。
+//
+namespace
+{
+#if JUCE_MAC
+    constexpr bool kOscUseImageCache = false;
+#else
+    constexpr bool kOscUseImageCache = true;
+#endif
+}
+
 void OscilloscopeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     // 内容区底色（深色主题下也保持浅色，保证按钮文字可读）
@@ -160,12 +177,37 @@ void OscilloscopeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> co
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
-    // 方案 A：动态层缓存
-    //   · 只有尺寸变化 / 模式变化 / 冻结状态变化 / snapshot 有新数据时才重绘动态层
-    //   · 否则直接 drawImageAt，避开 4 次 strokePath 与上千次 fillRect
-    redrawDynamicLayerIfNeeded(canvas);
-    if (dynamicLayer.isValid())
-        g.drawImageAt(dynamicLayer, canvas.getX(), canvas.getY());
+    if (kOscUseImageCache)
+    {
+        // 方案 A：动态层缓存
+        //   · 只有尺寸变化 / 模式变化 / 冻结状态变化 / snapshot 有新数据时才重绘动态层
+        //   · 否则直接 drawImageAt，避开 4 次 strokePath 与上千次 fillRect
+        redrawDynamicLayerIfNeeded(canvas);
+        if (dynamicLayer.isValid())
+            g.drawImageAt(dynamicLayer, canvas.getX(), canvas.getY());
+    }
+    else
+    {
+        // macOS 直绘分支：波形/XY 直接画到屏幕 Graphics（canvas 绝对坐标）
+        // 省去一次 width×height×4B 的 Image 分配 + 一次像素合成
+        switch (displayMode)
+        {
+            case DisplayMode::waveform:  drawWaveform(g, canvas);        break;
+            case DisplayMode::xy:        drawXY      (g, canvas, false); break;
+            case DisplayMode::lissajous: drawXY      (g, canvas, true);  break;
+        }
+
+        if (frozen)
+        {
+            auto dot = juce::Rectangle<int>(canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
+            g.setColour(juce::Colour(0xffec4d85));
+            g.fillEllipse(dot.toFloat());
+            g.setColour(PinkXP::ink);
+            g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+            g.drawText("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
+                       42, 12, juce::Justification::centredRight, false);
+        }
+    }
 }
 
 // ----------------------------------------------------------

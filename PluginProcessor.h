@@ -88,6 +88,12 @@ public:
     juce::String getSavedLayoutXml() const;
     void         setSavedLayoutXml(const juce::String& xml);
 
+    // P4：host 调用 getStateInformation 前，Processor 会先触发此钩子，
+    //   让 Editor 端 flush 掉 ModuleWorkspace 里处于 debounce 合并中的
+    //   布局变更通知，保证保存到 host 的布局 XML 永远是最新版本。
+    //   Editor 构造时注册，析构时清空。
+    std::function<void()> flushPendingUiStateBeforeSave;
+
     // ---- 兼容旧接口（供 EqModule 使用，内部转发到 AnalyserHub）----
     double getCurrentSampleRate() const noexcept;
     void getOscilloscopeSnapshot(juce::Array<float>& dest);   // 返回 L 声道

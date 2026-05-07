@@ -51,6 +51,23 @@ namespace PinkXP
     void drawHardShadow(juce::Graphics& g, juce::Rectangle<int> r, int offset = 4);
     void drawDesktop  (juce::Graphics& g, juce::Rectangle<int> r);
 
+    // ==========================================================
+    // 桌面纹理共享缓存（P6 · 跨实例 weak-ref cache）
+    //   多实例场景下（VST3 宿主加载 N 份插件）drawDesktop 的循环绘制会被放大 N 倍，
+    //   尤其 macOS 软光栅下是明显的 UI 线程热点。这里把"指定尺寸 + 当前主题"的
+    //   drawDesktop 输出烘焙到一张进程级共享 Image：
+    //     · 多个 Editor 的 workspace 同尺寸时直接共用同一张 Image，零重复绘制；
+    //     · 实例持有 Image 的值拷贝（JUCE Image 内部是 shared pixel ref-counted）
+    //       —— 最后一个持有者析构时像素数据自动释放（weak-ref 行为等价）；
+    //     · 主题切换时 applyTheme 内部会调用 invalidateDesktopTextureCache()，
+    //       下一帧各实例 paint 会拿到新 key 的全新共享 Image。
+    //
+    //   widthIfNot0 / heightIfNot0：期望的 Image 尺寸（通常 = workspace bounds 大小）。
+    //   返回的 Image 以 (0,0) 为左上原点绘制；调用方贴到目标矩形左上角即可。
+    // ==========================================================
+    juce::Image getSharedDesktopTexture(int width, int height);
+    void        invalidateDesktopTextureCache();
+
     // 在 area 中央绘制插件 logo（由调用方提供 Image，通常是 Editor 成员缓存，
     // 这样避免 ImageCache / static 跨 DLL 卸载时的悬垂引用）
     void drawLogo     (juce::Graphics& g, juce::Rectangle<int> area,

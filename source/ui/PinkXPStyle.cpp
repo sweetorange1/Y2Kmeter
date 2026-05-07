@@ -267,6 +267,83 @@ namespace PinkXP
     }
 
     // ------------------------------------------------------
+    // 跨实例共享桌面纹理缓存（P6）
+    //   · key：当前主题 id + (width, height)
+    //   · 最多保留少量尺寸的条目（常见情况是用户开 N 个相同尺寸的 Editor
+    //     时，所有实例都命中同一个共享 Image）
+    //   · 不使用 JUCE ImageCache：那是一个进程级 static，插件 DLL 卸载时
+    //     容易发生像素内存跨 DLL 悬垂；这里改为本 .cpp TU 内部 static，
+    //     生命周期与 PinkXPStyle 所在的模块一致。
+    // ------------------------------------------------------
+    namespace
+    {
+        struct DesktopTextureEntry
+        {
+            ThemeId       theme;
+            int           width;
+            int           height;
+            juce::Image   image;
+        };
+
+        // 采用普通 vector + 简单 LRU 淘汰；N 不会很大（通常 1~3 种尺寸）
+        static std::vector<DesktopTextureEntry>& getDesktopTextureCache()
+        {
+            static std::vector<DesktopTextureEntry> cache;
+            return cache;
+        }
+
+        static constexpr size_t kMaxDesktopTextureEntries = 4;
+    }
+
+    juce::Image getSharedDesktopTexture(int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+            return {};
+
+        auto& cache = getDesktopTextureCache();
+        const auto currentTheme = getCurrentThemeId();
+
+        // 查找既存条目
+        for (size_t i = 0; i < cache.size(); ++i)
+        {
+            auto& e = cache[i];
+            if (e.theme == currentTheme
+                && e.width == width
+                && e.height == height
+                && e.image.isValid())
+            {
+                // 命中：把条目移到末尾（简单 LRU）
+                if (i + 1 != cache.size())
+                {
+                    DesktopTextureEntry hit = std::move(e);
+                    cache.erase(cache.begin() + (std::ptrdiff_t) i);
+                    cache.push_back(std::move(hit));
+                }
+                return cache.back().image;
+            }
+        }
+
+        // 未命中：烘焙一张新的（左上角原点 = (0,0)，尺寸 = width × height）
+        juce::Image img(juce::Image::RGB, width, height, true);
+        {
+            juce::Graphics gg(img);
+            drawDesktop(gg, juce::Rectangle<int>(0, 0, width, height));
+        }
+
+        // LRU 容量控制：超出时弹出最旧一条
+        if (cache.size() >= kMaxDesktopTextureEntries)
+            cache.erase(cache.begin());
+
+        cache.push_back({ currentTheme, width, height, img });
+        return cache.back().image;
+    }
+
+    void invalidateDesktopTextureCache()
+    {
+        getDesktopTextureCache().clear();
+    }
+
+    // ------------------------------------------------------
     // drawLogo —— 在 area 中央绘制插件 logo 图片（由调用方提供 Image）
     //   半透明渲染；Image 由 Editor 成员缓存（避免 ImageCache 跨 DLL 悬垂）
     // ------------------------------------------------------
@@ -774,6 +851,10 @@ namespace PinkXP
         //   arrowColourId/textColourId 等通过 findColour() 读取的控件颜色
         //   立刻跟随新主题（否则会保留构造时的旧配色）。
         syncPinkXPColours (getPinkXPLookAndFeel());
+
+        // P6: 主题切换时让"跨实例共享桌面纹理"全部失效，下一帧各 Editor
+        //     paint 会拿到 key=(newThemeId,size) 的全新共享 Image。
+        invalidateDesktopTextureCache();
 
         // 通知所有订阅者
         for (auto& s : gThemeSubs)

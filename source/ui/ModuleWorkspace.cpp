@@ -514,6 +514,19 @@ ModuleWorkspace::ModuleWorkspace()
 
 ModuleWorkspace::~ModuleWorkspace()
 {
+    // P4：如有 debounce 中待决的布局变更通知，析构前先 flush，避免
+    //   "用户刚松开鼠标就关窗"场景下最后一次布局丢写。
+    //   注意：必须先 stopTimer 再同步派发，防止析构期间 timer 再次触发。
+    //   onLayoutChanged 回调通常走到 Processor::setSavedLayoutXml（字符串赋值），
+    //   此时 Editor/Processor 仍然存活，flush 是安全的。
+    layoutChangeCoalescer.stopTimer();
+    if (layoutChangePending)
+    {
+        layoutChangePending = false;
+        if (! suspendNotifications && onLayoutChanged)
+            onLayoutChanged();
+    }
+
     // 如果析构时 gainPopup 仍处打开态（监听器还挂在 topLevel），必须先摘下来，
     // 否则后续 mouseDown 会回调到已销毁的 this → 崩溃。
     // 注意：这里用保存的 gainPopupListenerHost 做 detach，因为到了析构阶段
@@ -2390,8 +2403,31 @@ void ModuleWorkspace::clearDragPreview()
 
 void ModuleWorkspace::notifyLayoutChanged()
 {
+    // 批量恢复期间静默，避免反复回写 Processor 中间态
     if (suspendNotifications) return;
+
+    // P4：短时间内多次 notify 仅保留 1 次真正派发。
+    //   · 首次调用立即 startTimer(16)；后续调用会 restart 同一个计时器
+    //     （JUCE Timer::startTimer 在 timer 已 running 时相当于重置倒计时）。
+    //   · 这样拖动过程中连续调的 notify 会被压成"最后一次 +16ms"派发一次，
+    //     避免在 10+ 模块场景下每次 saveLayoutAsXml 的毫秒级开销堆积。
+    layoutChangePending = true;
+    layoutChangeCoalescer.startTimer (16);
+}
+
+void ModuleWorkspace::dispatchLayoutChangeNow()
+{
+    if (! layoutChangePending) return;
+    layoutChangePending = false;
+    if (suspendNotifications) return;          // 安全兜底
     if (onLayoutChanged) onLayoutChanged();
+}
+
+void ModuleWorkspace::flushPendingLayoutChange()
+{
+    if (! layoutChangePending) return;
+    layoutChangeCoalescer.stopTimer();
+    dispatchLayoutChangeNow();
 }
 
 // ==========================================================

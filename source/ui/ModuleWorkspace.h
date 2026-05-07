@@ -676,6 +676,39 @@ private:
     // 正在从 ValueTree 批量恢复布局，此期间静默通知避免递归
     bool suspendNotifications = false;
 
+    // ======================================================
+    // P4：onLayoutChanged 抑动合并（debounce）
+    //   · notifyLayoutChanged() 在拼豆 cellSize/opacity 滑块拖动末尾、perler
+    //     拖动/缩放每一次调整、批量导入等路径会被短时间内多次调用。每次
+    //     都会触发 onLayoutChanged → saveLayoutAsXml()（遍历所有 Module +
+    //     Perler，构造 ValueTree 再序列化成字符串），在 10+ 模块下单次就
+    //     能达到毫秒级，连发时 macOS 上拖动会有明显卡顿。
+    //   · 方案：把"真正的派发"延后到一个 16ms（~1 帧）单发计时器里。短时
+    //     间内多次 notify 只会保留 1 次派发，用户感知是"松开后一瞬完成"。
+    //   · flushPendingLayoutChange() 在析构/关键同步时立即触发待决派发，
+    //     避免窗口关闭时漏写最后一次布局。
+    // ======================================================
+    struct LayoutChangeCoalescer : public juce::Timer
+    {
+        explicit LayoutChangeCoalescer (ModuleWorkspace& o) : owner (o) {}
+        void timerCallback() override
+        {
+            stopTimer();
+            owner.dispatchLayoutChangeNow();
+        }
+        ModuleWorkspace& owner;
+    };
+    LayoutChangeCoalescer layoutChangeCoalescer { *this };
+    bool layoutChangePending = false;
+
+    // 真正把通知派发给 onLayoutChanged（由 coalescer 或 flush 路径调用）
+    void dispatchLayoutChangeNow();
+
+public:
+    // 窗口关闭/关键同步（如 Editor 在保存状态前）时：若有待决通知，立即 flush
+    void flushPendingLayoutChange();
+
+private:
     // Editor 在 chrome 隐藏态下指定的 hit-test 挖洞矩形（workspace 坐标系）
     //   · 落在这些矩形内的鼠标事件会被忽略（本组件 hitTest 返回 false），
     //     从而冒泡到父组件（Editor）去处理"浮动关闭按钮/标题文字点击"等顶部交互。

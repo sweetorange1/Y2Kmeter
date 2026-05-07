@@ -295,6 +295,22 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         processor.setSavedLayoutXml(workspace->saveLayoutAsXml());
     };
 
+    // 4.b) P4：host 调用 getStateInformation 前，Processor 会触发此钩子，
+    //      把 ModuleWorkspace 里 debounce 合并中的变更立即 flush，并
+    //      同步回写最新 XML 到 savedLayoutXml，避免保存到工程的布局
+    //      落后 16ms 的"上一版"。
+    processor.flushPendingUiStateBeforeSave = [this]()
+    {
+        if (workspace != nullptr)
+        {
+            workspace->flushPendingLayoutChange();
+            // flushPendingLayoutChange 内部若有待决通知会同步回调
+            // onLayoutChanged → setSavedLayoutXml；若无待决，这里兜底
+            // 再写一次也廉价（仅字符串赋值），保证一致性。
+            processor.setSavedLayoutXml (workspace->saveLayoutAsXml());
+        }
+    };
+
     // 4.05) 布局预设切换：Preset 1 = 默认布局 + 默认窗口大小；
     //       Preset 2 = 把顶层窗口宽度拉到当前屏幕宽，并让默认模块横向等分 canvas。
     //       实现细节：
@@ -690,6 +706,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
 Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
 {
+    // P4：先解绑 Processor → Editor 的 flush 钩子，避免析构阶段里
+    //   宿主线程调 getStateInformation 触发回调到已部分销毁的 this。
+    processor.flushPendingUiStateBeforeSave = nullptr;
+
     // -1) 最先 detach GPU 上下文，确保随后 workspace / chromeHiddenOverlay 等
     //     子组件析构时，GL 资源（Texture/VBO/FBO）已经从上下文解绑。
     //     若依赖成员反向析构顺序隐式 detach，会触发"GL 资源释放时子组件已部分销毁"的
@@ -1330,14 +1350,18 @@ void Y2KmeterAudioProcessorEditor::invalidateDesktopCache() noexcept
 
 void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
 {
-#if JUCE_MAC
-    // macOS 上 legacy NSOpenGLContext 对大尺寸 Image 的纹理 upload 有隐式同步开销，
-    // 并且构造里我们已经不再 attach OpenGLContext，软光栅后端 drawDesktop/drawLogo
-    // 已足够快 —— 直接走实时绘制，不维护这张 cache Image。
-    desktopCacheImage = {};
-    desktopCacheBounds = {};
-    desktopCacheDirty = false;
-#else
+    // P6 · 跨实例共享桌面纹理：
+    //   之前按"每个 Editor 实例"各自维护一张 desktopCacheImage，
+    //   并且 macOS 分支因顾虑 legacy NSOpenGLContext 的纹理 upload 开销
+    //   选择**每帧重绘** drawDesktop / drawLogo 的循环图样——多实例场景
+    //   （DAW 同时加载 N 份）下这段循环被放大 N 倍，是 UI 线程热点。
+    //
+    //   P0 已不再 attach OpenGLContext 到 mac，软光栅 drawImageAt 走的是
+    //   CoreGraphics blit，比每帧重新画循环图样便宜一个数量级；因此 mac
+    //   分支也启用共享 cache，并把底图 Image 抽到 PinkXP 进程级 weak-ref
+    //   共享池（getSharedDesktopTexture），多实例 + 同尺寸时零重复绘制。
+    //   Logo 仍由各实例按自己的 logoImage 独立叠加（中心区单次 drawImage，
+    //   成本可忽略）。
     const auto bounds = workspace != nullptr ? workspace->getBounds() : getLocalBounds();
     if (bounds.isEmpty())
     {
@@ -1352,19 +1376,36 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
         && desktopCacheBounds == bounds)
         return;
 
+    // 1) 从进程级共享池取（或新建）底图 —— 多个 Editor 同尺寸时共用像素数据
+    juce::Image sharedBase = PinkXP::getSharedDesktopTexture (bounds.getWidth(),
+                                                              bounds.getHeight());
+
+    if (! sharedBase.isValid())
+    {
+        // 兜底：共享池失败时退回原有路径
+        desktopCacheImage = {};
+        desktopCacheBounds = {};
+        desktopCacheDirty = false;
+        return;
+    }
+
+    // 2) 本实例的 cache Image = 共享底图 + 居中 logo 叠加
+    //    由于 logo 位置/尺寸依赖 bounds，无法跨实例共用最终图；
+    //    但共享部分已经覆盖了 drawDesktop 所有重复循环（最大头）。
     desktopCacheImage = juce::Image (juce::Image::RGB,
                                      bounds.getWidth(),
                                      bounds.getHeight(),
-                                     true);
+                                     false);
     desktopCacheBounds = bounds;
     desktopCacheDirty = false;
 
     juce::Graphics cacheGraphics (desktopCacheImage);
-    cacheGraphics.addTransform (juce::AffineTransform::translation ((float) -bounds.getX(),
-                                                                    (float) -bounds.getY()));
-    PinkXP::drawDesktop (cacheGraphics, bounds);
-    PinkXP::drawLogo    (cacheGraphics, bounds, logoImage);
-#endif
+    cacheGraphics.drawImageAt (sharedBase, 0, 0);
+    // drawLogo 期望 area 是"目标绘制矩形"，而 cache Image 以 (0,0) 起点，
+    // 因此传递一个左上角为 (0,0) 的等尺寸矩形。
+    PinkXP::drawLogo (cacheGraphics,
+                      juce::Rectangle<int>(0, 0, bounds.getWidth(), bounds.getHeight()),
+                      logoImage);
 }
 
 // ----------------------------------------------------------

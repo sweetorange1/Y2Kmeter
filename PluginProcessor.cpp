@@ -354,6 +354,12 @@ void Y2KmeterAudioProcessor::changeProgramName(int, const juce::String&) {}
 
 void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
+    // P4：如果 Editor 在运行，debounce 合并中的 workspace 布局变更可能
+    //   还没落到 savedLayoutXml。先 flush，保证下面序列化的是最新布局。
+    //   非 UI 打开状态下此回调为空，no-op。
+    if (flushPendingUiStateBeforeSave)
+        flushPendingUiStateBeforeSave();
+
     // 顶层 <PBEQ_State>
     //   <Layout>...</Layout>        ← UI 布局
     juce::ValueTree root("PBEQ_State");
