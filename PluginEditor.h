@@ -30,6 +30,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     void visibilityChanged() override;
+    void parentHierarchyChanged() override;
 
     // 鼠标事件：右上角关闭按钮 + 空白区域拖拽窗口（仅 Standalone 模式生效）
     void mouseMove (const juce::MouseEvent&) override;
@@ -207,6 +208,22 @@ private:
     bool minButtonPressed     = false;
     bool alwaysOnTopActive    = true;  // 固定按钮当前状态：默认启用（置顶不被遮挡）
     bool initialAlwaysOnTopApplied = false; // 首次 visibilityChanged 时把默认置顶应用到顶层窗口的一次性 flag
+
+    // Windows 下强制关闭 Direct2D 渲染器的一次性 flag。
+    //   背景：JUCE 8 默认在 Windows 上启用 Direct2D。VST3 DLL 被宿主
+    //   FreeLibrary 卸载时，CRT 在持有 loader lock 的上下文里开始执行
+    //   atexit 析构链；其中 JUCE 的 SharedResourcePointer<DxgiAdapters> 静态
+    //   缓存会释放 ID3D11Device，触发 AMD 的 atidxx64.dll::CDevice::DestroyDriverInstance
+    //   内部 Sleep 等 GPU fence——因 loader lock导致驱动 worker thread 无法推进，
+    //   主线程无限 Sleep → FL Studio 刷新删除插件时卡死。
+    //   解法：首次顶层 peer 可用时把渲染引擎切到软光栅/GDI（0 = software renderer），
+    //   避免 DLL 生命周期内初始化 Direct2D 全局资源。
+    bool renderingEngineConfigured = false;
+
+    // Editor 析构流程已启动——用于在 resized() 中拒绝把析构末端
+    //   宿主/JUCE 塞来的极小尺寸（实测 FL Studio 关闭插件窗口时曾传入 ~175×85）
+    //   回写到 Processor.savedEditorSize，从而避免下次打开窗口恢复到异常小尺寸。
+    bool editorBeingDestructed = false;
     bool titleTextHovered     = false; // 左侧标题文字 hover 态（hover 时显示下划线 + 手型光标）
 
     // 标题文字实际绘制的总像素宽度（由 paint() 计算后回写，供 mouseMove / mouseDown

@@ -368,6 +368,13 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
                      (double) analysisInputGainDb.load (std::memory_order_relaxed),
                      nullptr);
 
+    // 插件 Editor 最近一次窗口尺寸：仅在非零时写入（0=从未被 Editor 写过）
+    if (savedEditorWidth > 0 && savedEditorHeight > 0)
+    {
+        root.setProperty ("editorW", savedEditorWidth,  nullptr);
+        root.setProperty ("editorH", savedEditorHeight, nullptr);
+    }
+
     if (savedLayoutXml.isNotEmpty())
     {
         if (auto layoutXml = juce::parseXML(savedLayoutXml))
@@ -392,6 +399,18 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
 
     if (root.hasProperty ("analysisInputGainDb"))
         setAnalysisInputGainDb ((float) (double) root.getProperty ("analysisInputGainDb", 0.0));
+
+    // 插件 Editor 最近一次窗口尺寸（可能为 0 = 未保存；后续 Editor 构造时兜底到默认值）
+    if (root.hasProperty ("editorW") && root.hasProperty ("editorH"))
+    {
+        const int w = (int) root.getProperty ("editorW", 0);
+        const int h = (int) root.getProperty ("editorH", 0);
+        if (w > 0 && h > 0)
+        {
+            savedEditorWidth  = w;
+            savedEditorHeight = h;
+        }
+    }
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())

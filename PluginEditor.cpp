@@ -66,7 +66,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.8");
+const int versionW = versionFont.getStringWidth ("v1.8.1");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -107,7 +107,7 @@ const int versionW = versionFont.getStringWidth ("v1.8");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8";
+const juce::String versionText = "v1.8.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -284,7 +284,34 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         setResizeLimits(50, 50, 8192, 8192);
     else
         setResizeLimits(640, 420, 1600, 1100);
-    setSize(960, 640);
+
+    // 插件模式（VST3/AU）：若 host state 里保存过上次 Editor 关闭时的窗口尺寸，
+    //   优先用它恢复，实现"每次重开窗口保持上次大小"（尤其是 FL Studio Windows 版
+    //   本身不会记住 VST3 窗口尺寸）。
+    //   Standalone 模式由 PropertiesFile 体系记忆位置+尺寸，不走这里。
+    //
+    //   下限校验与 resized() 的回写下限 (400×300) 保持一致：若历史 state 里
+    //   残留了异常小尺寸（例如早期版本曾回存过 FL Studio 关闭子窗口时的
+    //   ~175×85 中间态），直接视为无效并回退到默认 960×640，不要盲目 setSize
+    //   让用户看到一个几乎看不见的小窗口。
+    constexpr int kMinRestoreW = 400;
+    constexpr int kMinRestoreH = 300;
+    const int savedW = processor.getSavedEditorWidth();
+    const int savedH = processor.getSavedEditorHeight();
+
+    if (isPluginHost
+        && savedW >= kMinRestoreW
+        && savedH >= kMinRestoreH)
+    {
+        const int maxW = 8192, maxH = 8192;
+        const int w = juce::jlimit (kMinRestoreW, maxW, savedW);
+        const int h = juce::jlimit (kMinRestoreH, maxH, savedH);
+        setSize (w, h);
+    }
+    else
+    {
+        setSize(960, 640);
+    }
 
     // 3) 再装载默认/已保存模块
     loadInitialModules();
@@ -706,6 +733,11 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
 Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
 {
+    // 进入析构：后续宿主/JUCE 对 Editor 的任何 resize（包括 FL Studio 关闭
+    //   嵌入子窗口时塞给我们的 ~175×85 极小中间态）都不应被 resized() 回写到
+    //   Processor.savedEditorSize，否则下次打开窗口会恢复成异常小尺寸。
+    editorBeingDestructed = true;
+
     // P4：先解绑 Processor → Editor 的 flush 钩子，避免析构阶段里
     //   宿主线程调 getStateInformation 触发回调到已部分销毁的 this。
     processor.flushPendingUiStateBeforeSave = nullptr;
@@ -760,8 +792,39 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     //    BinaryData 内存已被释放而全局 gTypeface 仍持有悬垂引用导致宿主卡死
     PinkXP::initCustomTypeface(nullptr);
 
+    // 3.1) 关键：清空 PinkXPStyle 的桌面纹理缓存（getSharedDesktopTexture）。
+    //
+    //   【此行是 2026-05 Windows VST3 FL Studio 删除插件卡死修复的核心】
+    //
+    //   根因：该缓存以 TU 内部 static vector 持有若干 juce::Image，Windows 上
+    //   实际类型是 Direct2DPixelData，内部通过 SharedResourcePointer<DirectX>
+    //   持有 ID3D11Device / DxgiAdapters 全局单例。若不在这里主动清理：
+    //     · DLL 卸载时 CRT 走 execute_onexit_table 析构这些 Image；
+    //     · Direct2DPixelData 析构 → DirectX 引用计数归零 → ID3D11Device 释放；
+    //     · AMD 驱动 atidxx64.dll::CDevice::DestroyDriverInstance 内部需要
+    //       等待 GPU worker thread 退出（GetExitCodeThread / SleepEx）；
+    //     · 但此时 CRT 持有 atexit lock，loader lock 也在 FreeLibrary 链路里
+    //       被持有，驱动 worker 线程无法完成 DLL 引用链处理 → 主线程永久等待。
+    //   修复：在 Editor 析构时（此时 loader lock 未持有、audio 回调已停），
+    //   主动把这些 Image 释放干净，让 DirectX 单例在此刻就自然析构，DLL 卸载
+    //   时 atexit 链里就没有"等 GPU 驱动 worker 线程"这种重活。
+    PinkXP::invalidateDesktopTextureCache();
+
+    // 3.2) 关键：解除 LookAndFeel 对 Typeface 的引用。
+    //   PinkXPLookAndFeel 是 TU 级 static 实例（生命周期与 DLL 相同），通过
+    //   setDefaultSansSerifTypeface 持有 Typeface::Ptr。Windows 上
+    //   DirectWriteTypeface 内部持有 SharedResourcePointer<Direct2DFactories>，
+    //   不提前解引用的话，同样会在 atexit 阶段触发 DirectWrite / Direct2D
+    //   全局资源的 DLL 卸载链析构。
+    getPinkXPLookAndFeel().setDefaultSansSerifTypeface (nullptr);
+    juce::LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypeface (nullptr);
+
     // 4) 清空 ImageCache（保险；我们自己不用它，但有些 JUCE 默认路径可能写入）
     juce::ImageCache::releaseUnusedImages();
+
+    // 4.1) 清空 JUCE 内置 Typeface 缓存（juce::Font 查字型时内部 LRU；
+    //   也可能持有 DirectWriteTypeface 实例 → 同样的 atexit 风险）。
+    juce::Typeface::clearTypefaceCache();
 
     // 5) 实例成员 customTypeface / logoImage 会在随后自动析构，
     //    此时已没有任何 LookAndFeel / Font / Image 引用 BinaryData，安全
@@ -790,9 +853,17 @@ void Y2KmeterAudioProcessorEditor::loadInitialModules()
     if (savedXml.isNotEmpty() && workspace->loadLayoutFromXml(savedXml))
         return;
 
-    // 2) 首次打开（无已保存布局）默认应用 Horizontal Bar(T)
-    //    注意：仅变更首次默认入口，不影响预设列表里的 Default 选项。
-    applyLayoutPreset ((int) ModuleWorkspace::LayoutPreset::horizontalFull);
+    // 2) 首次打开（无已保存布局）的默认预设：
+    //    · Standalone 模式：Horizontal Bar(T)——保留老用户习惯（横向铺满屏幕顶部）；
+    //    · 插件模式（VST3 / AU 等）：Default 预设——宿主 DAW 的子窗口不适合让
+    //      Y2Kmeter 主动去改顶层窗口尺寸/位置（horizontalFull 会尝试把窗口拉到
+    //      屏幕宽度并移到屏幕左上，和宿主嵌入布局冲突），因此首次使用"默认瀑布
+    //      布局 + 默认 960×640 窗口"更安全、体验更一致。
+    //    注意：仅变更首次默认入口，不影响预设列表里的 Default / Horizontal Bar 选项。
+    const auto firstRunPreset = isPluginHost
+                                    ? ModuleWorkspace::LayoutPreset::defaultGrid
+                                    : ModuleWorkspace::LayoutPreset::horizontalFull;
+    applyLayoutPreset ((int) firstRunPreset);
 }
 
 // ----------------------------------------------------------
@@ -1462,7 +1533,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8";
+const juce::String versionText = "v1.8.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1595,6 +1666,75 @@ void Y2KmeterAudioProcessorEditor::resized()
 
     // 同步 workspace 的 hit-test 挖洞（按钮位置依赖 getWidth()，resize 后必须重新计算）
     updateWorkspaceHitTestHoles();
+
+    // 插件模式下实时把 Editor 尺寸写回 Processor：host 调用 getStateInformation
+    //   时会把最新尺寸一起序列化，下一次重新打开编辑器窗口时即可恢复。
+    //   · Standalone 不走此路径（PropertiesFile 体系自行处理位置+尺寸）；
+    //   · 析构期间 (editorBeingDestructed) 不再写回：FL Studio 等宿主在关闭
+    //     嵌入子窗口的瞬间会先把插件视图 resize 到 ~175×85 这种极小中间态
+    //     （目的是让窗口先从屏幕上隐形），若此时回写到 savedEditorSize，下次
+    //     重新打开插件窗口就会恢复成这个异常小尺寸；
+    //   · 写入下限提到 400×300：该阈值大于任何正常可用的最小 Editor 尺寸
+    //     （标题栏 26 + toolbar 36 + 至少一行模块 ≈ 需要 300+ 高度），但又
+    //     远小于构造默认值 960×640，起到"防止宿主偷偷塞小尺寸"的护栏作用，
+    //     同时不会阻碍用户主动把窗口拉到合理的较小尺寸。
+    if (isPluginHost && ! editorBeingDestructed)
+    {
+        constexpr int kMinPersistW = 400;
+        constexpr int kMinPersistH = 300;
+
+        const int w = getWidth();
+        const int h = getHeight();
+        if (w >= kMinPersistW && h >= kMinPersistH)
+            processor.setSavedEditorSize (w, h);
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::parentHierarchyChanged()
+{
+    // --------------------------------------------------------------------
+    // Windows VST3 卡死修复 —— 强制使用软件渲染引擎
+    //
+    // 背景（基于 dump 栈实证）：
+    //   JUCE 8 在 Windows 默认启用 Direct2D 渲染器；Direct2D 用
+    //   SharedResourcePointer<DxgiAdapters>（DLL 级 static shared_ptr）缓存
+    //   D3D11/DXGI 设备。当 FL Studio / 某些 DAW 刷新/删除 VST3 时会调用
+    //   FreeLibrary，CRT 在 DLL_PROCESS_DETACH 路径（持有 loader lock 的上下文）
+    //   里执行 atexit 析构链，触发 DxgiAdapters 析构 → ID3D11Device 释放 →
+    //   AMD 驱动 atidxx64.dll::CDevice::DestroyDriverInstance 内部 SleepEx
+    //   等待 GPU fence / worker thread，而 loader lock 又阻塞了那些线程的推进，
+    //   主线程从此无限 Sleep（= 进程未响应 / 宿主卡死）。
+    //
+    //   解决方案：在 peer 刚拿到时把渲染引擎切到 Software（index 0），
+    //   让 Direct2D 全局资源根本不被构造，DLL 卸载链路上就没有 AMD 驱动销毁
+    //   环节，彻底避开 loader lock 死等。
+    //
+    // 限定范围：
+    //   · 仅 Windows 生效（mac/Linux 没有该问题）。
+    //   · peer 可用且有 Direct2D 可选项时才切换（少数旧系统仅 Software 一档，
+    //     此时 setCurrentRenderingEngine 是 no-op）。
+    //   · 只做一次：首次切换成功后 renderingEngineConfigured 置 true，后续
+    //     parentHierarchyChanged 不再重复（避免用户手动切回 Direct2D 后被覆盖）。
+    //
+    // 代价：Windows 下 UI 由 GDI/软件光栅绘制，性能略降。对当前插件（UI 主要为
+    //   低频仪表 + 频谱小图，且我们另外开启了 OpenGLContext 兜底）几乎无感知。
+    // --------------------------------------------------------------------
+   #if JUCE_WINDOWS
+    if (! renderingEngineConfigured)
+    {
+        if (auto* peer = getPeer())
+        {
+            const auto engines = peer->getAvailableRenderingEngines();
+            if (engines.size() > 1)
+            {
+                peer->setCurrentRenderingEngine (0); // 0 = Software Renderer
+            }
+            renderingEngineConfigured = true;
+        }
+    }
+   #endif
+
+    juce::AudioProcessorEditor::parentHierarchyChanged();
 }
 
 void Y2KmeterAudioProcessorEditor::visibilityChanged()

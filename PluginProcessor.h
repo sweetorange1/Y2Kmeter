@@ -88,6 +88,21 @@ public:
     juce::String getSavedLayoutXml() const;
     void         setSavedLayoutXml(const juce::String& xml);
 
+    // ---- 插件 Editor 窗口尺寸持久化 ----
+    //   · 由 Editor::resized() 实时写回，保存到 host 的 state 中；
+    //   · VST3 / AU 等插件宿主在关闭→重开插件窗口时，宿主不会记住尺寸
+    //     （尤其 FL Studio Windows 版），因此我们在 Editor 构造时读取
+    //     这里保存的尺寸并 setSize，实现"上次关闭时多大，再次打开就多大"。
+    //   · 默认 0 表示未保存；Editor 会在此情况下使用硬编码默认 960×640。
+    //   · Standalone 下不使用此值（Standalone 自己走 PropertiesFile 保存位置+尺寸）。
+    int getSavedEditorWidth()  const noexcept { return savedEditorWidth; }
+    int getSavedEditorHeight() const noexcept { return savedEditorHeight; }
+    void setSavedEditorSize (int w, int h) noexcept
+    {
+        savedEditorWidth  = w;
+        savedEditorHeight = h;
+    }
+
     // P4：host 调用 getStateInformation 前，Processor 会先触发此钩子，
     //   让 Editor 端 flush 掉 ModuleWorkspace 里处于 debounce 合并中的
     //   布局变更通知，保证保存到 host 的布局 XML 永远是最新版本。
@@ -109,6 +124,10 @@ private:
 
     // Phase E —— 最近一次保存的布局（由 Editor 同步过来；序列化到 host 状态）
     juce::String savedLayoutXml;
+
+    // 插件 Editor 最近一次窗口尺寸（0 = 未保存）
+    int savedEditorWidth  = 0;
+    int savedEditorHeight = 0;
 
     // processBlock 时间占比测量器（JUCE 内置，读写原子，实时线程友好）
     juce::AudioProcessLoadMeasurer loadMeasurer;
