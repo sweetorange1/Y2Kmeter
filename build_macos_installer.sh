@@ -3,23 +3,25 @@
 # Y2Kmeter · macOS 打包脚本（DMG 安装镜像，带可视化拖拽引导）
 #
 # 前置条件：
-#   在 IDE（CLion 等）里已经用 Release 配置把 Y2Kmeter_Standalone 与 Y2Kmeter_VST3
-#   两个 target 构建出来，产物应位于：
+#   在 IDE（CLion 等）里已经用 Release 配置把 Y2Kmeter_Standalone、Y2Kmeter_VST3
+#   与 Y2Kmeter_AU 三个 target 构建出来，产物应位于：
 #     cmake-build-release/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.app
 #     cmake-build-release/Y2Kmeter_artefacts/Release/VST3/Y2Kmeter.vst3
+#     cmake-build-release/Y2Kmeter_artefacts/Release/AU/Y2Kmeter.component
 #   本脚本不再负责触发 cmake 构建，只基于现有产物做签名 + 打包。
 #
 # 功能：
-#   1. 校验 Standalone (.app) 与 VST3 (.vst3) 产物是否已经存在
-#   2. 对两个 bundle 做 ad-hoc 代码签名（codesign --sign -），让 macOS 不会因未签名
+#   1. 校验 Standalone (.app)、VST3 (.vst3) 与 AU (.component) 产物是否已经存在
+#   2. 对三个 bundle 做 ad-hoc 代码签名（codesign --sign -），让 macOS 不会因未签名
 #      直接 Gatekeeper 拦截，也让 LaunchServices 正确读取 Icon
 #   3. 刷新本机 LaunchServices / Dock 图标缓存
 #   4. 用 scripts/macos_dmg_background.m 生成一张带箭头的引导背景图
 #   5. 创建 UDRW 可写 DMG → osascript 摆好图标/背景图/窗口尺寸 → 转 UDZO 只读
 #      用户双击 DMG 时会看到：
-#           Y2Kmeter.app  ──▶  Applications
-#           Y2Kmeter.vst3 ──▶  VST3 Plug-Ins
-#      两行清晰的拖拽引导。
+#           Y2Kmeter.app       ──▶  Applications
+#           Y2Kmeter.vst3      ──▶  VST3 Plug-Ins
+#           Y2Kmeter.component ──▶  Components
+#      三行清晰的拖拽引导。
 #
 # 使用：
 #   chmod +x build_macos_installer.sh
@@ -44,15 +46,17 @@ TOOLS_DIR="${DIST_DIR}/.tools"
 PRODUCT_NAME="Y2Kmeter"
 APP_BUNDLE_NAME="${PRODUCT_NAME}.app"
 VST3_BUNDLE_NAME="${PRODUCT_NAME}.vst3"
+AU_BUNDLE_NAME="${PRODUCT_NAME}.component"
 
 # DMG 视觉布局常量 —— **必须与 scripts/macos_dmg_background.m 里的坐标保持一致**。
 # 图标坐标是 Finder 窗口坐标（原点在左上角、y 向下增长）。
 WINDOW_W=720
-WINDOW_H=460
+WINDOW_H=600
 ICON_SIZE=128
 TEXT_SIZE=12
 ROW1_Y=170    # 上行（Y2Kmeter.app → Applications）
-ROW2_Y=290    # 下行（Y2Kmeter.vst3 → VST3 Plug-Ins）
+ROW2_Y=290    # 中行（Y2Kmeter.vst3 → VST3 Plug-Ins）
+ROW3_Y=410    # 下行（Y2Kmeter.component → Components）
 LEFT_X=150    # 左侧源 bundle
 RIGHT_X=570   # 右侧安装目标链接
 
@@ -110,6 +114,7 @@ log "Step 1/5 校验 Release 产物"
 
 APP_BUNDLE="${ARTEFACTS_DIR}/Standalone/${APP_BUNDLE_NAME}"
 VST3_BUNDLE="${ARTEFACTS_DIR}/VST3/${VST3_BUNDLE_NAME}"
+AU_BUNDLE="${ARTEFACTS_DIR}/AU/${AU_BUNDLE_NAME}"
 
 if [[ ! -d "${APP_BUNDLE}" ]]; then
   cat >&2 <<EOF
@@ -125,9 +130,17 @@ if [[ ! -d "${VST3_BUNDLE}" ]]; then
 EOF
   exit 1
 fi
+if [[ ! -d "${AU_BUNDLE}" ]]; then
+  cat >&2 <<EOF
+找不到 AU 产物：${AU_BUNDLE}
+请先在 IDE（CLion 等）里以 Release 配置构建 target: Y2Kmeter_AU
+EOF
+  exit 1
+fi
 
 log "  · Standalone: ${APP_BUNDLE}"
 log "  · VST3     : ${VST3_BUNDLE}"
+log "  · AU       : ${AU_BUNDLE}"
 
 # ---- Step 2: ad-hoc 代码签名 --------------------------------------------------
 if [[ "${DO_SIGN}" -eq 1 ]]; then
@@ -142,6 +155,7 @@ if [[ "${DO_SIGN}" -eq 1 ]]; then
   }
   sign_bundle "${APP_BUNDLE}"
   sign_bundle "${VST3_BUNDLE}"
+  sign_bundle "${AU_BUNDLE}"
 else
   log "Step 2/5 跳过签名（--no-sign）"
 fi
@@ -198,10 +212,12 @@ mkdir -p "${STAGE_DIR}"
 # Step 5.1 准备 stage 目录 —— 与最终 DMG 内容完全一致
 ditto "${APP_BUNDLE}"  "${STAGE_DIR}/${APP_BUNDLE_NAME}"
 ditto "${VST3_BUNDLE}" "${STAGE_DIR}/${VST3_BUNDLE_NAME}"
+ditto "${AU_BUNDLE}"   "${STAGE_DIR}/${AU_BUNDLE_NAME}"
 
 # 安装目标的符号链接 —— 让用户在 DMG 里直接拖拽即可安装
 ln -s /Applications                       "${STAGE_DIR}/Applications"
 ln -s /Library/Audio/Plug-Ins/VST3        "${STAGE_DIR}/VST3 Plug-Ins"
+ln -s /Library/Audio/Plug-Ins/Components  "${STAGE_DIR}/Components"
 
 # 背景图放到 .background/（Finder 习惯，并且 Finder 对隐藏目录的 resolve 最稳）
 mkdir -p "${STAGE_DIR}/.background"
@@ -225,6 +241,12 @@ Y2Kmeter ${VERSION} · macOS 安装说明
       若该路径因权限问题拒绝写入，可改放：
           ~/Library/Audio/Plug-Ins/VST3/
 
+  • AU 插件（Audio Unit）：
+      把 ${AU_BUNDLE_NAME} 拖到 "Components"
+      系统路径为 /Library/Audio/Plug-Ins/Components/
+      若该路径因权限问题拒绝写入，可改放：
+          ~/Library/Audio/Plug-Ins/Components/
+
 首次打开注意：
   本包采用本地 ad-hoc 签名，未经过 Apple 公证。若打开 ${APP_BUNDLE_NAME}
   时系统提示"无法验证开发者"，请在 Finder 中右键点击 → 选择"打开"，
@@ -233,6 +255,7 @@ Y2Kmeter ${VERSION} · macOS 安装说明
 卸载：
   从 /Applications 删除 ${APP_BUNDLE_NAME}
   从 /Library/Audio/Plug-Ins/VST3 删除 ${VST3_BUNDLE_NAME}
+  从 /Library/Audio/Plug-Ins/Components 删除 ${AU_BUNDLE_NAME}
 README
 
 # 让 Finder 少一些无关文件可见
@@ -303,6 +326,8 @@ tell application "Finder"
         set position of item "Applications"             of container window to {${RIGHT_X}, ${ROW1_Y}}
         set position of item "${VST3_BUNDLE_NAME}" of container window to {${LEFT_X},  ${ROW2_Y}}
         set position of item "VST3 Plug-Ins"            of container window to {${RIGHT_X}, ${ROW2_Y}}
+        set position of item "${AU_BUNDLE_NAME}"   of container window to {${LEFT_X},  ${ROW3_Y}}
+        set position of item "Components"               of container window to {${RIGHT_X}, ${ROW3_Y}}
         -- README 放到窗口下方，靠左，不抢主视觉
         try
             set position of item "README.txt" of container window to {${LEFT_X}, ${WINDOW_H} - 70}
@@ -349,9 +374,10 @@ cat <<POSTINFO
   1) 挂载 DMG 做一次冒烟测试：
        open "${DMG_PATH}"
      打开后应看到：
-       · 粉色背景 + 两条箭头
-       · 上行：Y2Kmeter.app     →  Applications
-       · 下行：Y2Kmeter.vst3    →  VST3 Plug-Ins
+       · 粉色背景 + 三条箭头
+       · 上行：Y2Kmeter.app        →  Applications
+       · 中行：Y2Kmeter.vst3       →  VST3 Plug-Ins
+       · 下行：Y2Kmeter.component  →  Components
      用户拖拽即可完成安装，不用再读文字说明。
 
   2) 直接从 Finder 打开 .app（走正常 LaunchServices 注册）：

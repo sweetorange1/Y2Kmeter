@@ -125,7 +125,11 @@ endif()
 #   · 产物仅供 JUCE ICON_BIG/ICON_SMALL 与 Dock/Finder 图标使用。
 # ==========================================================
 set(Y2KM_ICON_PLUGIN_ARGS)
+set(Y2KM_PLUGIN_FORMATS VST3 Standalone)
 if (APPLE)
+  # 仅 macOS 构建 AU 插件；Windows/Linux 维持原有格式不变
+  list(APPEND Y2KM_PLUGIN_FORMATS AU)
+
   set(Y2KM_MACOS_RES_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
   file(MAKE_DIRECTORY "${Y2KM_MACOS_RES_DIR}")
 
@@ -266,7 +270,7 @@ Y2Kmeter
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
-        FORMATS VST3 Standalone
+        FORMATS ${Y2KM_PLUGIN_FORMATS}
         # macOS 下 Y2KM_ICON_PLUGIN_ARGS 展开为 ICON_BIG/ICON_SMALL，其它平台为空，不影响 Windows。
         ${Y2KM_ICON_PLUGIN_ARGS}
         # 本插件是纯分析表（EQ 分析仪 / LUFS / 示波器 / 频谱 / 相位 / 动态等），

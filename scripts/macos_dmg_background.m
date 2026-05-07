@@ -3,18 +3,19 @@
 // ------------------------------------------------------------
 // 用途：
 //   为 build_macos_installer.sh 打出的 DMG 生成一张引导背景图，
-//   指引用户把 .app / .vst3 分别拖到右侧的安装目录链接上。
+//   指引用户把 .app / .vst3 / .component 分别拖到右侧的安装目录链接上。
 //
 //   输出两张 PNG：
-//     <outBase>.png       720 × 460   （@1x）
-//     <outBase>@2x.png    1440 × 920  （@2x，Retina）
+//     <outBase>.png       720 × 600    （@1x）
+//     <outBase>@2x.png    1440 × 1200  （@2x，Retina）
 //
 //   图内容（与 AppleScript 里图标坐标一一对应）：
 //     · 浅粉渐变背景
 //     · 顶部大字标题  "Y2Kmeter"  + 版本号 + 副标题
-//     · 上下两条粉色大箭头：
-//         行 1 (y≈200): [App 图标占位]   ——▶   [Applications]
-//         行 2 (y≈340): [VST3 图标占位]  ——▶   [VST3 插件目录]
+//     · 三条粉色大箭头：
+//         行 1 (y≈170): [App 图标占位]       ——▶   [Applications]
+//         行 2 (y≈290): [VST3 图标占位]      ——▶   [VST3 插件目录]
+//         行 3 (y≈410): [AU 图标占位]        ——▶   [Components]
 //       每条箭头上/下附一句说明文字（"拖到这里即完成安装"）
 //     · 底部小字提示：首次打开若被 Gatekeeper 拦 → 右键打开
 //
@@ -28,8 +29,8 @@
 //
 // 例：
 //   ./macos_dmg_background  /tmp/dmg_bg  "Y2Kmeter"  "1.6.0"
-//   → /tmp/dmg_bg.png      (720×460)
-//   → /tmp/dmg_bg@2x.png   (1440×920)
+//   → /tmp/dmg_bg.png      (720×600)
+//   → /tmp/dmg_bg@2x.png   (1440×1200)
 // ------------------------------------------------------------
 
 #import <AppKit/AppKit.h>
@@ -40,11 +41,12 @@
 
 // 与 build_macos_installer.sh 里 osascript 的图标坐标保持一致
 static const CGFloat kBaseW = 720.0;
-static const CGFloat kBaseH = 460.0;
+static const CGFloat kBaseH = 600.0;
 
 // 图标中心坐标（Finder 里我们会把图标放在同样的位置）
 static const CGFloat kRow1Y = 170.0;   // App / Applications 链接（上行）
-static const CGFloat kRow2Y = 290.0;   // VST3 / VST3 目录（下行）
+static const CGFloat kRow2Y = 290.0;   // VST3 / VST3 目录（中行）
+static const CGFloat kRow3Y = 410.0;   // AU / Components 目录（下行）
 static const CGFloat kLeftX  = 150.0;  // 左侧（源文件）
 static const CGFloat kRightX = 570.0;  // 右侧（安装目标链接）
 static const CGFloat kIconHalf = 64.0; // 图标绘制半径 128 / 2
@@ -190,11 +192,11 @@ static int renderBackground(NSString* outPath,
             NSFontAttributeName: [NSFont systemFontOfSize: 13],
             NSForegroundColorAttributeName: subInk,
         };
-        drawTextCentered(ctx, @"macOS Installer  ·  Standalone + VST3",
+        drawTextCentered(ctx, @"macOS Installer  ·  Standalone + VST3 + AU",
                          subAttrs, kBaseW * 0.5, 68);
     }
 
-    // ---- 3) 两条粉色引导箭头 ----
+    // ---- 3) 三条粉色引导箭头 ----
     {
         CGColorRef pinkCG = [pink CGColor];
         const CGFloat shaftH = 14.0;
@@ -203,6 +205,7 @@ static int renderBackground(NSString* outPath,
         const CGFloat gap = kIconHalf + 12; // 到图标中心的安全距离
         drawArrow(ctx, kLeftX + gap, kRightX - gap, kRow1Y, shaftH, pinkCG);
         drawArrow(ctx, kLeftX + gap, kRightX - gap, kRow2Y, shaftH, pinkCG);
+        drawArrow(ctx, kLeftX + gap, kRightX - gap, kRow3Y, shaftH, pinkCG);
     }
 
     // ---- 4) 每行图标下方标注说明 ----
@@ -218,11 +221,17 @@ static int renderBackground(NSString* outPath,
         drawTextCentered(ctx, @"Applications", labelAttrs,
                          kRightX, kRow1Y + kIconHalf + 20);
 
-        // 第 2 行（kRow2Y，下方）：VST3 插件安装引导
+        // 第 2 行（kRow2Y，中行）：VST3 插件安装引导
         drawTextCentered(ctx, @"Y2Kmeter.vst3", labelAttrs,
                          kLeftX,  kRow2Y + kIconHalf + 20);
         drawTextCentered(ctx, @"VST3 Plug-Ins", labelAttrs,
                          kRightX, kRow2Y + kIconHalf + 20);
+
+        // 第 3 行（kRow3Y，下行）：AU 插件安装引导
+        drawTextCentered(ctx, @"Y2Kmeter.component", labelAttrs,
+                         kLeftX,  kRow3Y + kIconHalf + 20);
+        drawTextCentered(ctx, @"Components", labelAttrs,
+                         kRightX, kRow3Y + kIconHalf + 20);
 
         // 箭头上方的 hint → y - 22（y 已翻转为从上往下）
         NSDictionary* hintAttrs = @{
@@ -233,6 +242,8 @@ static int renderBackground(NSString* outPath,
                          (kLeftX + kRightX) * 0.5, kRow1Y - 22);
         drawTextCentered(ctx, @"Drag to install VST3 plugin", hintAttrs,
                          (kLeftX + kRightX) * 0.5, kRow2Y - 22);
+        drawTextCentered(ctx, @"Drag to install AU component", hintAttrs,
+                         (kLeftX + kRightX) * 0.5, kRow3Y - 22);
     }
 
     // ---- 5) 底部 Gatekeeper 小字提示 ----
