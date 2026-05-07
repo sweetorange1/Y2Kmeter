@@ -298,8 +298,20 @@ public:
         //    反算成 show 态（h+=62, 贴底时 y-=62）再写入，保证重启恢复
         //    的窗口永远对应"show 态"。随后 setChromeVisible(false) 会用
         //    标准 Hide 路径在该 show 态尺寸上收缩一次，得到正确的 hide 态。
+        //    若不存在历史 bounds（首次启动），默认贴到当前屏幕 userArea 顶部，
+        //    与默认 horizontal bar(t) 预设的定位语义保持一致（不再居中）。
         if (! restoreMainWindowBounds())
-            mainWindow->centreWithSize (mainWindow->getWidth(), mainWindow->getHeight());
+        {
+            const auto& displays = juce::Desktop::getInstance().getDisplays();
+            const auto userArea  = displays.getPrimaryDisplay() != nullptr
+                ? displays.getPrimaryDisplay()->userArea
+                : juce::Rectangle<int> (0, 0, 1280, 720);
+
+            auto b = mainWindow->getBounds();
+            const int w = juce::jmin (b.getWidth(),  userArea.getWidth());
+            const int h = juce::jmin (b.getHeight(), userArea.getHeight());
+            mainWindow->setBounds (userArea.getX(), userArea.getY(), w, h);
+        }
 
         mainWindow->setVisible (true);
 

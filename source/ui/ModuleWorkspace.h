@@ -428,11 +428,11 @@ public:
     // ======================================================
     // 文件拖放（FileDragAndDropTarget） —— 拖入图片生成"拼豆像素画"
     //   · 仅接收常见图片格式（png/jpg/jpeg/bmp/gif）
-    //   · 落入后自动：① 按 10×10 像素块降采样 ② 每块颜色匹配到内置 144 色拼豆色
+    //   · 落入后自动：① 按像素块降采样 ② 使用每格原图平均色
     //                ③ 作为一张"贴画"绘制到 canvas 底图上（模块/网格线之下，被模块遮挡）
     //   · 允许多张图片叠放；用户可以像拖模块一样拖动它们（左键按住拖动）
     //   · 点击图片进入"聚焦"态：绘制选中框 + 8 个缩放手柄 + 右上角 ×；
-    //     拖动手柄缩放网格数（像素块尺寸不变），松开后重新量化颜色；
+    //     拖动手柄缩放网格数（像素块尺寸不变），松开后重新生成像素画；
     //     聚焦态下按 Delete / 单击 × 则删除该图片。
     // ======================================================
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
@@ -875,11 +875,8 @@ private:
     //   · alpha==0 的 cell 跳过，保留贴画原始透明区域
     void drawPerlerImageAsBeads (juce::Graphics& g, const PerlerImage& img, float opacity = 1.0f) const;
 
-    // 从 HEX 颜色字符串解析出的 144 色拼豆色调色板（内嵌常量在 .cpp 中定义）
-    static const juce::Array<juce::Colour>& getPerlerPalette();
-
-    // 对指定原图执行：1) 按 cellSize×cellSize 平均降采样；2) 每格在 144 色中查找
-    //   最近颜色（LAB 距离）；3) 返回"最终贴画"的 juce::Image（尺寸 = cellsW*cellSize × cellsH*cellSize）。
+    // 对指定原图执行：1) 按 cellSize×cellSize 平均降采样；2) 直接使用每格原图平均色；
+    //   3) 返回"最终贴画"的 juce::Image（尺寸 = cellsW*cellSize × cellsH*cellSize）。
     //   · maxCellsOnLongSide 用于限制长边格子数（避免超大图卡顿）
     static juce::Image buildPerlerImage (const juce::Image& source,
                                          int cellSize,

@@ -2943,117 +2943,6 @@ void HideChromeButton::paintButton(juce::Graphics& g, bool isMouseOver, bool isB
 // ==========================================================
 // 拼豆像素画（PerlerImage）—— 拖入图片 / 像素化 / 颜色量化 / 拖动
 // ==========================================================
-namespace
-{
-    // --------------------------------------------------
-    // sRGB <-> Linear <-> CIE Lab（用于"感知一致"的颜色最近邻匹配）
-    // --------------------------------------------------
-    struct Lab { float L, a, b; };
-
-    inline float srgbToLinear (float c)
-    {
-        c = juce::jlimit (0.0f, 1.0f, c);
-        return (c <= 0.04045f) ? (c / 12.92f)
-                               : std::pow ((c + 0.055f) / 1.055f, 2.4f);
-    }
-
-    inline Lab rgbToLab (juce::Colour col)
-    {
-        const float r = srgbToLinear (col.getFloatRed());
-        const float g = srgbToLinear (col.getFloatGreen());
-        const float b = srgbToLinear (col.getFloatBlue());
-
-        // sRGB -> XYZ (D65)
-        const float X = r * 0.4124564f + g * 0.3575761f + b * 0.1804375f;
-        const float Y = r * 0.2126729f + g * 0.7151522f + b * 0.0721750f;
-        const float Z = r * 0.0193339f + g * 0.1191920f + b * 0.9503041f;
-
-        // Normalize by D65 white
-        const float xn = X / 0.95047f;
-        const float yn = Y / 1.00000f;
-        const float zn = Z / 1.08883f;
-
-        auto f = [] (float v)
-        {
-            return (v > 0.008856f) ? std::cbrt (v) : (7.787f * v + 16.0f / 116.0f);
-        };
-
-        const float fx = f (xn);
-        const float fy = f (yn);
-        const float fz = f (zn);
-
-        Lab out;
-        out.L = 116.0f * fy - 16.0f;
-        out.a = 500.0f * (fx - fy);
-        out.b = 200.0f * (fy - fz);
-        return out;
-    }
-
-    inline float labDistSq (const Lab& x, const Lab& y)
-    {
-        const float dL = x.L - y.L;
-        const float da = x.a - y.a;
-        const float db = x.b - y.b;
-        return dL * dL + da * da + db * db;
-    }
-} // namespace
-
-// 内嵌 144 色拼豆色表（与 G:/PerlerBeadsEQ/color.txt 中的十六进制一一对应）
-const juce::Array<juce::Colour>& ModuleWorkspace::getPerlerPalette()
-{
-    static const juce::Array<juce::Colour> palette = []
-    {
-        static const char* const hexCodes[] = {
-            // 白/灰
-            "FFFFFF","F0F0F0","FFFDD0","FFFFF0","D3D3D3","A9A9A9","808080","555555",
-            "333333","000000","C0C0C0","708090",
-            // 棕/米
-            "F5F5DC","F5DEB3","C3B091","D2B48C","C2B280","C19A6B","A0522D","7B3F00",
-            "5C4033","3E2723","CC7722","D2691E",
-            // 红
-            "FF0000","ED1B24","8B0000","DE3163","E30B5C","722F37","CD5C5C","FF007F",
-            "FF6666","FF4D40","A52A2A","B22222",
-            // 橙/珊瑚
-            "F26522","FF7518","FF3B30","FFC324","FBBF77","F88379","FA8072","FFCBA4",
-            "F28500","FA5F3C","ED9121","FFAE42",
-            // 黄/奶油
-            "FFF44F","FFFF00","FFD700","FFFFE0","FFFACD","F7E7CE","FFFDD0","F0C24B",
-            "E1AD01","FFD700","FFE135","FFF1B5",
-            // 绿
-            "00A651","50C878","228B22","8DB600","7CFC00","6B8E23","98FB98","90EE90",
-            "006400","004B23","008080","32CD32",
-            // 蓝绿/青
-            "00FFFF","008B8B","B0E0E6","48D1CC","0ABAB5","AFEEEE","006D6D","4FE0B0",
-            "4C9F9F","B2DFEE","70DBDB","D0F0F0",
-            // 蓝
-            "87CEEB","ADD8E6","4169E1","000080","4B0082","1E3A8A","0047AB","00008B",
-            "0000CD","007FFF","003153","6699CC",
-            // 紫/紫罗兰
-            "800080","8F00FF","E6E6FA","D8BFD8","C9A0DC","C8A2C8","4B0082","DDA0DD",
-            "8B00FF","C154C1","6F2DA8","CCCCFF",
-            // 粉
-            "FFC0CB","FFB6C1","FF69B4","FF1493","FF66CC","FF007F","FADADD","F88379",
-            "FC5A8D","FFB7C5","FFB3DE","F4C2C2",
-            // 金属/闪光/透明
-            "FFD700","DAA520","C0C0C0","B87333","CD7F32","434B4D","E8E8E8","F8F8F8",
-            "F0EAD6","FCF5E5","D8D8D8","FFDF00",
-            // 荧光/霓虹
-            "CCFF00","39FF14","FF5E00","FF1493","00FFFF","BF00FF","FF0038","CCFF00",
-            "00FF7F","FFAE42","FF6EB4","FF00FF"
-        };
-
-        juce::Array<juce::Colour> arr;
-        arr.ensureStorageAllocated ((int) (sizeof (hexCodes) / sizeof (hexCodes[0])));
-        for (const char* hex : hexCodes)
-        {
-            const auto hexStr = juce::String ("FF") + juce::String (hex); // FF = 不透明
-            const auto argb   = (juce::uint32) hexStr.getHexValue32();
-            arr.add (juce::Colour (argb));
-        }
-        return arr;
-    }();
-    return palette;
-}
 
 // ----------------------------------------------------------
 // 把原图降采样到 (cellsW × cellsH) 格，每格取平均色并量化到 144 色调色板。
@@ -3097,13 +2986,6 @@ juce::Image ModuleWorkspace::buildPerlerImage (const juce::Image& source,
     const double stepX = (double) srcW / (double) cellsW;
     const double stepY = (double) srcH / (double) cellsH;
 
-    // 预缓存调色板的 Lab 值（避免每格都重算 144 次）
-    const auto& palette = getPerlerPalette();
-    juce::Array<Lab> paletteLab;
-    paletteLab.ensureStorageAllocated (palette.size());
-    for (const auto& c : palette)
-        paletteLab.add (rgbToLab (c));
-
     // 用 BitmapData 读原图（仅读）和写目标图（读写）
     juce::Image outImage (juce::Image::ARGB, cellsW * cellSize, cellsH * cellSize, true);
 
@@ -3146,18 +3028,8 @@ juce::Image ModuleWorkspace::buildPerlerImage (const juce::Image& source,
                               (juce::uint8) (sumG / (juce::uint64) count),
                               (juce::uint8) (sumB / (juce::uint64) count));
 
-            // --- 匹配 144 色中最近颜色 ---
-            const auto avgLab = rgbToLab (avg);
-            int bestIdx = 0;
-            float bestDist = std::numeric_limits<float>::max();
-            for (int i = 0; i < paletteLab.size(); ++i)
-            {
-                const float d = labDistSq (avgLab, paletteLab.getReference (i));
-                if (d < bestDist) { bestDist = d; bestIdx = i; }
-            }
-
-            // --- 把这一格填充为拼豆色 ---
-            g.setColour (palette.getReference (bestIdx));
+            // 直接使用原图该格的平均色（不再量化到给定调色板）
+            g.setColour (avg);
             g.fillRect (cx * cellSize, cy * cellSize, cellSize, cellSize);
         }
     }
@@ -4182,12 +4054,6 @@ juce::Image ModuleWorkspace::buildPerlerImageFixed (const juce::Image& source,
     const double stepX = (double) srcW / (double) targetCellsW;
     const double stepY = (double) srcH / (double) targetCellsH;
 
-    const auto& palette = getPerlerPalette();
-    juce::Array<Lab> paletteLab;
-    paletteLab.ensureStorageAllocated (palette.size());
-    for (const auto& c : palette)
-        paletteLab.add (rgbToLab (c));
-
     juce::Image outImage (juce::Image::ARGB, targetCellsW * cellSize, targetCellsH * cellSize, true);
     juce::Image::BitmapData srcBits (source, juce::Image::BitmapData::readOnly);
 
@@ -4228,16 +4094,8 @@ juce::Image ModuleWorkspace::buildPerlerImageFixed (const juce::Image& source,
                                     (juce::uint8) (sumG / (juce::uint64) count),
                                     (juce::uint8) (sumB / (juce::uint64) count));
 
-            const auto avgLab = rgbToLab (avg);
-            int bestIdx = 0;
-            float bestDist = std::numeric_limits<float>::max();
-            for (int i = 0; i < paletteLab.size(); ++i)
-            {
-                const float d = labDistSq (avgLab, paletteLab.getReference (i));
-                if (d < bestDist) { bestDist = d; bestIdx = i; }
-            }
-
-            g.setColour (palette.getReference (bestIdx));
+            // 直接使用原图该格的平均色（不再量化到给定调色板）
+            g.setColour (avg);
             g.fillRect (cx * cellSize, cy * cellSize, cellSize, cellSize);
         }
     }

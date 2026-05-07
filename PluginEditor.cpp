@@ -790,8 +790,9 @@ void Y2KmeterAudioProcessorEditor::loadInitialModules()
     if (savedXml.isNotEmpty() && workspace->loadLayoutFromXml(savedXml))
         return;
 
-    // 2) 默认状态：首次打开时按默认层叠瀑布填充七个核心模块
-    seedDefaultModules();
+    // 2) 首次打开（无已保存布局）默认应用 Horizontal Bar(T)
+    //    注意：仅变更首次默认入口，不影响预设列表里的 Default 选项。
+    applyLayoutPreset ((int) ModuleWorkspace::LayoutPreset::horizontalFull);
 }
 
 // ----------------------------------------------------------
@@ -1620,6 +1621,7 @@ void Y2KmeterAudioProcessorEditor::visibilityChanged()
             }
         }
     }
+
 }
 
 // ==========================================================
