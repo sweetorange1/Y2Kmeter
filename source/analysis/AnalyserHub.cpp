@@ -1,6 +1,61 @@
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
+#include <vector>
 #include "source/perf/PerformanceCounterSystem.h"
+
+namespace
+{
+// 在 bin 峰值附近做抛物线插值（log-magnitude 域），得到亚 bin 细化后的峰值幅度。
+static float refinedPeakInRange (const float* buf, int bufN, int binLo, int binHi) noexcept
+{
+    if (buf == nullptr || bufN <= 0)
+        return 0.0f;
+
+    binLo = juce::jlimit (0, bufN - 1, binLo);
+    binHi = juce::jlimit (0, bufN - 1, binHi);
+    if (binHi < binLo) std::swap (binLo, binHi);
+
+    int k = binLo;
+    float peak = 0.0f;
+    for (int b = binLo; b <= binHi; ++b)
+    {
+        const float v = std::abs (buf[b]);
+        if (std::isfinite (v) && v > peak)
+        {
+            peak = v;
+            k = b;
+        }
+    }
+
+    if (! std::isfinite (peak) || peak <= 0.0f)
+        return 0.0f;
+
+    // 边缘 bin 无法拿到两侧邻点，回退整数 bin 峰值。
+    if (k <= 0 || k >= bufN - 1)
+        return peak;
+
+    constexpr float eps = 1.0e-12f;
+    const float l = juce::jmax (eps, std::abs (buf[k - 1]));
+    const float c = juce::jmax (eps, std::abs (buf[k]));
+    const float r = juce::jmax (eps, std::abs (buf[k + 1]));
+
+    const double ll = std::log ((double) l);
+    const double cc = std::log ((double) c);
+    const double rr = std::log ((double) r);
+
+    const double denom = ll - 2.0 * cc + rr;
+    if (! std::isfinite (denom) || std::abs (denom) < 1.0e-12)
+        return peak;
+
+    double p = 0.5 * (ll - rr) / denom;
+    p = juce::jlimit (-0.5, 0.5, p);
+
+    // 顶点值（log 域）再映射回线性幅度。
+    const double lPeak = cc - 0.25 * (ll - rr) * p;
+    const float refined = (float) std::exp (lPeak);
+    return juce::jmax (peak, juce::jmax (0.0f, refined));
+}
+}
 
 // ==========================================================
 // Phase F —— FrameDispatcher 内部实现类
@@ -108,6 +163,10 @@ public:
                          sizeof (float) * frame->spectrumData.size());
             std::memcpy (frame->spectrumMagLo.data(), owner.magDataLo.data(),
                          sizeof (float) * frame->spectrumMagLo.size());
+            frame->spectrumMagCount   = owner.spectrumMagCountCurrent;
+            frame->spectrumDataCount  = owner.spectrumDataCountCurrent;
+            frame->spectrumMagLoCount = owner.spectrumMagLoCountCurrent;
+            frame->fourierMode        = owner.getFourierMode();
         }
 
         if (frame->has (Kind::Loudness))
@@ -272,6 +331,7 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
     fftData.fill(0.0f);
     specDataWork.fill(0.0f);
     magDataWork.fill(0.0f);
+    cqtDataWork.fill(0.0f);
     fftFifoIndex = 0;
 
     // 低频路工作缓冲
@@ -286,6 +346,9 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
         specData.fill(0.0f);
         magData.fill(0.0f);
         magDataLo.fill(0.0f);
+        spectrumMagCountCurrent   = spectrumMagSize;
+        spectrumDataCountCurrent  = spectrumBins;
+        spectrumMagLoCountCurrent = spectrumMagSizeLo;
     }
 
     // 响度计初始化
@@ -399,6 +462,17 @@ bool AnalyserHub::isActive(Kind kind) const noexcept
     return refCounts[idx].load (std::memory_order_relaxed) > 0;
 }
 
+void AnalyserHub::setFourierMode (FourierMode mode) noexcept
+{
+    fourierModeAtomic.store ((int) mode, std::memory_order_relaxed);
+}
+
+AnalyserHub::FourierMode AnalyserHub::getFourierMode() const noexcept
+{
+    const int v = fourierModeAtomic.load (std::memory_order_relaxed);
+    return (v == (int) FourierMode::cqt) ? FourierMode::cqt : FourierMode::fft;
+}
+
 // ==========================================================
 // 示波器（立体声环形缓冲）
 // ==========================================================
@@ -462,6 +536,105 @@ void AnalyserHub::getOscilloscopeSnapshot(juce::Array<float>& destL,
                      (size_t) oscWritePos * sizeof (float));
         std::memcpy (destR.getRawDataPointer() + firstChunk, oscBufR.data(),
                      (size_t) oscWritePos * sizeof (float));
+    }
+}
+
+int AnalyserHub::computeCqtFromCurrentFft() noexcept
+{
+    const double nyquist = juce::jmax (100.0, cachedSampleRate * 0.5);
+    const double fMin = (double) cqtMinFreqHz;
+    const double fMax = nyquist * 0.95;
+    if (fMax <= fMin)
+        return 0;
+
+    const double xover     = (double) spectrumXoverHz;
+    const double xoverLo   = xover / std::sqrt (2.0);
+    const double xoverHi   = xover * std::sqrt (2.0);
+    const double loHardMax = xover * 2.0;
+
+    const double binsPerOct = (double) cqtBinsPerOctave;
+    const double halfStep = std::pow (2.0, 0.5 / binsPerOct);
+    const int maxBins = (int) cqtDataWork.size();
+
+    const double hzToBinHi = (double) (spectrumMagSize   - 1) / nyquist;
+    const double hzToBinLo = (double) (spectrumMagSizeLo - 1) / nyquist;
+
+    const int midiStart = (int) std::ceil ((double) cqtA4Midi
+                                           + binsPerOct * std::log2 (fMin / (double) cqtA4Hz));
+
+    int count = 0;
+    int midi  = midiStart;
+    while (count < maxBins)
+    {
+        const double fc = (double) cqtA4Hz * std::pow (2.0, ((double) midi - (double) cqtA4Midi) / binsPerOct);
+        if (fc > fMax)
+            break;
+
+        const double bandLo = juce::jmax (fMin, fc / halfStep);
+        const double bandHi = juce::jmin (fMax, fc * halfStep);
+
+        const int hiLo = (int) std::floor (bandLo * hzToBinHi);
+        const int hiHi = (int) std::ceil  (bandHi * hzToBinHi);
+        const float magHi = refinedPeakInRange (magDataWork.data(), spectrumMagSize, hiLo, hiHi);
+
+        float magLo = 0.0f;
+        if (fc < loHardMax)
+        {
+            const int loLo = (int) std::floor (bandLo * hzToBinLo);
+            const int loHi = (int) std::ceil  (bandHi * hzToBinLo);
+            magLo = refinedPeakInRange (magDataLoWork.data(), spectrumMagSizeLo, loLo, loHi);
+        }
+
+        float w;
+        if      (fc <= xoverLo) w = 0.0f;
+        else if (fc >= xoverHi) w = 1.0f;
+        else
+        {
+            const double u = (std::log (fc) - std::log (xoverLo))
+                           / (std::log (xoverHi) - std::log (xoverLo));
+            w = (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * u));
+        }
+
+        const float eMix = w * magHi * magHi + (1.0f - w) * magLo * magLo;
+        cqtDataWork[(size_t) count] = std::sqrt (juce::jmax (0.0f, eMix));
+
+        ++count;
+        ++midi;
+    }
+
+    for (int i = count; i < maxBins; ++i)
+        cqtDataWork[(size_t) i] = 0.0f;
+
+    return count;
+}
+
+void AnalyserHub::rebuildSpecDataFromCqt (int cqtBinCount) noexcept
+{
+    if (cqtBinCount <= 0)
+    {
+        specDataWork.fill (0.0f);
+        return;
+    }
+
+    const int n = cqtBinCount;
+    for (int i = 0; i < spectrumBins; ++i)
+    {
+        const float norm = (float) i / (float) juce::jmax (1, spectrumBins - 1);
+        const float pos  = norm * (float) (n - 1);
+        const int   i0   = juce::jlimit (0, n - 1, (int) std::floor (pos));
+        const int   i1   = juce::jlimit (0, n - 1, i0 + 1);
+        const float u    = pos - (float) i0;
+
+        const float mag = juce::jmap (u,
+                                      cqtDataWork[(size_t) i0],
+                                      cqtDataWork[(size_t) i1]);
+        const float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-6f, mag));
+        const float mapped = juce::jlimit (0.0f, 1.0f,
+                                           juce::jmap (db, -50.0f, 50.0f, 0.0f, 1.0f));
+
+        const float prev = specDataWork[(size_t) i];
+        const float alpha = (mapped > prev) ? 0.6f : 0.15f;
+        specDataWork[(size_t) i] = prev + alpha * (mapped - prev);
     }
 }
 
@@ -594,20 +767,50 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
 
     if (publishHi || publishLo)
     {
+        const auto mode = getFourierMode();
+        int cqtBinCount = 0;
+        if (mode == FourierMode::cqt)
+        {
+            cqtBinCount = computeCqtFromCurrentFft();
+            rebuildSpecDataFromCqt (cqtBinCount);
+        }
+
         publishUnderSpecLock ([&]
         {
-            if (publishHi)
+            if (mode == FourierMode::cqt)
+            {
+                const int n = juce::jlimit (0, spectrumMagSize, cqtBinCount);
+                std::fill (magData.begin(),   magData.end(),   0.0f);
+                std::fill (magDataLo.begin(), magDataLo.end(), 0.0f);
+                if (n > 0)
+                    std::memcpy (magData.data(), cqtDataWork.data(), sizeof (float) * (size_t) n);
+
+                std::memcpy (specData.data(), specDataWork.data(),
+                             sizeof (float) * specData.size());
+
+                spectrumMagCountCurrent   = n;
+                spectrumDataCountCurrent  = spectrumBins;
+                spectrumMagLoCountCurrent = 0;
+            }
+            else if (publishHi)
             {
                 std::memcpy (magData.data(), magDataWork.data(),
                              sizeof (float) * magData.size());
                 std::memcpy (specData.data(), specDataWork.data(),
                              sizeof (float) * specData.size());
+                spectrumMagCountCurrent  = spectrumMagSize;
+                spectrumDataCountCurrent = spectrumBins;
             }
 
-            if (publishLo)
+            if (mode == FourierMode::fft && publishLo)
             {
                 std::memcpy (magDataLo.data(), magDataLoWork.data(),
                              sizeof (float) * magDataLo.size());
+                spectrumMagLoCountCurrent = spectrumMagSizeLo;
+            }
+            else if (mode == FourierMode::fft && ! publishLo)
+            {
+                spectrumMagLoCountCurrent = spectrumMagSizeLo;
             }
         });
     }
@@ -692,6 +895,70 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         return;
     }
 
+    if (getFourierMode() == FourierMode::cqt)
+    {
+        thread_local std::array<float, spectrumMagSize> cqtSnapshot;
+        int cqtCount = 0;
+        {
+            const juce::SpinLock::ScopedLockType sl (specLock);
+            cqtCount = juce::jlimit (0, spectrumMagSize, spectrumMagCountCurrent);
+            if (cqtCount > 0)
+                std::memcpy (cqtSnapshot.data(), magData.data(), sizeof (float) * (size_t) cqtCount);
+        }
+
+        auto* outData = dest.getRawDataPointer();
+        if (cqtCount <= 0)
+        {
+            std::fill (outData, outData + numPoints, 0.0f);
+            return;
+        }
+
+        const double binsPerOct = (double) cqtBinsPerOctave;
+        const double halfStep = std::pow (2.0, 0.5 / binsPerOct);
+        const double logMin = std::log10 (fLo2);
+        const double logMax = std::log10 (fHi2);
+
+        const int midiStart = (int) std::ceil ((double) cqtA4Midi
+                                               + binsPerOct * std::log2 (juce::jmax (1.0, fLo2) / (double) cqtA4Hz));
+
+        std::vector<double> bandLo ((size_t) cqtCount, 0.0);
+        std::vector<double> bandHi ((size_t) cqtCount, 0.0);
+        for (int k = 0; k < cqtCount; ++k)
+        {
+            const int midi = midiStart + k;
+            const double fc = (double) cqtA4Hz * std::pow (2.0, ((double) midi - (double) cqtA4Midi) / binsPerOct);
+            bandLo[(size_t) k] = fc / halfStep;
+            bandHi[(size_t) k] = fc * halfStep;
+        }
+
+        for (int i = 0; i < numPoints; ++i)
+        {
+            const double t = (double) i / (double) (numPoints - 1);
+            const double f = std::pow (10.0, logMin + t * (logMax - logMin));
+
+            const double tPrev = (double) (i - 1) / (double) (numPoints - 1);
+            const double tNext = (double) (i + 1) / (double) (numPoints - 1);
+            const double fPrev = (i == 0)             ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
+            const double fNext = (i == numPoints - 1) ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
+            const double f0 = std::sqrt (fPrev * f);
+            const double f1 = std::sqrt (f * fNext);
+
+            float m = 0.0f;
+            for (int k = 0; k < cqtCount; ++k)
+            {
+                if (bandHi[(size_t) k] < f0) continue;
+                if (bandLo[(size_t) k] > f1) break;
+                const double ovLo = juce::jmax (f0, bandLo[(size_t) k]);
+                const double ovHi = juce::jmin (f1, bandHi[(size_t) k]);
+                if (ovHi <= ovLo) continue;
+                m = juce::jmax (m, std::abs (cqtSnapshot[(size_t) k]));
+            }
+
+            outData[i] = m;
+        }
+        return;
+    }
+
     // P2-1：UI 线程里的每个 Spectrum/Spectrogram 实例每帧都会调一次本函数，
     //   两个数组合计 (1024+4096)*4 ≈ 20 KB 的栈分配 * N 实例 * 帧率。
     //   改为 thread_local 静态缓冲：函数调用零分配，跨实例复用同一块 TLS 内存。
@@ -722,20 +989,6 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
     const double loHardMax = xover * 2.0;
     auto* outData = dest.getRawDataPointer();
 
-    auto peakInRange = [] (const float* buf, int bufN, int binLo, int binHi) noexcept
-    {
-        binLo = juce::jlimit (0, bufN - 1, binLo);
-        binHi = juce::jlimit (0, bufN - 1, binHi);
-        if (binHi < binLo) std::swap (binLo, binHi);
-        float m = 0.0f;
-        for (int b = binLo; b <= binHi; ++b)
-        {
-            const float v = std::abs (buf[b]);
-            if (std::isfinite (v) && v > m) m = v;
-        }
-        return m;
-    };
-
     for (int i = 0; i < numPoints; ++i)
     {
         // 以点 i 为中心的频率带宽 [f0, f1]（几何平均法）
@@ -752,7 +1005,7 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         // ---- 主路取值 ----
         const int binHiLo  = (int) std::floor (f0 * hzToBinHi);
         const int binHiUp  = (int) std::ceil  (f1 * hzToBinHi);
-        const float magHi  = peakInRange (magHiSnapshot.data(), spectrumMagSize, binHiLo, binHiUp);
+        const float magHi  = refinedPeakInRange (magHiSnapshot.data(), spectrumMagSize, binHiLo, binHiUp);
 
         // ---- 低频路取值（只在有效频段内查询）----
         float magLo = 0.0f;
@@ -760,7 +1013,7 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         {
             const int binLoLo = (int) std::floor (f0 * hzToBinLo);
             const int binLoUp = (int) std::ceil  (f1 * hzToBinLo);
-            magLo = peakInRange (magLoSnapshot.data(), spectrumMagSizeLo, binLoLo, binLoUp);
+            magLo = refinedPeakInRange (magLoSnapshot.data(), spectrumMagSizeLo, binLoLo, binLoUp);
         }
 
         // ---- 交叉淡化（频率在 [xoverLo, xoverHi] 的八度内）----

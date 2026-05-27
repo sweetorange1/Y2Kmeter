@@ -3,6 +3,28 @@
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
 #include <algorithm>
+#include <array>
+#include <vector>
+
+namespace
+{
+constexpr double kA4Hz = 440.0;
+constexpr int    kA4Midi = 69;
+constexpr int    kBpo = 12;
+
+static double midiToHz (int midi) noexcept
+{
+    return kA4Hz * std::pow (2.0, ((double) midi - (double) kA4Midi) / (double) kBpo);
+}
+
+static juce::String midiToNote (int midi)
+{
+    static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    const int pc = (midi % 12 + 12) % 12;
+    const int oct = midi / 12 - 1;
+    return juce::String (names[pc]) + juce::String (oct);
+}
+}
 
 // ==========================================================
 // SpectrogramModule
@@ -19,6 +41,18 @@ SpectrogramModule::SpectrogramModule (AnalyserHub& h)
     setMinSize     (96, 80);
     setDefaultSize (384, 224); // 6×3.5 大格，宽胜于高——强调"时间轴"铺展
     setTitleText   ("Spectrogram");
+
+    auto setupModeBtn = [this] (juce::TextButton& b)
+    {
+        b.setClickingTogglesState (true);
+        b.setRadioGroupId (0x53475048); // "SGPH"
+        addAndMakeVisible (b);
+    };
+    setupModeBtn (btnClassic);
+    setupModeBtn (btnSharp);
+    btnClassic.onClick = [this]() { setDisplayMode (DisplayMode::classic); };
+    btnSharp  .onClick = [this]() { setDisplayMode (DisplayMode::sharp);   };
+    btnClassic.setToggleState (true, juce::dontSendNotification);
 
     // ---------- 右侧 SPEED 滑条（样式与 EqModule 的 SIZE 滑条完全一致）----------
     //   · 垂直滑条，范围 [5, 120] px/s，步长 1；默认 30 px/s
@@ -73,6 +107,31 @@ void SpectrogramModule::setCellPx (int px)
     repaint();
 }
 
+void SpectrogramModule::setDisplayMode (DisplayMode mode)
+{
+    if (displayMode == mode)
+        return;
+
+    displayMode = mode;
+    refreshModeButtons();
+
+    // 模式切换时强制重建网格/离屏缓存，避免 classic<->sharp 尺寸语义冲突。
+    rows = cols = 0;
+    lastCanvasW = lastCanvasH = 0;
+    writeCol = 0;
+    gridData.clear();
+    imageBuf = juce::Image();
+    columnAccumulator = 0.0f;
+
+    repaint();
+}
+
+void SpectrogramModule::refreshModeButtons()
+{
+    btnClassic.setToggleState (displayMode == DisplayMode::classic, juce::dontSendNotification);
+    btnSharp  .setToggleState (displayMode == DisplayMode::sharp,   juce::dontSendNotification);
+}
+
 // ----------------------------------------------------------
 // 布局
 // ----------------------------------------------------------
@@ -83,13 +142,20 @@ juce::Rectangle<int> SpectrogramModule::getCanvasBounds (juce::Rectangle<int> co
     //   · 不再做对称 pad 和 axisLeft/axisBottom 切割
     //     —— Hz 刻度文字会直接浮绘在画布内部左侧（半透明在频谱上色块上），
     //        older/newer 提示同样浮绘在画布内部底部，无需抠占画布空间。
-    return content.withTrimmedRight (sliderPanelW);
+    return content.withTrimmedTop (toolbarH + 3)
+                  .withTrimmedRight (sliderPanelW);
 }
 
 void SpectrogramModule::layoutContent (juce::Rectangle<int> contentBounds)
 {
+    auto top = contentBounds.removeFromTop (toolbarH).reduced (2, 1);
+    const int modeW = 62;
+    const int gap   = 4;
+    btnClassic.setBounds (top.getX(),                  top.getY(), modeW, top.getHeight());
+    btnSharp  .setBounds (top.getX() + modeW + gap,    top.getY(), modeW, top.getHeight());
+
     // 右侧 SPEED 滑条面板（样式与 EqModule、DynamicsCrestModule 完全一致）
-    auto area = contentBounds;
+    auto area = contentBounds.withTrimmedTop (3);
     auto rightPanel = area.removeFromRight (sliderPanelW);
     // sliderPanelGap 像素留白在画布右缘与面板左缘之间（由 getCanvasBounds 顺带扣掉）
     juce::ignoreUnused (area);
@@ -123,8 +189,9 @@ void SpectrogramModule::ensureGrid (int canvasW, int canvasH)
     canvasW = juce::jmax (1, canvasW);
     canvasH = juce::jmax (1, canvasH);
 
-    const int newCols = juce::jmax (1, canvasW / cellPx);
-    const int newRows = juce::jmax (1, canvasH / cellPx);
+    const int divisor = (displayMode == DisplayMode::sharp) ? 1 : cellPx;
+    const int newCols = juce::jmax (1, canvasW / divisor);
+    const int newRows = juce::jmax (1, canvasH / divisor);
 
     // 画布尺寸 & cellPx 都没变时不重建
     if (canvasW == lastCanvasW && canvasH == lastCanvasH
@@ -135,6 +202,8 @@ void SpectrogramModule::ensureGrid (int canvasW, int canvasH)
     rows     = newRows;
     cols     = newCols;
     gridData.assign ((size_t) rows * (size_t) cols, 0.0f);
+    sharpColumn.assign ((size_t) rows, 0.0f);
+    rowBinDensity.assign ((size_t) rows, 0.0f);
     writeCol = 0;
 
     lastCanvasW = canvasW;
@@ -259,6 +328,371 @@ void SpectrogramModule::pushColumn (const juce::Array<float>& rowsMags)
     writeCol = (writeCol + 1) % cols;
 }
 
+void SpectrogramModule::pushSharpColumnFromBins (const float* magHi, int numHi,
+                                                 const float* magLo, int numLo,
+                                                 double sampleRate,
+                                                 juce::uint32 seedBase)
+{
+    if (rows <= 0 || cols <= 0 || gridData.empty()) return;
+    if (magHi == nullptr || numHi < 4 || sampleRate <= 0.0) return;
+
+    if ((int) sharpColumn.size() != rows)  sharpColumn.assign ((size_t) rows, 0.0f);
+    if ((int) rowBinDensity.size() != rows) rowBinDensity.assign ((size_t) rows, 0.0f);
+    std::fill (sharpColumn.begin(), sharpColumn.end(), 0.0f);
+    std::fill (rowBinDensity.begin(), rowBinDensity.end(), 0.0f);
+
+    const double nyquist = sampleRate * 0.5;
+    const double fLo     = (double) minFreqHz;
+    const double fHi     = juce::jmin ((double) maxFreqHz, nyquist * 0.95);
+    if (fHi <= fLo) return;
+
+    const double xover     = 500.0;
+    const double xoverLo   = xover / std::sqrt (2.0);
+    const double xoverHi   = xover * std::sqrt (2.0);
+    const double loHardMax = xover * 2.0;
+    const double logA      = std::log10 (fLo);
+    const double logB      = std::log10 (fHi);
+    const double logSpan   = juce::jmax (1.0e-9, logB - logA);
+
+    auto wHi = [xoverLo, xoverHi] (double f) noexcept -> float
+    {
+        if (f >= xoverHi) return 1.0f;
+        if (f <= xoverLo) return 0.0f;
+        const double u = (std::log (f) - std::log (xoverLo)) / juce::jmax (1.0e-9, (std::log (xoverHi) - std::log (xoverLo)));
+        return (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * u));
+    };
+    auto wLo = [&wHi] (double f) noexcept -> float { return 1.0f - wHi (f); };
+
+    // 轻量确定性 hash，避免 std::rand 带来的全局状态与线程问题。
+    auto hash32 = [] (juce::uint32 x) noexcept -> juce::uint32
+    {
+        x ^= x >> 16;
+        x *= 0x7feb352du;
+        x ^= x >> 15;
+        x *= 0x846ca68bu;
+        x ^= x >> 16;
+        return x;
+    };
+    auto rand01 = [&hash32] (juce::uint32 x) noexcept -> float
+    {
+        return (float) (hash32 (x) & 0x00ffffffu) * (1.0f / 16777215.0f);
+    };
+
+    std::vector<double> rowLoHz ((size_t) rows, fLo);
+    std::vector<double> rowHiHz ((size_t) rows, fHi);
+    std::vector<double> rowSpanHz ((size_t) rows, 1.0);
+    for (int r = 0; r < rows; ++r)
+    {
+        const double tTop = 1.0 - (double) r / (double) rows;
+        const double tBot = 1.0 - (double) (r + 1) / (double) rows;
+        const double hiHz = std::pow (10.0, logA + tTop * logSpan);
+        const double loHz = std::pow (10.0, logA + tBot * logSpan);
+        rowHiHz[(size_t) r]   = juce::jmax (hiHz, loHz);
+        rowLoHz[(size_t) r]   = juce::jmin (hiHz, loHz);
+        rowSpanHz[(size_t) r] = juce::jmax (1.0e-9, rowHiHz[(size_t) r] - rowLoHz[(size_t) r]);
+    }
+
+    auto forEachBand = [&] (const float* mags, int nBin,
+                            double binToHz,
+                            auto&& weightOf,
+                            double clipMin,
+                            double clipMax,
+                            auto&& fn)
+    {
+        if (mags == nullptr || nBin < 4 || binToHz <= 0.0) return;
+
+        for (int b = 1; b < nBin - 1; ++b)
+        {
+            const double fCenter = (double) b * binToHz;
+            if (fCenter < fLo || fCenter > fHi) continue;
+
+            const float routeW = weightOf (fCenter);
+            if (routeW <= 1.0e-4f) continue;
+
+            const double fPrev = (double) (b - 1) * binToHz;
+            const double fNext = (double) (b + 1) * binToHz;
+            double bandLo = 0.5 * (fPrev + fCenter);
+            double bandHi = 0.5 * (fCenter + fNext);
+
+            bandLo = juce::jmax (bandLo, juce::jmax (fLo, clipMin));
+            bandHi = juce::jmin (bandHi, juce::jmin (fHi, clipMax));
+            if (bandHi <= bandLo) continue;
+
+            fn (mags[b], b, fCenter, bandLo, bandHi, routeW);
+        }
+    };
+
+    auto addBandDensity = [&] (double bandLo, double bandHi, float routeW)
+    {
+        const int rTop = juce::jmin (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+        const int rBot = juce::jmax (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+
+        for (int r = rTop; r <= rBot; ++r)
+        {
+            const double ovLo = juce::jmax (bandLo, rowLoHz[(size_t) r]);
+            const double ovHi = juce::jmin (bandHi, rowHiHz[(size_t) r]);
+            const double ovHz = ovHi - ovLo;
+            if (ovHz <= 0.0) continue;
+
+            const float cov = (float) juce::jlimit (0.0, 1.0, ovHz / rowSpanHz[(size_t) r]);
+            rowBinDensity[(size_t) r] += cov * routeW;
+        }
+    };
+
+    const double binToHzHi = nyquist / (double) (numHi - 1);
+    const double binToHzLo = (numLo > 1) ? (nyquist / (double) (numLo - 1)) : 0.0;
+
+    forEachBand (magHi, numHi, binToHzHi, wHi,
+                 xoverLo * 0.5, fHi,
+                 [&] (float, int, double, double bLo, double bHi, float w)
+                 {
+                     addBandDensity (bLo, bHi, w);
+                 });
+
+    forEachBand (magLo, numLo, binToHzLo, wLo,
+                 fLo, loHardMax,
+                 [&] (float, int, double, double bLo, double bHi, float w)
+                 {
+                     addBandDensity (bLo, bHi, w);
+                 });
+
+    float densityAvg = 1.0f;
+    {
+        float sumDensity = 0.0f;
+        int nonZeroRows  = 0;
+        for (int r = 0; r < rows; ++r)
+        {
+            if (rowBinDensity[(size_t) r] > 1.0e-6f)
+            {
+                sumDensity += rowBinDensity[(size_t) r];
+                ++nonZeroRows;
+            }
+        }
+        if (nonZeroRows > 0)
+            densityAvg = sumDensity / (float) nonZeroRows;
+    }
+
+    auto emitBand = [&] (float mag, int sourceTag, int binIndex,
+                         double bandLo, double bandHi,
+                         float routeW)
+    {
+        if (! std::isfinite (mag) || mag <= 0.0f || routeW <= 1.0e-4f) return;
+
+        const float db   = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag * std::sqrt (routeW)));
+        const float tLin = juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
+        const float tone = std::pow (tLin, 0.82f);
+        if (tone <= 1.0e-4f) return;
+
+        const int rTop = juce::jmin (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+        const int rBot = juce::jmax (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+
+        for (int r = rTop; r <= rBot; ++r)
+        {
+            const double ovLo = juce::jmax (bandLo, rowLoHz[(size_t) r]);
+            const double ovHi = juce::jmin (bandHi, rowHiHz[(size_t) r]);
+            const double ovHz = ovHi - ovLo;
+            if (ovHz <= 0.0) continue;
+
+            const float cov = (float) juce::jlimit (0.0, 1.0, ovHz / rowSpanHz[(size_t) r]);
+            const float rowLoad = juce::jmax (1.0e-4f, rowBinDensity[(size_t) r]);
+            const float densityComp = juce::jlimit (0.35f, 2.0f, densityAvg / rowLoad);
+
+            const float fillRate = 0.92f;
+            const float fireProb = juce::jlimit (0.0f, 1.0f,
+                                                 (0.06f + 0.94f * tone)
+                                                 * cov
+                                                 * densityComp
+                                                 * fillRate);
+
+            const juce::uint32 key = seedBase
+                                   ^ ((juce::uint32) sourceTag << 24)
+                                   ^ (juce::uint32) (binIndex * 2654435761u)
+                                   ^ (juce::uint32) (r * 40503);
+
+            if (rand01 (key ^ 0x3c6ef372u) >= fireProb)
+                continue;
+
+            const float sparkle = 0.86f + 0.14f * rand01 (key ^ 0xa54ff53au);
+            const float v = juce::jlimit (0.0f, 1.0f, (0.22f + 0.78f * tone) * sparkle);
+            sharpColumn[(size_t) r] = juce::jmax (sharpColumn[(size_t) r], v);
+        }
+    };
+
+    forEachBand (magHi, numHi, binToHzHi, wHi,
+                 xoverLo * 0.5, fHi,
+                 [&] (float mag, int binIndex, double, double bLo, double bHi, float w)
+                 {
+                     emitBand (mag, 1, binIndex, bLo, bHi, w);
+                 });
+
+    forEachBand (magLo, numLo, binToHzLo, wLo,
+                 fLo, loHardMax,
+                 [&] (float mag, int binIndex, double, double bLo, double bHi, float w)
+                 {
+                     emitBand (mag, 2, binIndex, bLo, bHi, w);
+                 });
+
+    for (int r = 0; r < rows; ++r)
+        set (r, writeCol, sharpColumn[(size_t) r]);
+
+    writeCol = (writeCol + 1) % cols;
+}
+
+void SpectrogramModule::pushSharpColumnFromCqt (const float* mags, int numBins,
+                                                double sampleRate,
+                                                juce::uint32 seedBase)
+{
+    if (rows <= 0 || cols <= 0 || gridData.empty()) return;
+    if (mags == nullptr || numBins < 4 || sampleRate <= 0.0) return;
+
+    if ((int) sharpColumn.size() != rows)  sharpColumn.assign ((size_t) rows, 0.0f);
+    if ((int) rowBinDensity.size() != rows) rowBinDensity.assign ((size_t) rows, 0.0f);
+    std::fill (sharpColumn.begin(), sharpColumn.end(), 0.0f);
+    std::fill (rowBinDensity.begin(), rowBinDensity.end(), 0.0f);
+
+    const double nyquist = sampleRate * 0.5;
+    const double fLo     = (double) minFreqHz;
+    const double fHi     = juce::jmin ((double) maxFreqHz, nyquist * 0.95);
+    if (fHi <= fLo) return;
+
+    const double logA      = std::log10 (fLo);
+    const double logB      = std::log10 (fHi);
+    const double logSpan   = juce::jmax (1.0e-9, logB - logA);
+    constexpr double bpo   = 12.0;
+    const double halfStep  = std::pow (2.0, 0.5 / bpo);
+    const int midiStart = (int) std::ceil ((double) kA4Midi + bpo * std::log2 (fLo / kA4Hz));
+
+    auto hash32 = [] (juce::uint32 x) noexcept -> juce::uint32
+    {
+        x ^= x >> 16;
+        x *= 0x7feb352du;
+        x ^= x >> 15;
+        x *= 0x846ca68bu;
+        x ^= x >> 16;
+        return x;
+    };
+    auto rand01 = [&hash32] (juce::uint32 x) noexcept -> float
+    {
+        return (float) (hash32 (x) & 0x00ffffffu) * (1.0f / 16777215.0f);
+    };
+
+    std::vector<double> rowLoHz ((size_t) rows, fLo);
+    std::vector<double> rowHiHz ((size_t) rows, fHi);
+    std::vector<double> rowSpanHz ((size_t) rows, 1.0);
+    for (int r = 0; r < rows; ++r)
+    {
+        const double tTop = 1.0 - (double) r / (double) rows;
+        const double tBot = 1.0 - (double) (r + 1) / (double) rows;
+        const double hiHz = std::pow (10.0, logA + tTop * logSpan);
+        const double loHz = std::pow (10.0, logA + tBot * logSpan);
+        rowHiHz[(size_t) r]   = juce::jmax (hiHz, loHz);
+        rowLoHz[(size_t) r]   = juce::jmin (hiHz, loHz);
+        rowSpanHz[(size_t) r] = juce::jmax (1.0e-9, rowHiHz[(size_t) r] - rowLoHz[(size_t) r]);
+    }
+
+    auto bandCenterHz = [midiStart] (int i) noexcept -> double
+    {
+        return midiToHz (midiStart + i);
+    };
+
+    for (int b = 0; b < numBins; ++b)
+    {
+        const double fc = bandCenterHz (b);
+        if (fc < fLo || fc > fHi) continue;
+        const double bandLo = juce::jmax (fLo, fc / halfStep);
+        const double bandHi = juce::jmin (fHi, fc * halfStep);
+        if (bandHi <= bandLo) continue;
+
+        const int rTop = juce::jmin (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+        const int rBot = juce::jmax (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+        for (int r = rTop; r <= rBot; ++r)
+        {
+            const double ovLo = juce::jmax (bandLo, rowLoHz[(size_t) r]);
+            const double ovHi = juce::jmin (bandHi, rowHiHz[(size_t) r]);
+            const double ovHz = ovHi - ovLo;
+            if (ovHz <= 0.0) continue;
+            const float cov = (float) juce::jlimit (0.0, 1.0, ovHz / rowSpanHz[(size_t) r]);
+            rowBinDensity[(size_t) r] += cov;
+        }
+    }
+
+    float densityAvg = 1.0f;
+    {
+        float sumDensity = 0.0f;
+        int nonZeroRows  = 0;
+        for (int r = 0; r < rows; ++r)
+        {
+            if (rowBinDensity[(size_t) r] > 1.0e-6f)
+            {
+                sumDensity += rowBinDensity[(size_t) r];
+                ++nonZeroRows;
+            }
+        }
+        if (nonZeroRows > 0)
+            densityAvg = sumDensity / (float) nonZeroRows;
+    }
+
+    for (int b = 0; b < numBins; ++b)
+    {
+        const float mag = mags[b];
+        if (! std::isfinite (mag) || mag <= 0.0f) continue;
+
+        const double fc = bandCenterHz (b);
+        if (fc < fLo || fc > fHi) continue;
+        const double bandLo = juce::jmax (fLo, fc / halfStep);
+        const double bandHi = juce::jmin (fHi, fc * halfStep);
+        if (bandHi <= bandLo) continue;
+
+        const float db   = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
+        const float tLin = juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
+        const float tone = std::pow (tLin, 0.82f);
+        if (tone <= 1.0e-4f) continue;
+
+        const int rTop = juce::jmin (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+        const int rBot = juce::jmax (freqToGridRow (bandHi, fLo, fHi, rows),
+                                     freqToGridRow (bandLo, fLo, fHi, rows));
+
+        for (int r = rTop; r <= rBot; ++r)
+        {
+            const double ovLo = juce::jmax (bandLo, rowLoHz[(size_t) r]);
+            const double ovHi = juce::jmin (bandHi, rowHiHz[(size_t) r]);
+            const double ovHz = ovHi - ovLo;
+            if (ovHz <= 0.0) continue;
+
+            const float cov = (float) juce::jlimit (0.0, 1.0, ovHz / rowSpanHz[(size_t) r]);
+            const float rowLoad = juce::jmax (1.0e-4f, rowBinDensity[(size_t) r]);
+            const float densityComp = juce::jlimit (0.35f, 2.0f, densityAvg / rowLoad);
+            const float fireProb = juce::jlimit (0.0f, 1.0f,
+                                                 (0.06f + 0.94f * tone)
+                                                 * cov
+                                                 * densityComp
+                                                 * 0.92f);
+
+            const juce::uint32 key = seedBase
+                                   ^ (juce::uint32) (b * 2654435761u)
+                                   ^ (juce::uint32) (r * 40503);
+            if (rand01 (key ^ 0x3c6ef372u) >= fireProb)
+                continue;
+
+            const float sparkle = 0.86f + 0.14f * rand01 (key ^ 0xa54ff53au);
+            const float v = juce::jlimit (0.0f, 1.0f, (0.22f + 0.78f * tone) * sparkle);
+            sharpColumn[(size_t) r] = juce::jmax (sharpColumn[(size_t) r], v);
+        }
+    }
+
+    for (int r = 0; r < rows; ++r)
+        set (r, writeCol, sharpColumn[(size_t) r]);
+
+    writeCol = (writeCol + 1) % cols;
+}
+
 // ----------------------------------------------------------
 // onFrame
 // ----------------------------------------------------------
@@ -273,18 +707,28 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     ensureGrid (plot.getWidth(), plot.getHeight());
     if (rows <= 0) return;
 
-    // 让 Hub 直接按 rows 个对数频率点返回"双路合并"的线性幅度数组，
-    // 低频段自动走 8192FFT（Δf≈5.86Hz @48k）—— 本模块低频分辨率显著提升。
-    //
-    // 注意：fMax 不直接取到 Nyquist。Nyquist 附近的 bin 会被抗混叠滤波
-    //       压成极低能量，若 rows 的最顶点落到 Nyquist，最顶那一行
-    //       几乎恒为 ≈0，视觉上呈现为"一条常态深色横线"。这里取 0.95×Nyquist
-    //       作为上限，既保留可用高频带，又规避这条恒黑线。
-    const double nyquist = hub.getSampleRate() * 0.5;
-    const float  fMin    = minFreqHz;
-    const float  fMax    = juce::jmin (maxFreqHz, (float) (nyquist * 0.95));
-
-    hub.getSpectrumMagnitudesBlended (rowMagBuf, rows, fMin, fMax);
+    const bool sharpMode = (displayMode == DisplayMode::sharp);
+    const float* sharpHiPtr = nullptr;
+    const float* sharpLoPtr = nullptr;
+    int sharpHiSize = 0;
+    int sharpLoSize = 0;
+    if (sharpMode)
+    {
+        sharpHiPtr  = frame.spectrumMag.data();
+        sharpLoPtr  = frame.spectrumMagLo.data();
+        sharpHiSize = frame.spectrumMagCount;
+        sharpLoSize = frame.spectrumMagLoCount;
+        if (sharpHiSize <= 0) sharpHiSize = (int) frame.spectrumMag.size();
+        if (sharpLoSize < 0)  sharpLoSize = 0;
+    }
+    else
+    {
+        // classic 模式保留原有逻辑：按 rows 个对数频率点拉双路合并幅度。
+        const double nyquist = hub.getSampleRate() * 0.5;
+        const float  fMin    = minFreqHz;
+        const float  fMax    = juce::jmin (maxFreqHz, (float) (nyquist * 0.95));
+        hub.getSpectrumMagnitudesBlended (rowMagBuf, rows, fMin, fMax);
+    }
 
     // ---------- 速度解耦：按"真实流逝时间"累计推进列数 ----------
     //   旧行为：每帧 push 1 列 → 滚动速度 = 分发 fps（Hub 30/60Hz 直接体现在速度上）。
@@ -317,7 +761,27 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // ‘复制同一列形成连续横条’，视觉上则是滚动速度视帧插补）。
     for (int k = 0; k < nCols; ++k)
     {
-        pushColumn (rowMagBuf);
+        if (sharpMode)
+        {
+            sharpNoiseSeed += 0x9e3779b9u;
+            if (frame.fourierMode == AnalyserHub::FourierMode::cqt)
+            {
+                pushSharpColumnFromCqt (sharpHiPtr, sharpHiSize,
+                                        hub.getSampleRate(),
+                                        sharpNoiseSeed + (juce::uint32) (k * 131u));
+            }
+            else
+            {
+                pushSharpColumnFromBins (sharpHiPtr, sharpHiSize,
+                                         sharpLoPtr, sharpLoSize,
+                                         hub.getSampleRate(),
+                                         sharpNoiseSeed + (juce::uint32) (k * 131u));
+            }
+        }
+        else
+        {
+            pushColumn (rowMagBuf);
+        }
         writeLatestColumnToImage();
     }
 
@@ -524,23 +988,85 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
     const double fMin       = (double) minFreqHz;
     const double fMax       = juce::jmin ((double) maxFreqHz, nyquist);
 
-    struct L { float hz; const char* label; };
-    const L labels[] = {
-        {   100.0f, "100" },
-        {  1000.0f,  "1k" },
-        { 10000.0f, "10k" },
-    };
+    const bool isCqt = (hub.getFourierMode() == AnalyserHub::FourierMode::cqt);
+
+    // 测试功能：CQT 模式下绘制按音名频带划分的辅助横线。
+    //   每个音名频带由上下两根淡红线围成，右侧中间位置标注红色音名。
+    if (isCqt)
+    {
+        const double logA = std::log10 (fMin);
+        const double logB = std::log10 (fMax);
+        const double halfStep = std::pow (2.0, 0.5 / (double) kBpo);
+        const int midiMin = (int) std::ceil (kA4Midi + kBpo * std::log2 (juce::jmax (1.0, fMin) / kA4Hz));
+        const int midiMax = (int) std::floor (kA4Midi + kBpo * std::log2 (juce::jmax (1.0, fMax) / kA4Hz));
+
+        auto hzToY = [&] (double hz) -> int
+        {
+            const double t = (std::log10 (juce::jlimit (fMin, fMax, hz)) - logA)
+                           / juce::jmax (1.0e-9, logB - logA);
+            return canvas.getY() + (int) std::round ((1.0 - t) * (double) canvas.getHeight());
+        };
+
+        g.setColour (PinkXP::pink300.withAlpha (0.35f));
+        for (int midi = midiMin; midi <= midiMax + 1; ++midi)
+        {
+            const double boundaryHz = midiToHz (midi) / halfStep;
+            if (boundaryHz < fMin || boundaryHz > fMax) continue;
+            const int y = hzToY (boundaryHz);
+            if (y <= canvas.getY() || y >= canvas.getBottom()) continue;
+            g.drawHorizontalLine (y, (float) canvas.getX(), (float) canvas.getRight());
+        }
+
+        g.setColour (PinkXP::pink600.withAlpha (0.95f));
+        for (int midi = midiMin; midi <= midiMax; ++midi)
+        {
+            const double fc = midiToHz (midi);
+            const double fLoBand = juce::jmax (fMin, fc / halfStep);
+            const double fHiBand = juce::jmin (fMax, fc * halfStep);
+            if (fHiBand <= fLoBand) continue;
+
+            const int yTop = hzToY (fHiBand);
+            const int yBot = hzToY (fLoBand);
+            if (std::abs (yBot - yTop) < 8) continue;
+
+            const int by = (yTop + yBot) / 2 - 5;
+            g.drawText (midiToNote (midi),
+                        canvas.getRight() - 34, by, 32, 10,
+                        juce::Justification::centredRight, false);
+        }
+    }
+
+    struct L { double hz; juce::String label; };
+    std::vector<L> labels;
+    if (isCqt)
+    {
+        const int midiMin = (int) std::ceil (kA4Midi + kBpo * std::log2 (juce::jmax (1.0, fMin) / kA4Hz));
+        const int midiMax = (int) std::floor (kA4Midi + kBpo * std::log2 (juce::jmax (1.0, fMax) / kA4Hz));
+        for (int midi = midiMin; midi <= midiMax; ++midi)
+        {
+            const int pc = (midi % 12 + 12) % 12;
+            if (pc != 0 && pc != 9) // C 与 A（每八度 2 个标签，避免拥挤）
+                continue;
+            labels.push_back ({ midiToHz (midi), midiToNote (midi) });
+        }
+    }
+    else
+    {
+        labels.push_back ({ 100.0,  "100" });
+        labels.push_back ({ 1000.0, "1k"  });
+        labels.push_back ({ 10000.0,"10k" });
+    }
 
     // Hz 刻度文字直接浮绘在画布内部左侧（不再从画布外留白区取空间）：
     //   · 文字上面给一小块半透明的暗色背板（不被频谱色块干扰可读）
     //   · 文字用浅色 hl（反白）保证在深色背景上高对比
-    for (auto& l : labels)
+    for (const auto& l : labels)
     {
-        if ((double) l.hz < fMin || (double) l.hz > fMax) continue;
+        if (l.hz < fMin || l.hz > fMax) continue;
 
         const double logA = std::log10 (fMin);
         const double logB = std::log10 (fMax);
-        const double t    = (std::log10 ((double) l.hz) - logA) / juce::jmax (1.0e-9, logB - logA);
+        const double t    = (std::log10 (l.hz) - logA) / juce::jmax (1.0e-9, logB - logA);
         const int    y    = canvas.getY() + (int) std::round ((1.0 - t) * (double) canvas.getHeight());
 
         // 文字小背板（半透明墨色）—— 让文字从纷杂色块里跳出来

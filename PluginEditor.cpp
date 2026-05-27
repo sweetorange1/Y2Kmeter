@@ -575,6 +575,12 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
     };
 
+    workspace->onCqtModeChanged = [this](bool enabled)
+    {
+        processor.setCqtModeEnabled (enabled);
+    };
+    workspace->setCqtModeEnabled (processor.isCqtModeEnabled());
+
     // 4.4) gain 控制条变化 → 下发到分析输入增益（仅影响分析链，不影响透传输出）
     workspace->onInputGainChanged = [this](float db)
     {

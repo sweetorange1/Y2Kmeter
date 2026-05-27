@@ -28,6 +28,12 @@ class SpectrogramModule : public ModulePanel,
                           public AnalyserHub::FrameListener
 {
 public:
+    enum class DisplayMode
+    {
+        classic = 0,
+        sharp
+    };
+
     explicit SpectrogramModule (AnalyserHub& hub);
     ~SpectrogramModule() override;
 
@@ -44,6 +50,9 @@ protected:
     void resized() override;
 
 private:
+    void setDisplayMode (DisplayMode mode);
+    void refreshModeButtons();
+
     // ---- 布局 ----
     juce::Rectangle<int> getCanvasBounds (juce::Rectangle<int> content) const;
 
@@ -52,6 +61,16 @@ private:
 
     // 把当前已合并到「rows 个对数频率点」的线性幅度写到 grid 的 writeCol 列
     void pushColumn (const juce::Array<float>& rowsMags);
+
+    // sharp 模式：直接按 FFT bin 发射 1x1 像素点，避免大像素网格观感
+    void pushSharpColumnFromBins (const float* magHi, int numHi,
+                                  const float* magLo, int numLo,
+                                  double sampleRate,
+                                  juce::uint32 seedBase);
+
+    void pushSharpColumnFromCqt (const float* mags, int numBins,
+                                 double sampleRate,
+                                 juce::uint32 seedBase);
 
     // 方案 B：把 grid 的"最新一列强度"写入离屏 Image 的对应像素列。
     //   · Image 的每个像素 = grid 的一格（按 Image 尺寸等比映射），
@@ -125,10 +144,21 @@ private:
     float  pixelsPerSecond  = 60.0f;   // 默认 60 px/s（滚动速度，与 UI 帧率解耦）
     double lastFrameMs      = 0.0;     // 上一次 onFrame 时刻（毫秒）
     float  columnAccumulator = 0.0f;   // 累计的小数列值，⏲外部当 1 列抽走
+    juce::uint32 sharpNoiseSeed = 0x7f4a7c15u;
+
+    // 模式
+    DisplayMode displayMode = DisplayMode::classic;
+
+    // sharp 模式复用缓冲
+    std::vector<float> sharpColumn;
+    std::vector<float> rowBinDensity;
 
     // ---- 右侧控制条（样式与 EqModule 的 SIZE 滑条一致）----
+    juce::TextButton btnClassic { "CLASSIC" };
+    juce::TextButton btnSharp   { "SHARP" };
     juce::Slider speedSlider;
     juce::Label  speedLabel;
+    static constexpr int toolbarH    = 20;
     static constexpr int sliderPanelW = 42;  // 右侧滑条面板宽度（与 WaveformModule 的 GAIN 面板一致）
 
     // 主题订阅 token：切换主题时重新下发 Label / Slider textBox 的墨色

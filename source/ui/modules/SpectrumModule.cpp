@@ -2,6 +2,27 @@
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
+#include <vector>
+
+namespace
+{
+constexpr double kA4Hz = 440.0;
+constexpr int    kA4Midi = 69;
+constexpr int    kBpo = 12;
+
+static double midiToHz (int midi) noexcept
+{
+    return kA4Hz * std::pow (2.0, ((double) midi - (double) kA4Midi) / (double) kBpo);
+}
+
+static juce::String midiToNote (int midi)
+{
+    static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    const int pc = (midi % 12 + 12) % 12;
+    const int oct = midi / 12 - 1;
+    return juce::String (names[pc]) + juce::String (oct);
+}
+}
 
 // ==========================================================
 // SpectrumModule
@@ -331,24 +352,54 @@ void SpectrumModule::drawGrid(juce::Graphics& g, juce::Rectangle<int> canvas) co
         g.drawHorizontalLine(y, (float) inner.getX(), (float) inner.getRight());
     }
 
-    // 纵线（主 decade + 次 2/5）
-    const float majorFreqs[]   = { 100.0f, 1000.0f, 10000.0f };
-    const float minorFreqs[]   = { 30.0f, 50.0f, 200.0f, 300.0f, 500.0f,
-                                   2000.0f, 3000.0f, 5000.0f, 15000.0f };
+    const bool isCqt = (hub.getFourierMode() == AnalyserHub::FourierMode::cqt);
+    if (isCqt)
+    {
+        const int midiMin = (int) std::ceil (kA4Midi + kBpo * std::log2 ((double) minFreqHz / kA4Hz));
+        const int midiMax = (int) std::floor (kA4Midi + kBpo * std::log2 ((double) maxFreqHz / kA4Hz));
 
-    g.setColour(PinkXP::pink200.withAlpha(0.3f));
-    for (float f : minorFreqs)
-    {
-        const int x = (int) std::round(freqToX(f, canvas));
-        if (x > inner.getX() && x < inner.getRight())
-            g.drawVerticalLine(x, (float) inner.getY(), (float) inner.getBottom());
+        g.setColour (PinkXP::pink200.withAlpha (0.28f));
+        for (int midi = midiMin; midi <= midiMax; ++midi)
+        {
+            const int pc = (midi % 12 + 12) % 12;
+            if (pc != 0 && pc != 2 && pc != 4 && pc != 5 && pc != 7 && pc != 9 && pc != 11)
+                continue; // 仅自然音竖线
+            const int x = (int) std::round (freqToX ((float) midiToHz (midi), canvas));
+            if (x > inner.getX() && x < inner.getRight())
+                g.drawVerticalLine (x, (float) inner.getY(), (float) inner.getBottom());
+        }
+
+        g.setColour (PinkXP::pink300.withAlpha (0.62f));
+        for (int midi = midiMin; midi <= midiMax; ++midi)
+        {
+            const int pc = (midi % 12 + 12) % 12;
+            if (pc != 0) continue; // C 音作为主分割
+            const int x = (int) std::round (freqToX ((float) midiToHz (midi), canvas));
+            if (x > inner.getX() && x < inner.getRight())
+                g.drawVerticalLine (x, (float) inner.getY(), (float) inner.getBottom());
+        }
     }
-    g.setColour(PinkXP::pink300.withAlpha(0.6f));
-    for (float f : majorFreqs)
+    else
     {
-        const int x = (int) std::round(freqToX(f, canvas));
-        if (x > inner.getX() && x < inner.getRight())
-            g.drawVerticalLine(x, (float) inner.getY(), (float) inner.getBottom());
+        // 纵线（主 decade + 次 2/5）
+        const float majorFreqs[]   = { 100.0f, 1000.0f, 10000.0f };
+        const float minorFreqs[]   = { 30.0f, 50.0f, 200.0f, 300.0f, 500.0f,
+                                       2000.0f, 3000.0f, 5000.0f, 15000.0f };
+
+        g.setColour(PinkXP::pink200.withAlpha(0.3f));
+        for (float f : minorFreqs)
+        {
+            const int x = (int) std::round(freqToX(f, canvas));
+            if (x > inner.getX() && x < inner.getRight())
+                g.drawVerticalLine(x, (float) inner.getY(), (float) inner.getBottom());
+        }
+        g.setColour(PinkXP::pink300.withAlpha(0.6f));
+        for (float f : majorFreqs)
+        {
+            const int x = (int) std::round(freqToX(f, canvas));
+            if (x > inner.getX() && x < inner.getRight())
+                g.drawVerticalLine(x, (float) inner.getY(), (float) inner.getBottom());
+        }
     }
 }
 
@@ -508,17 +559,36 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
                    juce::Justification::centredRight, false);
     }
 
-    // 底部 Hz 标签
-    struct L { float hz; const char* label; };
-    const L labels[] = {
-        { 20.0f, "20" }, { 100.0f, "100" }, { 1000.0f, "1k" },
-        { 10000.0f, "10k" }, { 20000.0f, "20k" }
-    };
-    for (auto& l : labels)
+    const bool isCqt = (hub.getFourierMode() == AnalyserHub::FourierMode::cqt);
+    if (isCqt)
     {
-        const int x = (int) std::round(freqToX(l.hz, canvas));
-        if (x < canvas.getX() - 4 || x > canvas.getRight() + 4) continue;
-        g.drawText(l.label, x - 18, canvas.getBottom() + 2, 36, 12,
-                   juce::Justification::centred, false);
+        const int midiMin = (int) std::ceil (kA4Midi + kBpo * std::log2 ((double) minFreqHz / kA4Hz));
+        const int midiMax = (int) std::floor (kA4Midi + kBpo * std::log2 ((double) maxFreqHz / kA4Hz));
+        for (int midi = midiMin; midi <= midiMax; ++midi)
+        {
+            const int pc = (midi % 12 + 12) % 12;
+            if (pc != 0) continue; // 仅标注 C 音，避免底部拥挤
+            const int x = (int) std::round (freqToX ((float) midiToHz (midi), canvas));
+            if (x < canvas.getX() - 4 || x > canvas.getRight() + 4) continue;
+            const auto s = midiToNote (midi);
+            g.drawText (s, x - 20, canvas.getBottom() + 2, 40, 12,
+                        juce::Justification::centred, false);
+        }
+    }
+    else
+    {
+        // 底部 Hz 标签
+        struct L { float hz; const char* label; };
+        const L labels[] = {
+            { 20.0f, "20" }, { 100.0f, "100" }, { 1000.0f, "1k" },
+            { 10000.0f, "10k" }, { 20000.0f, "20k" }
+        };
+        for (auto& l : labels)
+        {
+            const int x = (int) std::round(freqToX(l.hz, canvas));
+            if (x < canvas.getX() - 4 || x > canvas.getRight() + 4) continue;
+            g.drawText(l.label, x - 18, canvas.getBottom() + 2, 36, 12,
+                       juce::Justification::centred, false);
+        }
     }
 }

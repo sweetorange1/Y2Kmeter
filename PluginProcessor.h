@@ -78,6 +78,10 @@ public:
     float getAnalysisInputGainDb() const noexcept;
     float getAnalysisInputGainLinear() const noexcept;
 
+    // 全局频谱算法模式（false = FFT，true = CQT）
+    void setCqtModeEnabled (bool enabled) noexcept;
+    bool isCqtModeEnabled() const noexcept;
+
     // ---- 全局性能计数器控制 ----
     juce::File exportPerfCountersNow();
     void setPerfAutoExportEnabled(bool enabled) noexcept;

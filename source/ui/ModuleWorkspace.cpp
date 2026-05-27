@@ -324,6 +324,16 @@ ModuleWorkspace::ModuleWorkspace()
     fpsBtn.setLookAndFeel (fpsMiniLnf.get());
     addAndMakeVisible (fpsBtn);
 
+    fourierBtn.setButtonText ("FFT");
+    fourierBtn.setTooltip    ("Click to toggle spectrum analysis mode (FFT / CQT)");
+    fourierBtn.setLookAndFeel (fpsMiniLnf.get());
+    fourierBtn.onClick = [this]()
+    {
+        setCqtModeEnabled (! cqtModeEnabled);
+        if (onCqtModeChanged) onCqtModeChanged (cqtModeEnabled);
+    };
+    addAndMakeVisible (fourierBtn);
+
     // gain：输入增益按钮（位于 hide 左侧）
     gainBtn.setButtonText ("gain");
     gainBtn.setTooltip ("Input gain (-4.0 dB ~ +18.0 dB)");
@@ -552,6 +562,7 @@ ModuleWorkspace::~ModuleWorkspace()
     // fpsBtn 绑定的是本对象持有的 fpsMiniLnf（unique_ptr）。
     // 必须先解绑，再让 unique_ptr 自行析构，否则 Button 在析构时会访问已销毁的 LnF。
     fpsBtn.setLookAndFeel (nullptr);
+    fourierBtn.setLookAndFeel (nullptr);
 
     // 解绑主题订阅，避免析构后 gThemeSubs 仍回调到已销毁的 this
     if (themeSubToken >= 0)
@@ -1952,7 +1963,7 @@ void ModuleWorkspace::resized()
         toolbarDividerX1 = tb.removeFromRight (1).getX();
         tb.removeFromRight (4);
 
-        // 5) 紧邻分隔线 #1 的左侧：FPS 按钮 + FPS 标签（FPS 标签靠近下拉，按钮更靠左）
+        // 5) 紧邻分隔线 #1 的左侧：FPS 标签 + FPS 按钮 + FFT/CQT 按钮
         //   · FPS 按钮与 Hide 按钮同宽（btnW=52），文字用紧凑格式避免被截断
         constexpr int fpsLabelW = 64;
         auto fpsLblArea = tb.removeFromRight (fpsLabelW);
@@ -1962,6 +1973,10 @@ void ModuleWorkspace::resized()
         constexpr int fpsBtnW = btnW + 6; // 52 + 6 = 58
         auto fpsBtnArea = tb.removeFromRight (fpsBtnW + 4);
         fpsBtn.setBounds (fpsBtnArea.withSizeKeepingCentre (fpsBtnW, btnH));
+
+        constexpr int fourierBtnW = btnW + 6;
+        auto fourierBtnArea = tb.removeFromRight (fourierBtnW + 4);
+        fourierBtn.setBounds (fourierBtnArea.withSizeKeepingCentre (fourierBtnW, btnH));
 
         // 5a) 分隔线 #0（Grid 与 FPS 之间）：与其他区域分隔符同样的视觉
         tb.removeFromRight (4);
@@ -2037,6 +2052,7 @@ void ModuleWorkspace::resized()
 
         fpsBtn.setVisible   (true);
         fpsLabel.setVisible (true);
+        fourierBtn.setVisible (true);
 
         // 6) 剩余区域：主题栏
         themeBar.setBounds(tb);
@@ -2050,6 +2066,7 @@ void ModuleWorkspace::resized()
         audioSourceBox.setVisible (false);
         fpsBtn.setVisible   (false);
         fpsLabel.setVisible (false);
+        fourierBtn.setVisible (false);
         gainBtn.setVisible  (false);
         setGainPopupVisible (false);
         gridBtn.setVisible  (false);
@@ -2320,6 +2337,15 @@ void ModuleWorkspace::setMeasuredFps (float fps)
         return;
 
     fpsLabel.setText (next, juce::dontSendNotification);
+}
+
+void ModuleWorkspace::setCqtModeEnabled (bool enabled)
+{
+    if (cqtModeEnabled == enabled)
+        return;
+
+    cqtModeEnabled = enabled;
+    fourierBtn.setButtonText (cqtModeEnabled ? "CQT" : "FFT");
 }
 
 void ModuleWorkspace::setInputGainDb (float db)

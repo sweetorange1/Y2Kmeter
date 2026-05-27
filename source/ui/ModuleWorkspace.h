@@ -349,8 +349,13 @@ public:
     void setFpsLimit (int hz);                 // 外部可调用（例如恢复上次设置）
     void setMeasuredFps (float fps);           // Editor 每秒更新一次显示
 
+    bool isCqtModeEnabled() const noexcept { return cqtModeEnabled; }
+    void setCqtModeEnabled (bool enabled);
+
     // 用户点击 FPS 按钮切换后的回调
     std::function<void(int hz)> onFpsLimitChanged;
+    // 用户点击 FFT/CQT 按钮切换后的回调（true = CQT）
+    std::function<void(bool enabled)> onCqtModeChanged;
 
     // ======================================================
     // 输入增益（toolbar 的 gain 按钮 + 上方弹出控制条）
@@ -538,8 +543,10 @@ private:
 
     // FPS 限制按钮 + 实时 FPS 标签（右下角，Hide 按钮左侧）
     juce::TextButton fpsBtn;
+    juce::TextButton fourierBtn;
     juce::Label      fpsLabel;
     int              fpsLimit = 60;  // 默认 60 FPS（P0~P3 优化后已可稳定承载）
+    bool             cqtModeEnabled = false;
 
     // FPS 按钮专用的 mini LookAndFeel：仅重写 getTextButtonFont 把"30FPS / 60FPS"
     //   渲染得比全局按钮字号更小一点（52px 宽 + 像素字体下不显挤）。

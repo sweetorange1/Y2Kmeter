@@ -291,6 +291,12 @@ private:
 class AnalyserHub
 {
 public:
+    enum class FourierMode : int
+    {
+        fft = 0,
+        cqt
+    };
+
     AnalyserHub();
     ~AnalyserHub();
 
@@ -350,6 +356,10 @@ public:
     // 查询某一路是否处于活跃（refCount > 0）。主要供调试 / UI 诊断。
     bool isActive(Kind kind) const noexcept;
 
+    // 全局频谱分析模式：FFT(默认) / CQT。
+    void        setFourierMode (FourierMode mode) noexcept;
+    FourierMode getFourierMode() const noexcept;
+
     // ======================================================
     // Phase F 聚合帧（Frame Snapshot） —— 计算/显示分离
     //
@@ -391,6 +401,11 @@ public:
         std::array<float, spectrumBins>     spectrumData {};
         // 低频路高分辨率幅度（4096 bin；仅前 ~spectrumXoverHz 段有效）
         std::array<float, spectrumMagSizeLo> spectrumMagLo {};
+        // 当前 spectrum* 缓冲里有效数据长度（其余元素为 0 填充）
+        int spectrumMagCount   = spectrumMagSize;
+        int spectrumDataCount  = spectrumBins;
+        int spectrumMagLoCount = spectrumMagSizeLo;
+        FourierMode fourierMode = FourierMode::fft;
 
         // Loudness / Phase / Dynamics 的快照
         LoudnessMeter::Snapshot      loudness {};
@@ -526,6 +541,8 @@ private:
     // 高精度 FFT 幅度缓冲（供 SpectrumModule）
     std::array<float, spectrumMagSize> magData {};
     std::array<float, spectrumMagSize> magDataWork {};
+    // CQT 路：写入到 magData 前的临时缓冲（前 cqtBinCount 有效）
+    std::array<float, spectrumMagSize> cqtDataWork {};
     int fftFifoIndex = 0;
 
     // ---- 低频路 FFT（8192 点，高频率分辨率）----
@@ -539,6 +556,21 @@ private:
     std::array<float, spectrumMagSizeLo> magDataLo {};
     std::array<float, spectrumMagSizeLo> magDataLoWork {};
     int fftFifoIndexLo = 0;
+
+    // 当前已发布的 spectrum 缓冲有效长度（受 FFT/CQT 模式影响）
+    int spectrumMagCountCurrent   = spectrumMagSize;
+    int spectrumDataCountCurrent  = spectrumBins;
+    int spectrumMagLoCountCurrent = spectrumMagSizeLo;
+
+    // CQT 参数
+    static constexpr float cqtMinFreqHz      = 20.0f;
+    static constexpr int   cqtBinsPerOctave  = 12; // 钢琴键网格：每半音一个频带
+    static constexpr float cqtA4Hz           = 440.0f;
+    static constexpr int   cqtA4Midi         = 69;
+
+    // CQT 计算：把当前 hi/lo FFT 幅度重采样到 log 频率 CQT bins，返回有效 bin 数。
+    int computeCqtFromCurrentFft() noexcept;
+    void rebuildSpecDataFromCqt (int cqtBinCount) noexcept;
 
     // ---- 响度计 ----
     LoudnessMeter loudnessMeter;
@@ -589,6 +621,7 @@ private:
     // 当前分发频率（Hz）—— 供 UI 自适应策略查询，避免重复 startTimerHz。
     //   初值 0 表示尚未启动，首次 startFrameDispatcher 一定会生效。
     std::atomic<int>                     currentFrameDispatcherHz { 0 };
+    std::atomic<int>                     fourierModeAtomic { (int) FourierMode::fft };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AnalyserHub)
 };

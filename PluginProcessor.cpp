@@ -285,6 +285,17 @@ float Y2KmeterAudioProcessor::getAnalysisInputGainLinear() const noexcept
     return analysisInputGainLin.load (std::memory_order_relaxed);
 }
 
+void Y2KmeterAudioProcessor::setCqtModeEnabled (bool enabled) noexcept
+{
+    analyserHub->setFourierMode (enabled ? AnalyserHub::FourierMode::cqt
+                                         : AnalyserHub::FourierMode::fft);
+}
+
+bool Y2KmeterAudioProcessor::isCqtModeEnabled() const noexcept
+{
+    return analyserHub->getFourierMode() == AnalyserHub::FourierMode::cqt;
+}
+
 juce::File Y2KmeterAudioProcessor::exportPerfCountersNow()
 {
 #if Y2K_ENABLE_PERF_COUNTERS
@@ -367,6 +378,9 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty("analysisInputGainDb",
                      (double) analysisInputGainDb.load (std::memory_order_relaxed),
                      nullptr);
+    root.setProperty ("fourierMode",
+                      isCqtModeEnabled() ? "cqt" : "fft",
+                      nullptr);
 
     // 插件 Editor 最近一次窗口尺寸：仅在非零时写入（0=从未被 Editor 写过）
     if (savedEditorWidth > 0 && savedEditorHeight > 0)
@@ -399,6 +413,12 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
 
     if (root.hasProperty ("analysisInputGainDb"))
         setAnalysisInputGainDb ((float) (double) root.getProperty ("analysisInputGainDb", 0.0));
+
+    if (root.hasProperty ("fourierMode"))
+    {
+        const auto mode = root.getProperty ("fourierMode").toString().toLowerCase();
+        setCqtModeEnabled (mode == "cqt");
+    }
 
     // 插件 Editor 最近一次窗口尺寸（可能为 0 = 未保存；后续 Editor 构造时兜底到默认值）
     if (root.hasProperty ("editorW") && root.hasProperty ("editorH"))
