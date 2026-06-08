@@ -605,6 +605,47 @@ int AnalyserHub::computeCqtFromCurrentFft() noexcept
     for (int i = count; i < maxBins; ++i)
         cqtDataWork[(size_t) i] = 0.0f;
 
+    // 纯音收束增强：当能量明显由单一音高主导时，把 CQT 能量向主音名频带收拢。
+    // 这一步是显示友好型后处理，不改变 FFT 主路径数据，只作用于 CQT 结果。
+    if (count >= 5)
+    {
+        int   topIdx1 = 0;
+        int   topIdx2 = 0;
+        float top1 = 0.0f;
+        float top2 = 0.0f;
+        for (int i = 0; i < count; ++i)
+        {
+            const float v = cqtDataWork[(size_t) i];
+            if (v > top1)
+            {
+                top2 = top1;
+                topIdx2 = topIdx1;
+                top1 = v;
+                topIdx1 = i;
+            }
+            else if (v > top2)
+            {
+                top2 = v;
+                topIdx2 = i;
+            }
+        }
+        juce::ignoreUnused (topIdx2);
+
+        const float dominance = top1 / juce::jmax (1.0e-9f, top2);
+        if (dominance > 1.35f)
+        {
+            const float strength = juce::jlimit (0.0f, 0.85f, (dominance - 1.35f) / 3.0f);
+            const float sigma = 0.60f;
+            for (int i = 0; i < count; ++i)
+            {
+                const float d = (float) (i - topIdx1);
+                const float w = std::exp (-0.5f * (d / sigma) * (d / sigma));
+                cqtDataWork[(size_t) i] *= ((1.0f - strength) + strength * w);
+            }
+            cqtDataWork[(size_t) topIdx1] *= (1.0f + 0.35f * strength);
+        }
+    }
+
     return count;
 }
 

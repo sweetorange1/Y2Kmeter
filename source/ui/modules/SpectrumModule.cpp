@@ -9,6 +9,10 @@ namespace
 constexpr double kA4Hz = 440.0;
 constexpr int    kA4Midi = 69;
 constexpr int    kBpo = 12;
+constexpr int    kLowFocusMidiMax  = 44; // G#2
+constexpr int    kLowFocusMidiFull = 24; // C1 (below this use max convergence)
+constexpr int    kHighFocusMidiLo  = 68; // G#4
+constexpr int    kHighFocusMidiHi  = 80; // G#5
 
 static double midiToHz (int midi) noexcept
 {
@@ -227,6 +231,130 @@ void SpectrumModule::rebuildDisplay()
     const int N = rawMags.size();
     if (N <= 1) return;
 
+    std::vector<float> displayMags ((size_t) N, 0.0f);
+    for (int i = 0; i < N; ++i)
+        displayMags[(size_t) i] = std::abs (rawMags.getUnchecked (i));
+
+    // CQT 模式显示侧收束（双端函数）：
+    //   1) 低频端：越靠近低频，收束力指数级增强；
+    //   2) 中高频端：在 G#4~G#5 区间给中等收束，减少纯音相邻音名串亮。
+    if (hub.getFourierMode() == AnalyserHub::FourierMode::cqt && N >= 6)
+    {
+        std::vector<float> collapsed = displayMags;
+        auto colToFreqHz = [this, N] (int col) -> double
+        {
+            const double t = (double) col / (double) juce::jmax (1, N - 1);
+            return std::pow (10.0,
+                             std::log10 ((double) minFreqHz)
+                             + t * (std::log10 ((double) maxFreqHz)
+                                    - std::log10 ((double) minFreqHz)));
+        };
+
+        for (int i = 1; i < N - 1; ++i)
+        {
+            const float c = displayMags[(size_t) i];
+            const float l = displayMags[(size_t) (i - 1)];
+            const float r = displayMags[(size_t) (i + 1)];
+            if (c <= 1.0e-7f)
+                continue;
+
+            // 只有中心明确强于两侧，且两侧都比中心弱，才触发收束
+            if (! (c > l && c > r))
+                continue;
+            if (! (l < c * 0.98f && r < c * 0.98f))
+                continue;
+
+            const double f = colToFreqHz (i);
+            const double midi = (double) kA4Midi + (double) kBpo * std::log2 (juce::jmax (1.0, f) / kA4Hz);
+            if (midi > (double) kLowFocusMidiMax)
+                continue;
+
+            const float lowT = juce::jlimit (0.0f, 1.0f,
+                                             (float) (((double) kLowFocusMidiMax - midi)
+                                                      / juce::jmax (1.0, (double) (kLowFocusMidiMax - kLowFocusMidiFull))));
+            const float lowExp = (std::exp (3.8f * lowT) - 1.0f) / (std::exp (3.8f) - 1.0f); // 低频端指数增强
+
+            const float highCenter = 0.5f * (float) (kHighFocusMidiLo + kHighFocusMidiHi);
+            const float highHalf   = 0.5f * (float) (kHighFocusMidiHi - kHighFocusMidiLo);
+            const float highDist   = std::abs ((float) midi - highCenter);
+            const float highT      = juce::jlimit (0.0f, 1.0f, 1.0f - highDist / juce::jmax (1.0f, highHalf));
+            const float highShape  = std::pow (highT, 1.25f);
+
+            const float convergeLow  = 0.50f + 0.50f * lowExp;
+            const float convergeHigh = 0.18f + 0.34f * highShape;
+            const float converge = juce::jlimit (0.0f, 1.0f, juce::jmax (convergeLow, convergeHigh));
+            const float sideWeak = 1.0f - juce::jlimit (0.0f, 1.0f, juce::jmax (l, r) / juce::jmax (1.0e-7f, c));
+            const float sideFloor = 0.20f + 0.52f * lowExp + 0.12f * highShape;
+            const float pull = converge * juce::jmax (juce::jlimit (0.0f, 1.0f, sideFloor), sideWeak);
+            if (pull <= 1.0e-4f)
+                continue;
+
+            const float keep = juce::jlimit (0.0f, 1.0f, 1.0f - 1.05f * pull);
+            collapsed[(size_t) (i - 1)] = juce::jmax (0.0f, collapsed[(size_t) (i - 1)] * keep);
+            collapsed[(size_t) (i + 1)] = juce::jmax (0.0f, collapsed[(size_t) (i + 1)] * keep);
+            collapsed[(size_t) i] += (l + r) * (0.25f * pull);
+
+            // 邻带上限钳制：避免低音纯正弦时相邻音名频带持续“亮边”。
+            const float maxNeighborRatio = 0.30f - 0.22f * lowExp - 0.10f * highShape;
+            const float cap = c * juce::jlimit (0.05f, 0.30f, maxNeighborRatio);
+            if (collapsed[(size_t) (i - 1)] > cap)
+            {
+                const float extra = collapsed[(size_t) (i - 1)] - cap;
+                collapsed[(size_t) (i - 1)] = cap;
+                collapsed[(size_t) i] += 0.55f * extra;
+            }
+            if (collapsed[(size_t) (i + 1)] > cap)
+            {
+                const float extra = collapsed[(size_t) (i + 1)] - cap;
+                collapsed[(size_t) (i + 1)] = cap;
+                collapsed[(size_t) i] += 0.55f * extra;
+            }
+
+            // 次邻带轻度抑制，进一步收紧低频“拖尾”。
+            const float ring2 = juce::jlimit (0.0f, 1.0f, 0.22f + 0.55f * lowExp + 0.20f * highShape);
+            if (i > 1)
+                collapsed[(size_t) (i - 2)] *= (1.0f - ring2);
+            if (i + 2 < N)
+                collapsed[(size_t) (i + 2)] *= (1.0f - ring2);
+        }
+
+        for (int i = 0; i < N; ++i)
+            displayMags[(size_t) i] = juce::jmax (0.0f, collapsed[(size_t) i]);
+
+        // 全局单主峰场景下再做一次轻量聚焦，避免纯音出现双峰抖动
+        int topIdx1 = 0;
+        float top1  = 0.0f;
+        float top2  = 0.0f;
+        for (int i = 0; i < N; ++i)
+        {
+            const float v = displayMags[(size_t) i];
+            if (v > top1)
+            {
+                top2 = top1;
+                top1 = v;
+                topIdx1 = i;
+            }
+            else if (v > top2)
+            {
+                top2 = v;
+            }
+        }
+
+        const float dominance = top1 / juce::jmax (1.0e-9f, top2);
+        if (dominance > 1.6f)
+        {
+            const float strength = juce::jlimit (0.0f, 0.65f, (dominance - 1.6f) / 3.0f);
+            const float sigma = 0.65f;
+            for (int i = 0; i < N; ++i)
+            {
+                const float d = (float) (i - topIdx1);
+                const float w = std::exp (-0.5f * (d / sigma) * (d / sigma));
+                displayMags[(size_t) i] *= ((1.0f - strength) + strength * w);
+            }
+            displayMags[(size_t) topIdx1] *= (1.0f + 0.20f * strength);
+        }
+    }
+
     if ((int) smoothedDb.size() != N)
     {
         smoothedDb .assign(N, minDb);
@@ -239,7 +367,7 @@ void SpectrumModule::rebuildDisplay()
 
     for (int col = 0; col < N; ++col)
     {
-        const float mag = std::abs (rawMags.getUnchecked (col));
+        const float mag = displayMags[(size_t) col];
         float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
 
         // Slope 补偿：4.5 dB/oct 高频提升（基准 1kHz）

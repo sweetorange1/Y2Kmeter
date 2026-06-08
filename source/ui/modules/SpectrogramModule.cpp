@@ -11,6 +11,10 @@ namespace
 constexpr double kA4Hz = 440.0;
 constexpr int    kA4Midi = 69;
 constexpr int    kBpo = 12;
+constexpr int    kLowFocusMidiMax  = 44; // G#2
+constexpr int    kLowFocusMidiFull = 24; // C1
+constexpr int    kHighFocusMidiLo  = 68; // G#4
+constexpr int    kHighFocusMidiHi  = 80; // G#5
 
 static double midiToHz (int midi) noexcept
 {
@@ -594,6 +598,82 @@ void SpectrogramModule::pushSharpColumnFromCqt (const float* mags, int numBins,
         rowSpanHz[(size_t) r] = juce::jmax (1.0e-9, rowHiHz[(size_t) r] - rowLoHz[(size_t) r]);
     }
 
+    // CQT 显示侧收束：低音区（<= A#2）中，若中心音同时强于上下邻音，
+    // 将邻音弱能量向中心收拢；音越低，收拢越重。
+    std::vector<float> collapsedMags ((size_t) numBins, 0.0f);
+    for (int i = 0; i < numBins; ++i)
+        collapsedMags[(size_t) i] = juce::jmax (0.0f, mags[i]);
+
+    if (numBins >= 3)
+    {
+        std::vector<float> src = collapsedMags;
+        std::vector<float> dst = src;
+        for (int b = 1; b < numBins - 1; ++b)
+        {
+            const float c = src[(size_t) b];
+            const float l = src[(size_t) (b - 1)];
+            const float r = src[(size_t) (b + 1)];
+            if (c <= 1.0e-7f)
+                continue;
+            if (! (c > l && c > r))
+                continue;
+            if (! (l < c * 0.98f && r < c * 0.98f))
+                continue;
+
+            const int midi = midiStart + b;
+            if (midi > kLowFocusMidiMax)
+                continue;
+
+            const float lowT = juce::jlimit (0.0f, 1.0f,
+                                             (float) (kLowFocusMidiMax - midi)
+                                             / (float) juce::jmax (1, kLowFocusMidiMax - kLowFocusMidiFull));
+            const float lowExp = (std::exp (3.8f * lowT) - 1.0f) / (std::exp (3.8f) - 1.0f);
+
+            const float highCenter = 0.5f * (float) (kHighFocusMidiLo + kHighFocusMidiHi);
+            const float highHalf   = 0.5f * (float) (kHighFocusMidiHi - kHighFocusMidiLo);
+            const float highDist   = std::abs ((float) midi - highCenter);
+            const float highT      = juce::jlimit (0.0f, 1.0f, 1.0f - highDist / juce::jmax (1.0f, highHalf));
+            const float highShape  = std::pow (highT, 1.25f);
+
+            const float convergeLow  = 0.50f + 0.50f * lowExp;
+            const float convergeHigh = 0.18f + 0.34f * highShape;
+            const float converge = juce::jlimit (0.0f, 1.0f, juce::jmax (convergeLow, convergeHigh));
+            const float sideWeak = 1.0f - juce::jlimit (0.0f, 1.0f,
+                                                        juce::jmax (l, r) / juce::jmax (1.0e-7f, c));
+            const float sideFloor = 0.20f + 0.52f * lowExp + 0.12f * highShape;
+            const float pull = converge * juce::jmax (juce::jlimit (0.0f, 1.0f, sideFloor), sideWeak);
+            if (pull <= 1.0e-4f)
+                continue;
+
+            const float keep = juce::jlimit (0.0f, 1.0f, 1.0f - 1.05f * pull);
+            dst[(size_t) (b - 1)] = juce::jmax (0.0f, dst[(size_t) (b - 1)] * keep);
+            dst[(size_t) (b + 1)] = juce::jmax (0.0f, dst[(size_t) (b + 1)] * keep);
+            dst[(size_t) b] += (l + r) * (0.28f * pull);
+
+            const float maxNeighborRatio = 0.30f - 0.22f * lowExp - 0.10f * highShape;
+            const float cap = c * juce::jlimit (0.05f, 0.30f, maxNeighborRatio);
+            if (dst[(size_t) (b - 1)] > cap)
+            {
+                const float extra = dst[(size_t) (b - 1)] - cap;
+                dst[(size_t) (b - 1)] = cap;
+                dst[(size_t) b] += 0.55f * extra;
+            }
+            if (dst[(size_t) (b + 1)] > cap)
+            {
+                const float extra = dst[(size_t) (b + 1)] - cap;
+                dst[(size_t) (b + 1)] = cap;
+                dst[(size_t) b] += 0.55f * extra;
+            }
+
+            const float ring2 = juce::jlimit (0.0f, 1.0f, 0.22f + 0.55f * lowExp + 0.20f * highShape);
+            if (b > 1)
+                dst[(size_t) (b - 2)] *= (1.0f - ring2);
+            if (b + 2 < numBins)
+                dst[(size_t) (b + 2)] *= (1.0f - ring2);
+        }
+        collapsedMags.swap (dst);
+    }
+
     auto bandCenterHz = [midiStart] (int i) noexcept -> double
     {
         return midiToHz (midiStart + i);
@@ -640,7 +720,7 @@ void SpectrogramModule::pushSharpColumnFromCqt (const float* mags, int numBins,
 
     for (int b = 0; b < numBins; ++b)
     {
-        const float mag = mags[b];
+        const float mag = collapsedMags[(size_t) b];
         if (! std::isfinite (mag) || mag <= 0.0f) continue;
 
         const double fc = bandCenterHz (b);

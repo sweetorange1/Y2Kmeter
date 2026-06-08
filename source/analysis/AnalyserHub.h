@@ -326,7 +326,7 @@ public:
     // ---- 常量（FrameSnapshot / 引用计数 / 快照接口都会用到，必须在它们之前可见）----
     static constexpr int oscilloscopeBufferSize = 2048;
     static constexpr int spectrumBins           = 160;
-    static constexpr int spectrumMagSize        = 1 << 10; // = fftSize / 2 = 1024
+    static constexpr int spectrumMagSize        = 1 << 11; // = fftSize / 2 = 2048
 
     // ======================================================
     // 多分辨率 FFT（双路）：
@@ -334,7 +334,7 @@ public:
     //   · 低频路（新增）：fftSize=8192，Δf≈5.86Hz @48k，高分辨率、只取 0~500Hz 左右
     // 供 UI 合并接口 getSpectrumMagnitudesBlended() / FrameSnapshot.spectrumMagLo 使用。
     // ======================================================
-    static constexpr int spectrumMagSizeLo      = 1 << 12; // = fftSizeLo / 2 = 4096
+    static constexpr int spectrumMagSizeLo      = 1 << 14; // = fftSizeLo / 2 = 16384
     // 切换点：低频路与主路交叉频率；UI 侧在此频率附近做一个八度的平滑交叉淡化
     static constexpr float spectrumXoverHz      = 500.0f;
 
@@ -512,10 +512,10 @@ public:
 
 private:
     // ---- 内部常量 ----
-    static constexpr int fftOrder = 11;
+    static constexpr int fftOrder = 12;
     static constexpr int fftSize  = 1 << fftOrder;
-    // 低频路：8192 点 FFT
-    static constexpr int fftOrderLo = 13;
+    // 低频路：32768 点 FFT
+    static constexpr int fftOrderLo = 15;
     static constexpr int fftSizeLo  = 1 << fftOrderLo;
 
     // ---- 示波器（立体声环形缓冲）----
