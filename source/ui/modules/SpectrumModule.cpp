@@ -71,22 +71,17 @@ void SpectrumModule::setSlopeEnabled(bool b)
 }
 
 // ----------------------------------------------------------
-// 频率/dB 坐标换算
+// 坐标换算
+//
+//   新设计：X 轴 = 132 个等宽半音格（C0~B10）。
+//     index ∈ [0, 131] ··· 0 = C0, 12 = C1, ..., 131 = B10
+//     不再使用 "freqToX/log10" 坐标 —— 同一个音符占 1 格，方便扚谱。
 // ----------------------------------------------------------
-float SpectrumModule::freqToX(float freqHz, juce::Rectangle<int> canvas)
+float SpectrumModule::noteToX (int note, juce::Rectangle<int> canvas)
 {
-    const float f   = juce::jlimit(minFreqHz, maxFreqHz, freqHz);
-    const float t   = (std::log10(f) - std::log10(minFreqHz))
-                    / (std::log10(maxFreqHz) - std::log10(minFreqHz));
+    const int N = AnalyserHub::kNoteBinCount;
+    const float t = (float) (note + 0.5f) / (float) N;
     return (float) canvas.getX() + t * (float) canvas.getWidth();
-}
-
-float SpectrumModule::xToFreq(float x, juce::Rectangle<int> canvas)
-{
-    const float t = (x - (float) canvas.getX()) / juce::jmax(1.0f, (float) canvas.getWidth());
-    return std::pow(10.0f, std::log10(minFreqHz)
-                         + juce::jlimit(0.0f, 1.0f, t)
-                           * (std::log10(maxFreqHz) - std::log10(minFreqHz)));
 }
 
 float SpectrumModule::dbToY(float db, juce::Rectangle<int> canvas) const
@@ -123,29 +118,22 @@ void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
 }
 
 // ----------------------------------------------------------
-// onFrame —— Hub 分发器回调（从 Hub 拿已经 "双路合并" 的幅度）
+// onFrame —— 拿 132 半音格数据
 // ----------------------------------------------------------
 void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
     if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Spectrum)) return;
 
-    // P1-1：分频 repaint —— Spectrum 曲线本身变化不如 Oscilloscope/Waveform 灵敏，
-    //   每 2 个 dispatch tick 才真正 repaint 一次（60Hz→30Hz，30Hz→15Hz）。
-    //   数据内部仍然每 tick 更新（保留峰值保持/下降的时间积分精度），
-    //   仅 repaint 被分频；多实例叠加时 GPU/CPU 开销直接减半。
+    // 分频 repaint（与原设计一致）
     const bool skipRepaintThisTick = ((frame.tickCount % 2ull) != 0ull);
 
-    // 使用 Hub 的双路合并接口：低频走 8192 点（Δf≈5.9Hz），高频走 2048 点（Δf≈23Hz），
-    // 在 500Hz 附近做等功率交叉淡化。UI 侧零额外重采样，直接拿到"每列一个线性幅度"。
-    //
-    // 关于 frame：
-    //   ·frame.spectrumMag / spectrumMagLo 仍然保留（其他模块可能用），本模块不再使用；
-    //   · blended 接口走 Hub 内部锁，成本极低（N 次查表 + 一次 cos 交叉）。
-    constexpr int N = 256;
-    hub.getSpectrumMagnitudesBlended (rawMags, N,
-                                      minFreqHz,
-                                      juce::jmin (maxFreqHz, (float) (hub.getSampleRate() * 0.5)));
+    // ★★ 直接从 FrameSnapshot 拿fame·spectrumByNote·—— 132 个半音格的线性幅度。
+    //    不再调用 hub·getSpectrumMagnitudesBlended，不再做任何重采样。
+    constexpr int N = AnalyserHub::kNoteBinCount;
+    rawMags.resize (N);
+    std::memcpy (rawMags.getRawDataPointer(), frame.spectrumByNote.data(),
+                 sizeof (float) * (size_t) N);
 
     const auto now = juce::Time::getCurrentTime();
     const float deltaMs = (float)(now - lastTickTime).inMilliseconds();
@@ -173,14 +161,13 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
+    // repaint 节流
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
     const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
     const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (1.8f, scale);
     if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
         return;
 
-    // P1-1：tick 级分频（见函数开头的 skipRepaintThisTick 注释）
     if (skipRepaintThisTick)
         return;
 
@@ -189,17 +176,9 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 }
 
 // ----------------------------------------------------------
-// rebuildDisplay —— 已合并的 N 列线性幅度 → N 列 dBFS 值（Slope 可选）
-//
-//   变更说明：
-//     旧实现里本函数把 1024 bin 的 FFT 幅度**在 UI 侧**按对数频率轴重采样到 N=256 列，
-//     并且费大力气处理"低频一个 bin 覆盖多列 → 阶梯/平滑"。
-//     现在 Hub 已直接返回 N 列对数频率轴上的合并线性幅度（低频路 8192FFT + 高频路 2048FFT），
-//     本函数只需：
-//       1) 线性 → dB；
-//       2) 可选 Slope 补偿；
-//       3) 上升快 / 下降慢平滑；
-//       4) 末端轻量 3 列模糊磨圆拐点。
+// rebuildDisplay —— 132 个半音格线性幅度 → 132 个 dB 值（可Slope）。
+//   不再做频率重采样。“列间平滑"不再需要（每格本身就是一个独立音符，
+//   横向平滑会让邙近音符能量互相渗透，反而损害扚谱体验）——这里只保留上升快下降慢的时间平滑。
 // ----------------------------------------------------------
 void SpectrumModule::rebuildDisplay()
 {
@@ -225,65 +204,38 @@ void SpectrumModule::rebuildDisplay()
         if (slopeEnabled && (int) slopeOffsetDb.size() == N)
             db += slopeOffsetDb[(size_t) col];
 
-        // 平滑：上升快，下降慢
+        // 时间平滑：上升快，下降慢
         const float prev  = smoothedDb[(size_t) col];
         const float alpha = (db > prev) ? 0.55f : 0.12f;
         float sm = prev + alpha * (db - prev);
         sm = juce::jlimit (minDb, maxDb + 12.0f, sm);
         smoothedDb[(size_t) col] = sm;
     }
-
-    // ----------------------------------------------------------
-    //  额外的列间平滑（一维小核卷积）：磨圆列间拐点
-    //   · 仅对已经求好的 smoothedDb 做轻量 [1,2,1]/4 低通，核宽 3 列
-    //   · 纯视觉磨平，完全不影响频率/幅度精度
-    // ----------------------------------------------------------
-    if (N >= 3)
-    {
-        if ((int) blurredDb.size() != N)
-            blurredDb.assign (N, minDb);
-
-        blurredDb[0]     = smoothedDb[0];
-        blurredDb[N - 1] = smoothedDb[(size_t)(N - 1)];
-        for (int i = 1; i < N - 1; ++i)
-        {
-            blurredDb[(size_t) i] = 0.25f * smoothedDb[(size_t)(i - 1)]
-                                   + 0.50f * smoothedDb[(size_t) i]
-                                   + 0.25f * smoothedDb[(size_t)(i + 1)];
-        }
-        smoothedDb.swap(blurredDb);
-    }
+    // 注意：不再做列间 [1,2,1] 平滑——保持每个音符独立起伏，扚谱更清晰。
 }
 
 void SpectrumModule::ensureDisplayCache (int numPoints)
 {
     numPoints = juce::jmax (2, numPoints);
 
-    const double sampleRate = hub.getSampleRate();
-    if (slopeCacheSize == numPoints
-        && std::abs (slopeCacheSampleRate - sampleRate) <= 0.5
-        && (int) slopeOffsetDb.size() == numPoints)
-    {
+    if (slopeCacheSize == numPoints && (int) slopeOffsetDb.size() == numPoints)
         return;
-    }
 
     slopeOffsetDb.resize ((size_t) numPoints);
 
-    const double fMin   = (double) minFreqHz;
-    const double fMax   = juce::jmin ((double) maxFreqHz, sampleRate * 0.5);
-    const double logMin = std::log10 (fMin);
-    const double logMax = std::log10 (juce::jmax (fMin, fMax));
-
-    for (int col = 0; col < numPoints; ++col)
+    // 按半音格索引计算 Slope：每个半音 = (1/12) 八度，基准 1kHz ≈ A5(MIDI 81) 附近。
+    // 3.0 dB/oct 高频提升（原本是 4.5 dB/oct，但在三段多分辨率 FFT 下，
+    //   过强的高频提升会把高音区残留的窗函数旁瓣放大成肉眼可见的暗亮线，
+    //   这里调到 3.0 dB/oct 折中：仍然抬高高频可读性，但不再放大伪影）。
+    // 1000Hz 对应的 noteIndex：log2(1000/16.3516)*12 ≈ 71.4 (介B5/C6)
+    constexpr float refNoteIndex = 71.4f;
+    for (int n = 0; n < numPoints; ++n)
     {
-        const double t = (double) col / (double) juce::jmax (1, numPoints - 1);
-        const double f = std::pow (10.0, logMin + t * (logMax - logMin));
-        const double octaves = std::log2 (juce::jmax (20.0, f) / 1000.0);
-        slopeOffsetDb[(size_t) col] = (float) (4.5 * octaves);
+        const float octaves = ((float) n - refNoteIndex) / 12.0f;
+        slopeOffsetDb[(size_t) n] = 3.0f * octaves;
     }
 
     slopeCacheSize = numPoints;
-    slopeCacheSampleRate = sampleRate;
 }
 
 // ----------------------------------------------------------
@@ -311,7 +263,7 @@ void SpectrumModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> canv
 }
 
 // ----------------------------------------------------------
-// 网格：每 20dB 一条横线，以及 100/1k/10k 纵线
+// 网格：每 20dB 一条横线，以及每个 C 音（n%12==0）一条纵线
 // ----------------------------------------------------------
 void SpectrumModule::drawGrid(juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
@@ -331,22 +283,12 @@ void SpectrumModule::drawGrid(juce::Graphics& g, juce::Rectangle<int> canvas) co
         g.drawHorizontalLine(y, (float) inner.getX(), (float) inner.getRight());
     }
 
-    // 纵线（主 decade + 次 2/5）
-    const float majorFreqs[]   = { 100.0f, 1000.0f, 10000.0f };
-    const float minorFreqs[]   = { 30.0f, 50.0f, 200.0f, 300.0f, 500.0f,
-                                   2000.0f, 3000.0f, 5000.0f, 15000.0f };
-
-    g.setColour(PinkXP::pink200.withAlpha(0.3f));
-    for (float f : minorFreqs)
-    {
-        const int x = (int) std::round(freqToX(f, canvas));
-        if (x > inner.getX() && x < inner.getRight())
-            g.drawVerticalLine(x, (float) inner.getY(), (float) inner.getBottom());
-    }
+    // 纵线：每个 C 音（八度分界）画一条；中央 A4 附近画一条稍亮的参考线
+    const int N = AnalyserHub::kNoteBinCount;
     g.setColour(PinkXP::pink300.withAlpha(0.6f));
-    for (float f : majorFreqs)
+    for (int n = 0; n < N; n += 12) // C0, C1, ..., C10
     {
-        const int x = (int) std::round(freqToX(f, canvas));
+        const int x = (int) std::round (noteToX (n, canvas));
         if (x > inner.getX() && x < inner.getRight())
             g.drawVerticalLine(x, (float) inner.getY(), (float) inner.getBottom());
     }
@@ -492,7 +434,7 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
 }
 
 // ----------------------------------------------------------
-// 坐标轴标签（左侧 dB / 底部 Hz）
+// 坐标轴标签（左侧 dB / 底部音符名）
 // ----------------------------------------------------------
 void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
@@ -508,17 +450,15 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
                    juce::Justification::centredRight, false);
     }
 
-    // 底部 Hz 标签
-    struct L { float hz; const char* label; };
-    const L labels[] = {
-        { 20.0f, "20" }, { 100.0f, "100" }, { 1000.0f, "1k" },
-        { 10000.0f, "10k" }, { 20000.0f, "20k" }
-    };
-    for (auto& l : labels)
+    // 底部音符名标签：每个 C 音画 C0 / C1 / ... / C10
+    const int N = AnalyserHub::kNoteBinCount;
+    for (int n = 0; n < N; n += 12)
     {
-        const int x = (int) std::round(freqToX(l.hz, canvas));
+        const int octave = n / 12;          // 0→10
+        const int x = (int) std::round (noteToX (n, canvas));
         if (x < canvas.getX() - 4 || x > canvas.getRight() + 4) continue;
-        g.drawText(l.label, x - 18, canvas.getBottom() + 2, 36, 12,
-                   juce::Justification::centred, false);
+        const juce::String label = "C" + juce::String (octave);
+        g.drawText (label, x - 14, canvas.getBottom() + 2, 28, 12,
+                    juce::Justification::centred, false);
     }
 }

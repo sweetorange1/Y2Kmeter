@@ -108,25 +108,21 @@ void SpectrogramModule::resized()
 // ----------------------------------------------------------
 // 网格尺寸管理
 //
-//   规则：
-//     · 默认（画布尺寸足够）情况下：rows = canvasH / cellPx，
-//       cols = canvasW / cellPx ——— 每格都是 cellPx × cellPx 正方形。
-//     · 用户拉伸模块时：rows/cols 会按新的画布尺寸整除 cellPx 重算。
-//       绘制时每格的实际像素尺寸 cellW = canvasW / cols、cellH = canvasH / rows
-//       —— 两者整数相同值时格子保持正方形；不同值时所有格子统一变成
-//       同一种长方形（符合"用户拉伸模块的时候可能根据窗口变成长方形，
-//       但全部格子仍然一致"的需求）。
-//     · 如果画布尺寸特别小（不足一个 cellPx），至少保留 1 行 1 列。
+//   新设计：
+//     · rows 固定为 132（每行 = 一个半音，C0~B10）—— 与 cellPx 无关。
+//     · cols = canvasW / cellPx，随画布宽度变化。
+//     · 每格实际像素尺寸 cellW = canvasW / cols、cellH = canvasH / rows——
+//       canvasH 被均切3132 段，即使 cellPx 与实际像素不一致也全部拉伸填满。
 // ----------------------------------------------------------
 void SpectrogramModule::ensureGrid (int canvasW, int canvasH)
 {
     canvasW = juce::jmax (1, canvasW);
     canvasH = juce::jmax (1, canvasH);
 
+    // rows 固定：半音格总数
+    const int newRows = AnalyserHub::kNoteBinCount; // 132
     const int newCols = juce::jmax (1, canvasW / cellPx);
-    const int newRows = juce::jmax (1, canvasH / cellPx);
 
-    // 画布尺寸 & cellPx 都没变时不重建
     if (canvasW == lastCanvasW && canvasH == lastCanvasH
         && newRows == rows && newCols == cols
         && (int) gridData.size() == rows * cols)
@@ -230,13 +226,8 @@ int SpectrogramModule::freqToGridRow (double freqHz, double minHz, double maxHz,
 // ----------------------------------------------------------
 // 一帧 → 一列网格值
 //
-//   变更说明：
-//     旧实现里本函数在 UI 侧对 1024 bin 的 FFT 幅度做"对数频率分段 + 每段取最大"。
-//     现在 Hub 直接给出 rows 个对数频率点上的合并幅度（低频 8192 FFT + 高频 2048 FFT，
-//     500Hz 附近做等功率交叉），行数 → 点数一一对应，本函数只需：
-//       1) 每行线性 → dB；
-//       2) dB → 归一化到 [0,1]；
-//       3) 写入 grid 的 writeCol 列；writeCol 环形前进。
+//   新设计：输入已是 132 个半音格的线性幅度（i ∈ [0,131]，
+//   i=0 → C0，i=131 → B10）。grid 约定 r=0 在顶 = 高频，所以写入时翻转。
 // ----------------------------------------------------------
 void SpectrogramModule::pushColumn (const juce::Array<float>& rowsMags)
 {
@@ -244,15 +235,13 @@ void SpectrogramModule::pushColumn (const juce::Array<float>& rowsMags)
     if (gridData.empty())       return;
     if (rowsMags.size() != rows) return;
 
-    // Hub 返回的顺序是 "低频 → 高频"（r=0 是最低频 f_0），
-    // 而 grid 约定 r=0 在"顶部 = 高频"、r=rows-1 在"底部 = 低频"，
-    // 所以写入时需要翻转：gridRow = rows - 1 - i。
     for (int i = 0; i < rows; ++i)
     {
         const float mag = std::abs (rowsMags.getUnchecked (i));
         const float db  = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
         const float t01 = juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
 
+        // i=0 (C0=低频) → grid 底部；i=131 (B10=高频) → grid 顶部
         set (rows - 1 - i, writeCol, t01);
     }
 
@@ -268,53 +257,35 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Spectrum)) return;
 
     const auto canvas = getCanvasBounds (getContentBounds());
-    // 与 paintContent 一致：内部绘图区 = canvas.reduced(2)，外围 2px 留给凹陷边框
     const auto plot   = canvas.reduced (2);
     ensureGrid (plot.getWidth(), plot.getHeight());
     if (rows <= 0) return;
 
-    // 让 Hub 直接按 rows 个对数频率点返回"双路合并"的线性幅度数组，
-    // 低频段自动走 8192FFT（Δf≈5.86Hz @48k）—— 本模块低频分辨率显著提升。
-    //
-    // 注意：fMax 不直接取到 Nyquist。Nyquist 附近的 bin 会被抗混叠滤波
-    //       压成极低能量，若 rows 的最顶点落到 Nyquist，最顶那一行
-    //       几乎恒为 ≈0，视觉上呈现为"一条常态深色横线"。这里取 0.95×Nyquist
-    //       作为上限，既保留可用高频带，又规避这条恒黑线。
-    const double nyquist = hub.getSampleRate() * 0.5;
-    const float  fMin    = minFreqHz;
-    const float  fMax    = juce::jmin (maxFreqHz, (float) (nyquist * 0.95));
+    // ★★ 直接从 FrameSnapshot 拿 132 半音格幅度 ★★
+    constexpr int N = AnalyserHub::kNoteBinCount;
+    rowMagBuf.resize (N);
+    std::memcpy (rowMagBuf.getRawDataPointer(), frame.spectrumByNote.data(),
+                 sizeof (float) * (size_t) N);
 
-    hub.getSpectrumMagnitudesBlended (rowMagBuf, rows, fMin, fMax);
-
-    // ---------- 速度解耦：按"真实流逝时间"累计推进列数 ----------
-    //   旧行为：每帧 push 1 列 → 滚动速度 = 分发 fps（Hub 30/60Hz 直接体现在速度上）。
-    //   新行为：columnAccumulator += dtMs * pixelsPerSecond / 1000，抽取整数部分 → 推进列数。
-    //   这样高 fps 时会"有几帧推 0 列"，低 fps 时会"一帧推多列"，
-    //   视觉滚动速度始终目标定在 pixelsPerSecond 列/秒。
+    // ---------- 速度解耦：按 "真实流逝时间" 累计推进列数 ----------
     const double now = juce::Time::getMillisecondCounterHiRes();
     float dtMs = 0.0f;
     if (lastFrameMs > 0.0)
         dtMs = (float) (now - lastFrameMs);
     lastFrameMs = now;
-    dtMs = juce::jlimit (0.0f, 500.0f, dtMs); // 显著卡顿/首帧时夹住，避免一次性满屏
+    dtMs = juce::jlimit (0.0f, 500.0f, dtMs);
 
     columnAccumulator += dtMs * pixelsPerSecond * 0.001f;
     int nCols = (int) columnAccumulator;
-    // 卡上限：即使大拖动/黑屏后恢复，最多一次补全满屏列
     if (cols > 0 && nCols > cols) nCols = cols;
     if (nCols < 0) nCols = 0;
     columnAccumulator -= (float) nCols;
 
     if (nCols == 0)
-    {
-        // 这一帧不推进：不改变 writeCol、不改变 image，也不需要 repaint。
         return;
-    }
 
     ensureImage();
 
-    // 连续 push nCols 列（都是当前帧最新的幅度快照 —— 低 fps 下这会
-    // ‘复制同一列形成连续横条’，视觉上则是滚动速度视帧插补）。
     for (int k = 0; k < nCols; ++k)
     {
         pushColumn (rowMagBuf);
@@ -513,37 +484,29 @@ void SpectrogramModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
 }
 
 // ----------------------------------------------------------
-// 轴标签
+// 轴标签：每个八度的 C 音点画一条横线标签 C0..C10
 // ----------------------------------------------------------
 void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
 
-    const double sampleRate = hub.getSampleRate();
-    const double nyquist    = (sampleRate > 0.0) ? sampleRate * 0.5 : 24000.0;
-    const double fMin       = (double) minFreqHz;
-    const double fMax       = juce::jmin ((double) maxFreqHz, nyquist);
+    // grid 约定：r=0 在顶（高音符），r=rows-1 在底（低音符）。
+    //   音符索引 n ··· 0=C0(低), 131=B10(高) → row = rows-1 - n
+    const int N = AnalyserHub::kNoteBinCount;
 
-    struct L { float hz; const char* label; };
-    const L labels[] = {
-        {   100.0f, "100" },
-        {  1000.0f,  "1k" },
-        { 10000.0f, "10k" },
+    auto noteToY = [&] (int n) -> int
+    {
+        const float t  = (float) (n + 0.5f) / (float) N;          // 0..1，越大越高音
+        const float yt = 1.0f - t;                                 // 顶部 (yt=0) 是高音
+        return canvas.getY() + (int) std::round (yt * (float) canvas.getHeight());
     };
 
-    // Hz 刻度文字直接浮绘在画布内部左侧（不再从画布外留白区取空间）：
-    //   · 文字上面给一小块半透明的暗色背板（不被频谱色块干扰可读）
-    //   · 文字用浅色 hl（反白）保证在深色背景上高对比
-    for (auto& l : labels)
+    // 画 C0..C10 标签
+    for (int n = 0; n < N; n += 12)
     {
-        if ((double) l.hz < fMin || (double) l.hz > fMax) continue;
+        const int octave = n / 12;
+        const int y      = noteToY (n);
 
-        const double logA = std::log10 (fMin);
-        const double logB = std::log10 (fMax);
-        const double t    = (std::log10 ((double) l.hz) - logA) / juce::jmax (1.0e-9, logB - logA);
-        const int    y    = canvas.getY() + (int) std::round ((1.0 - t) * (double) canvas.getHeight());
-
-        // 文字小背板（半透明墨色）—— 让文字从纷杂色块里跳出来
         const int bx = canvas.getX() + 2;
         const int by = y - 6;
         const int bw = 22;
@@ -551,10 +514,11 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.fillRect (bx, by, bw, bh);
         g.setColour (PinkXP::hl);
-        g.drawText (l.label, bx, by, bw, bh, juce::Justification::centred, false);
+        g.drawText ("C" + juce::String (octave),
+                    bx, by, bw, bh, juce::Justification::centred, false);
     }
 
-    // 底部 older/newer 提示：同样浮绘在画布内部底边，带半透明暗背板
+    // 底部 older/newer 提示
     {
         const int by = canvas.getBottom() - 13;
         const int bh = 11;

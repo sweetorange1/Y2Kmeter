@@ -320,17 +320,78 @@ public:
     // ---- 常量（FrameSnapshot / 引用计数 / 快照接口都会用到，必须在它们之前可见）----
     static constexpr int oscilloscopeBufferSize = 2048;
     static constexpr int spectrumBins           = 160;
-    static constexpr int spectrumMagSize        = 1 << 10; // = fftSize / 2 = 1024
 
-    // ======================================================
-    // 多分辨率 FFT（双路）：
-    //   · 主路（原有）：fftSize=2048，Δf≈23.4Hz @48k，低延迟、覆盖全频
-    //   · 低频路（新增）：fftSize=8192，Δf≈5.86Hz @48k，高分辨率、只取 0~500Hz 左右
-    // 供 UI 合并接口 getSpectrumMagnitudesBlended() / FrameSnapshot.spectrumMagLo 使用。
-    // ======================================================
-    static constexpr int spectrumMagSizeLo      = 1 << 12; // = fftSizeLo / 2 = 4096
-    // 切换点：低频路与主路交叉频率；UI 侧在此频率附近做一个八度的平滑交叉淡化
-    static constexpr float spectrumXoverHz      = 500.0f;
+    // ============================================================
+    // 三段多分辨率 FFT（基准采样率 = 44.1 kHz）—— 让最终结果精准落到
+    //   每一个半音（C0~B10，共 132 格），并尽量减少高频区的旁瓣伪影。
+    //
+    //   · 高频路 Hi  : 原始采样率（≤44.1k 时为 SR；>44.1k 时先重采样到 44.1k）
+    //                  fftSizeHi = 1024，Δf ≈ 43.07 Hz @44.1k
+    //                  hop = fftSizeHi / 2（50% overlap）→ 帧间不连续抑制
+    //                  目标音域：C8 (4186 Hz) ~ B10 (31609 Hz)
+    //   · 中频路 Md  : 抗混叠低通后下采样 D_M=4 倍 → 11025 Hz（覆盖到 ~5 kHz）
+    //                  fftSizeMd = 2048，Δf ≈ 5.39 Hz @44.1k
+    //                  hop = fftSizeMd / 8（87.5% overlap）
+    //                  目标音域：C3 (130.8 Hz) ~ B7 (3951 Hz)
+    //   · 低频路 Lo  : 抗混叠低通后下采样 D_L=32 倍 → 1378 Hz
+    //                  fftSizeLo = 4096，Δf ≈ 0.336 Hz @44.1k
+    //                  hop = 64（≈98.4% overlap）→ 刷新率 ≈ 21.5 Hz @44.1k
+    //                  目标音域：C0 (16.35 Hz) ~ B2 (123.5 Hz)
+    //
+    //   抗混叠滤波：每级降采样前接一个 N 阶 Butterworth 低通；
+    //     截止频率 = (新 Nyquist) × kAntiAliasCutoffRatio。
+    //
+    //   ============================================================
+    //   ★★★ Q3：调整抗混叠阶数的唯一位置 ★★★
+    //     如果你觉得效果不理想，把 kAntiAliasOrder 改成 12 即可（必须为偶数；
+    //     建议 8 / 12 / 16 三档之一）。中频/低频路同时生效。
+    //   ============================================================
+    static constexpr int   kAntiAliasOrder       = 8;
+    static constexpr float kAntiAliasCutoffRatio = 0.85f;
+    // ============================================================
+
+    // 三路 FFT 大小（公开常量，便于 FrameSnapshot / UI 复用）
+    static constexpr int spectrumMagSizeHi = 1 << 9;   // 1024 / 2 = 512  Hi
+    static constexpr int spectrumMagSizeMd = 1 << 10;  // 2048 / 2 = 1024 Md
+    static constexpr int spectrumMagSizeLo = 1 << 11;  // 4096 / 2 = 2048 Lo
+
+    // 兼容旧 API：spectrumMagSize 现在指向高频路的 bin 数（旧代码不再被两个频谱模块使用）
+    static constexpr int spectrumMagSize   = spectrumMagSizeHi;
+
+    // 中/低频路降采样比（基准 44.1k；其他采样率自适应缩放，比例不变）
+    //   D_M=4 让中频流 Nyquist ≈ 5.5k，足以覆盖 C8 (4186Hz) 以下
+    //   D_L=32 让低频流 Nyquist ≈ 689Hz，足以覆盖 C5 以下
+    static constexpr int kDecimMd = 4;
+    static constexpr int kDecimLo = 32;
+
+    // 三路 FFT hop 大小（单位 = 各路自身采样后的样本数）
+    //   Hi 路 50% overlap → 减少帧间断点伪影；
+    //   Md 路 87.5% overlap → 高刷新率（中频区域是扒谱主战场）；
+    //   Lo 路 hop=64 ≈ 98.4% overlap → 把低频路的刷新率从原本 ~0.7 Hz
+    //     提升到 ~21.5 Hz @44.1k，避免低音条 "每秒才动一次"。
+    static constexpr int kFftHopHi = (1 << 10) / 2;   // 512
+    static constexpr int kFftHopMd = (1 << 11) / 8;   // 256
+    static constexpr int kFftHopLo = 64;              // 96.875% overlap
+
+    // 132 半音格：C0 (MIDI=12, 16.3516 Hz) ~ B10 (MIDI=143, 31608.5 Hz)
+    //   noteBins[n] 对应 MIDI 12+n，频率 = 440 * 2^((MIDI-69)/12)
+    static constexpr int   kNoteBinCount = 132;
+    static constexpr int   kNoteMidiBase = 12;     // C0
+    static constexpr float kNoteRefHz    = 440.0f; // A4
+    static constexpr int   kNoteRefMidi  = 69;     // A4
+
+    // 段间分界（半音索引；用于决定每个音符从哪一路取值 + 1 半音 crossfade）
+    //   n < kNoteSplitLoMd  → 纯低频路
+    //   kNoteSplitLoMd .. kNoteSplitMdHi-1 → 中频路（边缘 1 格与低频/高频路 crossfade）
+    //   n >= kNoteSplitMdHi → 纯高频路
+    //
+    //   注：kNoteSplitMdHi=96 把 C5/C6/C7（最常用的人声/乐器音区）全部交给
+    //   分辨率更高的中频路，从而避免 Hi 路 Δf=43Hz 旁瓣污染高半音格。
+    static constexpr int   kNoteSplitLoMd = 36;  // C3：低 → 中
+    static constexpr int   kNoteSplitMdHi = 96;  // C8：中 → 高
+
+    // 兼容旧字段（getSpectrumMagnitudesBlended 仍在用）
+    static constexpr float spectrumXoverHz = 500.0f;
 
     enum class Kind : int
     {
@@ -386,11 +447,18 @@ public:
         std::array<float, oscilloscopeBufferSize> oscL {};
         std::array<float, oscilloscopeBufferSize> oscR {};
 
-        // Spectrum：1024 个高精度 mag（线性）+ 160 个粗粒度归一化 specData
-        std::array<float, spectrumMagSize>  spectrumMag  {};
-        std::array<float, spectrumBins>     spectrumData {};
-        // 低频路高分辨率幅度（4096 bin；仅前 ~spectrumXoverHz 段有效）
+        // Spectrum：粗粒度归一化数组（保留给可能的旧消费者）
+        std::array<float, spectrumBins>      spectrumData {};
+
+        // 三路 FFT 幅度快照（线性，已 2/N 归一化）
+        std::array<float, spectrumMagSizeHi> spectrumMagHi {};
+        std::array<float, spectrumMagSizeMd> spectrumMagMd {};
         std::array<float, spectrumMagSizeLo> spectrumMagLo {};
+
+        // 132 半音格幅度（线性；每格 = 该半音 ±50 cent 内峰值）
+        //   ★ Spectrum / Spectrogram 模块的最终消费来源 ★
+        std::array<float, kNoteBinCount>     spectrumByNote {};
+    
 
         // Loudness / Phase / Dynamics 的快照
         LoudnessMeter::Snapshot      loudness {};
@@ -439,14 +507,19 @@ public:
     // 频谱：返回 spectrumBins 个归一化 [0,1] 幅度值
     void getSpectrumSnapshot(juce::Array<float>& dest);
 
-    // 高精度频谱幅度快照：返回 fftSize/2 = 1024 个原始幅度值
-    // （未做对数/平滑，供 SpectrumModule 自行处理）
+    // 高频路 1024-FFT 幅度快照（512 bin）—— 供旧代码用
     void getSpectrumMagnitudes(juce::Array<float>& dest);
 
-    // 低频路高分辨率幅度快照：返回 fftSizeLo/2 = 4096 个原始幅度值
-    //   注意：虽然返回了全部 4096 bin，但由于低频 FFT 延迟较大、
-    //   且高频段主路的 23Hz 分辨率完全够用，UI 侧应只使用前 ~spectrumXoverHz 的 bin。
+    // 中频路 2048-FFT 幅度快照（1024 bin，输入流为 SR/D_M）
+    void getSpectrumMagnitudesMd(juce::Array<float>& dest);
+
+    // 低频路 4096-FFT 幅度快照（2048 bin，输入流为 SR/D_L）
     void getSpectrumMagnitudesLo(juce::Array<float>& dest);
+
+    // ★★ 132 半音格幅度（C0~B10）—— 推荐 UI 直接使用 ★★
+    //   每格输出对应音符的 ±50 cent 频带内峰值（线性幅度）。
+    //   段间自动选择低/中/高路并在 1 个半音内 crossfade。
+    void getSpectrumMagnitudesByNote (juce::Array<float>& dest);
 
     // ======================================================
     // 合并（对数频率轴）幅度快照 —— 推荐 UI 频谱/瀑布图直接使用。
@@ -496,12 +569,17 @@ public:
     double getSampleRate() const noexcept { return cachedSampleRate; }
 
 private:
-    // ---- 内部常量 ----
-    static constexpr int fftOrder = 11;
-    static constexpr int fftSize  = 1 << fftOrder;
-    // 低频路：8192 点 FFT
-    static constexpr int fftOrderLo = 13;
+    // ---- 内部常量：三路 FFT 阶数 ----
+    static constexpr int fftOrderHi = 10;  // 1024
+    static constexpr int fftSizeHi  = 1 << fftOrderHi;
+    static constexpr int fftOrderMd = 11;  // 2048
+    static constexpr int fftSizeMd  = 1 << fftOrderMd;
+    static constexpr int fftOrderLo = 12;  // 4096
     static constexpr int fftSizeLo  = 1 << fftOrderLo;
+
+    // 兼容旧名（仅本文件内部使用）
+    static constexpr int fftSize  = fftSizeHi;
+    static constexpr int fftOrder = fftOrderHi;
 
     // ---- 示波器（立体声环形缓冲）----
     void pushSamplesToOscilloscope(const float* left, const float* right, int numSamples);
@@ -512,33 +590,95 @@ private:
     int oscWritePos = 0;
 
     // ---- 频谱（单声道混合，FFT）----
-    void pushSamplesToSpectrum(const float* left, const float* right, int numSamples);
+    //
+    //   总流程：
+    //     audio mid → [SR>44.1k? 4× 多相重采样到 44.1k] → highStream
+    //     highStream → 喂 fftFifoHi（1024，hop=kFftHopHi=50% overlap）
+    //     highStream → AA-LP-Md → ÷kDecimMd → 喂 fftFifoMd（2048，hop=kFftHopMd=87.5% overlap）
+    //     midStream  → AA-LP-Lo → ÷(kDecimLo/kDecimMd) → 喂 fftFifoLo（4096，hop=kFftHopLo）
+    //
+    //   注：每个 IIR 抗混叠链的阶数 = kAntiAliasOrder（见公开常量区注释）。
+    //   一个 N 阶 Butterworth 在 juce::dsp::IIR 里 = (N/2) 个 biquad cascade。
+    void pushSamplesToSpectrum (const float* left, const float* right, int numSamples);
 
     // 只保护发布给 UI 的频谱快照数组；FFT/FIFO 工作状态由音频线程单写。
     juce::SpinLock specLock;
-    juce::dsp::FFT fft { fftOrder };
-    juce::dsp::WindowingFunction<float> window { fftSize,
-        juce::dsp::WindowingFunction<float>::hann };
-    std::array<float, fftSize>     fftFifo  {};
-    std::array<float, fftSize * 2> fftData  {};
-    std::array<float, spectrumBins> specData {};
-    std::array<float, spectrumBins> specDataWork {};
-    // 高精度 FFT 幅度缓冲（供 SpectrumModule）
-    std::array<float, spectrumMagSize> magData {};
-    std::array<float, spectrumMagSize> magDataWork {};
-    int fftFifoIndex = 0;
 
-    // ---- 低频路 FFT（8192 点，高频率分辨率）----
-    //   与主路同一循环里并行喂 FIFO；
-    //   为了降低 CPU，低频 FFT 用 75% overlap（hop = fftSizeLo/4 = 2048）。
+    // ---- 三路 FFT 工作器 ----
+    juce::dsp::FFT fftHi { fftOrderHi };
+    juce::dsp::FFT fftMd { fftOrderMd };
     juce::dsp::FFT fftLo { fftOrderLo };
-    juce::dsp::WindowingFunction<float> windowLo { fftSizeLo,
-        juce::dsp::WindowingFunction<float>::hann };
+
+    juce::dsp::WindowingFunction<float> windowHi { fftSizeHi, juce::dsp::WindowingFunction<float>::hann };
+    juce::dsp::WindowingFunction<float> windowMd { fftSizeMd, juce::dsp::WindowingFunction<float>::hann };
+    juce::dsp::WindowingFunction<float> windowLo { fftSizeLo, juce::dsp::WindowingFunction<float>::hann };
+
+    // FIFO（高频路非重叠；中/低频路环形 + 75% overlap）
+    // Hi 路改为环形 FIFO + 50% overlap（解决 C5 等单音注入 C6~C9 的旁瓣伪影）
+    std::array<float, fftSizeHi>     fftFifoHi {};
+    std::array<float, fftSizeHi * 2> fftDataHi {};
+    int fftFifoIndexHi = 0;   // 环形写指针（0..fftSizeHi-1）
+    int hopAccumHi     = 0;   // 每收满 kFftHopHi 个新样本就跑一次 FFT
+
+    std::array<float, fftSizeMd>     fftFifoMd {};
+    std::array<float, fftSizeMd * 2> fftDataMd {};
+    int fftFifoIndexMd = 0;   // 环形写指针
+    int decimCounterMd = 0;   // 抽 D_M 个样本只往 fftFifoMd 写 1 个
+
     std::array<float, fftSizeLo>     fftFifoLo {};
     std::array<float, fftSizeLo * 2> fftDataLo {};
+    int fftFifoIndexLo = 0;
+    int decimCounterLo = 0;
+
+    // 三路输出幅度（线性）—— work 是音频线程私有，magXxx 是发布给 UI 的快照
+    std::array<float, spectrumMagSizeHi> magDataHi {};
+    std::array<float, spectrumMagSizeHi> magDataHiWork {};
+    std::array<float, spectrumMagSizeMd> magDataMd {};
+    std::array<float, spectrumMagSizeMd> magDataMdWork {};
     std::array<float, spectrumMagSizeLo> magDataLo {};
     std::array<float, spectrumMagSizeLo> magDataLoWork {};
-    int fftFifoIndexLo = 0;
+
+    // 132 半音格幅度（线性；从三路幅度合成；UI 直接消费）
+    std::array<float, kNoteBinCount> noteMagPublished {};
+
+    // 粗粒度归一化谱（保留给可能的旧消费者）
+    std::array<float, spectrumBins>  specData {};
+    std::array<float, spectrumBins>  specDataWork {};
+
+    // 兼容旧名：FrameDispatcher 拷贝路径中使用 magData 变量名的地方后面会改成 magDataHi。
+    // 这里不再保留别名，避免与 std::array 引用字段带来拷贝/初始化坑。
+
+    // ---- 抗混叠 IIR 链（中/低频路）----
+    //   每条链 = (kAntiAliasOrder / 2) 个 biquad；
+    //   prepare() 里按当前采样率 + 目标 D_M / D_L 重新设计系数。
+    //
+    //   实现细节：
+    //     · 中频路：在 highStream（≤44.1kHz）上做 LP（截止 ~ SR_hi/(2*D_M)*ratio），
+    //       然后每 D_M 个样本抽 1。
+    //     · 低频路：复用中频路的输出（已经 LP 到 ~Nyq/D_M），再做一级 LP（截止 ~ SR_md/(2*D_L/D_M)*ratio），
+    //       然后每 (D_L/D_M) 个样本抽 1。两级级联可有效压低过渡带。
+    //
+    //   使用 juce::dsp::IIR::Filter 的 stage cascade。每路最多支持 16 阶 → 8 个 biquad。
+    static constexpr int kMaxBiquadStages = 8;  // ≥ kAntiAliasOrder/2
+    using BiquadF = juce::dsp::IIR::Filter<float>;
+    std::array<BiquadF, kMaxBiquadStages> aaFilterMd;        // 中频路抗混叠（44.1k → 5.5k）
+    std::array<BiquadF, kMaxBiquadStages> aaFilterLo;        // 低频路抗混叠（5.5k → 689）
+    int  aaActiveStages = 0;  // = kAntiAliasOrder / 2
+
+    // ---- 输入端可选重采样：若来料 SR > 44.1k，则先降到 44.1k 再分析 ----
+    //   仅作用于分析路径，主音频输出不动。
+    //   实现：4 阶 Butterworth LP（截止 = 44100/2 * 0.85 ≈ 18743 Hz）→ 多相抽取。
+    //   实际抽取比 = SR / 44100（可能是 2.0 / 4.0 / 4.35... 非整数 → 用 1D 线性插值的多项式相位采样）。
+    static constexpr float kAnalysisTargetSR = 44100.0f;
+    bool   inputResampleEnabled = false;       // SR > 44.1k 时为 true
+    double inputDecimRatio      = 1.0;         // = SR / 44100
+    double inputDecimPhase      = 0.0;         // 多相累加相位 [0,1)
+    float  inputResampleZ1      = 0.0f;        // 上一个输入样本（线性插值用）
+    std::array<BiquadF, 4> inputPreLp;         // 4 阶 anti-image LP
+    int    inputPreLpStages     = 0;
+
+    // 兼容旧名（getSpectrumMagnitudes 依然返回它）
+    static constexpr int fftSizeLegacy = fftSizeHi;
 
     // ---- 响度计 ----
     LoudnessMeter loudnessMeter;

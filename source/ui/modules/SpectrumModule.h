@@ -59,10 +59,8 @@ private:
     juce::Rectangle<int> getToolbarBounds(juce::Rectangle<int> content) const;
     juce::Rectangle<int> getCanvasBounds (juce::Rectangle<int> content) const;
 
-    // 频率 → X 像素坐标（对数）
-    static float freqToX(float freqHz, juce::Rectangle<int> canvas);
-    // X 像素坐标 → 频率
-    static float xToFreq(float x, juce::Rectangle<int> canvas);
+    // 半音格索引 → X 像素坐标（等宽）
+    static float noteToX (int note, juce::Rectangle<int> canvas);
     // dBFS → Y 像素坐标
     float dbToY(float db, juce::Rectangle<int> canvas) const;
 
@@ -82,7 +80,7 @@ private:
     std::vector<float> blurredDb;
     std::vector<float> slopeOffsetDb;
     int    slopeCacheSize = 0;
-    double slopeCacheSampleRate = 0.0;
+    double slopeCacheSampleRate = 0.0; // 保留，仅为二进制兼容占位；ensureDisplayCache 已不再依赖
 
     // paintContent 是 const 路径，使用 mutable 缓存承接曲线点数组。
     mutable std::vector<juce::Point<float>> curvePts;
