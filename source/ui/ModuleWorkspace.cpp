@@ -128,6 +128,7 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::waveform:          return "waveform";
         case ModuleType::vuMeter:           return "vu_meter";
         case ModuleType::spectrogram:       return "spectrogram";
+        case ModuleType::spectrogram3d:    return "spectrogram3d";
         case ModuleType::tamagotchi:        return "tamagotchi";
     }
 
@@ -159,6 +160,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "waveform",           ModuleType::waveform },
         { "vu_meter",           ModuleType::vuMeter },
         { "spectrogram",        ModuleType::spectrogram },
+        { "spectrogram3d",     ModuleType::spectrogram3d },
         { "tamagotchi",         ModuleType::tamagotchi },
     };
     for (auto& p : kv)

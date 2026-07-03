@@ -40,6 +40,9 @@ enum class ModuleType
     // 像素式实时频谱瀑布图（复用 Spectrum 路的 FFT 幅度，后端零新增计算）
     spectrogram,
 
+    // 3D 频谱瀑布图（45° 俯视三维曲面效果，复用 Spectrum 路 FFT 幅度）
+    spectrogram3d,
+
     // Tamagotchi 小宠物模块（独立模块，不走拖图逻辑）
     tamagotchi
 };
@@ -681,7 +684,7 @@ private:
         ModuleType::vuMeter,
         ModuleType::oscilloscope, ModuleType::oscilloscopeWave,
         ModuleType::waveform,
-        ModuleType::spectrum, ModuleType::spectrogram,
+        ModuleType::spectrum, ModuleType::spectrogram, ModuleType::spectrogram3d,
         ModuleType::tamagotchi,
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 

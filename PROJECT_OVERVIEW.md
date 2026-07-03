@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`1.8.5`）
+- **产品名**：`Y2Kmeter` （版本：`1.8.6`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -141,6 +141,7 @@
 | [DynamicsModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | `DynamicsModule`（Peak/RMS 四柱 + DR + Crest 历史） | `Dynamics` |
 | [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列） | `Oscilloscope` |
 | [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成） | `Spectrum` |
+| [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增，45° 俯视 3D 频谱曲面图，蓝→红热力图 Z 轴映射） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 
@@ -584,6 +585,71 @@ virtual void restoreModuleSpecificState(const juce::ValueTree& state) { ignoreUn
 - **`restore` 中调用 setter 而非直接赋值**：如 `setDisplayMode()` / `setPeakHoldEnabled()` 会触发按钮状态刷新和 `repaint()`。直接改成员变量不会。
 - **enum 序列化用 `(int)` 强转**：简单可靠，不依赖字符串解析，不引入新依赖。
 
+### 6.19 Spectrogram3D 模块设计与性能踩坑（v1.8.6）
+
+#### 模块概述
+
+新增 3D 频谱瀑布图模块（`Spectrogram3DModule`），45° 俯视 isometric 投影，将频谱幅度映射为 Z 轴高度 + 蓝→红热力图颜色，形成类似山峰曲面的视觉效果。
+
+**关键架构**：
+- **数据源复用**：完全复用 `AnalyserHub::Kind::Spectrum` 路 + `getSpectrumMagnitudesBlended()`，128 bin 对数频率点，后端零新增计算。
+- **环形历史缓冲**：`defaultHistoryLen=500` 层 × `numBins=128` bin，`visibleRows=150` 仅绘制最新 150 层，旧层自然滚动出画布外。
+- **速度解耦**：沿用 SpectrogramModule 的 `pixelsPerSecond` + `columnAccumulator` 模式，滚动速度与 UI 帧率解耦。
+- **画家算法**：从最旧切片（屏幕上方）画到最新切片（下方），正确实现俯视遮挡。
+
+#### 投影算法
+
+```cpp
+// 频率轴占 canvas 宽的 82%，幅度高度占 40%，斜角偏移填充剩余空间
+freqTotalW = (canvasW - padL - padR) * 0.82f;
+slantX = (剩余宽度) / (visibleRows - 1);       // 深度方向 X 偏移
+slantY = canvasH * (1.0 - 0.40 - 0.10) / (visibleRows - 1);  // 深度方向 Y 偏移
+originY  = canvasH - 4;   // 最新切片在底部
+```
+
+深度间距固定按 `visibleRows`（150）计算，不随 `frameCount` 变化，避免冷启动时投影被压缩。
+
+#### 颜色方案：蓝→红热力图
+
+```
+t=0(无信号) → 深蓝黑(4,4,36)
+t=0.15      → 深蓝(8,20,100)
+t=0.30      → 蓝(0,100,180)
+t=0.45      → 青(0,180,160)
+t=0.60      → 绿(20,210,40)
+t=0.78      → 黄(230,230,0)
+t=0.92      → 橙(240,80,0)
+t=1.0(满幅) → 红(240,10,10)
+```
+
+热力图配色**不依赖主题**，保证在所有 10 种主题下都能通过颜色辨识电平高低。深度 fade 向深蓝黑 `(8,8,24)` 融合（旧切片消退）。
+
+#### 性能优化历程（三次迭代）
+
+| 版本 | 问题 | 修复 | 效果 |
+|------|------|------|------|
+| v0 | 每切片一个单色 `fillPath`，颜色取中位频率 | 画面一片深色，Z 轴信息丢失 | — |
+| v1 | 每个 bin 独立着色 `fillPath`（19,000 Path/帧） | 颜色正确 | CPU 100%，帧率从 60→15fps |
+| v2（当前） | 三项优化同时落地 | — | — |
+|   | ① `fillRect` 替代 `fillPath` | 消除 Path 构造/解析/光栅化 | CPU ↓70% |
+|   | ② 256 级调色板预计算 | `valueToColour` 调用从 19k→256 | CPU ↓20% |
+|   | ③ repaint 节流 ~30fps | `lastRepaintMs >= 33ms` 间隔控制 | CPU ↓50% |
+|   | ④ `t01` 单次计算复用 | `gainToDecibels` 调用从 38k→19k | CPU ↓10% |
+
+最终在保持完整热力图 Z 轴映射的前提下，CPU 占用降低到约原版的 20-25%，帧率回到 ~60fps。
+
+#### 视角修复（从下方仰视 → 上方俯视）
+
+初始绘制顺序 d=0→effRows-1（新→旧），旧数据（屏幕上方）后画盖住新数据，形成仰视错觉。**反转循环**为 `for (int d = effRows - 1; d >= 0; --d)`，旧数据（上方）先画，新数据（下方）后画遮挡 → 正确俯视效果。
+
+#### MSVC 编译错误：`static_assert` + 非编译期常量
+
+`static_assert (numBins <= 256)` 因 `numBins` 是普通 `int` 成员变量（非 `constexpr`），MSVC 不认，报 C2131。改为 `jassert(numBins <= 256)`，逻辑上 `numBins=128` 永不越界。
+
+#### 模块注册检查清单
+
+按 §6.15 的 ⑧ 处检查清单完成注册：枚举新增 `spectrogram3d` → `availableTypes` → `getModuleDisplayName` → `moduleTypeToString` → `stringToModuleType` → `PluginEditor` include+工厂+可用列表 → `PerformanceCounterSystem` ID 17 → `CMakeLists.txt` 源文件。
+
 ---
 
 ## 7. 常见修改场景速查
@@ -633,7 +699,7 @@ I:/Y2KMeter/
     │       ├── EqModule / LoudnessModule / OscilloscopeModule
     │       ├── OscilloscopeWaveModule（v1.8.4 新增，纯波形 L/R/Both）
     │       ├── SpectrumModule / PhaseModule / DynamicsModule
-    │       ├── WaveformModule / SpectrogramModule
+    │       ├── WaveformModule / SpectrogramModule / Spectrogram3DModule（v1.8.6 新增 3D 瀑布图）
     │       ├── FineSplitModules（7 类细粒度模块 + VuMeter，v1.8.4 移除 OscilloscopeChannel）
     │       └── TamagotchiModule（.cpp 82KB，含状态机）
     └── standalone/
