@@ -123,6 +123,14 @@ public:
     juce::String getTitleText() const { return titleText; }
     void setTitleText(const juce::String& s);
 
+    // ---- 模块特定状态的序列化/反序列化（v1.8.4 持久化修复）----
+    // 每个模块覆写 saveModuleSpecificState() 返回自己需要持久化的状态
+    // （如 displayMode / channelMode / peakHoldEnabled 等），
+    // restoreModuleSpecificState() 从存档恢复。
+    // 默认实现返回空/无操作 → 不持久化任何状态 = 兼容旧行为及旧存档。
+    virtual juce::ValueTree saveModuleSpecificState() const    { return {}; }
+    virtual void restoreModuleSpecificState(const juce::ValueTree& state) { juce::ignoreUnused(state); }
+
     // 下发当前插件 CPU 占用率（[0..1]），UI 线程调用；
     //   改变足够大时会触发右下角小字区域的局部 repaint。
     void setCpuLoad (float load01) noexcept;

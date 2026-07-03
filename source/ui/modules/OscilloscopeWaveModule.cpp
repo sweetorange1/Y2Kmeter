@@ -55,6 +55,19 @@ OscilloscopeWaveModule::~OscilloscopeWaveModule()
     hub.release(AnalyserHub::Kind::Oscilloscope);
 }
 
+juce::ValueTree OscilloscopeWaveModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s("state");
+    s.setProperty("channelMode", (int) channelMode, nullptr);
+    return s;
+}
+
+void OscilloscopeWaveModule::restoreModuleSpecificState(const juce::ValueTree& state)
+{
+    if (state.hasProperty("channelMode"))
+        setChannelMode((ChannelMode) (int) state.getProperty("channelMode"));
+}
+
 void OscilloscopeWaveModule::setChannelMode(ChannelMode m)
 {
     if (channelMode == m) return;

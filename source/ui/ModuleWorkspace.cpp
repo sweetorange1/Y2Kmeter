@@ -2516,6 +2516,11 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
                 }
             }
 
+            // v1.8.4：保存模块特定状态（displayMode / channelMode / peakHold 等）
+            auto specificState = m->saveModuleSpecificState();
+            if (specificState.isValid())
+                node.appendChild(specificState, nullptr);
+
             tree.appendChild(node, nullptr);
             continue;
 
@@ -2660,6 +2665,11 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
 
             }
         }
+
+        // v1.8.4：恢复模块特定状态（displayMode / channelMode / peakHold 等）
+        auto stateChild = node.getChildWithName("state");
+        if (stateChild.isValid())
+            raw->restoreModuleSpecificState(stateChild);
 
         modules.add(panel.release());
 

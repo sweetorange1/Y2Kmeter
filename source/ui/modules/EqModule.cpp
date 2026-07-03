@@ -488,6 +488,19 @@ EqModule::~EqModule()
     processor.getAnalyserHub().release(AnalyserHub::Kind::Spectrum);
 }
 
+juce::ValueTree EqModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s("state");
+    s.setProperty("cellSize", eqGraph.getCellSize(), nullptr);
+    return s;
+}
+
+void EqModule::restoreModuleSpecificState(const juce::ValueTree& state)
+{
+    if (state.hasProperty("cellSize"))
+        eqGraph.setCellSize((int) state.getProperty("cellSize"));
+}
+
 void EqModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     // 内容区自身不画背景（由 eqGraph 的凹陷画布+内部 UI 组件覆盖全区），

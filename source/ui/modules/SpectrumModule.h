@@ -38,6 +38,10 @@ public:
     void setSlopeEnabled(bool b);
     bool isSlopeEnabled() const noexcept { return slopeEnabled; }
 
+    // v1.8.4 持久化：保存/恢复 peakHoldEnabled + slopeEnabled
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState(const juce::ValueTree& state) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

@@ -41,6 +41,10 @@ public:
     void setChannelMode(ChannelMode m);
     ChannelMode getChannelMode() const noexcept { return channelMode; }
 
+    // v1.8.4 持久化：保存/恢复 channelMode
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState(const juce::ValueTree& state) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

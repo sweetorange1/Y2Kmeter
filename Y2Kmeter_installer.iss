@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "1.8.4"
+#define MyAppVersion   "1.8.5"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"

@@ -96,6 +96,28 @@ WaveformModule::~WaveformModule()
     hub.release (AnalyserHub::Kind::Oscilloscope);
 }
 
+juce::ValueTree WaveformModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s("state");
+    s.setProperty("displaySeconds", (double) displaySeconds, nullptr);
+    s.setProperty("frozen", frozen, nullptr);
+    s.setProperty("gainDb", (double) gainDb, nullptr);
+    return s;
+}
+
+void WaveformModule::restoreModuleSpecificState(const juce::ValueTree& state)
+{
+    if (state.hasProperty("displaySeconds"))
+        setDisplaySeconds((float) (double) state.getProperty("displaySeconds"));
+    if (state.hasProperty("frozen"))
+        setFrozen((bool) state.getProperty("frozen"));
+    if (state.hasProperty("gainDb"))
+    {
+        gainDb = (float) (double) state.getProperty("gainDb");
+        gainSlider.setValue(gainDb, juce::dontSendNotification);
+    }
+}
+
 // ----------------------------------------------------------
 // 设置显示时长（秒）—— 仅刷新 samplesPerColumn，列缓冲内容保留
 //   · 缩短时长：右半部分列继续显示；左边自动被新帧覆盖

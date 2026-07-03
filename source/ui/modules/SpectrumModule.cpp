@@ -48,6 +48,22 @@ SpectrumModule::~SpectrumModule()
     hub.release(AnalyserHub::Kind::Spectrum);
 }
 
+juce::ValueTree SpectrumModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s("state");
+    s.setProperty("peakHold", peakHoldEnabled, nullptr);
+    s.setProperty("slope", slopeEnabled, nullptr);
+    return s;
+}
+
+void SpectrumModule::restoreModuleSpecificState(const juce::ValueTree& state)
+{
+    if (state.hasProperty("peakHold"))
+        setPeakHoldEnabled((bool) state.getProperty("peakHold"));
+    if (state.hasProperty("slope"))
+        setSlopeEnabled((bool) state.getProperty("slope"));
+}
+
 void SpectrumModule::setPeakHoldEnabled(bool b)
 {
     if (peakHoldEnabled == b) return;

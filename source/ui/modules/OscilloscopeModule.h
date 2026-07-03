@@ -55,6 +55,10 @@ public:
     void setFrozen(bool b);
     bool isFrozen() const noexcept { return frozen; }
 
+    // v1.8.4 持久化：保存/恢复 displayMode + frozen
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState(const juce::ValueTree& state) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

@@ -57,6 +57,22 @@ OscilloscopeModule::~OscilloscopeModule()
     hub.release(AnalyserHub::Kind::Oscilloscope);
 }
 
+juce::ValueTree OscilloscopeModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s("state");
+    s.setProperty("displayMode", (int) displayMode, nullptr);
+    s.setProperty("frozen", frozen, nullptr);
+    return s;
+}
+
+void OscilloscopeModule::restoreModuleSpecificState(const juce::ValueTree& state)
+{
+    if (state.hasProperty("displayMode"))
+        setDisplayMode((DisplayMode) (int) state.getProperty("displayMode"));
+    if (state.hasProperty("frozen"))
+        setFrozen((bool) state.getProperty("frozen"));
+}
+
 void OscilloscopeModule::setDisplayMode(DisplayMode m)
 {
     if (displayMode == m) return;
