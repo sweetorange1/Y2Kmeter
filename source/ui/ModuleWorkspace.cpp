@@ -119,8 +119,7 @@ juce::String moduleTypeToString(ModuleType t)
 
         case ModuleType::lufsRealtime:      return "lufs_realtime";
         case ModuleType::truePeak:          return "true_peak";
-        case ModuleType::oscilloscopeLeft:  return "oscilloscope_left";
-        case ModuleType::oscilloscopeRight: return "oscilloscope_right";
+        case ModuleType::oscilloscopeWave:  return "oscilloscope_wave";
         case ModuleType::phaseCorrelation:  return "phase_correlation";
         case ModuleType::phaseBalance:      return "phase_balance";
         case ModuleType::dynamicsMeters:    return "dynamics_meters";
@@ -148,8 +147,10 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
 
         { "lufs_realtime",      ModuleType::lufsRealtime },
         { "true_peak",          ModuleType::truePeak },
-        { "oscilloscope_left",  ModuleType::oscilloscopeLeft },
-        { "oscilloscope_right", ModuleType::oscilloscopeRight },
+        { "oscilloscope_wave",  ModuleType::oscilloscopeWave },
+        // 向后兼容：旧版存档中的 oscilloscope_left / oscilloscope_right 映射到新类型
+        { "oscilloscope_left",  ModuleType::oscilloscopeWave },
+        { "oscilloscope_right", ModuleType::oscilloscopeWave },
         { "phase_correlation",  ModuleType::phaseCorrelation },
         { "phase_balance",      ModuleType::phaseBalance },
         { "dynamics_meters",    ModuleType::dynamicsMeters },

@@ -24,8 +24,7 @@ enum class ModuleType
     // 细粒度拆分模块
     lufsRealtime,
     truePeak,
-    oscilloscopeLeft,
-    oscilloscopeRight,
+    oscilloscopeWave,
     phaseCorrelation,
     phaseBalance,
     dynamicsMeters,
@@ -672,7 +671,7 @@ private:
     juce::Array<ModuleType> availableTypes {
         ModuleType::eq, ModuleType::loudness, ModuleType::lufsRealtime, ModuleType::truePeak,
         ModuleType::vuMeter,
-        ModuleType::oscilloscope, ModuleType::oscilloscopeLeft, ModuleType::oscilloscopeRight,
+        ModuleType::oscilloscope, ModuleType::oscilloscopeWave,
         ModuleType::waveform,
         ModuleType::spectrum, ModuleType::spectrogram,
         ModuleType::tamagotchi,

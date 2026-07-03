@@ -66,17 +66,16 @@ juce::String moduleTypeNameById(int id)
         case 5: return "dynamics";
         case 6: return "lufsRealtime";
         case 7: return "truePeak";
-        case 8: return "oscilloscopeLeft";
-        case 9: return "oscilloscopeRight";
-        case 10: return "phaseCorrelation";
-        case 11: return "phaseBalance";
-        case 12: return "dynamicsMeters";
-        case 13: return "dynamicsDr";
-        case 14: return "dynamicsCrest";
-        case 15: return "waveform";
-        case 16: return "vuMeter";
-        case 17: return "spectrogram";
-        case 18: return "tamagotchi";
+        case 8: return "oscilloscopeWave";
+        case 9: return "phaseCorrelation";
+        case 10: return "phaseBalance";
+        case 11: return "dynamicsMeters";
+        case 12: return "dynamicsDr";
+        case 13: return "dynamicsCrest";
+        case 14: return "waveform";
+        case 15: return "vuMeter";
+        case 16: return "spectrogram";
+        case 17: return "tamagotchi";
         default: return juce::String("unknown(") + juce::String(id) + ")";
     }
 }

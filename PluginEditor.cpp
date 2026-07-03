@@ -6,6 +6,7 @@
 #include "source/ui/modules/EqModule.h"
 #include "source/ui/modules/LoudnessModule.h"
 #include "source/ui/modules/OscilloscopeModule.h"
+#include "source/ui/modules/OscilloscopeWaveModule.h"
 #include "source/ui/modules/SpectrumModule.h"
 #include "source/ui/modules/PhaseModule.h"
 #include "source/ui/modules/DynamicsModule.h"
@@ -66,7 +67,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.8.3");
+const int versionW = versionFont.getStringWidth ("v1.8.4");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -107,7 +108,7 @@ const int versionW = versionFont.getStringWidth ("v1.8.3");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.3";
+const juce::String versionText = "v1.8.4";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -234,8 +235,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::vuMeter,
 
         ModuleType::oscilloscope,
-        ModuleType::oscilloscopeLeft,
-        ModuleType::oscilloscopeRight,
+        ModuleType::oscilloscopeWave,
 
         ModuleType::spectrum,
 
@@ -1253,10 +1253,8 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
             return std::make_unique<LufsRealtimeModule>(processor.getAnalyserHub());
         case ModuleType::truePeak:
             return std::make_unique<TruePeakModule>(processor.getAnalyserHub());
-        case ModuleType::oscilloscopeLeft:
-            return std::make_unique<OscilloscopeChannelModule>(processor.getAnalyserHub(), true);
-        case ModuleType::oscilloscopeRight:
-            return std::make_unique<OscilloscopeChannelModule>(processor.getAnalyserHub(), false);
+        case ModuleType::oscilloscopeWave:
+            return std::make_unique<OscilloscopeWaveModule>(processor.getAnalyserHub());
         case ModuleType::phaseCorrelation:
             return std::make_unique<PhaseCorrelationModule>(processor.getAnalyserHub());
         case ModuleType::phaseBalance:
@@ -1544,7 +1542,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.3";
+const juce::String versionText = "v1.8.4";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);

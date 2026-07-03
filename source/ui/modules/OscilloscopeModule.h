@@ -12,13 +12,24 @@
 //   * XY        ：李萨如 XY 模式（L→X，R→Y，点阵）
 //   * Lissajous ：Mid/Side 模式（旋转 45° 的 XY）
 //
+// v1.8.5 自动缩放（XY / Lissajous 模式）：
+//   · 每秒统计样本最大欧氏距离 sqrt(L²+R²)
+//   · gain = 0.80 / maxDistance → 峰值落在边界 80%，避免过度补偿
+//   · 10% 死区：波动不大不缩放，减少抖动
+//
 // 顶部工具栏：
 //   ┌──────────────────────────────────────┐
 //   │ [Wave] [X-Y] [Liss]   [Freeze]       │
 //   ├──────────────────────────────────────┤
-//   │                                      │
-//   │           波形画布（凹陷）           │
-//   │                                      │
+//   │         同心标尺环（淡粉）           │
+//   │       ╭──────────────────╮           │
+//   │       │   ·· 点阵 ··    │           │
+//   │       │  · ╭──○──╮ ·   │           │
+//   │       │  · │ 十字  │ ·  │           │
+//   │       │  · ╰──○──╯ ·   │           │
+//   │       │   ·· ·· ··    │           │
+//   │       ╰──────────────────╯           │
+//   │  M/S                          3.2x  │
 //   └──────────────────────────────────────┘
 //
 // 数据来源：AnalyserHub::getOscilloscopeSnapshot（立体声）
@@ -104,6 +115,16 @@ private:
     float lastDrawnFingerprint[6] { 0, 0, 0, 0, 0, 0 };
     DisplayMode lastDrawnMode = DisplayMode::waveform;
     bool        lastDrawnFrozen = false;
+
+    // XY / Lissajous 自动缩放（v1.8.5）
+    //   · 每秒统计样本最大欧氏距离 sqrt(L²+R²)，计算增益使峰值落在边界 80% 处
+    //   · 避免 RMS 过度补偿：峰值驱动确保不出界
+    //   · 更新频率限制：每秒最多 1 次实际缩放；波动 <10% 不更新
+    float autoGainFactor              = 1.0f;    // 当前增益系数 [0.25, 8.0]
+    float periodicMaxAccum            = 0.0f;    // 当前周期内累积的样本最大距离
+    float prevPeriodicMax             = 1.0f;    // 上一周期的最大距离（初始 1.0 = 0dBFS）
+    float lastDrawnAutoGain           = 1.0f;    // 上次绘制时的 autoGainFactor，用于动态层脏标记
+    double lastPeriodicGainUpdateMs   = 0.0;     // 上次周期性增益更新的时间戳（ms，HiRes）
 
     // 顶部工具栏按钮
     juce::TextButton btnWave   { "Wave"   };

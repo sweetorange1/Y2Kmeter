@@ -31,8 +31,7 @@ juce::String getModuleDisplayName(ModuleType t)
 
         case ModuleType::lufsRealtime:      return "LUFS Real-time";
         case ModuleType::truePeak:          return "True Peak";
-        case ModuleType::oscilloscopeLeft:  return "Oscilloscope L";
-        case ModuleType::oscilloscopeRight: return "Oscilloscope R";
+        case ModuleType::oscilloscopeWave:  return "Oscilloscope Wave";
         case ModuleType::phaseCorrelation:  return "Phase Correlation";
         case ModuleType::phaseBalance:      return "Phase Balance";
         case ModuleType::dynamicsMeters:    return "Dynamics Meters";

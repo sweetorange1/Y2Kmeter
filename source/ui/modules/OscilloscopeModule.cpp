@@ -103,6 +103,62 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         // 方案 A：只有数据真正变化才标脏动态层，避免每帧 4 次 strokePath
         if (snapshotChangedSinceLastDraw())
             dynamicLayerDirty = true;
+
+        // v1.8.5 XY/Lissajous 自动缩放：峰值驱动（避免 RMS 过度补偿）
+        //   · 每帧取样本最大欧氏距离 sqrt(L²+R²)，累积到 periodicMaxAccum
+        //   · 每秒结算一次：gain = 0.80 / periodicMaxAccum → 峰值落在边界 80%
+        //   · 与上周期的 gain 差 <10% 则不缩放，避免频繁抖动
+        if ((displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous) && n > 0)
+        {
+            // 本帧峰值：取 sqrt(L²+R²) 的最大值
+            {
+                float frameMax = 0.0f;
+                const int nR = snapshotR.size();
+                const int nr = juce::jmin(n, nR);
+                for (int i = 0; i < nr; ++i)
+                {
+                    const float l = snapshotL.getUnchecked(i);
+                    const float r = snapshotR.getUnchecked(i);
+                    const float dist = std::sqrt (l * l + r * r);
+                    if (dist > frameMax) frameMax = dist;
+                }
+                // 仅右声道样本（若快照不对称）
+                for (int i = nr; i < nR; ++i)
+                {
+                    const float r = snapshotR.getUnchecked(i);
+                    if (std::abs (r) > frameMax) frameMax = std::abs (r);
+                }
+                for (int i = nr; i < n; ++i)
+                {
+                    const float l = snapshotL.getUnchecked(i);
+                    if (std::abs (l) > frameMax) frameMax = std::abs (l);
+                }
+                if (frameMax > periodicMaxAccum)
+                    periodicMaxAccum = frameMax;
+            }
+
+            // 每秒结算一次
+            const double nowMs2 = juce::Time::getMillisecondCounterHiRes();
+            constexpr double kPeriodMs       = 1000.0;  // 1 秒周期
+            constexpr float  kTargetFraction = 1.00f;   // 峰值目标：边界 80%
+            constexpr float  kDeadZone       = 0.10f;   // 死区：波动 <10% 不更新
+
+            if ((nowMs2 - lastPeriodicGainUpdateMs) >= kPeriodMs)
+            {
+                const float safeMax = juce::jmax (periodicMaxAccum, 0.001f);  // 防除零
+                const float targetGain = juce::jlimit (0.1f, 10.0f, kTargetFraction / safeMax);
+
+                if (std::abs (targetGain - autoGainFactor) > autoGainFactor * kDeadZone)
+                {
+                    autoGainFactor = targetGain;
+                    dynamicLayerDirty = true;
+                }
+
+                prevPeriodicMax            = periodicMaxAccum;
+                periodicMaxAccum           = 0.0f;
+                lastPeriodicGainUpdateMs   = nowMs2;
+            }
+        }
     }
 
     // 性能优化（阶段1）：UI 侧 repaint 节流。
@@ -306,11 +362,40 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
 
     const float cx = (float) inner.getCentreX();
     const float cy = (float) inner.getCentreY();
-    const float radius = (float) juce::jmin(inner.getWidth(), inner.getHeight()) * 0.45f;
+    const float baseRadius = (float) juce::jmin(inner.getWidth(), inner.getHeight()) * 0.45f;
 
-    // 边界圆（轻）
-    g.setColour(PinkXP::pink300.withAlpha(0.45f));
-    g.drawEllipse(cx - radius, cy - radius, radius * 2.0f, radius * 2.0f, 1.0f);
+    // v1.8.5 自动缩放：样本值 × autoGainFactor 后映射到像素
+    const float gain = autoGainFactor;
+
+    // ---- 标尺环（淡粉同心圆，位于 baseRadius * gain 的 25% / 50% / 75% / 100%）----
+    {
+        const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
+        g.setColour(PinkXP::pink200.withAlpha(0.30f));
+        for (int ri = 0; ri < 4; ++ri)
+        {
+            const float rr = baseRadius * gain * ringFrac[ri];
+            if (rr < 2.0f) continue;
+            g.drawEllipse(cx - rr, cy - rr, rr * 2.0f, rr * 2.0f, 1.0f);
+        }
+
+        // 标尺环 dB 标签（贴在顶部环右侧）
+        if (baseRadius * gain * 1.0f >= 20.0f)
+        {
+            g.setColour(PinkXP::ink.withAlpha(0.55f));
+            g.setFont(PinkXP::getAxisFont(7.5f, juce::Font::plain));
+            const char* labels[4] = { "-12", "-6", "-2.5", "0 dB" };
+            for (int ri = 0; ri < 4; ++ri)
+            {
+                const float rr = baseRadius * gain * ringFrac[ri];
+                if (rr < 8.0f) continue;
+                g.drawText(labels[ri],
+                           juce::Rectangle<int>((int)(cx + rr + 3), (int)(cy - 6), 26, 12),
+                           juce::Justification::centredLeft, false);
+            }
+        }
+    }
+
+    const float effectiveRadius = baseRadius * gain;
 
     const int targetPoints = juce::jmax(96, inner.getWidth() * 2);
     const int stride = juce::jmax(1, N / targetPoints);
@@ -333,6 +418,7 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
         if (! std::isfinite(rawL) || ! std::isfinite(rawR))
             continue;
 
+        // v1.8.5：样本直接限幅到 ±1，autoGain 在像素映射阶段生效
         const float lx = juce::jlimit(-1.0f, 1.0f, rawL);
         const float ry = juce::jlimit(-1.0f, 1.0f, rawR);
 
@@ -341,13 +427,13 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
         {
             const float mid  = (lx + ry) * 0.7071067f;
             const float side = (lx - ry) * 0.7071067f;
-            px = cx + side * radius;
-            py = cy - mid  * radius;
+            px = cx + side * effectiveRadius;
+            py = cy - mid  * effectiveRadius;
         }
         else
         {
-            px = cx + lx * radius;
-            py = cy - ry * radius;
+            px = cx + lx * effectiveRadius;
+            py = cy - ry * effectiveRadius;
         }
 
         if (! innerF.contains(px, py))
@@ -369,12 +455,19 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
         g.fillRectList(buckets[b]);
     }
 
-    // 左下角模式说明
+    // 左下角模式说明 + 当前增益
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
     const juce::String hint = rotate45 ? "M/S" : "X=L  Y=R";
     g.drawText(hint, canvas.getX() + 4, canvas.getBottom() - 14,
                80, 12, juce::Justification::centredLeft, false);
+    // 当前增益倍数
+    if (std::abs(gain - 1.0f) > 0.05f)
+    {
+        juce::String gainText = juce::String(gain, 1) + "x";
+        g.drawText(gainText, canvas.getRight() - 46, canvas.getBottom() - 14,
+                   42, 12, juce::Justification::centredRight, false);
+    }
 }
 
 juce::Path OscilloscopeModule::buildWaveformPath(const juce::Array<float>& samples,
@@ -526,6 +619,7 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
 
     const bool modeChanged   = (lastDrawnMode   != displayMode);
     const bool frozenChanged = (lastDrawnFrozen != frozen);
+    const bool gainChanged   = (std::abs(autoGainFactor - lastDrawnAutoGain) > 0.005f);
 
     if (sizeChanged)
     {
@@ -536,7 +630,7 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
         dynamicLayerDirty = true;
     }
 
-    if (modeChanged || frozenChanged)
+    if (modeChanged || frozenChanged || gainChanged)
         dynamicLayerDirty = true;
 
     dynamicLayerCanvasBounds = canvas;
@@ -588,5 +682,6 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
     }
     lastDrawnMode     = displayMode;
     lastDrawnFrozen   = frozen;
+    lastDrawnAutoGain = autoGainFactor;
     dynamicLayerDirty = false;
 }

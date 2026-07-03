@@ -57,25 +57,6 @@ private:
     float flashTp = 0.0f,   flashRms = 0.0f;
 };
 
-class OscilloscopeChannelModule : public ModulePanel,
-                                  public AnalyserHub::FrameListener
-{
-public:
-    OscilloscopeChannelModule(AnalyserHub& hub, bool leftChannel);
-    ~OscilloscopeChannelModule() override;
-
-    void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
-
-protected:
-    void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
-
-private:
-    AnalyserHub& hub;
-    bool useLeft = true;
-    juce::Array<float> oscL;
-    juce::Array<float> oscR;
-};
-
 class SpectrumOverviewModule_REMOVED {}; // 已废弃（原 Spectrum Overview） – 保留空壳防编译器获得路径时报错，无任何功能
 
 class PhaseCorrelationModule : public ModulePanel,
