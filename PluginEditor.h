@@ -38,6 +38,9 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp   (const juce::MouseEvent&) override;
+    // 双击标题栏空白区（非按钮、非标题文字热区）→ 切换顶层窗口全屏 / 还原
+    //   · 仅在 Standalone 且非 chrome 隐藏态下生效；插件宿主模式忽略。
+    void mouseDoubleClick (const juce::MouseEvent&) override;
 
     // 兼容旧接口：返回自定义字体
     static juce::Font getCustomFont(float height, int styleFlags = juce::Font::plain);

@@ -17,7 +17,7 @@ endif()
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
 
-project(Y2Kmeter VERSION 1.8.1 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 1.8.2 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -266,7 +266,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 1.8.1
+        VERSION 1.8.2
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -572,15 +572,32 @@ endforeach()
 # Standalone EXE 图标（Windows）
 #   · 通过一个独立的 .rc 把 assets/icon.ico 作为 EXE 的主图标嵌入。
 #   · juce_add_plugin 的 ICON_BIG/ICON_SMALL 需要 png，这里我们已有 .ico，
-#     所以绕过 JUCE，直接给 Standalone target 追加一个 RC 资源文件。
+#     所以绕过 JUCE，直接把 .rc 编译成 .res 再链接。
+#   · 关键：不使用 target_sources 直接添加 .rc 文件，因为 CMake 会把它
+#     当作 RC 源文件并把 target 的所有 INCLUDE_DIRECTORIES 作为 /I 参数
+#     传给 rc.exe。JUCE 模块 + VST3 SDK 路径极多，命令行轻松超过 32767
+#     字符上限，触发 NMAKE U1095（rc.exe 命令过长）。
+#   · 改为用自定义命令以最小参数（仅 /fo 输出路径）调用 rc.exe，.res
+#     结果直接作为链接输入，完全绕过命令行长度的限制。
 #   · 不影响 VST3 / AAX 等其它格式的构建；非 Windows 平台上此段静默跳过。
 #   · JUCE 默认生成的 Y2Kmeter_resources.rc（VERSION_INFO）与本 RC 并存，
 #     互相不干扰（ID 不冲突）。
 # ==========================================================
 if (WIN32 AND TARGET Y2Kmeter_Standalone)
-  target_sources(Y2Kmeter_Standalone PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.rc"
+  set(Y2KM_APP_ICON_RC  "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.rc")
+  set(Y2KM_APP_ICON_RES "${CMAKE_CURRENT_BINARY_DIR}/app_icon.res")
+  set(Y2KM_APP_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
+
+  add_custom_command(
+    OUTPUT "${Y2KM_APP_ICON_RES}"
+    COMMAND "${CMAKE_RC_COMPILER}" /nologo /fo "${Y2KM_APP_ICON_RES}" "${Y2KM_APP_ICON_RC}"
+    DEPENDS "${Y2KM_APP_ICON_RC}" "${Y2KM_APP_ICON_ICO}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    COMMENT "Compiling Windows resource (app icon)"
+    VERBATIM
   )
+
+  target_sources(Y2Kmeter_Standalone PRIVATE "${Y2KM_APP_ICON_RES}")
 endif()
 
 # ==========================================================

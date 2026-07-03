@@ -66,7 +66,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.8.1");
+const int versionW = versionFont.getStringWidth ("v1.8.2");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -107,7 +107,7 @@ const int versionW = versionFont.getStringWidth ("v1.8.1");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.1";
+const juce::String versionText = "v1.8.2";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1533,7 +1533,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.1";
+const juce::String versionText = "v1.8.2";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2207,6 +2207,65 @@ void Y2KmeterAudioProcessorEditor::mouseUp(const juce::MouseEvent& e)
         repaint (getMinimiseButtonBounds());
         if (stillOn) handleMinimiseClicked();
         return;
+    }
+}
+
+// ==========================================================
+// 双击标题栏空白区 → 切换顶层窗口全屏 / 还原
+//   · 参考 Windows 系统标题栏双击最大化的用户习惯；
+//   · 命中矩形：抬头 titleBarHeight 高度内、避开右侧三个按钮和左侧标题文字热区；
+//   · 仅 Standalone 有效，插件宿主模式下窗口由 DAW 管理，直接忽略；
+//   · chrome 隐藏态下不响应（隐藏时"标题栏"实际不存在，浮层区域也不合适当"抬头"）；
+//   · 全屏与还原都通过顶层 Component::setFullScreen(bool)；JUCE ComponentPeer
+//     内部会记住 restore-bounds，切回时自动还原到原来的位置和大小。
+//
+// 踩坑记录：
+//   · JUCE 双击流程是 mouseDown → mouseUp → mouseDoubleClick，中间的 mouseDown
+//     会启动 windowDragger.startDraggingComponent()。这里进入全屏后要主动把
+//     draggingWindow 复位并调用 setFullScreen 前先 clear，否则接下来任何 mouseDrag
+//     都会尝试拖动全屏窗口（在 Windows 上 dragComponent 对全屏窗口是 no-op，
+//     但视觉上会给用户"卡了一下"的错觉）。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (isPluginHost) return;
+    if (chromeDim)    return;
+
+    // 命中区域：仅标题栏矩形，且不落在三个按钮 + 标题文字热区
+    const auto pos = e.getPosition();
+    if (! getTitleBarBounds().contains (pos)) return;
+
+    if (getCloseButtonBounds()   .contains (pos)) return;
+    if (getPinButtonBounds()     .contains (pos)) return;
+    if (getMinimiseButtonBounds().contains (pos)) return;
+
+    {
+        auto tt = getTitleTextBounds();
+        const int textW = juce::jmax (0, juce::jmin (cachedTitleTextW, tt.getWidth()));
+        juce::Rectangle<int> hotspot (tt.getX(), tt.getY(), textW, tt.getHeight());
+        if (textW > 0 && hotspot.contains (pos)) return;
+    }
+
+    if (! juce::JUCEApplicationBase::isStandaloneApp()) return;
+
+    auto* top = getTopLevelComponent();
+    if (top == nullptr) return;
+
+    // 前置的 mouseDown 已启动了 windowDragger —— 复位，避免全屏后残留拖动状态
+    draggingWindow = false;
+
+    // 全屏 API 定义在 juce::ResizableWindow 上（DocumentWindow → ResizableWindow），
+    // 不在 juce::Component / juce::TopLevelWindow 上。Standalone 的顶层
+    // Y2KMainWindow : DocumentWindow，能命中；否则退回到 ComponentPeer 层。
+    if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+    {
+        const bool nowFullScreen = rw->isFullScreen();
+        rw->setFullScreen (! nowFullScreen);
+    }
+    else if (auto* peer = top->getPeer())
+    {
+        // Fallback：直接走 peer 层。restore-bounds 由 peer 内部维护。
+        peer->setFullScreen (! peer->isFullScreen());
     }
 }
 
