@@ -277,6 +277,17 @@ public:
     void setChromeVisible(bool shouldBeVisible);
     bool isChromeVisible() const noexcept { return chromeVisible; }
 
+    // ======================================================
+    // 布局锁定态（v1.8.3 新增）
+    //   · 锁定后：模块 tile 不可拖动/缩放；拼豆贴画不可拖动/缩放/删除/拖入新图片；
+    //     空白区右键不弹"添加模块"菜单，双击也不会新增模块。
+    //   · 本标志只接入鼠标交互早退，模块/贴画 数据不变，因此取消锁定后一切交互自动恢复。
+    //   · 持久化：不存于 workspace/layout XML、而是存在 Processor 的
+    //     savedLayoutLocked（layoutLocked 属性）；Editor 在切换时同步两边。
+    // ======================================================
+    void setLayoutLocked (bool locked) noexcept { layoutLocked = locked; }
+    bool isLayoutLocked() const noexcept { return layoutLocked; }
+
     // chrome 可见性变化回调（例如 Editor 订阅 → 顶部 TitleBar 做半透明）
     std::function<void(bool visible)> onChromeVisibleChanged;
 
@@ -530,6 +541,11 @@ private:
     // 右下角的 Hide/Show 按钮（隐藏白色底框 + 控制区）
     HideChromeButton hideBtn;
     bool             chromeVisible = true;
+
+    // 布局锁定态（v1.8.3）：true = 一切拖动/resize 交互均早退。由 Editor 在
+    //   锁定按钮切换时同步下发。本标志不参与 workspace 自己的 XML 序列化（
+    //   避免与旧 layout XML 无此字段的兼容性问题），而是由 Processor 统一持久化。
+    bool             layoutLocked = false;
 
     // Chrome 切换过渡期标志（由 beginChromeTransition/endChromeTransition 设置）
     //   · true 期间，resized() 末尾的"模块越界 clamp"会被跳过，

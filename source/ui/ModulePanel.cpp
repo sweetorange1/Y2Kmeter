@@ -2,6 +2,19 @@
 #include "source/ui/PinkXPStyle.h"
 #include "source/perf/PerformanceCounterSystem.h"
 
+namespace
+{
+    // 从任一 ModulePanel 查取父 workspace 的布局锁定态。
+    //   · 未挂到 workspace 上时默认"未锁定"，不会误拦临时孤立面板。
+    //   · dynamic_cast 开销可忽略（仅在 mouseMove/Down 上下文发生）。
+    bool isPanelLayoutLocked (const juce::Component& panel) noexcept
+    {
+        if (auto* ws = dynamic_cast<const ModuleWorkspace*> (panel.getParentComponent()))
+            return ws->isLayoutLocked();
+        return false;
+    }
+}
+
 // ==========================================================
 // getModuleDisplayName —— 模块类型 -> 默认标题
 // ==========================================================
@@ -367,15 +380,24 @@ void ModulePanel::mouseExit(const juce::MouseEvent&)
 
 void ModulePanel::mouseMove(const juce::MouseEvent& e)
 {
-    // 关闭按钮悬浮
-    const bool hovered = getCloseButtonBounds().contains(e.getPosition());
+    // 锁定态：不展示 resize 光标，也不展示关闭按钮 hover（关闭已被禁用）。
+    const bool locked = isPanelLayoutLocked (*this);
+
+    // 关闭按钮悬浮：锁定态下一律不高亮（确保与"不可点"视觉一致）
+    const bool hovered = (! locked) && getCloseButtonBounds().contains(e.getPosition());
     if (hovered != closeButtonHovered)
     {
         closeButtonHovered = hovered;
         repaint(getCloseButtonBounds());
     }
 
-    // 边缘缩放 cursor
+    // 边缘缩放 cursor（锁定态下不变光标）
+    if (locked)
+    {
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        return;
+    }
+
     if (!hovered)
         updateCursorFor(detectEdge(e.getPosition()));
     else
@@ -384,12 +406,16 @@ void ModulePanel::mouseMove(const juce::MouseEvent& e)
 
 void ModulePanel::mouseDown(const juce::MouseEvent& e)
 {
-    // 抬到顶层
+    // 抹到顶层
     toFront(true);
     if (onBroughtToFront)
         onBroughtToFront(*this);
 
     const auto pos = e.getPosition();
+
+    // 布局锁定态：关闭 / resize / move 均不启动（锁定不允许删除子组件）。
+    if (isPanelLayoutLocked (*this))
+        return;
 
     // 1) 点击关闭按钮
     if (getCloseButtonBounds().contains(pos))

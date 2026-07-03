@@ -1288,6 +1288,13 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
     if (! getCanvasArea().contains(e.getPosition()))
         return;
 
+    // 布局锁定态：禁止任何拖拽/选择/弹菜交互。仅保留 focused 图片可视装饰，
+    //   但拖动/缩放/删除/滑块 均不启动 - 直接早退就能造成任何数据变更（
+    //   下面的缩放/拖动仅在 dragMode/resizeMode 、cellSize/opacity 拖动态下位，
+    //   头没启动，尚未发生任何拖拽）。右键弹菜/双击新增也同岁封锁。
+    if (layoutLocked)
+        return;
+
     clearTamagotchiFocusVisuals (modules);
 
     // 事件来源区分：workspace 原生 / layer 转发
@@ -1446,6 +1453,9 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
 void ModuleWorkspace::mouseDoubleClick(const juce::MouseEvent& e)
 {
     if (! getCanvasArea().contains(e.getPosition()))
+        return;
+    // 锁定态：禁止双击弹"添加模块"菜单。
+    if (layoutLocked)
         return;
     showAddMenu(e.getScreenPosition(), e.getPosition());
 }
@@ -3263,6 +3273,9 @@ void ModuleWorkspace::syncPerlerLayerBounds (int idx)
 // ----------------------------------------------------------
 bool ModuleWorkspace::isInterestedInFileDrag (const juce::StringArray& files)
 {
+    // 锁定态：拒绝任何拖入文件（避免新增拼豆贴画改变布局）
+    if (layoutLocked) return false;
+
     for (const auto& f : files)
     {
         const auto ext = juce::File (f).getFileExtension().toLowerCase();

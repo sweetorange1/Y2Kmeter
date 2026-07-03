@@ -6,6 +6,15 @@
 
 namespace
 {
+// v1.8.3：从任一 Tamagotchi 面板查取父 workspace 的布局锁定态（与 ModulePanel.cpp 内
+//   同名 helper 作用相同，但位于不同翻译单元，互不影响）。
+bool isPanelLayoutLocked (const juce::Component& panel) noexcept
+{
+    if (auto* ws = dynamic_cast<const ModuleWorkspace*> (panel.getParentComponent()))
+        return ws->isLayoutLocked();
+    return false;
+}
+
 juce::File findTamagotchiAssetsRoot()
 
 {
@@ -619,11 +628,20 @@ void TamagotchiModule::mouseMove (const juce::MouseEvent& e)
         return;
     }
 
-    const bool hoveredDel = getDeleteButtonBounds().contains (e.getPosition());
+    // 锁定态：不展示 resize 光标，也不展示删除按钮 hover。
+    const bool locked = isPanelLayoutLocked (*this);
+
+    const bool hoveredDel = (! locked) && getDeleteButtonBounds().contains (e.getPosition());
     if (hoveredDel != deleteBtnHovered)
     {
         deleteBtnHovered = hoveredDel;
         repaintSelfAndParent (getDeleteButtonBounds());
+    }
+
+    if (locked)
+    {
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        return;
     }
 
     if (! hoveredDel)
@@ -650,6 +668,10 @@ void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
         onBroughtToFront (*this);
 
     setFocusVisual (true);
+
+    // 布局锁定态：删除 / resize / move 均不启动（锁定不允许删除子组件）。
+    if (isPanelLayoutLocked (*this))
+        return;
 
     const auto pos = e.getPosition();
     if (getDeleteButtonBounds().contains (pos))

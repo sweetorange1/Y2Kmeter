@@ -88,6 +88,14 @@ public:
     juce::String getSavedLayoutXml() const;
     void         setSavedLayoutXml(const juce::String& xml);
 
+    // ---- 布局锁定态持久化（v1.8.3 新增）----
+    //   · 抵锁后用户无法拖动/resize 窗口，模块 tile 、贴画也不能拖动/缩放；
+    //   · 锁定态本身与具体布局 XML 同下位 - 由不同字段制控，避免影响 loadLayoutFromXml。
+    //   · 序列化为 <PBEQ_State layoutLocked="1|0" ...> 属性；
+    //     未保存时默认 false。
+    bool getLayoutLocked() const noexcept { return savedLayoutLocked; }
+    void setLayoutLocked (bool locked) noexcept { savedLayoutLocked = locked; }
+
     // ---- 插件 Editor 窗口尺寸持久化 ----
     //   · 由 Editor::resized() 实时写回，保存到 host 的 state 中；
     //   · VST3 / AU 等插件宿主在关闭→重开插件窗口时，宿主不会记住尺寸
@@ -124,6 +132,11 @@ private:
 
     // Phase E —— 最近一次保存的布局（由 Editor 同步过来；序列化到 host 状态）
     juce::String savedLayoutXml;
+
+    // 布局锁定态（v1.8.3）：true = 窗口/模块/贴画 均不可拖动/缩放。
+    //   · Editor 里的锁定按钮切换时写到这里；
+    //   · 本身不影响音频处理，仅作为 UI-only state。
+    bool savedLayoutLocked = false;
 
     // 插件 Editor 最近一次窗口尺寸（0 = 未保存）
     int savedEditorWidth  = 0;

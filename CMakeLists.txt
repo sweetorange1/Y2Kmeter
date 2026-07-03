@@ -15,9 +15,29 @@ if (POLICY CMP0091)
   cmake_policy(SET CMP0091 NEW)
 endif()
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+# Release / RelWithDebInfo / MinSizeRel → 静态链接 CRT（/MT），
+# 便于把最终 exe 发给任何一台干净的 Win10/Win11 x64 电脑而不依赖 VCRUNTIME*.dll。
+# Debug → 动态链接 CRT（/MDd），本地调试专用，不需要静态发布；
+#   踩坑记录一：VS 2026 Preview（MSVC 14.51.x）下 libcpmtd.lib（Debug 静态 C++ 标准库）
+#     会引用 debug UCRT 的 _free_dbg / _malloc_dbg / _CrtDbgReport / _CrtSetDbgFlag /
+#     _CrtDumpMemoryLeaks 等符号，但这些符号所在的 libucrtd.lib / libvcruntimed.lib
+#     在部分 SDK 组合下并未安装或版本对不齐，触发 LNK2001/LNK2019 大批链接失败。
+#     动态链接（ucrtbased.dll + vcruntime140d.dll + msvcp140d.dll）后本地机器的
+#     Windows SDK 会一并提供这些 DLL，Debug 构建就不再报错。
+#   踩坑记录二：不能使用 generator expression（例如 "MultiThreaded$<$<CONFIG:Debug>:DebugDLL>"），
+#     因为 JUCE 的 juceaide 是通过 execute_process(cmake -B ...) 单独启动的子 configure，
+#     它不会去展开顶层项目的 $<CONFIG:...> 生成器表达式，结果 juceaide 依然按默认走 /MTd
+#     依旧触发 libcpmtd.lib 的链接错误。这里必须根据 CMAKE_BUILD_TYPE 直接给出裸字符串。
+if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
+endif()
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDebugDLL" CACHE STRING "" FORCE)
+else()
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
+endif()
 
-project(Y2Kmeter VERSION 1.8.2 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 1.8.3 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -111,6 +131,27 @@ FetchContent_MakeAvailable(juce)
 
 if (TARGET juceaide AND NOT TARGET juce::juceaide)
   add_executable(juce::juceaide ALIAS juceaide)
+endif()
+
+# ==========================================================
+# 覆盖 juceaide 的 MSVC_RUNTIME_LIBRARY
+#   · JUCE 官方在 extras/Build/juceaide/CMakeLists.txt 里对 juceaide
+#     硬编码：set_target_properties(juceaide PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+#     即"Release 静态 CRT (/MT)"。
+#   · 而 CMake 在 Debug 配置下会自动给编译加 -D_DEBUG，STL 头因此选择 debug 版本，
+#     用到 debug UCRT 符号（_free_dbg / _malloc_dbg / _CrtDbgReport /
+#     _CrtDumpMemoryLeaks / _CrtSetDbgFlag）；但 /MT 链的是 release 静态 UCRT
+#     libucrt.lib，符号缺失 → 大批 LNK2001/LNK2019。
+#   · 修复：把 juceaide 的属性显式覆盖为与本项目一致的运行库
+#       Debug   → MultiThreadedDebugDLL (/MDd)
+#       非 Debug → MultiThreaded (/MT)
+#     必须用 target property（优先级 > CMAKE_MSVC_RUNTIME_LIBRARY 全局默认）。
+if (WIN32 AND TARGET juceaide)
+  if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set_target_properties(juceaide PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreadedDebugDLL")
+  else()
+    set_target_properties(juceaide PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  endif()
 endif()
 
 # add_subdirectory(grid_plugin)
@@ -266,7 +307,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 1.8.2
+        VERSION 1.8.3
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km

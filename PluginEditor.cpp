@@ -66,7 +66,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v1.8.2");
+const int versionW = versionFont.getStringWidth ("v1.8.3");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -107,7 +107,7 @@ const int versionW = versionFont.getStringWidth ("v1.8.2");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.2";
+const juce::String versionText = "v1.8.3";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -284,6 +284,17 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         setResizeLimits(50, 50, 8192, 8192);
     else
         setResizeLimits(640, 420, 1600, 1100);
+
+    // ------------------------------------------------------------------
+    // v1.8.3：从 Processor state 恢复"布局锁定态"。
+    //   · 初始化时已确保 workspace / 顶层窗口已就位（workspace 上面刚 make_unique
+    //     + addAndMakeVisible；顶层窗口则交给 setResizable 自己取）。
+    //   · initial=true 避免回写 processor（保持与已保存一致即可）；
+    //   · 若 processor 未保存过（缺省 false），则仅刷新一下按钮视觉即 no-op，
+    //     applyLayoutLocked 内部会将 setResizable(true,true) 重推一次——与上面刚刚手动
+    //     setResizable(true,true) 同步，安全。
+    applyLayoutLocked (processor.getLayoutLocked(), /*initial*/ true);
+    // ------------------------------------------------------------------
 
     // 插件模式（VST3/AU）：若 host state 里保存过上次 Editor 关闭时的窗口尺寸，
     //   优先用它恢复，实现"每次重开窗口保持上次大小"（尤其是 FL Studio Windows 版
@@ -1533,7 +1544,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.2";
+const juce::String versionText = "v1.8.3";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1611,6 +1622,15 @@ const juce::String versionText = "v1.8.2";
                 if (pressed || activeLatched) txt.translate (1, 1);
                 g.drawText (glyph, txt, juce::Justification::centred, false);
             };
+
+            // 3a-lock) 布局锁定按钮（v1.8.3 新增）："L" 作为 Lock 的助记符号
+            //   · 之所以选 "L" 而非 Unicode 锁头符 🔒 是因为项目内自制像素字体 PinkXP
+            //     未包含 Emoji 字形，直接绘会回退到系统字体，与周围三个按钮不归一。
+            //   · pressed（点击瞬间凹陷）与 activeLatched=layoutLocked（长按锁定态凹陷）
+            //     两条视觉路径复用同一 pressedLook，切换手感与 Pin 按钮一致。
+            drawTitleBtn (getLockButtonBounds(),
+                          lockButtonHovered, lockButtonPressed, layoutLocked,
+                          "L", 12.0f, -1, -2);
 
             // 3a) 最小化按钮："_"（字体里下划线位置偏低，y=-3 让底横线略高一点更像传统 _ 位置）
             drawTitleBtn (getMinimiseButtonBounds(),
@@ -1762,6 +1782,30 @@ void Y2KmeterAudioProcessorEditor::visibilityChanged()
         }
     }
 
+    // v1.8.3：布局锁定态延迟 apply。
+    //   构造期 applyLayoutLocked(initial=true, locked=true) 因顶层未挂载 / 尺寸=0
+    //   走了早退分支，仅把 layoutLocked=true 和 pendingLockApplyOnAttach=true 记下。
+    //   visibilityChanged 是顶层可用且尺寸稳定的最早时机——若确实需要补做且当前
+    //   仍是锁定态，则再走一次 initial=true（此时顶层已 ready 会真正跑 constrainer 分支，
+    //   同时 initial=true 保证不回写 Processor 造成 dirty state）。
+    //   触发前先清 pending 避免任何潜在重入。
+    if (pendingLockApplyOnAttach && layoutLocked)
+    {
+        if (auto* top = getTopLevelComponent())
+        {
+            if (top != this && top->getWidth() > 0 && top->getHeight() > 0)
+            {
+                pendingLockApplyOnAttach = false;
+                applyLayoutLocked (true, /*initial*/ true);
+            }
+        }
+    }
+    else if (pendingLockApplyOnAttach && ! layoutLocked)
+    {
+        // 未锁但仍残留 pending：清掉，防止后续每次 hide/show 都重复检查
+        pendingLockApplyOnAttach = false;
+    }
+
 }
 
 // ==========================================================
@@ -1775,12 +1819,12 @@ juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getTitleBarBounds() const
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getTitleTextBounds() const
 {
     // 标题栏左侧可点击文字区域：从 x=28 开始（drawPinkTitleBar 已为左侧 icon 保留 6..25 的 19px）
-    //   · Standalone：右边界到最小化按钮左侧留 8px 间隔，避免误点到按钮
+    //   · Standalone：右边界到最左按钮（lock）左侧留 8px 间隔，避免误点到按钮
     //   · 插件宿主模式：没有右侧按钮，右边界直接贴到 Editor 右缘，留 8px 边距
     auto tb = getTitleBarBounds();
     const int x = tb.getX() + 28;
     const int right = isPluginHost ? (tb.getRight() - 8)
-                                    : (getMinimiseButtonBounds().getX() - 8);
+                                    : (getLockButtonBounds().getX() - 8);
     return { x, tb.getY(), juce::jmax (0, right - x), tb.getHeight() };
 }
 
@@ -1802,9 +1846,17 @@ juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getPinButtonBounds() const
 
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getMinimiseButtonBounds() const
 {
-    // Pin 按钮左侧（最左那一个）：最小化按钮
+    // Pin 按钮左侧（中间那一个）：最小化按钮
     auto pb = getPinButtonBounds();
     return { pb.getX() - titleButtonGap - closeButtonSize, pb.getY(),
+             closeButtonSize, closeButtonSize };
+}
+
+// 最小化按钮左侧（最左那一个）：布局锁定按钮（v1.8.3 新增）
+juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getLockButtonBounds() const
+{
+    auto mb = getMinimiseButtonBounds();
+    return { mb.getX() - titleButtonGap - closeButtonSize, mb.getY(),
              closeButtonSize, closeButtonSize };
 }
 
@@ -1880,6 +1932,117 @@ void Y2KmeterAudioProcessorEditor::handleMinimiseClicked()
         if (auto* peer = top->getPeer())
             peer->setMinimised (true);
     }
+}
+
+// ==========================================================
+// 布局锁定按钮（v1.8.3 新增）
+//   · 切换 layoutLocked 状态；同步 workspace / Processor 持久化 / 顶层窗口 resize 上下限。
+//   · 生效范围：
+//       1) 顶层窗口不可拖动（Editor::mouseDown 在锁定态跳过 startDraggingComponent）
+//       2) 顶层窗口不可 resize（setResizeLimits(w,h,w,h) 夹紧当前尺寸；不 recreatePeer）
+//       3) 模块 tile 不可拖动/缩放/关闭（ModulePanel/Tamagotchi mouseDown 锁定态早退）
+//       4) 拼豆贴画不可拖动/缩放/滑块拖动/添加（ModuleWorkspace::mouseDown 锁定态早退）
+//       5) 空白区右键"添加模块"菜单/双击"添加"/文件拖入 均被阻断
+//   · 关闭 / 固定 / 最小化 / 双击标题栏切换全屏 均**不**受锁定影响
+//     （这些是"窗口生命周期 / 窗口尺寸档位"级操作，与"用户手动布局"语义不同）。
+//   · 关键实现细节（v1.8.3 踩坑）：**不能**调用 juce::ResizableWindow::setResizable
+//     来切换锁定 —— 该函数内部会 recreateDesktopWindow()，直接导致窗口在切换瞬间
+//     隐藏一帧再重建，用户看到的就是"闪现消失再出现"。改走 setResizeLimits：
+//     锁定时把 min/max 都夹到"当前尺寸"，corner resizer 图标即使还在，也拉不动。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::handleLockClicked()
+{
+    applyLayoutLocked (! layoutLocked, /*initial*/ false);
+}
+
+void Y2KmeterAudioProcessorEditor::applyLayoutLocked (bool locked, bool initial)
+{
+    layoutLocked = locked;
+
+    // v1.8.3：构造期极简保护。
+    //   Editor 构造末尾会调 applyLayoutLocked(processor.getLayoutLocked(), initial=true)
+    //   来从 Processor state 恢复锁定态。此时 Editor 通常尚未 attach 到 Y2KMainWindow，
+    //   或即使已挂上，顶层窗口 getWidth()/getHeight() 仍为 0。若在这种状态下调
+    //   setResizeLimits(w,h,w,h)，会命中 ComponentBoundsConstrainer::setSizeLimits 内部
+    //   jassert(minW>0 && minH>0)，Debug 构建表现为 EXCEPTION_BREAKPOINT (0x80000003)。
+    //   保护策略：initial=true 且顶层尚未就绪时——只把状态位记下，pending 置起来，
+    //   等 visibilityChanged 阶段（顶层已挂载且尺寸稳定）再补做真正 apply。
+    //   locked=false 时构造期无事可做（constrainer 也没备份可还原），也走早退。
+    bool topReady = false;
+    if (auto* topProbe = getTopLevelComponent())
+    {
+        if (topProbe != this
+            && dynamic_cast<juce::ResizableWindow*> (topProbe) != nullptr
+            && topProbe->getWidth() > 0
+            && topProbe->getHeight() > 0)
+        {
+            topReady = true;
+        }
+    }
+
+    if (initial && (! topReady || ! locked))
+    {
+        pendingLockApplyOnAttach = locked; // 只有真的锁着才需要补做
+        return;
+    }
+
+    // 1) 复位任何进行中的窗口拖拽（避免用户按住鼠标切锁的边缘态）
+    draggingWindow = false;
+
+    // 2) 同步 workspace（模块 tile / 贴画所在层）；也让子组件的关闭按钮 hover/press
+    //    在锁定态下不响应（由 ModulePanel/TamagotchiModule 内部检查 workspace 锁定态）。
+    if (workspace != nullptr)
+        workspace->setLayoutLocked (locked);
+
+    // 3) 顶层窗口尺寸约束：使用 setResizeLimits 而非 setResizable，避免 peer 重建。
+    //    · 首次进入锁定前先备份当前 min/max，解锁时还原；
+    //    · 锁定时把 min = max = 当前尺寸，用户即使拖 corner 也无法改变尺寸。
+    if (auto* top = getTopLevelComponent())
+    {
+        if (top != this)
+        {
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+            {
+                const int w = top->getWidth();
+                const int h = top->getHeight();
+                if (w > 0 && h > 0)
+                {
+                    if (auto* cbc = rw->getConstrainer())
+                    {
+                        if (locked)
+                        {
+                            if (! savedLockLimitsValid)
+                            {
+                                savedLockMinW = cbc->getMinimumWidth();
+                                savedLockMinH = cbc->getMinimumHeight();
+                                savedLockMaxW = cbc->getMaximumWidth();
+                                savedLockMaxH = cbc->getMaximumHeight();
+                                savedLockLimitsValid = true;
+                            }
+                            rw->setResizeLimits (w, h, w, h);
+                        }
+                        else
+                        {
+                            if (savedLockLimitsValid)
+                            {
+                                rw->setResizeLimits (savedLockMinW, savedLockMinH,
+                                                     savedLockMaxW, savedLockMaxH);
+                                savedLockLimitsValid = false;
+                            }
+                        }
+                        pendingLockApplyOnAttach = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4) 持久化：把布局锁定态写回 Processor（初次由 Processor state 驱动时不写回）
+    if (! initial)
+        processor.setLayoutLocked (locked);
+
+    // 5) 视觉反馈：重绘标题栏，让 lock 按钮显示为 pressed-latched 或 raised。
+    repaint (getTitleBarBounds());
 }
 
 // 同步 workspace 的 hit-test 挖洞。
@@ -2002,6 +2165,7 @@ void Y2KmeterAudioProcessorEditor::mouseMove(const juce::MouseEvent& e)
         updateHover (closeButtonHovered, getCloseButtonBounds());
         updateHover (pinButtonHovered,   getPinButtonBounds());
         updateHover (minButtonHovered,   getMinimiseButtonBounds());
+        updateHover (lockButtonHovered,  getLockButtonBounds());
 
         // 标题文字 hover 检测（实际文字像素矩形，宽度由 paint 回写）
         auto tt = getTitleTextBounds();
@@ -2041,6 +2205,7 @@ void Y2KmeterAudioProcessorEditor::mouseExit(const juce::MouseEvent&)
     clearHover (closeButtonHovered, getCloseButtonBounds());
     clearHover (pinButtonHovered,   getPinButtonBounds());
     clearHover (minButtonHovered,   getMinimiseButtonBounds());
+    clearHover (lockButtonHovered,  getLockButtonBounds());
 
     if (titleTextHovered)
     {
@@ -2122,6 +2287,12 @@ void Y2KmeterAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
         repaint (getMinimiseButtonBounds());
         return;
     }
+    if (getLockButtonBounds().contains (e.getPosition()))
+    {
+        lockButtonPressed = true;
+        repaint (getLockButtonBounds());
+        return;
+    }
 
     // 2) 只有 TitleBar 区域才允许拖拽顶层窗口（模块 / toolbar 区不参与窗口拖拽）
     if (! getTitleBarBounds().contains(e.getPosition()))
@@ -2141,10 +2312,16 @@ void Y2KmeterAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
 
     if (juce::JUCEApplicationBase::isStandaloneApp())
     {
-        if (auto* top = getTopLevelComponent())
+        // 锁定态：不启动顶层窗口拖拽。双击全屏的前置 mouseDown 不会受影响，
+        //   因为下面不会将 draggingWindow 置 true，mouseDrag 也不会拖。双击全屏
+        //   本身在锁定态下仍允许（属于"窗口尺寸"而非"用户拖拽"）。
+        if (! layoutLocked)
         {
-            windowDragger.startDraggingComponent(top, e.getEventRelativeTo(top));
-            draggingWindow = true;
+            if (auto* top = getTopLevelComponent())
+            {
+                windowDragger.startDraggingComponent(top, e.getEventRelativeTo(top));
+                draggingWindow = true;
+            }
         }
     }
 }
@@ -2208,6 +2385,14 @@ void Y2KmeterAudioProcessorEditor::mouseUp(const juce::MouseEvent& e)
         if (stillOn) handleMinimiseClicked();
         return;
     }
+    if (lockButtonPressed)
+    {
+        lockButtonPressed = false;
+        const bool stillOn = getLockButtonBounds().contains (e.getPosition());
+        repaint (getLockButtonBounds());
+        if (stillOn) handleLockClicked();
+        return;
+    }
 }
 
 // ==========================================================
@@ -2238,6 +2423,7 @@ void Y2KmeterAudioProcessorEditor::mouseDoubleClick (const juce::MouseEvent& e)
     if (getCloseButtonBounds()   .contains (pos)) return;
     if (getPinButtonBounds()     .contains (pos)) return;
     if (getMinimiseButtonBounds().contains (pos)) return;
+    if (getLockButtonBounds()    .contains (pos)) return;
 
     {
         auto tt = getTitleTextBounds();

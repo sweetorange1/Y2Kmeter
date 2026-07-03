@@ -51,17 +51,29 @@ namespace PinkXP
     //   只有 plain 样式（如抬头 iisaacbeats.cn 那一行）仍能命中自定义 Typeface，
     //   其余 bold/italic 文本全部变成系统字体——这正是本次字体异常的根因。
     //
-    //   修复：改用 juce::FontOptions(height).withTypeface(gTypeface)，
+    //   修复：改用 juce::FontOptions(gTypeface).withHeight(height)，
     //   直接锁定 Typeface 实例，不走 family name 再查询的回退路径；
     //   并忽略 styleFlags（Silkscreen 只有一种字形，bold/italic 仅靠
     //   调用方做伪粗/伪斜即可，不应触发 Typeface 替换）。
+    //
+    // 踩坑记录（Debug 崩溃）：
+    //   最初写法 juce::FontOptions(height).withTypeface(gTypeface) 在 Debug 下会
+    //   触发 juce_FontOptions.h:126 附近的 jassert：
+    //       jassert (x == nullptr || style.isEmpty());
+    //   原因是 FontOptions(float) 会级联调用 (String&, String&, float) 版本，
+    //   把 style 字段先塞成 "Regular"（Font::plain 转出来的字体样式名），此时
+    //   再 withTypeface(非空指针) 就会命中 assert。Release 版 jassert 是空操作，
+    //   看似正常；Debug 下 int3 直接卡死在启动阶段（软件窗口都没弹出来）。
+    //   正确写法：使用 FontOptions(Typeface::Ptr) 构造函数，让 name/style
+    //   从一开始就和 typeface 保持一致（withTypeface 内部同样是这样做的），
+    //   然后 withHeight() 覆盖字号即可。
     static juce::Font makeFontRaw(float height, int styleFlags)
     {
         if (gTypeface != nullptr)
         {
             // 单一自定义 Typeface 兜底所有样式，避免 bold/italic 场景回退系统字体
             juce::ignoreUnused (styleFlags);
-            return juce::Font (juce::FontOptions (height).withTypeface (gTypeface));
+            return juce::Font (juce::FontOptions (gTypeface).withHeight (height));
         }
         return juce::Font (juce::FontOptions (height, styleFlags));
     }

@@ -375,6 +375,10 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
         root.setProperty ("editorH", savedEditorHeight, nullptr);
     }
 
+    // 布局锁定态（v1.8.3）：仅 true 时写入，避免旧 state 无意义地多一个 false 属性。
+    if (savedLayoutLocked)
+        root.setProperty ("layoutLocked", true, nullptr);
+
     if (savedLayoutXml.isNotEmpty())
     {
         if (auto layoutXml = juce::parseXML(savedLayoutXml))
@@ -411,6 +415,9 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
             savedEditorHeight = h;
         }
     }
+
+    // 布局锁定态（v1.8.3）：旧 state 无此属性时默认 false，保持向后兼容。
+    savedLayoutLocked = (bool) root.getProperty ("layoutLocked", false);
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())

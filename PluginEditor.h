@@ -116,11 +116,12 @@ private:
     // 标题栏左侧"可点击标题文字"区域（含软件名 + 版本号），点击后跳转官网
     juce::Rectangle<int> getTitleTextBounds() const;
 
-    // 右上角三个按钮的几何（从右到左：关闭 × / 最大化固定 ★ / 最小化 _ ）
+    // 右上角四个按钮的几何（从右到左：关闭 × / 固定 ★ / 最小化 _ / 锁定 ⮌ ）
     //   样式完全复用 ModulePanel 的 × 按钮（drawRaised + pink200 hover）
     juce::Rectangle<int> getCloseButtonBounds()    const;
     juce::Rectangle<int> getPinButtonBounds()      const; // 固定（置顶）
     juce::Rectangle<int> getMinimiseButtonBounds() const; // 最小化
+    juce::Rectangle<int> getLockButtonBounds()     const; // 布局锁定（v1.8.3 新增）
 
     // chrome 隐藏态下独立悬浮在右上角的"小关闭浮标"
     //   · 不参与标题栏的按钮组（pin / minimise 在隐藏态下不显示）
@@ -130,6 +131,13 @@ private:
     void handleCloseClicked();
     void handlePinClicked();       // 切换 alwaysOnTop
     void handleMinimiseClicked();  // 最小化顶层窗口
+    void handleLockClicked();      // 切换布局锁定（v1.8.3）
+
+    // 将 layoutLocked 同步到 workspace / 顶层窗口的 setResizable / Processor 持久化。
+    //   · shouldRepaintButton 为 true 时刷新 lock 按钮局部（仅在用户交互时需要）；
+    //   · initial 为 true 时代表从持久化引入初值，不回写 Processor（避免未变同步）。
+    void applyLayoutLocked (bool locked, bool initial = false);
+    bool isLayoutLocked() const noexcept { return layoutLocked; }
 
     // chrome 隐藏态下同步 workspace 的 hit-test 挖洞矩形
     //   · 在"浮动关闭按钮 + 标题文字"位置告诉 workspace"此区域事件别吃"，
@@ -209,7 +217,23 @@ private:
     bool pinButtonPressed     = false;
     bool minButtonHovered     = false;
     bool minButtonPressed     = false;
+    bool lockButtonHovered    = false;   // v1.8.3
+    bool lockButtonPressed    = false;
     bool alwaysOnTopActive    = true;  // 固定按钮当前状态：默认启用（置顶不被遮挡）
+    bool layoutLocked         = false; // v1.8.3：布局锁定态（抱锁后不可拖动/resize）
+
+    // v1.8.3：布局锁定前记住的 resize 上下限，锁定时用当前尺寸夹紧、解锁时还原。
+    //   · 走 setResizeLimits 而非 setResizable —— 后者会 recreateDesktopWindow
+    //     导致窗口"闪现"一次；前者只是改约束器上下限，不重建 peer。
+    //   · initValid=false 表示还没保存过原始值（构造时 initial=true 分支不写）。
+    int  savedLockMinW = 0, savedLockMinH = 0, savedLockMaxW = 0, savedLockMaxH = 0;
+    bool savedLockLimitsValid = false;
+
+    // v1.8.3：Editor 在构造末尾调用 applyLayoutLocked(initial=true) 从 state 恢复锁定态时
+    // Editor 可能还未 attach 到 Y2KMainWindow / 顶层窗口尺寸未就绪；此时无法安全调用
+    // setResizeLimits（ComponentBoundsConstrainer 会 assert(minW>0 && minH>0)）。
+    // 用此标记等 parentHierarchyChanged 触发后补做一次真正的 apply。
+    bool pendingLockApplyOnAttach = false;
     bool initialAlwaysOnTopApplied = false; // 首次 visibilityChanged 时把默认置顶应用到顶层窗口的一次性 flag
 
     // Windows 下强制关闭 Direct2D 渲染器的一次性 flag。
