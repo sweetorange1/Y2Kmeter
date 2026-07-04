@@ -48,7 +48,8 @@ Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
     addAndMakeVisible (speedSlider);
     addAndMakeVisible (speedLabel);
 
-    // 预分配历史缓冲
+    // 预分配历史缓冲 + 幅度→色板 LUT
+    buildMagLut();
     ensureHistory (defaultHistoryLen);
 }
 
@@ -109,7 +110,8 @@ void Spectrogram3DModule::ensureHistory (int newLength)
     writeIdx   = 0;
     frameCount = 0;
     columnAccumulator = 0.0f;
-    lastFrameMs       = 0.0;
+    lastFrameMs       = 0.0f;
+    depthPalettesDirty = true;
 }
 
 void Spectrogram3DModule::pushFrame (const juce::Array<float>& mags)
@@ -193,6 +195,7 @@ void Spectrogram3DModule::recomputeProjection (int canvasW, int canvasH)
     lastCanvasW = canvasW;
     lastCanvasH = canvasH;
     lastCachedFrameCount = frameCount;
+    depthPalettesDirty   = true; // 投影变化 → 深度色板需要重建
 }
 
 // ----------------------------------------------------------
@@ -290,6 +293,7 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // 连续 push nCols 帧（都是当前幅度快照）
     for (int k = 0; k < nCols; ++k)
         pushFrame (rowMagBuf);
+    imageCacheDirty = true;
 
     // repaint 节流（P1-1）：限制最短重绘间隔，降低宿主消息线程压力。
     //   默认 384×256 模块下，每帧 150×127≈19k 次 fillRect 即使优化后
@@ -303,7 +307,12 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 }
 
 // ----------------------------------------------------------
-// paintContent
+// paintContent —— 离屏 Image 缓存版
+//
+//   P2 性能优化：将 3D 视图渲染到离屏 juce::Image，paintContent
+//   只需一次 g.drawImageAt。无论 macOS CoreGraphics 软光栅还是
+//   Windows OpenGL，单次位图 blit 都远快于逐层 38,100 次 fillRect
+//   + 300 次 strokePath 的分散绘制。
 // ----------------------------------------------------------
 void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
@@ -311,85 +320,166 @@ void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> 
     g.fillRect (contentBounds);
 
     const auto canvas = getCanvasBounds (contentBounds);
-    drawBackground (g, canvas);
+    const auto plot   = canvas.reduced (2);
 
-    const auto plot = canvas.reduced (2);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
         return;
 
-    // 只有至少 1 帧才值得绘制
     const int effLen = juce::jmax (1, frameCount);
     if (effLen <= 0) return;
 
+    // 离屏 Image 缓存：仅在尺寸变化或数据更新时重建
+    if (imageCacheDirty || cached3DImage.isNull()
+        || cached3DImage.getWidth()  != canvas.getWidth()
+        || cached3DImage.getHeight() != canvas.getHeight())
+    {
+        renderToImage (canvas);
+        imageCacheDirty = false;
+    }
+
+    // 单次 blit 替代逐层 38,100 次 fillRect + 300 次 strokePath
+    g.drawImageAt (cached3DImage, canvas.getX(), canvas.getY());
+
+    // 轴标签浮绘在 3D 视图上方（不进入 Image，保证文字清晰度）
+    drawAxisLabels (g, plot);
+}
+
+// ----------------------------------------------------------
+// buildMagLut —— 预计算 4096 级 mag → 色板下标
+//
+//   每帧原本需要 128 bins × visibleRows 次 gainToDecibels (log10)
+//   + jlimit + lround，共 ~19K 次昂贵浮点运算。改为查表后仅剩
+//   一次整数索引，在 Apple Silicon / x86 上均快到可忽略。
+// ----------------------------------------------------------
+void Spectrogram3DModule::buildMagLut()
+{
+    for (int i = 0; i < 4096; ++i)
+    {
+        const float mag = (float) i * (1.0f / 4095.0f);
+        const float db  = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
+        const float t01 = juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
+        magToIdx[(size_t) i] = (uint8_t) juce::jlimit (0, 255, (int) std::lround (t01 * 255.0f));
+    }
+}
+
+// ----------------------------------------------------------
+// rebuildDepthPalettes —— 预计算逐层深度 fade 色板
+//
+//   基准色板（256 级）已由 valueToColour 生成；本函数为每层
+//   叠加深度 fade 后存为 depthPalettes[d][256]。
+//   仅在 effRows 变化（投影 recalc 引起）时调用一次，
+//   之后每帧直接 depthPalettes[d][colIdx] 取值即可。
+// ----------------------------------------------------------
+void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
+{
+    nRows = juce::jmax (1, juce::jmin (nRows, visibleRows));
+    if (nRows == depthPalettesRows && ! depthPalettesDirty)
+        return;
+
+    const juce::Colour fadeTarget (8, 8, 24);
+    // 先算基准色板（depthFade=0）
+    std::array<juce::Colour, 256> basePalette;
+    for (int i = 0; i < 256; ++i)
+        basePalette[(size_t) i] = valueToColour ((float) i * (1.0f / 255.0f), 0.0f);
+
+    for (int d = 0; d < nRows; ++d)
+    {
+        const float depthFade = (nRows > 1) ? (float) d / (float) (nRows - 1) : 0.0f;
+        const float fadeAmt   = depthFade * 0.65f;
+        for (int i = 0; i < 256; ++i)
+            depthPalettes[(size_t) d][(size_t) i] =
+                basePalette[(size_t) i].interpolatedWith (fadeTarget, fadeAmt);
+    }
+
+    depthPalettesRows  = nRows;
+    depthPalettesDirty = false;
+}
+
+// ----------------------------------------------------------
+// renderToImage —— 将完整 3D 视图渲染到离屏 Image（P3 优化版）
+//
+//   相对于 P2 版本（已用离屏 Image），P3 新增三项优化：
+//     1) magToIdx LUT     → 消除 19,200 次 gainToDecibels/log10
+//     2) depthPalettes    → 消除 19,050 次 interpolatedWith
+//     3) Image 复用       → 不再每帧 malloc
+// ----------------------------------------------------------
+void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
+{
+    const int cw = canvas.getWidth();
+    const int ch = canvas.getHeight();
+    if (cw <= 0 || ch <= 0) return;
+
+    const int effLen = juce::jmax (1, frameCount);
+    if (effLen <= 0) return;
+
+    // 复用 Image：尺寸匹配时只清空，避免 malloc
+    if (cached3DImage.isNull()
+        || cached3DImage.getWidth()  != cw
+        || cached3DImage.getHeight() != ch)
+    {
+        cached3DImage = juce::Image (juce::Image::ARGB, cw, ch, true);
+    }
+    else
+    {
+        cached3DImage.clear (cached3DImage.getBounds());
+    }
+
+    juce::Graphics ig (cached3DImage);
+
+    // 底衬（Image-local 坐标）
+    juce::Rectangle<int> imgCanvas (0, 0, cw, ch);
+    drawBackground (ig, imgCanvas);
+
+    const auto plot = imgCanvas.reduced (2);
+    if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
+
     recomputeProjection (plot.getWidth(), plot.getHeight());
-
-    // 原点 offset（投影坐标是相对于 plot 的）
-    const float ox = (float) plot.getX();
-    const float oy = (float) plot.getY();
-
-    // ---- 从远到近逐层绘制（画家算法）----
-    //   最旧的切片在最上方（屏幕 Y 最小），最新切片在最下方（屏幕 Y 最大）。
-    //   从上往下画：旧数据先画（被新数据遮挡），新数据后画（盖住后方）。
-    //   这样形成「从上方俯视曲面」的视觉。
-
-    juce::Graphics::ScopedSaveState ss (g);
-    g.reduceClipRegion (plot);
 
     const int effRows = juce::jmin (historyLen, juce::jmin (effLen, visibleRows));
 
-    // ---- 预计算 256 级热力图调色板（depthFade=0 基准色）----
-    //   每帧计算一次，消除内层循环 19,000 次 valueToColour 调用。
-    const juce::Colour fadeTarget (8, 8, 24);
-    std::array<juce::Colour, 256> palette;
-    for (int i = 0; i < 256; ++i)
-        palette[(size_t) i] = valueToColour ((float) i * (1.0f / 255.0f), 0.0f);
+    // 深度色板只在投影/行数变化时重建
+    if (depthPalettesDirty || depthPalettesRows != effRows)
+        rebuildDepthPalettes (effRows);
+
+    const float ox = (float) plot.getX();
+    const float oy = (float) plot.getY();
+
+    juce::Graphics::ScopedSaveState ss (ig);
+    ig.reduceClipRegion (plot);
 
     for (int d = effRows - 1; d >= 0; --d)
     {
-        // d=effRows-1 → 最旧（上方），d=0 → 最新（下方）
         const int readIdx = (writeIdx - 1 - d + historyLen * 2) % historyLen;
         const auto& row = historyRing[(size_t) readIdx];
 
-        // 深度 fade: 0 = 最新, 1 = 最旧
-        const float depthFade = (effRows > 1) ? (float) d / (float) (effRows - 1) : 0.0f;
-
-        // 该层基线的 Y 坐标
-        const float baseY = oy + projOriginY - (float) d * projSlantY;
-
-        // 该层基线的 X 偏移
+        const float baseY  = oy + projOriginY - (float) d * projSlantY;
         const float depthX = (float) d * projSlantX;
 
-        // 预计算每个 bin 的 X / topY / 颜色下标（单次遍历，避免重复 gainToDecibels）
         std::array<float, 256> binX, binTopY;
         std::array<int,   256> colIdx;
         jassert (numBins <= 256);
         for (int i = 0; i < numBins; ++i)
         {
+            // P3: magToIdx LUT 替代 gainToDecibels + jlimit + lround
             const float mag = row[(size_t) i];
-            const float db  = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
-            const float t01 = juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
-            const int   idx = juce::jlimit (0, 255, (int) std::lround (t01 * 255.0f));
+            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
+            const int   idx = (int) magToIdx[(size_t) mi];
 
             binX[(size_t) i]    = ox + projOriginX + depthX + (float) i * projBinWidth;
-            binTopY[(size_t) i] = baseY - t01 * projMaxH;
+            binTopY[(size_t) i] = baseY - (float) idx * (1.0f / 255.0f) * projMaxH;
             colIdx[(size_t) i]  = idx;
         }
 
-        // ---- 逐段绘制矩形条（fillRect 替代 fillPath，消除 Path 分配开销）----
-        //   每个 bin i → i+1 的梯形近似为矩形条：
-        //     x = binX[i], yTop = binTopY[i], w = projBinWidth, h = baseY - binTopY[i]
-        //   相邻 bin 顶边高度差异仅几像素，用矩形近似在视觉上几乎无差异。
         for (int i = 0; i < numBins - 1; ++i)
         {
-            const auto c = palette[(size_t) colIdx[(size_t) i]]
-                              .interpolatedWith (fadeTarget, depthFade * 0.65f);
-            g.setColour (c);
+            // P3: 深度色板直接查表，替代 interpolatedWith
+            ig.setColour (depthPalettes[(size_t) d][(size_t) colIdx[(size_t) i]]);
             const float top = binTopY[(size_t) i];
             const float h   = juce::jmax (0.5f, baseY - top);
-            g.fillRect (binX[(size_t) i], top, projBinWidth, h);
+            ig.fillRect (binX[(size_t) i], top, projBinWidth, h);
         }
 
-        // ---- 绘制顶部轮廓线（强化"曲面脊线"视觉）----
+        // 顶部轮廓线
         {
             juce::Path outline;
             outline.startNewSubPath (binX[0], baseY);
@@ -398,13 +488,10 @@ void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> 
                 outline.lineTo (binX[(size_t) i + 1], binTopY[(size_t) i + 1]);
             outline.lineTo (binX[(size_t) (numBins - 1)], baseY);
 
-            g.setColour (juce::Colours::white.withAlpha (0.25f));
-            g.strokePath (outline, juce::PathStrokeType (0.6f));
+            ig.setColour (juce::Colours::white.withAlpha (0.25f));
+            ig.strokePath (outline, juce::PathStrokeType (0.6f));
         }
     }
-
-    // 绘制轴标签（浮绘在 3D 视图上方）
-    drawAxisLabels (g, plot);
 }
 
 // ----------------------------------------------------------

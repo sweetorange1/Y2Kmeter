@@ -61,6 +61,13 @@ private:
     void drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> canvas) const;
 
+    // 将 3D 视图渲染到离屏 Image（内部使用 Image-local 坐标）
+    void renderToImage (juce::Rectangle<int> canvas);
+
+    // P3 性能优化：预计算辅助表
+    void buildMagLut();                        // 4096 级 mag → 色板下标 LUT
+    void rebuildDepthPalettes (int nRows);      // 逐层深度 fade 色板（visibleRows×256）
+
     // ---- 成员 ----
     AnalyserHub& hub;
 
@@ -100,6 +107,21 @@ private:
     // repaint 节流（P1-1 风格）：限制最短重绘间隔，降低宿主消息线程压力
     double lastRepaintMs = 0.0;
 
+    // ---- 离屏 Image 缓存（P2 性能优化）----
+    //   将 3D 视图渲染到离屏 Image，paintContent 只需一次 drawImageAt。
+    //   macOS 上 CoreGraphics 软光栅场景下，单次位图 blit 远快于
+    //   逐层 38,100 次 fillRect + 300 次 strokePath 的分散绘制；
+    //   Windows+OpenGL 场景下也减少了纹理状态切换开销。
+    juce::Image cached3DImage;
+    bool        imageCacheDirty = true;
+
+    // ---- P3 预计算加速表 ----
+    // magToIdx: 4096 级线性幅度 → 256 级色板下标 (uint8_t)。
+    //   消除每帧 19,200 次 gainToDecibels (log10) + jlimit + lround。
+    std::array<uint8_t, 4096> magToIdx {};
+
+    static constexpr int   kPaletteLevels = 256;
+
     // 缓冲区复用
     juce::Array<float> rowMagBuf;
 
@@ -108,8 +130,14 @@ private:
     static constexpr float maxFreqHz = 20000.0f;
     static constexpr float minDb     = -90.0f;
     static constexpr float maxDb     = 0.0f;
-    static constexpr int   defaultHistoryLen = 500;  // 环形缓冲总容量（远大于可见层数，旧层滚出屏幕后延迟覆盖）
-    static constexpr int   visibleRows      = 300;  // 屏幕可见层数：投影计算只考虑这 150 层，其余在画布外
+    static constexpr int   defaultHistoryLen = 300;  // 环形缓冲总容量（远大于可见层数，旧层滚出屏幕后延迟覆盖）
+    static constexpr int   visibleRows      = 150;  // 屏幕可见层数：投影计算只考虑这些，其余在画布外
+
+    // depthPalettes: visibleRows×256 色板，已叠加深度 fade。
+    //   消除每帧 19,050 次 interpolatedWith。
+    std::array<std::array<juce::Colour, kPaletteLevels>, visibleRows> depthPalettes {};
+    int  depthPalettesRows  = 0;    // 当前 depthPalettes 对应的有效行数
+    bool depthPalettesDirty = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Spectrogram3DModule)
 };
