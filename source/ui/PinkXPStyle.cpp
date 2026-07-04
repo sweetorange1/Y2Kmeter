@@ -825,7 +825,7 @@ namespace PinkXP
     }
 
     // 当前主题状态
-    static ThemeId gCurrentThemeId = ThemeId::bubblegum;
+    static ThemeId gCurrentThemeId = ThemeId::winXP;
 
     // 主题变更回调表
     struct ThemeSub { int token; ThemeChangedCallback cb; };

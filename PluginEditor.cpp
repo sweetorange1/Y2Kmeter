@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include <JuceHeader.h>
+#include <cmath>
 #include "BinaryData.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/ModuleWorkspace.h"
@@ -68,7 +69,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v1.8.6");
+        const int versionW = versionFont.getStringWidth ("v1.8.7");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -109,7 +110,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.6";
+const juce::String versionText = "v1.8.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -365,7 +366,35 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //         · 切换后手动 notifyLayoutChanged 以把新布局回写 Processor。
     workspace->onLayoutPresetChanged = [this](ModuleWorkspace::LayoutPreset preset)
     {
+        // 切换布局预设期间抑制 auto-show，避免窗口瞬间跳动到屏幕边缘时
+        // 鼠标被判定为"进入窗口"而触发临时 chrome 展开，挤占模块区域。
+        ++suppressAutoShowCounter;
+
+        // ★ 预设切换前：自动退出 auto-hide 模式 + 解除布局锁定。
+        //   否则 applyLayoutPreset 中的 setSize/setBounds 会被
+        //   applyLayoutLocked 锁定的 resizeLimits(w,h,w,h) 夹回
+        //   当前收缩尺寸，导致预设宽度/高度无法正确应用。
+        if (autoHideMode)
+        {
+            autoHideMode = false;
+            if (workspace != nullptr) workspace->setAutoHideActive (false);
+            hasSavedBoundsBeforeHide = false;
+        }
+
+        if (layoutLocked)
+            applyLayoutLocked (false, /*initial*/ false);
+
+        // 确保 workspace chrome 可见：applyLayoutPreset 通过
+        // getCanvasArea() 反推 overheadH 时依赖 chromeVisible 状态；
+        // chrome 隐藏时 canvas 满铺导致 overheadH 少算 toolbarHeight(36px)，
+        // 最终窗口高度比预期多 36px。
+        if (workspace != nullptr && ! workspace->isChromeVisible())
+            workspace->setChromeVisible (true);
+
+        autoHideNeedsExitFirst = false;
+
         applyLayoutPreset ((int) preset);
+        --suppressAutoShowCounter;
     };
 
     // 4.05b) 预设 Save/Load —— 仅做透传：workspace 已经弹完 FileChooser，
@@ -388,16 +417,72 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //     模块 y 坐标不做任何补偿，靠 workspace 自身位置变化带动模块整体平移。
     workspace->onChromeVisibleChanged = [this](bool visible)
     {
+        // ★ 整个 chrome 显隐回调期间抑制 auto-show，防止窗口 resize
+        //   （topComp->setBounds）过程中 JUCE 分发虚假 mouseEnter/mouseMove
+        //   事件导致误触发 hover-show。首次启动时此路径不经过
+        //   onLayoutPresetChanged 的保护，需要独立包裹。
+        //   使用计数器而非 bool：setBounds() 会 post 异步 mouse 事件，
+        //   回调返回后 counter>0 仍能拦截 ~300ms（3 个 timer tick）内的异步事件。
+        suppressAutoShowCounter = 3;
+
         const bool toHide = ! visible;           // 本次切换是"进入隐藏态"吗？
-        chromeDim = toHide;
 
         // 切换态时重置 hover/pressed，避免残留视觉
         closeButtonHovered = closeButtonPressed = false;
         pinButtonHovered   = pinButtonPressed   = false;
         minButtonHovered   = minButtonPressed   = false;
 
+        // ========================================================
+        // v1.8.6：auto-hide 模式 —— HIDE 按钮按下后自动固定+置顶，
+        //   鼠标悬停暂显 chrome，离开恢复隐藏。
+        //   · 进入隐藏：autoHide=true、layoutLocked=true、alwaysOnTop=true
+        //   · 临时显隐（鼠标 hover）：不触动 lock/pin 状态，不缩放窗口
+        //   · 真正 Show（用户点 Show 按钮）：解锁、取消 autoHide，但保留置顶状态
+        //   · 窗口缩放：首次 HIDE / 显式 SHOW / hover 进出 均会执行
+        // ========================================================
+        const bool wasInAutoHide = autoHideMode;
+        bool shouldShrink = false;
+        bool shouldExpand = false;
+        bool isTemporaryResize = false;  // hover 触发 vs 按钮点击触发
+
+        if (toHide)
+        {
+            // 首次 HIDE → 进入 auto-hide 模式（lock + pin 仅设一次）+ 收缩窗口
+            if (! autoHideMode)
+            {
+                autoHideMode = true;
+                if (workspace != nullptr) workspace->setAutoHideActive (true);
+                applyLayoutLocked (true, /*initial*/ false);
+                setAlwaysOnTopActive (true);
+                shouldShrink = true;
+            }
+            else
+            {
+                // Hover-hide（鼠标移出窗口）：重新收缩窗口，保持 autoHide 状态不变
+                shouldShrink = true;
+                isTemporaryResize = true;
+            }
+        }
+        else // showing chrome
+        {
+            if (autoHideMode && ! temporaryChromeShow)
+            {
+                // 用户点 Show 按钮：真正退出 autoHide + 展开窗口
+                autoHideMode = false;
+                if (workspace != nullptr) workspace->setAutoHideActive (false);
+                applyLayoutLocked (false, /*initial*/ false);
+                shouldExpand = true;
+            }
+            else if (autoHideMode)
+            {
+                // Hover-show（鼠标移入窗口）：临时展开窗口，保持 autoHide/lock/pin 不变
+                shouldExpand = true;
+                isTemporaryResize = true;
+            }
+        }
+
         // ------------------------------------------------------------
-        // Hide 收缩窗口 / Show 反向展开
+        // Hide 收缩窗口 / Show 反向展开（仅在首次 HIDE / 显式 SHOW 时）
         //   · Hide：窗口高度 -shrink（上半屏顶边固定、下半屏底边固定），
         //            workspace 占满整窗后，模块屏幕位置自然贴向对应屏幕边。
         //   · Show：严格还原 Hide 前的完整 bounds 快照（幂等），不做浮动计算。
@@ -457,22 +542,26 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         //     bottomAligned 翻转、constrainer 夹紧等），N 次 Hide→Show 循环
         //     后窗口 bounds 严格等于初始值。
         // ------------------------------------------------------------
-        if (canResizeWindow)
+        if (canResizeWindow && (shouldShrink || shouldExpand))
         {
-            if (toHide)
+            if (shouldShrink)
             {
-                // 1) 快照当前完整 bounds + resizeLimits（将在 Show 时原样还原）
-                savedTopBoundsBeforeHide = topComp->getBounds();
-                if (auto* cbc = getConstrainer())
+                // 临时收缩（hover-hide）使用首次 HIDE 时保存的快照，不重新取值
+                if (! isTemporaryResize)
                 {
-                    savedResizeMinW = cbc->getMinimumWidth();
-                    savedResizeMinH = cbc->getMinimumHeight();
-                    savedResizeMaxW = cbc->getMaximumWidth();
-                    savedResizeMaxH = cbc->getMaximumHeight();
+                    // 1) 快照当前完整 bounds + resizeLimits（将在 Show 时原样还原）
+                    savedTopBoundsBeforeHide = topComp->getBounds();
+                    if (auto* cbc = getConstrainer())
+                    {
+                        savedResizeMinW = cbc->getMinimumWidth();
+                        savedResizeMinH = cbc->getMinimumHeight();
+                        savedResizeMaxW = cbc->getMaximumWidth();
+                        savedResizeMaxH = cbc->getMaximumHeight();
+                    }
+                    hasSavedBoundsBeforeHide = true;
                 }
-                hasSavedBoundsBeforeHide = true;
 
-                // 2) 计算 Hide 后的目标 bounds
+                // 2) 计算 Hide 后的目标 bounds（基于完整快照）
                 //    · 上半屏：顶边固定，高度 -shrink（底边上移 shrink）
                 //    · 下半屏：底边固定，顶边 +shrink（高度 -shrink）
                 const auto b = savedTopBoundsBeforeHide;
@@ -480,12 +569,21 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
                 const int newH = juce::jmax (1, b.getHeight() - shrink);
 
                 // 3) 放宽 resizeLimits 以让 newH 能被接受（不让 min 夹回）
+                //   · Editor 自身的 constrainer
                 if (getConstrainer() != nullptr)
                 {
                     setResizeLimits (juce::jmin (savedResizeMinW, b.getWidth()),
                                      juce::jmin (savedResizeMinH, newH),
                                      juce::jmax (savedResizeMaxW, b.getWidth()),
                                      juce::jmax (savedResizeMaxH, b.getHeight()));
+                }
+                //   · 顶层 ResizableWindow 的 constrainer（applyLayoutLocked 锁在此处）
+                if (auto* rw = dynamic_cast<juce::ResizableWindow*> (topComp))
+                {
+                    rw->setResizeLimits (juce::jmin (savedResizeMinW, b.getWidth()),
+                                         juce::jmin (savedResizeMinH, newH),
+                                         juce::jmax (savedResizeMaxW, b.getWidth()),
+                                         juce::jmax (savedResizeMaxH, b.getHeight()));
                 }
 
                 // 4) 应用收缩后的窗口 bounds
@@ -508,26 +606,27 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
                     // 2) 直接还原完整 bounds（x/y/w/h 全部等于 Hide 前快照）
                     topComp->setBounds (savedTopBoundsBeforeHide);
 
-                    // 3) 还原 resizeLimits—— 但必须与刚还原的 bounds 相容，防止
-                    //    ComponentBoundsConstrainer 在 setResizeLimits 内部对当前
-                    //    bounds 重新 check 并夹紧。
-                    //
-                    //    场景：快照的 savedResizeMin/Max 是"Hide 按下那一刻"的
-                    //      值——而 resizeLimits 未持久化，启动后仅恢复模块 XML
-                    //      不会重跑 preset 扩展 limits；一旦 savedTopBoundsBeforeHide
-                    //      来自 horizontal bar 预设（2558×246 这种超出默认 limits
-                    //      的尺寸），直接写回默认 limits（1600×1100）会把它夹
-                    //      成1600×420。
-                    //    解决：min 向下夹到当前宽高、max 向上抬到当前宽高，其
-                    //      余保持快照值。对 default/tiled 等天然在默认 limits 内的
-                    //      预设无影响；对 horizontal bar 则把上限抬到 screenW。
-                    const auto restoredBounds = savedTopBoundsBeforeHide;
-                    setResizeLimits (juce::jmin (savedResizeMinW, restoredBounds.getWidth()),
-                                     juce::jmin (savedResizeMinH, restoredBounds.getHeight()),
-                                     juce::jmax (savedResizeMaxW, restoredBounds.getWidth()),
-                                     juce::jmax (savedResizeMaxH, restoredBounds.getHeight()));
+                    // 3) 还原 resizeLimits（永久展开时）；临时展开不还原，保持宽松
+                    //    以便下次 hover-hide 能顺利收缩。
+                    if (! isTemporaryResize)
+                    {
+                        //    场景：快照的 savedResizeMin/Max 是"Hide 按下那一刻"的
+                        //      值——而 resizeLimits 未持久化，启动后仅恢复模块 XML
+                        //      不会重跑 preset 扩展 limits；一旦 savedTopBoundsBeforeHide
+                        //      来自 horizontal bar 预设（2558×246 这种超出默认 limits
+                        //      的尺寸），直接写回默认 limits（1600×1100）会把它夹
+                        //      成1600×420。
+                        //    解决：min 向下夹到当前宽高、max 向上抬到当前宽高，其
+                        //      余保持快照值。对 default/tiled 等天然在默认 limits 内的
+                        //      预设无影响；对 horizontal bar 则把上限抬到 screenW。
+                        const auto restoredBounds = savedTopBoundsBeforeHide;
+                        setResizeLimits (juce::jmin (savedResizeMinW, restoredBounds.getWidth()),
+                                         juce::jmin (savedResizeMinH, restoredBounds.getHeight()),
+                                         juce::jmax (savedResizeMaxW, restoredBounds.getWidth()),
+                                         juce::jmax (savedResizeMaxH, restoredBounds.getHeight()));
 
-                    hasSavedBoundsBeforeHide = false;
+                        hasSavedBoundsBeforeHide = false;
+                    }
                 }
                 else
                 {
@@ -554,17 +653,111 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             }
         }
 
-        // 非 canResizeWindow 的兜底路径（插件宿主 / 启动恢复）：
-        //   不改窗口尺寸，但仍需让 Editor 根据 chromeDim 重新分配内部区域。
-        if (! canResizeWindow)
-            resized();
+        // ★ v1.8.6 修复：chromeDim 必须在窗口 resize 完成后才设置，避免
+        //   chromeDim=true 但窗口未实际缩小导致的 workspace 越界空余。
+        chromeDim = toHide;
 
+        // 任何 chrome 显隐切换都需要让 Editor 根据 chromeDim 重新分配内部区域：
+        //   · chrome 显示 → workspace 从顶部让出 titleBarHeight
+        //   · chrome 隐藏 → workspace 占满整窗
+        // 窗口缩放路径中 topComp->setBounds 已触发一次，这里再调一次确保最终态正确。
+        resized();
         repaint();
+
+        // auto-hide 守卫：shouldShrink 后在窗口 resize 完成后设置标志，因此
+        //   resize 引发的虚假 mouseEnter 不会触发。mouseExit 无条件清除，
+        //   用户下次 mouseEnter 即可正常触发 hover show。
+        //  shouldExpand（用户点 Show）时清除标志，恢复正常。
+        if (shouldShrink)
+        {
+            autoHideNeedsExitFirst = true;
+
+            // 上半屏 shrink 后底边上移，鼠标可能已经落在窗口外。
+            // 此时"先离开一次"的条件天然满足，应直接清零 guard，
+            // 否则首次移入会被拦截，用户需要移出再移入两次才能触发 auto-show。
+            if (auto* top = getTopLevelComponent())
+            {
+                const auto topScreenBounds = (top == this) ? getScreenBounds() : top->getScreenBounds();
+                const auto mouseScreen = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+                if (! topScreenBounds.contains (mouseScreen))
+                    autoHideNeedsExitFirst = false;
+            }
+        }
+        else if (shouldExpand)
+        {
+            autoHideNeedsExitFirst = false;
+        }
 
         // 切换后同步 workspace 的 hit-test 挖洞：让 overlay 按钮/文字区的鼠标事件
         //   冒泡到 Editor，从而 Editor 能直接接管浮动按钮的 hover/press 逻辑，
         //   同时任何压在按钮之上的模块都能正常独占鼠标事件（JUCE 先派发给子组件）。
         updateWorkspaceHitTestHoles();
+
+        // suppressAutoShowCounter 由 timerCallback 递减，此处不清零（异步事件窗口保护）
+    };
+
+    // 4.1b) 鼠标进入 workspace → auto-hide 模式下暂显 chrome
+    //   · workspace 覆盖整个 Editor 时 Editor::mouseEnter 可能不触发，
+    //     workspace 自身的 mouseEnter 回调更可靠。
+    workspace->onMouseEntered = [this]()
+    {
+        // 布局预设切换期间抑制 auto-show（见 onLayoutPresetChanged）
+        if (suppressAutoShowCounter > 0)
+            return;
+
+        // Hide 后必须等鼠标先离开窗口一次，才允许鼠标再次进入时触发 hover show
+        if (autoHideNeedsExitFirst)
+            return;
+
+        if (autoHideMode && workspace != nullptr && ! workspace->isChromeVisible())
+        {
+            temporaryChromeShow = true;
+            workspace->setChromeVisible (true);
+            temporaryChromeShow = false;
+        }
+    };
+
+    // 4.1c) 鼠标在 workspace 内移动 → auto-hide 模式下暂显 chrome
+    //   · mouseMove 比 mouseEnter 更可靠：resize 后 JUCE 内部
+    //     isMouseOverOrDragging 状态可能导致 mouseEnter 被跳过，
+    //     但 mouseMove 每次鼠标移动都会触发，不依赖 enter/exit 状态。
+    //   · setChromeVisible 内部有 idempotent guard，重复调用是安全的。
+    workspace->onMouseMoved = [this]()
+    {
+        // 布局预设切换期间抑制 auto-show（见 onLayoutPresetChanged）
+        if (suppressAutoShowCounter > 0)
+            return;
+
+        if (autoHideNeedsExitFirst)
+            return;
+
+        if (autoHideMode && workspace != nullptr && ! workspace->isChromeVisible())
+        {
+            temporaryChromeShow = true;
+            workspace->setChromeVisible (true);
+            temporaryChromeShow = false;
+        }
+    };
+
+    // 4.1d) 鼠标离开 workspace → auto-hide 模式下检测是否真正离开了顶层窗口
+    //   · 仅判断是否在顶层窗口 bounds 外（不在任何 Editor/workspace 子区域）。
+    //   · hide 态 workspace 占满整窗时 Editor::mouseExit 不触发，靠此路径。
+    //   · 无论 chrome 当前是否可见，只要鼠标真的离开了窗口就必须清零
+    //     autoHideNeedsExitFirst，否则后续 mouseEnter 永远被拦截。
+    workspace->onMouseExited = [this](juce::Point<int> mouseScreenPos)
+    {
+        if (! autoHideMode || workspace == nullptr) return;
+
+        auto* top = getTopLevelComponent();
+        if (top == nullptr) return;
+
+        const auto topScreenBounds = (top == this) ? getScreenBounds() : top->getScreenBounds();
+        if (! topScreenBounds.contains (mouseScreenPos))
+        {
+            if (workspace->isChromeVisible())
+                workspace->setChromeVisible (false);
+            autoHideNeedsExitFirst = false;
+        }
     };
 
     // 4.2) 音频源下拉变化 → 透传给外部（Standalone App 订阅后会真正切换音频设备）
@@ -892,11 +1085,14 @@ void Y2KmeterAudioProcessorEditor::seedDefaultModules()
     static const ModuleType defaultOrder[] = {
         ModuleType::eq,
         ModuleType::loudness,
+        ModuleType::vuMeter,
         ModuleType::oscilloscope,
         ModuleType::spectrum,
         ModuleType::phase,
         ModuleType::dynamics,
-        ModuleType::waveform
+        ModuleType::waveform,
+        ModuleType::spectrogram,
+        ModuleType::spectrogram3d
     };
 
     // workspace 的 canvas 原点（此时 setSize 已触发 resized，canvas 有效）
@@ -1089,12 +1285,12 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         // setSize / setBounds 会触发 resized()，workspace 随之拿到新 canvas。
         //   此时按横向等分的方式铺默认 7 个模块。
         static const ModuleType horizOrder[] = {
-            ModuleType::eq,
-            ModuleType::spectrogram,
-            ModuleType::oscilloscope,
-            ModuleType::spectrum,
-            ModuleType::phase,
+            ModuleType::spectrogram3d,
             ModuleType::dynamics,
+            ModuleType::vuMeter,
+            ModuleType::oscilloscope,       // 下面循环中设为 Liss 模式
+            ModuleType::spectrum,
+            ModuleType::oscilloscopeWave,
             ModuleType::waveform
         };
 
@@ -1132,8 +1328,26 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         const int usableH = juce::jmax (kGrid,         yB - y0);
 
         const int totalCells    = usableW / kGrid;              // 小格数量（8px/格）
-        const int baseCells     = totalCells / count;           // 每个模块的基础格数
-        const int leftoverCells = totalCells - baseCells * count; // 需要 +1 格的模块数量
+
+        // v1.8.6：加权宽度分配（非均分），按以下比例从左到右：
+        //   SPECTROGRAM3D:1.0 | DYNAMICS:1.0 | VU:0.7 | OSC(Liss):0.7
+        //   SPECTRUM:1.5 | OSC WAVE:1.0 | WAVEFORM:1.5
+        static const float kWidthRatios[] = {
+            1.0f, 1.0f, 0.7f, 0.7f, 1.5f, 1.0f, 1.5f
+        };
+        static constexpr float kTotalRatio = 7.4f;
+
+        int cellsForModule[7] = {};
+        int cellsAllocated = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            int cells = (int) std::round ((float) totalCells * kWidthRatios[i] / kTotalRatio);
+            cells = juce::jmax (1, cells);
+            cellsForModule[i] = cells;
+            cellsAllocated += cells;
+        }
+        // 修正最后一个模块（WAVEFORM）消纳舍入误差
+        cellsForModule[count - 1] += totalCells - cellsAllocated;
 
         const int slotH = juce::jmax (80, usableH);             // 高度占满 canvas 的整网格
 
@@ -1143,8 +1357,12 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
             auto panel = createModule (horizOrder[i]);
             if (panel == nullptr) continue;
 
-            // 前 leftoverCells 个模块多拿一格 gridSize，消化 usableW 不能整除 count 的余数
-            const int cellsForThis = baseCells + (i < leftoverCells ? 1 : 0);
+            // Horizontal Bar 预设中 Oscilloscope 默认使用 Lissajous 模式
+            if (horizOrder[i] == ModuleType::oscilloscope)
+                if (auto* osc = dynamic_cast<OscilloscopeModule*>(panel.get()))
+                    osc->setDisplayMode(OscilloscopeModule::DisplayMode::lissajous);
+
+            const int cellsForThis = cellsForModule[i];
             const int slotW        = cellsForThis * kGrid;
 
             const int w = juce::jmax (panel->getMinWidth(),  slotW);
@@ -1154,62 +1372,6 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
             curX += slotW;
         }
-    }
-    else if (presetId == 4)
-    {
-        // Preset 4 "Tiled": 按用户 Y2Kmeter.settings 里的快照还原
-        //   · 顶层窗口：1346×1087（屏幕坐标 (89,134)；Standalone 下会真实移动窗口，
-        //     插件模式下仅设尺寸，位置由宿主决定）
-        //   · 模块布局：使用下方硬编码的 PBEQ_Layout XML（直接从 settings 的
-        //     filterState 二进制解码得到），loadLayoutFromXml 内部会自行清空
-        //     workspace 旧模块 / 拼豆贴画，不需要额外 clear。
-
-        // ------------------------------------------------------------------
-        // 预设 4 的模块快照 XML（根节点 = PBEQ_Layout，loadLayoutFromXml 要求）。
-        //   · 来源：C:/Users/echotcxu/AppData/Roaming/Y2Kmeter/Y2Kmeter.settings
-        //     的 filterState 经 MemoryBlock::fromBase64Encoding + copyXmlToBinary
-        //     反序列化得到。
-        //   · 14 个模块：eq/loudness/dynamics/lufs_realtime/true_peak/spectrum/
-        //     phase/phase_correlation/phase_balance/dynamics_meters/dynamics_dr/
-        //     oscilloscope/dynamics_crest/waveform，铺满 1344×1024 canvas（waveform
-        //     横贯底部）。
-        //   · 将来如果用户需要"再增加一个类似预设"，可以用项目根目录的
-        //     decode_filterstate.py 把新 settings 解码成 XML，再把内层
-        //     PBEQ_Layout 拷到这里。
-        // ------------------------------------------------------------------
-        static const juce::String kTiledPresetLayoutXml = R"TILED(<PBEQ_Layout gridVisible="1"><Module type="eq" id="78" x="0" y="0" w="384" h="256"/><Module type="loudness" id="79" x="384" y="0" w="320" h="256"/><Module type="dynamics" id="83" x="0" y="512" w="384" h="256"/><Module type="lufs_realtime" id="85" x="704" y="0" w="320" h="256"/><Module type="true_peak" id="86" x="1024" y="0" w="256" h="192"/><Module type="spectrum" id="88" x="384" y="256" w="384" h="256"/><Module type="phase" id="89" x="768" y="256" w="320" h="192"/><Module type="phase_correlation" id="90" x="1088" y="256" w="192" h="128"/><Module type="phase_balance" id="91" x="1088" y="384" w="192" h="128"/><Module type="dynamics_meters" id="93" x="384" y="512" w="256" h="256"/><Module type="dynamics_dr" id="94" x="640" y="512" w="320" h="256"/><Module type="oscilloscope" id="97" x="0" y="256" w="384" h="256"/><Module type="dynamics_crest" id="113" x="960" y="512" w="384" h="256"/><Module type="waveform" id="115" x="0" y="768" w="1344" h="256"/></PBEQ_Layout>)TILED";
-
-        constexpr int kTiledW = 1346;
-        constexpr int kTiledH = 1087;
-        constexpr int kTiledX = 89;
-        constexpr int kTiledY = 134;
-
-        auto* top = getTopLevelComponent();
-        if (top == nullptr) top = this;
-
-        // 放开 resizeLimits 上限，否则 1346×1087 会被旧约束（默认 1600×1100）限制
-        //   下限保留现值，避免影响用户以后拉小窗口
-        if (auto* cbc = getConstrainer())
-        {
-            setResizeLimits (juce::jmin (cbc->getMinimumWidth(),  kTiledW),
-                             juce::jmin (cbc->getMinimumHeight(), kTiledH),
-                             juce::jmax (cbc->getMaximumWidth(),  kTiledW),
-                             juce::jmax (cbc->getMaximumHeight(), kTiledH));
-        }
-
-        if (top == this)
-        {
-            // 插件模式：无法移动顶层窗口位置，仅调尺寸；宿主会决定实际位置
-            setSize (kTiledW, kTiledH);
-        }
-        else
-        {
-            // Standalone：连同外层 Y2KMainWindow 一起搬到 settings 记录的屏幕位置
-            top->setBounds (kTiledX, kTiledY, kTiledW, kTiledH);
-        }
-
-        // 注入快照布局（loadLayoutFromXml 内部会先清空再恢复）
-        workspace->loadLayoutFromXml (kTiledPresetLayoutXml);
     }
 
     // 手动回写布局到 Processor（clearAllModules + 批量 addModule 会触发多次
@@ -1549,7 +1711,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.8.6";
+const juce::String versionText = "v1.8.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1759,6 +1921,11 @@ void Y2KmeterAudioProcessorEditor::parentHierarchyChanged()
     }
    #endif
 
+    // v1.8.6：如果顶层窗口监听器已注册但 Editor 正在被从窗口树中移除，
+    //   释放监听器（顶层窗口即将销毁，继续持有原始指针不安全）。
+    if (topLevelExitWatcher != nullptr && getParentComponent() == nullptr)
+        topLevelExitWatcher.reset();
+
     juce::AudioProcessorEditor::parentHierarchyChanged();
 }
 
@@ -1811,6 +1978,32 @@ void Y2KmeterAudioProcessorEditor::visibilityChanged()
         pendingLockApplyOnAttach = false;
     }
 
+    // v1.8.6：注册顶层窗口 mouseExit 监听器（仅一次），用于处理 auto-hide 下
+    //   鼠标穿过标题栏离开窗口的场景——此时 Editor::mouseExit 已提前触发且
+    //   因鼠标在标题栏内判定"未离开顶层窗口"而不清零 autoHideNeedsExitFirst，
+    //   需要监听顶层窗口自身的 mouseExit 来补清零。
+    if (topLevelExitWatcher == nullptr)
+    {
+        auto* top = getTopLevelComponent();
+        if (top != nullptr && top != this)
+        {
+            topLevelExitWatcher = std::make_unique<TopLevelExitWatcher>();
+            topLevelExitWatcher->onExit = [this]()
+            {
+                // 无论鼠标是从 workspace 直接离开还是穿过标题栏离开，
+                // 只要离开了整个顶层窗口（含标题栏），就必须：
+                //   · 若当前 chrome 因 hover-show 可见 → 隐藏 chrome
+                //   · 清零 autoHideNeedsExitFirst 守卫（否则后续 hover show 永远被拦截）
+                if (! autoHideMode) return;
+
+                if (workspace != nullptr && workspace->isChromeVisible())
+                    workspace->setChromeVisible (false);
+
+                autoHideNeedsExitFirst = false;
+            };
+            top->addMouseListener (topLevelExitWatcher.get(), false);
+        }
+    }
 }
 
 // ==========================================================
@@ -2187,7 +2380,29 @@ void Y2KmeterAudioProcessorEditor::mouseMove(const juce::MouseEvent& e)
     }
 }
 
-void Y2KmeterAudioProcessorEditor::mouseExit(const juce::MouseEvent&)
+// v1.8.6：auto-hide 模式下的 mouseEnter —— 鼠标悬停暂时恢复 chrome
+void Y2KmeterAudioProcessorEditor::mouseEnter(const juce::MouseEvent&)
+{
+    mouseInsideEditor = true;
+
+    // 布局预设切换期间抑制 auto-show（见 onLayoutPresetChanged）
+    if (suppressAutoShowCounter > 0)
+        return;
+
+    // Hide 后必须等鼠标先离开窗口一次，才允许鼠标再次进入时触发 hover show
+    if (autoHideNeedsExitFirst)
+        return;
+
+    // 仅在 auto-hide 模式 + chrome 当前隐藏时：暂时显示 chrome（保持 lock+pin）
+    if (autoHideMode && workspace != nullptr && ! workspace->isChromeVisible())
+    {
+        temporaryChromeShow = true;
+        workspace->setChromeVisible (true);
+        temporaryChromeShow = false;
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::mouseExit(const juce::MouseEvent& e)
 {
     // 插件宿主模式：没有按钮 hover 要清理，但标题文字 hover 状态仍要复位
     //   （否则鼠标移出顶部抬头后，下划线和手型光标不会消失）。
@@ -2224,6 +2439,30 @@ void Y2KmeterAudioProcessorEditor::mouseExit(const juce::MouseEvent&)
     {
         chromeHiddenOverlay->setCloseButtonHovered (false);
         chromeHiddenOverlay->setTitleTextHovered (false);
+    }
+
+    // v1.8.6：auto-hide 模式下鼠标离开窗口 → 重新隐藏 chrome（保持 lock+pin）
+    //   · 必须检查鼠标屏幕坐标是否真正离开了顶层窗口。
+    //   · 用户从抬头区移到模块/工具栏区也会触发 Editor::mouseExit，
+    //     仅靠组件边界判断会误隐藏——必须用屏幕坐标最终裁决。
+    //   · chrome 隐藏时真正离开也要清零 autoHideNeedsExitFirst，
+    //     否则下次 mouseEnter 永远被拦截。
+    //   · 使用 MouseEvent 的屏幕坐标而非 Desktop::getMainMouseSource()
+    //     （后者在高速移动时可能返回 stale 坐标）。
+    if (autoHideMode)
+    {
+        auto* top = getTopLevelComponent();
+        if (top != nullptr)
+        {
+            const auto mouseScreen = e.getScreenPosition().toInt();
+            const auto topScreenBounds = (top == this) ? getScreenBounds() : top->getScreenBounds();
+            if (! topScreenBounds.contains (mouseScreen))
+            {
+                if (workspace != nullptr && workspace->isChromeVisible())
+                    workspace->setChromeVisible (false);
+                autoHideNeedsExitFirst = false;
+            }
+        }
     }
 
     mouseInsideEditor = false;
@@ -2498,6 +2737,51 @@ void Y2KmeterAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 void Y2KmeterAudioProcessorEditor::timerCallback()
 {
     if (workspace == nullptr) return;
+
+    // v1.8.6：递减 auto-show 抑制计数器（用于 onChromeVisibleChanged 异步事件窗口保护）
+    if (suppressAutoShowCounter > 0)
+        --suppressAutoShowCounter;
+
+    // v1.8.6：焦点保护 —— timer 轮询检测前台状态，弥补 mouseExit 漏判场景
+    //   · 始终追踪 windowWasForeground（即使 autoHideMode 为 false），确保首次 HIDE
+    //     时前台状态已同步，避免因初始值 false 导致误触发 auto-show。
+    //   · 仅当 autoHideMode 活跃时才执行 hide/show 动作。
+    //   · Timer 周期为 ~100ms（startTimerHz(10)），响应延时 < 200ms，用户感知不明显。
+    {
+        auto* top = getTopLevelComponent();
+        if (top != nullptr)
+        {
+            auto* focused = juce::Component::getCurrentlyFocusedComponent();
+            const bool isForeground = (focused != nullptr
+                                       && focused->getTopLevelComponent() == top);
+            if (isForeground != windowWasForeground)
+            {
+                windowWasForeground = isForeground;
+                if (autoHideMode)
+                {
+                    if (isForeground)
+                    {
+                        // 用户切回本软件 → auto-show（模拟 hover show 行为）
+                        if (! workspace->isChromeVisible()
+                            && suppressAutoShowCounter == 0)
+                        {
+                            temporaryChromeShow = true;
+                            workspace->setChromeVisible (true);
+                            temporaryChromeShow = false;
+                        }
+                        autoHideNeedsExitFirst = false;
+                    }
+                    else
+                    {
+                        // 用户切到别的软件 → auto-hide
+                        if (workspace->isChromeVisible())
+                            workspace->setChromeVisible (false);
+                        autoHideNeedsExitFirst = true;
+                    }
+                }
+            }
+        }
+    }
 
     // 仅当存在 Tamagotchi 模块时，才保活/计算对应的音频信号。
     const int n = workspace->getNumModules();

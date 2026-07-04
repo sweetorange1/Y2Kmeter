@@ -33,9 +33,10 @@ public:
     void parentHierarchyChanged() override;
 
     // 鼠标事件：右上角关闭按钮 + 空白区域拖拽窗口（仅 Standalone 模式生效）
-    void mouseMove (const juce::MouseEvent&) override;
-    void mouseExit (const juce::MouseEvent&) override;
-    void mouseDown (const juce::MouseEvent&) override;
+    void mouseMove  (const juce::MouseEvent&) override;
+    void mouseEnter (const juce::MouseEvent&) override;
+    void mouseExit  (const juce::MouseEvent&) override;
+    void mouseDown  (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp   (const juce::MouseEvent&) override;
     // 双击标题栏空白区（非按钮、非标题文字热区）→ 切换顶层窗口全屏 / 还原
@@ -263,6 +264,13 @@ private:
     bool chromeDim = false;
     bool mouseInsideEditor = false;
 
+    // v1.8.6：auto-hide 模式（HIDE 按钮按下后自动固定+置顶，鼠标悬停暂显 chrome）
+    bool autoHideMode = false;
+    bool temporaryChromeShow = false; // 防止临时的 chrome show 解除 lock/pin
+    bool autoHideNeedsExitFirst = false; // Hide 后必须等鼠标离开窗口一次，才允许 hover show
+    bool windowWasForeground = false;     // v1.8.6：timer 轮询追踪顶层窗口是否在前台（焦点保护）
+    int  suppressAutoShowCounter = 0;     // v1.8.6：>0 时抑制 auto-show（timer 递减，覆盖异步事件窗口期）
+
     // —— Hide 按钮收缩窗口支持 ——
     //   点击 Hide 时，把顶层窗口高度收缩掉 titleBarHeight + toolbarHeight(=26+36=62) 像素，
     //   Show 恢复时反向加回。根据窗口当前在屏幕中的位置（上/下）决定：
@@ -336,6 +344,26 @@ private:
     //   · 本成员**必须**在类的末尾（所有子组件之后）声明，保证析构时最先执行
     //     （反向声明顺序），而我们在 ~Editor 起始处已显式 detach 一次兜底。
     juce::OpenGLContext openGLContext;
+
+    // v1.8.6：顶层窗口 mouseExit 监听器（auto-hide 场景下鼠标穿过标题栏离开窗口时需要）
+    //   · 当 Editor::mouseExit 因鼠标仅离开了 Editor（进入了标题栏）而无法清零
+    //     autoHideNeedsExitFirst 时，由该监听器在鼠标**完全离开顶层窗口**（含标题栏）后清零。
+    //   · 仅监听顶层组件自身的 mouseExit（不监听子组件），避免误触发。
+    class TopLevelExitWatcher : public juce::MouseListener
+    {
+    public:
+        std::function<void()> onExit;
+        void mouseExit(const juce::MouseEvent&) override { if (onExit) onExit(); }
+        void mouseEnter(const juce::MouseEvent&) override {}
+        void mouseDown(const juce::MouseEvent&) override {}
+        void mouseUp(const juce::MouseEvent&) override {}
+        void mouseDrag(const juce::MouseEvent&) override {}
+        void mouseMove(const juce::MouseEvent&) override {}
+        void mouseDoubleClick(const juce::MouseEvent&) override {}
+        void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override {}
+        void mouseMagnify(const juce::MouseEvent&, float) override {}
+    };
+    std::unique_ptr<TopLevelExitWatcher> topLevelExitWatcher;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };

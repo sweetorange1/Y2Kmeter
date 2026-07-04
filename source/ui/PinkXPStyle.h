@@ -142,7 +142,7 @@ namespace PinkXP
     // ======================================================
     enum class ThemeId
     {
-        bubblegum,    // 🌸 糖果粉（默认）
+        bubblegum,    // 🌸 糖果粉
         starlight,    // 🌌 星空深蓝 + 黄星
         cyberLilac,   // 🪩 赛博紫 + 青
         tangerinePop, // 🍊 橘色波普 + 奶油

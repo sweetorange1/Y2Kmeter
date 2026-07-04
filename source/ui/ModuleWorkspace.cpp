@@ -309,7 +309,33 @@ ModuleWorkspace::ModuleWorkspace()
     // 右下角 Hide 按钮：默认"显示态"不透明
     hideBtn.setButtonText("Hide");
     hideBtn.setDimWhenIdle(false);
-    hideBtn.onClick = [this]() { setChromeVisible(! chromeVisible); };
+    hideBtn.onClick = [this]()
+    {
+        if (autoHideActive)
+        {
+            // v1.8.6：auto-hide 模式下点击 "Show" 按钮应退出 auto-hide。
+            // 先复位 autoHideActive 标志，再通过 false→true 双拍强制触发
+            // Editor 的 onChromeVisibleChanged(true) 退出路径。
+            // 注意：单次 setChromeVisible(true) 在 hover-show 状态下
+            // （chrome 已可见）会被 early return 吞掉，必须经过 false 中间态。
+            autoHideActive = false;
+            if (chromeVisible)
+            {
+                // hover-show 状态：先隐再显，触发退出路径
+                setChromeVisible(false);
+                setChromeVisible(true);
+            }
+            else
+            {
+                // 纯隐藏状态：直接显式即触发退出路径
+                setChromeVisible(true);
+            }
+        }
+        else
+        {
+            setChromeVisible(!chromeVisible);
+        }
+    };
     addAndMakeVisible(hideBtn);
 
     // 左下角：FPS 限制按钮 + 实时 FPS 标签
@@ -401,7 +427,6 @@ ModuleWorkspace::ModuleWorkspace()
     layoutPresetBox.addItem ("Default",             (int) LayoutPreset::defaultGrid);
     layoutPresetBox.addItem ("Horizontal Bar(T)",      (int) LayoutPreset::horizontalFull);
     layoutPresetBox.addItem ("Horizontal Bar(B)", (int) LayoutPreset::horizontalBottom);
-    layoutPresetBox.addItem ("Tiled",               (int) LayoutPreset::tiled);
     layoutPresetBox.setLookAndFeel (&getPinkXPLookAndFeel());
     layoutPresetBox.onChange = [this]()
     {
@@ -2149,11 +2174,11 @@ void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
     chromeVisible = shouldBeVisible;
 
     // 按钮文案 + 空闲透明行为切换
-    hideBtn.setButtonText(chromeVisible ? "Hide" : "Show");
+    //   v1.8.6：auto-hide 模式下始终显示 "Show"（点击退出 autoHide）
+    hideBtn.setButtonText((chromeVisible && ! autoHideActive) ? "Hide" : "Show");
     hideBtn.setDimWhenIdle(! chromeVisible);
 
     resized();
-    repaint();
 
     // 通知外部（Editor 会据此把顶部 TitleBar 和 × 按钮切到半透明/不透明，
     //   并同步调整顶层窗口尺寸/位置）。Editor 的回调内部会再触发若干 resized()，
@@ -2164,6 +2189,10 @@ void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
     // 过渡结束：关闭保护开关，再跑一次 resized() 让最终态的 clamp（如需要）正常执行。
     chromeTransitionActive = false;
     resized();
+
+    // repaint 必须在回调之后执行，此时 workspace 已被 Editor 正确放置到最终位置，
+    // 避免在中间态（workspace 仍盖住 title bar 区域）绘制导致的灰色遮罩残留。
+    repaint();
 }
 
 // ----------------------------------------------------------
@@ -3710,6 +3739,11 @@ void ModuleWorkspace::mouseUp (const juce::MouseEvent&)
 // ----------------------------------------------------------
 void ModuleWorkspace::mouseMove (const juce::MouseEvent& e)
 {
+    // v1.8.6：每次鼠标移动都通知外部——比 mouseEnter 更可靠（resize 后
+    //   mouseEnter 可能因 JUCE 内部 isMouseOverOrDragging 状态被跳过）。
+    //   必须放在所有 early return 之前，确保无拼豆聚焦时也能触发 hover show。
+    if (onMouseMoved) onMouseMoved();
+
     if (focusedPerlerIdx < 0 || focusedPerlerIdx >= perlerImages.size())
     {
         if (deleteBtnHovered)
@@ -3776,7 +3810,12 @@ void ModuleWorkspace::mouseMove (const juce::MouseEvent& e)
         setMouseCursor (juce::MouseCursor::NormalCursor);
 }
 
-void ModuleWorkspace::mouseExit (const juce::MouseEvent&)
+void ModuleWorkspace::mouseEnter (const juce::MouseEvent&)
+{
+    if (onMouseEntered) onMouseEntered();
+}
+
+void ModuleWorkspace::mouseExit (const juce::MouseEvent& e)
 {
     if (deleteBtnHovered)
     {
@@ -3786,6 +3825,10 @@ void ModuleWorkspace::mouseExit (const juce::MouseEvent&)
                 repaint (getDeleteBtnRect (fimg->getBounds()).expanded (2));
     }
     setMouseCursor (juce::MouseCursor::NormalCursor);
+
+    // v1.8.6：鼠标离开 workspace → 通知外部检查是否真正离开窗口
+    //   传递事件发生时的屏幕坐标（比 Desktop::getMainMouseSource() 更可靠）
+    if (onMouseExited) onMouseExited (e.getScreenPosition().toInt());
 }
 
 // ----------------------------------------------------------

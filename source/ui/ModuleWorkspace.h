@@ -301,6 +301,18 @@ public:
     // chrome 可见性变化回调（例如 Editor 订阅 → 顶部 TitleBar 做半透明）
     std::function<void(bool visible)> onChromeVisibleChanged;
 
+    // 鼠标进入 workspace 回调（v1.8.6：auto-hide 模式下鼠标悬停暂显 chrome）
+    std::function<void()> onMouseEntered;
+    // 鼠标在 workspace 内移动回调（每次 mouseMove 都触发，比 mouseEnter 更可靠）
+    std::function<void()> onMouseMoved;
+    // 鼠标离开 workspace 回调（v1.8.6：auto-hide 模式下用于检测真正离开窗口；
+    //   参数为事件发生时的鼠标屏幕坐标，比 Desktop::getMainMouseSource() 更可靠）
+    std::function<void(juce::Point<int> mouseScreenPos)> onMouseExited;
+
+    // v1.8.6：auto-hide 模式下按钮始终显示 "Show"（点击退出 autoHide）
+    void setAutoHideActive (bool active) { autoHideActive = active; hideBtn.setButtonText((chromeVisible && !autoHideActive) ? "Hide" : "Show"); }
+    bool isAutoHideActive() const noexcept { return autoHideActive; }
+
     // ======================================================
     // Chrome 切换过渡期（transition）控制
     //   · Editor 在执行 Hide/Show 前调 beginChromeTransition()，切换完成后调 endChromeTransition()
@@ -479,6 +491,7 @@ public:
     void mouseUp         (const juce::MouseEvent& e) override;
     // 聚焦图片时：监听鼠标移动以更新 × 按钮 hover 态 + 光标
     void mouseMove       (const juce::MouseEvent& e) override;
+    void mouseEnter      (const juce::MouseEvent& e) override;
     void mouseExit       (const juce::MouseEvent& e) override;
 
     // ==================================================================
@@ -556,6 +569,7 @@ private:
     //   锁定按钮切换时同步下发。本标志不参与 workspace 自己的 XML 序列化（
     //   避免与旧 layout XML 无此字段的兼容性问题），而是由 Processor 统一持久化。
     bool             layoutLocked = false;
+    bool             autoHideActive = false;  // v1.8.6：auto-hide 模式下按钮始终显示 "Show"
 
     // Chrome 切换过渡期标志（由 beginChromeTransition/endChromeTransition 设置）
     //   · true 期间，resized() 末尾的"模块越界 clamp"会被跳过，
