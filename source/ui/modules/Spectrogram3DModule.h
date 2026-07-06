@@ -8,6 +8,7 @@
 
 // ==========================================================
 // Spectrogram3DModule —— Pink XP 像素风"3D 频谱瀑布图"
+// (v1.9.4 P7: depthPalettes migrated to std::vector)
 //
 // 功能概述：
 //   * 订阅 AnalyserHub::Kind::Spectrum（复用 SpectrumModule 同一路
@@ -112,8 +113,14 @@ private:
     //   macOS 上 CoreGraphics 软光栅场景下，单次位图 blit 远快于
     //   逐层 38,100 次 fillRect + 300 次 strokePath 的分散绘制；
     //   Windows+OpenGL 场景下也减少了纹理状态切换开销。
+    // ---- P4 动态分辨率缓存 ----
+    //   canvas 对角线 ≤ 900px → 1:1 渲染；超出则反比降分辨率（下限 35%），
+    //   大幅减少大窗口下 fillRect 的总像素写入量，维持帧率稳定。
     juce::Image cached3DImage;
     bool        imageCacheDirty = true;
+    float       cachedRenderScale = 0.0f;
+    int         cachedCanvasW = -1;
+    int         cachedCanvasH = -1;
 
     // ---- P3 预计算加速表 ----
     // magToIdx: 4096 级线性幅度 → 256 级色板下标 (uint8_t)。
@@ -135,7 +142,9 @@ private:
 
     // depthPalettes: visibleRows×256 色板，已叠加深度 fade。
     //   消除每帧 19,050 次 interpolatedWith。
-    std::array<std::array<juce::Colour, kPaletteLevels>, visibleRows> depthPalettes {};
+    //   注意：使用 std::vector 而非 std::array 以避免构造函数成员初始化阶段
+    //   一次性构造 38,400 个 juce::Colour 导致 MSVC 下可能的访问冲突。
+    std::vector<std::array<juce::Colour, kPaletteLevels>> depthPalettes;
     int  depthPalettesRows  = 0;    // 当前 depthPalettes 对应的有效行数
     bool depthPalettesDirty = true;
 

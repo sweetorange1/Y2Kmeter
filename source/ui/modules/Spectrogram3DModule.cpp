@@ -7,6 +7,7 @@
 
 // ==========================================================
 // Spectrogram3DModule
+// (force rebuild: v1.9.4 P7 canvas bg cache)
 // ==========================================================
 
 Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
@@ -51,6 +52,7 @@ Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
     // 预分配历史缓冲 + 幅度→色板 LUT
     buildMagLut();
     ensureHistory (defaultHistoryLen);
+    depthPalettes.resize (visibleRows);
 }
 
 Spectrogram3DModule::~Spectrogram3DModule()
@@ -307,12 +309,16 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 }
 
 // ----------------------------------------------------------
-// paintContent —— 离屏 Image 缓存版
+// paintContent —— 离屏 Image 缓存版（P2+P4）
 //
 //   P2 性能优化：将 3D 视图渲染到离屏 juce::Image，paintContent
-//   只需一次 g.drawImageAt。无论 macOS CoreGraphics 软光栅还是
+//   只需一次 g.drawImage。无论 macOS CoreGraphics 软光栅还是
 //   Windows OpenGL，单次位图 blit 都远快于逐层 38,100 次 fillRect
 //   + 300 次 strokePath 的分散绘制。
+//
+//   P4 动态分辨率：当 canvas 对角线超过 900px 时，renderToImage
+//   以低于 1:1 的分辨率渲染，paintContent 用 drawImage 放大到屏上
+//   尺寸。像素风 UI 对此类上采样高度宽容，主观质量几乎无损。
 // ----------------------------------------------------------
 void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
@@ -328,17 +334,19 @@ void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> 
     const int effLen = juce::jmax (1, frameCount);
     if (effLen <= 0) return;
 
-    // 离屏 Image 缓存：仅在尺寸变化或数据更新时重建
+    // 离屏 Image 缓存：仅在数据脏或 canvas 尺寸变化时重建
     if (imageCacheDirty || cached3DImage.isNull()
-        || cached3DImage.getWidth()  != canvas.getWidth()
-        || cached3DImage.getHeight() != canvas.getHeight())
+        || cachedCanvasW != canvas.getWidth()
+        || cachedCanvasH != canvas.getHeight())
     {
         renderToImage (canvas);
         imageCacheDirty = false;
     }
 
-    // 单次 blit 替代逐层 38,100 次 fillRect + 300 次 strokePath
-    g.drawImageAt (cached3DImage, canvas.getX(), canvas.getY());
+    // P4: 将降分辨率 Image 放大到 canvas 尺寸（单次 drawImage 完成上采样 blit）
+    g.drawImage (cached3DImage,
+                 canvas.getX(), canvas.getY(), canvas.getWidth(), canvas.getHeight(),
+                 0, 0, cached3DImage.getWidth(), cached3DImage.getHeight());
 
     // 轴标签浮绘在 3D 视图上方（不进入 Image，保证文字清晰度）
     drawAxisLabels (g, plot);
@@ -396,12 +404,17 @@ void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
 }
 
 // ----------------------------------------------------------
-// renderToImage —— 将完整 3D 视图渲染到离屏 Image（P3 优化版）
+// renderToImage —— 将完整 3D 视图渲染到离屏 Image（P3+P4 优化版）
 //
-//   相对于 P2 版本（已用离屏 Image），P3 新增三项优化：
+//   P3 优化（已内化）：
 //     1) magToIdx LUT     → 消除 19,200 次 gainToDecibels/log10
 //     2) depthPalettes    → 消除 19,050 次 interpolatedWith
 //     3) Image 复用       → 不再每帧 malloc
+//
+//   P4 动态分辨率：
+//     canvas 对角线 ≤ 900px → 1:1 渲染（零质量损失）
+//     超出则 scale = 900/diag，下限 35%，大幅降低大窗口 fillRect 像素量
+//     所有坐标通过 AffineTransform::scale 自动缩放到实际 Image，代码无需改动
 // ----------------------------------------------------------
 void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
 {
@@ -412,12 +425,22 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     const int effLen = juce::jmax (1, frameCount);
     if (effLen <= 0) return;
 
+    // P4: 动态渲染分辨率 —— 对角线 ≤ 900px 时 1:1，超出反比降采样
+    const float diag  = std::sqrt ((float) (cw * cw + ch * ch));
+    const float scale = juce::jlimit (0.35f, 1.0f, 900.0f / juce::jmax (900.0f, diag));
+    cachedRenderScale = scale;
+    cachedCanvasW     = cw;
+    cachedCanvasH     = ch;
+
+    const int rw = juce::jmax (8, (int) ((float) cw * scale));
+    const int rh = juce::jmax (8, (int) ((float) ch * scale));
+
     // 复用 Image：尺寸匹配时只清空，避免 malloc
     if (cached3DImage.isNull()
-        || cached3DImage.getWidth()  != cw
-        || cached3DImage.getHeight() != ch)
+        || cached3DImage.getWidth()  != rw
+        || cached3DImage.getHeight() != rh)
     {
-        cached3DImage = juce::Image (juce::Image::ARGB, cw, ch, true);
+        cached3DImage = juce::Image (juce::Image::ARGB, rw, rh, true);
     }
     else
     {
@@ -425,8 +448,11 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     }
 
     juce::Graphics ig (cached3DImage);
+    // P4: 缩放变换 —— 后续所有 fillRect/strokePath 用全尺寸 cw×ch 坐标，
+    //     自动等比缩放到 rw×rh 的实际 Image 像素
+    ig.addTransform (juce::AffineTransform::scale (scale));
 
-    // 底衬（Image-local 坐标）
+    // 底衬（Image-local 坐标 → 由变换转为 scaled 坐标）
     juce::Rectangle<int> imgCanvas (0, 0, cw, ch);
     drawBackground (ig, imgCanvas);
 
@@ -530,8 +556,12 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
         const double logB = std::log10 (fMax);
         const double t    = (std::log10 ((double) l.hz) - logA) / juce::jmax (1.0e-9, logB - logA);
 
-        // 鼠标位置 = canvas 左边缘 + t * canvasW
-        const int x = canvas.getX() + (int) std::round (t * (double) canvas.getWidth());
+        // 频率轴在屏幕上的实际范围：
+        //   起点 = canvas.getX() + projOriginX
+        //   宽度 = projBinWidth × (numBins-1)（与 recomputeProjection 的 freqTotalW 等价）
+        // 不使用 canvas 全宽，因为深度偏移占用了剩余 ~18% 宽度
+        const float freqAxisW = projBinWidth * (float) (numBins - 1);
+        const int x = canvas.getX() + (int) std::round ((double) projOriginX + t * (double) freqAxisW);
         const int y = canvas.getBottom() - 13;
 
         g.setColour (PinkXP::ink.withAlpha (0.55f));
@@ -549,10 +579,10 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
         g.fillRect (canvas.getRight() - ow - 2,       canvas.getBottom() - oh - 2, ow, oh);
 
         g.setColour (PinkXP::hl);
-        g.drawText (juce::String::fromUTF8 ("\xe2\x86\x96 older"),
+        g.drawText (juce::String::fromUTF8 ("\xe2\x86\x97 older"),
                     canvas.getX() + 2, canvas.getY() + 2, ow, oh,
                     juce::Justification::centred, false);
-        g.drawText (juce::String::fromUTF8 ("newer \xe2\x86\x98"),
+        g.drawText (juce::String::fromUTF8 ("newer \xe2\x86\x99"),
                     canvas.getRight() - ow - 2, canvas.getBottom() - oh - 2, ow, oh,
                     juce::Justification::centred, false);
     }

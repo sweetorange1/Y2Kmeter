@@ -413,6 +413,7 @@ ModuleWorkspace::ModuleWorkspace()
     gridBtn.onClick = [this]()
     {
         gridOverlayVisible = gridBtn.getToggleState();
+        canvasBgCacheDirty = true;  // P7：Grid 叠加线变化 → 下次 paint 重建缓存
         repaint();
         notifyLayoutChanged();
     };
@@ -1491,42 +1492,85 @@ void ModuleWorkspace::mouseDoubleClick(const juce::MouseEvent& e)
 // ----------------------------------------------------------
 // 绘制 & 布局
 // ----------------------------------------------------------
+
+// P7 · 画布背景缓存重建：
+//   在 chromeVisible 状态下，将 drawSunken(canvasOuter) + 网格点阵 + Grid 叠加线
+//   烘焙到一张离屏 Image（尺寸 = canvasOuter 大小）。缓存仅在下列情况失效重建：
+//     · canvasOuter 尺寸变化（resize）
+//     · gridOverlayVisible 切换
+//     · 主题切换（PinkXP 内联配色变量更新）
+//   paint() 中仅需一次 drawImageAt，将每帧 13000+ 次 fillRect(1,1) 缩减为 1 次 blit。
+void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
+{
+    auto canvasOuter = getLocalBounds().withTrimmedBottom(toolbarHeight);
+    const int w = canvasOuter.getWidth();
+    const int h = canvasOuter.getHeight();
+    if (w <= 0 || h <= 0)
+        return;
+
+    const int currentThemeId = static_cast<int>(PinkXP::getCurrentThemeId());
+    if (! canvasBgCacheDirty
+        && canvasBgCache.isValid()
+        && canvasBgCache.getWidth()  == w
+        && canvasBgCache.getHeight() == h
+        && canvasBgCacheThemeId == currentThemeId)
+        return;
+
+    canvasBgCache = juce::Image (juce::Image::ARGB, w, h, true);
+    juce::Graphics cg (canvasBgCache);
+
+    // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
+    PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
+                        PinkXP::content.withAlpha (0.70f));
+
+    // 2) 网格点阵 —— 转换为 Image-local 坐标
+    auto canvas = getCanvasArea();
+    auto localCanvas = juce::Rectangle<int>(
+        canvas.getX() - canvasOuter.getX(),
+        canvas.getY() - canvasOuter.getY(),
+        canvas.getWidth(),
+        canvas.getHeight());
+
+    cg.setColour (PinkXP::pink200.withAlpha (0.35f));
+    for (int y = localCanvas.getY(); y < localCanvas.getBottom(); y += gridSize)
+    {
+        for (int x = localCanvas.getX(); x < localCanvas.getRight(); x += gridSize * 2)
+            cg.fillRect (x, y, 1, 1);
+    }
+
+    // 3) Grid 叠加线
+    if (gridOverlayVisible)
+    {
+        const int major = gridSize * 8;
+
+        cg.setColour (PinkXP::pink300.withAlpha (0.22f));
+        for (int x = localCanvas.getX(); x <= localCanvas.getRight(); x += gridSize)
+            cg.fillRect (x, localCanvas.getY(), 1, localCanvas.getHeight());
+        for (int y = localCanvas.getY(); y <= localCanvas.getBottom(); y += gridSize)
+            cg.fillRect (localCanvas.getX(), y, localCanvas.getWidth(), 1);
+
+        cg.setColour (PinkXP::pink500.withAlpha (0.30f));
+        for (int x = localCanvas.getX(); x <= localCanvas.getRight(); x += major)
+            cg.fillRect (x, localCanvas.getY(), 1, localCanvas.getHeight());
+        for (int y = localCanvas.getY(); y <= localCanvas.getBottom(); y += major)
+            cg.fillRect (localCanvas.getX(), y, localCanvas.getWidth(), 1);
+    }
+
+    canvasBgCacheDirty   = false;
+    canvasBgCacheThemeId = currentThemeId;
+}
+
 void ModuleWorkspace::paint(juce::Graphics& g)
 {
     if (chromeVisible)
     {
-        // 工作区背景：凹陷 + 半透明内容色（70% 不透明，让桌面纹理透过来）
-        auto canvasOuter = getLocalBounds().withTrimmedBottom(toolbarHeight);
-        PinkXP::drawSunken(g, canvasOuter, PinkXP::content.withAlpha(0.70f));
-
-        // 网格点（8px 间距，低透明度淡粉点阵）
-        g.setColour(PinkXP::pink200.withAlpha(0.35f));
-        auto canvas = getCanvasArea();
-        for (int y = canvas.getY(); y < canvas.getBottom(); y += gridSize)
+        // P7 · 画布背景（drawSunken + 网格点阵 + Grid 叠加线）使用离屏 Image 缓存。
+        //   每帧仅一次 drawImageAt，避免 ~13000 次 fillRect(1,1) 的循环绘制。
+        rebuildCanvasBgCacheIfNeeded();
+        if (canvasBgCache.isValid())
         {
-            for (int x = canvas.getX(); x < canvas.getRight(); x += gridSize * 2)
-                g.fillRect(x, y, 1, 1);
-        }
-
-        // Grid 叠加：按下 toolbar 的 Grid 按钮后，在 canvas 上叠加 8px 对齐网格线。
-        //   · 主网格（8px）用较淡的粉线；每 8 条（即 64px）画一条稍深的"主分隔线"，
-        //     方便用户在拖动拼豆贴画时做大致的距离估算。
-        //   · 网格绘制在 canvas 底图上、拼豆贴画之前，模块与贴画仍会自然覆盖它。
-        if (gridOverlayVisible)
-        {
-            const int major = gridSize * 8; // 64px
-            // 次网格：较淡的粉线
-            g.setColour (PinkXP::pink300.withAlpha (0.22f));
-            for (int x = canvas.getX(); x <= canvas.getRight(); x += gridSize)
-                g.fillRect (x, canvas.getY(), 1, canvas.getHeight());
-            for (int y = canvas.getY(); y <= canvas.getBottom(); y += gridSize)
-                g.fillRect (canvas.getX(), y, canvas.getWidth(), 1);
-            // 主网格：每 64px 一条稍深的线
-            g.setColour (PinkXP::pink500.withAlpha (0.30f));
-            for (int x = canvas.getX(); x <= canvas.getRight(); x += major)
-                g.fillRect (x, canvas.getY(), 1, canvas.getHeight());
-            for (int y = canvas.getY(); y <= canvas.getBottom(); y += major)
-                g.fillRect (canvas.getX(), y, canvas.getWidth(), 1);
+            auto canvasOuter = getLocalBounds().withTrimmedBottom(toolbarHeight);
+            g.drawImageAt (canvasBgCache, canvasOuter.getX(), canvasOuter.getY());
         }
 
         // 底部工具栏：凸起面板（深色主题下也保持浅色底，让文字/色票可读）
@@ -2163,11 +2207,10 @@ void ModuleWorkspace::resized()
 
     // 按钮始终保持在最上层（避免被模块窗口遮挡）
     hideBtn.toFront(false);
-}
 
-// ----------------------------------------------------------
-// Chrome（白色底框 + 底部控制区）显隐控制
-// ----------------------------------------------------------
+    // P7：窗口尺寸变化 → 画布背景缓存下次 paint 时重建
+    canvasBgCacheDirty = true;
+}
 void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
 {
     if (chromeVisible == shouldBeVisible) return;
@@ -2609,6 +2652,7 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
     {
         gridOverlayVisible = (bool) tree.getProperty ("gridVisible");
         gridBtn.setToggleState (gridOverlayVisible, juce::dontSendNotification);
+        canvasBgCacheDirty = true;  // P7：从布局恢复后确保缓存含正确的 grid 叠加状态
     }
 
     // 恢复全局：分析输入增益（dB）

@@ -710,7 +710,7 @@ namespace PinkXP
             //   pink50..pink700 在此主题下被"重新解读"为一组 Luna 蓝色阶
             //   （从极浅 sky → 经典 Luna 深蓝），所有使用 pink* 色的 UI
             //   控件（EQ 格子、Meter、曲线等）自动获得 Luna 蓝配色。
-            //   桌面纹理用 bigDots 模拟 XP 经典 Bliss 草地/蓝天的绿色波点。
+            //   桌面纹理用 bigDots 模拟 XP 经典 Bliss 天空蓝的波点。
             {
                 ThemeId::winXP,
                 "Win XP Luna",
@@ -726,8 +726,8 @@ namespace PinkXP
                 juce::Colour(0xff0a1e3a),                           // ink
                 juce::Colour(0xff0a66b0),                           // sel (XP 标题栏深 Luna 蓝)
                 juce::Colour(0xffffffff),                           // selInk
-                juce::Colour(0xff3a7d3a),                           // desktop (草地绿)
-                juce::Colour(0xff6aa85f),                           // desktop2 (淡草绿)
+                juce::Colour(0xff3a649c),                           // desktop (天空蓝)
+                juce::Colour(0xff6e97c8),                           // desktop2 (淡天空蓝)
                 juce::Colour(0xfff7fbff),                           // content (near-white 画布)
                 juce::Colour(0xffe6effa),                           // btnFace (XP 按钮灰蓝)
                 juce::Colour(0xff2d6fcd),                           // swatch (色票 Luna 蓝)

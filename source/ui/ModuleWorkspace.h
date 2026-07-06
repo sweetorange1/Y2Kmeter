@@ -442,6 +442,10 @@ public:
     void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
 
+    // P7：将 canvas 底色的 drawSunken + 网格点阵 + Grid 叠加线烘焙到离屏 Image 缓存，
+    //   避免每帧 paint() 中 ~13000 次 fillRect(1,1) 的循环绘制。
+    void rebuildCanvasBgCacheIfNeeded();
+
     // 双击 / 右键空白区 → 弹出 "添加模块" 菜单
     void mouseDown       (const juce::MouseEvent& e) override;
     void mouseDoubleClick(const juce::MouseEvent& e) override;
@@ -628,6 +632,15 @@ private:
     //   · 持久化到 layout tree，以便恢复上次打开时的状态
     juce::TextButton gridBtn;
     bool             gridOverlayVisible = false;
+
+    // P7 · 画布背景缓存（性能优化）：
+    //   · 将 canvas 的 drawSunken + 网格点阵 + Grid 叠加线烘焙到离屏 Image，
+    //     每帧 paint() 只需一次 drawImageAt，避免 ~13000 次 fillRect(1,1)。
+    //   · resize / Grid toggle / 主题切换时标脏重建。
+    //   · 缓存键：尺寸 + gridOverlayVisible + 当前主题 ID。
+    juce::Image canvasBgCache;
+    bool        canvasBgCacheDirty   = true;
+    int         canvasBgCacheThemeId = -1;
 
     // 布局预设下拉（位于 Grid 按钮左侧，中间用一条竖直分割线和 Grid 分开）
     //   · 样式：与 audioSourceBox 一致 —— PinkXP LookAndFeel 下的 ComboBox

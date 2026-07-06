@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "1.9.0"
+#define MyAppVersion   "1.9.4"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -71,7 +71,7 @@ Type: filesandordirs; Name: "{code:GetVst3Dir}\{#MyPluginBundle}"; Components: v
 ; -----------------------------------------------------------------------
 [Files]
 ; Standalone EXE
-Source: "cmake-build-release\Y2Kmeter_artefacts\Release\Standalone\{#MyAppExeName}"; \
+Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone\{#MyAppExeName}"; \
     DestDir: "{app}"; \
     Flags: ignoreversion; \
     Components: standalone
@@ -84,7 +84,7 @@ Source: "assets\Tamagotchi\*"; \
 
 ; VST3（整个 .vst3 bundle 目录递归复制）
 ; DestDir 走 [Code] 段 GetVst3Dir —— 用户在独立向导页里选择的路径
-Source: "cmake-build-release\Y2Kmeter_artefacts\Release\VST3\{#MyPluginBundle}\*"; \
+Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\VST3\{#MyPluginBundle}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: vst3
