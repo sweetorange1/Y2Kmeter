@@ -2120,8 +2120,13 @@ void ModuleWorkspace::resized()
     //   出 toolbar 的 36px，但窗口高度还未被放大 62px），如果此时 clamp 会把
     //   模块高度永久夹小。切换结束后 Editor 会再触发一次 resized，clamp 会在
     //   那时以正确尺寸执行。
+    //
+    // ⚠ 布局锁定保护（v1.9.0）：
+    //   layoutLocked 为 true 时（L 按钮按下），窗口尺寸应被 freeze，不应发生
+    //   resize；但作为防御层，若因 auto-hide resizeLimits 竞态等原因意外触发
+    //   resized()，跳过模块 clamp 以保护模块尺寸不被意外压缩。
     auto canvas = getCanvasArea();
-    if (! chromeTransitionActive)
+    if (! chromeTransitionActive && ! isLayoutLocked())
     {
         for (auto* m : modules)
         {

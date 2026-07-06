@@ -69,7 +69,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v1.9.0");
+        const int versionW = versionFont.getStringWidth ("v1.9.1");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -110,7 +110,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.9.0";
+const juce::String versionText = "v1.9.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -603,6 +603,24 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
                                          juce::jmax (savedResizeMaxH, savedTopBoundsBeforeHide.getHeight()));
                     }
 
+                    // v1.9.0: 若处于布局锁定态，shrink 路径的 applyLayoutLocked 会把
+                    //   顶层 ResizableWindow 的 limits 锁死在收缩后的尺寸上。此处
+                    //   必须在 setBounds 扩展窗口前同样放松 RW 层的 limits，否则
+                    //   native 窗口受 OS 级 constrainer 约束无法扩回原尺寸，
+                    //   导致模块渲染区域被压缩。扩展完成后再由后续的
+                    //   applyLayoutLocked(true) 重新锁到当前（扩展后）尺寸。
+                    if (layoutLocked)
+                    {
+                        if (auto* rw = dynamic_cast<juce::ResizableWindow*> (topComp))
+                        {
+                            rw->setResizeLimits (
+                                juce::jmin (savedResizeMinW, savedTopBoundsBeforeHide.getWidth()),
+                                juce::jmin (savedResizeMinH, savedTopBoundsBeforeHide.getHeight()),
+                                juce::jmax (savedResizeMaxW, savedTopBoundsBeforeHide.getWidth()),
+                                juce::jmax (savedResizeMaxH, savedTopBoundsBeforeHide.getHeight()));
+                        }
+                    }
+
                     // 2) 直接还原完整 bounds（x/y/w/h 全部等于 Hide 前快照）
                     topComp->setBounds (savedTopBoundsBeforeHide);
 
@@ -663,6 +681,17 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         // 窗口缩放路径中 topComp->setBounds 已触发一次，这里再调一次确保最终态正确。
         resized();
         repaint();
+
+        // v1.9.0 修复：shrink/expand 代码块会放宽顶层 ResizableWindow 的
+        //   resize limits（rw->setResizeLimits）以让窗口成功缩小/放大。
+        //   但若当前处于布局锁定态（L 按钮按下），放宽后的 limits 会绕过锁定，
+        //   导致用户即使锁定状态下也能拉动窗口边缘调整大小。
+        //   此处在 resize 完成后重新调用 applyLayoutLocked(true)，
+        //   将 limits 重新夹紧到当前窗口尺寸，恢复 lock 对 resize 的约束。
+        //   注意：只有当 layoutLocked=true 且确实发生了 shrink/expand 时才需要；
+        //   permanent show（退出 auto-hide）路径中 layoutLocked 已被设为 false。
+        if (layoutLocked && canResizeWindow && (shouldShrink || shouldExpand))
+            applyLayoutLocked (true, /*initial*/ false);
 
         // auto-hide 守卫：shouldShrink 后在窗口 resize 完成后设置标志，因此
         //   resize 引发的虚假 mouseEnter 不会触发。mouseExit 无条件清除，
@@ -1711,7 +1740,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v1.9.0";
+const juce::String versionText = "v1.9.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1926,6 +1955,14 @@ void Y2KmeterAudioProcessorEditor::parentHierarchyChanged()
     if (topLevelExitWatcher != nullptr && getParentComponent() == nullptr)
         topLevelExitWatcher.reset();
 
+    // v1.9.0：同理，Editor 从窗口树移除时释放 workspace 嵌套子组件监听器。
+    if (autoHideChildWatcher != nullptr && getParentComponent() == nullptr)
+    {
+        if (workspace != nullptr)
+            workspace->removeMouseListener (autoHideChildWatcher.get());
+        autoHideChildWatcher.reset();
+    }
+
     juce::AudioProcessorEditor::parentHierarchyChanged();
 }
 
@@ -2003,6 +2040,48 @@ void Y2KmeterAudioProcessorEditor::visibilityChanged()
             };
             top->addMouseListener (topLevelExitWatcher.get(), false);
         }
+    }
+
+    // v1.9.0：注册 workspace 嵌套子组件鼠标监听器（修复 auto-hide 下模块上鼠标事件无法
+    //   触发 auto-show/hide 的问题）。addMouseListener 第二个参数 true 表示接收 workspace
+    //   所有嵌套子组件（ModulePanel/TamagotchiModule 等）的鼠标事件。
+    if (autoHideChildWatcher == nullptr && workspace != nullptr)
+    {
+        autoHideChildWatcher = std::make_unique<AutoHideChildWatcher>();
+
+        // mouseMove / mouseEnter：auto-hide 模式下鼠标在任何子组件上移动时触发 auto-show。
+        //   复用 suppressAutoShowCounter 和 autoHideNeedsExitFirst 守卫。
+        autoHideChildWatcher->onMouseActivity = [this](const juce::MouseEvent& e)
+        {
+            (void) e;
+            if (suppressAutoShowCounter > 0) return;
+            if (autoHideNeedsExitFirst) return;
+            if (autoHideMode && workspace != nullptr && ! workspace->isChromeVisible())
+            {
+                temporaryChromeShow = true;
+                workspace->setChromeVisible (true);
+                temporaryChromeShow = false;
+            }
+        };
+
+        // mouseExit：鼠标从任何子组件（含模块）离开 workspace 时，检查是否真正
+        //   离开了顶层窗口。若是，则触发 auto-hide 并清零守卫。
+        autoHideChildWatcher->onMouseLeave = [this](const juce::MouseEvent& e)
+        {
+            if (! autoHideMode || workspace == nullptr) return;
+            auto* top = getTopLevelComponent();
+            if (top == nullptr) return;
+            const auto mouseScreen = e.getScreenPosition().toInt();
+            const auto topScreenBounds = (top == this) ? getScreenBounds() : top->getScreenBounds();
+            if (! topScreenBounds.contains (mouseScreen))
+            {
+                if (workspace->isChromeVisible())
+                    workspace->setChromeVisible (false);
+                autoHideNeedsExitFirst = false;
+            }
+        };
+
+        workspace->addMouseListener (autoHideChildWatcher.get(), true);
     }
 }
 

@@ -365,5 +365,29 @@ private:
     };
     std::unique_ptr<TopLevelExitWatcher> topLevelExitWatcher;
 
+    // v1.9.0：workspace 嵌套子组件鼠标监听器（修复 auto-hide 下模块上的鼠标事件无法触发
+    //   auto-show/hide 的问题）。
+    //   · ModulePanel/TamagotchiModule 是 workspace 的子组件，mouseMove 只发给最深子组件
+    //     不向上传播 → workspace.onMouseMoved 对模块区域无效。
+    //   · 此监听器以 addMouseListener(workspace, true) 注册，第二个参数 true 表示接收
+    //     workspace 所有嵌套子组件的鼠标事件（包括 ModulePanel 和 TamagotchiModule）。
+    //   · onMouseMove/Enter：触发 auto-show；onMouseExit：触发 auto-hide。
+    class AutoHideChildWatcher : public juce::MouseListener
+    {
+    public:
+        std::function<void(const juce::MouseEvent&)> onMouseActivity; // mouseMove / mouseEnter
+        std::function<void(const juce::MouseEvent&)> onMouseLeave;    // mouseExit
+        void mouseMove  (const juce::MouseEvent& e) override { if (onMouseActivity) onMouseActivity(e); }
+        void mouseEnter (const juce::MouseEvent& e) override { if (onMouseActivity) onMouseActivity(e); }
+        void mouseExit  (const juce::MouseEvent& e) override { if (onMouseLeave)   onMouseLeave(e); }
+        void mouseDown      (const juce::MouseEvent&) override {}
+        void mouseUp        (const juce::MouseEvent&) override {}
+        void mouseDrag      (const juce::MouseEvent&) override {}
+        void mouseDoubleClick(const juce::MouseEvent&) override {}
+        void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override {}
+        void mouseMagnify   (const juce::MouseEvent&, float) override {}
+    };
+    std::unique_ptr<AutoHideChildWatcher> autoHideChildWatcher;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };
