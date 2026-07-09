@@ -34,6 +34,7 @@ UsePreviousAppDir=no
 DisableProgramGroupPage=yes
 DisableDirPage=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=assets\icon.ico
 
 ; -----------------------------------------------------------------------
 ; 关键：升级安装时自动关闭占用中的 Y2Kmeter.exe，避免"旧文件未被新文件覆盖"

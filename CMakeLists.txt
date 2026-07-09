@@ -642,6 +642,12 @@ if (WIN32 AND TARGET Y2Kmeter_Standalone)
     VERBATIM
   )
 
+  # EXTERNAL_OBJECT 告诉 CMake 这个 .res 已经是编译好的对象文件，
+  # 应直接作为链接器输入（而非再次编译），确保图标正确嵌入 EXE。
+  set_source_files_properties("${Y2KM_APP_ICON_RES}" PROPERTIES
+    EXTERNAL_OBJECT TRUE
+    GENERATED TRUE
+  )
   target_sources(Y2Kmeter_Standalone PRIVATE "${Y2KM_APP_ICON_RES}")
 endif()
 
