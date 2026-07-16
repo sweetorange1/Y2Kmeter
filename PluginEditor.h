@@ -389,5 +389,29 @@ private:
     };
     std::unique_ptr<AutoHideChildWatcher> autoHideChildWatcher;
 
+    // ================================================================
+    // v1.9.x：新手引导（仅 Standalone 模式生效，插件宿主模式忽略）
+    //   · step_hidden:      不显示引导
+    //   · step1_rightClick: 右键点击画布添加拓麻歌子
+    //   · step2_playAudio:  播放音频孵化宠物蛋
+    //   · tutorialWasSkipped: 用户在引导期间切换了非 default 预设 → 跳过
+    // ================================================================
+    enum class TutorialStep { hidden, step1_rightClick, step1_menuOpened, step2_playAudio };
+    TutorialStep tutorialStep = TutorialStep::hidden;
+    bool tutorialWasSkipped = false;  // 切换预设导致跳过，切回 default 时重新触发
+
+    // 新手引导覆盖层（全屏半透明 + 聚光灯 + Y2K 气泡提示）
+    //   完整定义在 PluginEditor.cpp 中（与 ChromeHiddenOverlay 同理）
+    class TutorialOverlay;
+    std::unique_ptr<TutorialOverlay> tutorialOverlay;
+
+    // 新手引导流程控制
+    void startTutorial();                           // 启动引导 STEP 1
+    void advanceTutorialStep2();                    // STEP 1 → STEP 2
+    void completeTutorial();                        // STEP 2 完成，标记 tutorialCompleted
+    void skipTutorial();                            // 用户切换预设时跳过引导
+    void dismissTutorialOverlay();                  // 只隐藏覆盖层，不改变完成状态
+    void checkTutorialStep2Condition();             // timer 中轮询：蛋是否孵化
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };

@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`1.9.4`）
+- **产品名**：`Y2Kmeter` （版本：`1.9.7`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -1260,13 +1260,267 @@ I:/Y2KMeter/
     │       ├── SpectrumModule / PhaseModule / DynamicsModule
     │       ├── WaveformModule / SpectrogramModule / Spectrogram3DModule（v1.8.6 新增 3D 瀑布图）
     │       ├── FineSplitModules（7 类细粒度模块 + VuMeter，v1.8.4 移除 OscilloscopeChannel）
-    │       └── TamagotchiModule（.cpp 82KB，含状态机）
+│       └── TamagotchiModule（.cpp 87KB，含状态机）
     └── standalone/
         ├── Y2KStandaloneApp.cpp      ─ 自定义 JUCEApplication (69KB)
         ├── WasapiLoopbackCapture.h/.cpp   ─ Windows 系统输出采集
         ├── MacDesktopAudioCapture.h/.mm   ─ macOS ScreenCaptureKit
         └── AudioDumpRecorder.h/.cpp        ─ macOS 调试用音频转储
 ```
+
+---
+
+### 6.24 v1.9.5 Tamagotchi 模块功能增强
+
+v1.9.5 聚焦于 Tamagotchi 模块的用户体验增强，包含三个子功能。
+
+#### ① Tamagotchi 始终置顶（z-order always-on-top）
+
+- **需求**：Tamagotchi 模块始终显示在所有普通模块之上，不因用户聚焦其他模块而沉到底层。
+- **根因**：`ModulePanel::mouseDown()` 对所有模块统一调用 `toFront(true)` 将自己移到 z-order 最顶层。用户点击其他模块时，被点击的模块置顶，Tamagotchi 被压在下面。
+- **方案**：在 `ModuleWorkspace::hookPanel()` 的 `onBroughtToFront` 回调中，`hideBtn.toFront(false)` 之前插入 Tamagotchi 置顶逻辑 —— 遍历 `modules` 数组，将所有 `ModuleType::tamagotchi` 类型的模块调用 `toFront(false)` 抬到最上层。
+- **最终 z-order（从顶到底）**：`hideBtn` → Tamagotchi 模块 → 当前聚焦的普通模块 → 其余模块。
+- **关键代码**：[ModuleWorkspace.cpp](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) `hookPanel()` 中 `onBroughtToFront` 回调，`hideBtn.toFront(false)` 之前新增的 for 循环。
+
+#### ② 切换预设时保留 Tamagotchi 模块
+
+- **需求**：用户切换布局预设时，Tamagotchi 模块不被清除，而是保留状态并重新定位到 canvas 右下角。
+- **方案**：在 `applyLayoutPreset()` 中做了两步改动：
+  1. **清除前保存**：在 `workspace->clearAllModules()` 之前，遍历所有模块找出 Tamagotchi，保存 `roleName` / `hunger` / `health` 到 `juce::Array<TamagotchiState>`。
+  2. **布局后重建**：在所有预设专属的模块播种完成后、`processor.setSavedLayoutXml()` 之前，遍历保存的状态重新 `make_unique<TamagotchiModule>()` → `restorePersistentState()` → 定位到 canvas 右下角（padding=8px）→ `workspace->addModule()`。
+  - 没有 Tamagotchi 时 `tamagotchiStates` 为空数组，零副作用。
+  - Preset 1（瀑布）、Preset 2/3（横向铺满）均适用。
+- **关键代码**：[PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) `applyLayoutPreset()` 函数开头新增的保存逻辑 + 函数末尾所有预设分支结束后新增的重建逻辑。
+
+#### ③ 删除二次确认弹窗（TamagotchiConfirmOverlay）
+
+- **需求**：点击 Tamagotchi 右上角 × 按钮时弹出确认对话框，防止误删除；弹窗样式参考模块的 `PinkXP::drawRaised` 凸起边框。
+- **架构设计**：弹窗不作为模块内部绘制（否则会受模块边界裁剪），而是作为 **workspace 层级的独立覆盖层组件** `TamagotchiConfirmOverlay`（继承 `juce::Component`），通过 `workspace->addAndMakeVisible()` 挂载到 workspace 上。
+  - **边界处理**：覆盖层的 `setBounds` 取"模块区域 ∪ 对话框区域"的并集，保证最小 160×90 的弹窗始终完整渲染。
+  - **遮罩策略**：仅对模块区域施加半透明黑色遮罩（`black.withAlpha(0.55)`），不遮挡 workspace 其他内容。
+- **交互流程**：
+  ```
+  mouseUp × 按钮 → showConfirmOverlay() 创建覆盖层
+    ├─ 点击 OK       → onConfirm → onCloseClicked → 模块删除
+    ├─ 点击 Cancel   → onDismiss → 覆盖层销毁
+    ├─ 点击对话框外   → onDismiss
+    └─ 切到其他模块   → setFocusVisual(false) → dismissConfirmOverlay()
+  ```
+- **对话框样式**：PinkXP 凸起边框 + 粉红标题栏 `"r u sure?"` + Y2K 风格文案 `"say bye to ur pet? :(\ncan't undo this~"` + `Cancel` / `OK` 双按钮（最大 55px 宽，dialog 保底 160×90）。
+- **重要：按钮点击在 `onBroughtToFront` 之前处理**：`TamagotchiModule::mouseDown()` 中已将 `confirmOverlay` 检查移到 `toFront()`/`onBroughtToFront()`/`setFocusVisual()` 之前（否则 `onBroughtToFront → clearTamagotchiFocusVisuals` 会把其他 Tamagotchi 的覆盖层也清掉，且若当前模块的 `setFocusVisual(false)` 被调用也会关闭弹窗）。
+- **涉及文件**：
+  - [TamagotchiModule.h](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) — 新增 `TamagotchiConfirmOverlay` 类 + `confirmOverlay` 成员 + `showConfirmOverlay()`/`dismissConfirmOverlay()`
+  - [TamagotchiModule.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) — `TamagotchiConfirmOverlay` 完整实现（paint/mouseDown/mouseMove/dismiss/getButtonBounds/hitTestButton）+ `showConfirmOverlay()`/`dismissConfirmOverlay()`
+
+#### 改动文件清单（v1.9.5）
+
+| 文件 | 改动 |
+|------|------|
+| `ModuleWorkspace.cpp` | `hookPanel()` 中 `onBroughtToFront` 回调新增 Tamagotchi 置顶循环 |
+| `PluginEditor.cpp` | `applyLayoutPreset()` 新增 Tamagotchi 状态保存+重建逻辑 |
+| `TamagotchiModule.h` | 新增 `TamagotchiConfirmOverlay` 类声明 + 成员/方法 |
+| `TamagotchiModule.cpp` | `TamagotchiConfirmOverlay` 完整实现 + mouseUp/mouseDown/setFocusVisual 适配 |
+| `CMakeLists.txt` | 版本号 1.9.4 → 1.9.5 |
+| `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
+
+#### 后续开发注意点
+
+| 注意项 | 说明 |
+|--------|------|
+| **`onBroughtToFront` 回调中不可操作已删除的 Tamagotchi** | `clearTamagotchiFocusVisuals()` 和 Tamagotchi 置顶循环都遍历 `modules`。如果某个 Tamagotchi 刚被 `removeModule()` 但回调尚未返回，遍历可能悬垂。目前 `removeModule` 同步 delete，回调链在 mouseDown 内部完成，暂无问题，但未来如有异步删除需加防护。 |
+| **`TamagotchiConfirmOverlay` 生命周期管理** | 覆盖层通过 `confirmOverlay`（`unique_ptr`）管理。务必确保覆盖层在以下几种场景都能正确清理：(a) 用户点击 OK/Cancel；(b) 模块失去焦点（`setFocusVisual(false)`）；(c) 模块被外部删除（如 `clearAllModules`）。当前 `clearAllModules` 会同步 delete TamagotchiModule → 析构函数 → `confirmOverlay.reset()`，但如果未来模块删除改为异步，覆盖层需独立解绑。 |
+| **预设切换+位置计算依赖 canvas** | `applyLayoutPreset()` 中重建 Tamagotchi 时使用 `workspace->getCanvasArea()` 计算右下角位置。如果未来预设切换不再经过 `setSize()`/`setBounds()` 触发 `resized()`，canvas 可能是旧尺寸，宠物位置将错位。 |
+| **覆盖层渲染独立于模块 paint** | `TamagotchiConfirmOverlay` 作为 workspace 子组件独立渲染，不依赖 `TamagotchiModule::paint()`。这意味着覆盖层的 paint 不会经过 `repaintSelfAndParent()` 路径。如果未来需要在模块 paint 中访问 overlay 状态，需注意此解耦。 |
+| **多个 Tamagotchi 的情况** | 当前系统不支持同时添加多个 Tamagotchi 模块（工厂创建后 workspace 的右键菜单不允许多选同一类型），置顶循环和预设保存逻辑均已按"可能有多个"的模式编写，未来若放开多宠物支持无需额外改动。 |
+
+---
+
+### 6.25 v1.9.6 新手引导（Tutorial Overlay）
+
+v1.9.6 新增面向 Standalone 模式的新用户引导系统，引导用户添加拓麻歌子模块并孵化宠物蛋。
+
+#### 引导流程
+
+```
+首次启动（processor.tutorialCompleted == false）
+  │
+  ├─ STEP 1（step1_rightClick）
+  │   气泡 "WELCOME 2 Y2KMETER!" + "Right-click the canvas to add ur Tamagotchi pet! <3"
+  │   全屏 65% 黑色遮罩 + canvas 区域"聚光灯"粉色虚线边框 + Y2K 气泡对话框
+  │
+  ├─ 用户右键聚光灯区域
+  │   → TutorialOverlay 隐藏 → workspace->showAddMenu(screenPos, canvasPos, {Tamagotchi})
+  │   → 菜单中仅 Tamagotchi 可点击，其余类型置灰
+  │   → 状态变为 step1_menuOpened（timer 轮询检测到 Tamagotchi 添加）
+  │
+  ├─ STEP 2（step2_playAudio）
+  │   气泡 "ALMOST THERE!" + "Play some audio to hatch the egg! :3"
+  │   聚光灯移至 Tamagotchi 模块位置
+  │
+  ├─ timer 每 100ms 轮询 isInEggPhase()
+  │   → 孵化完成（非 egg/hatching 态）→ completeTutorial()
+  │
+  └─ 完成：processor.setTutorialCompleted(true) → 持久化 → 后续启动不再触发
+```
+
+#### 关键设计决策
+
+| 决策 | 说明 |
+|------|------|
+| **仅 Standalone 有效** | 所有入口有 `!isPluginHost` 守卫，VST3/AU 插件模式下构造时完全跳过。插件宿主窗口由 DAW 管理，引导语义不合场景。 |
+| **首次启动判定** | `!processor.isTutorialCompleted()` —— Processor state 缺省 `tutorialCompleted=false`（等同于无存档），`onSave/LoadPresetRequested` 导入旧 settings 也不会误触发。 |
+| **按需创建/销毁** | **这是解决模块拖拽/缩放失效 bug 的关键**。TutorialOverlay 不在构造时预创建，而是 `startTutorial()` 时 `make_unique` + `addChildComponent`，`dismissTutorialOverlay()` 时 `removeChildComponent` + `reset()`。引导不活动时 Editor 子组件列表中完全不存在此组件，从根本上杜绝 JUCE 子组件遍历 / OpenGL 渲染合成层对 workspace 模块事件路由的干扰。 |
+| **预设切换交互** | `onLayoutPresetChanged` 中：切换非 default → `skipTutorial()`（不标记完成，`tutorialWasSkipped=true`）；切回 default 时若被跳过 → `startTutorial()` 重新触发。 |
+| **气泡 × 关闭 + 二次确认** | 气泡右上角绘制半透明 × 按钮（hover 恢复不透明），点击弹出居中确认弹窗："SKIP TUTORIAL? / U will miss the fun :( this can't be undone~"，Cancel 关闭弹窗，Skip 触发 `skipTutorial()`。 |
+| **右键菜单仅 Tamagotchi 可选** | `showAddMenu` 新增 `enabledOnlyTypes` 参数，STEP1 调用时传入 `{ModuleType::tamagotchi}`；`AddMenuItemComponent` 支持 `itemEnabled` 构造参数：disabled 时灰色绘制 + 不响应 hover。 |
+| **引导结束后清理** | `dismissTutorialOverlay()` 执行 `hide()` → `removeChildComponent` → `tutorialOverlay.reset()`，彻底从 child list 中移除。 |
+
+#### 涉及文件
+
+| 文件 | 改动 |
+|------|------|
+| `TamagotchiModule.h` | 新增 `isInEggPhase()` 公开查询方法（`egg/hatching` → `true`） |
+| `TamagotchiModule.cpp` | 实现 `isInEggPhase()` |
+| `PluginProcessor.h` | 新增 `tutorialCompleted` 成员 + `isTutorialCompleted()` / `setTutorialCompleted()` |
+| `PluginProcessor.cpp` | `getStateInformation` / `setStateInformation` 中加入 `<PBEQ_State tutorialCompleted="1"/>` 序列化 |
+| `PluginEditor.h` | 新增 `TutorialStep` 枚举、`TutorialOverlay` 前向声明、`tutorialStep/tutorialWasSkipped` 成员、5 个教程管理方法声明 |
+| `PluginEditor.cpp` | `TutorialOverlay` 完整实现（~200 行，含绘制/交互/确认弹窗）；构造末尾按需初始化教程；教程流程编排（`startTutorial/advanceTutorialStep2/completeTutorial/skipTutorial/dismissTutorialOverlay/checkTutorialStep2Condition`）；`onLayoutPresetChanged` 中预设切换逻辑；timer 轮询；`resized()` 同步 overlay bounds |
+| `ModuleWorkspace.h` | `showAddMenu` 公开 + 新增 `enabledOnlyTypes` 参数 + `onModuleAdded` 回调 |
+| `ModuleWorkspace.cpp` | `AddMenuItemComponent` 支持 `itemEnabled` 构造参数；`showAddMenu` 菜单创建时检查 `enabledOnlyTypes`；`addModule` 末尾触发 `onModuleAdded` |
+
+#### 踩坑记录
+
+| 坑 | 原因 | 解决 |
+|----|------|------|
+| **模块拖拽/缩放/删除完全不响应** | **核心 bug**：TutorialOverlay 在 Editor 构造时被 `addChildComponent` 预创建，`showStep1/showStep2` 中 `setAlwaysOnTop(true)` 触发 `toFront()` 将其物理移到 child list 末尾。`hide()` 虽然设了 `setVisible(false)` + `setAlwaysOnTop(false)` + `setInterceptsMouseClicks(false,false)` + `hitTest()→false` + `setBounds(0,0,0,0)` + `toBack()`，但在 OpenGL 渲染合成层下某些事件派发路径仍然会因为 child list 位置而误匹配。**最终方案**：改为按需创建/销毁——引导活跃时 `make_unique + addChildComponent`，结束时 `removeChildComponent + reset()`。引导不活动时 Editor 子列表中完全不存在此组件。 |
+| **构建缓存问题** | 修改 `ModuleWorkspace.h` 等头文件后直接编译可能不生效，需删除构建目录重新 CMake 配置（cmake-build-release-visual-studio）。用户反馈删除构建目录重编译后 bug 才真正消失。 |
+| **`onRightClickHighlight` use-after-free** | `dismissTutorialOverlay()` 会 `reset()` 销毁 TutorialOverlay，但在回调中需要在销毁前计算 `screenPos`。修复：将 `tutorialOverlay->localPointToGlobal(clickPos)` 移到 `dismissTutorialOverlay()` 之前。 |
+| **类型重定义 C2011** | `.h` 和 `.cpp` 各有一份 `TutorialOverlay` 完整类定义。修复：`.h` 改为前向声明 `class TutorialOverlay;`，完整定义仅留在 `.cpp`。 |
+| **`drawDashedLine` 参数签名** | `juce::Graphics::drawDashedLine` 第一个参数是 `juce::Line<float>` 而非两个 `juce::Point<float>`。修复：`juce::Line<float>(p1, p2)` 包装。 |
+| **`showAddMenu` 是 private** | 教程需要从 Editor 侧触发右键菜单。修复：从 `private:` 移到 `public:` 区域。 |
+
+#### 后续开发注意点
+
+| 注意项 | 说明 |
+|--------|------|
+| **TutorialOverlay 按需创建/销毁是硬约束** | 任何将 TutorialOverlay 预创建并常驻 child list 的做法都会导致模块交互失效。若未来需要在引导结束后保留 overlay 做其他用途，必须确保它在 child list 末尾且 `hitTest()` 根据状态返回 false。但最稳妥的做法仍然是按需创建/销毁。 |
+| **`showAddMenu` 的 `enabledOnlyTypes` 参数** | 默认为空数组（全部启用），不影响正常右键菜单行为。新手引导结束后自动恢复全部可选。 |
+| **`skipTutorial` vs `completeTutorial`** | `skipTutorial()` 不标记 `tutorialCompleted`，保留下次切回 default 预设时重新触发的可能性；`completeTutorial()` 标记 `tutorialCompleted=true` 并持久化，后续启动不再触发。两者不可混用。 |
+| **`step1_menuOpened` 状态** | v1.9.6 中为用户必须完成选择才能推进；v1.9.7 已通过 `showAddMenu` 的 `onMenuClosed` 回调支持菜单关闭后恢复 STEP 1 文案。 |
+| **`onModuleAdded` 回调** | 在 `addModule()` 末尾触发，包括编辑器中正常右键添加和预设切换后重建两种情况。后者不会触发教程推进（因为此时 `tutorialStep == hidden`），是安全的。 |
+
+#### 改动文件清单（v1.9.6）
+
+| 文件 | 改动 |
+|------|------|
+| `TamagotchiModule.h` | 新增 `isInEggPhase()` 查询方法 |
+| `TamagotchiModule.cpp` | 实现 `isInEggPhase()` |
+| `PluginProcessor.h` | 新增 `tutorialCompleted` 成员 + getter/setter |
+| `PluginProcessor.cpp` | `getStateInformation` / `setStateInformation` 序列化 `tutorialCompleted` |
+| `PluginEditor.h` | `TutorialOverlay` 前向声明 + 教程状态成员 + 5 个管理方法 |
+| `PluginEditor.cpp` | `TutorialOverlay` 完整实现 + 流程编排 + 预设切换逻辑 + timer 轮询 |
+| `ModuleWorkspace.h` | `showAddMenu` 公开 + `enabledOnlyTypes` 参数 + `onModuleAdded` 回调 |
+| `ModuleWorkspace.cpp` | `AddMenuItemComponent` 支持 enabled 参数 + `showAddMenu` 限制逻辑 + `addModule` 触发回调 |
+| `CMakeLists.txt` | 版本号 1.9.5 → 1.9.6 |
+| `Y2Kmeter_installer.iss` | 版本号 1.9.5 → 1.9.6 |
+| `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
+
+---
+
+### 6.26 v1.9.7 新手引导交互打磨
+
+v1.9.7 基于 v1.9.6 的新手引导进行了多项交互打磨和 bug 修复，提升引导流畅度和用户体验。
+
+#### ① STEP 2 遮罩镂空（Tamagotchi 模块保持明亮）
+
+- **需求**：STEP 2 弹窗引导"播放音频孵化蛋"时，全屏 65% 黑色遮罩把 Tamagotchi 模块也盖住了，用户看不到宠物状态。
+- **方案**：`drawSpotlight()` 中用 `juce::Graphics::ScopedSaveState` + `g.excludeClipRegion(highlightArea)` 替代原来的 `g.fillRect(fullArea)`，使遮罩镂空聚光灯区域。Tamagotchi 模块透过镂空保持原色可见。
+- **影响范围**：STEP 1 的 canvas 区域也同样受益（canvas 镂空保持可见）。
+
+#### ② STEP 2 气泡左右避让（不覆盖 Tamagotchi）
+
+- **需求**：STEP 2 气泡仍然放在模块上方/下方，会遮挡 Tamagotchi。
+- **方案**：`getBubbleBounds()` 在 STEP 2 时改为左右避让逻辑：
+  - 模块中心 X > Editor 中心 X → 模块偏右 → 气泡放模块**左侧**（右缘贴左缘，间距 12px）
+  - 模块中心 X ≤ Editor 中心 X → 模块偏左 → 气泡放模块**右侧**（左缘贴右缘，间距 12px）
+  - 垂直居中于模块
+  - 夹紧到 Editor 可见范围
+- **STEP 1 不受影响**：保持原有的上方→下方→居中三级降级策略。
+
+#### ③ STEP 1 右键菜单期间遮罩+弹窗不消失
+
+- **需求**：用户右键展开添加模块菜单后，引导弹窗消失，此时用户可以点击其他区域打断引导流程。新的流程：菜单弹出后遮罩保持、弹窗保持（更换文案）、菜单外的区域不可点击，直到用户选中 Tamagotchi。
+- **方案**（涉及 3 个文件）：
+
+| 文件 | 改动 |
+|------|------|
+| `ModuleWorkspace.h` | `showAddMenu` 新增 `std::function<void()> onMenuClosed` 回调参数 |
+| `ModuleWorkspace.cpp` | `showMenuAsync` lambda 中 `result <= 0` 时调用 `onMenuClosed` |
+| `PluginEditor.cpp` | `TutorialOverlay` 新增 `menuIsOpen` 标志 + `showStep1MenuOpened()` 方法 + `getHighlightArea()` 公开方法 |
+
+- **新交互流程**：
+  ```
+  STEP 1: 气泡 "WELCOME 2 Y2KMETER! / Right-click ..."
+    ↓ 用户右键聚光灯区域
+  气泡变为 "NOW CHOOSE IT! / Click 'Tamagotchi' in the menu ..."
+  → showStep1MenuOpened()（遮罩保持 + 仅更换文案）
+  → showAddMenu(callback: 菜单关闭 → 恢复 STEP 1 原文案)
+    ↓ 用户选中 Tamagotchi
+  → 模块添加 → onModuleAdded → advanceTutorialStep2()
+    ↓ 用户关闭菜单（未选择）
+  → onMenuClosed → showStep1(originalArea) → 恢复 STEP 1 文案
+  ```
+- **关键变更**：
+  - `onRightClickHighlight` 不再调用 `dismissTutorialOverlay()`，改为 `showStep1MenuOpened()`
+  - `advanceTutorialStep2()` 不再判空重建 overlay（overlay 一直存活）
+  - overlay 生命周期：从 `startTutorial()` 创建直到 `completeTutorial()`/`skipTutorial()` 才销毁
+
+#### ④ 旧存档向后兼容 `tutorialCompleted` 判定
+
+- **需求**：已有存档文件的用户更新到 v1.9.6+ 后，每次启动仍触发新手引导。
+- **根因**：`setStateInformation` 中 `root.getProperty("tutorialCompleted", false)`，旧存档无此属性 → 返回默认值 `false` → 每次判定为"未完成"。
+- **修复**（[PluginProcessor.cpp](I:/Y2KMeter/source/PluginProcessor.cpp)）：
+
+| 位置 | 旧行为 | 新行为 |
+|------|--------|--------|
+| `getStateInformation` | `if (tutorialCompleted)` 才写入 | **始终写入**（`false` 也写） |
+| `setStateInformation` | `getProperty(..., false)` 缺失→false | `hasProperty` 检测：**缺失→true**（老用户跳过） |
+
+- **各场景行为**：
+
+| 场景 | `setStateInformation` 路径 | `tutorialCompleted` | 引导 |
+|------|---------------------------|---------------------|------|
+| 全新安装（无 .settings） | 不调用（data==nullptr） | 构造默认 `false` | ✅ 触发 |
+| 旧存档（无此属性） | `hasProperty=false` → `true` | `true` | ❌ 跳过 |
+| 完成引导后重启 | 属性 `true` → `true` | `true` | ❌ 跳过 |
+| 跳过引导后重启 | 属性 `false` → `false` | `false` | ✅ 重新触发 |
+
+#### 踩坑总结（v1.9.6 + v1.9.7）
+
+| 坑 | 版本 | 原因 | 解决 |
+|----|------|------|------|
+| **模块拖拽/缩放/删除完全不响应** | v1.9.6 | TutorialOverlay 在构造时被 `addChildComponent` 预创建，`showStep1` 中 `setAlwaysOnTop(true)` 触发 `toFront()` 将 overlay 移到 child list 末尾。`hide()` 虽设了 `setVisible(false)` + `setAlwaysOnTop(false)` + `setInterceptsMouseClicks(false,false)` + `hitTest()→false` + `setBounds(0,0,0,0)` + `toBack()`，但在 OpenGL 渲染合成层下某些事件派发路径仍因 child list 位置误匹配。 | 改为按需创建/销毁：`startTutorial()` 时 `make_unique + addChildComponent`，`dismissTutorialOverlay()` 时 `removeChildComponent + reset()` |
+| **构建缓存导致修改不生效** | v1.9.6 | 修改 `ModuleWorkspace.h` 等头文件后直接编译可能不生效。 | 删除构建目录重新 CMake 配置后重编译 |
+| **`onRightClickHighlight` use-after-free** | v1.9.6 | `dismissTutorialOverlay()` 重置 `tutorialOverlay` 后，回调中仍需访问成员计算 `screenPos`。 | 将 `localPointToGlobal` 调用移到 `dismissTutorialOverlay()` 之前 |
+| **类型重定义 C2011** | v1.9.6 | `.h` 和 `.cpp` 各有一份 `TutorialOverlay` 完整类定义。 | `.h` 改为前向声明 `class TutorialOverlay;` |
+| **`drawDashedLine` 参数签名** | v1.9.6 | `juce::Graphics::drawDashedLine` 第一个参数是 `juce::Line<float>`，代码传了两个 `Point`。 | `juce::Line<float>(p1, p2)` 包装 |
+| **`showAddMenu` 私有访问** | v1.9.6 | 教程需要从 Editor 侧触发 `ModuleWorkspace::showAddMenu`，但它在 `private:` 区域。 | 移到 `public:` 区域 |
+| **STEP 2 遮罩盖住 Tamagotchi** | v1.9.7 | 全屏 `fillRect` 覆盖宠物模块。 | `excludeClipRegion` 镂空 |
+| **STEP 2 气泡覆盖宠物** | v1.9.7 | 上下定位仍会遮挡模块。 | 左右避让定位 |
+| **旧存档反复触发引导** | v1.9.7 | `getProperty` 默认值 `false` 导致旧存档被误判。 | `hasProperty` 检测，缺失→`true` |
+| **菜单弹出后 overlay 被销毁** | v1.9.7 | 数据流断裂，`advanceTutorialStep2` 被迫重建 overlay。 | 保持 overlay 存活，通过 `menuIsOpen` 切换文案 |
+
+#### 改动文件清单（v1.9.7）
+
+| 文件 | 改动 |
+|------|------|
+| `PluginEditor.cpp` | `drawSpotlight` 镂空遮罩；`getBubbleBounds` STEP2 左右避让；`TutorialOverlay` 新增 `menuIsOpen` / `showStep1MenuOpened()` / `getHighlightArea()`；`onRightClickHighlight` 不再 dismiss；`advanceTutorialStep2` 移除重建逻辑；`drawSpeechBubble` 菜单态文案 |
+| `PluginProcessor.cpp` | `tutorialCompleted` 序列化改为始终写入；反序列化改为 `hasProperty` 检测，缺失→`true` |
+| `ModuleWorkspace.h` | `showAddMenu` 新增 `onMenuClosed` 回调参数 |
+| `ModuleWorkspace.cpp` | `showAddMenu` 签名同步 + `showMenuAsync` lambda 调用 `onMenuClosed` |
+| `CMakeLists.txt` | 版本号 1.9.6 → 1.9.7 |
+| `Y2Kmeter_installer.iss` | 版本号 1.9.6 → 1.9.7 |
+| `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
 
 ---
 

@@ -429,6 +429,21 @@ public:
     std::function<void(juce::File)> onSavePresetRequested;
     std::function<void(juce::File)> onLoadPresetRequested;
 
+    // 模块添加回调：每当 addModule() 成功添加一个模块时触发
+    //   · 参数为已添加模块的引用（面板已挂载、已 makeVisible）
+    //   · 供 Editor 层订阅（如新手引导检测 Tamagotchi 模块已添加）
+    std::function<void(ModulePanel&)> onModuleAdded;
+
+    // 弹出"添加模块"右键菜单（供外部如 TutorialOverlay 触发）
+    //   anchorScreenPos: 屏幕坐标，菜单弹出锚点
+    //   placeAtCanvasPos: canvas 内坐标，新模块放置位置（-1,-1 表示自动找空位）
+    //   enabledOnlyTypes: 非空时仅这些类型可点击，其余置灰（供新手引导等限制场景）
+    //   onMenuClosed: 菜单关闭（无选择或取消）时回调，nullptr 表示不关心
+    void showAddMenu(juce::Point<int> anchorScreenPos,
+                     juce::Point<int> placeAtCanvasPos = { -1, -1 },
+                     const juce::Array<ModuleType>& enabledOnlyTypes = {},
+                     std::function<void()> onMenuClosed = nullptr);
+
     // 被 ModulePanel 在 drag 过程中调用，更新吸附预览线
     void updateDragPreview(ModulePanel& movingPanel);
     void clearDragPreview();
@@ -531,11 +546,6 @@ private:
 
     juce::Rectangle<int> findNextSlot(int w, int h) const;
 
-    // 弹出添加模块菜单：
-    //   anchorScreenPos 控制弹出位置（屏幕坐标）
-    //   placeAtCanvasPos 非 (-1,-1) 时，新模块将放置到 canvas 内该坐标（左上角）
-    void showAddMenu(juce::Point<int> anchorScreenPos,
-                     juce::Point<int> placeAtCanvasPos = { -1, -1 });
     void hookPanel(ModulePanel& panel);
 
     juce::OwnedArray<ModulePanel> modules;

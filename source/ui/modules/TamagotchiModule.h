@@ -6,6 +6,35 @@
 #include "source/ui/ModuleWorkspace.h"
 
 // ==========================================================
+// TamagotchiConfirmOverlay —— 删除二次确认覆盖层
+//   · 添加到 workspace 层级渲染，不受模块边界裁剪
+//   · 半透明遮罩 + PinkXP 凸起边框对话框
+// ==========================================================
+class TamagotchiConfirmOverlay : public juce::Component
+{
+public:
+    TamagotchiConfirmOverlay (const juce::Rectangle<int>& moduleBoundsInWorkspace,
+                              std::function<void()> onConfirm,
+                              std::function<void()> onDismiss);
+
+    void paint (juce::Graphics& g) override;
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseMove (const juce::MouseEvent& e) override;
+
+    void dismiss();
+
+private:
+    juce::Rectangle<int> moduleArea;   // 模块区域（相对本组件坐标）
+    juce::Rectangle<int> dlgBounds;    // 对话框区域（相对本组件坐标）
+    std::function<void()> onConfirmCb;
+    std::function<void()> onDismissCb;
+    int hoveredBtn = -1;               // -1=none, 0=cancel, 1=ok
+
+    juce::Rectangle<int> getButtonBounds (int idx) const;
+    int hitTestButton (juce::Point<int> pos) const;
+};
+
+// ==========================================================
 // TamagotchiModule —— 独立小宠物模块（非拖图）
 //   · 模块名固定：Tamagotchi
 //   · 通过右键/双击 ModuleWorkspace 空白区添加
@@ -30,6 +59,9 @@ public:
 
     void setFocusVisual (bool shouldFocus);
     void setSignalLevel01 (float level01) noexcept;
+
+    // 查询宠物是否处于蛋/孵化阶段（供新手引导使用）
+    bool isInEggPhase() const noexcept;
 
     juce::String getRoleName() const noexcept;
     float getHunger() const noexcept;
@@ -291,6 +323,11 @@ private:
 
     bool deleteBtnHovered = false;
     bool deleteBtnPressed = false;
+
+    // 删除二次确认覆盖层（workspace 层级，不受模块边界裁剪）
+    std::unique_ptr<juce::Component> confirmOverlay;
+    void showConfirmOverlay();
+    void dismissConfirmOverlay();
 
     // 拖拽/缩放
     DragMode dragMode = DragMode::none;

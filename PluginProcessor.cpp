@@ -379,6 +379,9 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     if (savedLayoutLocked)
         root.setProperty ("layoutLocked", true, nullptr);
 
+    // 新手引导完成状态：始终写入，区分"未完成"与"旧存档中缺失"
+    root.setProperty ("tutorialCompleted", tutorialCompleted, nullptr);
+
     if (savedLayoutXml.isNotEmpty())
     {
         if (auto layoutXml = juce::parseXML(savedLayoutXml))
@@ -418,6 +421,12 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
 
     // 布局锁定态（v1.8.3）：旧 state 无此属性时默认 false，保持向后兼容。
     savedLayoutLocked = (bool) root.getProperty ("layoutLocked", false);
+
+    // 新手引导完成状态：旧存档中无此属性 → 视为老用户，默认已完成
+    if (root.hasProperty ("tutorialCompleted"))
+        tutorialCompleted = (bool) root.getProperty ("tutorialCompleted");
+    else
+        tutorialCompleted = true;   // old settings file → user already has experience
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())

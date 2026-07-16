@@ -47,13 +47,18 @@ namespace
     class AddMenuItemComponent : public juce::PopupMenu::CustomComponent
     {
     public:
-        AddMenuItemComponent (ModuleWorkspace& ws, ModuleType t, juce::String name)
+        AddMenuItemComponent (ModuleWorkspace& ws, ModuleType t, juce::String name,
+                              bool enabled = true)
             : juce::PopupMenu::CustomComponent (true /*triggeredAutomatically*/),
-              workspace (ws), moduleType (t), displayName (std::move (name)) {}
+              workspace (ws), moduleType (t), displayName (std::move (name)),
+              itemEnabled (enabled)
+        {
+            // 禁用时让 JUCE 不把点击当作"选中该项"
+            setEnabled (enabled);
+        }
 
         void getIdealSize (int& idealWidth, int& idealHeight) override
         {
-            // 沿用当前 LookAndFeel 给普通菜单项的理想尺寸（保持与原生菜单视觉一致）
             int w = 180, h = 22;
             getLookAndFeel().getIdealPopupMenuItemSize (displayName, false, /*standardHeight*/ 22, w, h);
             idealWidth  = juce::jmax (w, 160);
@@ -62,15 +67,13 @@ namespace
 
         void paint (juce::Graphics& g) override
         {
-            // 构造一个等价的 PopupMenu::Item，用于让 LookAndFeel 绘制。
-            //   · 保留原 item id / 文本；不需要填 customComponent（本类即是）。
             juce::PopupMenu::Item item (displayName);
             item.itemID = getItem() != nullptr ? getItem()->itemID : 0;
 
             getLookAndFeel().drawPopupMenuItem (g, getLocalBounds(),
                                                 /*isSeparator*/ false,
-                                                /*isActive*/    true,
-                                                /*isHighlighted*/ isItemHighlighted(),
+                                                /*isActive*/    itemEnabled,
+                                                /*isHighlighted*/ isItemHighlighted() && itemEnabled,
                                                 /*isTicked*/    false,
                                                 /*hasSubMenu*/  false,
                                                 displayName,
@@ -79,20 +82,15 @@ namespace
                                                 /*textColour*/  nullptr);
         }
 
-        // JUCE 在鼠标进入/离开此 item 时会调用 Component::mouseEnter/mouseExit。
-        // 我们借此通知 workspace 更新 hover 预览状态。
-        //   注：PopupMenu::CustomComponent::setHighlighted 是 @internal 的
-        //   非 virtual 方法，不能重写；mouseEnter/Exit 才是可靠的 hover 信号。
         void mouseEnter (const juce::MouseEvent&) override
         {
+            if (! itemEnabled) return;
             workspace.setAddMenuHoverPreview (true, moduleType);
         }
 
         void mouseExit (const juce::MouseEvent&) override
         {
-            // 切到别的 item 时，别项的 mouseEnter 会先触发并覆盖 hoverPreviewType；
-            // 仅当 hover 离开整张菜单（鼠标到菜单外）时此分支有效清除预览。
-            // 我们这里只在"离开时仍然是 me"的情况下关闭，避免和 enter 竞争。
+            if (! itemEnabled) return;
             workspace.setAddMenuHoverPreview (false, moduleType);
         }
 
@@ -100,6 +98,7 @@ namespace
         ModuleWorkspace& workspace;
         ModuleType       moduleType;
         juce::String     displayName;
+        bool             itemEnabled = true;
     };
 }
 
@@ -867,6 +866,15 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
             repaint();
         }
 
+        // Tamagotchi 始终置顶：其他模块 mouseDown → toFront(true) 会把自己冒到
+        // 所有子组件之上（包括 Tamagotchi）。这里在模块冒前之后，再把所有
+        // Tamagotchi 模块抬回最上层，保证宠物永远不被其他模块遮挡。
+        for (auto* m : modules)
+        {
+            if (m->getModuleType() == ModuleType::tamagotchi)
+                m->toFront (false);
+        }
+
         // hideBtn 始终保持在最上层：模块 mouseDown 会调 toFront(true) 把自己
         // 移到 child 列表末尾（z-order 最顶），此时 hideBtn 会被压在下面。
         // 这里在模块冒前之后再把 hideBtn 拉回最顶，保证用户无论聚焦哪个模块
@@ -902,6 +910,11 @@ ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool
     modules.add(panel.release());
     raw->toFront(false);
     notifyLayoutChanged();
+
+    // 通知外部订阅者（如新手引导检测 Tamagotchi 模块已添加）
+    if (onModuleAdded)
+        onModuleAdded (*raw);
+
     return *raw;
 }
 
@@ -997,7 +1010,9 @@ void ModuleWorkspace::autoLayout()
 // 添加模块菜单（双击 / 右键空白区触发）
 // ----------------------------------------------------------
 void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
-                                   juce::Point<int> placeAtCanvasPos)
+                                   juce::Point<int> placeAtCanvasPos,
+                                   const juce::Array<ModuleType>& enabledOnlyTypes,
+                                   std::function<void()> onMenuClosed)
 {
     juce::PopupMenu m;
     m.setLookAndFeel(&getLookAndFeel());
@@ -1072,10 +1087,13 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
     for (int i = 0; i < availableTypes.size(); ++i)
     {
         const auto t = availableTypes[i];
-        // 用 CustomComponent 替换普通 addItem，借 setHighlighted 捕捉 hover
+        const bool itemOk = enabledOnlyTypes.isEmpty()
+                         || enabledOnlyTypes.contains (t);
+
         juce::PopupMenu::Item item (getModuleDisplayName (t));
         item.itemID = i + 1;
-        item.customComponent = new AddMenuItemComponent (*this, t, getModuleDisplayName (t));
+        item.isEnabled = itemOk;
+        item.customComponent = new AddMenuItemComponent (*this, t, getModuleDisplayName (t), itemOk);
         m.addItem (std::move (item));
 
         int iw = 180, ih = 22;
@@ -1117,7 +1135,7 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
 
     const auto placePos = placeAtCanvasPos;
 
-    m.showMenuAsync(options, [this, hasPlacement, placePos](int result)
+    m.showMenuAsync(options, [this, hasPlacement, placePos, onMenuClosed](int result)
     {
         // 无论用户是选中了某项还是取消菜单，都清除 hover 预览
         if (hoverPreviewActive)
@@ -1127,7 +1145,10 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
         }
 
         if (result <= 0)
+        {
+            if (onMenuClosed) onMenuClosed();
             return;
+        }
         const int idx = result - 1;
         if (idx < 0 || idx >= availableTypes.size())
             return;

@@ -397,6 +397,7 @@ void TamagotchiModule::setFocusVisual (bool shouldFocus)
     {
         deleteBtnHovered = false;
         deleteBtnPressed = false;
+        dismissConfirmOverlay();
         hoveredTestButton = -1;
         pressedTestButton = -1;
         if (dragMode == DragMode::none)
@@ -521,6 +522,9 @@ void TamagotchiModule::paint (juce::Graphics& g)
         if (deleteBtnPressed) txt.translate (1, 1);
         g.drawText ("x", txt, juce::Justification::centred, false);
     }
+
+    // 删除确认对话框已迁移到 TamagotchiConfirmOverlay（workspace 层级渲染，
+    // 不受模块边界裁剪），见 showConfirmOverlay()。
 }
 
 void TamagotchiModule::resized()
@@ -752,7 +756,9 @@ void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
         repaintSelfAndParent (getDeleteButtonBounds());
 
         if (stillOnDel && onCloseClicked)
-            onCloseClicked (*this);
+        {
+            showConfirmOverlay();
+        }
         return;
     }
 
@@ -1232,6 +1238,11 @@ void TamagotchiModule::onAnimationFinished()
 void TamagotchiModule::setSignalLevel01 (float level01) noexcept
 {
     signalLevel01 = juce::jlimit (0.0f, 1.0f, level01);
+}
+
+bool TamagotchiModule::isInEggPhase() const noexcept
+{
+    return motionMode == MotionMode::egg || motionMode == MotionMode::hatching;
 }
 
 void TamagotchiModule::updateNeeds()
@@ -2396,5 +2407,191 @@ void TamagotchiModule::updateCursorFor (Edge e)
         case Edge::bottom:       setMouseCursor (juce::MouseCursor::UpDownResizeCursor); break;
         case Edge::bottomRight:  setMouseCursor (juce::MouseCursor::BottomRightCornerResizeCursor); break;
         default:                 setMouseCursor (juce::MouseCursor::NormalCursor); break;
+    }
+}
+
+// ==========================================================
+// TamagotchiConfirmOverlay —— 删除二次确认覆盖层
+//   添加到 workspace 层级渲染，不受模块边界裁剪。
+// ==========================================================
+
+static juce::Rectangle<int> calcDlgBounds (const juce::Rectangle<int>& modArea)
+{
+    const int dlgW = juce::jlimit (160, 220, modArea.getWidth()  - 16);
+    const int dlgH = juce::jlimit (90,  110, modArea.getHeight() - 16);
+    return juce::Rectangle<int> (dlgW, dlgH).withCentre (modArea.getCentre());
+}
+
+TamagotchiConfirmOverlay::TamagotchiConfirmOverlay (
+    const juce::Rectangle<int>& moduleBoundsInWorkspace,
+    std::function<void()> onConfirm,
+    std::function<void()> onDismiss)
+    : onConfirmCb (std::move (onConfirm))
+    , onDismissCb (std::move (onDismiss))
+{
+    // 对话框区域（workspace 坐标，居中于模块）
+    const auto dlgInWorkspace = calcDlgBounds (moduleBoundsInWorkspace);
+
+    // 覆盖层区域 = 模块 + 对话框的并集（确保两者都不被裁剪）
+    const auto totalBounds = moduleBoundsInWorkspace.getUnion (dlgInWorkspace);
+    setBounds (totalBounds);
+
+    // 转为相对本组件坐标
+    moduleArea = moduleBoundsInWorkspace.withPosition (
+        moduleBoundsInWorkspace.getPosition() - getPosition());
+    dlgBounds  = dlgInWorkspace.withPosition (
+        dlgInWorkspace.getPosition() - getPosition());
+
+    setOpaque (false);
+    setInterceptsMouseClicks (true, true);
+}
+
+void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
+{
+    // 半透明遮罩（仅覆盖模块区域，不遮住 workspace 其他内容）
+    g.setColour (juce::Colours::black.withAlpha (0.55f));
+    g.fillRect (moduleArea);
+
+    // 对话框外壳：凸起边框（参考 ModulePanel::paint 的 PinkXP::drawRaised）
+    PinkXP::drawRaised (g, dlgBounds, PinkXP::btnFace);
+
+    auto inner = dlgBounds.reduced (6);
+    if (inner.getHeight() < 40) return;
+
+    // 标题行：粉红标题栏风格
+    auto titleRow = inner.removeFromTop (juce::jmin (18, inner.getHeight() - 24));
+    g.setColour (PinkXP::sel);
+    g.fillRect (titleRow);
+    g.setColour (PinkXP::dark);
+    g.fillRect (titleRow.getX(), titleRow.getBottom(), titleRow.getWidth(), 1);
+
+    // 标题文字
+    g.setColour (PinkXP::selInk);
+    g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
+    g.drawText ("r u sure?", titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
+
+    // 正文区域
+    auto body = inner.reduced (2, 2);
+    auto textArea = body.removeFromTop (body.getHeight() - 22);
+    g.setColour (PinkXP::ink);
+    g.setFont (PinkXP::getFont (9.0f));
+    g.drawFittedText ("say bye to ur pet? :(\ncan't undo this~", textArea,
+                      juce::Justification::centred, 2);
+
+    // 取消按钮
+    auto cancelBounds = getButtonBounds (0);
+    if (hoveredBtn == 0)
+        PinkXP::drawRaised (g, cancelBounds, PinkXP::pink200);
+    else
+        PinkXP::drawRaised (g, cancelBounds, PinkXP::btnFace);
+    g.setColour (PinkXP::ink);
+    g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+    g.drawText ("Cancel", cancelBounds, juce::Justification::centred, false);
+
+    // 确认按钮
+    auto confirmBounds = getButtonBounds (1);
+    if (hoveredBtn == 1)
+        PinkXP::drawRaised (g, confirmBounds, PinkXP::pink200);
+    else
+        PinkXP::drawRaised (g, confirmBounds, PinkXP::btnFace);
+    g.setColour (PinkXP::pink700);
+    g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+    g.drawText ("OK", confirmBounds, juce::Justification::centred, false);
+}
+
+void TamagotchiConfirmOverlay::mouseDown (const juce::MouseEvent& e)
+{
+    const int hit = hitTestButton (e.getPosition());
+    if (hit == 1)       // 确认 → 删除模块
+    {
+        if (onConfirmCb)
+            onConfirmCb();
+    }
+    else                // 取消 / 点击对话框外
+    {
+        if (onDismissCb)
+            onDismissCb();
+    }
+}
+
+void TamagotchiConfirmOverlay::mouseMove (const juce::MouseEvent& e)
+{
+    const int hit = hitTestButton (e.getPosition());
+    if (hit != hoveredBtn)
+    {
+        hoveredBtn = hit;
+        repaint();
+    }
+}
+
+void TamagotchiConfirmOverlay::dismiss()
+{
+    if (onDismissCb)
+        onDismissCb();
+}
+
+juce::Rectangle<int> TamagotchiConfirmOverlay::getButtonBounds (int idx) const
+{
+    auto inner = dlgBounds.reduced (6);
+    inner.removeFromTop (juce::jmin (18, inner.getHeight() - 24));
+
+    const int btnH = 20;
+    auto btnRow = juce::Rectangle<int> (inner.getX(), inner.getBottom() - btnH,
+                                         inner.getWidth(), btnH);
+    const int btnW = juce::jmin (55, (btnRow.getWidth() - 8) / 2);
+
+    if (idx == 0)
+        return juce::Rectangle<int> (btnRow.getCentreX() - btnW - 4,
+                                      btnRow.getY(), btnW, btnH);
+    else
+        return juce::Rectangle<int> (btnRow.getCentreX() + 4,
+                                      btnRow.getY(), btnW, btnH);
+}
+
+int TamagotchiConfirmOverlay::hitTestButton (juce::Point<int> pos) const
+{
+    if (getButtonBounds (1).contains (pos)) return 1;
+    if (getButtonBounds (0).contains (pos)) return 0;
+    return -1;
+}
+
+// ==========================================================
+// TamagotchiModule 覆盖层管理
+// ==========================================================
+void TamagotchiModule::showConfirmOverlay()
+{
+    if (confirmOverlay != nullptr) return;
+
+    auto* ws = getParentComponent();
+    if (ws == nullptr) return;
+
+    confirmOverlay = std::make_unique<TamagotchiConfirmOverlay> (
+        getBounds(),  // 模块在 workspace 坐标系中的矩形
+
+        // 确认 → 删除模块
+        [this]()
+        {
+            confirmOverlay.reset();
+            if (onCloseClicked)
+                onCloseClicked (*this);
+        },
+
+        // 取消 → 关闭覆盖层
+        [this]()
+        {
+            confirmOverlay.reset();
+            repaintSelfAndParent();
+        });
+
+    ws->addAndMakeVisible (*confirmOverlay);
+    confirmOverlay->toFront (false);
+}
+
+void TamagotchiModule::dismissConfirmOverlay()
+{
+    if (confirmOverlay != nullptr)
+    {
+        confirmOverlay.reset();
+        repaintSelfAndParent();
     }
 }

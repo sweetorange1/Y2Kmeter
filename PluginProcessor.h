@@ -96,6 +96,10 @@ public:
     bool getLayoutLocked() const noexcept { return savedLayoutLocked; }
     void setLayoutLocked (bool locked) noexcept { savedLayoutLocked = locked; }
 
+    // 新手引导完成状态
+    bool isTutorialCompleted() const noexcept { return tutorialCompleted; }
+    void setTutorialCompleted (bool completed) noexcept { tutorialCompleted = completed; }
+
     // ---- 插件 Editor 窗口尺寸持久化 ----
     //   · 由 Editor::resized() 实时写回，保存到 host 的 state 中；
     //   · VST3 / AU 等插件宿主在关闭→重开插件窗口时，宿主不会记住尺寸
@@ -137,6 +141,12 @@ private:
     //   · Editor 里的锁定按钮切换时写到这里；
     //   · 本身不影响音频处理，仅作为 UI-only state。
     bool savedLayoutLocked = false;
+
+    // 新手引导完成状态（持久化到 host state / settings 文件中）
+    //   · true = 用户已完成新手引导（STEP1→STEP2→complete），后续启动不再触发
+    //   · false = 尚未完成；仅在 Standalone 下生效，插件模式忽略
+    //   · 序列化为 <PBEQ_State tutorialCompleted="1|0" ...>
+    bool tutorialCompleted = false;
 
     // 插件 Editor 最近一次窗口尺寸（0 = 未保存）
     int savedEditorWidth  = 0;

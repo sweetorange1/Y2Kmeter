@@ -69,7 +69,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v1.9.4");
+        const int versionW = versionFont.getStringWidth ("v1.9.7");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -110,14 +110,14 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v1.9.4";
+        const juce::String versionText = "v1.9.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const int nameW    = nameFont.getStringWidth (nameText);
+        const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
         const int versionW = versionFont.getStringWidth (versionText);
         const int urlW     = urlFont.getStringWidth (urlText);
 
@@ -186,6 +186,426 @@ private:
     bool closeButtonPressed = false;
     bool titleTextHovered   = false;
     mutable int cachedTitleTextW = 0;
+};
+
+// ==========================================================
+// TutorialOverlay —— 新手引导全屏覆盖层
+//
+// 职责：
+//   · 半透明遮罩 + "聚光灯"镂空区域（高亮引导目标）
+//   · Y2K 风格气泡对话框提示（右上角带 × 关闭按钮）
+//   · STEP 1：右键画布添加 Tamagotchi
+//   · STEP 2：播放音频孵化宠物蛋
+//   · 点击 × 按钮 → 弹出二次确认对话框（"跳过引导不可撤销"）
+//
+// 关键设计：
+//   · 覆盖整个 Editor，z-order 最高（在 workspace 之上）
+//   · setInterceptsMouseClicks (true, true)：拦截点击
+//   · 仅右键点击聚光灯区域触发回调；左键/其他区域忽略
+//   · 视觉风格参考 TamagotchiConfirmOverlay（PinkXP 凸起边框对话框）
+// ==========================================================
+class Y2KmeterAudioProcessorEditor::TutorialOverlay : public juce::Component
+{
+public:
+    TutorialOverlay()
+    {
+        setOpaque (false);
+    }
+
+    void showStep1 (const juce::Rectangle<int>& canvasAreaInEditor)
+    {
+        currentStep = Step::step1;
+        highlightArea = canvasAreaInEditor;
+        confirmSkipVisible = false;
+        menuIsOpen = false;
+        setAlwaysOnTop (true);
+        setInterceptsMouseClicks (true, true);
+        setVisible (true);
+        repaint();
+    }
+
+    // 右键菜单已弹出：保持遮罩和聚光灯不变，只更换气泡引导文案
+    void showStep1MenuOpened()
+    {
+        jassert (currentStep == Step::step1); // 仅 STEP 1 有效
+        menuIsOpen = true;
+        repaint();
+    }
+
+    void showStep2 (const juce::Rectangle<int>& petAreaInEditor)
+    {
+        currentStep = Step::step2;
+        highlightArea = petAreaInEditor.expanded (12);
+        confirmSkipVisible = false;
+        menuIsOpen = false;
+        setAlwaysOnTop (true);
+        setInterceptsMouseClicks (true, true);
+        setVisible (true);
+        repaint();
+    }
+
+    void hide()
+    {
+        currentStep = Step::hidden;
+        highlightArea = {};
+        bubbleHovered = false;
+        closeBtnHovered = false;
+        closeBtnPressed = false;
+        confirmSkipVisible = false;
+        confirmBtnHovered = false;
+        menuIsOpen = false;
+        setVisible (false);
+        setAlwaysOnTop (false);
+        setInterceptsMouseClicks (false, false);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        if (currentStep == Step::hidden) return;
+
+        drawSpotlight (g);
+        drawSpeechBubble (g);
+
+        // 二次确认弹窗（在气泡之上）
+        if (confirmSkipVisible)
+            drawConfirmSkipDialog (g);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (currentStep == Step::hidden) return;
+        const auto pos = e.getPosition();
+
+        // 二次确认弹窗可见 → 只处理确认/取消
+        if (confirmSkipVisible)
+        {
+            if (e.mods.isLeftButtonDown())
+            {
+                const auto dlg = getConfirmDialogBounds();
+                if (! dlg.contains (pos)) { confirmSkipVisible = false; repaint(); return; }
+                if (getConfirmBtnBounds (1).contains (pos)) // Skip 按钮
+                {
+                    confirmSkipVisible = false;
+                    hide();
+                    if (onSkipRequested) onSkipRequested();
+                    return;
+                }
+                // Cancel 按钮或 dialog 内非按钮区 → 关闭弹窗
+                confirmSkipVisible = false;
+                repaint();
+                return;
+            }
+        }
+
+        // 左键点击气泡 × 关闭按钮
+        if (e.mods.isLeftButtonDown())
+        {
+            const auto closeBtn = getCloseButtonBounds();
+            if (closeBtn.contains (pos))
+            {
+                confirmSkipVisible = true;
+                confirmBtnHovered = false;
+                repaint();
+                return;
+            }
+        }
+
+        // STEP 1：右键聚光灯区域 → 触发添加
+        if (currentStep == Step::step1 && e.mods.isRightButtonDown())
+        {
+            if (highlightArea.contains (pos) && onRightClickHighlight)
+                onRightClickHighlight (pos);
+        }
+    }
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        if (currentStep == Step::hidden) return;
+        const auto pos = e.getPosition();
+
+        if (confirmSkipVisible)
+        {
+            const auto dlg = getConfirmDialogBounds();
+            const bool btnHover = getConfirmBtnBounds (1).contains (pos)
+                               || getConfirmBtnBounds (0).contains (pos);
+            const bool dlgHover = dlg.contains (pos);
+            if (btnHover != confirmBtnHovered || dlgHover != bubbleHovered)
+            {
+                confirmBtnHovered = btnHover;
+                bubbleHovered = dlgHover;
+                repaint (dlg);
+            }
+            return;
+        }
+
+        // 关闭按钮 hover
+        const auto closeBtn = getCloseButtonBounds();
+        const bool cbHover = closeBtn.contains (pos);
+        if (cbHover != closeBtnHovered)
+        {
+            closeBtnHovered = cbHover;
+            repaint (closeBtn.expanded (2));
+        }
+
+        // 气泡整体 hover
+        const auto bubble = getBubbleBounds();
+        const bool hover = bubble.contains (pos);
+        if (hover != bubbleHovered)
+        {
+            bubbleHovered = hover;
+            repaint (bubble);
+        }
+    }
+
+    // 用户右键点击了高亮区域 → 回调（参数：相对本组件的点击位置）
+    std::function<void(juce::Point<int> clickPos)> onRightClickHighlight;
+    // 用户确认跳过新手引导 → 回调
+    std::function<void()> onSkipRequested;
+
+    // 返回当前聚光灯区域（Editor 坐标系），供外部恢复 STEP1 时复用
+    juce::Rectangle<int> getHighlightArea() const { return highlightArea; }
+
+private:
+    enum class Step { hidden, step1, step2 };
+    Step currentStep = Step::hidden;
+    juce::Rectangle<int> highlightArea;
+    bool bubbleHovered = false;
+    bool closeBtnHovered = false;
+    bool closeBtnPressed = false;
+    bool confirmSkipVisible = false;
+    bool confirmBtnHovered = false;
+    bool menuIsOpen = false;     // STEP 1 右键菜单已弹出，此时切换气泡文案
+
+    // 气泡右上角 × 按钮（相对本组件坐标，基于 getBubbleBounds 偏移）
+    juce::Rectangle<int> getCloseButtonBounds() const
+    {
+        const auto bubble = getBubbleBounds();
+        constexpr int btnSize = 18;
+        constexpr int margin  = 4;
+        return { bubble.getRight() - margin - btnSize,
+                 bubble.getY() + margin,
+                 btnSize, btnSize };
+    }
+
+    // 二次确认弹窗区域（居中于 Editor）
+    juce::Rectangle<int> getConfirmDialogBounds() const
+    {
+        constexpr int dlgW = 260;
+        constexpr int dlgH = 100;
+        const int cx = getWidth()  / 2;
+        const int cy = getHeight() / 2;
+        return { cx - dlgW / 2, cy - dlgH / 2, dlgW, dlgH };
+    }
+
+    // 二次确认弹窗按钮（idx: 0=Cancel, 1=Skip）
+    juce::Rectangle<int> getConfirmBtnBounds (int idx) const
+    {
+        const auto dlg = getConfirmDialogBounds();
+        auto inner = dlg.reduced (6);
+        // 跳过标题行 18 + 分隔线(1) 后的正文区
+        inner.removeFromTop (juce::jmin (18, inner.getHeight() - 30));
+
+        const int btnH = 20;
+        auto btnRow = juce::Rectangle<int> (inner.getX(), inner.getBottom() - btnH,
+                                             inner.getWidth(), btnH);
+        const int btnW = juce::jmin (70, (btnRow.getWidth() - 12) / 2);
+        const int gap = 8;
+
+        if (idx == 0) // Cancel（左）
+            return { btnRow.getCentreX() - btnW - gap / 2, btnRow.getY(), btnW, btnH };
+        else          // Skip（右）
+            return { btnRow.getCentreX() + gap / 2, btnRow.getY(), btnW, btnH };
+    }
+
+    void drawConfirmSkipDialog (juce::Graphics& g)
+    {
+        const auto dlg = getConfirmDialogBounds();
+
+        // 半透明底衬
+        g.setColour (juce::Colours::black.withAlpha (0.35f));
+        g.fillRect (getLocalBounds());
+
+        // 对话框外壳
+        PinkXP::drawRaised (g, dlg, PinkXP::btnFace);
+
+        auto inner = dlg.reduced (6);
+        if (inner.getHeight() < 50) return;
+
+        // 标题行
+        auto titleRow = inner.removeFromTop (juce::jmin (18, inner.getHeight() - 30));
+        g.setColour (PinkXP::sel);
+        g.fillRect (titleRow);
+        g.setColour (PinkXP::dark);
+        g.fillRect (titleRow.getX(), titleRow.getBottom(), titleRow.getWidth(), 1);
+        g.setColour (PinkXP::selInk);
+        g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
+        g.drawText ("SKIP TUTORIAL?", titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
+
+        // 正文
+        auto body = inner.reduced (2, 2);
+        auto textArea = body.removeFromTop (body.getHeight() - 24);
+        g.setColour (PinkXP::ink);
+        g.setFont (PinkXP::getFont (9.0f));
+        g.drawFittedText ("U will miss the fun :(\nthis can't be undone~",
+                          textArea, juce::Justification::centred, 2);
+
+        // Cancel 按钮（始终平面，不单独高亮）
+        auto cancelBounds = getConfirmBtnBounds (0);
+        PinkXP::drawRaised (g, cancelBounds, PinkXP::btnFace);
+        g.setColour (PinkXP::ink);
+        g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+        g.drawText ("Cancel", cancelBounds, juce::Justification::centred, false);
+
+        // Skip 按钮（粉红突出，始终醒目）
+        auto skipBounds = getConfirmBtnBounds (1);
+        PinkXP::drawRaised (g, skipBounds, PinkXP::pink200);
+        g.setColour (PinkXP::pink700);
+        g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+        g.drawText ("Skip", skipBounds, juce::Justification::centred, false);
+    }
+
+    void drawSpotlight (juce::Graphics& g)
+    {
+        const auto fullArea = getLocalBounds();
+
+        // 半透明黑色遮罩 —— 镂空聚光灯区域（Tamagotchi 模块保持可见）
+        {
+            juce::Graphics::ScopedSaveState save (g);
+            g.excludeClipRegion (highlightArea);
+            g.setColour (juce::Colours::black.withAlpha (0.65f));
+            g.fillRect (fullArea);
+        }
+
+        // 聚光灯边框：虚线闪烁效果（粉色，暗示交互区域）
+        {
+            g.setColour (PinkXP::pink600.withAlpha (0.8f));
+            const float dash[] = { 4.0f, 4.0f };
+            g.drawDashedLine (juce::Line<float> (highlightArea.getTopLeft().toFloat(),
+                              highlightArea.getTopRight().toFloat()), dash, 2);
+            g.drawDashedLine (juce::Line<float> (highlightArea.getTopRight().toFloat(),
+                              highlightArea.getBottomRight().toFloat()), dash, 2);
+            g.drawDashedLine (juce::Line<float> (highlightArea.getBottomRight().toFloat(),
+                              highlightArea.getBottomLeft().toFloat()), dash, 2);
+            g.drawDashedLine (juce::Line<float> (highlightArea.getBottomLeft().toFloat(),
+                              highlightArea.getTopLeft().toFloat()), dash, 2);
+        }
+    }
+
+    // 气泡位置：
+    //   STEP 1：优先聚光灯上方 → 下方 → 居中（canvas 占满整个区域）
+    //   STEP 2：放在 Tamagotchi 模块的左侧或右侧（取决于模块在 Editor 中的位置），
+    //           绝不覆盖模块本身
+    juce::Rectangle<int> getBubbleBounds() const
+    {
+        constexpr int bubbleW = 280;
+        constexpr int bubbleH = 76;
+
+        if (currentStep == Step::step2)
+        {
+            const int editorW = getWidth();
+
+            // 模块中心 X > Editor 中心 → 模块偏右 → 气泡放在模块左侧
+            // 模块中心 X < Editor 中心 → 模块偏左 → 气泡放在模块右侧
+            const bool petOnRight = highlightArea.getCentreX() > editorW / 2;
+
+            int bubbleX;
+            if (petOnRight)
+                bubbleX = highlightArea.getX() - bubbleW - 12;  // 气泡右缘贴模块左缘
+            else
+                bubbleX = highlightArea.getRight() + 12;         // 气泡左缘贴模块右缘
+
+            // 垂直居中于模块
+            int bubbleY = highlightArea.getCentreY() - bubbleH / 2;
+
+            // 夹紧到 Editor 可见范围
+            bubbleX = juce::jlimit (8, juce::jmax (8, editorW - bubbleW - 8), bubbleX);
+            bubbleY = juce::jlimit (4, juce::jmax (4, getHeight() - bubbleH - 4), bubbleY);
+
+            return { bubbleX, bubbleY, bubbleW, bubbleH };
+        }
+
+        // --- STEP 1: 原有上下避让逻辑 ---
+        const int cx = highlightArea.getCentreX();
+        int bubbleX = cx - bubbleW / 2;
+
+        // 尝试上方
+        int bubbleY = highlightArea.getY() - bubbleH - 14;
+
+        // 上方不够 → 尝试下方
+        if (bubbleY < 10)
+            bubbleY = highlightArea.getBottom() + 14;
+
+        // 下方也超出 Editor → 直接居中放
+        if (bubbleY + bubbleH > getHeight() - 8)
+            bubbleY = (getHeight() - bubbleH) / 2;
+
+        // 保底不超出顶部
+        bubbleY = juce::jmax (4, bubbleY);
+
+        // 不超出左右边界
+        const int rightLimit = getWidth() - 16;
+        bubbleX = juce::jlimit (8, juce::jmax (8, rightLimit - bubbleW), bubbleX);
+
+        return { bubbleX, bubbleY, bubbleW, bubbleH };
+    }
+
+    void drawSpeechBubble (juce::Graphics& g)
+    {
+        if (currentStep == Step::hidden) return;
+
+        auto bubble = getBubbleBounds();
+
+        // 外壳
+        PinkXP::drawRaised (g, bubble, bubbleHovered ? PinkXP::pink200 : PinkXP::btnFace);
+
+        auto inner = bubble.reduced (6);
+        if (inner.getHeight() < 40) return;
+
+        // 标题行
+        auto titleRow = inner.removeFromTop (juce::jmin (18, inner.getHeight() - 24));
+        g.setColour (PinkXP::sel);
+        g.fillRect (titleRow);
+        g.setColour (PinkXP::dark);
+        g.fillRect (titleRow.getX(), titleRow.getBottom(), titleRow.getWidth(), 1);
+
+        // 标题
+        g.setColour (PinkXP::selInk);
+        g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
+        const juce::String title = (currentStep == Step::step1)
+            ? (menuIsOpen ? "NOW CHOOSE IT!" : "WELCOME 2 Y2KMETER!")
+            : "ALMOST THERE!";
+        g.drawText (title, titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
+
+        // 正文
+        auto body = inner.reduced (2, 2);
+        g.setColour (PinkXP::ink);
+        g.setFont (PinkXP::getFont (9.0f));
+        const juce::String text = (currentStep == Step::step1)
+            ? (menuIsOpen
+                ? "Click 'Tamagotchi' in\nthe menu to add ur pet! <3"
+                : "Right-click the canvas to\nadd ur Tamagotchi pet! <3")
+            : "Play some audio to\nhatch the egg! :3";
+        g.drawFittedText (text, body, juce::Justification::centred, 2);
+
+        // 右上角 × 关闭按钮（参考 ChromeHiddenOverlay 的浮动关闭按钮样式）
+        {
+            auto cb = getCloseButtonBounds();
+            juce::Graphics::ScopedSaveState save (g);
+            g.setOpacity (closeBtnHovered ? 1.0f : 0.55f);
+
+            if (closeBtnPressed)
+                PinkXP::drawPressed (g, cb, PinkXP::pink100);
+            else
+                PinkXP::drawRaised  (g, cb, closeBtnHovered ? PinkXP::pink200 : PinkXP::btnFace);
+
+            g.setColour (PinkXP::ink);
+            g.setFont   (PinkXP::getFont (11.0f, juce::Font::bold));
+            auto cbText = cb;
+            cbText.translate (-1, -1);
+            if (closeBtnPressed) cbText.translate (1, 1);
+            g.drawText ("x", cbText, juce::Justification::centred, false);
+        }
+    }
 };
 
 // ==========================================================
@@ -392,6 +812,19 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             workspace->setChromeVisible (true);
 
         autoHideNeedsExitFirst = false;
+
+        // v1.9.x：新手引导期间的预设切换处理
+        //   · 切换到非 default 预设 → 跳过引导
+        //   · 切换回 default 时若之前被跳过 → 重新触发
+        if (tutorialStep != TutorialStep::hidden && preset != ModuleWorkspace::LayoutPreset::defaultGrid)
+        {
+            skipTutorial();
+        }
+        else if (tutorialStep == TutorialStep::hidden && tutorialWasSkipped
+                 && preset == ModuleWorkspace::LayoutPreset::defaultGrid)
+        {
+            startTutorial();
+        }
 
         applyLayoutPreset ((int) preset);
         --suppressAutoShowCounter;
@@ -966,6 +1399,18 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 #if  Y2K_ENABLE_PERF_COUNTERS    
     processor.setPerfAutoExportEnabled (true);
 #endif
+
+    // ==================================================================
+    // v1.9.x：新手引导覆盖层 —— 按需创建/销毁，不提前驻留在 child list 中
+    //   · startTutorial() 时创建 + addChildComponent
+    //   · dismissTutorialOverlay() 时 removeChildComponent + reset
+    //   · 关键：引导不活动时 Editor 子组件列表中完全不存在此组件，
+    //     从根本上杜绝 JUCE 子组件遍历 / OpenGL 渲染合成层的任何干扰
+    // ==================================================================
+
+    // 首次启动检测：非插件模式且 processor 未记录完成 → 启动引导
+    if (! isPluginHost && ! processor.isTutorialCompleted())
+        startTutorial();
 }
 
 Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
@@ -1104,6 +1549,210 @@ void Y2KmeterAudioProcessorEditor::loadInitialModules()
 }
 
 // ----------------------------------------------------------
+// v1.9.x：新手引导流程控制（仅 Standalone 模式）
+//   · startTutorial()       —— 启动 STEP 1：右键添加 Tamagotchi
+//   · advanceTutorialStep2()—— 用户添加了 Tamagotchi → 推进到 STEP 2
+//   · completeTutorial()    —— 宠物孵化完成 → 标记完成并持久化
+//   · skipTutorial()        —— 用户切换预设时跳过引导
+//   · dismissTutorialOverlay—— 隐藏覆盖层，清空 step 状态
+//   · checkTutorialStep2Condition —— timer 中轮询：蛋是否孵化
+// ----------------------------------------------------------
+
+void Y2KmeterAudioProcessorEditor::startTutorial()
+{
+    // 仅 Standalone 生效；插件模式与已完成状态直接跳过
+    if (isPluginHost || processor.isTutorialCompleted()) return;
+    if (workspace == nullptr) return;
+
+    // 按需创建覆盖层（不提前创建，避免干扰子组件事件路由）
+    if (tutorialOverlay == nullptr)
+    {
+        tutorialOverlay = std::make_unique<TutorialOverlay>();
+        addChildComponent (*tutorialOverlay);
+
+        // 订阅 "右键点击聚光灯区域" → 打开模块选择菜单
+        tutorialOverlay->onRightClickHighlight = [this](juce::Point<int> clickPos)
+        {
+            if (tutorialStep == TutorialStep::step1_rightClick && workspace != nullptr)
+            {
+                const auto screenPos = tutorialOverlay->localPointToGlobal (clickPos);
+                const auto wsPos = workspace->getPosition();
+                const auto canvasPos = clickPos - wsPos;
+
+                // 不销毁 overlay！切换文案引导用户点击菜单中的 Tamagotchi
+                tutorialOverlay->showStep1MenuOpened();
+                tutorialStep = TutorialStep::step1_menuOpened;
+
+                // 弹出受限菜单：仅 Tamagotchi 可选，关闭时恢复 STEP1 文案
+                workspace->showAddMenu (screenPos, canvasPos,
+                    { ModuleType::tamagotchi },
+                    [this]()
+                    {
+                        // 用户关闭了菜单但没有选择 → 恢复文案，回到 STEP1
+                        if (tutorialOverlay != nullptr && tutorialStep == TutorialStep::step1_menuOpened)
+                        {
+                            tutorialOverlay->showStep1 (
+                                tutorialOverlay->getHighlightArea());
+                            tutorialStep = TutorialStep::step1_rightClick;
+                        }
+                    });
+            }
+        };
+
+        // 订阅 "点击气泡 × 按钮 → 确认跳过" → 跳过新手引导
+        tutorialOverlay->onSkipRequested = [this]()
+        {
+            skipTutorial();
+        };
+    }
+
+    // 获取 canvas 区域（相对 Editor 坐标 = workspace 坐标 + workspace 的 Y 偏移）
+    const auto canvas = workspace->getCanvasArea();
+    const auto wsPos  = workspace->getPosition();
+    const auto canvasInEditor = canvas.translated (wsPos.x, wsPos.y);
+
+    tutorialStep = TutorialStep::step1_rightClick;
+    tutorialWasSkipped = false;
+
+    tutorialOverlay->setBounds (getLocalBounds());
+    tutorialOverlay->showStep1 (canvasInEditor);
+    tutorialOverlay->toFront (false);
+}
+
+void Y2KmeterAudioProcessorEditor::advanceTutorialStep2()
+{
+    if (tutorialStep != TutorialStep::step1_rightClick
+        && tutorialStep != TutorialStep::step1_menuOpened) return;
+
+    // overlay 一直存活（STEP1 右键后未销毁），直接切换到 STEP2
+    jassert (tutorialOverlay != nullptr);
+
+    // 查找刚添加的 Tamagotchi 模块所在位置
+    juce::Rectangle<int> petAreaInEditor;
+    if (workspace != nullptr)
+    {
+        const auto wsPos = workspace->getPosition();
+        for (int i = 0; i < workspace->getNumModules(); ++i)
+        {
+            if (auto* m = workspace->getModule (i))
+            {
+                if (m->getModuleType() == ModuleType::tamagotchi)
+                {
+                    const auto modBounds = m->getBounds();
+                    petAreaInEditor = modBounds.translated (wsPos.x, wsPos.y);
+                    break;
+                }
+            }
+        }
+    }
+
+    tutorialStep = TutorialStep::step2_playAudio;
+
+    tutorialOverlay->setBounds (getLocalBounds());
+    tutorialOverlay->showStep2 (petAreaInEditor);
+    tutorialOverlay->toFront (false);
+}
+
+void Y2KmeterAudioProcessorEditor::completeTutorial()
+{
+    tutorialStep = TutorialStep::hidden;
+    tutorialWasSkipped = false;
+    dismissTutorialOverlay();
+
+    // 持久化完成状态
+    processor.setTutorialCompleted (true);
+
+    // 清理 Tamagotchi 信号保留（由正常的 tick 逻辑接管）
+}
+
+void Y2KmeterAudioProcessorEditor::skipTutorial()
+{
+    tutorialStep = TutorialStep::hidden;
+    tutorialWasSkipped = true;
+    dismissTutorialOverlay();
+
+    // 注意：不标记 tutorialCompleted，保留下次切回 default 重新触发的可能
+}
+
+void Y2KmeterAudioProcessorEditor::dismissTutorialOverlay()
+{
+    if (tutorialOverlay != nullptr)
+    {
+        // 先隐藏（内部清理状态），再移出 child list，最后销毁
+        tutorialOverlay->hide();
+        removeChildComponent (tutorialOverlay.get());
+        tutorialOverlay.reset();
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::checkTutorialStep2Condition()
+{
+    if (workspace == nullptr || isPluginHost) return;
+
+    // ------ STEP 1: 等待用户从右键菜单中选中 Tamagotchi -------
+    if (tutorialStep == TutorialStep::step1_menuOpened)
+    {
+        for (int i = 0; i < workspace->getNumModules(); ++i)
+        {
+            if (auto* m = workspace->getModule (i))
+            {
+                if (m->getModuleType() == ModuleType::tamagotchi)
+                {
+                    // 用户已添加 Tamagotchi → 推进到 STEP 2
+                    advanceTutorialStep2();
+                    return;
+                }
+            }
+        }
+        return;
+    }
+
+    // ------ STEP 2: 等待蛋孵化 -------
+    if (tutorialStep != TutorialStep::step2_playAudio) return;
+
+    // 遍历寻找 Tamagotchi 模块：检查是否已从蛋阶段孵化
+    for (int i = 0; i < workspace->getNumModules(); ++i)
+    {
+        if (auto* m = workspace->getModule (i))
+        {
+            if (m->getModuleType() == ModuleType::tamagotchi)
+            {
+                if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
+                {
+                    // 宠物已不再处于蛋/孵化阶段 → 孵化完成
+                    if (! tamagotchi->isInEggPhase())
+                    {
+                        completeTutorial();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // 如果没有找到 Tamagotchi（被用户删除了），则重试 STEP 1
+    bool hasTamagotchi = false;
+    for (int i = 0; i < workspace->getNumModules(); ++i)
+    {
+        if (auto* m = workspace->getModule (i))
+        {
+            if (m->getModuleType() == ModuleType::tamagotchi)
+            {
+                hasTamagotchi = true;
+                break;
+            }
+        }
+    }
+
+    if (! hasTamagotchi)
+    {
+        // 用户删除了 Tamagotchi，重新回到 STEP 1
+        dismissTutorialOverlay();
+        startTutorial();
+    }
+}
+
+// ----------------------------------------------------------
 // 按默认层叠瀑布布局加载七个默认模块（eq / loudness / oscilloscope /
 // spectrum / phase / dynamics / waveform）。
 //   · 调用方需先清空 workspace（首次启动由构造器保证）
@@ -1181,6 +1830,17 @@ void Y2KmeterAudioProcessorEditor::seedDefaultModules()
 void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 {
     if (workspace == nullptr) return;
+
+    // 保存所有 Tamagotchi 模块的状态（切换预设时保留，不被清除）
+    struct TamagotchiState { juce::String roleName; float hunger; float health; };
+    juce::Array<TamagotchiState> tamagotchiStates;
+    for (int i = 0; i < workspace->getNumModules(); ++i)
+    {
+        auto* m = workspace->getModule (i);
+        if (m->getModuleType() == ModuleType::tamagotchi)
+            if (auto* t = dynamic_cast<TamagotchiModule*> (m))
+                tamagotchiStates.add ({ t->getRoleName(), t->getHunger(), t->getHealth() });
+    }
 
     // 先清空现有模块 / 拼豆贴画（clearAllModules 不触发 onLayoutChanged）
     workspace->clearAllModules();
@@ -1401,6 +2061,23 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
             curX += slotW;
         }
+    }
+
+    // 重新添加 Tamagotchi 模块到 canvas 右下角（切换预设时保留宠物不被清除）
+    for (const auto& state : tamagotchiStates)
+    {
+        auto tamagotchi = std::make_unique<TamagotchiModule>();
+        if (state.roleName.isNotEmpty())
+            tamagotchi->restorePersistentState (state.roleName, state.hunger, state.health);
+
+        const auto canvas = workspace->getCanvasArea();
+        constexpr int padding = 8;
+        const int petW = tamagotchi->getDefaultWidth();
+        const int petH = tamagotchi->getDefaultHeight();
+        tamagotchi->setBounds (canvas.getRight()  - petW - padding,
+                               canvas.getBottom() - petH - padding,
+                               petW, petH);
+        workspace->addModule (std::move (tamagotchi), false);
     }
 
     // 手动回写布局到 Processor（clearAllModules + 批量 addModule 会触发多次
@@ -1740,7 +2417,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v1.9.4";
+        const juce::String versionText = "v1.9.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1879,6 +2556,10 @@ void Y2KmeterAudioProcessorEditor::resized()
     // 浮层固定在顶部，与 TitleBar 同尺寸（Editor 同宽 × titleBarHeight）。
     if (chromeHiddenOverlay != nullptr)
         chromeHiddenOverlay->setBounds (0, 0, getWidth(), titleBarHeight);
+
+    // 教程覆盖层始终铺满整个 Editor
+    if (tutorialOverlay != nullptr && tutorialOverlay->isVisible())
+        tutorialOverlay->setBounds (getLocalBounds());
 
     // 同步 workspace 的 hit-test 挖洞（按钮位置依赖 getWidth()，resize 后必须重新计算）
     updateWorkspaceHitTestHoles();
@@ -2820,6 +3501,10 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
     // v1.8.6：递减 auto-show 抑制计数器（用于 onChromeVisibleChanged 异步事件窗口保护）
     if (suppressAutoShowCounter > 0)
         --suppressAutoShowCounter;
+
+    // v1.9.x：新手引导 STEP 2 条件检查（孵化完成检测）
+    if (! isPluginHost)
+        checkTutorialStep2Condition();
 
     // v1.8.6：焦点保护 —— timer 轮询检测前台状态，弥补 mouseExit 漏判场景
     //   · 始终追踪 windowWasForeground（即使 autoHideMode 为 false），确保首次 HIDE
