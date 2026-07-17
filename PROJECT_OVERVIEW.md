@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`1.9.7`）
+- **产品名**：`Y2Kmeter` （版本：`2.0.0`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -1521,6 +1521,98 @@ v1.9.7 基于 v1.9.6 的新手引导进行了多项交互打磨和 bug 修复，
 | `CMakeLists.txt` | 版本号 1.9.6 → 1.9.7 |
 | `Y2Kmeter_installer.iss` | 版本号 1.9.6 → 1.9.7 |
 | `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
+
+---
+
+### 6.27 v2.0.0 交互增强与细节打磨
+
+v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要围绕右键添加模块的交互优化、Tamagotchi 置顶逻辑完善、以及宠物聚焦信息展示。
+
+#### ① 右键任意位置添加模块（不再限制空白区）
+
+- **需求**：之前只有右键点击 workspace 空白区域（未被模块覆盖处）才能弹出添加模块菜单。用户期望右键点击**任何位置**（包括模块上方）都能添加模块。
+- **方案**（涉及 3 个文件）：
+
+| 文件 | 改动 |
+|------|------|
+| `ModuleWorkspace.h` | `ModulePanel` 新增 `onRightClick(ModulePanel&, juce::Point<int>)` 回调 |
+| `ModulePanel.cpp` | `mouseDown` 开头：右键时立即触发 `onRightClick` 回调并 return |
+| `ModuleWorkspace.cpp` | `hookPanel` 中注册 `onRightClick` → 计算屏幕坐标/canvas坐标 → 调用 `showAddMenu` |
+
+- **回调签名设计**：`onRightClick(ModulePanel&, juce::Point<int> localPos)` —— 与 `onCloseClicked`/`onBroughtToFront` 风格一致，`localPos` 参数用于计算菜单弹出锚点。
+
+#### ② Tamagotchi 模块右键特殊处理
+
+- **Bug**：`TamagotchiModule::mouseDown` 完全重写了基类方法，之前加在 `ModulePanel::mouseDown` 中的右键转发逻辑不生效。
+- **修复**：在 `TamagotchiModule::mouseDown` 开头加入相同的右键转发代码。
+
+#### ③ 修复菜单位置偏移
+
+- **Bug**：右键模块时菜单位置偏移（没有贴着点击位置）。
+- **根因**：`screenPos = localPointToGlobal(p.localPointToGlobal(localPos))` —— `p.localPointToGlobal()` 已经返回屏幕坐标，外层又做了一次 workspace→屏幕 转换，坐标被双重偏移。
+- **修复**：去掉外层 `localPointToGlobal`，直接用 `p.localPointToGlobal(localPos)`。
+
+#### ④ 修复拼豆图片聚焦覆盖 Tamagotchi
+
+- **Bug**：拖入的图片聚焦（左键点击）后，`PerlerImageLayer::toFront(true)` 将图片推到所有子组件最上层，包括 Tamagotchi 模块。
+- **根因**：之前 `hookPanel` 的 `onBroughtToFront` 回调已处理「其他模块冒前时 Tamagotchi 置顶」，但图片聚焦走的是 `mouseDown → hitTestPerlerImageAt → focusedLayer->toFront(true)` 这条不同路径，缺少 Tamagotchi 重新置顶。
+- **修复**：在 `mouseDown` 图片聚焦分支中，`focusedLayer->toFront(true)` 之后立即遍历所有 Tamagotchi 模块并 `toFront(false)`。
+
+#### ⑤ 聚焦时显示宠物名字
+
+- **需求**：聚焦 Tamagotchi 模块时，在状态栏（饥饿/健康 HUD）下方显示宠物角色名，名字来源于资源文件的文件夹名。
+- **实现**：在 `TamagotchiModule::paint()` 的 `focused` 块中新增绘制：
+  - **位置**：`getHudBounds().withTrimmedTop(18)` 截取 14px 高的行
+  - **样式**：`PinkXP::ink` 颜色 + 9px Bold 字体 + 居中
+  - **来源**：`roleName` 字段（在 `loadRandomRoleAnimations()` 中从目录名自动提取）
+- **颜色迭代**：初版使用 `PinkXP::pink300` 浅粉色，在多主题预设下不可读；改为 `PinkXP::ink` 深色墨水色（与删除按钮 "x" 一致）。
+
+#### ⑥ 未使用动画文件分析
+
+本轮还完成了对 33 个 `PetAnim` 动画 ID 的全面审计，发现 **7 个动画文件未被代码引用**：
+
+| ID | 枚举 | 含义 |
+|----|------|------|
+| 8 | `angry` | 生气 |
+| 14 | `full` | 吃饱 |
+| 17 | `talkNegative` | 负面对话 |
+| 18 | `talkNormal` | 普通对话 |
+| 19 | `talkHappy` | 开心对话 |
+| 31 | `yell` | 大叫 |
+| 32 | `runAwayLeft` | 向左逃跑 |
+
+建议接入场景已记录在 §6.25 末尾的状态机总结中。
+
+#### 踩坑总结（v2.0.0）
+
+| 坑 | 原因 | 解决 |
+|----|------|------|
+| **`localPointToGlobal` 双重转换导致菜单位置偏移** | `p.localPointToGlobal(localPos)` 已返回屏幕坐标，外层又包了 `this->localPointToGlobal()` | 去掉外层转换 |
+| **Tamagotchi 右键无响应** | `TamagotchiModule` 重写了 `mouseDown`，未调用基类，新增的右键转发无法执行 | 在 `TamagotchiModule::mouseDown` 开头加上同样的右键转发 |
+| **拼豆图片聚焦覆盖 Tamagotchi** | 图片聚焦走 `mouseDown` 路径而非 `onBroughtToFront` 回调，缺少置顶逻辑 | 在图片聚焦分支后追加 Tamagotchi `toFront(false)` |
+| **`replace_all` 短字符串失败** | `v1.9.7` 太短无法匹配 | 加上整行上下文（`versionText = "v..."`） |
+
+#### 改动文件清单（v2.0.0）
+
+| 文件 | 改动 |
+|------|------|
+| `ModuleWorkspace.h` | `ModulePanel` 新增 `onRightClick` 回调声明 |
+| `ModulePanel.cpp` | `mouseDown` 右键转发 |
+| `ModuleWorkspace.cpp` | `hookPanel` 注册 `onRightClick`；图片聚焦后 Tamagotchi 置顶 |
+| `TamagotchiModule.cpp` | `mouseDown` 右键转发；`paint` 聚焦态绘制 `roleName`；名字颜色从 `pink300` → `ink` |
+| `TamagotchiModule.h` | 无改动（已继承 `onRightClick` 回调） |
+| `CMakeLists.txt` | 版本号 1.9.7 → 2.0.0 |
+| `Y2Kmeter_installer.iss` | 版本号 1.9.7 → 2.0.0 |
+| `PluginEditor.cpp` | 3 处硬编码版本号 1.9.7 → 2.0.0 |
+| `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
+
+#### 后续开发注意点
+
+| 注意项 | 说明 |
+|--------|------|
+| **`onRightClick` 回调仅用于右键添加菜单** | 该回调专为 `showAddMenu` 设计。未来如有模块需要右键自定义菜单（如 Tamagotchi 设置），应在各自 `mouseDown` 中独立处理，不要复用此回调。 |
+| **Tamagotchi 置顶逻辑有两处** | ① `hookPanel` 的 `onBroughtToFront`（其他模块冒前时）、② `mouseDown` 图片聚焦分支（图片冒前时）。如果未来新增第三类可 `toFront` 的组件（如视频/3D 层），必须同步加入置顶逻辑。 |
+| **`roleName` 来源** | 由 `loadRandomRoleAnimations()` 通过 `selected.getFileNameWithoutExtension()` 提取。如果未来资源目录命名规范变化，需同步更新提取逻辑。 |
 
 ---
 

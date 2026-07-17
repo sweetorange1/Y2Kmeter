@@ -840,6 +840,14 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
         updateDragPreview(p);
     };
     panel.onCloseClicked   = [this](ModulePanel& p) { removeModule(p); };
+    // 模块上任意位置右键 → 弹出"添加模块"菜单
+    panel.onRightClick = [this](ModulePanel& p, juce::Point<int> localPos)
+    {
+        if (layoutLocked) return;
+        const auto screenPos = p.localPointToGlobal (localPos);
+        const auto canvasPos = p.getBounds().getTopLeft() + localPos;
+        showAddMenu (screenPos, canvasPos);
+    };
     // bug2：点击任何模块（无论标题栏 / 内容区 / 缩放边缘）都取消图片聚焦
     //   · ModulePanel::mouseDown 最开头就会 toFront(true) + onBroughtToFront(*this)，
     //     因此这里能拦住"点击子模块"这条事件路径（父 ModuleWorkspace 的 mouseDown
@@ -1468,6 +1476,14 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
             }
             if (auto* focusedLayer = perlerLayers[draggingPerlerIdx])
                 focusedLayer->toFront (true);
+            // Tamagotchi 始终置顶：图片聚焦后 toFront(true) 会把 perlerLayer
+            //   冒到所有子组件之上（包括 Tamagotchi 模块）。这里再把所有
+            //   Tamagotchi 模块抬回最上层，保证宠物永远不被图片遮挡。
+            for (auto* m : modules)
+            {
+                if (m->getModuleType() == ModuleType::tamagotchi)
+                    m->toFront (false);
+            }
             // 设为聚焦 + 请求键盘焦点，以监听 Delete
             const int oldFocus = focusedPerlerIdx;
             focusedPerlerIdx = draggingPerlerIdx;

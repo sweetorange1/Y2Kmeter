@@ -521,6 +521,15 @@ void TamagotchiModule::paint (juce::Graphics& g)
         txt.translate (-1, -1);
         if (deleteBtnPressed) txt.translate (1, 1);
         g.drawText ("x", txt, juce::Justification::centred, false);
+
+        // 聚焦时在状态栏下方显示宠物名字
+        if (roleName.isNotEmpty())
+        {
+            auto nameArea = getHudBounds().withTrimmedTop (18);
+            g.setColour (PinkXP::ink);
+            g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+            g.drawText (roleName, nameArea.withHeight (14), juce::Justification::centred, false);
+        }
     }
 
     // 删除确认对话框已迁移到 TamagotchiConfirmOverlay（workspace 层级渲染，
@@ -667,6 +676,14 @@ void TamagotchiModule::mouseExit (const juce::MouseEvent& e)
 
 void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
 {
+    // 右键 → 冒泡给 workspace 弹出"添加模块"菜单（任何位置均可）
+    if (e.mods.isPopupMenu())
+    {
+        if (onRightClick)
+            onRightClick (*this, e.getPosition());
+        return;
+    }
+
     toFront (true);
     if (onBroughtToFront)
         onBroughtToFront (*this);

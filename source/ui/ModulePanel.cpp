@@ -406,6 +406,14 @@ void ModulePanel::mouseMove(const juce::MouseEvent& e)
 
 void ModulePanel::mouseDown(const juce::MouseEvent& e)
 {
+    // 右键 → 冒泡给 workspace 弹出"添加模块"菜单（任何位置均可）
+    if (e.mods.isPopupMenu())
+    {
+        if (onRightClick)
+            onRightClick (*this, e.getPosition());
+        return;
+    }
+
     // 抹到顶层
     toFront(true);
     if (onBroughtToFront)

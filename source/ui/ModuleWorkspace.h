@@ -165,6 +165,7 @@ public:
     std::function<void(ModulePanel&)> onBoundsDragging;   // 拖拽过程中持续回调（吸附预览用）
     std::function<void(ModulePanel&)> onCloseClicked;
     std::function<void(ModulePanel&)> onBroughtToFront;
+    std::function<void(ModulePanel&, juce::Point<int> localPos)> onRightClick;  // 右键模块任意位置 → 弹出添加菜单
 
     void paint(juce::Graphics& g) override;
     // CPU 小字绘制在所有子组件之上（子组件如 EQ 的 PixelEqGraph 会填满整个
