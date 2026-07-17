@@ -1616,4 +1616,112 @@ v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要
 
 ---
 
+### 6.28 v2.0.1 Carried 拖拽状态机
+
+v2.0.1 引入了一个全新的瞬时状态机 `carried`，当用户鼠标按下并拖动 Tamagotchi 模块位置时触发。宠物在 workspace 坐标系中保持不动（类似 falling 的 startled 动画），外框随鼠标移动。当宠物触碰边框时被边框推动。松手后从当前位置触发 falling 物理跌落。
+
+#### ① 状态机定义
+
+| 项目 | 值 |
+|------|-----|
+| 枚举名 | `MotionMode::carried`（排在 `landingFall` 之后） |
+| 动画 | `PetAnim::startled`（与 falling 相同），拖动期间循环播放 |
+| 刷新率 | 20Hz（与 falling 同） |
+| 触发条件 | `dragMode == move` 且鼠标移动超过 4px 阈值 |
+| 退出条件 | `mouseUp` → `switchMotionMode(MotionMode::falling)` |
+
+#### ② 核心逻辑
+
+```mermaid
+stateDiagram-v2
+    [*] --> carried: mouseDrag delta≥4px
+    carried --> carried: mouseDrag 持续拖动
+    carried --> falling: mouseUp 松手
+    falling --> landingFall: petPos触底
+    landingFall --> patrol: 动画播完
+    
+    note right of carried
+        petPos 由 mouseDrag 独占管理
+        stepOneFrame/stepWander/resized 均跳过
+        carriedPetWsX/Y 锚点每帧夹持同步
+    end note
+```
+
+#### ③ 关键设计与实现细节
+
+| 组件 | 改动 | 说明 |
+|------|------|------|
+| `MotionMode` 枚举 | 新增 `carried` | `TamagotchiModule.h` |
+| 成员变量 | `carriedPetWsX/Y`、`carriedDragSuppressRepaint` | workspace 坐标锚点 + 拖拽期间重绘抑制标志 |
+| `mouseDown` | `toFront(true)` → `toFront(false)` | 仅改 z-order 不触发重绘 |
+| `mouseDrag` | 4px 阈值 → `switchMotionMode(carried)`；petPos 在 `setTopLeftPosition` **之前**用 `newTopLeft` 预计算 | 确保位置变更重绘时 petPos 已就绪 |
+| `mouseUp` | 保存 `frozenPos` → `switchMotionMode(falling)` → 恢复 `petPos` | 阻止 `forceAnimation` 锚点反算漂移 |
+| `switchMotionMode` | 新增 `carried` 分支：`forceAnimation(PetAnim::startled)` | |
+| `stepWander` | carried → `break` | petPos 同步由 mouseDrag 全权处理 |
+| `stepOneFrame` | carried → `early return` | 冻结动画帧推进 |
+| `resized()` | carried → `early return` | 不修改 petPos |
+| `flushVisualRepaintQueue` | carried + `!forceNow` → 清空队列跳过重绘 | 避免与 `setTopLeftPosition` 内置重绘竞态 |
+| `evaluateAutoMotionMode` | carried 加入瞬时状态锁定链 | 拖动期间不被打断 |
+| `onAnimationFinished` | carried → `forceAnimation(startled, true)` 循环 | 拖动期间持续播放 startled |
+| `getTargetVisualHzForMode` | carried → 20Hz | |
+| `stateModeCombo` | 新增 ID 17 "Carried" | 调试下拉 |
+| petPos 夹持 | Y 下限从 `0` → `playArea.getY()` (=hudHeight=64) | **闪烁根因修复**：禁止宠物进入 HUD 区 |
+
+#### ④ 踩坑记录（本轮最重要部分）
+
+本轮开发历经 **10+ 轮迭代**才最终稳定，是项目中调试 non-opaque 组件拖拽闪烁问题最深入的一次。核心问题链条如下：
+
+| # | 现象 | 曾尝试的修复 | 为何不够 | 最终根因 |
+|---|------|------------|---------|---------|
+| 1 | 拖动时宠物抽动（闪现-闪回） | `repaintSelfAndParent()` 移除 | `timerCallback` 异步重绘仍在竞争 | `flushVisualRepaintQueue` + 抑制标记 |
+| 2 | 边界粘滞 | `carriedPetWs` 夹持后同步 | 仍会粘滞 | 同 #1，两路 petPos 写入竞争 |
+| 3 | `mouseDown` 立即触发动画 | 移到 `mouseDrag` | — | 加入 4px 阈值 `delta.getDistanceFromOrigin()` |
+| 4 | `getDistance()` 编译失败 | `getDistanceFromOrigin()` | — | JUCE `Point<int>` API |
+| 5 | 向下拖动每小段闪一次 | `stepOneFrame` carried 冻结 | `forceAnimation` 不再漂移但闪烁依旧 | `resized()` 中 `else` 分支覆盖 petPos → carried early return |
+| 6 | 仍闪烁 | `mouseDrag` petPos 提到 `setTopLeftPosition` **之前**用 `newTopLeft` 预计算 | 消除了单帧延迟窗口，但仍未根除 | **三重竞态**：`toFront(true)` z-order 重绘 + `setTopLeftPosition` 位置变更重绘 + timer 异步重绘 |
+| 7 | 仍闪烁 | `setBufferedToImage(true)` | 产生残影，模块完全不可用（non-opaque + buffered 在 macOS/Windows 表现不一致） | ❌ 不可行方案 |
+| 8 | 距离上边界 ~64px 时闪烁 | 排查发现 `hudHeight=64` 精确对应 | — | **HUD 边界脏矩形分裂**：宠物进入 HUD 区时，`setTopLeftPosition` 的脏矩形同时覆盖 HUD 和 playArea，non-opaque 组件两级 painting 非原子化产生竞态 |
+
+**最终有效的防御体系**（5 层）：
+
+```
+第1层 mouseDrag:   petPos 在 setTopLeftPosition 之前预计算（消除单帧延迟）
+第2层 resized():    carried 期间跳过 petPos 修改（防止覆盖）
+第3层 stepOneFrame: carried 期间冻结动画帧（防止 forceAnimation 漂移）
+第4层 flushQueue:   carried 期间抑制 timer 异步重绘（消除竞态）
+第5层 petPos 夹持:  Y 下限 = playArea.getY()（禁止进入 HUD 区，消除脏矩形分裂）
+```
+
+**关键教训**：
+
+| 教训 | 详细说明 |
+|------|---------|
+| **non-opaque 组件拖拽闪烁是 JUCE 经典难题** | `setOpaque(false)` 的组件在 `setTopLeftPosition` 时，JUCE 需要先画父组件底色再叠子组件，这两步不是原子的。高频拖拽（60Hz mouseDrag）+ 异步重绘 + OpenGL 合成层会产生中间态可见。 |
+| **`toFront(true)` 是隐藏炸弹** | `toFront(true)` 会触发立即重绘。对 non-opaque 组件，它与 `setTopLeftPosition` 的重绘形成竞态。拖拽场景中应始终用 `toFront(false)`。 |
+| **`setBufferedToImage` 不是银弹** | 对某些平台/渲染后端，`setBufferedToImage(true)` + `setOpaque(false)` 会产生残影。Y2KMeter 使用 OpenGL 渲染，此方案不可行。 |
+| **脏矩形分裂是 non-opaque 闪烁的关键原因** | 如果 dirty rect 跨越组件的"异构区域"（如 HUD 用 `drawPixelBar` 画、playArea 画宠物），parent 底色重绘和 child 叠加的时序差异会被放大。解决方式：让 dirty rect 始终落在**同一类区域**内（即禁止宠物进入 HUD 区）。 |
+| **多路径 petPos 写入是竞态根源** | `mouseDrag`、`timerCallback→stepWander`、`resized()`、`switchMotionMode→forceAnimation` 共 4 条路径都能修改 petPos。carried 状态下必须只保留一条（mouseDrag），其余全部跳过。 |
+
+#### ⑤ 改动文件清单（v2.0.1）
+
+| 文件 | 改动 |
+|------|------|
+| `TamagotchiModule.h` | `MotionMode` 新增 `carried`；新增 `carriedPetWsX/Y` + `carriedDragSuppressRepaint` 成员变量 |
+| `TamagotchiModule.cpp` | mouseDown/mouseDrag/mouseUp 重写；switchMotionMode/evaluateAutoMotionMode/getTargetVisualHzForMode/onAnimationFinished/stepWander/stepOneFrame/resized/flushVisualRepaintQueue/stateModeCombo 共 12 处修改 |
+| `CMakeLists.txt` | 版本号 2.0.0 → 2.0.1 |
+| `Y2Kmeter_installer.iss` | 版本号 2.0.0 → 2.0.1 |
+| `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
+
+#### ⑥ 后续开发注意点
+
+| 注意项 | 说明 |
+|--------|------|
+| **carried 状态下 petPos 写入独占** | mouseDrag 是唯一的 petPos 写入路径，`stepOneFrame`/`stepWander`/`resized()`/`flushVisualRepaintQueue` 都有 carried 防御分支。如果未来新增修改 petPos 的代码路径（如新的定时器回调或 resize 事件处理），必须加入 carried 防御。 |
+| **`carriedDragSuppressRepaint` 标记** | 进入 carried 时置 `true`，松手恢复。`flushVisualRepaintQueue` 在 `carriedDragSuppressRepaint && !forceNow` 时仅清空队列不重绘。如果未来 carried 期间需要显示动态特效（如粒子），需要重新评估此机制。 |
+| **HUD 边界（hudHeight=64）不可跨越** | `petPos.y` 下限 `= playArea.getY() = hudHeight`。如果未来 HUD 高度变化，夹持逻辑自动跟随（因为用的是 `playArea.getY()` 而非硬编码 64）。 |
+| **`toFront(false)` 是正确的 z-order 操作** | 拖拽触发的 `mouseDown` 中必须使用 `toFront(false)`，不可改为 `toFront(true)`。这是 non-opaque 组件闪烁的根因之一。 |
+| **`getDistanceFromOrigin()` 而非 `getDistance()`** | JUCE `Point<int>` 的距离方法名。 |
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

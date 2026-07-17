@@ -327,6 +327,7 @@ TamagotchiModule::TamagotchiModule()
     stateModeCombo.addItem ("Sick", 14);
     stateModeCombo.addItem ("CriticalSick", 15);
     stateModeCombo.addItem ("Dead", 16);
+    stateModeCombo.addItem ("Carried", 17);
     stateModeCombo.setSelectedId (1, juce::dontSendNotification);
     stateModeCombo.onChange = [this]
     {
@@ -350,6 +351,7 @@ TamagotchiModule::TamagotchiModule()
             case 14: forcedMotionMode = MotionMode::sick; break;
             case 15: forcedMotionMode = MotionMode::criticalSick; break;
             case 16: forcedMotionMode = MotionMode::dead; break;
+            case 17: forcedMotionMode = MotionMode::carried; break;
             default: break;
         }
 
@@ -579,6 +581,14 @@ void TamagotchiModule::resized()
 
     else
     {
+        // carried 拖拽期间不在此修改 petPos——mouseDrag 已全权接管，
+        // 避免与 setTopLeftPosition 触发的异步重绘产生竞态闪烁。
+        if (motionMode == MotionMode::carried)
+        {
+            lastLocalBounds = now;
+            return;
+        }
+
         petGroundAnchorX = juce::jlimit (anchorMin, anchorMax, petGroundAnchorX);
 
         petPos.x = juce::jlimit (minX, maxX, petGroundAnchorX - halfW);
@@ -684,7 +694,11 @@ void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    toFront (true);
+    // ★ carried 闪烁修复：使用 toFront(false) 改变 z-order 但不触发重绘。
+    // 后续 setFocusVisual(true) → repaintSelfAndParent() 统一处理视觉刷新。
+    // 若用 toFront(true)，其内置重绘与 mouseDrag 中 setTopLeftPosition 的
+    // 内置重绘形成竞态，对 non-opaque 组件在 OpenGL 下产生"闪现-闪回"。
+    toFront (false);
     if (onBroughtToFront)
         onBroughtToFront (*this);
 
@@ -717,6 +731,7 @@ void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
     dragStartMouse = e.getEventRelativeTo (getParentComponent()).getPosition();
     dragStartBounds = getBounds();
     setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+
     repaintSelfAndParent();
 }
 
@@ -740,7 +755,55 @@ void TamagotchiModule::mouseDrag (const juce::MouseEvent& e)
             newTopLeft.y = juce::jlimit (0, maxY, newTopLeft.y);
         }
 
-        setTopLeftPosition (newTopLeft);
+        // ------- carried 状态触发与同步（在 setTopLeftPosition 之前完成）-------
+        //
+        // ★ 关键：petPos 必须在 setTopLeftPosition 之前计算完毕。
+        // setTopLeftPosition 会触发 JUCE 内置重绘（标记脏区），
+        // 若此时 petPos 还是旧值，non-opaque 组件的一次异步重绘就能读到错误
+        // 位置，造成"闪现—闪回"的闪烁抖动。
+        //
+        // 因此这里用 newTopLeft（即将生效的位置）预计算 petPos，
+        // 确保 setTopLeftPosition 触发的任何重绘都使用正确的 petPos。
+        constexpr float kCarriedTriggerDistPx = 4.0f;
+
+        if (motionMode != MotionMode::carried
+            && delta.getDistanceFromOrigin() >= kCarriedTriggerDistPx
+            && ! forceMotionModeEnabled)
+        {
+            carriedPetWsX = (float) dragStartBounds.getX() + petPos.x;
+            carriedPetWsY = (float) dragStartBounds.getY() + petPos.y;
+            carriedDragSuppressRepaint = true;
+            switchMotionMode (MotionMode::carried);
+        }
+
+        if (motionMode == MotionMode::carried)
+        {
+            const auto cf = getCurrentFrame();
+            if (! cf.isNull())
+            {
+                // 用 newTopLeft（将生效的坐标）预计算，而非 getX()/getY()（当前坐标）
+                const float desiredX = carriedPetWsX - (float) newTopLeft.x;
+                const float desiredY = carriedPetWsY - (float) newTopLeft.y;
+
+                const auto area = getLocalBounds();
+                const auto playArea = area.withTrimmedTop (juce::jmin (hudHeight, area.getHeight()));
+                const float cfHalfW = (float) cf.getWidth() * 0.5f;
+                const float cfFloorY = (float) juce::jmax (0, area.getHeight() - cf.getHeight());
+
+                const float pMinX = 0.0f;
+                const float pMinY = (float) playArea.getY();  // HUD 下边界，宠物不可进入 HUD 区
+                const float pMaxX = (float) juce::jmax (0, playArea.getWidth() - cf.getWidth());
+                petPos.x = juce::jlimit (pMinX, pMaxX, desiredX);
+                petPos.y = juce::jlimit (pMinY, cfFloorY, desiredY);
+
+                // 夹持后同步锚点，避免反向拖动时粘滞在边界
+                carriedPetWsX = (float) newTopLeft.x + petPos.x;
+                carriedPetWsY = (float) newTopLeft.y + petPos.y;
+                petGroundAnchorX = petPos.x + cfHalfW;
+            }
+        }
+
+        setTopLeftPosition (newTopLeft);  // petPos 已就绪 → 重绘使用正确坐标
     }
     else
     {
@@ -780,8 +843,27 @@ void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
     }
 
     if (dragMode != DragMode::none)
-
     {
+        // 拖动松手：若正处于 carried 状态 → 宠物触发物理跌落
+        if (motionMode == MotionMode::carried)
+        {
+            carriedDragSuppressRepaint = false;
+
+            // 保存拖动最终位置的 petPos，switchMotionMode(falling)→
+            // forceAnimation(startled) 会通过 petGroundAnchorX 反算漂移 petPos.x。
+            // switchMotionMode 内部也会 enqueuePetDirtyRepaint，但其 dirty bounds
+            // 基于被漂移后的 petPos，不能直接 flush。此处用 frozenPos 恢复后做
+            // 全量 repaintSelfAndParent 确保宠物立即绘制在正确位置。
+            const auto frozenPos = petPos;
+            fallVelocityPxPerTick = 0.0f;
+            switchMotionMode (MotionMode::falling);
+            petPos = frozenPos;
+            petGroundAnchorX = petPos.x + (float) getCurrentFrame().getWidth() * 0.5f;
+
+            hasQueuedPetDirty = false;   // 丢弃 switchMotionMode 积累的 dirty bounds
+            repaintSelfAndParent();      // 全量重绘，确保 petPos 正确
+        }
+
         dragMode = DragMode::none;
         resizeEdge = Edge::none;
         setMouseCursor (juce::MouseCursor::NormalCursor);
@@ -967,6 +1049,11 @@ void TamagotchiModule::stepOneFrame()
             enqueuePetDirtyRepaint (oldPetBounds.getUnion (newPetBounds));
         return;
     }
+
+    // carried 期间冻结动画帧推进：petPos 由 mouseDrag 独占管理，
+    // 不走 forceAnimation 锚点反算，避免浮点漂移导致携带闪烁与松手跳位。
+    if (motionMode == MotionMode::carried)
+        return;
 
     if (availableAnimIds.isEmpty())
         return;
@@ -1222,6 +1309,11 @@ void TamagotchiModule::onAnimationFinished()
 
         case MotionMode::falling:
             forceAnimation ((int) PetAnim::startled);
+            break;
+
+        case MotionMode::carried:
+            // 拖动期间持续循环 startled 动画
+            forceAnimation ((int) PetAnim::startled, true);
             break;
 
         case MotionMode::landingFall:
@@ -1538,9 +1630,11 @@ TamagotchiModule::MotionMode TamagotchiModule::evaluateAutoMotionMode() const
         return MotionMode::toilet;
 
     // 瞬时状态链优先：由边界拖拽触发后，必须完整经历 惊吓 -> 下落 -> 摔倒
+    // carried 也属于不可打断的瞬时状态（拖动中）
     if (motionMode == MotionMode::startledIntro
         || motionMode == MotionMode::falling
-        || motionMode == MotionMode::landingFall)
+        || motionMode == MotionMode::landingFall
+        || motionMode == MotionMode::carried)
         return motionMode;
 
     // 需求状态优先级：死亡 > 吃饭(含低信号保持) > 重病 > 生病 > 睡觉 > 困倦 > 极度饥饿 > 饥饿 > 巡逻
@@ -1630,6 +1724,12 @@ void TamagotchiModule::switchMotionMode (MotionMode newMode)
 
         case MotionMode::landingFall:
             forceAnimation ((int) PetAnim::fall);
+            break;
+
+        case MotionMode::carried:
+            // 拖动拖动——播放和下跌同样的 startled 动画
+            // carriedPetWsX/Y 已在 mouseDown 中记录，此处不动
+            forceAnimation ((int) PetAnim::startled);
             break;
 
         case MotionMode::drowsy:
@@ -1877,6 +1977,7 @@ int TamagotchiModule::getTargetVisualHzForMode (MotionMode mode) const noexcept
         case MotionMode::landingFall:
         case MotionMode::hatching:
         case MotionMode::eating:
+        case MotionMode::carried:
             return 20;
 
         case MotionMode::drowsy:
@@ -1937,10 +2038,17 @@ void TamagotchiModule::repaintSelfAndParent()
 
 void TamagotchiModule::flushVisualRepaintQueue (bool forceNow)
 {
-    juce::ignoreUnused (forceNow);
-
     if (! hasQueuedPetDirty)
         return;
+
+    // carried 拖拽期间抑制 timer 驱动的异步重绘，避免与 setTopLeftPosition
+    // 触发的内置重绘产生竞态导致 non-opaque 组件闪烁。
+    if (carriedDragSuppressRepaint && ! forceNow)
+    {
+        hasQueuedPetDirty = false;
+        queuedPetDirtyBounds = {};
+        return;
+    }
 
     const auto dirty = queuedPetDirtyBounds.getIntersection (getLocalBounds());
     hasQueuedPetDirty = false;
@@ -2307,6 +2415,12 @@ void TamagotchiModule::stepWander()
 
         case MotionMode::landingFall:
             petPos.y = floorY;
+            break;
+
+        case MotionMode::carried:
+            // petPos 同步（含夹持与锚点更新）已由 mouseDrag 在每次鼠标移动时实时完成。
+            // 动画帧推进由 stepOneFrame + flushVisualRepaintQueue 处理。
+            // 此处不做额外计算，避免与 mouseDrag 重绘路径竞争导致 non-opaque 组件闪烁。
             break;
 
         case MotionMode::drowsy:

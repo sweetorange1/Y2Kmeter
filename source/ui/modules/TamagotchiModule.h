@@ -122,6 +122,7 @@ private:
         startledIntro,
         falling,
         landingFall,
+        carried,        // 用户拖动模块时: 宠物保持 workspace 相对位置不动，外框移动
         drowsy,
         sleeping,
         eating,
@@ -241,6 +242,11 @@ private:
     float patrolSpeedPxPerTick = 0.95f;
     float fallVelocityPxPerTick = 0.0f;
     float gravityPxPerTick2 = 0.28f;
+    // carried 状态：记录拖动开始时宠物在 workspace(父容器)坐标系中的位置
+    // 拖动过程中 stepWander 按此坐标反算 petPos，实现"宠物原地不动、外框滑走"
+    float carriedPetWsX = 0.0f;
+    float carriedPetWsY = 0.0f;
+    bool  carriedDragSuppressRepaint = false;  // 拖动期间抑制 timer 驱动的异步重绘
     juce::Rectangle<int> lastLocalBounds;
 
     // eating 状态（饥饿增长时）：每 4 秒轮播 10/11/12/13，并左右随机小幅走动
@@ -337,8 +343,8 @@ private:
 
     static constexpr int edgeHotSize = 8;
     static constexpr int deleteButtonSize = 18;
-    static constexpr int minW = 64;
-    static constexpr int minH = 64;
+    static constexpr int minW = 128;
+    static constexpr int minH = 128;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TamagotchiModule)
 };
