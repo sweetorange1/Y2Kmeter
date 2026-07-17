@@ -767,6 +767,8 @@ void TamagotchiModule::mouseDrag (const juce::MouseEvent& e)
         constexpr float kCarriedTriggerDistPx = 4.0f;
 
         if (motionMode != MotionMode::carried
+            && motionMode != MotionMode::egg
+            && motionMode != MotionMode::hatching
             && delta.getDistanceFromOrigin() >= kCarriedTriggerDistPx
             && ! forceMotionModeEnabled)
         {
@@ -1617,7 +1619,7 @@ TamagotchiModule::MotionMode TamagotchiModule::evaluateAutoMotionMode() const
 {
     // egg/hatching 启动流程：蛋阶段等待音频，孵化阶段必须完整播放
     if (motionMode == MotionMode::egg)
-        return signalLevel01 > 0.02f ? MotionMode::hatching : MotionMode::egg;
+        return signalLevel01 > 0.0f ? MotionMode::hatching : MotionMode::egg;
 
     if (motionMode == MotionMode::hatching)
         return MotionMode::hatching;
