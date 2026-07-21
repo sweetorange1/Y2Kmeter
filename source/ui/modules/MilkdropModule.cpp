@@ -312,6 +312,11 @@ void MilkdropModule::randomPreset()
     if (glView != nullptr) glView->requestPresetRandom();
 }
 
+void MilkdropModule::jumpToPresetIndex(int index)
+{
+    if (glView != nullptr) glView->requestPresetJump(index);
+}
+
 // ==========================================================
 // GLView
 // ==========================================================
@@ -702,12 +707,22 @@ void MilkdropModule::GLView::renderOpenGL()
         }
     }
 
-    // 2) 消费预设切换请求（UI 线程通过 requestedPresetDelta / requestedPresetRandom 传递）
-    int delta = requestedPresetDelta.exchange (0);
+    // 2) 消费预设切换请求（UI 线程通过 requestedPresetJump / requestedPresetDelta /
+    //    requestedPresetRandom 传递）。优先级：跳跃 > 随机 > 增量。
+    int jumpIdx = requestedPresetJump.exchange (-1);
+    int delta   = requestedPresetDelta.exchange (0);
     bool random = requestedPresetRandom.exchange (false);
     if (! presetPaths.isEmpty())
     {
-        if (random)
+        if (jumpIdx >= 0)
+        {
+            currentPresetIndex = juce::jlimit (0, presetPaths.size() - 1, jumpIdx);
+            last_preset_switch_time_ms_.store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            loadPresetInternal();
+        }
+        else if (random)
         {
             std::mt19937 rng { (uint32_t) std::chrono::high_resolution_clock::now()
                                    .time_since_epoch().count() };
@@ -1053,7 +1068,12 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
         }
 
         if (hit != OverlayButton::kNone)
-            setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        {
+            if (hit == OverlayButton::kPresetName)
+                setMouseCursor(juce::MouseCursor::IBeamCursor);
+            else
+                setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        }
         else if (overlay.contains(e.getPosition()))
             setMouseCursor(juce::MouseCursor::NormalCursor);
         else
@@ -1103,6 +1123,10 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     if (nextBtn.contains(pos))   return OverlayButton::kNext;
     if (randomBtn.contains(pos)) return OverlayButton::kRandom;
 
+    // name area：覆盖 < 和 [1:1] 之间的空余区域
+    if (cachedNameArea_.contains(pos))
+        return OverlayButton::kPresetName;
+
     return OverlayButton::kNone;
 }
 
@@ -1146,6 +1170,7 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     case OverlayButton::kNext:   nextPreset();              break;
     case OverlayButton::kRandom: randomPreset();            break;
     case OverlayButton::kRes:    glView->cycleReadbackScale(); break;
+    case OverlayButton::kPresetName: showPresetJumpDialog();   break;
     default: break;
     }
 }
@@ -1224,7 +1249,24 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     auto idxRect = nameArea.withWidth(juce::jmin((int)idxW, nameArea.getWidth()));
     auto nameRect = nameArea.withTrimmedLeft(idxRect.getWidth());
 
-    g.setColour(PinkXP::pink300.withAlpha(0.85f));
+    // 缓存 nameArea 供 hitTestOverlayButton 使用
+    cachedNameArea_ = nameArea;
+
+    // name area 交互视觉：hover 时底部淡粉线，pressed 时亮粉底色
+    bool nameHovered = (hoveredOverlayBtn_ == OverlayButton::kPresetName);
+    bool namePressed = (pressedOverlayBtn_ == OverlayButton::kPresetName);
+    if (namePressed)
+    {
+        g.setColour(PinkXP::pink300.withAlpha(0.18f));
+        g.fillRect(nameArea);
+    }
+    else if (nameHovered)
+    {
+        g.setColour(PinkXP::pink300.withAlpha(0.45f));
+        g.fillRect(nameArea.getX(), nameArea.getBottom() - 1, nameArea.getWidth(), 1);
+    }
+
+    g.setColour(PinkXP::pink300.withAlpha(namePressed ? 1.0f : 0.85f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(idxPart, idxRect, juce::Justification::centredLeft, true);
 
@@ -1276,4 +1318,39 @@ void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<in
   g.setColour(PinkXP::pink300.withAlpha(alpha));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
   g.drawText("Switching...", bar, juce::Justification::centred, false);
+}
+
+void MilkdropModule::showPresetJumpDialog()
+{
+    if (glView == nullptr)
+        return;
+
+    int total = glView->getTotalPresetCount();
+    if (total <= 0)
+        return;
+
+    int current = glView->getCurrentPresetIndex();
+    juce::String defaultInput = juce::String(current + 1);
+
+    juce::AlertWindow dlg("Jump to Preset",
+                          "Enter preset number (1–" + juce::String(total) + "):",
+                          juce::MessageBoxIconType::QuestionIcon,
+                          this);
+
+    dlg.addTextEditor("index", defaultInput, "Preset #");
+    dlg.addButton("Go", 1);
+    dlg.addButton("Cancel", 0);
+
+    if (dlg.runModalLoop() != 0)
+    {
+        auto* editor = dlg.getTextEditor("index");
+        if (editor != nullptr)
+        {
+            juce::String input = editor->getText().trim();
+            int val = input.getIntValue();
+            if (val < 1) val = 1;
+            if (val > total) val = total;
+            jumpToPresetIndex(val - 1);
+        }
+    }
 }

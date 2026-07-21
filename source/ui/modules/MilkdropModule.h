@@ -100,6 +100,7 @@ public:
     void nextPreset();
     void prevPreset();
     void randomPreset();
+    void jumpToPresetIndex(int index);  ///< UI 线程调用：请求跳转到指定预设索引
 
     // === 焦点与叠加层交互 ===
     void setFocusVisual(bool shouldFocus);
@@ -154,6 +155,7 @@ private:
         // 采用原子累加：连点 next 多次，delta 累计到位。
         void requestPresetDelta (int delta) noexcept { requestedPresetDelta.fetch_add (delta); triggerRepaint(); }
         void requestPresetRandom() noexcept { requestedPresetRandom = true; triggerRepaint(); }
+        void requestPresetJump (int index) noexcept { requestedPresetJump.store (index); triggerRepaint(); }
 
         // 诊断接口：供 owner 在 paintContent 中展示错误信息。
         // 当 renderInitialized == false 时，说明 projectM 未能成功创建或已销毁；
@@ -260,6 +262,7 @@ private:
         // GL 线程侧的 preset 切换请求。UI 线程置位，GL 线程消费。
         std::atomic<int>         requestedPresetDelta { 0 };   // -1 / +1 / 0
         std::atomic<bool>        requestedPresetRandom { false };
+        std::atomic<int>         requestedPresetJump { -1 };   // -1=无请求, >=0=目标索引
 
         // 分辨率缩放级别：GL 线程在 glReadPixels 时按此值降采样回读（1/2/4）。
         // UI 线程通过 cycleReadbackScale() 切换，GL 线程在 renderOpenGL 消费。
@@ -311,9 +314,12 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kRes };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kRes, kPresetName };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
+
+    // 缓存 nameArea 矩形，供 mouseDown/Up/Move 中做 hit test
+    juce::Rectangle<int> cachedNameArea_;
 
     // 辅助
     juce::Rectangle<int> getOverlayBounds(juce::Rectangle<int> content) const;
@@ -322,6 +328,7 @@ private:
     void executeOverlayAction(OverlayButton btn);
     void paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<int> content);
     void PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content);
+    void showPresetJumpDialog();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilkdropModule)
 };

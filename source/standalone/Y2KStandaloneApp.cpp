@@ -164,7 +164,7 @@ public:
                                                             256 * 1024 /*maxInitialFileSizeBytes*/));
             juce::Logger::setCurrentLogger (runtimeFileLogger.get());
             juce::Logger::writeToLog ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
-            juce::Logger::writeToLog ("[BUILD_SIGNATURE] v2.1.5, compiled "
+            juce::Logger::writeToLog ("[BUILD_SIGNATURE] v2.1.6, compiled "
                                      + juce::String(__DATE__) + " " + juce::String(__TIME__)
                                      + ", exe=" + juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName());
         }
