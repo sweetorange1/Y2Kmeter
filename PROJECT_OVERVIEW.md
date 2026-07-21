@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.1.3`）
+- **产品名**：`Y2Kmeter` （版本：`2.1.4`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.1.0 新增，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个真实 Milkdrop 预设（11 个视觉类别），零网络依赖）
+- **Milkdrop 可视化模块**（v2.1.0 新增，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个真实 Milkdrop 预设，零网络依赖）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -1816,7 +1816,7 @@ v2.0.4 目标：彻底放弃 WebView2，改用**原生 libprojectM 4**（LGPL-2.
 | 文件 | 作用 |
 |------|------|
 | `third_party/projectm/` | `projectM-4.dll` (4.1.x) + `glew32.dll` + 公共 C 头 |
-| `assets/milkdrop_presets/*.milk` | 1114 个精选预设（11 类别：Dancer/Drawing/Fractal/Geometric/Hypnotic/Particles/Reaction/Sparkle/Supernova/Waveform/Transition） |
+| `assets/milkdrop_presets/*.milk` | 1114 个精选预设，扁平化存储，无子目录 |
 | `assets/projectm/textures/*` | 66 个纹理 |
 | `source/ui/modules/ProjectMApi.h/.cpp` | DLL shim：LoadLibrary + GetProcAddress + SEH 保护 + `initGlew()` |
 | `source/ui/modules/MilkdropModule.h/.cpp` | `GLView : Component, OpenGLRenderer`；单实例互斥；合成 PCM；异步 attach |

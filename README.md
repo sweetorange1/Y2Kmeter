@@ -7,7 +7,7 @@
 <p align="center"><strong>Y2K 像素复古音频分析仪</strong> — VST3 / AU / Standalone</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.3-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.1.4-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
 </p>
@@ -46,7 +46,7 @@
 Y2Kmeter v2.1.0 起内置完整 **Milkdrop 可视化引擎**：
 
 - 基于 **libprojectM 4**（OpenGL Core Profile 4.1）：通过 `LoadLibrary` 动态加载 `projectM-4.dll`，零编译期依赖
-- 1114 个精选 `.milk` 预设（来自 [Cream of the Crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)），覆盖 11 个视觉类别
+- 1114 个精选 `.milk` 预设（来自 [Cream of the Crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)），扁平化存储，0 重复
 - 66 个基础纹理（来自 projectM 官方 texture pack）
 - 预设切换软渐变（soft-cut 1.0s），支持上一个/下一个/随机/指定
 - 分辨率缩放（1:1 / 1:2 / 1:4）平衡画质与性能

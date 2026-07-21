@@ -351,7 +351,7 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     if (presetsDir.exists() && presetsDir.isDirectory())
     {
         auto files = presetsDir.findChildFiles (juce::File::findFiles,
-                                                true,           // 递归
+                                                false,          // 非递归：预设已全部扁平化到根目录
                                                 "*.milk");
         for (auto& f : files)
             presetPaths.add (f.getFullPathName());
