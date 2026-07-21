@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.1.0 新增，WebView 嵌入 Butterchurn WebGL Milkdrop 引擎，本地打包 100+ 真实 Milkdrop 预设，零网络依赖）
+- **Milkdrop 可视化模块**（v2.1.0 新增，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个真实 Milkdrop 预设（11 个视觉类别），零网络依赖）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.1.0 新增，WebView 嵌入 Butterchurn (WebGL Milkdrop 引擎)，本地化打包了 butterchurn@2.6.7 + butterchurn-presets@2.4.7 到 BinaryData，共 100+ Milkdrop 预设。⚠️ **已知问题（v2.0.3）**：手动添加模块时 WebView2 异步初始化时序导致白屏，需关闭重新打开软件才能正常显示，详见 §6.30） | 无（内部 GPU 渲染循环自驱动，不依赖 AnalyserHub）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.1.0 新增，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个 Milkdrop 预设） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -1816,7 +1816,7 @@ v2.0.4 目标：彻底放弃 WebView2，改用**原生 libprojectM 4**（LGPL-2.
 | 文件 | 作用 |
 |------|------|
 | `third_party/projectm/` | `projectM-4.dll` (4.1.x) + `glew32.dll` + 公共 C 头 |
-| `assets/projectm/presets/*.milk` | 100 个精选预设 |
+| `assets/milkdrop_presets/*.milk` | 1114 个精选预设（11 类别：Dancer/Drawing/Fractal/Geometric/Hypnotic/Particles/Reaction/Sparkle/Supernova/Waveform/Transition） |
 | `assets/projectm/textures/*` | 66 个纹理 |
 | `source/ui/modules/ProjectMApi.h/.cpp` | DLL shim：LoadLibrary + GetProcAddress + SEH 保护 + `initGlew()` |
 | `source/ui/modules/MilkdropModule.h/.cpp` | `GLView : Component, OpenGLRenderer`；单实例互斥；合成 PCM；异步 attach |
@@ -1835,7 +1835,7 @@ v2.0.4 目标：彻底放弃 WebView2，改用**原生 libprojectM 4**（LGPL-2.
 
 ##### v2.0.4 结果：projectM 初始化完全正常，但模块 UI **纯黑**
 
-日志证实：DLL 加载、GLEW 初始化、projectM 创建、100 个预设、`renderOpenGL` 60fps 调用全部正常——但画面不显示。
+日志证实：DLL 加载、GLEW 初始化、projectM 创建、1114 个预设、`renderOpenGL` 60fps 调用全部正常——但画面不显示。
 
 ---
 

@@ -37,7 +37,7 @@
 | **EQ 频谱** | Y2K 主题的 6 段 EQ 频谱可视化（仅显示，不处理音频） |
 | **Tamagotchi 电子宠物** | 音频信号驱动的像素小怪，含孵化/觅食/睡眠/生病/死亡完整状态机 |
 | **拼豆像素画** | 用户拖入图片生成拼豆像素画，可贴到桌面背景 |
-| **Milkdrop 可视化** 🔥 | 基于 **libprojectM 4** 原生 OpenGL 渲染，本地打包 100+ 真实 Milkdrop 预设 |
+| **Milkdrop 可视化** 🔥 | 基于 **libprojectM 4** 原生 OpenGL 渲染，本地打包 1114 个真实 Milkdrop 预设 |
 
 ---
 
@@ -46,7 +46,7 @@
 Y2Kmeter v2.1.0 起内置完整 **Milkdrop 可视化引擎**：
 
 - 基于 **libprojectM 4**（OpenGL Core Profile 4.1）：通过 `LoadLibrary` 动态加载 `projectM-4.dll`，零编译期依赖
-- 100 个精选 `.milk` 预设（来自 [Cream of the Crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)）
+- 1114 个精选 `.milk` 预设（来自 [Cream of the Crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)），覆盖 11 个视觉类别
 - 66 个基础纹理（来自 projectM 官方 texture pack）
 - 预设切换软渐变（soft-cut 1.0s），支持上一个/下一个/随机/指定
 - 分辨率缩放（1:1 / 1:2 / 1:4）平衡画质与性能
