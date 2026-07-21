@@ -16,6 +16,7 @@
 #include "source/ui/modules/SpectrogramModule.h"
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/modules/TamagotchiModule.h"
+#include "source/ui/modules/MilkdropModule.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -69,7 +70,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.0.2");
+        const int versionW = versionFont.getStringWidth ("v2.1.0");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -110,7 +111,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.0.2";
+    const juce::String versionText = "v2.1.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -680,7 +681,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::spectrogram3d,
 
         // 独立小宠物模块（右键/双击空白区添加）
-        ModuleType::tamagotchi
+        ModuleType::tamagotchi,
+
+        // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
+        ModuleType::milkdrop
     });
 
     addAndMakeVisible(*workspace);
@@ -2153,6 +2157,9 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
         case ModuleType::tamagotchi:
             return std::make_unique<TamagotchiModule>();
 
+        case ModuleType::milkdrop:
+            return std::make_unique<MilkdropModule>(&processor.getAnalyserHub());
+
         default:
             jassertfalse; // 暂未实现
             return nullptr;
@@ -2417,7 +2424,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.0.2";
+    const juce::String versionText = "v2.1.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);

@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.0.2 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.1.0 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -307,7 +307,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 2.0.2
+    VERSION 2.1.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -320,6 +320,10 @@ Y2Kmeter
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
+        # 注：Milkdrop 模块自 2.0.4 起改用 libprojectM（native OpenGL），
+        # 因此不再声明 NEEDS_WEBVIEW2；相关的 juce_gui_extra + WebBrowser 依赖
+        # 已经从下方 target_compile_definitions 中移除。projectM DLL 通过
+        # LoadLibrary 动态加载，见 source/ui/modules/ProjectMApi.cpp。
         VST3_AUTO_MANIFEST FALSE
         COPY_PLUGIN_AFTER_BUILD TRUE
 )
@@ -352,6 +356,27 @@ juce_add_binary_data(Y2Kmeter_BinaryData
     "${CMAKE_CURRENT_BINARY_DIR}/resources/logo.png"
 )
 
+# ==========================================================
+# libprojectM (Milkdrop 模块运行时依赖，LGPL-2.1-or-later)
+#   · third_party/projectm/bin/*.dll —— 运行时通过 LoadLibraryW 显式加载
+#   · third_party/projectm/include   —— C API 头文件，仅用于类型定义 /
+#     函数指针 typedef；不会在链接期依赖任何 .lib
+#   · 见 source/ui/modules/ProjectMApi.{h,cpp}
+# ==========================================================
+set(Y2KM_PROJECTM_DIR     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/projectm")
+set(Y2KM_PROJECTM_INCLUDE "${Y2KM_PROJECTM_DIR}/include")
+set(Y2KM_PROJECTM_BIN     "${Y2KM_PROJECTM_DIR}/bin")
+set(Y2KM_MILKDROP_PRESETS "${CMAKE_CURRENT_SOURCE_DIR}/assets/milkdrop_presets")
+set(Y2KM_MILKDROP_TEXTURES "${CMAKE_CURRENT_SOURCE_DIR}/assets/milkdrop_textures")
+if (NOT EXISTS "${Y2KM_PROJECTM_INCLUDE}/projectM-4/projectM.h")
+  message(FATAL_ERROR "缺少 libprojectM 头文件：${Y2KM_PROJECTM_INCLUDE}/projectM-4/projectM.h\n"
+                      "请参考 third_party/projectm/README.md 重新拉取。")
+endif()
+if (WIN32 AND NOT EXISTS "${Y2KM_PROJECTM_BIN}/projectM-4.dll")
+  message(FATAL_ERROR "缺少 libprojectM 运行时：${Y2KM_PROJECTM_BIN}/projectM-4.dll\n"
+                      "请参考 third_party/projectm/README.md 重新拉取。")
+endif()
+
 target_compile_definitions(Y2Kmeter
   PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
@@ -369,6 +394,8 @@ target_compile_definitions(Y2Kmeter
     # 关闭 JUCE 默认的 StandaloneFilterApp / StandaloneFilterWindow，
     # 转而使用我们自定义的 source/standalone/Y2KStandaloneApp.cpp（无边框 Y2K 外壳）
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
+    # Milkdrop 模块现在使用 libprojectM（native OpenGL）而不是 WebView2；
+    # 因此不再启用 JUCE_WEB_BROWSER。如果未来其他模块需要，可以按需重新打开。
 )
 
 # MSVC: 强制按 UTF-8 解析源码，支持中文注释与字符串
@@ -433,6 +460,10 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/ui/modules/Spectrogram3DModule.cpp
   source/ui/modules/TamagotchiModule.h
   source/ui/modules/TamagotchiModule.cpp
+  source/ui/modules/MilkdropModule.h
+  source/ui/modules/MilkdropModule.cpp
+  source/ui/modules/ProjectMApi.h
+  source/ui/modules/ProjectMApi.cpp
 
   # === Standalone 自定义入口（仅 Standalone 构建时启用，内部已用宏保护）===
 
@@ -458,6 +489,7 @@ endif()
 
 target_include_directories(Y2Kmeter PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${Y2KM_PROJECTM_INCLUDE}
 )
 
 target_link_libraries(Y2Kmeter PRIVATE
@@ -698,5 +730,73 @@ if (APPLE)
 
   if (TARGET Y2Kmeter_Standalone)
     y2km_copy_tamagotchi_into_bundle(Y2Kmeter_Standalone "Y2Kmeter.app")
+  endif()
+endif()
+
+# ==========================================================
+# libprojectM DLL + Milkdrop 预设/纹理 —— Post-build 部署
+#   · Standalone (Windows)：把 projectM-4.dll / glew32.dll 拷贝到
+#     Y2Kmeter.exe 同目录；MilkdropModule::ProjectMApi 用 LoadLibraryW
+#     从 exe 所在目录（默认 DLL 搜索路径）加载。
+#   · VST3   (Windows)：拷贝到 Y2Kmeter.vst3\Contents\x86_64-win\ 旁边
+#     （bundle DLL 同级目录）。VST3 宿主加载插件时该目录会被加入 DLL
+#     搜索路径。
+#   · macOS：暂未打包（frontend-sdl-cpp 未提供 macOS libprojectM DLL；
+#     后续可从 Homebrew 或源码构建补齐，本改动只保证 Windows 场景完整）。
+#   · 预设 / 纹理放在可执行文件同级 `milkdrop_presets` / `milkdrop_textures`
+#     目录，路径解析由 MilkdropModule 完成（详见 ProjectMApi.cpp）。
+# ==========================================================
+if (WIN32)
+  set(Y2KM_PROJECTM_DLLS
+      "${Y2KM_PROJECTM_BIN}/projectM-4.dll"
+      "${Y2KM_PROJECTM_BIN}/glew32.dll"
+  )
+
+  function(y2km_copy_projectm_runtime tgt dest_expr comment_tag)
+    if (NOT TARGET ${tgt})
+      return()
+    endif()
+
+    # 1) DLLs
+    foreach(_dll IN LISTS Y2KM_PROJECTM_DLLS)
+      add_custom_command(TARGET ${tgt} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_dll}" "${dest_expr}/"
+        COMMENT "Y2Kmeter[${comment_tag}]: copy $<PATH:GET_FILENAME,${_dll}> next to target"
+        VERBATIM
+      )
+    endforeach()
+
+    # 2) 预设目录
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${Y2KM_MILKDROP_PRESETS}"
+              "${dest_expr}/milkdrop_presets"
+      COMMENT "Y2Kmeter[${comment_tag}]: sync milkdrop_presets/"
+      VERBATIM
+    )
+
+    # 3) 纹理目录
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${Y2KM_MILKDROP_TEXTURES}"
+              "${dest_expr}/milkdrop_textures"
+      COMMENT "Y2Kmeter[${comment_tag}]: sync milkdrop_textures/"
+      VERBATIM
+    )
+  endfunction()
+
+  # Standalone EXE 旁边（$<TARGET_FILE_DIR:Y2Kmeter_Standalone>）
+  if (TARGET Y2Kmeter_Standalone)
+    y2km_copy_projectm_runtime(Y2Kmeter_Standalone
+      "$<TARGET_FILE_DIR:Y2Kmeter_Standalone>"
+      "Standalone")
+  endif()
+
+  # VST3 bundle 内 x86_64-win 目录（$<TARGET_FILE_DIR:Y2Kmeter_VST3>）
+  if (TARGET Y2Kmeter_VST3)
+    y2km_copy_projectm_runtime(Y2Kmeter_VST3
+      "$<TARGET_FILE_DIR:Y2Kmeter_VST3>"
+      "VST3")
   endif()
 endif()

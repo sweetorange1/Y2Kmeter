@@ -44,7 +44,10 @@ enum class ModuleType
     spectrogram3d,
 
     // Tamagotchi 小宠物模块（独立模块，不走拖图逻辑）
-    tamagotchi
+    tamagotchi,
+
+    // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
+    milkdrop
 };
 
 juce::String getModuleDisplayName(ModuleType t);
@@ -726,7 +729,8 @@ private:
         ModuleType::tamagotchi,
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 
-        ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest
+        ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest,
+        ModuleType::milkdrop
     };
 
     int nextIdCounter = 1;

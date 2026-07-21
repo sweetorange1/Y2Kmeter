@@ -129,6 +129,7 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::spectrogram:       return "spectrogram";
         case ModuleType::spectrogram3d:    return "spectrogram3d";
         case ModuleType::tamagotchi:        return "tamagotchi";
+        case ModuleType::milkdrop:         return "milkdrop";
     }
 
     return "eq";
@@ -161,6 +162,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "spectrogram",        ModuleType::spectrogram },
         { "spectrogram3d",     ModuleType::spectrogram3d },
         { "tamagotchi",         ModuleType::tamagotchi },
+        { "milkdrop",          ModuleType::milkdrop },
     };
     for (auto& p : kv)
         if (s == p.k)
@@ -1092,11 +1094,31 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
     auto& lfRef            = getLookAndFeel();
     const int menuMinWidth = 160;
     int maxItemW = menuMinWidth;
+
+    // ------------------------------------------------------------
+    // 单例限制：Milkdrop 模块底层 libprojectM 4 (Windows) 内部依赖
+    //   进程全局的 GLEW 状态，第二个 juce::OpenGLContext 尝试挂载 projectM
+    //   时会因 GLEW 函数指针错乱直接跳到 0x0 崩溃。
+    //   —— 因此工作区内同一时刻只允许存在 1 个 MilkdropModule；
+    //   若已有一个，则在"添加模块"菜单里把 Milkdrop 项置灰。
+    // ------------------------------------------------------------
+    auto isTypeAtInstanceLimit = [this] (ModuleType t) -> bool
+    {
+        if (t != ModuleType::milkdrop)
+            return false;
+        for (auto* m : modules)
+            if (m != nullptr && m->getModuleType() == ModuleType::milkdrop)
+                return true;
+        return false;
+    };
+
     for (int i = 0; i < availableTypes.size(); ++i)
     {
         const auto t = availableTypes[i];
-        const bool itemOk = enabledOnlyTypes.isEmpty()
-                         || enabledOnlyTypes.contains (t);
+        const bool passesWhitelist = enabledOnlyTypes.isEmpty()
+                                  || enabledOnlyTypes.contains (t);
+        const bool underInstanceLimit = ! isTypeAtInstanceLimit (t);
+        const bool itemOk = passesWhitelist && underInstanceLimit;
 
         juce::PopupMenu::Item item (getModuleDisplayName (t));
         item.itemID = i + 1;

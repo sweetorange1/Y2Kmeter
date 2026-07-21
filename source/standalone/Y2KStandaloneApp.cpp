@@ -150,6 +150,26 @@ public:
         }
        #endif
 
+       #if JUCE_WINDOWS
+        // Windows：无论调试/Release，把日志写到 %APPDATA%/Y2Kmeter/runtime.log，
+        // 便于用户在 Release 崩溃/卡死时抓到 [projectm_api] 等诊断信息（Release 无 debugger 时
+        // DBG() / juce::Logger::outputDebugString 是无法看到的）。
+        {
+            auto logDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                              .getChildFile ("Y2Kmeter");
+            logDir.createDirectory();
+            const auto logFile = logDir.getChildFile ("runtime.log");
+            runtimeFileLogger.reset (new juce::FileLogger (logFile,
+                                                            "Y2Kmeter runtime log",
+                                                            256 * 1024 /*maxInitialFileSizeBytes*/));
+            juce::Logger::setCurrentLogger (runtimeFileLogger.get());
+            juce::Logger::writeToLog ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
+            juce::Logger::writeToLog ("[BUILD_SIGNATURE] v2.1.0, compiled "
+                                     + juce::String(__DATE__) + " " + juce::String(__TIME__)
+                                     + ", exe=" + juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName());
+        }
+       #endif
+
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
             appProperties.getUserSettings(),   // 设置持久化
@@ -375,6 +395,12 @@ public:
 
        #if JUCE_MAC
         // macOS 专属：解除全局 logger 指针，避免 runtimeFileLogger 析构后悬空
+        juce::Logger::setCurrentLogger (nullptr);
+        runtimeFileLogger.reset();
+       #endif
+
+       #if JUCE_WINDOWS
+        // Windows：同上，先摘钩再释放。
         juce::Logger::setCurrentLogger (nullptr);
         runtimeFileLogger.reset();
        #endif
@@ -1372,8 +1398,9 @@ private:
     // 以便在 delete 之前显式调用 processor->editorBeingDeleted()。
     std::unique_ptr<juce::AudioProcessorEditor>     pluginEditor;
 
-   #if JUCE_MAC
-    // macOS 专属：音频转储的 runtime 日志文件（受 Y2KM_AUDIO_DUMP 控制）
+   #if JUCE_MAC || JUCE_WINDOWS
+    // macOS：音频转储的 runtime 日志文件（受 Y2KM_AUDIO_DUMP 控制）
+    // Windows：无条件写 %APPDATA%/Y2Kmeter/runtime.log，方便抓 Release 崩溃日志
     std::unique_ptr<juce::FileLogger>               runtimeFileLogger;
    #endif
 

@@ -42,6 +42,7 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::spectrogram:       return "Spectrogram";
         case ModuleType::spectrogram3d:    return "Spectrogram 3D";
         case ModuleType::tamagotchi:        return "Tamagotchi";
+        case ModuleType::milkdrop:         return "Milkdrop";
 
         default:                            return "Module";
 
