@@ -159,16 +159,7 @@ struct MacDesktopAudioCapture::Impl
         if (! suspicious && asbdLogElapsedSec < periodSec)
             return;
 
-        asbdLogElapsedSec = 0.0;
-
-        const juce::String msg = "[MacDesktopAudioCapture] ASBD id=" + fourCCToString (asbd.mFormatID)
-                               + " flags=0x" + juce::String::toHexString ((int) asbd.mFormatFlags)
-                               + " bits=" + juce::String ((int) asbd.mBitsPerChannel)
-                               + " bytesPerFrame=" + juce::String ((int) asbd.mBytesPerFrame)
-                               + " channels=" + juce::String ((int) asbd.mChannelsPerFrame)
-                               + " sampleRate=" + juce::String (asbd.mSampleRate, 1)
-                               + (suspicious ? " suspicious=1" : " suspicious=0");
-        juce::Logger::writeToLog (msg);
+        asbdLogElapsedSec = 0.0f; // reset only, no logging
     }
 
     static float sanitizeDecodedSample (float v)
@@ -792,50 +783,7 @@ struct MacDesktopAudioCapture::Impl
                              const juce::Array<CandidateResult>& candidates,
                              bool suspicious)
     {
-        const bool urgent = suspicious || selectedStats.pathologicalDc || selectedStats.clipRatio > 0.08;
-        const double periodSec = coldStartRemainSec > 0.0 ? 1.0 : 5.0;
-
-        monitorLogElapsedSec += durationSec;
-        if (! urgent && monitorLogElapsedSec < periodSec)
-            return;
-
-        monitorLogElapsedSec = 0.0;
-
-        juce::String msg;
-        msg << "[MacDesktopAudioCapture] monitor mode=";
-        if (decodeMode == DecodeMode::autoSelect) msg << "auto";
-        else if (decodeMode == DecodeMode::forceFloat) msg << "forceFloat";
-        else msg << "forceInteger";
-
-        msg << " selected=" << pathToString (selected)
-            << " peak=" << selectedStats.peakAbs
-            << " preClampPeak=" << selectedStats.preClampPeakAbs
-            << " clipRatio=" << selectedStats.clipRatio
-            << " rmsDb=" << selectedStats.rmsDb
-            << " var=" << selectedStats.variance
-            << " zcr=" << selectedStats.zeroCrossingRate
-            << " unhealthy=" << (selectedStats.lowLevel ? 1 : 0)
-            << " suspiciousFormat=" << (suspicious ? 1 : 0)
-            << " numBuffers=" << (int) selectedInfo.numBuffers
-            << " b0Bytes=" << (int) selectedInfo.buffer0Bytes
-            << " b1Bytes=" << (int) selectedInfo.buffer1Bytes
-            << " bytesPerSampleUsed=" << (int) selectedInfo.bytesPerSampleUsed
-            << " bytesPerFrameUsed=" << (int) selectedInfo.bytesPerFrameUsed
-            << " effectiveFrames=" << selectedInfo.effectiveFrames;
-
-        for (int i = 0; i < candidates.size(); ++i)
-        {
-            const auto& c = candidates.getReference(i);
-            msg << " cand{" << pathToString (c.path)
-                << ",ok=" << (c.ok ? 1 : 0)
-                << ",peak=" << c.stats.peakAbs
-                << ",clip=" << c.stats.clipRatio
-                << ",rms=" << c.stats.rmsDb
-                << ",zcr=" << c.stats.zeroCrossingRate
-                << "}";
-        }
-
-        juce::Logger::writeToLog (msg);
+        // logging removed
     }
 
     void handleAudioSampleBuffer (CMSampleBufferRef sampleBuffer)
@@ -900,7 +848,6 @@ struct MacDesktopAudioCapture::Impl
                 fullScanRemainSec = 0.8;
                 fullScanCooldownSec = 0.0;
                 pendingSelectedWindows = 0;
-                juce::Logger::writeToLog ("[MacDesktopAudioCapture] fallback force mode expired, back to autoSelect");
             }
         }
 
@@ -1124,9 +1071,6 @@ struct MacDesktopAudioCapture::Impl
             forcedModeRemainSec = 2.0;
             fallbackRetryCooldownSec = 4.0;
             unhealthyDurationSec = 0.0;
-
-            juce::Logger::writeToLog ("[MacDesktopAudioCapture] health check failed for 1s (peak<=2/32768 && rms<-85dBFS), switch to backup path="
-                                      + pathToString (backup));
         }
 
         logMonitorIfNeeded (durationSec, selectedPath, selected.stats, selected.info, candidates, suspicious);

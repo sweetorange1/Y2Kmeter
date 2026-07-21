@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.1.6`）
+- **产品名**：`Y2Kmeter` （版本：`2.1.7`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -2049,7 +2049,63 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 
 --- 
 
-#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1）
+#### ⑦ v2.1.7 变更记录
+
+**1. PresetJumpDialog —— 自定义 PinkXP 风格预设跳转弹窗**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)、[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+替代 `juce::AlertWindow`（会产生 Windows 系统提示音且不跟随主题），新增内部类 `PresetJumpDialog : juce::Component`：
+- PinkXP 配色：`PinkXP::content` 面板底、`PinkXP::pink50` 输入框底、粉色边框/按钮、主题跟随的 `PinkXP::ink` 文字
+- 交互：回车确认 / Esc 取消 / 点击遮罩关闭 / 输入限制 6 位纯数字、范围自动 clamp
+- 通过 `addToDesktop()` + `enterModalState()` 实现模态，无系统提示音
+- `showPresetJumpDialog()` 创建实例，`jumpToPresetIndex()` 执行跳转
+
+**2. 移除全部运行时日志代码**（涉及 5 个文件，共 ~50 处 `juce::Logger::writeToLog`）
+
+| 文件 | 删除内容 |
+|------|---------|
+| [MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | 29 处日志（构造/paintContent/GLView 生命周期/renderOpenGL/loadPresetInternal） |
+| [MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `frameCounter` 成员变量（仅用于日志采样） |
+| [ProjectMApi.cpp](I:/Y2KMeter/source/ui/modules/ProjectMApi.cpp) | 14 处日志（reload/initGlew/locateDll/loadLibrary） |
+| [Y2KStandaloneApp.cpp](I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | `runtimeFileLogger` 创建/销毁、`setCurrentLogger`、BUILD_SIGNATURE 日志 |
+| [MacDesktopAudioCapture.mm](I:/Y2KMeter/source/standalone/MacDesktopAudioCapture.mm) | 4 处日志 |
+
+**3. skipTutorial 持久化**（[PluginEditor.cpp](I:/Y2KMeter/PluginEditor.cpp)）
+
+`skipTutorial()` 中新增 `processor.setTutorialCompleted(true)`。修复前 skip 不写此标志导致每次重启都重新触发新手引导。
+
+**4. Milkdrop overlay 自动隐藏**
+
+新增两个机制：
+
+| 触发条件 | 实现 |
+|---------|------|
+| 长时间不操作 overlay（4s idle）| `GLView::timerCallback`（UI 线程 30Hz）→ `MilkdropModule::checkOverlayAutoHide()` 轮询 `lastInteractionTime_` |
+| 点击其他模块 | `ModuleWorkspace::onBroughtToFront` → `clearMilkdropFocus`（已有机制） |
+
+新增接口（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)）：
+- `touchOverlayIdleTimer()` —— 公开 inline，重置 `lastInteractionTime_`
+- `checkOverlayAutoHide()` —— 公开方法，由 GLView 的 UI 线程 timer 调用
+- `lastInteractionTime_` —— `juce::uint32`，记录 `getMillisecondCounter()`
+
+交互细节（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）：
+- `setFocusVisual(true)` → 自动 `touchOverlayIdleTimer()`（聚焦时重置 4s 倒计时）
+- `mouseDown`/`mouseMove` 在 overlay 区域 → `touchOverlayIdleTimer()`
+
+**5. 踩坑记录**
+
+| 坑 | 现象 | 根因 | 修复 |
+|----|------|------|------|
+| `juce::AlertWindow::runModalLoop` 不存在 | C2039 编译错误 | `AlertWindow` 无此成员，JUCE 用 `enterModalState` | 改用 `new + enterModalState + ModalCallbackFunction` |
+| `FocusChangeType` 不存在 | C2838/C2065 | JUCE Component 没有 `focusLost` 虚函数，也没有该枚举 | 移除虚函数方案 |
+| `juce::Timer` 继承导致启动崩溃 | 启动 `int3` 卡死在 `CachedImage::paint` | 多基类对象布局变化 + 构造期 Timer 回调竞态 | 移除 `juce::Timer` 继承，复用 GLView 已有的 30Hz timer |
+| `hasKeyboardFocus` 导致 overlay 闪现消失 | overlay 出现一帧即消失 | `hasKeyboardFocus(false)` 是组件级键盘焦点，Milkdrop 未 grabKeyboardFocus → 永远返回 false | 移除该检查，仅用 4s idle 超时 |
+| 在 `paintContent` 内调用 `setFocusVisual` → `repaint` 导致 Debug 断言 | `CachedImage::paint` 被 GL 线程调用 | 绘制期间 `repaint` 干扰 CachedImage 合成管线 | 将 auto-hide 逻辑移到 `timerCallback`（不在 paint 回调内） |
+
+**版本号**：`2.1.6 → 2.1.7`
+
+--- 
+
+#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7）
 
 1. **写第三方 C 头封装类时，命名空间不要跟第三方公开符号重名**——用 `_api` 后缀。
 2. **中文注释源文件必须存为 UTF-8 with BOM**（Windows MSVC 下 GBK 解码会把 `。` 认成非法字符）。
@@ -2064,6 +2120,9 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 11. **`glCopyTexSubImage2D` 是唯一跨驱动可靠的默认 FBO 读回方式**——但目的地必须是纹理，不能直接写 off-screen FBO。
 12. **`glContext.triggerRepaint()` 不可靠驱动 UI 重绘**——标志位在下帧 `renderFrame` 入口即被清零。`juce::Timer` 在消息线程回调是唯一可靠方案。
 13. **`juce::Timer` + WebView2 危险，但 `juce::Timer` + CPU Image 安全**——前者 vtable 竞态，后者纯数据读写。
+14. **不要在 `paint`/`paintContent` 回调内部调用 `repaint()`**——JUCE `componentPaintingEnabled(true)` 下，绘制期间 `repaint()` 会干扰 CachedImage 合成管线，导致 `CachedImage::paint` 被 GL 线程调用，Debug 下触发 `jassertfalse`（`int3`）。auto-hide 等轮询逻辑应放在独立的 `timerCallback` 中。
+15. **`hasKeyboardFocus()` 不是"窗口是否激活"的检测**——它是组件级键盘焦点 API，只检测本组件或其子组件是否 `grabKeyboardFocus`，不能用于检测顶层窗口失焦。检测顶层窗口失焦需 `TopLevelWindow::getActiveTopLevelWindow()` 或 `Desktop::addFocusChangeListener`。
+16. **新增 `juce::Timer` 继承到已有深继承链时可能触发构造期崩溃**——多基类对象布局变化 + 构造阶段 `startTimer` 回调可能在 vtable 尚未完全建立时触发。优先复用已有 timer（如 GLView 的 30Hz 回调），通过公开方法暴露给需要轮询的逻辑。
 
 ---
 

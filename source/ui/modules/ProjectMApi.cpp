@@ -88,14 +88,16 @@ static juce::File locateProjectMDll()
 
     // 4) 系统 VST3 安装目录（DAW 加载 VST3 时最可能的部署位置）
     {
-      auto vst3Dir = juce::File::getSpecialLocation (juce::File::windowsSystemDrive)
-                         .getChildFile ("Program Files")
-                         .getChildFile ("Common Files")
-                         .getChildFile ("VST3")
-                         .getChildFile ("Y2Kmeter.vst3")
-                         .getChildFile ("Contents")
-                         .getChildFile ("x86_64-win");
-      candidates.add (vst3Dir.getChildFile ("projectM-4.dll").getFullPathName());
+      auto commonFiles = juce::SystemStats::getEnvironmentVariable ("CommonProgramFiles", "");
+      if (commonFiles.isNotEmpty())
+      {
+        auto vst3Dir = juce::File (commonFiles)
+                           .getChildFile ("VST3")
+                           .getChildFile ("Y2Kmeter.vst3")
+                           .getChildFile ("Contents")
+                           .getChildFile ("x86_64-win");
+        candidates.add (vst3Dir.getChildFile ("projectM-4.dll").getFullPathName());
+      }
     }
 
     // 5) 进程启动目录（用户从命令行直接运行 Standalone 的场景）
@@ -168,14 +170,11 @@ void Api::reload()
 {
     // 调用侧已确保无存活 handle（MilkdropModule 中在 openGLContextClosing
     // 里destroy() -> reload()）。这里直接卸载、重新加载、重新解析。
-    juce::Logger::writeToLog ("[projectm_api] reload() begin");
     unloadLibrary();
     // unloadLibrary 已把 glewInitialized 置 false，下一次 initGlew() 会在新上下文重新初始化。
     loadLibrary();
     if (moduleHandle != nullptr)
         resolveSymbols();
-    juce::Logger::writeToLog (juce::String ("[projectm_api] reload() end, available=")
-                              + (available ? "true" : "false"));
 }
 
 // ============================================================
@@ -200,7 +199,6 @@ bool Api::initGlew()
     if (glew == nullptr)
     {
         errorMessage = "Cannot load glew32.dll (expected in same directory as projectM-4.dll).";
-        juce::Logger::writeToLog ("[projectm_api] initGlew() FAIL: cannot load glew32.dll");
         return false;
     }
 
@@ -213,19 +211,13 @@ bool Api::initGlew()
     if (glewInitFn == nullptr)
     {
         errorMessage = "glew32.dll is missing the glewInit export.";
-        juce::Logger::writeToLog ("[projectm_api] initGlew() FAIL: no glewInit export");
         return false;
     }
 
     if (glewExperimentalPtr != nullptr)
-    {
         *glewExperimentalPtr = 1u; // GL_TRUE
-        juce::Logger::writeToLog ("[projectm_api] glewExperimental set to GL_TRUE");
-    }
 
-    juce::Logger::writeToLog ("[projectm_api] calling glewInit()");
     const int glewErr = glewInitFn();
-    juce::Logger::writeToLog (juce::String ("[projectm_api] glewInit() returned ") + juce::String (glewErr));
 
     // GLEW_OK == 0；GLEW_ERROR_NO_GL_VERSION==1、GLEW_ERROR_GL_VERSION_10_ONLY==2 等。
     // 使用 glewExperimental 后，即使非 0 也往往可以继续工作——但我们只在 OK 时才
@@ -243,16 +235,6 @@ void Api::loadLibrary()
    #if defined (_WIN32)
     auto dll = locateProjectMDll();
 
-    // 诊断：打印当前进程的路径信息，方便排查 VST3/Standalone 不同形态下的搜索行为
-    juce::Logger::writeToLog ("[projectm_api] Searching for projectM-4.dll...");
-    juce::Logger::writeToLog ("[projectm_api]   currentApplicationFile  = "
-                              + juce::File::getSpecialLocation (juce::File::currentApplicationFile).getFullPathName());
-    juce::Logger::writeToLog ("[projectm_api]   hostApplicationPath     = "
-                              + juce::File::getSpecialLocation (juce::File::hostApplicationPath).getFullPathName());
-    juce::Logger::writeToLog ("[projectm_api]   currentExecutableFile   = "
-                              + juce::File::getSpecialLocation (juce::File::currentExecutableFile).getFullPathName());
-    juce::Logger::writeToLog ("[projectm_api] best candidate=" + dll.getFullPathName());
-
     if (! dll.existsAsFile())
     {
         errorMessage = "Cannot find projectM-4.dll. "
@@ -260,7 +242,6 @@ void Api::loadLibrary()
                        "or in the VST3 bundle (Y2Kmeter.vst3/Contents/x86_64-win/), "
                        "or in third_party/projectm/bin/. "
                        "Please rebuild with latest CMake install rules.";
-        juce::Logger::writeToLog ("[projectm_api] loadLibrary() FAIL: " + juce::String (errorMessage));
         return;
     }
 
@@ -279,12 +260,6 @@ void Api::loadLibrary()
         const auto err = ::GetLastError();
         errorMessage = "LoadLibraryExW(projectM-4.dll) failed, Win32 error code = "
                      + juce::String ((int) err).toStdString();
-        juce::Logger::writeToLog ("[projectm_api] loadLibrary() FAIL: " + juce::String (errorMessage));
-    }
-    else
-    {
-        juce::Logger::writeToLog ("[projectm_api] loadLibrary() OK, HMODULE=0x"
-                                  + juce::String::toHexString ((juce::pointer_sized_int) moduleHandle));
     }
    #else
     errorMessage = "libprojectM dynamic loading is not implemented on this platform.";
@@ -334,16 +309,6 @@ void Api::resolveSymbols()
     fn_loadPresetFile      = (Fn_projectm_load_preset_file)     resolveRequired ("projectm_load_preset_file");
     fn_loadPresetData      = (Fn_projectm_load_preset_data)     resolveOptional ("projectm_load_preset_data");
     fn_pcmAddFloat         = (Fn_projectm_pcm_add_float)        resolveRequired ("projectm_pcm_add_float");
-
-    // 诊断日志：方便在 IDE Output 里直接看到符号解析情况。
-    juce::Logger::writeToLog (
-        juce::String ("[projectm_api] resolveSymbols done. available=")
-        + (available ? "true" : "false")
-        + ", fn_create="     + juce::String::toHexString ((juce::pointer_sized_int) fn_create)
-        + ", fn_render="     + juce::String::toHexString ((juce::pointer_sized_int) fn_openglRenderFrame)
-        + ", fn_render_fbo=" + juce::String::toHexString ((juce::pointer_sized_int) fn_openglRenderFrameFbo)
-        + ", fn_presetData=" + juce::String::toHexString ((juce::pointer_sized_int) fn_loadPresetData)
-        + (errorMessage.empty() ? "" : ", err=" + juce::String (errorMessage)));
 }
 
 // ============================================================================
@@ -387,28 +352,17 @@ projectm_handle Api::create() const
         return nullptr;
     }
 
-    // 诊断日志：便于在 Release 出现"跳转 0x0"时确认是不是 fn_create 内部崩，
-    // 而不是我们这里错误地调用了空指针。
-    juce::Logger::writeToLog (juce::String ("[projectm_api] calling fn_create @ 0x")
-                              + juce::String::toHexString ((juce::pointer_sized_int) fn_create));
-
     projectm_handle h = nullptr;
    #if defined (_WIN32)
     DWORD sehCode = 0;
     // reinterpret_cast 因两个别名类型完全一致（同签名的 C 函数指针）是无害的。
     const bool ok = callFnCreateWithSeh (reinterpret_cast<LocalFnCreate> (fn_create), h, sehCode);
     if (! ok)
-    {
-        juce::Logger::writeToLog (juce::String ("[projectm_api] fn_create raised SEH exception, code=0x")
-                                  + juce::String::toHexString ((int) sehCode));
         return nullptr;
-    }
    #else
     h = fn_create();
    #endif
 
-    juce::Logger::writeToLog (juce::String ("[projectm_api] fn_create returned handle=0x")
-                              + juce::String::toHexString ((juce::pointer_sized_int) h));
     return h;
 }
 

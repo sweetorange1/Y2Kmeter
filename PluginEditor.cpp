@@ -70,7 +70,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.1.6");
+const int versionW = versionFont.getStringWidth ("v2.1.7");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -111,7 +111,7 @@ const int versionW = versionFont.getStringWidth ("v2.1.6");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-    const juce::String versionText = "v2.1.6";
+const juce::String versionText = "v2.1.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1675,7 +1675,9 @@ void Y2KmeterAudioProcessorEditor::skipTutorial()
     tutorialWasSkipped = true;
     dismissTutorialOverlay();
 
-    // 注意：不标记 tutorialCompleted，保留下次切回 default 重新触发的可能
+    // 持久化跳过状态：用户主动跳过引导后，下次启动不再触发。
+    // （v2.1.5 之前不标记 tutorialCompleted，导致每次重启都重新出现）
+    processor.setTutorialCompleted (true);
 }
 
 void Y2KmeterAudioProcessorEditor::dismissTutorialOverlay()
@@ -2424,7 +2426,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-    const juce::String versionText = "v2.1.6";
+const juce::String versionText = "v2.1.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2432,7 +2434,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.1.6");
+const int versionW = versionFont.getStringWidth ("v2.1.7");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间

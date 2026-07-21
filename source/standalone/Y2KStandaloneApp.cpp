@@ -127,48 +127,6 @@ public:
     // --------------------------------------------------
     void initialise (const juce::String&) override
     {
-       #if JUCE_MAC
-        // macOS 专属：按环境变量 Y2KM_AUDIO_DUMP 启用音频转储调试采样。
-        //   · 默认环境变量不存在时 AudioDumpRecorder 保持关闭，零开销。
-        //   · 若开启，则在会话目录下开一份 runtime.log，便于排查 Standalone 下的启动与采集问题。
-        AudioDumpRecorder::instance().configureFromEnvironment();
-        {
-            auto& dump = AudioDumpRecorder::instance();
-            if (dump.isEnabled())
-            {
-                const auto dir = dump.getSessionDirectory();
-                if (dir != juce::File())
-                {
-                    const auto logFile = dir.getChildFile ("runtime.log");
-                    runtimeFileLogger.reset (new juce::FileLogger (logFile,
-                                                                    "Y2Kmeter runtime log",
-                                                                    0));
-                    juce::Logger::setCurrentLogger (runtimeFileLogger.get());
-                    juce::Logger::writeToLog ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
-                }
-            }
-        }
-       #endif
-
-       #if JUCE_WINDOWS
-        // Windows：无论调试/Release，把日志写到 %APPDATA%/Y2Kmeter/runtime.log，
-        // 便于用户在 Release 崩溃/卡死时抓到 [projectm_api] 等诊断信息（Release 无 debugger 时
-        // DBG() / juce::Logger::outputDebugString 是无法看到的）。
-        {
-            auto logDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                              .getChildFile ("Y2Kmeter");
-            logDir.createDirectory();
-            const auto logFile = logDir.getChildFile ("runtime.log");
-            runtimeFileLogger.reset (new juce::FileLogger (logFile,
-                                                            "Y2Kmeter runtime log",
-                                                            256 * 1024 /*maxInitialFileSizeBytes*/));
-            juce::Logger::setCurrentLogger (runtimeFileLogger.get());
-            juce::Logger::writeToLog ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
-            juce::Logger::writeToLog ("[BUILD_SIGNATURE] v2.1.6, compiled "
-                                     + juce::String(__DATE__) + " " + juce::String(__TIME__)
-                                     + ", exe=" + juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName());
-        }
-       #endif
 
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
@@ -392,18 +350,6 @@ public:
 
         // 4) 停止音频 + 销毁 processor
         pluginHolder = nullptr;
-
-       #if JUCE_MAC
-        // macOS 专属：解除全局 logger 指针，避免 runtimeFileLogger 析构后悬空
-        juce::Logger::setCurrentLogger (nullptr);
-        runtimeFileLogger.reset();
-       #endif
-
-       #if JUCE_WINDOWS
-        // Windows：同上，先摘钩再释放。
-        juce::Logger::setCurrentLogger (nullptr);
-        runtimeFileLogger.reset();
-       #endif
 
         appProperties.saveIfNeeded();
     }
@@ -1397,12 +1343,6 @@ private:
     // 独立持有 editor —— 与 DocumentWindow 解耦生命周期，
     // 以便在 delete 之前显式调用 processor->editorBeingDeleted()。
     std::unique_ptr<juce::AudioProcessorEditor>     pluginEditor;
-
-   #if JUCE_MAC || JUCE_WINDOWS
-    // macOS：音频转储的 runtime 日志文件（受 Y2KM_AUDIO_DUMP 控制）
-    // Windows：无条件写 %APPDATA%/Y2Kmeter/runtime.log，方便抓 Release 崩溃日志
-    std::unique_ptr<juce::FileLogger>               runtimeFileLogger;
-   #endif
 
     // 裸指针缓存 —— 指向 pluginEditor.get() 动态转型后的具体类型
     //   · 用于 ChangeListener 回调里刷新下拉框；不拥有生命周期

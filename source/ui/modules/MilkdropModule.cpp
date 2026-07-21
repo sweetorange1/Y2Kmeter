@@ -163,14 +163,8 @@ MilkdropModule::MilkdropModule (AnalyserHub* hub_)
         hubRetained = true;
     }
 
-    // 构造 GLView 并挂到内容区。
-    juce::Logger::writeToLog("[Milkdrop] Module ctor: creating GLView...");
     glView = std::make_unique<GLView> (*this);
-    juce::Logger::writeToLog("[Milkdrop] Module ctor: GLView created, calling addAndMakeVisible...");
     addAndMakeVisible (glView.get());
-    juce::Logger::writeToLog("[Milkdrop] Module ctor: done. GLView peer="
-                             + juce::String(glView->getPeer() ? "exists" : "null")
-                             + ", isShowing=" + juce::String(glView->isShowing() ? "true" : "false"));
 }
 
 MilkdropModule::~MilkdropModule()
@@ -220,14 +214,6 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     // ---- Phase 1: 渲染主内容（GL 帧或兜底黑底） ----
     if (glView != nullptr && ! glView->getBounds().isEmpty())
     {
-        static int paintLogCounter = 0;
-        if (paintLogCounter < 5 || paintLogCounter % 120 == 0)
-        {
-            juce::Logger::writeToLog("[Milkdrop] paintContent #" + juce::String(paintLogCounter)
-                                     + ": glView " + juce::String(glView->getWidth()) + "x" + juce::String(glView->getHeight())
-                                     + ", initialized=" + juce::String(glView->isRenderInitialized() ? "true" : "false"));
-        }
-        ++paintLogCounter;
 
         if (glView->isRenderInitialized())
         {
@@ -367,9 +353,6 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     // 随机化起始索引，让每个新加的模块从不同预设开始
     // 若后续 restoreModuleSpecificState 设置了存档索引，则 newOpenGLContextCreated
     // 会覆盖此值；若无存档，首次启动时从第 0 个开始。
-    juce::Logger::writeToLog("[Milkdrop] GLView ctor done. presets="
-                             + juce::String(presetPaths.size())
-                             + ", attached=" + juce::String(glContext.isAttached() ? "true" : "false"));
 }
 
 MilkdropModule::GLView::~GLView()
@@ -408,10 +391,7 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
 {
     // 已 attach → 无需再试。
     if (glContext.isAttached())
-    {
-        juce::Logger::writeToLog("[Milkdrop] scheduleAsyncAttach: already attached, skip");
         return;
-    }
 
     // 递归深度限制：最多重试 60 次（每 callAsync ~16ms → ~1 秒上限）。
     // 超过上限说明宿主窗口永远不会 visible，放弃 attach。
@@ -419,19 +399,10 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
     {
         renderErrorMessage = "GLView attach failed: component never became visible after "
                            + juce::String(kMaxAttachRetries).toStdString() + " retries.";
-        juce::Logger::writeToLog("[Milkdrop] scheduleAsyncAttach: GAVE UP after "
-                                 + juce::String(kMaxAttachRetries) + " retries. "
-                                 + "isShowing=" + juce::String(isShowing() ? "true" : "false")
-                                 + ", size=" + juce::String(getWidth()) + "x" + juce::String(getHeight()));
         return;
     }
 
     ++attachRetries;
-
-    juce::Logger::writeToLog("[Milkdrop] scheduleAsyncAttach: retry="
-                             + juce::String(attachRetries)
-                             + ", isShowing=" + juce::String(isShowing() ? "true" : "false")
-                             + ", size=" + juce::String(getWidth()) + "x" + juce::String(getHeight()));
 
     // 用 SafePointer + weak_ptr 风格确保回调时组件未销毁。
     juce::Component::SafePointer<GLView> weak(this);
@@ -439,46 +410,24 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
     {
         if (auto* self = weak.getComponent())
         {
-            juce::Logger::writeToLog("[Milkdrop] callAsync cb: isShowing="
-                                     + juce::String(self->isShowing() ? "true" : "false")
-                                     + ", size=" + juce::String(self->getWidth()) + "x" + juce::String(self->getHeight())
-                                     + ", attached=" + juce::String(self->glContext.isAttached() ? "true" : "false")
-                                     + ", retries=" + juce::String(self->attachRetries));
-
             if (self->glContext.isAttached())
                 return;
 
-            if (self->isShowing() && self->getWidth() > 0 && self->getHeight() > 0)
+            if (self->isShowing() && self->getWidth() > 0 && self->getHeight() > 0
+                && self->getPeer() != nullptr)
             {
-                juce::Logger::writeToLog("[Milkdrop] callAsync cb: conditions met, calling attachTo");
-
-                // 重要：attachTo 返回并不意味着 GL 线程已就绪——
-                // OpenGLContext 内部异步初始化 GL surface + 创建线程。
-                // 我们通过 newOpenGLContextCreated() 回调确认就绪。
                 self->glContext.attachTo(*self);
-
-                juce::Logger::writeToLog("[Milkdrop] callAsync cb: attachTo returned, attached="
-                                         + juce::String(self->glContext.isAttached() ? "true" : "false"));
             }
             else
             {
-                juce::Logger::writeToLog("[Milkdrop] callAsync cb: conditions NOT met, will retry");
-                self->scheduleAsyncAttach();  // 递归重试
+                self->scheduleAsyncAttach();
             }
-        }
-        else
-        {
-            juce::Logger::writeToLog("[Milkdrop] callAsync cb: weak component is null (destroyed)");
         }
     });
 }
 
 void MilkdropModule::GLView::parentHierarchyChanged()
 {
-    juce::Logger::writeToLog("[Milkdrop] GLView::parentHierarchyChanged, "
-                             "isShowing=" + juce::String(isShowing() ? "true" : "false")
-                             + ", attached=" + juce::String(glContext.isAttached() ? "true" : "false"));
-
     // 不做 isShowing() 门控——scheduleAsyncAttach 内部会用 callAsync 推迟到
     // 消息循环末尾重新判断 isShowing()，此时 native peer 已完全建立。
     scheduleAsyncAttach();
@@ -486,9 +435,6 @@ void MilkdropModule::GLView::parentHierarchyChanged()
 
 void MilkdropModule::GLView::visibilityChanged()
 {
-    juce::Logger::writeToLog("[Milkdrop] GLView::visibilityChanged, "
-                             "isShowing=" + juce::String(isShowing() ? "true" : "false"));
-
     scheduleAsyncAttach();
 }
 
@@ -496,11 +442,6 @@ void MilkdropModule::GLView::resized()
 {
     const int w = getWidth();
     const int h = getHeight();
-    juce::Logger::writeToLog("[Milkdrop] GLView::resized() "
-                             + juce::String(w) + "x" + juce::String(h)
-                             + ", isShowing=" + juce::String(isShowing() ? "true" : "false")
-                             + ", attached=" + juce::String(glContext.isAttached() ? "true" : "false")
-                             + ", retries=" + juce::String(attachRetries));
 
     // 无条件尝试 attach（scheduleAsyncAttach 内部有递归重试 + 上限保护）。
     // 这里不做 isShowing() 预判：在"手动添加模块"场景下，resized() 触发时
@@ -562,15 +503,11 @@ void MilkdropModule::GLView::pushPcm (const float* interleavedLR, unsigned int f
 
 void MilkdropModule::GLView::newOpenGLContextCreated()
 {
-    juce::Logger::writeToLog ("[MilkdropModule] newOpenGLContextCreated() begin, thread="
-                              + juce::String::toHexString ((juce::pointer_sized_int) juce::Thread::getCurrentThreadId()));
-
     auto& api = projectm_api::Api::instance();
     if (! api.isAvailable())
     {
         renderErrorMessage = api.loadError();
         renderInitialized = false;
-        juce::Logger::writeToLog ("[MilkdropModule] Api not available: " + juce::String (renderErrorMessage));
         return;
     }
 
@@ -585,11 +522,8 @@ void MilkdropModule::GLView::newOpenGLContextCreated()
     {
         renderErrorMessage = "Only 1 Milkdrop instance is allowed at a time (libprojectM Windows limitation).";
         renderInitialized = false;
-        juce::Logger::writeToLog ("[MilkdropModule] CAS reject: another Milkdrop is active.");
         return;
     }
-
-    juce::Logger::writeToLog ("[MilkdropModule] about to call projectm_create()");
 
     // 关键：projectM-4.1.x on Windows 内部使用 glew32.dll 提供 GL 扩展函数指针表，
     // 但 projectm_create() 自身不 glewInit()——它假设宿主已经 init 过。若不 init，
@@ -600,13 +534,10 @@ void MilkdropModule::GLView::newOpenGLContextCreated()
         renderErrorMessage = api.loadError();
         renderInitialized  = false;
         gActiveProjectMInstances.store (0);
-        juce::Logger::writeToLog ("[MilkdropModule] initGlew() failed: " + juce::String (renderErrorMessage));
         return;
     }
 
     pmHandle = api.create();
-    juce::Logger::writeToLog (juce::String ("[MilkdropModule] projectm_create returned handle=0x")
-                              + juce::String::toHexString ((juce::pointer_sized_int) pmHandle));
     if (pmHandle == nullptr)
     {
         renderErrorMessage = "projectm_create() returned NULL (bad GL context or unsupported driver).";
@@ -658,27 +589,10 @@ void MilkdropModule::GLView::newOpenGLContextCreated()
 
     renderInitialized = true;
     startTimerHz(30);  // UI 线程每 ~33ms 调用 paintContent 消费 cachedGlFrame_
-    frameCounter = 0;   // context 重建后日志采样重新对齐
-    juce::Logger::writeToLog ("[MilkdropModule] newOpenGLContextCreated() done, initialized=true, w="
-                              + juce::String (w) + ", h=" + juce::String (h)
-                              + ", presets=" + juce::String (presetPaths.size()));
 }
 
 void MilkdropModule::GLView::renderOpenGL()
 {
-    // 密一点的日志：前 5 帧 + 每 300 帧一次，既能确认新建上下文后
-    // renderOpenGL 很快重新启动，又不会偷走 60fps 主环。
-    ++frameCounter;
-    if (frameCounter <= 5 || frameCounter % 300 == 0)
-    {
-        juce::Logger::writeToLog ("[MilkdropModule] renderOpenGL tick #"
-                                  + juce::String (frameCounter)
-                                  + ", pmHandle=0x"
-                                  + juce::String::toHexString ((juce::pointer_sized_int) pmHandle)
-                                  + ", size=" + juce::String (getWidth()) + "x" + juce::String (getHeight())
-                                  + ", initialized=" + (renderInitialized ? "true" : "false"));
-    }
-
     if (! renderInitialized || pmHandle == nullptr)
     {
         // 兑底：GL 清屏成黑色，避免暴露未初始化的 framebuffer 内容。
@@ -761,8 +675,7 @@ void MilkdropModule::GLView::renderOpenGL()
           // 冷启动：从未收到过音频，合成低幅度多频波形防止首帧黑屏
           constexpr unsigned int kSynthFrames = 256;
           float synth[kSynthFrames * 2];
-          const double t0 = static_cast<double>(frameCounter)
-              * (kSynthFrames / 44100.0);
+          const double t0 = 0.0;
           for (unsigned int i = 0; i < kSynthFrames; ++i) {
             const double t = t0 + static_cast<double>(i) / 44100.0;
             const float s =
@@ -797,12 +710,6 @@ void MilkdropModule::GLView::renderOpenGL()
     {
         GLint currentDrawFbo = 0;
         juce::gl::glGetIntegerv (juce::gl::GL_DRAW_FRAMEBUFFER_BINDING, &currentDrawFbo);
-
-        if (frameCounter <= 3)
-        {
-            juce::Logger::writeToLog ("[MilkdropModule] using render_frame_fbo, JUCE draw FBO="
-                                      + juce::String ((int) currentDrawFbo));
-        }
 
         api.openglRenderFrameFbo (pmHandle, (uint32_t) currentDrawFbo);
         juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, (GLuint) currentDrawFbo);
@@ -874,8 +781,6 @@ void MilkdropModule::GLView::renderOpenGL()
 
 void MilkdropModule::GLView::openGLContextClosing()
 {
-    juce::Logger::writeToLog ("[MilkdropModule] openGLContextClosing() begin, pmHandle=0x"
-                              + juce::String::toHexString ((juce::pointer_sized_int) pmHandle));
     if (pmHandle != nullptr)
     {
         auto& api = projectm_api::Api::instance();
@@ -897,7 +802,6 @@ void MilkdropModule::GLView::openGLContextClosing()
     }
     stopTimer();
     renderInitialized = false;
-    juce::Logger::writeToLog ("[MilkdropModule] openGLContextClosing() done");
 }
 
 void MilkdropModule::GLView::timerCallback()
@@ -905,8 +809,14 @@ void MilkdropModule::GLView::timerCallback()
   // GL 线程在 renderOpenGL 中以 ~60fps 更新 cachedGlFrame_，
   // 本 Timer 在 UI 线程以 ~30Hz 唤醒 owner 的重绘管线，
   // 使 paintContent 消费最新帧并覆盖 ModulePanel 底色。
-  if (isRenderInitialized())
-    owner.repaint();
+
+  if (!isRenderInitialized())
+    return;
+
+  // -------- Auto-hide 检测（UI 线程安全） --------
+  owner.checkOverlayAutoHide();
+
+  owner.repaint();
 }
 
 // ---- 私有辅助 -------------------------------------------------
@@ -929,15 +839,11 @@ void MilkdropModule::GLView::loadPresetInternal()
       {
         auto raw = file.loadFileAsString().toStdString();
         auto fixed = FixMilkdropShaderTypes(raw);
-        juce::Logger::writeToLog("[Milkdrop] loadPresetInternal: using memory path (loadPresetData), idx="
-                                 + juce::String(currentPresetIndex) + " file=" + path);
         api.loadPresetData(pmHandle, fixed, true /*smooth*/);
       }
     }
     else
     {
-      juce::Logger::writeToLog("[Milkdrop] loadPresetInternal: using file path (loadPresetFile), idx="
-                               + juce::String(currentPresetIndex) + " file=" + path);
       api.loadPresetFile(pmHandle, path.toStdString(), true /*smooth*/);
     }
 
@@ -991,13 +897,29 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
         return;
 
     focused_ = shouldFocus;
-    if (! focused_)
+    if (!focused_)
     {
         hoveredOverlayBtn_ = OverlayButton::kNone;
         pressedOverlayBtn_ = OverlayButton::kNone;
     }
+    else
+    {
+        touchOverlayIdleTimer();  // 聚焦时重置 4 秒倒计时
+    }
 
     repaint();
+}
+
+void MilkdropModule::checkOverlayAutoHide()
+{
+  if (!focused_)
+    return;
+
+  // overlay 无交互超过 4 秒 → 自动隐藏
+  if (juce::Time::getMillisecondCounter() - lastInteractionTime_ >= 4000)
+  {
+    setFocusVisual(false);
+  }
 }
 
 void MilkdropModule::mouseDown(const juce::MouseEvent& e)
@@ -1029,6 +951,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         if (btn != OverlayButton::kNone)
         {
             pressedOverlayBtn_ = btn;
+            touchOverlayIdleTimer();
             repaint(overlay);
         }
     }
@@ -1069,13 +992,17 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
 
         if (hit != OverlayButton::kNone)
         {
+            touchOverlayIdleTimer();
             if (hit == OverlayButton::kPresetName)
                 setMouseCursor(juce::MouseCursor::IBeamCursor);
             else
                 setMouseCursor(juce::MouseCursor::PointingHandCursor);
         }
         else if (overlay.contains(e.getPosition()))
+        {
+            touchOverlayIdleTimer();
             setMouseCursor(juce::MouseCursor::NormalCursor);
+        }
         else
             ModulePanel::mouseMove(e); // 基类处理边缘光标
     }
@@ -1320,6 +1247,134 @@ void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<in
   g.drawText("Switching...", bar, juce::Justification::centred, false);
 }
 
+// ==========================================================
+// PresetJumpDialog：自定义 PinkXP 风格预设跳转对话框
+// ==========================================================
+MilkdropModule::PresetJumpDialog::PresetJumpDialog(
+    MilkdropModule& owner_, int total, int current,
+    std::function<void(int)> onResult)
+    : owner_(owner_), total_(total), onResult_(std::move(onResult))
+{
+    setOpaque(false);
+
+    editor_.setText(juce::String(current + 1));
+    editor_.setFont(PinkXP::getFont(11.0f, juce::Font::plain));
+    editor_.setColour(juce::TextEditor::backgroundColourId,
+                      PinkXP::pink50);
+    editor_.setColour(juce::TextEditor::textColourId, PinkXP::ink);
+    editor_.setColour(juce::TextEditor::outlineColourId,
+                      PinkXP::pink600.withAlpha(0.6f));
+    editor_.setColour(juce::TextEditor::focusedOutlineColourId,
+                      PinkXP::pink500.withAlpha(0.9f));
+    editor_.setInputRestrictions(6, "0123456789");
+    editor_.setSelectAllWhenFocused(true);
+    editor_.onReturnKey = [this] {
+        juce::String input = editor_.getText().trim();
+        int val = input.getIntValue();
+        if (val < 1) val = 1;
+        if (val > total_) val = total_;
+        onResult_(val - 1);
+        exitModalState(1);
+    };
+    editor_.onEscapeKey = [this] {
+        exitModalState(0);
+    };
+    addAndMakeVisible(editor_);
+}
+
+void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
+{
+    // 半透明暗色遮罩
+    g.fillAll(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.55f));
+
+    // 对话框主体位置（居中）
+    constexpr int kDlgW = 290;
+    constexpr int kDlgH = 130;
+    auto dlg = juce::Rectangle<int>(
+        (getWidth() - kDlgW) / 2, (getHeight() - kDlgH) / 2,
+        kDlgW, kDlgH);
+
+    // 面板底色跟随主题
+    g.setColour(PinkXP::content.withAlpha(0.95f));
+    g.fillRoundedRectangle(dlg.toFloat(), 4.0f);
+    g.setColour(PinkXP::pink300.withAlpha(0.7f));
+    g.drawRoundedRectangle(dlg.toFloat().reduced(0.5f), 4.0f, 1.5f);
+
+    // 标题
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+    g.drawText("Jump to Preset",
+               dlg.getX() + 14, dlg.getY() + 8,
+               dlg.getWidth() - 28, 20,
+               juce::Justification::centredLeft, false);
+
+    // 提示文字
+    g.setColour(PinkXP::pink700.withAlpha(0.75f));
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
+    g.drawText("Enter preset number (1\u2013" + juce::String(total_) + "):",
+               dlg.getX() + 14, dlg.getY() + 28,
+               dlg.getWidth() - 28, 18,
+               juce::Justification::centredLeft, false);
+
+    // Go 按钮（右侧）
+    auto goRect = juce::Rectangle<int>(
+        dlg.getRight() - 66, dlg.getBottom() - 34, 54, 22);
+    PinkXP::drawRaised(g, goRect, PinkXP::face);
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText("Go", goRect, juce::Justification::centred, false);
+
+    // Cancel 按钮
+    auto cancelRect = juce::Rectangle<int>(
+        goRect.getX() - 62, dlg.getBottom() - 34, 54, 22);
+    PinkXP::drawRaised(g, cancelRect, PinkXP::face);
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText("Cancel", cancelRect, juce::Justification::centred, false);
+}
+
+void MilkdropModule::PresetJumpDialog::resized()
+{
+    constexpr int kDlgW = 290;
+    constexpr int kDlgH = 130;
+    auto dlgX = (getWidth() - kDlgW) / 2;
+    auto dlgY = (getHeight() - kDlgH) / 2;
+
+    // TextEditor 位于标题下方
+    editor_.setBounds(dlgX + 14, dlgY + 48, kDlgW - 28, 24);
+}
+
+void MilkdropModule::PresetJumpDialog::mouseDown(const juce::MouseEvent&)
+{
+    constexpr int kDlgW = 290;
+    constexpr int kDlgH = 130;
+    auto dlgX = (getWidth() - kDlgW) / 2;
+    auto dlgY = (getHeight() - kDlgH) / 2;
+
+    // Go 按钮区域
+    auto goRect = juce::Rectangle<int>(
+        dlgX + kDlgW - 66, dlgY + kDlgH - 34, 54, 22);
+    if (goRect.contains(getMouseXYRelative()))
+    {
+        juce::String input = editor_.getText().trim();
+        int val = input.getIntValue();
+        if (val < 1) val = 1;
+        if (val > total_) val = total_;
+        onResult_(val - 1);
+        exitModalState(1);
+        return;
+    }
+
+    // Cancel 按钮区域
+    auto cancelRect = juce::Rectangle<int>(
+        goRect.getX() - 62, dlgY + kDlgH - 34, 54, 22);
+    if (cancelRect.contains(getMouseXYRelative()))
+    {
+        exitModalState(0);
+        return;
+    }
+}
+
 void MilkdropModule::showPresetJumpDialog()
 {
     if (glView == nullptr)
@@ -1330,31 +1385,14 @@ void MilkdropModule::showPresetJumpDialog()
         return;
 
     int current = glView->getCurrentPresetIndex();
-    juce::String defaultInput = juce::String(current + 1);
+    if (current < 0) current = 0;
 
-    auto* alert = new juce::AlertWindow(
-        "Jump to Preset",
-        "Enter preset number (1–" + juce::String(total) + "):",
-        juce::MessageBoxIconType::QuestionIcon,
-        this);
-
-    alert->addTextEditor("index", defaultInput, "Preset #");
-    alert->addButton("Go",    1, juce::KeyPress(juce::KeyPress::returnKey));
-    alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-
-    alert->enterModalState(true,
-        juce::ModalCallbackFunction::create(
-            [this, alert, total](int result) {
-                if (result != 0) {
-                    auto* editor = alert->getTextEditor("index");
-                    if (editor != nullptr) {
-                        juce::String input = editor->getText().trim();
-                        int val = input.getIntValue();
-                        if (val < 1) val = 1;
-                        if (val > total) val = total;
-                        jumpToPresetIndex(val - 1);
-                    }
-                }
-            }),
-        true);  // deleteWhenDone
+    auto* dlg = new PresetJumpDialog(*this, total, current,
+        [this](int result) {
+            if (result >= 0)
+                jumpToPresetIndex(result);
+        });
+    dlg->setBounds(getLocalBounds());
+    addAndMakeVisible(dlg);
+    dlg->enterModalState(true, nullptr, true);  // deleteWhenDone
 }

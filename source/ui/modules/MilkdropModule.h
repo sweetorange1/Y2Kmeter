@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -104,6 +105,8 @@ public:
 
     // === 焦点与叠加层交互 ===
     void setFocusVisual(bool shouldFocus);
+    void touchOverlayIdleTimer() { lastInteractionTime_ = juce::Time::getMillisecondCounter(); }
+    void checkOverlayAutoHide();  ///< 由 GLView::timerCallback 在 UI 线程轮询调用
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
     void mouseMove(const juce::MouseEvent& e) override;
@@ -280,9 +283,6 @@ private:
         std::atomic<bool>        renderInitialized { false };
         std::string              renderErrorMessage;
 
-        // 帧计数，仅用于稀疏日志（第 1/60/每 600 帧记录一次）。GL 线程独占访问。
-        long long                frameCounter = 0;
-
         // 当前预设索引的 UI 线程可读镜像。GL 线程在 loadPresetInternal() 中
         // store，UI 线程通过 getCurrentPresetIndex() load，用于显示预设名。
         std::atomic<int>         currentPresetIndexUi_ { -1 };
@@ -299,6 +299,27 @@ private:
         std::mutex               glFrameMutex_;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLView)
+    };
+
+    // ------------------------------------------------------
+    // PresetJumpDialog：自定义 PinkXP 风格预设跳转对话框
+    //   替代 juce::AlertWindow，消除 Windows 系统提示音，
+    //   并保持与插件整体 UI 风格一致。
+    // ------------------------------------------------------
+    class PresetJumpDialog : public juce::Component
+    {
+    public:
+        PresetJumpDialog(MilkdropModule& owner_, int total, int current,
+                         std::function<void(int)> onResult);
+        void paint(juce::Graphics& g) override;
+        void resized() override;
+        void mouseDown(const juce::MouseEvent& e) override;
+
+    private:
+        MilkdropModule& owner_;
+        int total_;
+        std::function<void(int)> onResult_;
+        juce::TextEditor editor_;
     };
 
     // === 私有成员 ===
@@ -329,6 +350,14 @@ private:
     void paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<int> content);
     void PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content);
     void showPresetJumpDialog();
+
+    // Auto-hide 逻辑（由 GLView::timerCallback 在 UI 线程驱动，30Hz 轮询）：
+    //   · 检测 !hasKeyboardFocus → 窗口失焦即隐藏
+    //   · 检测 idle > 4s → 长时间不操作 overlay 自动隐藏
+    //   · mouseMove/mouseDown 在 overlay 区域交互时通过 touchOverlayIdleTimer() 刷新
+
+    // overlay 最后一次交互时间（getMillisecondCounter），用于 idle 超时检测
+    juce::uint32 lastInteractionTime_ { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilkdropModule)
 };
