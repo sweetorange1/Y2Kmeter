@@ -1332,25 +1332,29 @@ void MilkdropModule::showPresetJumpDialog()
     int current = glView->getCurrentPresetIndex();
     juce::String defaultInput = juce::String(current + 1);
 
-    juce::AlertWindow dlg("Jump to Preset",
-                          "Enter preset number (1–" + juce::String(total) + "):",
-                          juce::MessageBoxIconType::QuestionIcon,
-                          this);
+    auto* alert = new juce::AlertWindow(
+        "Jump to Preset",
+        "Enter preset number (1–" + juce::String(total) + "):",
+        juce::MessageBoxIconType::QuestionIcon,
+        this);
 
-    dlg.addTextEditor("index", defaultInput, "Preset #");
-    dlg.addButton("Go", 1);
-    dlg.addButton("Cancel", 0);
+    alert->addTextEditor("index", defaultInput, "Preset #");
+    alert->addButton("Go",    1, juce::KeyPress(juce::KeyPress::returnKey));
+    alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
 
-    if (dlg.runModalLoop() != 0)
-    {
-        auto* editor = dlg.getTextEditor("index");
-        if (editor != nullptr)
-        {
-            juce::String input = editor->getText().trim();
-            int val = input.getIntValue();
-            if (val < 1) val = 1;
-            if (val > total) val = total;
-            jumpToPresetIndex(val - 1);
-        }
-    }
+    alert->enterModalState(true,
+        juce::ModalCallbackFunction::create(
+            [this, alert, total](int result) {
+                if (result != 0) {
+                    auto* editor = alert->getTextEditor("index");
+                    if (editor != nullptr) {
+                        juce::String input = editor->getText().trim();
+                        int val = input.getIntValue();
+                        if (val < 1) val = 1;
+                        if (val > total) val = total;
+                        jumpToPresetIndex(val - 1);
+                    }
+                }
+            }),
+        true);  // deleteWhenDone
 }
