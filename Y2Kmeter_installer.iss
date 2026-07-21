@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "2.1.1"
+#define MyAppVersion   "2.1.3"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -87,12 +87,6 @@ Source: "assets\Tamagotchi\*"; \
 ; DestDir 走 [Code] 段 GetVst3Dir —— 用户在独立向导页里选择的路径
 Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\VST3\{#MyPluginBundle}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}"; \
-    Flags: ignoreversion recursesubdirs createallsubdirs; \
-    Components: vst3
-
-; VST3 Tamagotchi 动画资源（放入 bundle 根目录，供运行时向上回溯查找）
-Source: "assets\Tamagotchi\*"; \
-    DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}\assets\Tamagotchi"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: vst3
 
