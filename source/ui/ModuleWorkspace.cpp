@@ -1126,9 +1126,28 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
         return false;
     };
 
+    // ------------------------------------------------------------
+    // VST3 运行时限制：拓麻歌子模块仅在 Standalone 中可用，
+    //   在 VST3/AU 插件形态下从菜单中排除。
+    //   使用运行时检测而非编译期 #if，因为 JUCE NMake 共享代码
+    //   同时定义 JucePlugin_Build_VST3=1 和
+    //   JucePlugin_Build_Standalone=1，编译期宏无法区分。
+    // ------------------------------------------------------------
+    const bool isPluginHost = !juce::JUCEApplicationBase::isStandaloneApp();
+
+    auto isTypeAllowedInCurrentHost = [isPluginHost](ModuleType t) -> bool
+    {
+        if (t != ModuleType::tamagotchi)
+            return true;
+        // Tamagotchi 仅在 Standalone 中可用
+        return !isPluginHost;
+    };
+
     for (int i = 0; i < availableTypes.size(); ++i)
     {
         const auto t = availableTypes[i];
+        if (!isTypeAllowedInCurrentHost(t))
+            continue;
         const bool passesWhitelist = enabledOnlyTypes.isEmpty()
                                   || enabledOnlyTypes.contains (t);
         const bool underInstanceLimit = ! isTypeAtInstanceLimit (t);
@@ -1195,6 +1214,12 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
         }
         const int idx = result - 1;
         if (idx < 0 || idx >= availableTypes.size())
+            return;
+
+        // 运行时安全防护：插件形态下不允许添加 Tamagotchi
+        // （正常情况下菜单中不会显示该项，此处为纵深防御）
+        if (!juce::JUCEApplicationBase::isStandaloneApp()
+            && availableTypes[idx] == ModuleType::tamagotchi)
             return;
 
         if (! hasPlacement)

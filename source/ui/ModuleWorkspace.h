@@ -726,9 +726,7 @@ private:
         ModuleType::oscilloscope, ModuleType::oscilloscopeWave,
         ModuleType::waveform,
         ModuleType::spectrum, ModuleType::spectrogram, ModuleType::spectrogram3d,
-#if !JucePlugin_Build_VST3
         ModuleType::tamagotchi,
-#endif
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 
         ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest,
