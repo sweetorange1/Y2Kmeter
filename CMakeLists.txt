@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.1.1 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.1.2 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -307,7 +307,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.1.1
+VERSION 2.1.2
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -802,30 +802,42 @@ if (WIN32)
 endif()
 
 # ==========================================================
-# VST3 安装时同步拷贝 projectM 运行时到系统 VST3 目录
+# VST3 系统部署：将 projectM 运行时从构建产物目录拷贝到系统 VST3 目录
 #   · COPY_PLUGIN_AFTER_BUILD 通过 cmake --install 只拷贝 VST3
-#     二进制本身，不包含 post-build 中额外拷贝的 projectM DLL、
-#     预设和纹理。这里用 install() 指令确保这些文件随 VST3 一起
-#     部署到 $ENV{CommonProgramFiles}/VST3/Y2Kmeter.vst3/ 下。
-#   · 仅在 Windows 且 VST3 target 存在时生效。
+#     二进制本身，不包含 post-build 中额外拷贝的 DLL/预设/纹理。
+#     这里的 post-build 命令在每次编译后直接把文件同步到
+#     C:\Program Files\Common Files\VST3\Y2Kmeter.vst3\Contents\x86_64-win\，
+#     无需额外 cmake --install 步骤即可让 DAW 加载到完整插件。
 # ==========================================================
 if (WIN32 AND TARGET Y2Kmeter_VST3)
-  # VST3 安装目标目录：JUCE 将 VST3 安装到
-  #   $ENV{CommonProgramFiles}/VST3/Y2Kmeter.vst3/Contents/x86_64-win/
-  # 和 JUCE 内部 install(TARGETS ... DESTINATION ...) 保持一致。
   set(Y2KM_VST3_INSTALL_DEST
       "$ENV{CommonProgramFiles}/VST3/Y2Kmeter.vst3/Contents/x86_64-win")
 
-  install(FILES "${Y2KM_PROJECTM_BIN}/projectM-4.dll"
-                "${Y2KM_PROJECTM_BIN}/glew32.dll"
-          DESTINATION "${Y2KM_VST3_INSTALL_DEST}"
-          COMPONENT Y2Kmeter_VST3)
+  # DLL
+  foreach(_dll IN LISTS Y2KM_PROJECTM_DLLS)
+    add_custom_command(TARGET Y2Kmeter_VST3 POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${_dll}" "${Y2KM_VST3_INSTALL_DEST}/"
+      COMMENT "Y2Kmeter[VST3 deploy]: copy $<PATH:GET_FILENAME,${_dll}> to system VST3 dir"
+      VERBATIM
+    )
+  endforeach()
 
-  install(DIRECTORY "${Y2KM_MILKDROP_PRESETS}/"
-          DESTINATION "${Y2KM_VST3_INSTALL_DEST}/milkdrop_presets"
-          COMPONENT Y2Kmeter_VST3)
+  # 预设
+  add_custom_command(TARGET Y2Kmeter_VST3 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${Y2KM_MILKDROP_PRESETS}"
+            "${Y2KM_VST3_INSTALL_DEST}/milkdrop_presets"
+    COMMENT "Y2Kmeter[VST3 deploy]: sync milkdrop_presets/"
+    VERBATIM
+  )
 
-  install(DIRECTORY "${Y2KM_MILKDROP_TEXTURES}/"
-          DESTINATION "${Y2KM_VST3_INSTALL_DEST}/milkdrop_textures"
-          COMPONENT Y2Kmeter_VST3)
+  # 纹理
+  add_custom_command(TARGET Y2Kmeter_VST3 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${Y2KM_MILKDROP_TEXTURES}"
+            "${Y2KM_VST3_INSTALL_DEST}/milkdrop_textures"
+    COMMENT "Y2Kmeter[VST3 deploy]: sync milkdrop_textures/"
+    VERBATIM
+  )
 endif()
