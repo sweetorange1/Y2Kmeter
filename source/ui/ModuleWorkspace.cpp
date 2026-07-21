@@ -1,6 +1,7 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/modules/TamagotchiModule.h"
+#include "source/ui/modules/MilkdropModule.h"
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
@@ -19,6 +20,18 @@ namespace
 
             if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
                 tamagotchi->setFocusVisual (false);
+        }
+    }
+
+    void clearMilkdropFocus (juce::OwnedArray<ModulePanel>& modules)
+    {
+        for (auto* m : modules)
+        {
+            if (m == nullptr || m->getModuleType() != ModuleType::milkdrop)
+                continue;
+
+            if (auto* milkdrop = dynamic_cast<MilkdropModule*> (m))
+                milkdrop->setFocusVisual (false);
         }
     }
 
@@ -858,6 +871,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     panel.onBroughtToFront = [this](ModulePanel&)
     {
         clearTamagotchiFocusVisuals (modules);
+        clearMilkdropFocus (modules);
 
         if (focusedPerlerIdx >= 0)
         {
@@ -1376,6 +1390,7 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
         return;
 
     clearTamagotchiFocusVisuals (modules);
+    clearMilkdropFocus (modules);
 
     // 事件来源区分：workspace 原生 / layer 转发
     //   · layer 转发过来的事件指向图片 / 装饰区域，此时右键不应弹"添加模块"菜单；

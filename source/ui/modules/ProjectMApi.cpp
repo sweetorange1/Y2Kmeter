@@ -126,6 +126,7 @@ void Api::resetSymbols()
     fn_setSoftCutDuration    = nullptr;
     fn_setHardCutEnabled     = nullptr;
     fn_loadPresetFile        = nullptr;
+    fn_loadPresetData        = nullptr;
     fn_pcmAddFloat           = nullptr;
     available    = false;
     errorMessage.clear();
@@ -285,6 +286,7 @@ void Api::resolveSymbols()
     fn_setSoftCutDuration  = (Fn_projectm_set_soft_cut_duration)resolveRequired ("projectm_set_soft_cut_duration");
     fn_setHardCutEnabled   = (Fn_projectm_set_hard_cut_enabled) resolveRequired ("projectm_set_hard_cut_enabled");
     fn_loadPresetFile      = (Fn_projectm_load_preset_file)     resolveRequired ("projectm_load_preset_file");
+    fn_loadPresetData      = (Fn_projectm_load_preset_data)     resolveOptional ("projectm_load_preset_data");
     fn_pcmAddFloat         = (Fn_projectm_pcm_add_float)        resolveRequired ("projectm_pcm_add_float");
 
     // 诊断日志：方便在 IDE Output 里直接看到符号解析情况。
@@ -294,6 +296,7 @@ void Api::resolveSymbols()
         + ", fn_create="     + juce::String::toHexString ((juce::pointer_sized_int) fn_create)
         + ", fn_render="     + juce::String::toHexString ((juce::pointer_sized_int) fn_openglRenderFrame)
         + ", fn_render_fbo=" + juce::String::toHexString ((juce::pointer_sized_int) fn_openglRenderFrameFbo)
+        + ", fn_presetData=" + juce::String::toHexString ((juce::pointer_sized_int) fn_loadPresetData)
         + (errorMessage.empty() ? "" : ", err=" + juce::String (errorMessage)));
 }
 
@@ -427,6 +430,14 @@ void Api::loadPresetFile (projectm_handle h,
 {
     if (available && h != nullptr)
         fn_loadPresetFile (h, filename.c_str(), smoothTransition);
+}
+
+void Api::loadPresetData (projectm_handle h,
+                          const std::string& data,
+                          bool smoothTransition) const
+{
+    if (available && h != nullptr && fn_loadPresetData != nullptr)
+        fn_loadPresetData (h, data.c_str(), smoothTransition);
 }
 
 void Api::addPcmFloat (projectm_handle h,

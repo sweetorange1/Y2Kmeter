@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.0.4`）
+- **产品名**：`Y2Kmeter` （版本：`2.1.1`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -1983,7 +1983,73 @@ void MilkdropModule::GLView::timerCallback()
 
 ---
 
-#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0）
+#### ⑤ v2.1.0→v2.1.1：Milkdrop 交互体验优化
+
+本轮开发围绕 Milkdrop 模块的**交互可用性**进行全面打磨：
+
+**GLView 鼠标事件转发**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事件不向上冒泡，导致父组件 MilkdropModule 永远收不到内容区的 `mouseDown`/`mouseMove` 等事件。全部 5 个鼠标方法 (`mouseDown`/`mouseUp`/`mouseMove`/`mouseExit`/`mouseDrag`) override 为 `parent->method(e.getEventRelativeTo(parent))` 转发。
+
+**聚焦叠加层控制条**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+- 聚焦时在内容区顶部显示半透明控制条：`[<] 3/100 presetName [1:1] [>] [?]`
+- `<` / `>` ：上一个/下一个预设
+- `?`：随机预设
+- `1:1`：glReadPixels 分辨率缩放（三态循环：1:1 → 1:2 → 1:4 → 1:1）
+- 预设号+名称（粉色序号 + 白色名称）
+- `executeOverlayAction()` 分发按钮；`paintOverlayControlBar()` 绘制（PinkXP 风格）
+
+**"Switching..." 加载指示器**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+右下角短暂提示条，持续 1.2s，标记 projectM soft-cut 过渡过程。
+
+**分辨率缩放**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)/[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+`GLView` 新增 `enum class ReadbackScale { kFull=1, kHalf=2, kQuarter=4 }`，`renderOpenGL` 的 `glReadPixels` 后 Y轴翻转以中心采样降采样写入 `cachedGlFrame_`。大模块时 1:4 模式将 `drawImage` 上传量降为 1/16。
+
+**PCM 音频链路优化**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)/[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+`renderOpenGL` 消费 PCM 的三态逻辑：
+1. 有新 PCM → `addPcmFloat(新数据)` + 备份到 `lastRealPcm`
+2. 无新数据但曾收到过 → `addPcmFloat(lastRealPcm)` 复播上一帧
+3. 冷启动从未收到 → 合成低频正弦波（220Hz+55Hz）
+
+效果：音频播放期间，100% 帧由真实音乐频谱驱动，不再有合成假节拍干扰。
+
+**Soft-cut 过渡时间**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+`kSoftCutDuration` 从 3.0s 缩短为 1.0s，预设切换视觉响应更快。
+
+**新增模块默认预设池**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+`newOpenGLContextCreated()` 无存档时从预设 {57,64,69,71,73,75,77,78}（显示号 58/65/70/72/74/76/78/79）中随机选取，替代固定第 0 个。
+
+**预设索引持久化**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)/[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+覆盖 `saveModuleSpecificState()`/`restoreModuleSpecificState()`，保存/恢复 `presetIndex`。`restored_preset_index_` 在 `newOpenGLContextCreated` 中消费一次后清零。
+
+**Milkdrop DSL → GLSL 运行时兼容修正**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
+
+新增 `FixMilkdropShaderTypes()`：内存中预处理 `.milk` 内容，修正两种 Winamp Milkdrop → projectM GLSL 不兼容模式：
+1. `float2 (` → `float2(`（类型名与括号间的空格）
+2. `float3(` → `float2(`（`float2` 声明行中 `float3` 类型不匹配，截取前 2 参数）
+
+通过 `projectm_load_preset_data`（ProjectMApi 新增内存加载 API）加载修正后内容，不改动磁盘上 `.milk` 文件。
+
+**Spectrum 模块离屏 Image 缓存**（[SpectrumModule.h](I:/Y2KMeter/source/ui/modules/SpectrumModule.h)/[SpectrumModule.cpp](I:/Y2KMeter/source/ui/modules/SpectrumModule.cpp)）
+
+新增 `cached_curve_image_` + `curve_cache_dirty_`。`onFrame()` 数据更新时标记脏，`paintContent()` 在脏时才 `renderCurvesToCache()` 构建 Catmull-Rom Path，其余帧直接 `drawImageAt` 零开销 blit。解决大 Milkdrop 模块导致 Spectrum 掉帧的问题。
+
+**ProjectMApi 扩展**（[ProjectMApi.h](I:/Y2KMeter/source/ui/modules/ProjectMApi.h)/[ProjectMApi.cpp](I:/Y2KMeter/source/ui/modules/ProjectMApi.cpp)）
+
+新增 `loadPresetData()` / `hasLoadPresetData()` / `Fn_projectm_load_preset_data` typedef / `fn_loadPresetData` 成员，`resolveOptional` 解析 `projectm_load_preset_data`。
+
+**版本号**：`2.1.0 → 2.1.1`
+
+--- 
+
+#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1）
 
 1. **写第三方 C 头封装类时，命名空间不要跟第三方公开符号重名**——用 `_api` 后缀。
 2. **中文注释源文件必须存为 UTF-8 with BOM**（Windows MSVC 下 GBK 解码会把 `。` 认成非法字符）。

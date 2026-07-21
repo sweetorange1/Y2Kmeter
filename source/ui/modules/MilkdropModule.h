@@ -89,6 +89,10 @@ public:
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
     void layoutContent (juce::Rectangle<int> contentBounds) override;
 
+    // === 预设索引持久化 ===
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState(const juce::ValueTree& state) override;
+
     // === AnalyserHub::FrameListener 覆写 ===
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
@@ -96,6 +100,13 @@ public:
     void nextPreset();
     void prevPreset();
     void randomPreset();
+
+    // === 焦点与叠加层交互 ===
+    void setFocusVisual(bool shouldFocus);
+    void mouseDown(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
 
 private:
     // ------------------------------------------------------
@@ -119,6 +130,14 @@ private:
         void parentHierarchyChanged() override;
         void visibilityChanged() override;
         void resized() override;
+
+        // GLView 覆盖整个内容区，必须把鼠标事件转发给父组件 MilkdropModule，
+        // 否则焦点获取和叠加层按钮交互全部被 GLView 吞掉。
+        void mouseDown(const juce::MouseEvent& e) override;
+        void mouseUp(const juce::MouseEvent& e) override;
+        void mouseMove(const juce::MouseEvent& e) override;
+        void mouseExit(const juce::MouseEvent& e) override;
+        void mouseDrag(const juce::MouseEvent& e) override;
 
         // 显式 detach —— 在 MilkdropModule 析构最前面调用，
         // 保证 GL 线程完全收尾后再销毁 hub listener 等成员。
@@ -146,6 +165,56 @@ private:
         // 中读取。调用者负责持锁（glFrameMutex_ 是 public 成员）。
         juce::Image& getCachedGlFrame() { return cachedGlFrame_; }
         std::mutex& getGlFrameMutex() { return glFrameMutex_; }
+
+        // 预设索引：GL 线程在 loadPresetInternal 中写入，UI 线程在 paintContent
+        // 中读取以显示当前预设名。atomic 保证跨线程安全。
+        int getCurrentPresetIndex() const noexcept { return currentPresetIndexUi_.load(); }
+
+        // 预设总数（UI 线程安全只读）。
+        int getTotalPresetCount() const noexcept { return presetPaths.size(); }
+
+        // 最后一次预设切换的时间戳（毫秒，steady_clock）。GL 线程写，UI 线程读。
+        // 用于在 soft-cut 过渡期间显示"Loading..."提示。
+        int64_t getLastPresetSwitchTimeMs() const noexcept { return last_preset_switch_time_ms_.load(); }
+
+        // ---- 分辨率缩放（glReadPixels 降采样） ----
+        enum class ReadbackScale { kFull = 1, kHalf = 2, kQuarter = 4 };
+        ReadbackScale getReadbackScale() const noexcept { return readback_scale_.load(); }
+        void cycleReadbackScale() noexcept
+        {
+          // 三态循环: 1:1 → 1:2 → 1:4 → 1:1
+          auto cur = readback_scale_.load();
+          switch (cur)
+          {
+          case ReadbackScale::kFull:    readback_scale_.store(ReadbackScale::kHalf);    break;
+          case ReadbackScale::kHalf:    readback_scale_.store(ReadbackScale::kQuarter); break;
+          case ReadbackScale::kQuarter: readback_scale_.store(ReadbackScale::kFull);    break;
+          }
+        }
+        juce::String getReadbackScaleLabel() const noexcept
+        {
+          switch (readback_scale_.load())
+          {
+          case ReadbackScale::kFull:    return "1:1";
+          case ReadbackScale::kHalf:    return "1:2";
+          case ReadbackScale::kQuarter: return "1:4";
+          }
+          return {};
+        }
+
+        // 根据当前预设索引返回用于 UI 显示的预设名（不含路径和 .milk 扩展名）。
+        // 可在 UI 线程安全调用。
+        juce::String getCurrentPresetName() const
+        {
+            int idx = currentPresetIndexUi_.load();
+            if (idx >= 0 && idx < presetPaths.size())
+            {
+                return presetPaths[idx].fromLastOccurrenceOf("/", false, false)
+                                       .fromLastOccurrenceOf("\\", false, false)
+                                       .upToLastOccurrenceOf(".milk", false, false);
+            }
+            return {};
+        }
 
     private:
         // Timer: GL 线程 60fps 更新 cachedGlFrame_，UI 线程的 paintContent
@@ -178,6 +247,12 @@ private:
         std::vector<float>       pendingPcm;   // 长度 = 2 * frameCount
         unsigned int             pendingFrames = 0;
 
+        // 上一次真实音频的备份（GL 线程独占）。当本帧没有新 PCM 到达时，
+        // 用此备份复播以保持 projectM 的频谱活力，避免合成假音频。
+        std::vector<float>       lastRealPcm;
+        unsigned int             lastRealFrames = 0;
+        bool                     hasEverReceivedRealPcm = false;
+
         // 预设列表（构造 GL 时扫描一次；GL 线程也可读，UI 线程不再修改）
         juce::StringArray        presetPaths;
         int                      currentPresetIndex = -1;
@@ -185,6 +260,10 @@ private:
         // GL 线程侧的 preset 切换请求。UI 线程置位，GL 线程消费。
         std::atomic<int>         requestedPresetDelta { 0 };   // -1 / +1 / 0
         std::atomic<bool>        requestedPresetRandom { false };
+
+        // 分辨率缩放级别：GL 线程在 glReadPixels 时按此值降采样回读（1/2/4）。
+        // UI 线程通过 cycleReadbackScale() 切换，GL 线程在 renderOpenGL 消费。
+        std::atomic<ReadbackScale> readback_scale_ { ReadbackScale::kFull };
 
         // 尺寸变化：UI 线程 setBounds 时置位，GL 线程 renderOpenGL 消费并
         // 调用 projectm_set_window_size —— projectM 的 fbo 会随之重建。
@@ -201,6 +280,16 @@ private:
         // 帧计数，仅用于稀疏日志（第 1/60/每 600 帧记录一次）。GL 线程独占访问。
         long long                frameCounter = 0;
 
+        // 当前预设索引的 UI 线程可读镜像。GL 线程在 loadPresetInternal() 中
+        // store，UI 线程通过 getCurrentPresetIndex() load，用于显示预设名。
+        std::atomic<int>         currentPresetIndexUi_ { -1 };
+
+        // 最后一次预设切换的 steady_clock 毫秒时间戳。
+        // GL 线程在 renderOpenGL 消费切换请求时 store；
+        // UI 线程通过 getLastPresetSwitchTimeMs() load，
+        // 用于在 soft-cut 过渡期间显示"Loading..."提示。
+        std::atomic<int64_t>     last_preset_switch_time_ms_ { 0 };
+
         // 帧缓存：renderOpenGL（GL 线程）通过 glReadPixels 从 FBO 0 回读 projectM
         // 输出到此 Image；paintContent（UI 线程）将其绘制到内容区。用 mutex 保护。
         juce::Image              cachedGlFrame_;
@@ -213,6 +302,26 @@ private:
     AnalyserHub* hub;                       ///< 可为 nullptr（无音频源）
     bool         hubRetained = false;       ///< 标记是否成功 retain（析构时 release）
     std::unique_ptr<GLView> glView;
+
+    // 从布局存档恢复的预设索引（-1 = 无存档，首次启动）。在 GL context 创建后
+    // newOpenGLContextCreated 中消费，消费后重置为 -1 防止重复覆盖。
+    int          restored_preset_index_ = -1;
+
+    // ---- 焦点与叠加层控件 ----
+    bool focused_ { false };
+
+    // 叠加层按钮类型
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kRes };
+    OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
+    OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
+
+    // 辅助
+    juce::Rectangle<int> getOverlayBounds(juce::Rectangle<int> content) const;
+    OverlayButton hitTestOverlayButton(juce::Point<int> pos, juce::Rectangle<int> overlay) const;
+    juce::Rectangle<int> getOverlayButtonRect(juce::Rectangle<int> overlay, OverlayButton btn) const;
+    void executeOverlayAction(OverlayButton btn);
+    void paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<int> content);
+    void PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilkdropModule)
 };

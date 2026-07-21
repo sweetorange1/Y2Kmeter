@@ -1,110 +1,133 @@
-# Y2Kmeter 项目文件整理说明
+<p align="center">
+  <img src="assets/logo.png" alt="Y2Kmeter Logo" width="128">
+</p>
 
-## 项目概述
-这是一个基于JUCE框架的音频插件项目，包含VST3插件和独立应用程序版本。
+<h1 align="center">Y2Kmeter</h1>
 
-## 目录结构说明
+<p align="center"><strong>Y2K 像素复古音频分析仪</strong> — VST3 / AU / Standalone</p>
 
-### 根目录文件
-- `CMakeLists.txt` - CMake构建配置文件
-- `PluginEditor.cpp/h` - 插件编辑器主类
-- `PluginProcessor.cpp/h` - 插件处理器主类
-- `Y2Kmeter_installer.iss` - Inno Setup安装器脚本
-- `build_installer.bat` - 构建安装器的批处理脚本
-- `.gitignore` - Git忽略规则文件
+<p align="center">
+  <img src="https://img.shields.io/badge/version-2.1.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
+</p>
 
-### 源代码目录 (`source/`)
-- `analysis/` - 音频分析模块
-  - `AnalyserHub.cpp/h` - 分析器管理中心
-  - `DynamicRangeMeter.cpp` - 动态范围计量器
-  - `LoudnessMeter.cpp/h` - 响度计量器
-  - `PhaseCorrelator.cpp` - 相位相关器
-- `standalone/` - 独立应用程序模块
-  - `WasapiLoopbackCapture.cpp/h` - WASAPI音频捕获
-  - `Y2KStandaloneApp.cpp` - 独立应用程序主类
-- `ui/` - 用户界面模块
-  - `ModulePanel.cpp/h` - 模块面板
-  - `ModuleWorkspace.cpp/h` - 模块工作区
-  - `PinkXPStyle.cpp/h` - 界面样式定义
-  - `modules/` - 具体功能模块
-    - 动态、均衡器、频谱、波形等各功能模块
+---
 
-### 资源文件目录
-- `assets/` - 应用程序资源
-  - `app_icon.rc` - 图标资源定义
-  - `icon.ico` - 应用程序图标
-  - `logo.png` - 应用程序Logo
-  - `milkdrop_presets/` - Milkdrop 模块使用的 100 个精选 `.milk` 预设
-    （来自 [Cream of the Crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)，与 projectM 一同以 LGPL-2.1-or-later 分发）
-  - `milkdrop_textures/` - Milkdrop 模块使用的 66 个基础纹理
-    （来自 projectM 官方 Milkdrop texture pack）
-  - `Tamagotchi/` - 电子宠物模块动画资源
-- `third_party/projectm/` - **libprojectM 4** Windows 预编译库（DLL + 头文件）
-  - 详见 [`third_party/projectm/README.md`](third_party/projectm/README.md)
-  - 以 **LGPL-2.1-or-later** 授权，运行时通过 `LoadLibrary` 动态加载
-- `ttf/` - 字体文件
-  - `Silkscreen-Regular.ttf` - Silkscreen字体
-  - 其他中文字体文件
+## 概述
 
-## 文件筛选指南
+**Y2Kmeter** 是一款面向音乐制作人的专业音频分析插件，带有强烈的 **Windows 95-XP 像素复古粉色（Pink XP）** 视觉主题。支持 VST3、AU 和独立应用（Standalone）三种形态。
 
-### 保留的核心文件类型
-- **源代码文件**: `.cpp`, `.h`, `.hpp`
-- **构建配置文件**: `CMakeLists.txt`
-- **资源文件**: `.rc`, `.ico`, `.png`, `.ttf`
-- **安装脚本**: `.iss`, `.bat`
-- **文档文件**: `.md`, `.txt`
+> 分类：Analyzer / Fx | BundleID：`cn.iisaacbeats.Y2Kmeter` | 开源协议：GPL-3.0
 
-### 排除的文件类型
-- **编译产物**: 所有构建目录 (`cmake-build-*`, `out`, `dist`)
-- **IDE配置**: `.vs/`, `.idea/` 目录
-- **临时文件**: `_filterstate.*`, `color.txt`
-- **测试文件**: `pngtest/` 目录
-- **大文件**: `grid_plugin.zip`
-- **系统文件**: `desktop.ini`, `.DS_Store`, `Thumbs.db`
+---
 
-### Git仓库使用说明
-1. 将整理好的 `D:/y2kmetergit` 目录初始化为新的Git仓库
-2. 确保 `.gitignore` 文件已正确配置
-3. 提交所有保留的文件到仓库
-4. 后续开发时，编译产物会自动被忽略
+## 功能模块
 
-## 项目构建说明
-使用CMake进行项目构建，支持VST3插件和独立应用程序的生成。
+| 模块 | 功能描述 |
+|------|---------|
+| **电平表** | 立体声 RMS L/R + True Peak L/R，含数值溢出计数 |
+| **响度计** | ITU-R BS.1770-4（LUFS-M / LUFS-S / LUFS-I），含 rang 计算 |
+| **相位相关仪** | Correlation / Width / Balance / Goniometer 矢量示波器 |
+| **动态范围** | Peak / RMS / Crest / Short-DR / Integrated-DR |
+| **频谱分析** | 对数轴 20Hz~20kHz，双路 FFT（2048 + 8192），dBFS 纵轴，峰值保持 |
+| **频谱瀑布图** | 像素方格风格 Spectrogram，时间×频率 滚动热力图 |
+| **示波器 / 波形** | X-Y / Lissajous / 持续滚动瀑布波形 |
+| **VU 表** | 模拟指针式 VU 表，带峰值灯 |
+| **EQ 频谱** | Y2K 主题的 6 段 EQ 频谱可视化（仅显示，不处理音频） |
+| **Tamagotchi 电子宠物** | 音频信号驱动的像素小怪，含孵化/觅食/睡眠/生病/死亡完整状态机 |
+| **拼豆像素画** | 用户拖入图片生成拼豆像素画，可贴到桌面背景 |
+| **Milkdrop 可视化** 🔥 | 基于 **libprojectM 4** 原生 OpenGL 渲染，本地打包 100+ 真实 Milkdrop 预设 |
 
-## 开源协议
-本项目采用 **GNU General Public License v3.0 (GPL-3.0)** 开源。
+---
 
-- 完整协议文本见根目录文件：`LICENSE`
-- 你可以自由使用、修改和分发本项目，但分发衍生作品时需遵循 GPL-3.0 的同等开源要求。
+## Milkdrop 模块
 
-## 第三方组件许可
+Y2Kmeter v2.1.0 起内置完整 **Milkdrop 可视化引擎**：
 
-Y2Kmeter 在运行时/发布物中包含以下第三方作品：
+- 基于 **libprojectM 4**（OpenGL Core Profile 4.1）：通过 `LoadLibrary` 动态加载 `projectM-4.dll`，零编译期依赖
+- 100 个精选 `.milk` 预设（来自 [Cream of the Crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)）
+- 66 个基础纹理（来自 projectM 官方 texture pack）
+- 预设切换软渐变（soft-cut 1.0s），支持上一个/下一个/随机/指定
+- 分辨率缩放（1:1 / 1:2 / 1:4）平衡画质与性能
+- 音频实时联动（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）
+- 预设索引持久化（关闭软件后重新打开自动恢复）
+- 100% 本地运行，无需网络，无需 WebView/WebGL
 
-### libprojectM 4  (LGPL-2.1-or-later) — Milkdrop 模块的核心可视化引擎
+---
 
-- 上游仓库：<https://github.com/projectM-visualizer/projectm>
-- 我们仅以**动态链接**（`LoadLibrary()` + `GetProcAddress()`）的方式使用官方
-  预编译的 `projectM-4.dll`（以及其依赖 `glew32.dll`），并**未修改**其源码。
-- LGPL-2.1 要求：
-  1. 用户可以**替换或升级** `projectM-4.dll` 而无需重新编译 Y2Kmeter ——
-     我们的加载策略（从 exe 目录读取 DLL）已满足该要求；
-  2. 完整源码见上游仓库；
-  3. 完整 LGPL-2.1 协议文本见
-     <https://github.com/projectM-visualizer/projectm/blob/master/LICENSE.txt>。
+## 技术栈
 
-**Powered by projectM** — 感谢 projectM 团队让 Milkdrop 生态得以在原生
-应用中复用。
+| 项目 | 版本 |
+|------|------|
+| 语言 | C++17 |
+| 框架 | [JUCE](https://juce.com) 8.0.12 |
+| OpenGL | Core Profile 4.1（libprojectM 4） |
+| FFT | `juce::dsp::FFT` |
+| 构建 | CMake ≥ 3.22 |
+| 安装器 | Inno Setup（Windows） |
 
-### Milkdrop 预设 / 纹理  (LGPL-2.1-or-later)
+---
 
-- `assets/milkdrop_presets/`：来自
-  [presets-cream-of-the-crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)
-  的 100 个精选 `.milk` 预设。
-- `assets/milkdrop_textures/`：来自 projectM 官方 Milkdrop texture pack 的 66 个基础纹理。
-- 与 libprojectM 同以 LGPL-2.1-or-later 授权。
+## 构建
 
-### JUCE  (GPL v3 / 商业双授权)
+```bash
+# 克隆仓库
+git clone https://github.com/iisaacbeats/Y2Kmeter.git
+cd Y2Kmeter
 
-框架本身；Y2Kmeter 采用 GPL v3 授权，因此我们使用 JUCE 的 GPL v3 版本。
+# CMake 配置 & 构建（Release）
+cmake -B cmake-build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build cmake-build-release --config Release
+```
+
+**Windows 用户**：构建前请将 `third_party/projectm/bin/projectM-4.dll` 和 `glew32.dll` 放置到可执行文件同目录（CMake Post-build 脚本会自动处理）。
+
+---
+
+## 鸣谢
+
+本项目站在众多开源项目的肩膀上，在此致以诚挚感谢 🙏
+
+### libprojectM & Milkdrop 生态
+
+- **[projectM](https://github.com/projectM-visualizer/projectm)** — 将 Milkdrop 可视化引擎带出 Winamp，移植到跨平台 OpenGL 的杰出项目。Y2Kmeter 的 Milkdrop 模块完全基于 libprojectM 4 构建。
+- **[ProjectM Team](https://github.com/projectM-visualizer)** — 感谢所有 projectM 维护者和贡献者，让 Milkdrop 生态得以在现代系统中延续。
+- **[Ryan Geiss](https://www.geisswerks.com/milkdrop/)** — 致敬 Milkdrop 原始作者，创造了一个影响深远的可视化传奇。
+- **[presets-cream-of-the-crop](https://github.com/projectM-visualizer/presets-cream-of-the-crop)** — 精选 Milkdrop 预设集，Y2Kmeter 内 100 个预设来源。
+- **所有 Milkdrop 预设作者** — 感谢每一位 `.milk` 创作者的想象力与艺术贡献，包括但不限于：suksma、flexi、shifter、martin、rova、fiShbRaiN、EvilTwin、orb、geiss、unChained、Zylot 等。
+
+### 框架与工具
+
+- **[JUCE](https://juce.com)** — 强大的跨平台音频应用框架，提供插件格式、OpenGL 上下文、DSP 等一切基础设施。
+- **[Inno Setup](https://jrsoftware.org/isinfo.php)** — Windows 安装包制作工具。
+- **[Silkscreen](https://kottke.org/plus/type/silkscreen/)** — 经典的像素英文字体，作为 Y2Kmeter 的默认 UI 字体。
+
+### 音频标准参考
+
+- **ITU-R BS.1770-4** — 响度计量算法标准
+- **EBU R 128** — 广播响度规范
+
+---
+
+## 许可
+
+Y2Kmeter 本体以 **GPL-3.0** 开源。
+
+第三方组件许可：
+
+| 组件 | 许可 |
+|------|------|
+| libprojectM 4 | LGPL-2.1-or-later（动态链接，可替换 DLL） |
+| Milkdrop 预设 / 纹理 | LGPL-2.1-or-later |
+| JUCE | GPL-3.0 / 商业双授权 |
+| Silkscreen 字体 | SIL Open Font License |
+
+> 详细许可文本见根目录 `LICENSE` 文件。
+
+---
+
+<p align="center">
+  <em>Made with ❤️ and pixels. Powered by projectM.</em><br>
+  &copy; 2024-2026 iisaacbeats
+</p>

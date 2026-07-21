@@ -10,6 +10,7 @@
 */
 #include "MilkdropModule.h"
 #include "ProjectMApi.h"
+#include "source/ui/PinkXPStyle.h"
 
 #include "projectM-4/projectM.h"
 
@@ -17,7 +18,114 @@
 #include <cmath>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <vector>
+
+// ==========================================================
+// 布局锁定判断（ModulePanel / TamagotchiModule 各自都有一份,
+//   供 mouseDown 中判断是否禁止拖拽/缩放/关闭等操作）
+// ==========================================================
+namespace
+{
+    bool isPanelLayoutLocked(const juce::Component& panel) noexcept
+    {
+        if (auto* ws = dynamic_cast<const ModuleWorkspace*>(panel.getParentComponent()))
+            return ws->isLayoutLocked();
+        return false;
+    }
+
+    /**
+     * @brief 运行时修正 .milk 预设中 Milkdrop DSL → GLSL 的类型不兼容问题。
+     *
+     * 原始 Milkdrop (Winamp) 表达式引擎是弱类型的，对空格和类型转换非常宽容。
+     * projectM 4 将其翻译为真正的 GLSL，以下三种模式都会导致 shader 编译失败：
+     *
+     * 1) float2 (0,1)   → 空格在类型和 '(' 之间，GLSL 认为 float2 是未定义变量
+     * 2) float3 (b,m,t) → 同上
+     * 3) float2 uv2 = ... - float3(a,b,c)  → float2 = float3，类型不匹配
+     *
+     * 此函数在内存中预处理预设文本，不修改磁盘上的 .milk 文件。
+     */
+    static std::string FixMilkdropShaderTypes(const std::string& data)
+    {
+      std::string result;
+      result.reserve(data.size() + 512);
+
+      std::istringstream stream(data);
+      std::string line;
+      while (std::getline(stream, line))
+      {
+        // ---- A. 修复空格：float2 ( → float2(、float3 ( → float3( ----
+        // 只在构造函数调用场景生效（类型后紧跟空格+括号），不影响声明 float2 uv2
+        static const std::pair<const char*, const char*> kSpaceFixes[] = {
+          {"float2 (",  "float2("},
+          {"float3 (",  "float3("},
+          {"float2x2 (","float2x2("},
+          {"float3x3 (","float3x3("},
+          {"float4 (",  "float4("},
+          {"float4x4 (","float4x4("},
+        };
+        for (auto& fix : kSpaceFixes)
+        {
+          size_t pos = 0;
+          while ((pos = line.find(fix.first, pos)) != std::string::npos)
+          {
+            line.replace(pos, std::strlen(fix.first), fix.second);
+            pos += std::strlen(fix.second);
+          }
+        }
+
+        // ---- B. 修复类型不匹配：float2 声明行里的 float3(...) → float2(...) ----
+        if (line.find("float2") != std::string::npos
+            && line.find("float3(") != std::string::npos)
+        {
+          size_t searchPos = 0;
+          while ((searchPos = line.find("float3(", searchPos)) != std::string::npos)
+          {
+            size_t argStart = searchPos + 7; // 跳过 "float3("
+            int depth = 1;
+            size_t argEnd = argStart;
+            while (argEnd < line.size() && depth > 0)
+            {
+              if (line[argEnd] == '(') ++depth;
+              else if (line[argEnd] == ')') --depth;
+              ++argEnd;
+            }
+            --argEnd; // 指向闭合 ')'
+
+            std::string args = line.substr(argStart, argEnd - argStart);
+
+            // 找第二个顶层逗号（跳过嵌套括号），只保留前两个参数
+            int nest = 0;
+            int commaCount = 0;
+            size_t secondComma = std::string::npos;
+            for (size_t i = 0; i < args.size(); ++i)
+            {
+              if (args[i] == '(') ++nest;
+              else if (args[i] == ')') --nest;
+              else if (args[i] == ',' && nest == 0)
+              {
+                ++commaCount;
+                if (commaCount == 2) { secondComma = i; break; }
+              }
+            }
+
+            if (secondComma != std::string::npos)
+            {
+              std::string first2 = args.substr(0, secondComma);
+              line.replace(searchPos, argEnd - searchPos + 1,
+                           "float2(" + first2 + ")");
+            }
+            ++searchPos;
+          }
+        }
+
+        result += line;
+        result += '\n';
+      }
+      return result;
+    }
+}
 
 // ==========================================================
 // 常量：预设/纹理相对 exe 目录的位置（CMake Post-build 已同步）
@@ -28,7 +136,7 @@ namespace
     constexpr int    kDefaultMeshHeight = 80;
     constexpr int    kTargetFps         = 60;     // 内部动画时基
     constexpr double kPresetDuration    = 20.0;   // 秒
-    constexpr double kSoftCutDuration   = 3.0;    // 秒
+    constexpr double kSoftCutDuration   = 1.0;    // 秒（projectM 预设间视觉渐变过渡时长）
 
     // 进程内当前已拥有 projectM handle 的 Milkdrop GLView 数。
     // libprojectM 4 (Windows/GLEW) 依赖进程全局的函数指针表，
@@ -84,8 +192,32 @@ MilkdropModule::~MilkdropModule()
     glView.reset(); // 现在可以安全地销毁子组件
 }
 
+juce::ValueTree MilkdropModule::saveModuleSpecificState() const
+{
+  juce::ValueTree s("state");
+  if (glView != nullptr)
+  {
+    int idx = glView->getCurrentPresetIndex();
+    if (idx >= 0)
+      s.setProperty("presetIndex", idx, nullptr);
+  }
+  return s;
+}
+
+void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
+{
+  if (state.hasProperty("presetIndex"))
+  {
+    int idx = static_cast<int>(state.getProperty("presetIndex"));
+    // 范围校验由 newOpenGLContextCreated 负责（此时 presetPaths 可能还未扫描）
+    if (idx >= 0)
+      restored_preset_index_ = idx;
+  }
+}
+
 void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> content)
 {
+    // ---- Phase 1: 渲染主内容（GL 帧或兜底黑底） ----
     if (glView != nullptr && ! glView->getBounds().isEmpty())
     {
         static int paintLogCounter = 0;
@@ -105,26 +237,36 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
           auto& frame = glView->getCachedGlFrame();
           if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0)
             g.drawImage(frame, content.toFloat());
-          return;
         }
-
-        // GL 尚未就绪：显示黑色背景 + 诊断文字
-        g.fillAll(juce::Colours::black);
-        auto msg = glView->getRenderError().isEmpty()
-                   ? juce::String("Milkdrop initializing...")
-                   : juce::String("Milkdrop error: ")
-                     + glView->getRenderError();
-        g.setColour(juce::Colours::grey);
-        g.setFont(juce::Font(12.0f));
-        g.drawText(msg, content, juce::Justification::centred, false);
-        return;
+        else
+        {
+          // GL 尚未就绪：显示黑色背景 + 诊断文字
+          g.fillAll(juce::Colours::black);
+          auto msg = glView->getRenderError().isEmpty()
+                     ? juce::String("Milkdrop initializing...")
+                     : juce::String("Milkdrop error: ")
+                       + glView->getRenderError();
+          g.setColour(juce::Colours::grey);
+          g.setFont(juce::Font(12.0f));
+          g.drawText(msg, content, juce::Justification::centred, false);
+        }
+    }
+    else
+    {
+      // 兜底提示（GLView 尚未被布局或尺寸为 0）
+      g.fillAll(juce::Colours::black);
+      g.setColour(juce::Colours::grey);
+      g.setFont(juce::Font(12.0f));
+      g.drawText("Milkdrop initializing...", content, juce::Justification::centred, false);
     }
 
-    // 兜底提示（GLView 尚未被布局或尺寸为 0）
-    g.fillAll(juce::Colours::black);
-    g.setColour(juce::Colours::grey);
-    g.setFont(juce::Font(12.0f));
-    g.drawText("Milkdrop initializing...", content, juce::Justification::centred, false);
+    // ---- Phase 2: 加载指示器（右下角，不依赖聚焦态） ----
+    if (glView != nullptr && glView->isRenderInitialized())
+      PaintLoadingIndicator(g, content);
+
+    // ---- Phase 3: 聚焦时在所有内容之上绘制预设控制叠加条 ----
+    if (focused_ && glView != nullptr)
+      paintOverlayControlBar(g, content);
 }
 
 void MilkdropModule::layoutContent (juce::Rectangle<int> content)
@@ -218,12 +360,8 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     }
 
     // 随机化起始索引，让每个新加的模块从不同预设开始
-    if (! presetPaths.isEmpty())
-    {
-        std::mt19937 rng { std::random_device{}() };
-        currentPresetIndex = (int) (rng() % (juce::uint32) presetPaths.size());
-    }
-
+    // 若后续 restoreModuleSpecificState 设置了存档索引，则 newOpenGLContextCreated
+    // 会覆盖此值；若无存档，首次启动时从第 0 个开始。
     juce::Logger::writeToLog("[Milkdrop] GLView ctor done. presets="
                              + juce::String(presetPaths.size())
                              + ", attached=" + juce::String(glContext.isAttached() ? "true" : "false"));
@@ -366,6 +504,41 @@ void MilkdropModule::GLView::resized()
     scheduleAsyncAttach();
 }
 
+// ---- GLView 鼠标事件全部转发给父组件 MilkdropModule -------------------
+//  GLView 覆盖整个内容区，默认 juce::Component 会吞掉所有鼠标事件，
+//  导致 MilkdropModule::mouseDown 永远收不到事件 → 焦点无法获取、
+//  叠加层按钮无法点击。这里把所有鼠标事件用父组件坐标重发过去。
+
+void MilkdropModule::GLView::mouseDown(const juce::MouseEvent& e)
+{
+    if (auto* parent = getParentComponent())
+        parent->mouseDown(e.getEventRelativeTo(parent));
+}
+
+void MilkdropModule::GLView::mouseUp(const juce::MouseEvent& e)
+{
+    if (auto* parent = getParentComponent())
+        parent->mouseUp(e.getEventRelativeTo(parent));
+}
+
+void MilkdropModule::GLView::mouseMove(const juce::MouseEvent& e)
+{
+    if (auto* parent = getParentComponent())
+        parent->mouseMove(e.getEventRelativeTo(parent));
+}
+
+void MilkdropModule::GLView::mouseExit(const juce::MouseEvent& e)
+{
+    if (auto* parent = getParentComponent())
+        parent->mouseExit(e.getEventRelativeTo(parent));
+}
+
+void MilkdropModule::GLView::mouseDrag(const juce::MouseEvent& e)
+{
+    if (auto* parent = getParentComponent())
+        parent->mouseDrag(e.getEventRelativeTo(parent));
+}
+
 void MilkdropModule::GLView::triggerRepaint()
 {
     // 若 continuousRepainting=false，需要 triggerRepaint() 才会重新调度 GL 线程。
@@ -460,7 +633,22 @@ void MilkdropModule::GLView::newOpenGLContextCreated()
     lastAppliedWidth  = w;
     lastAppliedHeight = h;
 
-    // 加载起始预设
+    // 加载起始预设：优先从布局存档恢复，否则从第 0 个开始
+    if (owner.restored_preset_index_ >= 0
+        && owner.restored_preset_index_ < presetPaths.size())
+    {
+      currentPresetIndex = owner.restored_preset_index_;
+    }
+    else if (!presetPaths.isEmpty())
+    {
+      // 无存档时从精选预设池中随机选取（显示号 58/65/70/72/74/76/78/79）
+      constexpr int kDefaultPool[] = {57, 64, 69, 71, 73, 75, 77, 78};
+      constexpr int kPoolSize = static_cast<int>(sizeof(kDefaultPool) / sizeof(kDefaultPool[0]));
+      std::mt19937 rng{static_cast<uint32_t>(
+          std::chrono::high_resolution_clock::now().time_since_epoch().count())};
+      currentPresetIndex = kDefaultPool[rng() % kPoolSize];
+    }
+    owner.restored_preset_index_ = -1;  // 消费一次即清空
     loadPresetInternal();
 
     renderInitialized = true;
@@ -524,46 +712,58 @@ void MilkdropModule::GLView::renderOpenGL()
             std::mt19937 rng { (uint32_t) std::chrono::high_resolution_clock::now()
                                    .time_since_epoch().count() };
             currentPresetIndex = (int) (rng() % (juce::uint32) presetPaths.size());
+            last_preset_switch_time_ms_.store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
             loadPresetInternal();
         }
         else if (delta != 0)
         {
             currentPresetIndex = (currentPresetIndex + delta + presetPaths.size())
                                  % presetPaths.size();
+            last_preset_switch_time_ms_.store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
             loadPresetInternal();
         }
     }
 
-    // 3) 推 PCM 到 projectM（无音频时自行合成，让预设也能“动”起来）
-    bool consumedRealPcm = false;
+    // 3) 推 PCM 到 projectM。有真实音频时消费并备份；无新数据时复播上一帧
+    //    的真实 PCM。只有从未收到过音频时才用合成兜底（冷启动）。
     {
-        std::lock_guard<std::mutex> lock (pcmMutex);
-        if (pendingFrames > 0 && ! pendingPcm.empty())
-        {
-            api.addPcmFloat (pmHandle,
-                             pendingPcm.data(),
-                             pendingFrames,
-                             true /*stereo*/);
-            pendingFrames = 0;
-            consumedRealPcm = true;
+        std::lock_guard<std::mutex> lock(pcmMutex);
+        if (pendingFrames > 0 && !pendingPcm.empty()) {
+          api.addPcmFloat(pmHandle, pendingPcm.data(), pendingFrames, true);
+          // 备份为复播源
+          lastRealPcm = pendingPcm;
+          lastRealFrames = pendingFrames;
+          hasEverReceivedRealPcm = true;
+          pendingFrames = 0;
+        } else if (hasEverReceivedRealPcm) {
+          // 无新数据 → 复播上一帧真实 PCM，保持频谱连续
+          api.addPcmFloat(pmHandle, lastRealPcm.data(), lastRealFrames, true);
+        } else {
+          // 冷启动：从未收到过音频，合成低幅度多频波形防止首帧黑屏
+          constexpr unsigned int kSynthFrames = 256;
+          float synth[kSynthFrames * 2];
+          const double t0 = static_cast<double>(frameCounter)
+              * (kSynthFrames / 44100.0);
+          for (unsigned int i = 0; i < kSynthFrames; ++i) {
+            const double t = t0 + static_cast<double>(i) / 44100.0;
+            const float s =
+                0.20f *
+                    static_cast<float>(
+                        std::sin(2.0 * juce::MathConstants<double>::pi *
+                                 220.0 * t)) +
+                0.10f *
+                    static_cast<float>(
+                        std::sin(2.0 * juce::MathConstants<double>::pi * 55.0 *
+                                 t));
+            synth[i * 2 + 0] = s;
+            synth[i * 2 + 1] = s;
+          }
+          api.addPcmFloat(pmHandle, synth, kSynthFrames, true);
         }
-    }
-    if (! consumedRealPcm)
-    {
-        // 无音频时合成一小段低幅度多频波形，保证 projectM 内部的
-        // beatDetect 不会完全安静，从而避免“初始预设自己一直黑屏”。
-        constexpr unsigned int kSynthFrames = 256;
-        float synth [kSynthFrames * 2];
-        const double t0 = (double) frameCounter * (kSynthFrames / 44100.0);
-        for (unsigned int i = 0; i < kSynthFrames; ++i)
-        {
-            const double t = t0 + (double) i / 44100.0;
-            const float s = 0.20f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 220.0 * t)
-                          + 0.10f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 55.0  * t);
-            synth [i * 2 + 0] = s;
-            synth [i * 2 + 1] = s;
-        }
-        api.addPcmFloat (pmHandle, synth, kSynthFrames, true);
     }
 
     // 4) 让 projectM 出一帧
@@ -606,32 +806,43 @@ void MilkdropModule::GLView::renderOpenGL()
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
       api.openglRenderFrame(pmHandle);
 
-      // 回读像素（FBO 0 → CPU buffer → cachedGlFrame_）
+      // 回读像素（FBO 0 → CPU buffer → cachedGlFrame_），支持降分辨率读取
       {
-        std::lock_guard<std::mutex> lock(glFrameMutex_);
-        if (cachedGlFrame_.getWidth() != cw || cachedGlFrame_.getHeight() != ch)
-          cachedGlFrame_ = juce::Image(juce::Image::ARGB, cw, ch, true);
+        const int scale = static_cast<int>(readback_scale_.load());
+        const int rw = cw / scale;
+        const int rh = ch / scale;
+        const int rwClamped = juce::jmax(1, rw);
+        const int rhClamped = juce::jmax(1, rh);
 
-        std::vector<uint8_t> pixels(static_cast<size_t>(cw * ch * 4));
+        std::lock_guard<std::mutex> lock(glFrameMutex_);
+        if (cachedGlFrame_.getWidth() != rwClamped
+            || cachedGlFrame_.getHeight() != rhClamped)
+          cachedGlFrame_ = juce::Image(juce::Image::ARGB, rwClamped, rhClamped, true);
+
+        // glReadPixels 不支持子采样，必须按全分辨率 cw×ch 读取
+        std::vector<uint8_t> pixels(
+            static_cast<size_t>(cw * ch * 4));
         juce::gl::glReadBuffer(juce::gl::GL_BACK);
-        juce::gl::glReadPixels(0, 0, (GLsizei)cw, (GLsizei)ch,
+        juce::gl::glReadPixels(0, 0, (GLsizei) cw, (GLsizei) ch,
                                juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
                                pixels.data());
 
-        // OpenGL 像素原点在左下角，JUCE Image 原点在左上角，翻转 Y
+        // Y轴翻转 + 降采样：从全分辨率向上取行，跳过 scale-1 行
         juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
-        for (int y = 0; y < ch; ++y) {
-          for (int x = 0; x < cw; ++x) {
-            const int srcIdx = ((ch - 1 - y) * cw + x) * 4;
-            const uint8_t r = pixels[static_cast<size_t>(srcIdx)];
-            const uint8_t g = pixels[static_cast<size_t>(srcIdx + 1)];
-            const uint8_t b = pixels[static_cast<size_t>(srcIdx + 2)];
-            const uint8_t a = pixels[static_cast<size_t>(srcIdx + 3)];
+        for (int y = 0; y < rhClamped; ++y)
+        {
+          const int srcY = ch - 1 - (y * scale + scale / 2);
+          const uint8_t* srcRow = pixels.data()
+              + static_cast<size_t>(srcY * cw * 4);
+          for (int x = 0; x < rwClamped; ++x)
+          {
+            const int srcX = x * scale + scale / 2;
+            const int srcIdx = srcX * 4;
             *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
-                (static_cast<uint32_t>(a) << 24) |
-                (static_cast<uint32_t>(r) << 16) |
-                (static_cast<uint32_t>(g) << 8)  |
-                 static_cast<uint32_t>(b);
+                (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
+                | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
+                | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
+                | static_cast<uint32_t>(srcRow[srcIdx + 2]);
           }
         }
       }
@@ -690,8 +901,33 @@ void MilkdropModule::GLView::loadPresetInternal()
     if (pmHandle == nullptr) return;
     if (currentPresetIndex < 0 || currentPresetIndex >= presetPaths.size()) return;
 
-    auto path = presetPaths[currentPresetIndex].toStdString();
-    projectm_api::Api::instance().loadPresetFile (pmHandle, path, true /*smooth*/);
+    auto& api = projectm_api::Api::instance();
+    auto path = presetPaths[currentPresetIndex];
+
+    // 如果 DLL 提供 load_preset_data，走"内存修正"路径：读取 .milk → 修正
+    // Milkdrop DSL 与 GLSL 之间的类型不兼容问题 → 从内存加载。
+    // 如果不提供（老旧 DLL），回退到传统 loadPresetFile。
+    if (api.hasLoadPresetData())
+    {
+      juce::File file(path);
+      if (file.existsAsFile())
+      {
+        auto raw = file.loadFileAsString().toStdString();
+        auto fixed = FixMilkdropShaderTypes(raw);
+        juce::Logger::writeToLog("[Milkdrop] loadPresetInternal: using memory path (loadPresetData), idx="
+                                 + juce::String(currentPresetIndex) + " file=" + path);
+        api.loadPresetData(pmHandle, fixed, true /*smooth*/);
+      }
+    }
+    else
+    {
+      juce::Logger::writeToLog("[Milkdrop] loadPresetInternal: using file path (loadPresetFile), idx="
+                               + juce::String(currentPresetIndex) + " file=" + path);
+      api.loadPresetFile(pmHandle, path.toStdString(), true /*smooth*/);
+    }
+
+    // 同步预设索引到 UI 线程可读的 atomic，供 paintContent 显示预设名
+    currentPresetIndexUi_.store(currentPresetIndex);
 }
 
 juce::File MilkdropModule::GLView::findAssetsDir (const juce::String& subdir)
@@ -729,4 +965,315 @@ juce::File MilkdropModule::GLView::findAssetsDir (const juce::String& subdir)
             return c;
 
     return {};
+}
+
+// ==========================================================
+// MilkdropModule —— 焦点与叠加层交互
+// ==========================================================
+void MilkdropModule::setFocusVisual(bool shouldFocus)
+{
+    if (focused_ == shouldFocus)
+        return;
+
+    focused_ = shouldFocus;
+    if (! focused_)
+    {
+        hoveredOverlayBtn_ = OverlayButton::kNone;
+        pressedOverlayBtn_ = OverlayButton::kNone;
+    }
+
+    repaint();
+}
+
+void MilkdropModule::mouseDown(const juce::MouseEvent& e)
+{
+    // 右键 → 冒泡给 workspace 弹出"添加模块"菜单
+    if (e.mods.isPopupMenu())
+    {
+        if (onRightClick)
+            onRightClick(*this, e.getPosition());
+        return;
+    }
+
+    // 基类处理：toFront + onBroughtToFront + 关闭按钮 + 缩放边缘 + 标题栏拖动
+    // 所有涉及 private 成员的逻辑（closeButtonPressed / dragMode / detectEdge 等）
+    // 均由基类完成，我们只在上层附加 overlay 按钮处理。
+    ModulePanel::mouseDown(e);
+
+    setFocusVisual(true);
+
+    if (isPanelLayoutLocked(*this))
+        return;
+
+    // 内容区 overlay 按钮点击
+    if (focused_ && glView != nullptr)
+    {
+        auto content = getContentBounds();
+        auto overlay = getOverlayBounds(content);
+        auto btn = hitTestOverlayButton(e.getPosition(), overlay);
+        if (btn != OverlayButton::kNone)
+        {
+            pressedOverlayBtn_ = btn;
+            repaint(overlay);
+        }
+    }
+}
+
+void MilkdropModule::mouseUp(const juce::MouseEvent& e)
+{
+    // 优先处理 overlay 按钮释放
+    if (pressedOverlayBtn_ != OverlayButton::kNone)
+    {
+        auto content = getContentBounds();
+        auto overlay = getOverlayBounds(content);
+        auto hit = hitTestOverlayButton(e.getPosition(), overlay);
+        if (hit == pressedOverlayBtn_)
+            executeOverlayAction(hit);
+
+        pressedOverlayBtn_ = OverlayButton::kNone;
+        repaint(overlay);
+        return;
+    }
+
+    // 否则走基类（关闭按钮释放、拖拽/缩放收尾）
+    ModulePanel::mouseUp(e);
+}
+
+void MilkdropModule::mouseMove(const juce::MouseEvent& e)
+{
+    if (focused_ && glView != nullptr)
+    {
+        auto content = getContentBounds();
+        auto overlay = getOverlayBounds(content);
+        auto hit = hitTestOverlayButton(e.getPosition(), overlay);
+        if (hit != hoveredOverlayBtn_)
+        {
+            hoveredOverlayBtn_ = hit;
+            repaint(overlay);
+        }
+
+        if (hit != OverlayButton::kNone)
+            setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        else if (overlay.contains(e.getPosition()))
+            setMouseCursor(juce::MouseCursor::NormalCursor);
+        else
+            ModulePanel::mouseMove(e); // 基类处理边缘光标
+    }
+    else
+    {
+        ModulePanel::mouseMove(e);
+    }
+}
+
+void MilkdropModule::mouseExit(const juce::MouseEvent& e)
+{
+    if (hoveredOverlayBtn_ != OverlayButton::kNone)
+    {
+        hoveredOverlayBtn_ = OverlayButton::kNone;
+        repaint();
+    }
+    ModulePanel::mouseExit(e);
+}
+
+// ---- 叠加层布局辅助 ----
+
+juce::Rectangle<int> MilkdropModule::getOverlayBounds(juce::Rectangle<int> content) const
+{
+    constexpr int kBarHeight = 26;
+    return content.withHeight(juce::jmin(kBarHeight, content.getHeight()));
+}
+
+MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
+    juce::Point<int> pos, juce::Rectangle<int> overlay) const
+{
+    if (! overlay.contains(pos))
+        return OverlayButton::kNone;
+
+    constexpr int kBtnSize = 22;
+    constexpr int kResBtnW = 30;
+    constexpr int kPadding = 4;
+
+    auto prevBtn   = juce::Rectangle<int>(overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize);
+    auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
+    auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
+    auto resBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize);
+
+    if (prevBtn.contains(pos))   return OverlayButton::kPrev;
+    if (resBtn.contains(pos))    return OverlayButton::kRes;
+    if (nextBtn.contains(pos))   return OverlayButton::kNext;
+    if (randomBtn.contains(pos)) return OverlayButton::kRandom;
+
+    return OverlayButton::kNone;
+}
+
+juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
+    juce::Rectangle<int> overlay, OverlayButton btn) const
+{
+    constexpr int kBtnSize = 22;
+    constexpr int kResBtnW = 30;
+    constexpr int kPadding = 4;
+
+    switch (btn)
+    {
+    case OverlayButton::kPrev:
+        return { overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize };
+    case OverlayButton::kRandom:
+        return { overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize };
+    case OverlayButton::kNext:
+    {
+        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        return { randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize };
+    }
+    case OverlayButton::kRes:
+    {
+        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        return { nextBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize };
+    }
+    default:
+        return {};
+    }
+}
+
+void MilkdropModule::executeOverlayAction(OverlayButton btn)
+{
+    switch (btn)
+    {
+    case OverlayButton::kPrev:   prevPreset();              break;
+    case OverlayButton::kNext:   nextPreset();              break;
+    case OverlayButton::kRandom: randomPreset();            break;
+    case OverlayButton::kRes:    glView->cycleReadbackScale(); break;
+    default: break;
+    }
+}
+
+// ---- 叠加层绘制 ----
+
+void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<int> content)
+{
+    constexpr int kBarHeight = 26;
+    constexpr int kBtnSize   = 22;
+    constexpr int kPadding   = 4;
+
+    if (content.getHeight() < kBarHeight)
+        return;
+
+    auto bar = content.withHeight(kBarHeight);
+
+    // 半透明暗底
+    g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.78f));
+    g.fillRect(bar);
+
+    // 底部分割线（粉色）
+    g.setColour(PinkXP::pink300.withAlpha(0.7f));
+    g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
+
+    // 按钮位置: [<] nameArea [1:1] [>] [?]
+    auto prevBtn   = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
+    auto randomBtn = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
+    auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
+    auto resBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - 30, bar.getY() + 2, 30, kBtnSize);
+    auto nameArea  = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
+                                          resBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
+
+    // 按钮绘制 lambda
+    auto drawBtn = [&](juce::Rectangle<int> r, const juce::String& text, OverlayButton btn)
+    {
+        bool hovered = (hoveredOverlayBtn_ == btn);
+        bool pressed = (pressedOverlayBtn_ == btn);
+
+        if (pressed)
+            PinkXP::drawPressed(g, r, PinkXP::pink100);
+        else if (hovered)
+            PinkXP::drawRaised(g, r, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.12f));
+            g.fillRect(r);
+            g.setColour(PinkXP::pink300.withAlpha(0.4f));
+            g.drawRect(r, 1);
+        }
+
+        g.setColour(PinkXP::ink);
+        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+        g.drawText(text, r, juce::Justification::centred, false);
+    };
+
+    drawBtn(prevBtn,   "<",   OverlayButton::kPrev);
+    drawBtn(resBtn,    glView->getReadbackScaleLabel(), OverlayButton::kRes);
+    drawBtn(nextBtn,   ">",   OverlayButton::kNext);
+    drawBtn(randomBtn, "?",   OverlayButton::kRandom);
+
+    // 预设名：格式 "3/100  presetName"
+    int idx = glView->getCurrentPresetIndex();
+    int total = glView->getTotalPresetCount();
+    juce::String presetDisplay;
+    if (total > 0 && idx >= 0)
+      presetDisplay = juce::String(idx + 1) + "/" + juce::String(total) + "  ";
+    presetDisplay += glView->getCurrentPresetName();
+    if (presetDisplay.isEmpty())
+      presetDisplay = "(no preset)";
+
+    // 序号部分用粉色高亮，名称部分用白色
+    juce::String idxPart = juce::String(idx + 1) + "/" + juce::String(total) + "  ";
+    float idxW = PinkXP::getFont(9.0f, juce::Font::bold).getStringWidthFloat(idxPart) + 2.0f;
+
+    auto idxRect = nameArea.withWidth(juce::jmin((int)idxW, nameArea.getWidth()));
+    auto nameRect = nameArea.withTrimmedLeft(idxRect.getWidth());
+
+    g.setColour(PinkXP::pink300.withAlpha(0.85f));
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText(idxPart, idxRect, juce::Justification::centredLeft, true);
+
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.9f));
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
+    g.drawText(presetDisplay.substring(idxPart.length()), nameRect, juce::Justification::centredLeft, true);
+}
+
+// ---- 加载指示器绘制 ----
+
+void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content)
+{
+  // projectM soft-cut 过渡在 1-2 秒内完成，指示器只需短暂提示"正在切换"，
+  // 不应延长到过渡结束之后。连续点击会不断重置时间戳、保持指示器可见。
+  constexpr int64_t kIndicatorDurationMs = 1200;
+
+  if (glView == nullptr)
+    return;
+
+  int64_t last_switch = glView->getLastPresetSwitchTimeMs();
+  if (last_switch == 0)
+    return;
+
+  auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  int64_t elapsed = now - last_switch;
+  if (elapsed > kIndicatorDurationMs)
+    return;
+
+  // 右下角半透明提示条
+  constexpr int kBarW = 90;
+  constexpr int kBarH = 18;
+  constexpr int kPad = 4;
+
+  auto bar = juce::Rectangle<int>(content.getRight() - kPad - kBarW,
+                                   content.getBottom() - kPad - kBarH,
+                                   kBarW, kBarH);
+
+  // 渐出：最后 300ms 透明度从 0.8 线性降到 0
+  float alpha = 0.8f;
+  constexpr int64_t kFadeMs = 300;
+  int64_t fadeout = kIndicatorDurationMs - kFadeMs;
+  if (elapsed > fadeout)
+    alpha = 0.8f * (1.0f - static_cast<float>(elapsed - fadeout) / static_cast<float>(kFadeMs));
+
+  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(alpha * 0.75f));
+  g.fillRoundedRectangle(bar.toFloat(), 3.0f);
+
+  g.setColour(PinkXP::pink300.withAlpha(alpha));
+  g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
+  g.drawText("Switching...", bar, juce::Justification::centred, false);
 }

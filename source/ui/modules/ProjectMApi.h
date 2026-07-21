@@ -154,6 +154,9 @@ public:
     /** 当前加载的 DLL 是否提供 projectm_opengl_render_frame_fbo。 */
     bool hasOpenglRenderFrameFbo() const noexcept { return fn_openglRenderFrameFbo != nullptr; }
 
+    /** 当前加载的 DLL 是否提供 projectm_load_preset_data。 */
+    bool hasLoadPresetData() const noexcept { return fn_loadPresetData != nullptr; }
+
     // --- Presets / Transitions -------------------------------------------
     /** paths 为 UTF-8 字符串。projectM 会把这些目录加入纹理搜索路径。 */
     void setTextureSearchPaths (projectm_handle instance,
@@ -163,6 +166,9 @@ public:
     void setHardCutEnabled     (projectm_handle instance, bool enabled) const;
     void loadPresetFile        (projectm_handle instance,
                                 const std::string& filename,
+                                bool smoothTransition) const;
+    void loadPresetData        (projectm_handle instance,
+                                const std::string& data,
                                 bool smoothTransition) const;
 
     // --- Audio ------------------------------------------------------------
@@ -208,6 +214,7 @@ private:
     using Fn_projectm_set_soft_cut_duration= void (*)(projectm_handle, double);
     using Fn_projectm_set_hard_cut_enabled = void (*)(projectm_handle, bool);
     using Fn_projectm_load_preset_file     = void (*)(projectm_handle, const char*, bool);
+    using Fn_projectm_load_preset_data     = void (*)(projectm_handle, const char*, bool);
     using Fn_projectm_pcm_add_float        = void (*)(projectm_handle, const float*, unsigned int, projectm_channels);
 
     Fn_projectm_create              fn_create              = nullptr;
@@ -222,6 +229,7 @@ private:
     Fn_projectm_set_soft_cut_duration fn_setSoftCutDuration = nullptr;
     Fn_projectm_set_hard_cut_enabled fn_setHardCutEnabled  = nullptr;
     Fn_projectm_load_preset_file     fn_loadPresetFile     = nullptr;
+    Fn_projectm_load_preset_data     fn_loadPresetData     = nullptr;
     Fn_projectm_pcm_add_float        fn_pcmAddFloat        = nullptr;
 
     bool         available = false;

@@ -112,6 +112,14 @@ private:
     // 性能优化（阶段1）：按 UI 缩放动态限制最短重绘间隔，降低宿主消息线程压力。
     double lastRepaintMs = 0.0;
 
+    // 性能优化（阶段2）：离屏 Image 缓存。每次新数据到达时标脏，
+    // paintContent 用一次 drawImage blit 替代每帧重建 Path+rasterize。
+    mutable juce::Image cached_curve_image_;
+    mutable bool        curve_cache_dirty_  = true;
+    mutable int         curve_cache_w_      = 0;
+    mutable int         curve_cache_h_      = 0;
+    void renderCurvesToCache(juce::Rectangle<int> content) const;
+
     // ---- 顶部工具栏 ----
     juce::TextButton btnPeak  { "Peak"  };
     juce::TextButton btnSlope { "Slope" };

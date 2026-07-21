@@ -201,6 +201,7 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         return;
 
     lastRepaintMs = nowMs;
+    curve_cache_dirty_ = true;
     repaint();
 }
 
@@ -307,18 +308,52 @@ void SpectrumModule::ensureDisplayCache (int numPoints)
 // ----------------------------------------------------------
 void SpectrumModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
+    // 离屏缓存：尺寸变化或数据更新时重建，否则直接 blit
+    const int cw = contentBounds.getWidth();
+    const int ch = contentBounds.getHeight();
+    if (cw <= 0 || ch <= 0) return;
+
+    if (curve_cache_dirty_
+        || !cached_curve_image_.isValid()
+        || cw != curve_cache_w_
+        || ch != curve_cache_h_)
+    {
+      renderCurvesToCache(contentBounds);
+    }
+
+    g.drawImageAt(cached_curve_image_, contentBounds.getX(), contentBounds.getY());
+}
+
+// ----------------------------------------------------------
+// renderCurvesToCache —— 将完整内容渲染到离屏 Image
+// ----------------------------------------------------------
+void SpectrumModule::renderCurvesToCache(juce::Rectangle<int> contentBounds) const
+{
+    const int cw = contentBounds.getWidth();
+    const int ch = contentBounds.getHeight();
+
+    cached_curve_image_ = juce::Image(juce::Image::ARGB, cw, ch, true);
+    curve_cache_w_ = cw;
+    curve_cache_h_ = ch;
+
+    juce::Graphics g(cached_curve_image_);
+    g.addTransform(juce::AffineTransform::translation(
+        (float) -contentBounds.getX(), (float) -contentBounds.getY()));
+
     g.setColour(PinkXP::btnFace);
     g.fillRect(contentBounds);
 
     auto canvas = getCanvasBounds(contentBounds);
     drawBackground(g, canvas);
 
-    if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
-        return;
+    if (canvas.getWidth() > 8 && canvas.getHeight() > 8)
+    {
+      drawGrid(g, canvas);
+      drawCurves(g, canvas);
+      drawAxisLabels(g, canvas);
+    }
 
-    drawGrid      (g, canvas);
-    drawCurves    (g, canvas);
-    drawAxisLabels(g, canvas);
+    curve_cache_dirty_ = false;
 }
 
 void SpectrumModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const
