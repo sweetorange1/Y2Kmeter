@@ -55,6 +55,20 @@ static juce::File locateProjectMDll()
 
     // 1) 当前动态库所在目录（VST3 / DLL 场景）
     sameDirAs (juce::File::getSpecialLocation (juce::File::currentApplicationFile).getParentDirectory());
+
+    // 1b) VST3 bundle 结构回退：从 Contents/x86_64-win/ 再上溯两层到 .vst3 根，
+    //     然后重新进入 Contents/<arch>/ 查找（覆盖手工放置或符号链接场景）。
+    {
+      auto appDir = juce::File::getSpecialLocation (juce::File::currentApplicationFile).getParentDirectory();
+      auto bundleRoot = appDir.getParentDirectory().getParentDirectory();  // Contents/x86_64-win → .vst3
+      if (bundleRoot.getFileName().endsWith (".vst3"))
+      {
+        auto platDir = bundleRoot.getChildFile ("Contents")
+                                 .getChildFile (sizeof(void*) == 8 ? "x86_64-win" : "x86-win");
+        candidates.add (platDir.getChildFile ("projectM-4.dll").getFullPathName());
+      }
+    }
+
     // 2) 主可执行文件目录（Standalone / DAW 主进程）
     sameDirAs (juce::File::getSpecialLocation (juce::File::hostApplicationPath).getParentDirectory());
     // 3) 开发树兜底：从 exe 向上找 third_party/projectm/bin
@@ -70,6 +84,24 @@ static juce::File locateProjectMDll()
             }
             up = up.getParentDirectory();
         }
+    }
+
+    // 4) 系统 VST3 安装目录（DAW 加载 VST3 时最可能的部署位置）
+    {
+      auto vst3Dir = juce::File::getSpecialLocation (juce::File::windowsSystemDrive)
+                         .getChildFile ("Program Files")
+                         .getChildFile ("Common Files")
+                         .getChildFile ("VST3")
+                         .getChildFile ("Y2Kmeter.vst3")
+                         .getChildFile ("Contents")
+                         .getChildFile ("x86_64-win");
+      candidates.add (vst3Dir.getChildFile ("projectM-4.dll").getFullPathName());
+    }
+
+    // 5) 进程启动目录（用户从命令行直接运行 Standalone 的场景）
+    {
+      auto cwd = juce::File::getCurrentWorkingDirectory();
+      candidates.add (cwd.getChildFile ("projectM-4.dll").getFullPathName());
     }
    #endif
 
@@ -210,10 +242,24 @@ void Api::loadLibrary()
 {
    #if defined (_WIN32)
     auto dll = locateProjectMDll();
-    juce::Logger::writeToLog ("[projectm_api] loadLibrary() candidate=" + dll.getFullPathName());
+
+    // 诊断：打印当前进程的路径信息，方便排查 VST3/Standalone 不同形态下的搜索行为
+    juce::Logger::writeToLog ("[projectm_api] Searching for projectM-4.dll...");
+    juce::Logger::writeToLog ("[projectm_api]   currentApplicationFile  = "
+                              + juce::File::getSpecialLocation (juce::File::currentApplicationFile).getFullPathName());
+    juce::Logger::writeToLog ("[projectm_api]   hostApplicationPath     = "
+                              + juce::File::getSpecialLocation (juce::File::hostApplicationPath).getFullPathName());
+    juce::Logger::writeToLog ("[projectm_api]   currentExecutableFile   = "
+                              + juce::File::getSpecialLocation (juce::File::currentExecutableFile).getFullPathName());
+    juce::Logger::writeToLog ("[projectm_api] best candidate=" + dll.getFullPathName());
+
     if (! dll.existsAsFile())
     {
-        errorMessage = "Cannot find projectM-4.dll (expected next to executable or in third_party/projectm/bin/).";
+        errorMessage = "Cannot find projectM-4.dll. "
+                       "Expected next to the plugin/executable, "
+                       "or in the VST3 bundle (Y2Kmeter.vst3/Contents/x86_64-win/), "
+                       "or in third_party/projectm/bin/. "
+                       "Please rebuild with latest CMake install rules.";
         juce::Logger::writeToLog ("[projectm_api] loadLibrary() FAIL: " + juce::String (errorMessage));
         return;
     }

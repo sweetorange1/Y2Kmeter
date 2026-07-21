@@ -800,3 +800,32 @@ if (WIN32)
       "VST3")
   endif()
 endif()
+
+# ==========================================================
+# VST3 安装时同步拷贝 projectM 运行时到系统 VST3 目录
+#   · COPY_PLUGIN_AFTER_BUILD 通过 cmake --install 只拷贝 VST3
+#     二进制本身，不包含 post-build 中额外拷贝的 projectM DLL、
+#     预设和纹理。这里用 install() 指令确保这些文件随 VST3 一起
+#     部署到 $ENV{CommonProgramFiles}/VST3/Y2Kmeter.vst3/ 下。
+#   · 仅在 Windows 且 VST3 target 存在时生效。
+# ==========================================================
+if (WIN32 AND TARGET Y2Kmeter_VST3)
+  # VST3 安装目标目录：JUCE 将 VST3 安装到
+  #   $ENV{CommonProgramFiles}/VST3/Y2Kmeter.vst3/Contents/x86_64-win/
+  # 和 JUCE 内部 install(TARGETS ... DESTINATION ...) 保持一致。
+  set(Y2KM_VST3_INSTALL_DEST
+      "$ENV{CommonProgramFiles}/VST3/Y2Kmeter.vst3/Contents/x86_64-win")
+
+  install(FILES "${Y2KM_PROJECTM_BIN}/projectM-4.dll"
+                "${Y2KM_PROJECTM_BIN}/glew32.dll"
+          DESTINATION "${Y2KM_VST3_INSTALL_DEST}"
+          COMPONENT Y2Kmeter_VST3)
+
+  install(DIRECTORY "${Y2KM_MILKDROP_PRESETS}/"
+          DESTINATION "${Y2KM_VST3_INSTALL_DEST}/milkdrop_presets"
+          COMPONENT Y2Kmeter_VST3)
+
+  install(DIRECTORY "${Y2KM_MILKDROP_TEXTURES}/"
+          DESTINATION "${Y2KM_VST3_INSTALL_DEST}/milkdrop_textures"
+          COMPONENT Y2Kmeter_VST3)
+endif()
