@@ -107,9 +107,15 @@ public:
     void setFocusVisual(bool shouldFocus);
     void touchOverlayIdleTimer() { lastInteractionTime_ = juce::Time::getMillisecondCounter(); }
     void checkOverlayAutoHide();  ///< 由 GLView::timerCallback 在 UI 线程轮询调用
+    void checkAutoMode();         ///< 由 GLView::timerCallback 在 UI 线程轮询，自动切换预设
+
+    // === 自动轮播模式 ===
+    bool isAutoModeActive() const noexcept { return isAutoMode_; }
+    void toggleAutoMode();
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
     void mouseMove(const juce::MouseEvent& e) override;
+    void mouseDrag(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
 
 private:
@@ -244,6 +250,16 @@ private:
         // 达到 kMaxAttachRetries 后放弃。仅在 UI 线程读写。
         int attachRetries = 0;
 
+        // 析构保护标志：~GLView 开头置 true，scheduleAsyncAttach / callAsync
+        // 回调检查此标志立即返回，防止析构期间 post 的 callAsync 与
+        // glContext.detach() 形成竞态导致卡死。
+        std::atomic<bool> destroying_ { false };
+
+        // 首次焦点激活标志：render 就绪后仅自动激活一次焦点（展示预设名等控件），
+        // 之后不再自动激活。避免 auto 模式下 auto-hide 清除焦点后被 timer
+        // 立即恢复，造成控制栏闪烁。
+        bool first_focus_done_ { false };
+
         // projectM handle —— 只在 GL 线程访问。
         projectm_handle pmHandle = nullptr;
 
@@ -335,7 +351,7 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kRes, kPresetName };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kRes, kPresetName, kAuto };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
 
@@ -351,6 +367,14 @@ private:
     void PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content);
     void showPresetJumpDialog();
 
+    // ---- 自动轮播控制行 ----
+    void ensureAutoIntervalEditor();  ///< 延迟创建 TextEditor（首次进入 auto 模式时调用）
+    void paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int> topBar);
+    juce::Rectangle<int> getAutoRowBounds(juce::Rectangle<int> topBar) const;
+    juce::Rectangle<int> getSliderBounds(juce::Rectangle<int> autoRow) const;
+    void updateAutoIntervalFromSlider(float proportion);
+    void applyAutoInterval(float seconds);
+
     // Auto-hide 逻辑（由 GLView::timerCallback 在 UI 线程驱动，30Hz 轮询）：
     //   · 检测 !hasKeyboardFocus → 窗口失焦即隐藏
     //   · 检测 idle > 4s → 长时间不操作 overlay 自动隐藏
@@ -358,6 +382,18 @@ private:
 
     // overlay 最后一次交互时间（getMillisecondCounter），用于 idle 超时检测
     juce::uint32 lastInteractionTime_ { 0 };
+
+    // ---- 自动轮播模式 ----
+    bool isAutoMode_ { false };
+    float autoIntervalSeconds_ { 10.0f };
+    juce::uint32 lastAutoSwitchTime_ { 0 };
+    std::unique_ptr<juce::TextEditor> autoIntervalEditor_;
+    bool isDraggingSlider_ { false };
+
+    static constexpr float kAutoRowHeight = 28.0f;
+    static constexpr int   kAutoBtnW = 32;
+    static constexpr float kMinAutoInterval = 1.0f;
+    static constexpr float kMaxAutoInterval = 60.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilkdropModule)
 };

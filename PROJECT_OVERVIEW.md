@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.1.10`）
+- **产品名**：`Y2Kmeter` （版本：`2.1.12`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.1.0 新增，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个 Milkdrop 预设） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.1.0 新增，v2.1.11 auto轮播模式 / v2.1.12 小数间隔与持久化，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个 Milkdrop 预设） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2219,7 +2219,95 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 
 **版本号**：`2.1.9 → 2.1.10`
 
-#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8 + v2.1.9 + v2.1.10）
+--- 
+
+#### ⑪ v2.1.11 → v2.1.12 变更记录：Milkdrop 自动轮播模式
+
+**v2.1.11** — Auto 模式核心实现
+
+**1. 新增「自动轮播」功能**（[MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h)）
+
+聚焦 overlay 控制栏新增 `[auto]` 按钮：点击进入自动轮播模式，每 N 秒随机切换到下一个预设。
+
+| 组件 | 说明 |
+|------|------|
+| 顶栏 `[auto]` 按钮 | toggle 样式，激活时粉色高亮；位于 `[1:1]` 和 `[>]` 之间 |
+| 扩展行（仅 auto 模式）| `Auto:` 标签 + 秒数输入框 + slider + 时间标签，黑色半透明底色 28px |
+| 间隔范围 | 3s ~ 120s，默认 10s，通过 slider 拖动或 TextEditor 输入调节 |
+| 轮播驱动 | `GLView::timerCallback`（UI 线程 30Hz）→ `checkAutoMode()` 轮询定时 |
+
+**OverlayButton 枚举新增** `kAuto`，对应的 `hitTestOverlayButton`、`getOverlayButtonRect`、`executeOverlayAction` 全部更新。
+
+**2. PresetJumpDialog / GLView 原生 HWND 冲突修复**
+
+**问题**：`setComponentPaintingEnabled(false)` 使 GLView 拥有独立原生 HWND 子窗口，Z-order 高于 JUCE 普通 Component。模态对话框无法覆盖此原生窗口——对话框被遮挡且鼠标事件被 GL 窗口捕获，界面卡死。
+
+**修复**（`showPresetJumpDialog`）：
+- 弹窗前 `glView->setVisible(false)` 隐藏原生 GL 窗口
+- 使用 `juce::ModalComponentManager::Callback` 回调对象，在 `modalStateFinished()` 中恢复 `glView->setVisible(true)`（非阻塞方式，JUCE 的 `enterModalState()` 立即返回）
+
+**3. TextEditor 延迟创建 —— 修复 hover 预览卡死**
+
+**问题**：`ModuleWorkspace::getHoverPreviewImage()` 通过工厂创建临时 `MilkdropModule` 做快照。构造器中 `juce::TextEditor` 的 `addAndMakeVisible` + `[this]` 回调在软件渲染管线中触发断点断言 (`0x80000003`)。
+
+**修复**：
+- 从构造函数中移除 TextEditor 创建代码
+- 新增 `ensureAutoIntervalEditor()`：首次进入 auto 模式时延迟创建 TextEditor
+- 所有访问点保持 `if (autoIntervalEditor_ != nullptr)` 保护
+
+**4. GLView 析构期异步 attach 竞争修复**
+
+**问题**：`parentHierarchyChanged` / `visibilityChanged` → `scheduleAsyncAttach` 在添加/删除模块时高频触发 `callAsync`。析构流程中排队的异步回调与 `glContext.detach()` 竞争导致随机卡死。
+
+**修复**：GLView 新增 `std::atomic<bool> destroying_{false}`：
+- `~GLView()` 开头 `destroying_ = true`
+- `scheduleAsyncAttach` 开头检测 `destroying_`，命中直接 return
+
+---
+
+**v2.1.12** — Auto 模式完善与持久化
+
+**1. 修复 overlay 隐藏后底色残留**
+
+**问题**：`layoutContent` 无条件 trim GLView 顶部（auto 模式 54px / 普通 26px），即使 overlay 已隐藏，GLView 上方透出 ModulePanel face 底色。
+
+**修复**：`layoutContent` 改为按 `focused_` 动态控制：
+- `focused_==true` → `controlHeight = 26` (+28 auto 扩展行)
+- `focused_==false` → `controlHeight = 0`，GLView 填满整个内容区
+- `setFocusVisual` 末尾调用 `layoutContent(getContentBounds())` 触发重新布局
+
+**2. 修复 auto 轮播在 overlay 隐藏后停止**
+
+**根因**：`checkAutoMode()` 开头 `if (!isAutoMode_ || !focused_) return;`，overlay 隐藏后 `focused_==false` 直接返回。移除 `!focused_` 条件。
+
+**3. 修复 slider 拖动无效问题**
+
+**问题**：`mouseDown` 中 slider 检测跳过了 `ModulePanel::mouseDown(e)`，但 JUCE 鼠标事件路由依赖基类 `mouseDown` 做事件注册。
+
+**修复**：
+- `mouseDown` slider 分支：先调 `juce::Component::mouseDown(e)` 确保事件注册
+- 新增 `MilkdropModule::mouseDrag` 覆盖：优先检测 slider 拖动
+- `mouseMove` 中保留 slider 逻辑作为双保险
+
+**4. 轮播间隔改为小数（1.0s ~ 60.0s，步进 0.1s）**
+
+| 改动 | 说明 |
+|------|------|
+| `autoIntervalSeconds_` | `int` → `float`，默认 `10.0f` |
+| `kMinAutoInterval`/`kMaxAutoInterval` | `3`/`120` → `1.0f`/`60.0f` |
+| TextEditor 输入限制 | `"0123456789"` → `"0123456789."` |
+| `applyAutoInterval(seconds)` | 参数 `int` → `float`，`getFloatValue()` + 四舍五入到 0.1 |
+| 时间标签 | 支持 `2.5s`、`1m30.5s` 等格式 |
+
+**5. 自动轮播模式持久化**
+
+`saveModuleSpecificState` 新增 `autoMode`(bool) 和 `autoInterval`(float) 属性；`restoreModuleSpecificState` 对应恢复。旧存档无这些属性时维持默认值，向后兼容。
+
+**版本号**：`2.1.10 → 2.1.11 → 2.1.12`
+
+--- 
+
+#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8 + v2.1.9 + v2.1.10 + v2.1.11 + v2.1.12）
 
 1. **写第三方 C 头封装类时，命名空间不要跟第三方公开符号重名**——用 `_api` 后缀。
 2. **中文注释源文件必须存为 UTF-8 with BOM**（Windows MSVC 下 GBK 解码会把 `。` 认成非法字符）。
@@ -2239,6 +2327,9 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 16. **新增 `juce::Timer` 继承到已有深继承链时可能触发构造期崩溃**——多基类对象布局变化 + 构造阶段 `startTimer` 回调可能在 vtable 尚未完全建立时触发。优先复用已有 timer（如 GLView 的 30Hz 回调），通过公开方法暴露给需要轮询的逻辑。
 17. **嵌套 `juce::OpenGLContext` 不支持且无 workaround**——当父组件持有 GL 上下文（`setComponentPaintingEnabled(true)`）且子组件也持有独立 GL 上下文时，JUCE CachedImage 管线会从 GL 线程回调子组件 `paint()`，触发 `jassertfalse`；`#ifdef NDEBUG` 仅在 Debug 避开断言，Release 下表现为系统 DLL 随机地址挂起。唯一正确方案：移除父级 GL 上下文，各组件走 CPU 软光栅，仅 Milkdrop 保留独立 GL。
 18. **`paint()` 需要窗口可见才会被 OS 调度；不能用"等 paint() 回调再 setVisible(true)"**——这是逻辑死锁。消除启动闪屏的正确方案：用与 UI 主题一致的纯黑底色（闪黑不闪灰），同步 `addToDesktop()` + `setVisible(true)`。
+19. **`enterModalState()` 是非阻塞的**——调用后立即返回，内部运行嵌套消息循环。不要在 `enterModalState()` 之后立刻恢复被隐藏的组件。正确方式：使用 `juce::ModalComponentManager::Callback` 基类的 `modalStateFinished()` 回调，在对话框真正关闭时才恢复组件可见性。
+20. **`setComponentPaintingEnabled(false)` 衍生原生 HWND，Z-order 高于普通 JUCE Component**——GLView 的独立原生窗口会覆盖所有普通 JUCE 组件（包括模态对话框），导致对话框不可见且鼠标事件被捕获造成"假卡死"。弹窗时必须先 `glView->setVisible(false)` 隐藏原生窗口。
+21. **不要在构造函数中创建含 `addAndMakeVisible` 的子组件用于 hover snapshot**——`ModuleWorkspace::getHoverPreviewImage()` 创建临时模块做软件快照时，如果模块构造器中包含可见子组件（如 TextEditor），会在渲染管线中触发断点断言（`0x80000003`）。应延迟创建子组件到首次使用。
 
 ---
 

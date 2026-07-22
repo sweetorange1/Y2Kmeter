@@ -146,6 +146,16 @@ namespace
     // 只是前置防御；即便布局反序列化或拖拽复制插入了第二个
     // Milkdrop，此处的计数也会拒绝挂 projectM，换为兑底提示。
     std::atomic<int> gActiveProjectMInstances { 0 };
+
+    // 用于 showPresetJumpDialog：enterModalState 是非阻塞的（立即返回），
+    // 不能在其后直接 setVisible(true)。此类作为 ModalComponentManager::Callback
+    // 在对话框真正退出模态状态时才恢复 GLView 的可见性。
+    struct GlViewRestorer : juce::ModalComponentManager::Callback
+    {
+        explicit GlViewRestorer(juce::Component& v) : view(v) {}
+        void modalStateFinished(int) override { view.setVisible(true); }
+        juce::Component& view;
+    };
 }
 
 // ==========================================================
@@ -195,6 +205,8 @@ juce::ValueTree MilkdropModule::saveModuleSpecificState() const
     if (idx >= 0)
       s.setProperty("presetIndex", idx, nullptr);
   }
+  s.setProperty("autoMode", isAutoMode_, nullptr);
+  s.setProperty("autoInterval", autoIntervalSeconds_, nullptr);
   return s;
 }
 
@@ -206,6 +218,13 @@ void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
     // 范围校验由 newOpenGLContextCreated 负责（此时 presetPaths 可能还未扫描）
     if (idx >= 0)
       restored_preset_index_ = idx;
+  }
+  if (state.hasProperty("autoMode"))
+    isAutoMode_ = static_cast<bool>(state.getProperty("autoMode"));
+  if (state.hasProperty("autoInterval"))
+  {
+    autoIntervalSeconds_ = juce::jlimit(kMinAutoInterval, kMaxAutoInterval,
+                                        static_cast<float>(state.getProperty("autoInterval")));
   }
 }
 
@@ -251,20 +270,46 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
       PaintLoadingIndicator(g, content);
 
     // ---- Phase 3: 聚焦时在顶部 GDI 控制栏区域绘制预设控制叠加条 ----
-    //   GLView 上方留出 26px，此区域无 GL 原生窗口覆盖，GDI 控制栏可见。
+    //   GLView 上方留出固定空间，此区域无 GL 原生窗口覆盖，GDI 控制栏可见。
     if (focused_ && glView != nullptr)
-      paintOverlayControlBar(g, content.withHeight(26));
+    {
+      auto topBar = content.withHeight(26);
+      paintOverlayControlBar(g, topBar);
+
+      // Phase 3b: auto 模式下在顶栏下方绘制自动轮播控制行
+      if (isAutoMode_)
+        paintAutoControlRow(g, topBar);
+    }
 }
 
 void MilkdropModule::layoutContent (juce::Rectangle<int> content)
 {
     if (glView != nullptr)
     {
-        // v2.1.10: GLView 上方留出 26px 用于 GDI 控制栏。
-        // setComponentPaintingEnabled(false) 时 GL 原生窗口覆盖 GDI 绘制，
-        // 需在 GLView bounds 上方向后退让才能暴露 paintContent 的控制栏。
-        constexpr int kControlBarHeight = 26;
-        glView->setBounds(content.withTrimmedTop(kControlBarHeight));
+        // 顶部控制栏仅在 overlay 可见（focused_==true）时保留空间；
+        // 隐藏时 GLView 应填满整个内容区，避免留出无绘制的空白 bar。
+        int controlHeight = 0;
+        if (focused_)
+        {
+            controlHeight = 26;
+            if (isAutoMode_)
+                controlHeight += kAutoRowHeight;
+        }
+        glView->setBounds(content.withTrimmedTop(controlHeight));
+
+
+        // 定位 auto 间隔输入框到顶栏下方的自动行内（"Auto:" 标签之后）
+        if (autoIntervalEditor_ != nullptr && isAutoMode_)
+        {
+            auto topBar = content.withHeight(26);
+            auto autoRow = getAutoRowBounds(topBar);
+            constexpr int kEditorW = 36;
+            constexpr int kEditorH = 20;
+            // "Auto:" 标签从 x+6 起宽 38px，编辑器紧跟其后
+            autoIntervalEditor_->setBounds(
+                autoRow.getX() + 48, autoRow.getY() + (autoRow.getHeight() - kEditorH) / 2,
+                kEditorW, kEditorH);
+        }
     }
 }
 
@@ -375,6 +420,11 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
 
 MilkdropModule::GLView::~GLView()
 {
+    // 置位析构标志，阻止任何 pending callAsync 回调继续触发
+    // scheduleAsyncAttach / attachIfNeeded / parentHierarchyChanged 等路径。
+    // 这防止 ~GLView 里 glContext.detach() 与异步 attach 操作竞态导致卡死。
+    destroying_.store(true);
+
     // 兜底：即便 owner 忘了 detachAndWait()，析构里再来一次也是安全的
     // （detach 会等 GL 线程收尾并触发 openGLContextClosing → destroy handle）。
     if (glContext.isAttached())
@@ -411,6 +461,11 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
     if (glContext.isAttached())
         return;
 
+    // 析构期间禁止异步 attach：此时 ~GLView 正在等待 detach 收尾，
+    // 任何 callAsync 回调里的 attachTo 都会与 detach 形成竞态导致卡死。
+    if (destroying_.load())
+        return;
+
     // 递归深度限制：最多重试 60 次（每 callAsync ~16ms → ~1 秒上限）。
     // 超过上限说明宿主窗口永远不会 visible，放弃 attach。
     if (attachRetries >= kMaxAttachRetries)
@@ -428,6 +483,11 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
     {
         if (auto* self = weak.getComponent())
         {
+            // 第二道防线：即使 SafePointer 仍有效（基类 ~Component 尚未执行），
+            // ~GLView 已设置 destroying_，此时绝不能再尝试 attach。
+            if (self->destroying_.load())
+                return;
+
             if (self->glContext.isAttached())
                 return;
 
@@ -818,18 +878,25 @@ void MilkdropModule::GLView::timerCallback()
   if (!isRenderInitialized())
     return;
 
-  // -------- 首次自动激活焦点 --------
-  // focused_ 默认为 false，必须点击模块才会变为 true。在 render 就绪后
-  // 自动激活一次，确保预设名称 / 切换按钮等叠加控件立即可见。
-  // checkOverlayAutoHide 会在此后 4s 无交互时自动隐藏。
-  if (!owner.focused_)
+  // -------- 首次自动激活焦点（仅一次） --------
+  // focused_ 默认为 false。在 render 就绪后自动激活一次以展示预设名等控件。
+  // 之后不再自动激活——若 auto-hide 清除焦点或用户点击了其他模块，不再恢复。
+  // 这避免了 auto 轮播模式下 overhead 控件反复闪现的问题。
+  if (!first_focus_done_)
   {
-    owner.setFocusVisual(true);
-    owner.touchOverlayIdleTimer();
+    first_focus_done_ = true;
+    if (!owner.focused_)
+    {
+      owner.setFocusVisual(true);
+      owner.touchOverlayIdleTimer();
+    }
   }
 
   // -------- Auto-hide 检测（UI 线程安全） --------
   owner.checkOverlayAutoHide();
+
+  // -------- Auto 轮播切换检测（UI 线程安全） --------
+  owner.checkAutoMode();
 
   owner.repaint();
 }
@@ -916,13 +983,26 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
     {
         hoveredOverlayBtn_ = OverlayButton::kNone;
         pressedOverlayBtn_ = OverlayButton::kNone;
+        // overlay 隐藏时同步隐藏 auto 行 TextEditor
+        if (autoIntervalEditor_ != nullptr && isAutoMode_)
+        {
+            autoIntervalEditor_->giveAwayKeyboardFocus();
+            autoIntervalEditor_->setVisible(false);
+        }
     }
     else
     {
         touchOverlayIdleTimer();  // 聚焦时重置 4 秒倒计时
+        // overlay 显示时恢复 auto 行 TextEditor
+        if (autoIntervalEditor_ != nullptr && isAutoMode_)
+            autoIntervalEditor_->setVisible(true);
     }
 
     repaint();
+
+    // 焦点切换会改变 GLView 顶部 trim 量（overlay 显示→留出控制栏空间，
+    // overlay 隐藏→GLView 填满整个内容区），触发重新布局。
+    layoutContent(getContentBounds());
 }
 
 void MilkdropModule::checkOverlayAutoHide()
@@ -945,6 +1025,27 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         if (onRightClick)
             onRightClick(*this, e.getPosition());
         return;
+    }
+
+    // ---- auto 行 slider 拖动检测（必须在基类之前，避免基类启动拖拽状态） ----
+    if (isAutoMode_ && glView != nullptr && !isDraggingSlider_)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto autoRow = getAutoRowBounds(topBar);
+        auto sliderBounds = getSliderBounds(autoRow);
+        if (sliderBounds.expanded(4).contains(e.getPosition()))
+        {
+            isDraggingSlider_ = true;
+            if (!focused_)
+                setFocusVisual(true);
+            touchOverlayIdleTimer();
+            float proportion = static_cast<float>(e.getPosition().x - sliderBounds.getX())
+                               / static_cast<float>(sliderBounds.getWidth());
+            updateAutoIntervalFromSlider(proportion);
+            repaint(autoRow);
+            return;  // 不调用基类，避免 ModulePanel::mouseDown 启动标题栏/边缘拖拽
+        }
     }
 
     // 基类处理：toFront + onBroughtToFront + 关闭按钮 + 缩放边缘 + 标题栏拖动
@@ -974,6 +1075,14 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
 
 void MilkdropModule::mouseUp(const juce::MouseEvent& e)
 {
+    // slider 拖动结束
+    if (isDraggingSlider_)
+    {
+        isDraggingSlider_ = false;
+        repaint();
+        return;
+    }
+
     // 优先处理 overlay 按钮释放
     if (pressedOverlayBtn_ != OverlayButton::kNone)
     {
@@ -994,6 +1103,20 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
 
 void MilkdropModule::mouseMove(const juce::MouseEvent& e)
 {
+    // slider 拖动中
+    if (isDraggingSlider_)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto autoRow = getAutoRowBounds(topBar);
+        auto sliderBounds = getSliderBounds(autoRow);
+        float proportion = static_cast<float>(e.getPosition().x - sliderBounds.getX())
+                           / static_cast<float>(sliderBounds.getWidth());
+        updateAutoIntervalFromSlider(proportion);
+        repaint(autoRow);
+        return;
+    }
+
     if (focused_ && glView != nullptr)
     {
         auto content = getContentBounds();
@@ -1027,6 +1150,26 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
     }
 }
 
+void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
+{
+    // slider 拖动中（mouseDrag 是 JUCE 专为拖拽设计的回调，比 mouseMove 更可靠
+    // 地接收按下鼠标后的移动事件，尤其当组件树中存在原生 HWND 子窗口时）
+    if (isDraggingSlider_)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto autoRow = getAutoRowBounds(topBar);
+        auto sliderBounds = getSliderBounds(autoRow);
+        float proportion = static_cast<float>(e.getPosition().x - sliderBounds.getX())
+                           / static_cast<float>(sliderBounds.getWidth());
+        updateAutoIntervalFromSlider(proportion);
+        repaint(autoRow);
+        return;
+    }
+
+    ModulePanel::mouseDrag(e);
+}
+
 void MilkdropModule::mouseExit(const juce::MouseEvent& e)
 {
     if (hoveredOverlayBtn_ != OverlayButton::kNone)
@@ -1058,10 +1201,12 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     auto prevBtn   = juce::Rectangle<int>(overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto resBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize);
+    auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize);
+    auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize);
 
     if (prevBtn.contains(pos))   return OverlayButton::kPrev;
     if (resBtn.contains(pos))    return OverlayButton::kRes;
+    if (autoBtn.contains(pos))   return OverlayButton::kAuto;
     if (nextBtn.contains(pos))   return OverlayButton::kNext;
     if (randomBtn.contains(pos)) return OverlayButton::kRandom;
 
@@ -1091,13 +1236,23 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         return { randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize };
     }
+    case OverlayButton::kAuto:
+    {
+        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        return { nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize };
+    }
     case OverlayButton::kRes:
     {
         auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
-        return { nextBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize };
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
+                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
+        return { autoBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize };
     }
     default:
         return {};
@@ -1113,6 +1268,7 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     case OverlayButton::kRandom: randomPreset();            break;
     case OverlayButton::kRes:    glView->cycleReadbackScale(); break;
     case OverlayButton::kPresetName: showPresetJumpDialog();   break;
+    case OverlayButton::kAuto:       toggleAutoMode();          break;
     default: break;
     }
 }
@@ -1138,11 +1294,12 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     g.setColour(PinkXP::pink300.withAlpha(0.7f));
     g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
 
-    // 按钮位置: [<] nameArea [1:1] [>] [?]
+    // 按钮位置: [<] nameArea [1:1] [auto] [>] [?]
     auto prevBtn   = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto resBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - 30, bar.getY() + 2, 30, kBtnSize);
+    auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, bar.getY() + 2, kAutoBtnW, kBtnSize);
+    auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - 30, bar.getY() + 2, 30, kBtnSize);
     auto nameArea  = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
                                           resBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
 
@@ -1173,6 +1330,29 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     drawBtn(resBtn,    glView->getReadbackScaleLabel(), OverlayButton::kRes);
     drawBtn(nextBtn,   ">",   OverlayButton::kNext);
     drawBtn(randomBtn, "?",   OverlayButton::kRandom);
+
+    // auto 按钮：轮播模式激活时用高亮 toggle 样式
+    {
+        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kAuto);
+        bool pressed = (pressedOverlayBtn_ == OverlayButton::kAuto);
+        bool active  = isAutoMode_;
+
+        if (pressed || active)
+            PinkXP::drawPressed(g, autoBtn, PinkXP::pink100);
+        else if (hovered)
+            PinkXP::drawRaised(g, autoBtn, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.12f));
+            g.fillRect(autoBtn);
+            g.setColour(PinkXP::pink300.withAlpha(0.4f));
+            g.drawRect(autoBtn, 1);
+        }
+
+        g.setColour(active ? PinkXP::pink300 : PinkXP::ink);
+        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+        g.drawText("auto", autoBtn, juce::Justification::centred, false);
+    }
 
     // 预设名：格式 "3/100  presetName"
     int idx = glView->getCurrentPresetIndex();
@@ -1409,5 +1589,208 @@ void MilkdropModule::showPresetJumpDialog()
         });
     dlg->setBounds(getLocalBounds());
     addAndMakeVisible(dlg);
-    dlg->enterModalState(true, nullptr, true);  // deleteWhenDone
+
+    // setComponentPaintingEnabled(false) 使 GLView 拥有独立原生 HWND 子窗口，
+    // Z-order 高于 JUCE 普通 Component。模态对话框无法覆盖此原生窗口，
+    // 导致对话框不可见且鼠标事件被 GL 窗口捕获（界面卡死）。
+    // 解决方案：弹窗前隐藏 GLView，通过 ModalComponentManager::Callback
+    // 在对话框真正退出模态状态时才恢复 GLView 可见性。
+    // 注意：enterModalState 是**非阻塞**的，不能在其后直接 setVisible(true)。
+    glView->setVisible(false);
+    dlg->enterModalState(true, new GlViewRestorer(*glView), true);
+}
+
+// ==========================================================
+// Auto 轮播模式
+// ==========================================================
+
+void MilkdropModule::ensureAutoIntervalEditor()
+{
+  if (autoIntervalEditor_ != nullptr)
+    return;
+
+  autoIntervalEditor_ = std::make_unique<juce::TextEditor>();
+  autoIntervalEditor_->setInputRestrictions(5, "0123456789.");
+  autoIntervalEditor_->setFont(PinkXP::getFont(9.0f, juce::Font::plain));
+  autoIntervalEditor_->setColour(juce::TextEditor::backgroundColourId,
+                                 PinkXP::pink50);
+  autoIntervalEditor_->setColour(juce::TextEditor::textColourId, PinkXP::ink);
+  autoIntervalEditor_->setColour(juce::TextEditor::outlineColourId,
+                                 PinkXP::pink600.withAlpha(0.6f));
+  autoIntervalEditor_->setColour(juce::TextEditor::focusedOutlineColourId,
+                                 PinkXP::pink500.withAlpha(0.9f));
+  autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1));
+  autoIntervalEditor_->onReturnKey = [this] {
+    float val = autoIntervalEditor_->getText().getFloatValue();
+    applyAutoInterval(val);
+  };
+  autoIntervalEditor_->onEscapeKey = [this] {
+    autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1), false);
+    autoIntervalEditor_->giveAwayKeyboardFocus();
+  };
+  autoIntervalEditor_->onFocusLost = [this] {
+    float val = autoIntervalEditor_->getText().getFloatValue();
+    applyAutoInterval(val);
+  };
+  autoIntervalEditor_->setVisible(false);
+  addAndMakeVisible(autoIntervalEditor_.get());
+}
+
+void MilkdropModule::toggleAutoMode()
+{
+  isAutoMode_ = !isAutoMode_;
+  if (isAutoMode_)
+  {
+    ensureAutoIntervalEditor();
+    lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
+    autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1));
+    autoIntervalEditor_->setVisible(focused_);
+  }
+  else
+  {
+    if (autoIntervalEditor_ != nullptr)
+    {
+      autoIntervalEditor_->giveAwayKeyboardFocus();
+      autoIntervalEditor_->setVisible(false);
+    }
+  }
+  // 重新布局以调整 GLView 尺寸和 editor 位置
+  layoutContent(getContentBounds());
+  repaint();
+}
+
+void MilkdropModule::checkAutoMode()
+{
+  if (!isAutoMode_)
+    return;
+
+  juce::uint32 now = juce::Time::getMillisecondCounter();
+  juce::uint32 intervalMs = static_cast<juce::uint32>(autoIntervalSeconds_ * 1000.0f);
+  if (now - lastAutoSwitchTime_ >= intervalMs)
+  {
+    lastAutoSwitchTime_ = now;
+    randomPreset();
+  }
+}
+
+void MilkdropModule::applyAutoInterval(float seconds)
+{
+  seconds = juce::jlimit(kMinAutoInterval, kMaxAutoInterval, seconds);
+  // 四舍五入到 0.1
+  seconds = std::round(seconds * 10.0f) / 10.0f;
+  if (seconds != autoIntervalSeconds_)
+  {
+    autoIntervalSeconds_ = seconds;
+    lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
+  }
+  if (autoIntervalEditor_ != nullptr)
+    autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1), false);
+  repaint();
+}
+
+void MilkdropModule::updateAutoIntervalFromSlider(float proportion)
+{
+  proportion = juce::jlimit(0.0f, 1.0f, proportion);
+  float seconds = kMinAutoInterval
+                  + proportion * (kMaxAutoInterval - kMinAutoInterval);
+  seconds = juce::jlimit(kMinAutoInterval, kMaxAutoInterval, seconds);
+  // 四舍五入到 0.1
+  seconds = std::round(seconds * 10.0f) / 10.0f;
+
+  if (seconds != autoIntervalSeconds_)
+  {
+    autoIntervalSeconds_ = seconds;
+    if (autoIntervalEditor_ != nullptr)
+      autoIntervalEditor_->setText(juce::String(seconds, 1), false);
+    // 不重置计时器：用户拖动期间不触发自动切换
+  }
+}
+
+juce::Rectangle<int> MilkdropModule::getAutoRowBounds(juce::Rectangle<int> topBar) const
+{
+  return juce::Rectangle<int>(topBar.getX(), topBar.getBottom(),
+                              topBar.getWidth(), kAutoRowHeight);
+}
+
+juce::Rectangle<int> MilkdropModule::getSliderBounds(juce::Rectangle<int> autoRow) const
+{
+  constexpr int kSliderPadR = 44;
+  constexpr int kSliderH = 8;
+  // 布局: "Auto:"(x+6, 38px) + gap(4px) + editor(36px) + gap(8px) + slider
+  int sliderX = autoRow.getX() + 6 + 38 + 4 + 36 + 8;
+  int sliderW = autoRow.getWidth() - sliderX - kSliderPadR;
+  return juce::Rectangle<int>(sliderX,
+                              autoRow.getY() + (autoRow.getHeight() - kSliderH) / 2,
+                              juce::jmax(20, sliderW), kSliderH);
+}
+
+void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int> topBar)
+{
+  auto autoRow = getAutoRowBounds(topBar);
+
+  // 半透明暗底（比顶栏稍亮以区分层级）
+  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
+  g.fillRect(autoRow);
+
+  // 底部分割线
+  g.setColour(PinkXP::pink300.withAlpha(0.5f));
+  g.fillRect(autoRow.getX(), autoRow.getBottom(), autoRow.getWidth(), 1);
+
+  // "Auto:" 标签（左侧）
+  g.setColour(PinkXP::pink300.withAlpha(0.85f));
+  g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+  g.drawText("Auto:", autoRow.getX() + 6, autoRow.getY(),
+             38, autoRow.getHeight(), juce::Justification::centredLeft, false);
+
+  // ---- Slider 轨道与滑块 ----
+  auto sliderBounds = getSliderBounds(autoRow);
+  float proportion = static_cast<float>(autoIntervalSeconds_ - kMinAutoInterval)
+                     / static_cast<float>(kMaxAutoInterval - kMinAutoInterval);
+
+  // 轨道底色
+  g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.1f));
+  g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
+
+  // 已填充部分
+  int fillW = static_cast<int>(sliderBounds.getWidth() * proportion);
+  if (fillW > 0)
+  {
+    g.setColour(PinkXP::pink300.withAlpha(0.55f));
+    g.fillRoundedRectangle(
+        juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(),
+                             fillW, sliderBounds.getHeight()).toFloat(), 2.0f);
+  }
+
+  // 滑块手柄（粉色小方块）
+  int knobX = sliderBounds.getX() + fillW - 4;
+  int knobSize = 12;
+  auto knobBounds = juce::Rectangle<int>(
+      knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
+      knobSize, knobSize);
+  g.setColour(isDraggingSlider_ ? PinkXP::pink200 : PinkXP::pink100);
+  g.fillRect(knobBounds);
+  g.setColour(PinkXP::pink600);
+  g.drawRect(knobBounds, 1);
+
+  // 右侧时间标签（如 "10.0s"、"1m30.0s"）
+  juce::String timeLabel;
+  if (autoIntervalSeconds_ >= 60.0f)
+  {
+    int mins = static_cast<int>(autoIntervalSeconds_) / 60;
+    float secs = std::fmod(autoIntervalSeconds_, 60.0f);
+    timeLabel = juce::String(mins) + "m";
+    if (secs > 0.05f)
+      timeLabel += juce::String(secs, 1) + "s";
+  }
+  else
+  {
+    timeLabel = juce::String(autoIntervalSeconds_, 1) + "s";
+  }
+
+  g.setColour(PinkXP::pink300.withAlpha(0.75f));
+  g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
+  g.drawText(timeLabel,
+             sliderBounds.getRight() + 4, autoRow.getY(),
+             40, autoRow.getHeight(),
+             juce::Justification::centredLeft, false);
 }
