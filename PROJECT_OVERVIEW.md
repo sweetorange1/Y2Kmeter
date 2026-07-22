@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.1.9`）
+- **产品名**：`Y2Kmeter` （版本：`2.1.10`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -257,11 +257,14 @@ main
  → Y2KStandaloneApp::initialise:
      1. 加载 PropertiesFile / .settings
      2. 创建 Y2KmeterAudioProcessor
-     3. new Y2KMainWindow（DocumentWindow，无边框）
-     4. Editor = processor.createEditor()
-     5. 从 settings 恢复：主题、FPS、窗口位置/尺寸、alwaysOnTop、chromeVisible、Loopback 选择
-     6. 启动 WasapiLoopbackCapture（Win）/ MacDesktopAudioCapture（macOS）
-     7. onAudio callback → hub.pushStereo + processor.registerLoopbackRenderTime
+     3. new Y2KMainWindow（DocumentWindow，addToDesktop=false, 底色=纯黑）
+     4. Editor = processor.createEditor()（GL 上下文已全平台移除）
+     5. setContentNonOwned(editor)
+     6. 从 settings 恢复：主题、FPS、窗口位置/尺寸、alwaysOnTop
+     7. addToDesktop() + setVisible(true)（同步执行，黑色底色与暗黑主题无缝衔接，无闪屏）
+     8. callAsync 恢复 chromeVisible（依赖 editor.isShowing()==true）
+     9. 启动 WasapiLoopbackCapture（Win）/ MacDesktopAudioCapture（macOS）
+    10. onAudio callback → hub.pushStereo + processor.registerLoopbackRenderTime
  → shutdown:
      1. 停 loopback（thread join）
      2. deleteEditorImmediately
@@ -2179,7 +2182,44 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 
 --- 
 
-#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8 + v2.1.9）
+#### ⑩ v2.1.10 变更记录
+
+**1. 移除 Editor 级 OpenGL 上下文（全平台统一），彻底解决启动卡死**
+
+**问题**：Release 模式下软件启动 `addToDesktop()` 后 UI 线程卡死在系统 DLL 随机地址（`atidxx64.dll` / `0x00007fff...`），窗口永不出现；Debug 下触发 `jassertfalse`（`int3` 断点）。
+
+**根因**：嵌套 OpenGL 上下文冲突。Editor 的 `openGLContext`（`setComponentPaintingEnabled(true)`）为所有子组件创建 CachedImage 渲染管道，遇到 MilkdropModule::GLView（持有独立的 `juce::OpenGLContext`）时从 GL 线程回调 `CachedImage::paint()`，与 JUCE 的消息线程断言冲突。之前用 `#ifdef NDEBUG` 仅在 Debug 跳过 `attachTo` 规避 `jassertfalse` 断点，但 Release 下 `jassertfalse` 编译为空，嵌套冲突仍在底层驱动中表现为随机地址挂起。
+
+**修复**（[PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp)）：
+- 构造器中移除 `openGLContext.setContinuousRepainting / setComponentPaintingEnabled / attachTo` 三元调用
+- 析构函数中移除 `openGLContext.detach()`（改为 `juce::ignoreUnused`，成员仅保留以确保声明顺序）
+- 所有组件（Windows/macOS）走 CPU 软光栅；Milkdrop 使用自己独立的 `glContext` 不受影响
+
+**2. 消除启动闪屏：DocumentWindow 底色从灰色改为纯黑**
+
+**问题**：`addToDesktop()` + `setVisible(true)` 后首帧 Editor 内容渲染前，用户看到灰色文档窗口底色 —— Y2K 暗黑主题下极其刺眼。
+
+**历经方案**：
+| 方案 | 结果 |
+|------|------|
+| `Timer::callAfterDelay(80ms)` | 固定延迟不可靠（快/慢机器均失败） |
+| 双 `callAsync`（间隔一个消息循环） | GL CachedImage 管线未产出首帧 → 仍闪黑 |
+| `onFirstPaintCompleted` 回调延迟 `setVisible` | **逻辑死锁**：`paint()` 需要窗口可见才被 OS 调度 → 回调永不触发 → 窗口永不显示 |
+| **黑色底色 + 同步显示** ✅ | 闪黑不闪灰，与暗黑主题无缝衔接 |
+
+**修复**（[Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp)）：
+- `Y2KMainWindow` 构造参数 `addToDesktop=false`（不自动加入桌面）
+- `DocumentWindow` 背景色从 `LookAndFeel::backgroundColourId`（灰色）→ `juce::Colours::black`
+- `initialise()` 末尾同步执行 `addToDesktop()` + `setVisible(true)` + `callAsync` 恢复 chromeVisible
+- 清理 [PluginEditor.h/.cpp] 中不再使用的 `onFirstPaintCompleted` 回调与 `firstPaintCompleted_` 标志
+
+**3. 遗漏版本号补全**
+
+修复了 `PluginEditor.cpp`（4 处字符串字面量）、`README.md`（badge）、`Y2Kmeter_installer.iss`（`MyAppVersion`）中遗漏的版本号更新。
+
+**版本号**：`2.1.9 → 2.1.10`
+
+#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8 + v2.1.9 + v2.1.10）
 
 1. **写第三方 C 头封装类时，命名空间不要跟第三方公开符号重名**——用 `_api` 后缀。
 2. **中文注释源文件必须存为 UTF-8 with BOM**（Windows MSVC 下 GBK 解码会把 `。` 认成非法字符）。
@@ -2197,6 +2237,8 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 14. **不要在 `paint`/`paintContent` 回调内部调用 `repaint()`**——JUCE `componentPaintingEnabled(true)` 下，绘制期间 `repaint()` 会干扰 CachedImage 合成管线，导致 `CachedImage::paint` 被 GL 线程调用，Debug 下触发 `jassertfalse`（`int3`）。auto-hide 等轮询逻辑应放在独立的 `timerCallback` 中。
 15. **`hasKeyboardFocus()` 不是"窗口是否激活"的检测**——它是组件级键盘焦点 API，只检测本组件或其子组件是否 `grabKeyboardFocus`，不能用于检测顶层窗口失焦。检测顶层窗口失焦需 `TopLevelWindow::getActiveTopLevelWindow()` 或 `Desktop::addFocusChangeListener`。
 16. **新增 `juce::Timer` 继承到已有深继承链时可能触发构造期崩溃**——多基类对象布局变化 + 构造阶段 `startTimer` 回调可能在 vtable 尚未完全建立时触发。优先复用已有 timer（如 GLView 的 30Hz 回调），通过公开方法暴露给需要轮询的逻辑。
+17. **嵌套 `juce::OpenGLContext` 不支持且无 workaround**——当父组件持有 GL 上下文（`setComponentPaintingEnabled(true)`）且子组件也持有独立 GL 上下文时，JUCE CachedImage 管线会从 GL 线程回调子组件 `paint()`，触发 `jassertfalse`；`#ifdef NDEBUG` 仅在 Debug 避开断言，Release 下表现为系统 DLL 随机地址挂起。唯一正确方案：移除父级 GL 上下文，各组件走 CPU 软光栅，仅 Milkdrop 保留独立 GL。
+18. **`paint()` 需要窗口可见才会被 OS 调度；不能用"等 paint() 回调再 setVisible(true)"**——这是逻辑死锁。消除启动闪屏的正确方案：用与 UI 主题一致的纯黑底色（闪黑不闪灰），同步 `addToDesktop()` + `setVisible(true)`。
 
 ---
 

@@ -70,7 +70,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.1.8");
+const int versionW = versionFont.getStringWidth ("v2.1.10");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -111,7 +111,7 @@ const int versionW = versionFont.getStringWidth ("v2.1.8");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.1.8";
+const juce::String versionText = "v2.1.10";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -1393,26 +1393,25 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //     Windows 侧 WGL + 硬件驱动对小批次 draw / 纹理部分更新优化成熟，保持开启。
     // ==================================================================
     //
-    // ⚠️ 嵌套 OpenGL 上下文处理（v2.1.8）：
-    //   Editor 的 openGLContext 提供 GPU 加速的组件渲染（setComponentPaintingEnabled(true)），
-    //   能将所有子组件的 paint() 翻译成 GL 批次在 GPU 执行，CPU 负载大幅下降。
+    // ⚠️ v2.1.8：Editor 级 openGLContext 已彻底移除（Windows 与 macOS 统一）。
     //
-    //   但当 workspace 中存在 MilkdropModule（GLView 持有独立 juce::OpenGLContext）
-    //   时，外层 Editor GL 在渲染 GLView 时会从 GL 线程（而非消息线程）调用
-    //   CachedImage::paint()，触发 juce_OpenGLContext.cpp:239 的 jassertfalse
-    //   （Debug 下 int3 断点崩溃）。JUCE 官方明确不支持嵌套 GL 上下文。
+    //   Editor 级 GL 上下文的作用：将子组件的 paint() 翻译成 GL 批次在 GPU 执行。
+    //   但本项目的 ModuleWorkspace 中已有 MilkdropModule，其 GLView 持有独立的
+    //   juce::OpenGLContext 用于 projectM 渲染。两个 GL 上下文形成嵌套：
     //
-    //   策略：Release 模式保持完整 GPU 加速（jassertfalse 编译为 no-op，嵌套
-    //   GL 渲染只是跳过 GLView 的 CachedImage 更新，不影响功能）；Debug 模式
-    //   跳过 attachTo 走 CPU 软光栅，方便调试。
+    //     Editor GL context (setComponentPaintingEnabled=true)
+    //       └→ 为 GLView 创建 CachedImage → GL线程回调 paint() → 崩溃/卡死
+    //
+    //   JUCE 官方明确不支持嵌套 GL 上下文。之前的 `#ifdef NDEBUG` 策略仅在 Debug
+    //   下跳过 attachTo 来避免 jassertfalse 断点，但 Release 下冲突仍然存在，
+    //   表现为 atidxx64.dll / 系统 DLL 中的随机地址挂起。
+    //
+    //   此外，renderingEngineConfigured 已将 Windows 渲染引擎强制切到 Software
+    //   （规避 AMD Direct2D 死锁），Editor 级 GL 上下文实际运行在软件 GL 上，
+    //   无性能优势。全部组件走 CPU 软光栅即可（macOS CoreGraphics有Metal后端，
+    //   Windows GDI对低频仪表UI足够），Milkdrop 使用自己的独立 GL 上下文不受影响。
     // ==================================================================
-#if ! JUCE_MAC
-   #ifdef NDEBUG  // Release: 开启 GPU 加速组件渲染
-    openGLContext.setContinuousRepainting(false);
-    openGLContext.setComponentPaintingEnabled(true);
-    openGLContext.attachTo(*this);
-   #endif
-#endif
+    juce::ignoreUnused(openGLContext); // 不 attach；保留成员仅为析构顺序安全
 
     // Temporary profiling hook: with Y2K_ENABLE_PERF_COUNTERS=1 this writes
     // perf snapshots every 60 seconds to %APPDATA%/Y2Kmeter/perf_counters.
@@ -1444,15 +1443,10 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     //   宿主线程调 getStateInformation 触发回调到已部分销毁的 this。
     processor.flushPendingUiStateBeforeSave = nullptr;
 
-    // -1) 最先 detach GPU 上下文，确保随后 workspace / chromeHiddenOverlay 等
-    //     子组件析构时，GL 资源（Texture/VBO/FBO）已经从上下文解绑。
-    //     若依赖成员反向析构顺序隐式 detach，会触发"GL 资源释放时子组件已部分销毁"的
-    //     未定义行为（JUCE GL context 在析构里会 flush 队列，需要组件树依然完整）。
-    //
-    //   · macOS 下构造里未 attach（见对应 #if ! JUCE_MAC 保护），这里一并跳过 detach。
-#if ! JUCE_MAC
-    openGLContext.detach();
-#endif
+    // -1) GL 上下文已不再使用（v2.1.8 全平台移除 Editor 级 GL）。
+    //      openGLContext 成员仅保留用于声明顺序（确保在所有子组件之后析构）。
+    //      若曾 attach，这里需 detach；目前全平台均不 attach，此调用为安全 no-op。
+    juce::ignoreUnused(openGLContext);
 
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
@@ -2442,7 +2436,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.1.8";
+const juce::String versionText = "v2.1.10";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2450,7 +2444,7 @@ const juce::String versionText = "v2.1.8";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-const int versionW = versionFont.getStringWidth ("v2.1.8");
+const int versionW = versionFont.getStringWidth ("v2.1.10");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间

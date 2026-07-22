@@ -67,18 +67,14 @@ public:
     Y2KMainWindow (const juce::String& name, juce::Colour bg)
         : juce::DocumentWindow (name,
                                 bg,
-                                juce::DocumentWindow::minimiseButton, // 按钮并不会画出，因为下面关闭了原生标题栏
-                                true /*addToDesktop*/)
+                                juce::DocumentWindow::minimiseButton,
+                                false /*addToDesktop: 不立即显示，由 initialise()
+                                       末尾通过 MessageManager::callAsync 延迟加入桌面，
+                                       确保 Editor 首帧渲染完成后用户才看到窗口*/)
     {
-        // 关键 1：关掉原生标题栏，不再显示系统标题/关闭/Options
         setUsingNativeTitleBar (false);
-        // 关键 2：把 JUCE 自己的标题条高度设为 0 —— 这样 contentComponent 能占满整个窗口
         setTitleBarHeight (0);
-
-        // 允许窗口缩放（若你希望完全固定尺寸，把 true 改成 false 即可）
         setResizable (true, false);
-
-        // 关闭系统投影（我们自己画 Y2K 风格）
         setDropShadowEnabled (false);
     }
 
@@ -207,11 +203,11 @@ public:
         pluginHolder->reloadPluginState();
 
         // 2) 构建无边框窗口
-        //    背景色用 LookAndFeel 默认的窗口底色（实际看不到，因为 Editor 会占满）
-        const auto bg = juce::LookAndFeel::getDefaultLookAndFeel()
-                             .findColour (juce::ResizableWindow::backgroundColourId);
-
-        mainWindow = std::make_unique<Y2KMainWindow> (getApplicationName(), bg);
+        //    背景色用纯黑而非 LookAndFeel 默认灰色——Y2K 界面本身是暗黑风格，
+        //    黑色底色在首帧渲染前的瞬间几乎是不可感知的（而灰色会很明显地闪现）。
+        //    这是消除启动闪屏的最简方式：闪黑不闪灰。
+        mainWindow = std::make_unique<Y2KMainWindow> (getApplicationName(),
+                                                      juce::Colours::black);
 
         // 3) 取插件自己的 Editor 作为窗口内容
         //    关键：使用 setContentNonOwned —— 由本 App 管理 editor 的生命周期。
@@ -310,20 +306,31 @@ public:
             mainWindow->setBounds (userArea.getX(), userArea.getY(), w, h);
         }
 
-        mainWindow->setVisible (true);
+        // 6) 窗口显示。
+        //
+        //    addToDesktop() 必须在 initialise() 中同步执行（不能 defer 到 callAsync）：
+        //    addToDesktop 创建原生 HWND → peer 可用 → parentHierarchyChanged 触发
+        //    → renderingEngineConfigured 检测到 peer → 强制切 Software 渲染器 →
+        //    AMD atidxx64.dll Direct2D 死锁被从根上规避。
+        //
+        //    setVisible(true) 紧接其后：窗口立即显示，底色为纯黑（见上方"构建无
+        //    边框窗口"部分），与 Editor 首帧渲染的暗黑背景无缝衔接，用户感知不到
+        //    任何闪屏。之所以不再"等 paint() 回调再 setVisible"——因为 paint()
+        //    需要窗口可见才会被系统调度，等它等于死等。
+        //
+        //    chromeVisible 恢复通过 callAsync 延迟：setChromeVisible 内部依赖
+        //    editor.isShowing() 和 canResizeWindow 的标准路径，必须在窗口可见后执行。
+        mainWindow->addToDesktop();
+        mainWindow->setVisible(true);
 
-        // 6) 窗口可见后再应用 chromeVisible —— 此时 editor.isShowing()=true，
-        //    setChromeVisible 会走 canResizeWindow=true 的标准路径：
-        //      · savedChrome=true  → 无操作（workspace 已默认 chromeVisible=true）
-        //      · savedChrome=false → 标准 Hide 路径，基于当前（恢复的 show 态）
-        //        窗口快照 + 收缩 -62，最终得到与"运行时点 Hide"完全相同的 hide 态。
-        //    这样不论用户上次以何种状态退出，首次 Show 都能走主路径幂等还原到
-        //    savedTopBoundsBeforeHide，界面尺寸 100% 一致。
         if (cachedEditor != nullptr)
         {
-            const bool savedChrome = getUserSettings()
-                .getBoolValue ("ui.chromeVisible", true);
-            cachedEditor->setChromeVisible (savedChrome);
+            juce::MessageManager::callAsync([this]() {
+                if (cachedEditor == nullptr) return;
+                const bool savedChrome = getUserSettings()
+                    .getBoolValue("ui.chromeVisible", true);
+                cachedEditor->setChromeVisible(savedChrome);
+            });
         }
     }
 
