@@ -214,15 +214,15 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     // ---- Phase 1: 渲染主内容（GL 帧或兜底黑底） ----
     if (glView != nullptr && ! glView->getBounds().isEmpty())
     {
-
         if (glView->isRenderInitialized())
         {
-          // projectM 已正常运行。ModulePanel::paint 已将整个区域填为底色，
-          // 这里用 CPU 回读的 GL 帧覆盖内容区——渲染在底色之上。
+          // projectM 已正常运行。GL 帧通过 g.drawImage 绘制到 GLView bounds。
+          // setComponentPaintingEnabled(false): 无 CachedImage，纯 GDI 绘制。
+          // 视频区域 = GLView bounds (content 去掉顶部 26px 控制栏)。
           std::lock_guard<std::mutex> lock(glView->getGlFrameMutex());
           auto& frame = glView->getCachedGlFrame();
           if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0)
-            g.drawImage(frame, content.toFloat());
+            g.drawImage(frame, glView->getBounds().toFloat());
         }
         else
         {
@@ -250,15 +250,22 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     if (glView != nullptr && glView->isRenderInitialized())
       PaintLoadingIndicator(g, content);
 
-    // ---- Phase 3: 聚焦时在所有内容之上绘制预设控制叠加条 ----
+    // ---- Phase 3: 聚焦时在顶部 GDI 控制栏区域绘制预设控制叠加条 ----
+    //   GLView 上方留出 26px，此区域无 GL 原生窗口覆盖，GDI 控制栏可见。
     if (focused_ && glView != nullptr)
-      paintOverlayControlBar(g, content);
+      paintOverlayControlBar(g, content.withHeight(26));
 }
 
 void MilkdropModule::layoutContent (juce::Rectangle<int> content)
 {
     if (glView != nullptr)
-        glView->setBounds (content);
+    {
+        // v2.1.10: GLView 上方留出 26px 用于 GDI 控制栏。
+        // setComponentPaintingEnabled(false) 时 GL 原生窗口覆盖 GDI 绘制，
+        // 需在 GLView bounds 上方向后退让才能暴露 paintContent 的控制栏。
+        constexpr int kControlBarHeight = 26;
+        glView->setBounds(content.withTrimmedTop(kControlBarHeight));
+    }
 }
 
 void MilkdropModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
@@ -334,8 +341,19 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     // 拟音频包包的波形），而不依赖 AnalyserHub 的 onFrame 回调 tick。
     glContext.setContinuousRepainting (true);
     glContext.setSwapInterval (1);             // vsync
-    glContext.setComponentPaintingEnabled (true); // CachedImage 合成管线；
-                                                // paintContent 负责用 CPU 回读帧覆盖底色
+
+    // v2.1.10 修复：setComponentPaintingEnabled(false)
+    //
+    //   true → JUCE 创建 CachedImage FBO，renderOpenGL 后 paintComponent
+    //   将组件树渲染进 FBO，drawComponentBuffer 合成到屏幕。但 projectM 内部
+    //   强制 glBindFramebuffer(0) → 渲染到默认 FBO 而非 CachedImage FBO，
+    //   导致 CachedImage 纹理为空/过期 → 覆盖 paintContent 的 GDI 控制栏。
+    //   此外模态对话框（PresetJumpDialog）与 GL 渲染管线冲突导致 deadlock。
+    //
+    //   false → 无 CachedImage，GL 渲染到原生表面。GLView 上方留出 26px 的
+    //   GDI 控制栏区域不被 GL 原生窗口覆盖。视频帧通过 glReadPixels 回读到
+    //   cachedGlFrame_，在 paintContent 中用 g.drawImage 绘制到 GLView 区域。
+    glContext.setComponentPaintingEnabled (false);
 
     // 扫描预设目录（UI 线程；GL 线程之后只读 presetPaths）
     auto presetsDir = findAssetsDir ("milkdrop_presets");
@@ -603,21 +621,25 @@ void MilkdropModule::GLView::renderOpenGL()
 
     auto& api = projectm_api::Api::instance();
 
-    // 1) 尺寸同步（Component 尺寸随时可能改变）
-    const int cw = getWidth();
-    const int ch = getHeight();
-    if (cw > 0 && ch > 0)
-    {
-        desiredWidth  = cw;
-        desiredHeight = ch;
+    // 1) 尺寸同步：使用 GL viewport 尺寸（物理像素），而非 Component 逻辑尺寸。
+    //    HiDPI（150%/200% 缩放）下 Component::getWidth() 返回逻辑像素，
+    //    而 JUCE 的 glViewport 设为物理像素。projectM 内部 FBO 必须匹配
+    //    viewport 才能完整覆盖渲染区域，否则画面只在左下角显示。
+    GLint vp[4];
+    juce::gl::glGetIntegerv(juce::gl::GL_VIEWPORT, vp);
+    const int vpW = vp[2];
+    const int vpH = vp[3];
 
-        // JUCE 的 GL context 会自动设置 viewport 匹配 Component 尺寸，
-        // 但 projectM 内部有自己的 FBO 尺寸——必须显式通知它。
-        if (cw != lastAppliedWidth || ch != lastAppliedHeight)
+    if (vpW > 0 && vpH > 0)
+    {
+        desiredWidth  = vpW;
+        desiredHeight = vpH;
+
+        if (vpW != lastAppliedWidth || vpH != lastAppliedHeight)
         {
-            api.setWindowSize (pmHandle, (std::size_t) cw, (std::size_t) ch);
-            lastAppliedWidth  = cw;
-            lastAppliedHeight = ch;
+            api.setWindowSize(pmHandle, (std::size_t)vpW, (std::size_t)vpH);
+            lastAppliedWidth  = vpW;
+            lastAppliedHeight = vpH;
         }
     }
 
@@ -696,81 +718,64 @@ void MilkdropModule::GLView::renderOpenGL()
 
     // 4) 让 projectM 出一帧
     //
-    // 关键：JUCE 在调用 renderOpenGL 之前会把它的 CachedImage FBO
-    // 绑到 GL_FRAMEBUFFER（Windows 上非 0），期望我们把最终画面写入
-    // 这个 FBO；bufferSwapper.swap() 再把它送到 HWND。
+    //   当前 DLL 不支持 projectm_opengl_render_frame_fbo（fn_render_fbo=0），
+    //   走 fallback 路径：api.openglRenderFrame(pmHandle)。
     //
-    // 但 projectM 4 内部渲染最终帧时会 glBindFramebuffer(GL_FRAMEBUFFER, 0)，
-    // 把画面写到了 “系统默认 FBO”——JUCE 拿不到，屏幕就永远是黑的。
+    //   projectM 内部 glBindFramebuffer(0) → 渲染到默认 FBO。
+    //   v2.1.10 修复：setWindowSize 使用 viewport 尺寸（物理像素），
+    //   确保 projectM 内部 FBO 与 GL viewport 匹配（修复 HiDPI 左下角问题）。
     //
-    // projectM 4.2.0+ 提供 projectm_opengl_render_frame_fbo(handle, fbo)，
-    // 让调用方指定输出 FBO。我们查询 GL 当前 draw framebuffer binding，
-    // 把这个 ID 传给 projectM。
+    //   setComponentPaintingEnabled(false)：无 CachedImage FBO。
+    //   FBO 0 即为 JUCE 原生 GL 表面，projectM 输出直通该表面，
+    //   bufferSwapper.swap() 呈现。同时 glReadPixels 回读到 cachedGlFrame_，
+    //   供 paintContent 通过 g.drawImage 绘制视频帧。
     if (api.hasOpenglRenderFrameFbo())
     {
         GLint currentDrawFbo = 0;
-        juce::gl::glGetIntegerv (juce::gl::GL_DRAW_FRAMEBUFFER_BINDING, &currentDrawFbo);
+        juce::gl::glGetIntegerv(juce::gl::GL_DRAW_FRAMEBUFFER_BINDING, &currentDrawFbo);
 
-        api.openglRenderFrameFbo (pmHandle, (uint32_t) currentDrawFbo);
-        juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, (GLuint) currentDrawFbo);
+        api.openglRenderFrameFbo(pmHandle, (uint32_t)currentDrawFbo);
+        juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, (GLuint)currentDrawFbo);
     }
     else
     {
-      // projectM 内部强制 glBindFramebuffer(0) 渲染到默认 framebuffer。
-      // 不尝试任何 FBO→FBO blit（跨驱动不可靠）。改为 glReadPixels
-      // 从 FBO 0 回读到 CPU 像素缓冲，交由 paintContent 用 JUCE Graphics
-      // 绘制到内容区——GL 帧在 ModulePanel 底色之上，不会被覆盖。
+        // v2.1.10: setComponentPaintingEnabled(false)，无 CachedImage FBO。
+        // FBO 0 即为 JUCE 的原生 GL 表面。projectM 内部 glBindFramebuffer(0)
+        // 将其输出直通该表面，bufferSwapper.swap() 呈现。
+        juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+        api.openglRenderFrame(pmHandle);
 
-      // 保存 JUCE 的当前 draw FBO（CachedImage），projectM 之后再恢复
-      GLint juceDrawFbo = 0;
-      juce::gl::glGetIntegerv(juce::gl::GL_DRAW_FRAMEBUFFER_BINDING, &juceDrawFbo);
-
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-      api.openglRenderFrame(pmHandle);
-
-      // 回读像素（FBO 0 → CPU buffer → cachedGlFrame_），支持降分辨率读取
-      {
-        const int scale = static_cast<int>(readback_scale_.load());
-        const int rw = cw / scale;
-        const int rh = ch / scale;
-        const int rwClamped = juce::jmax(1, rw);
-        const int rhClamped = juce::jmax(1, rh);
-
-        std::lock_guard<std::mutex> lock(glFrameMutex_);
-        if (cachedGlFrame_.getWidth() != rwClamped
-            || cachedGlFrame_.getHeight() != rhClamped)
-          cachedGlFrame_ = juce::Image(juce::Image::ARGB, rwClamped, rhClamped, true);
-
-        // glReadPixels 不支持子采样，必须按全分辨率 cw×ch 读取
-        std::vector<uint8_t> pixels(
-            static_cast<size_t>(cw * ch * 4));
-        juce::gl::glReadBuffer(juce::gl::GL_BACK);
-        juce::gl::glReadPixels(0, 0, (GLsizei) cw, (GLsizei) ch,
-                               juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
-                               pixels.data());
-
-        // Y轴翻转 + 降采样：从全分辨率向上取行，跳过 scale-1 行
-        juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
-        for (int y = 0; y < rhClamped; ++y)
+        if (vpW > 0 && vpH > 0)
         {
-          const int srcY = ch - 1 - (y * scale + scale / 2);
-          const uint8_t* srcRow = pixels.data()
-              + static_cast<size_t>(srcY * cw * 4);
-          for (int x = 0; x < rwClamped; ++x)
+          // 回读像素（viewport 尺寸 = 物理像素）→ cachedGlFrame_
+          // 供 paintContent 用 g.drawImage 绘制到 GDI 表面
+          std::vector<uint8_t> pixels(static_cast<size_t>(vpW * vpH * 4));
+          juce::gl::glReadBuffer(juce::gl::GL_BACK);
+          juce::gl::glReadPixels(0, 0, (GLsizei)vpW, (GLsizei)vpH,
+                                 juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                                 pixels.data());
+
+          // Y 轴翻转：OpenGL 原点在左下，Image 原点在左上
           {
-            const int srcX = x * scale + scale / 2;
-            const int srcIdx = srcX * 4;
-            *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
-                (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
-                | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
-                | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
-                | static_cast<uint32_t>(srcRow[srcIdx + 2]);
+            std::lock_guard<std::mutex> lock(glFrameMutex_);
+            if (cachedGlFrame_.getWidth() != vpW || cachedGlFrame_.getHeight() != vpH)
+              cachedGlFrame_ = juce::Image(juce::Image::ARGB, vpW, vpH, true);
+
+            juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
+            for (int y = 0; y < vpH; ++y) {
+              const int srcY = vpH - 1 - y;
+              const uint8_t* srcRow = pixels.data() + static_cast<size_t>(srcY * vpW * 4);
+              for (int x = 0; x < vpW; ++x) {
+                const int srcIdx = x * 4;
+                *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
+                    (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
+                    | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
+                    | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
+                    | static_cast<uint32_t>(srcRow[srcIdx + 2]);
+              }
+            }
           }
         }
-      }
-
-      // 恢复 JUCE CachedImage FBO
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, (GLuint) juceDrawFbo);
     }
 
     // 5) continuousRepainting=true 已由 JUCE GL 线程自持续驱动，
@@ -812,6 +817,16 @@ void MilkdropModule::GLView::timerCallback()
 
   if (!isRenderInitialized())
     return;
+
+  // -------- 首次自动激活焦点 --------
+  // focused_ 默认为 false，必须点击模块才会变为 true。在 render 就绪后
+  // 自动激活一次，确保预设名称 / 切换按钮等叠加控件立即可见。
+  // checkOverlayAutoHide 会在此后 4s 无交互时自动隐藏。
+  if (!owner.focused_)
+  {
+    owner.setFocusVisual(true);
+    owner.touchOverlayIdleTimer();
+  }
 
   // -------- Auto-hide 检测（UI 线程安全） --------
   owner.checkOverlayAutoHide();
@@ -1311,7 +1326,7 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     // 提示文字
     g.setColour(PinkXP::pink700.withAlpha(0.75f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-    g.drawText("Enter preset number (1\u2013" + juce::String(total_) + "):",
+    g.drawText("Enter preset number (1-" + juce::String(total_) + "):",
                dlg.getX() + 14, dlg.getY() + 28,
                dlg.getWidth() - 28, 18,
                juce::Justification::centredLeft, false);
