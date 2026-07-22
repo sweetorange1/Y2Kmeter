@@ -172,17 +172,17 @@ private:
         bool isRenderInitialized() const noexcept { return renderInitialized; }
         juce::String getRenderError() const { return juce::String (renderErrorMessage); }
 
-        // CPU 帧缓存访问器：GL 线程在 renderOpenGL 中写入，UI 线程在 paintContent
-        // 中读取。调用者负责持锁（glFrameMutex_ 是 public 成员）。
-        juce::Image& getCachedGlFrame() { return cachedGlFrame_; }
-        std::mutex& getGlFrameMutex() { return glFrameMutex_; }
-
         // 预设索引：GL 线程在 loadPresetInternal 中写入，UI 线程在 paintContent
         // 中读取以显示当前预设名。atomic 保证跨线程安全。
         int getCurrentPresetIndex() const noexcept { return currentPresetIndexUi_.load(); }
 
         // 预设总数（UI 线程安全只读）。
         int getTotalPresetCount() const noexcept { return presetPaths.size(); }
+
+        // CPU 帧缓存访问器：GL 线程在 renderOpenGL 中通过 glReadPixels 写入，
+        // UI 线程在 GLView::paint 中通过 g.drawImage 绘制。调用者负责持锁。
+        juce::Image& getCachedGlFrame() { return cachedGlFrame_; }
+        std::mutex& getGlFrameMutex() { return glFrameMutex_; }
 
         // 最后一次预设切换的时间戳（毫秒，steady_clock）。GL 线程写，UI 线程读。
         // 用于在 soft-cut 过渡期间显示"Loading..."提示。
@@ -228,9 +228,8 @@ private:
         }
 
     private:
-        // Timer: GL 线程 60fps 更新 cachedGlFrame_，UI 线程的 paintContent
-        // 必须被定时唤醒才能消费这些帧。triggerRepaint() 无法可靠穿透到
-        // componentPaintingEnabled 管线，改用 Timer 在 UI 线程直接 repaint。
+        // Timer: UI 线程 30Hz。projectM 帧通过 glReadPixels → cachedGlFrame_
+        // → paintContent(g.drawImage) 显示。timer 驱动重绘、auto-hide 与 auto 轮播。
         void timerCallback() override;
         void loadPresetInternal();
         void attachIfNeeded();
@@ -309,10 +308,15 @@ private:
         // 用于在 soft-cut 过渡期间显示"Loading..."提示。
         std::atomic<int64_t>     last_preset_switch_time_ms_ { 0 };
 
-        // 帧缓存：renderOpenGL（GL 线程）通过 glReadPixels 从 FBO 0 回读 projectM
-        // 输出到此 Image；paintContent（UI 线程）将其绘制到内容区。用 mutex 保护。
+        // 帧缓存：renderOpenGL（GL 线程）通过 glReadPixels 从 GLView 的 FBO 0 回读，
+        // paintContent（UI 线程）以 g.drawImage 绘制到界面。mutex 保护。
         juce::Image              cachedGlFrame_;
         std::mutex               glFrameMutex_;
+
+        // setComponentPaintingEnabled(false) 时 GLView 拥有独立原生 HWND 子窗口。
+        // 调用此方法将其推到父窗口子控件 Z-order 最底层 + WS_EX_TRANSPARENT，
+        // 让 GDI 绘制的其他模块覆盖在 GL HWND 之上。
+        void pushNativeWindowToBottom();
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLView)
     };

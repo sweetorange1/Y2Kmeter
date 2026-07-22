@@ -123,6 +123,17 @@ public:
     // --------------------------------------------------
     void initialise (const juce::String&) override
     {
+        // 0) 启用文件日志：GUI 程序没有控制台，juce::Logger::writeToLog 默认输出到 stdout
+        //    无法看到。此处创建 FileLogger 写入可执行文件同目录的 Y2Kmeter.log。
+        //    （容量上限 1MB，超出后自动轮转）
+        {
+            juce::File exeDir = juce::File::getSpecialLocation(
+                juce::File::currentExecutableFile).getParentDirectory();
+            auto* fl = juce::FileLogger::createDateStampedLogger(
+                exeDir.getFullPathName(), "Y2Kmeter", ".log",
+                "===== Y2Kmeter Log Start =====");
+            juce::Logger::setCurrentLogger(fl);
+        }
 
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (

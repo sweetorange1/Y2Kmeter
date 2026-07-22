@@ -14,6 +14,16 @@
 
 #include "projectM-4/projectM.h"
 
+#if JUCE_WINDOWS
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+ #endif
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #include <windows.h>
+#endif
+
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -230,18 +240,32 @@ void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
 
 void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> content)
 {
+    static int paintCount = 0;
+    ++paintCount;
+
     // ---- Phase 1: 渲染主内容（GL 帧或兜底黑底） ----
     if (glView != nullptr && ! glView->getBounds().isEmpty())
     {
         if (glView->isRenderInitialized())
         {
           // projectM 已正常运行。GL 帧通过 g.drawImage 绘制到 GLView bounds。
-          // setComponentPaintingEnabled(false): 无 CachedImage，纯 GDI 绘制。
-          // 视频区域 = GLView bounds (content 去掉顶部 26px 控制栏)。
           std::lock_guard<std::mutex> lock(glView->getGlFrameMutex());
           auto& frame = glView->getCachedGlFrame();
-          if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0)
+          if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0) {
+            if (paintCount <= 10)
+              juce::Logger::writeToLog("[Milkdrop::paintContent] #" + juce::String(paintCount)
+                + " drawing frame " + juce::String(frame.getWidth()) + "x"
+                + juce::String(frame.getHeight())
+                + " at bounds " + glView->getBounds().toString());
             g.drawImage(frame, glView->getBounds().toFloat());
+          } else {
+            if (paintCount <= 10)
+              juce::Logger::writeToLog("[Milkdrop::paintContent] #" + juce::String(paintCount)
+                + " frame is NOT valid or zero-size: valid="
+                + juce::String(frame.isValid() ? "yes" : "no")
+                + " w=" + juce::String(frame.getWidth())
+                + " h=" + juce::String(frame.getHeight()));
+          }
         }
         else
         {
@@ -387,17 +411,17 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     glContext.setContinuousRepainting (true);
     glContext.setSwapInterval (1);             // vsync
 
-    // v2.1.10 修复：setComponentPaintingEnabled(false)
+    // v2.1.12 Z-order 修复：setComponentPaintingEnabled(false)
     //
-    //   true → JUCE 创建 CachedImage FBO，renderOpenGL 后 paintComponent
-    //   将组件树渲染进 FBO，drawComponentBuffer 合成到屏幕。但 projectM 内部
-    //   强制 glBindFramebuffer(0) → 渲染到默认 FBO 而非 CachedImage FBO，
-    //   导致 CachedImage 纹理为空/过期 → 覆盖 paintContent 的 GDI 控制栏。
-    //   此外模态对话框（PresetJumpDialog）与 GL 渲染管线冲突导致 deadlock。
+    //   false → GLView 拥有独立的原生 HWND 子窗口和独立 GL surface。
+    //   projectM 内部 glBindFramebuffer(0) 绑定的是 GLView 自己的 surface，
+    //   其 glClear 仅清除 GLView 自己的 back buffer，**不会污染主窗口 FBO 0**。
+    //   视频帧通过 glReadPixels 回读到 cachedGlFrame_，paintContent 用 GDI
+    //   绘制到正确 Z-order 位置。
     //
-    //   false → 无 CachedImage，GL 渲染到原生表面。GLView 上方留出 26px 的
-    //   GDI 控制栏区域不被 GL 原生窗口覆盖。视频帧通过 glReadPixels 回读到
-    //   cachedGlFrame_，在 paintContent 中用 g.drawImage 绘制到 GLView 区域。
+    //   HWND Z-order 问题：GLView 的原生子窗口默认在最上层，会遮挡其他模块。
+    //   在 scheduleAsyncAttach 中，attach 成功后通过 SetWindowPos 将 GLView
+    //   的 HWND 推到父窗口子控件 Z-order 最底层，让 GDI 绘制覆盖其上。
     glContext.setComponentPaintingEnabled (false);
 
     // 扫描预设目录（UI 线程；GL 线程之后只读 presetPaths）
@@ -453,6 +477,7 @@ void MilkdropModule::GLView::attachIfNeeded()
 
     // 到这一步：宿主已进入 peer 且 visible —— 可安全 attach。
     glContext.attachTo (*this);
+    pushNativeWindowToBottom();
 }
 
 void MilkdropModule::GLView::scheduleAsyncAttach()
@@ -495,6 +520,7 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
                 && self->getPeer() != nullptr)
             {
                 self->glContext.attachTo(*self);
+                self->pushNativeWindowToBottom();
             }
             else
             {
@@ -502,6 +528,65 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
             }
         }
     });
+}
+
+void MilkdropModule::GLView::pushNativeWindowToBottom()
+{
+    // 使 GLView 的原生 HWND 完全不可见：不再通过 SetWindowPos 操作 Z-order
+    // （那会误伤一级窗口导致整个 app 跑到桌面底部），而是用 SetWindowRgn(NULL)
+    // 将 HWND 的可见区域设为零——OpenGL 仍能正常渲染和 glReadPixels，
+    // 但 Windows 不绘制任何像素，GDI 内容自然透出。
+   #if JUCE_WINDOWS
+    if (auto* peer = getPeer())
+    {
+        auto* parentHwnd = static_cast<HWND>(peer->getNativeHandle());
+        if (parentHwnd)
+        {
+            // 枚举父窗口子控件，找到与 GLView 位置/尺寸匹配的 HWND
+            struct FindCtx {
+                HWND parent;
+                RECT target;  // GLView 在父窗口客户区中的位置
+                HWND found;
+            } ctx;
+            ctx.parent = parentHwnd;
+            ctx.found  = nullptr;
+
+            auto localBounds = getBounds();
+            ctx.target.left   = localBounds.getX();
+            ctx.target.top    = localBounds.getY();
+            ctx.target.right  = localBounds.getRight();
+            ctx.target.bottom = localBounds.getBottom();
+
+            ::EnumChildWindows(parentHwnd,
+                [](HWND hwnd, LPARAM lp) -> BOOL {
+                    auto* c = reinterpret_cast<FindCtx*>(lp);
+                    RECT r;
+                    ::GetWindowRect(hwnd, &r);
+                    ::MapWindowPoints(HWND_DESKTOP, c->parent, (LPPOINT)&r, 2);
+
+                    // 匹配左上角坐标（容差 2px）
+                    if (abs(r.left - c->target.left) <= 2 &&
+                        abs(r.top  - c->target.top)  <= 2)
+                    {
+                        c->found = hwnd;
+                        return FALSE;  // 停止枚举
+                    }
+                    return TRUE;
+                },
+                reinterpret_cast<LPARAM>(&ctx));
+
+            if (ctx.found)
+            {
+                // 不可见 + 鼠标穿透
+                ::SetWindowRgn(ctx.found, nullptr, TRUE);
+
+                LONG exStyle = ::GetWindowLong(ctx.found, GWL_EXSTYLE);
+                if (!(exStyle & WS_EX_TRANSPARENT))
+                    ::SetWindowLong(ctx.found, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
+            }
+        }
+    }
+   #endif
 }
 
 void MilkdropModule::GLView::parentHierarchyChanged()
@@ -681,25 +766,21 @@ void MilkdropModule::GLView::renderOpenGL()
 
     auto& api = projectm_api::Api::instance();
 
-    // 1) 尺寸同步：使用 GL viewport 尺寸（物理像素），而非 Component 逻辑尺寸。
-    //    HiDPI（150%/200% 缩放）下 Component::getWidth() 返回逻辑像素，
-    //    而 JUCE 的 glViewport 设为物理像素。projectM 内部 FBO 必须匹配
-    //    viewport 才能完整覆盖渲染区域，否则画面只在左下角显示。
-    GLint vp[4];
-    juce::gl::glGetIntegerv(juce::gl::GL_VIEWPORT, vp);
-    const int vpW = vp[2];
-    const int vpH = vp[3];
-
-    if (vpW > 0 && vpH > 0)
+    // 1) 尺寸同步（Component 尺寸随时可能改变）
+    const int cw = getWidth();
+    const int ch = getHeight();
+    if (cw > 0 && ch > 0)
     {
-        desiredWidth  = vpW;
-        desiredHeight = vpH;
+        desiredWidth  = cw;
+        desiredHeight = ch;
 
-        if (vpW != lastAppliedWidth || vpH != lastAppliedHeight)
+        // JUCE 的 GL context 会自动设置 viewport 匹配 Component 尺寸，
+        // 但 projectM 内部有自己的 FBO 尺寸——必须显式通知它。
+        if (cw != lastAppliedWidth || ch != lastAppliedHeight)
         {
-            api.setWindowSize(pmHandle, (std::size_t)vpW, (std::size_t)vpH);
-            lastAppliedWidth  = vpW;
-            lastAppliedHeight = vpH;
+            api.setWindowSize(pmHandle, (std::size_t)cw, (std::size_t)ch);
+            lastAppliedWidth  = cw;
+            lastAppliedHeight = ch;
         }
     }
 
@@ -778,17 +859,16 @@ void MilkdropModule::GLView::renderOpenGL()
 
     // 4) 让 projectM 出一帧
     //
-    //   当前 DLL 不支持 projectm_opengl_render_frame_fbo（fn_render_fbo=0），
-    //   走 fallback 路径：api.openglRenderFrame(pmHandle)。
+    // 关键：JUCE 在调用 renderOpenGL 之前会把它的 CachedImage FBO
+    // 绑到 GL_FRAMEBUFFER（Windows 上非 0），期望我们把最终画面写入
+    // 这个 FBO；bufferSwapper.swap() 再把它送到 HWND。
     //
-    //   projectM 内部 glBindFramebuffer(0) → 渲染到默认 FBO。
-    //   v2.1.10 修复：setWindowSize 使用 viewport 尺寸（物理像素），
-    //   确保 projectM 内部 FBO 与 GL viewport 匹配（修复 HiDPI 左下角问题）。
+    // 但 projectM 4 内部渲染最终帧时会 glBindFramebuffer(GL_FRAMEBUFFER, 0)，
+    // 把画面写到了"系统默认 FBO"——JUCE 拿不到，屏幕就永远是黑的。
     //
-    //   setComponentPaintingEnabled(false)：无 CachedImage FBO。
-    //   FBO 0 即为 JUCE 原生 GL 表面，projectM 输出直通该表面，
-    //   bufferSwapper.swap() 呈现。同时 glReadPixels 回读到 cachedGlFrame_，
-    //   供 paintContent 通过 g.drawImage 绘制视频帧。
+    // projectM 4.2.0+ 提供 projectm_opengl_render_frame_fbo(handle, fbo)，
+    // 让调用方指定输出 FBO。我们查询 GL 当前 draw framebuffer binding，
+    // 把这个 ID 传给 projectM。
     if (api.hasOpenglRenderFrameFbo())
     {
         GLint currentDrawFbo = 0;
@@ -799,47 +879,74 @@ void MilkdropModule::GLView::renderOpenGL()
     }
     else
     {
-        // v2.1.10: setComponentPaintingEnabled(false)，无 CachedImage FBO。
-        // FBO 0 即为 JUCE 的原生 GL 表面。projectM 内部 glBindFramebuffer(0)
-        // 将其输出直通该表面，bufferSwapper.swap() 呈现。
-        juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-        api.openglRenderFrame(pmHandle);
+      // projectM 内部强制 glBindFramebuffer(0) 渲染到默认 framebuffer。
+      // setComponentPaintingEnabled(false) 时，GLView 拥有独立的原生 HWND
+      // 和 GL surface，FBO 0 即为 GLView 自己的 back buffer——
+      // projectM glClear 只影响 GLView 自身，不污染主窗口。
+      //
+      // 策略：bind FBO 0 → projectM 渲染 → glReadPixels → cachedGlFrame_
+      // → paintContent 用 GDI g.drawImage 绘制到正确 Z-order 位置。
 
-        if (vpW > 0 && vpH > 0)
+      static int renderCount = 0;
+      ++renderCount;
+
+      if (renderCount <= 3)
+        juce::Logger::writeToLog("[Milkdrop::GL] renderOpenGL #" + juce::String(renderCount)
+          + " cw=" + juce::String(cw) + " ch=" + juce::String(ch));
+
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+      api.openglRenderFrame(pmHandle);
+
+      // 回读像素（FBO 0 → CPU buffer → cachedGlFrame_），支持降分辨率读取
+      if (cw > 0 && ch > 0)
+      {
+        const int scale = static_cast<int>(readback_scale_.load());
+        const int rw = cw / scale;
+        const int rh = ch / scale;
+        const int rwClamped = juce::jmax(1, rw);
+        const int rhClamped = juce::jmax(1, rh);
+
+        std::vector<uint8_t> pixels(
+            static_cast<size_t>(cw * ch * 4));
+        juce::gl::glReadBuffer(juce::gl::GL_BACK);
+        juce::gl::glReadPixels(0, 0, (GLsizei)cw, (GLsizei)ch,
+                               juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                               pixels.data());
+
+        if (renderCount <= 3)
+          juce::Logger::writeToLog("[Milkdrop::GL] glReadPixels done"
+            + juce::String(" pixels[0..3]=") + juce::String(static_cast<int>(pixels[0]))
+            + "," + juce::String(static_cast<int>(pixels[1]))
+            + "," + juce::String(static_cast<int>(pixels[2]))
+            + "," + juce::String(static_cast<int>(pixels[3])));
+
+        std::lock_guard<std::mutex> lock(glFrameMutex_);
+        if (cachedGlFrame_.getWidth() != rwClamped
+            || cachedGlFrame_.getHeight() != rhClamped)
+          cachedGlFrame_ = juce::Image(juce::Image::ARGB, rwClamped, rhClamped, true);
+
+        juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
+        for (int y = 0; y < rhClamped; ++y)
         {
-          // 回读像素（viewport 尺寸 = 物理像素）→ cachedGlFrame_
-          // 供 paintContent 用 g.drawImage 绘制到 GDI 表面
-          std::vector<uint8_t> pixels(static_cast<size_t>(vpW * vpH * 4));
-          juce::gl::glReadBuffer(juce::gl::GL_BACK);
-          juce::gl::glReadPixels(0, 0, (GLsizei)vpW, (GLsizei)vpH,
-                                 juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
-                                 pixels.data());
-
-          // Y 轴翻转：OpenGL 原点在左下，Image 原点在左上
+          const int srcY = ch - 1 - (y * scale + scale / 2);
+          const uint8_t* srcRow = pixels.data()
+              + static_cast<size_t>(srcY * cw * 4);
+          for (int x = 0; x < rwClamped; ++x)
           {
-            std::lock_guard<std::mutex> lock(glFrameMutex_);
-            if (cachedGlFrame_.getWidth() != vpW || cachedGlFrame_.getHeight() != vpH)
-              cachedGlFrame_ = juce::Image(juce::Image::ARGB, vpW, vpH, true);
-
-            juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
-            for (int y = 0; y < vpH; ++y) {
-              const int srcY = vpH - 1 - y;
-              const uint8_t* srcRow = pixels.data() + static_cast<size_t>(srcY * vpW * 4);
-              for (int x = 0; x < vpW; ++x) {
-                const int srcIdx = x * 4;
-                *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
-                    (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
-                    | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
-                    | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
-                    | static_cast<uint32_t>(srcRow[srcIdx + 2]);
-              }
-            }
+            const int srcX = x * scale + scale / 2;
+            const int srcIdx = srcX * 4;
+            *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
+                (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
+                | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
+                | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
+                | static_cast<uint32_t>(srcRow[srcIdx + 2]);
           }
         }
+      }
     }
 
     // 5) continuousRepainting=true 已由 JUCE GL 线程自持续驱动，
-    //    onFrame 送 PCM 只负责“数据侧”，无需再手动 triggerRepaint。
+    //    onFrame 送 PCM 只负责"数据侧"，无需再手动 triggerRepaint。
     //    hub 断线时 renderOpenGL 仍会以 vsync 频率被调用，但推入合成 PCM，
     //    projectM 也会保持动画不冻结。
 }
