@@ -7,7 +7,7 @@
 <p align="center"><strong>Y2K 像素复古音频分析仪</strong> — VST3 / AU / Standalone</p>
 
 <p align="center">
-<img src="https://img.shields.io/badge/version-2.1.7-blue" alt="Version">
+<img src="https://img.shields.io/badge/version-2.1.8-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
 </p>

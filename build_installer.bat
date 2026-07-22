@@ -27,6 +27,10 @@ if not exist "%ISCC_PATH%" (
 
 echo [INFO] 使用编译器: "%ISCC_PATH%"
 echo [INFO] 开始打包: "%ISS_FILE%"
+
+:: 切换到脚本目录，确保 .iss 中的相对 Source 路径（cmake-build-release-visual-studio\...、assets\...）正确解析
+cd /d "%SCRIPT_DIR%"
+
 "%ISCC_PATH%" "%ISS_FILE%"
 
 if errorlevel 1 (

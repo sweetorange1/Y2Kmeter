@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.1.7`）
+- **产品名**：`Y2Kmeter` （版本：`2.1.8`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -2105,7 +2105,39 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 
 --- 
 
-#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7）
+#### ⑧ v2.1.8 变更记录
+
+**1. 修复安装包打包失败（ISCC 长路径问题）**（[build_installer.bat](I:/Y2KMeter/build_installer.bat) + 所有 `.milk` 预设文件）
+
+| 现象 | 根因 | 修复 |
+|------|------|------|
+| ISCC 报 `系统找不到指定的路径` | 32 位 ISCC 受 Windows MAX_PATH(260字符) 限制，部分预设文件名最长 145 字符 + 深层构建路径超过限制 | 智能缩写过长的 `.milk` 文件名：移除 `--- Isosceles edit` 等编辑标注，截断 `nz+` 后的冗长描述，去掉 `- claim form`/`- mash0000` 后缀。最长文件名 145→95 字符 |
+
+三个目录同步缩写：`assets/milkdrop_presets`、`Standalone/milkdrop_presets`、`VST3/.../milkdrop_presets`。
+
+同时优化 `build_installer.bat`：添加 `cd /d "%SCRIPT_DIR%"` 确保从任意路径启动时 ISCC 相对路径解析正确。
+
+**2. 去除内容重复的预设文件**
+
+遍历全部预设文件，MD5 比对发现并移除内容完全相同的重复预设，避免冗余文件被打包。最终 1114 个唯一预设。
+
+**3. 清理非运行时文件防止被打包**（`assets/Tamagotchi/`）
+
+将 `assets/Tamagotchi/egg/cut.xlsx` 和 `role/cut.xlsx`（切图工具表格）从源目录移出，避免被打包进安装包。
+
+**4. 安装包冗余内容审查**
+
+审查了 Standalone 和 VST3 两个组件的 CMake 部署逻辑（`y2km_copy_projectm_runtime`），确认：
+- `projectM-4.dll` / `glew32.dll` — Milkdrop 运行时 DLL ✅
+- `milkdrop_presets/` — 预设目录 ✅
+- `milkdrop_textures/` — 纹理目录 ✅
+- 无其他开发工具、临时文件、或冗余资源被打包
+
+**版本号**：`2.1.7 → 2.1.8`
+
+--- 
+
+#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8）
 
 1. **写第三方 C 头封装类时，命名空间不要跟第三方公开符号重名**——用 `_api` 后缀。
 2. **中文注释源文件必须存为 UTF-8 with BOM**（Windows MSVC 下 GBK 解码会把 `。` 认成非法字符）。

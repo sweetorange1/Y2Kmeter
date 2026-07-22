@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "2.1.7"
+#define MyAppVersion   "2.1.8"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -64,6 +64,11 @@ Name: "vst3";       Description: "VST3 Plugin";                   Types: full cu
 Type: files; Name: "{app}\{#MyAppExeName}"; Components: standalone
 ; Standalone：删除旧 Tamagotchi 动画资源目录（若存在）
 Type: filesandordirs; Name: "{app}\assets\Tamagotchi"; Components: standalone
+; Standalone：删除旧 Milkdrop 运行时（projectM DLL + glew32 + 预设/纹理目录，确保升级时全量覆盖）
+Type: files; Name: "{app}\projectM-4.dll"; Components: standalone
+Type: files; Name: "{app}\glew32.dll"; Components: standalone
+Type: filesandordirs; Name: "{app}\milkdrop_presets"; Components: standalone
+Type: filesandordirs; Name: "{app}\milkdrop_textures"; Components: standalone
 ; VST3：删除旧 bundle 目录（若存在），用户选择的目录由 [Code] 段 GetVst3Dir 决定
 Type: filesandordirs; Name: "{code:GetVst3Dir}\{#MyPluginBundle}"; Components: vst3
 
@@ -80,6 +85,28 @@ Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone
 ; Standalone Tamagotchi 动画资源（递归复制）
 Source: "assets\Tamagotchi\*"; \
     DestDir: "{app}\assets\Tamagotchi"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: standalone
+
+; Standalone Milkdrop 运行时 DLL（projectM 渲染库 + OpenGL 扩展加载器）
+Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone\projectM-4.dll"; \
+    DestDir: "{app}"; \
+    Flags: ignoreversion; \
+    Components: standalone
+Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone\glew32.dll"; \
+    DestDir: "{app}"; \
+    Flags: ignoreversion; \
+    Components: standalone
+
+; Standalone Milkdrop 预设（~1000 个 .milk 文件，Milkdrop 可视化必需）
+Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone\milkdrop_presets\*"; \
+    DestDir: "{app}\milkdrop_presets"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: standalone
+
+; Standalone Milkdrop 纹理（projectM 渲染使用的 jpg 纹理）
+Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone\milkdrop_textures\*"; \
+    DestDir: "{app}\milkdrop_textures"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: standalone
 
