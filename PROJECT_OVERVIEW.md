@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.1.8`）
+- **产品名**：`Y2Kmeter` （版本：`2.1.9`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -287,12 +287,34 @@ main
 ### 5.4 主题切换流程
 
 ```
-用户点 ThemeSwatchBar 色票
+预设主题切换：
+  用户点 ThemeSwatchBar 色票
   → PinkXP::applyTheme(id)
   → 全局调色板变量（pink50..pink700, ink, sel, desktop, ...）就地覆盖
   → PinkXP::invalidateDesktopTextureCache()（下一帧重烘焙）
   → 触发所有 ThemeChangedCallback（组件订阅重绘）
   → workspace.hoverPreviewCache 全部失效（下次 hover 重新渲染）
+
+自定义主题创建：
+  用户点 ThemeSwatchBar 最左侧双三角方块 → 弹出 CustomThemePicker（RGB 色盘 ×2）
+  → 用户分别选取 primary（映射 sel/swatch）和 secondary（映射 hl/desktop2）
+  → 点 Apply → PinkXP::applyCustomTheme(primary, secondary)
+  → 内部根据双色派生完整 Theme 结构写入 gCustomTheme
+  → gCurrentThemeId = ThemeId::custom
+  → 触发 ThemeChangedCallback（与预设主题切换一致）
+
+自定义主题持久化：
+  退出软件 → saveUiAndAudioState()
+    → setValue("ui.themeId", (int)ThemeId::custom)
+    → setValue("ui.customPrimary", primary.toString())     // 如 "ff39ff14"
+    → setValue("ui.customSecondary", secondary.toString())
+
+  重启软件 → initialise() 1.15)
+    → 检测 savedThemeRaw == ThemeId::custom
+    → getValue("ui.customPrimary")   → Colour::fromString → primary
+    → getValue("ui.customSecondary") → Colour::fromString → secondary
+    → applyCustomTheme(primary, secondary)
+    → 之后 Editor 构造 applyTheme(getCurrentThemeId()) 再次确认一致
 ```
 
 ---
@@ -1167,6 +1189,7 @@ Y2KMainWindow (juce::DocumentWindow, 无边框)
 | 新增一种分析计算 | `AnalyserHub` 里加 `Kind`、加 pushStereo 分支、加 FrameSnapshot 字段 |
 | 新增一个模块类型 | 1) `ModuleWorkspace.h` 的 `ModuleType` 枚举扩展；2) `moduleTypeToString`/`stringToModuleType`（含向后兼容旧字符串→新类型映射）；3) `getModuleDisplayName`；4) `PluginEditor.cpp` 的 `createModule` 工厂加 case + `availableTypes` 补录；5) `PerformanceCounterSystem.cpp` 的 `moduleTypeNameById` 追加条目（ID 按枚举序数编排）；6) `CMakeLists.txt` 加新 `.h/.cpp`；7) `PROJECT_OVERVIEW.md` 同步更新。**若删除旧类型，参见 §6.15 完整检查清单** |
 | 加一个主题 | `PinkXPStyle.h` `ThemeId` 加枚举；`PinkXPStyle.cpp` `getAllThemes()` 追加 `Theme` 结构；`ThemeSwatchBar` 会自动展现 |
+| 自定义主题持久化 | 保存：`Y2KStandaloneApp::saveUiAndAudioState()` 写 `ui.customPrimary`/`ui.customSecondary`；加载：`initialise()` 1.15) 分支检测 `ThemeId::custom` → 读回 `Colour::fromString()` → `applyCustomTheme()` |
 | 修改音频前置增益范围 | `PluginProcessor.cpp` 的 `clampGainDb`（当前 -10..+36 dB）+ `ModuleWorkspace` 里 gainSlider 的 setRange |
 | 换字体 | `CMakeLists.txt` 的 `Y2KM_FONT_EN_SRC`；`PinkXP::loadActiveTypeface` 里 BinaryData 引用 |
 | 调 FPS 分档策略 | [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `applyAdaptiveFrameRate` |
@@ -2137,7 +2160,26 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 
 --- 
 
-#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8）
+#### ⑨ v2.1.9 变更记录
+
+**1. 自定义主题颜色持久化**
+
+**问题**：用户退出前若使用的是自定义主题（通过调色板 RGB 选择），重启软件后主题回退到默认 winXP，必须重新打开 CustomThemePicker 并点 Apply 才能恢复。
+
+**根因**：
+- `gCurrentThemeId` / `gCustomPrimary` / `gCustomSecondary` 是 static 变量，重启后初始化为默认值
+- `saveUiAndAudioState()` 只保存了 `ui.themeId` 整数，未保存自定义颜色的 RGB 值
+- `initialise()` 恢复时只在 `getAllThemes()` 预设列表中匹配，`ThemeId::custom` 不在其中 → 落到 winXP
+
+**修复**（仅改动 [Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp)）：
+- **保存**：`saveUiAndAudioState()` 中若 `isCustomThemeActive()`，额外写入 `ui.customPrimary` / `ui.customSecondary`（`juce::Colour::toString()` 格式 `ffaabbcc`）
+- **加载**：`initialise()` 1.15) 分支检测到 `savedThemeRaw == ThemeId::custom` 时，通过 `juce::Colour::fromString()` 解析双色 → `applyCustomTheme()` 重建
+
+**版本号**：`2.1.8 → 2.1.9`
+
+--- 
+
+#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8 + v2.1.9）
 
 1. **写第三方 C 头封装类时，命名空间不要跟第三方公开符号重名**——用 `_api` 后缀。
 2. **中文注释源文件必须存为 UTF-8 with BOM**（Windows MSVC 下 GBK 解码会把 `。` 认成非法字符）。
