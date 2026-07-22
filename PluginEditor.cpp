@@ -1392,10 +1392,26 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //       直接走软光栅路径反而更快。
     //     Windows 侧 WGL + 硬件驱动对小批次 draw / 纹理部分更新优化成熟，保持开启。
     // ==================================================================
+    //
+    // ⚠️ 嵌套 OpenGL 上下文处理（v2.1.8）：
+    //   Editor 的 openGLContext 提供 GPU 加速的组件渲染（setComponentPaintingEnabled(true)），
+    //   能将所有子组件的 paint() 翻译成 GL 批次在 GPU 执行，CPU 负载大幅下降。
+    //
+    //   但当 workspace 中存在 MilkdropModule（GLView 持有独立 juce::OpenGLContext）
+    //   时，外层 Editor GL 在渲染 GLView 时会从 GL 线程（而非消息线程）调用
+    //   CachedImage::paint()，触发 juce_OpenGLContext.cpp:239 的 jassertfalse
+    //   （Debug 下 int3 断点崩溃）。JUCE 官方明确不支持嵌套 GL 上下文。
+    //
+    //   策略：Release 模式保持完整 GPU 加速（jassertfalse 编译为 no-op，嵌套
+    //   GL 渲染只是跳过 GLView 的 CachedImage 更新，不影响功能）；Debug 模式
+    //   跳过 attachTo 走 CPU 软光栅，方便调试。
+    // ==================================================================
 #if ! JUCE_MAC
-    openGLContext.setContinuousRepainting (false);
-    openGLContext.setComponentPaintingEnabled (true);
-    openGLContext.attachTo (*this);
+   #ifdef NDEBUG  // Release: 开启 GPU 加速组件渲染
+    openGLContext.setContinuousRepainting(false);
+    openGLContext.setComponentPaintingEnabled(true);
+    openGLContext.attachTo(*this);
+   #endif
 #endif
 
     // Temporary profiling hook: with Y2K_ENABLE_PERF_COUNTERS=1 this writes

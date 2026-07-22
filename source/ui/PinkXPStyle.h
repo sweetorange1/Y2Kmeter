@@ -148,10 +148,12 @@ namespace PinkXP
         tangerinePop, // 🍊 橘色波普 + 奶油
         aquaPearl,    // 🪞 水蓝珠光
         matchaSoda,   // 🫧 苏打绿 + 粉
+        jungle,       // 🌿 丛林深绿
         winXP,        // 🪟 Windows XP 经典配色（Luna 蓝 / 绿草地）
         crimsonNoir,  // 🩸 红黑暗夜（深酒红 + 漆黑）
         voidGrey,     // ⬛ 纯黑灰（OLED 友好的暗色极简）
-        paperGrey     // ⬜ 纯白灰（纸面极简，亮色）
+        paperGrey,    // ⬜ 纯白灰（纸面极简，亮色）
+        custom        // 🎨 用户自定义（通过预览方块调色板生成）
     };
 
     // 桌面纹理样式
@@ -196,6 +198,18 @@ namespace PinkXP
 
     // 切换主题（写入全局调色板变量 + 触发 onThemeChanged 回调）
     void applyTheme(ThemeId id);
+
+    // 根据用户指定的双色生成并应用自定义主题
+    //   primary：预览方块左上三角色 → 映射到 sel / swatch
+    //   secondary：预览方块右下三角色 → 映射到 hl / desktop2
+    void applyCustomTheme(juce::Colour primary, juce::Colour secondary);
+
+    // 获取当前自定义主题的两种颜色（供 ThemeSwatchBar 绘制预览方块）
+    juce::Colour getCustomPrimary();
+    juce::Colour getCustomSecondary();
+
+    // 当前激活的主题是否为自定义主题
+    bool isCustomThemeActive();
 
     // 订阅主题变更事件（例如顶层 Editor 注册一个 repaint 全局刷新）
     // 返回订阅 token，调用 unsubscribeThemeChanged(token) 取消。

@@ -706,6 +706,33 @@ namespace PinkXP
                 DesktopPattern::diagStripes,
                 "\\"
             },
+            // ---- 🌿 Jungle（荧光绿丛林）----
+            //   · 荧光霓虹绿：暗黑丛林底 + 高饱和亮绿阶 → 经典荧光绿 #39FF14
+            //   · 桌面 pixelStars 模拟暗夜雨林中的萤火虫/孢子光点
+            //   · btnFace 暗绿底 + 亮绿 ink，确保深色主题下按钮文字清晰可读
+            {
+                ThemeId::jungle,
+                "Jungle",
+                "Neon / Rainforest / Fluorescent",
+                juce::Colour(0xff081002), juce::Colour(0xff102006), // pink50/100 近黑→深暗绿
+                juce::Colour(0xff1d3810), juce::Colour(0xff2a5218), // pink200/300 暗绿→暗翠绿
+                juce::Colour(0xff39ff14), juce::Colour(0xff60ff40), // pink400/500 ★荧光绿→亮柠绿
+                juce::Colour(0xff80ff6a), juce::Colour(0xffa0ff90), // pink600/700 亮霓虹→浅霓虹
+                juce::Colour(0xff204a0e),                           // hl（暗绿高光）
+                juce::Colour(0xff0a1a04),                           // face（深暗绿按钮面）
+                juce::Colour(0xff040c01),                           // shdw
+                juce::Colour(0xff010301),                           // dark（几乎纯黑）
+                juce::Colour(0xffc0ffa0),                           // ink（亮浅绿文字，暗底高对比）
+                juce::Colour(0xff39ff14),                           // sel（荧光绿标题栏）
+                juce::Colour(0xff050d02),                           // selInk（暗绿字 on 荧光绿标题）
+                juce::Colour(0xff040901),                           // desktop（暗黑丛林底）
+                juce::Colour(0xff39ff14),                           // desktop2（荧光绿纹理点，萤火虫感）
+                juce::Colour(0xff060e02),                           // content（暗黑绿画布）
+                juce::Colour(0xff122808),                           // btnFace（暗绿按钮底，与亮 ink 对比强）
+                juce::Colour(0xff39ff14),                           // swatch（荧光绿色票）
+                DesktopPattern::pixelStars,
+                "\xe2\x9c\xa6" // ✦（荧光星芒）
+            },
             // ---- 🪟 Windows XP Luna（经典 Bliss 蓝天绿草）----
             //   pink50..pink700 在此主题下被"重新解读"为一组 Luna 蓝色阶
             //   （从极浅 sky → 经典 Luna 深蓝），所有使用 pink* 色的 UI
@@ -832,10 +859,21 @@ namespace PinkXP
     static std::vector<ThemeSub> gThemeSubs;
     static int gNextThemeSubToken = 1;
 
+    // 自定义主题状态
+    static juce::Colour gCustomPrimary { 0xffec4d85 };     // 默认粉色
+    static juce::Colour gCustomSecondary { 0xffffffff };    // 默认白色
+    static Theme gCustomTheme;                              // 运行时动态构建的完整Theme
+
+    juce::Colour getCustomPrimary()  { return gCustomPrimary; }
+    juce::Colour getCustomSecondary() { return gCustomSecondary; }
+    bool isCustomThemeActive() { return gCurrentThemeId == ThemeId::custom; }
+
     ThemeId getCurrentThemeId() { return gCurrentThemeId; }
 
     const Theme& getCurrentTheme()
     {
+        if (gCurrentThemeId == ThemeId::custom)
+            return gCustomTheme;
         const auto& all = getAllThemes();
         for (const auto& t : all)
             if (t.id == gCurrentThemeId)
@@ -886,6 +924,94 @@ namespace PinkXP
         {
             if (it->token == token) { gThemeSubs.erase(it); return; }
         }
+    }
+
+    void applyCustomTheme(juce::Colour primary, juce::Colour secondary)
+    {
+        gCustomPrimary   = primary;
+        gCustomSecondary = secondary;
+
+        // 判断 primary 是亮色还是暗色 → 决定文字色方向
+        const float brightness = primary.getBrightness();
+        const bool  isDark     = (brightness <= 0.45f);
+
+        // pink50→pink700：以 primary 为 pivot(pink500)，向暗→亮两端拉伸 8 阶
+        auto stretch = [](juce::Colour c, float f) {
+            f = juce::jlimit(-1.0f, 1.0f, f);
+            if (f < 0.0f) return c.darker(-f);  // f ∈ [-1,0) → darker(0..1]
+            if (f > 0.0f) return c.brighter(f);  // f ∈ (0,1] → brighter(0..1]
+            return c;
+        };
+
+        const juce::Colour pk50  = stretch(primary, -0.65f);
+        const juce::Colour pk100 = stretch(primary, -0.50f);
+        const juce::Colour pk200 = stretch(primary, -0.32f);
+        const juce::Colour pk300 = stretch(primary, -0.15f);
+        const juce::Colour pk400 = stretch(primary,  0.00f);
+        const juce::Colour pk500 = stretch(primary,  0.12f);
+        const juce::Colour pk600 = stretch(primary,  0.25f);
+        const juce::Colour pk700 = stretch(primary,  0.40f);
+
+        const juce::Colour hlCol   = secondary.brighter(0.08f);
+        const juce::Colour desCol  = primary.darker(0.35f);
+        const juce::Colour des2Col = secondary;
+
+        // 桌面和基础底色由 primary 亮度决定走向
+        const juce::Colour darkCol = desCol.darker(0.30f);
+        const juce::Colour shdwCol = desCol.darker(0.18f);
+        const juce::Colour faceCol = desCol.brighter(0.12f);
+
+        // 文字色自适应：暗底→亮字，亮底→暗字
+        const juce::Colour inkCol   = isDark ? juce::Colour(0xffe0e0e0)
+                                             : juce::Colour(0xff1a1a1a);
+        const juce::Colour selInkCol = isDark ? juce::Colour(0xff050505)
+                                              : juce::Colour(0xffffffff);
+        const juce::Colour btnFaceCol = isDark ? desCol.brighter(0.25f)
+                                               : primary.brighter(0.35f);
+        const juce::Colour contentCol = isDark ? desCol.brighter(0.08f)
+                                               : primary.brighter(0.65f);
+
+        // 构建完整 Theme
+        gCustomTheme = Theme{
+            ThemeId::custom,
+            "Custom",
+            "RGB / Your colors",
+            pk50,  pk100, pk200, pk300, pk400, pk500, pk600, pk700,
+            hlCol,     // hl
+            faceCol,   // face
+            shdwCol,   // shdw
+            darkCol,   // dark
+            inkCol,    // ink
+            primary,   // sel → 标题栏用 primary
+            selInkCol, // selInk
+            desCol,    // desktop
+            des2Col,   // desktop2
+            contentCol,// content
+            btnFaceCol,// btnFace
+            primary,   // swatch
+            DesktopPattern::checker,
+            "+"        // titleIconText
+        };
+
+        // 走统一主题切换流程（复用 applyTheme 后半的写入 + 通知逻辑）
+        gCurrentThemeId = ThemeId::custom;
+        const Theme& t  = gCustomTheme;
+
+        pink50 = t.pink50;   pink100 = t.pink100; pink200 = t.pink200; pink300 = t.pink300;
+        pink400 = t.pink400; pink500 = t.pink500; pink600 = t.pink600; pink700 = t.pink700;
+
+        hl  = t.hl;   face = t.face; shdw = t.shdw; dark = t.dark;
+        ink = t.ink;  sel  = t.sel;  selInk = t.selInk;
+        desktop  = t.desktop;
+        desktop2 = t.desktop2;
+        content  = t.content;
+        btnFace  = t.btnFace;
+
+        syncPinkXPColours(getPinkXPLookAndFeel());
+        invalidateDesktopTextureCache();
+
+        for (auto& s : gThemeSubs)
+            if (s.cb) s.cb();
     }
 }
 

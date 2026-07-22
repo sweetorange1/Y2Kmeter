@@ -280,6 +280,23 @@ ModuleWorkspace::ModuleWorkspace()
     // 底部工具栏：主题选择器（XP 画图调色板样式）
     addAndMakeVisible(themeBar);
 
+    // 自定义主题双色取色器（点击预览方块时在左下角弹出）
+    addChildComponent(customThemePicker);
+    themeBar.onPreviewClicked = [this]()
+    {
+        customThemePicker.show(
+            PinkXP::getCustomPrimary(),
+            PinkXP::getCustomSecondary(),
+            [this](juce::Colour primary, juce::Colour secondary)
+            {
+                PinkXP::applyCustomTheme(primary, secondary);
+                if (auto* top = getTopLevelComponent()) top->repaint();
+            });
+        // 取色器定位到 workspace 左下角（toolbar 上方）
+        customThemePicker.setTopLeftPosition(
+            8, getHeight() - toolbarHeight - customThemePicker.getHeight() - 6);
+    };
+
     // 底部工具栏中部：音频信号源下拉（默认只放一个占位项 "System Output (Loopback)"，
     // 由 Standalone App 在启动时通过 setAudioSourceItems() 替换为真实设备列表）
     audioSourceLabel.setText ("Source", juce::dontSendNotification);
@@ -2057,6 +2074,10 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
 
 void ModuleWorkspace::resized()
 {
+    // 窗口尺寸变化时关闭可能处于错误位置的取色器
+    if (customThemePicker.isShowing())
+        customThemePicker.dismiss();
+
     // ---- 按钮尺寸（常量）----
     constexpr int btnW = 52;
     constexpr int btnH = 22;
@@ -2942,20 +2963,21 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
     {
         const auto prev = getPreviewBounds();
         const auto& th  = PinkXP::getCurrentTheme();
+        const bool isCustom = PinkXP::isCustomThemeActive();
         PinkXP::drawSunken(g, prev, juce::Colours::white);
         auto inner = prev.reduced(3);
 
-        // 底色 = 主色（swatch）
-        g.setColour(th.swatch);
+        // 右下三角 = 主色（swatch 或 custom primary）
+        g.setColour(isCustom ? PinkXP::getCustomPrimary() : th.swatch);
         g.fillRect(inner);
 
-        // 左上三角 = hl（高光/珍珠色），斜分
+        // 左上三角 = 次色（hl 或 custom secondary）
         juce::Path tri;
         tri.startNewSubPath((float) inner.getX(),     (float) inner.getY());
         tri.lineTo        ((float) inner.getRight(),  (float) inner.getY());
         tri.lineTo        ((float) inner.getX(),     (float) inner.getBottom());
         tri.closeSubPath();
-        g.setColour(th.hl);
+        g.setColour(isCustom ? PinkXP::getCustomSecondary() : th.hl);
         g.fillPath(tri);
     }
 
@@ -3051,6 +3073,14 @@ void ThemeSwatchBar::mouseExit(const juce::MouseEvent&)
 
 void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
 {
+    // 检查是否点击了左侧预览方块 → 弹出自定义取色器
+    if (getPreviewBounds().contains(e.getPosition()))
+    {
+        if (onPreviewClicked)
+            onPreviewClicked();
+        return;
+    }
+
     const int idx = hitTestSwatch(e.getPosition());
     if (idx >= 0)
     {
@@ -3060,6 +3090,209 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
         if (auto* top = getTopLevelComponent()) top->repaint();
         else                                    repaint();
     }
+}
+
+// ==========================================================
+// CustomThemePicker —— 自定义主题双色取色器弹出面板
+// ==========================================================
+
+// 全局点击外部关闭监听器（点击取色器外部区域时自动关闭）
+class CustomThemePicker::DismissListener : public juce::MouseListener
+{
+public:
+    explicit DismissListener(CustomThemePicker& ownerRef) : owner_(ownerRef) {}
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        // 如果点击不在取色器范围内，关闭之
+        if (!owner_.getScreenBounds().contains(e.getScreenPosition()))
+            owner_.dismiss();
+    }
+
+private:
+    CustomThemePicker& owner_;
+};
+
+CustomThemePicker::CustomThemePicker()
+    : dismissListener_(std::make_unique<DismissListener>(*this))
+{
+    // 不在构造阶段创建任何复杂子控件（ColourSelector 内部会创建 Slider 等，
+    //   在 ModuleWorkspace 构造期间初始化这些控件可能触发空 vtable 崩溃）。
+    //   所有子控件延迟到 createChildComponents()（首次 show() 调用时）创建。
+
+    // 设置组件基本尺寸（不创建子控件）
+    setSize(560, 280);
+    setVisible(false);
+}
+
+CustomThemePicker::~CustomThemePicker()
+{
+    detachDismissListener();
+}
+
+void CustomThemePicker::createChildComponents()
+{
+    if (primarySelector_ != nullptr)
+        return;  // 已经创建过
+
+    // ---- Primary 取色器 ----
+    primarySelector_ = std::make_unique<juce::ColourSelector>();
+    primarySelector_->setSize(240, 200);
+    addAndMakeVisible(*primarySelector_);
+
+    // ---- Secondary 取色器 ----
+    secondarySelector_ = std::make_unique<juce::ColourSelector>();
+    secondarySelector_->setSize(240, 200);
+    addAndMakeVisible(*secondarySelector_);
+
+    // ---- 标签 ----
+    primaryLabel_.setText("Primary (Title / Accent)", juce::dontSendNotification);
+    primaryLabel_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
+    primaryLabel_.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(primaryLabel_);
+
+    secondaryLabel_.setText("Secondary (Highlight / Texture)", juce::dontSendNotification);
+    secondaryLabel_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
+    secondaryLabel_.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(secondaryLabel_);
+
+    // ---- 标题 ----
+    titleLabel_.setText("Custom Theme Picker", juce::dontSendNotification);
+    titleLabel_.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
+    titleLabel_.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(titleLabel_);
+
+    // ---- Apply 按钮 ----
+    applyBtn_.setButtonText("Apply");
+    applyBtn_.onClick = [this] { applyAndDismiss(); };
+    addAndMakeVisible(applyBtn_);
+
+    // ---- Cancel 按钮 ----
+    cancelBtn_.setButtonText("Cancel");
+    cancelBtn_.onClick = [this] { dismiss(); };
+    addAndMakeVisible(cancelBtn_);
+
+    // 触发首次布局
+    resized();
+}
+
+void CustomThemePicker::paint(juce::Graphics& g)
+{
+    // 子控件未创建时不绘制内部
+    if (primarySelector_ == nullptr)
+        return;
+
+    // 凹槽边框 + PinkXP 样式背景
+    PinkXP::drawSunken(g, getLocalBounds(), PinkXP::btnFace);
+    auto inner = getLocalBounds().reduced(3);
+    g.setColour(PinkXP::content);
+    g.fillRect(inner);
+
+    // 两个取色器之间的垂直线分隔
+    const int midX = inner.getCentreX();
+    g.setColour(PinkXP::dark);
+    g.fillRect(midX - 1, inner.getY() + 24, 2, inner.getHeight() - 28);
+}
+
+void CustomThemePicker::resized()
+{
+    // 子控件未创建时跳过布局
+    if (primarySelector_ == nullptr)
+        return;
+
+    auto area = getLocalBounds().reduced(6);
+
+    // 标题栏
+    const int titleH = 20;
+    titleLabel_.setBounds(area.removeFromTop(titleH));
+    area.removeFromTop(4);
+
+    // 两个色盘并排，中间留分隔区
+    const int halfW = (area.getWidth() - 14) / 2;
+    auto leftArea  = area.removeFromLeft(halfW);
+    auto rightArea = area.removeFromRight(halfW);
+
+    auto leftLabel  = leftArea.removeFromTop(16);
+    auto rightLabel = rightArea.removeFromTop(16);
+    primaryLabel_.setBounds(leftLabel);
+    secondaryLabel_.setBounds(rightLabel);
+
+    primarySelector_->setBounds(leftArea.reduced(2));
+    secondarySelector_->setBounds(rightArea.reduced(2));
+
+    // Apply / Cancel 按钮（水平居中）
+    const int btnW = 70;
+    const int btnH = 24;
+    const int btnY = getHeight() - btnH - 5;
+    const int gap  = 8;
+    const int totalBtnW = btnW * 2 + gap;
+    const int btnX = (getWidth() - totalBtnW) / 2;
+    cancelBtn_.setBounds(btnX, btnY, btnW, btnH);
+    applyBtn_.setBounds(btnX + btnW + gap, btnY, btnW, btnH);
+}
+
+void CustomThemePicker::show(juce::Colour primary, juce::Colour secondary,
+                             std::function<void(juce::Colour, juce::Colour)> onApply)
+{
+    onApplyCallback_ = std::move(onApply);
+
+    // 延迟创建子控件（首次 show 时才创建 ColourSelector 等复杂控件）
+    createChildComponents();
+
+    primarySelector_->setCurrentColour(primary);
+    secondarySelector_->setCurrentColour(secondary);
+    visible_ = true;
+    setVisible(true);
+    toFront(false);
+
+    // 关键：不能在这里直接 attachDismissListener()。
+    // 当前 mouseDown 事件既触发了 show()，又会冒泡到 DismissListener，
+    // 而取色器刚弹出、点击位置（底部 toolbar）不在取色器区域内，
+    // 导致 DismissListener 立即判定为"外部点击"并 dismiss()——取色器闪一下就消失。
+    // 把监听器的挂载延迟到下一个消息循环，让本次点击事件完全消费后再启用外部关闭逻辑。
+    juce::Component::SafePointer<CustomThemePicker> safe(this);
+    juce::MessageManager::callAsync([safe]() {
+        if (safe != nullptr && safe->visible_)
+            safe->attachDismissListener();
+    });
+}
+
+void CustomThemePicker::dismiss()
+{
+    visible_ = false;
+    setVisible(false);
+    onApplyCallback_ = nullptr;
+    detachDismissListener();
+}
+
+void CustomThemePicker::applyAndDismiss()
+{
+    if (primarySelector_ == nullptr || secondarySelector_ == nullptr)
+    {
+        dismiss();
+        return;
+    }
+
+    const juce::Colour primary   = primarySelector_->getCurrentColour();
+    const juce::Colour secondary = secondarySelector_->getCurrentColour();
+
+    if (onApplyCallback_)
+        onApplyCallback_(primary, secondary);
+
+    dismiss();
+}
+
+void CustomThemePicker::attachDismissListener()
+{
+    if (auto* top = getTopLevelComponent())
+        top->addMouseListener(dismissListener_.get(),
+                              /*wantsEventsForAllNestedChildComponents=*/true);
+}
+
+void CustomThemePicker::detachDismissListener()
+{
+    if (auto* top = getTopLevelComponent())
+        top->removeMouseListener(dismissListener_.get());
 }
 
 // ==========================================================

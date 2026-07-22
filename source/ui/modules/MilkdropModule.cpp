@@ -1319,7 +1319,7 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     // Go 按钮（右侧）
     auto goRect = juce::Rectangle<int>(
         dlg.getRight() - 66, dlg.getBottom() - 34, 54, 22);
-    PinkXP::drawRaised(g, goRect, PinkXP::face);
+    PinkXP::drawRaised(g, goRect, PinkXP::btnFace);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText("Go", goRect, juce::Justification::centred, false);
@@ -1327,7 +1327,7 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     // Cancel 按钮
     auto cancelRect = juce::Rectangle<int>(
         goRect.getX() - 62, dlg.getBottom() - 34, 54, 22);
-    PinkXP::drawRaised(g, cancelRect, PinkXP::face);
+    PinkXP::drawRaised(g, cancelRect, PinkXP::btnFace);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText("Cancel", cancelRect, juce::Justification::centred, false);

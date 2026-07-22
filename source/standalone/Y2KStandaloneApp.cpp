@@ -168,16 +168,35 @@ public:
         //         以构造时的配色固化后需要额外 sendLookAndFeelChange 才能彻底刷新。
         //       · settings 里存整数（强转 ThemeId），缺键/越界兜底为 winXP。
         //       · ThemeId 枚举的数值顺序不会被动（新主题追加到末尾），因此存值稳定。
+        //       · 自定义主题（custom）需要额外读取双色并调用 applyCustomTheme。
         {
             const int savedThemeRaw = getUserSettings()
                 .getIntValue ("ui.themeId", (int) PinkXP::ThemeId::winXP);
-            const auto& themes = PinkXP::getAllThemes();
-            PinkXP::ThemeId targetId = PinkXP::ThemeId::winXP;
-            for (const auto& t : themes)
+
+            if (savedThemeRaw == (int) PinkXP::ThemeId::custom)
             {
-                if ((int) t.id == savedThemeRaw) { targetId = t.id; break; }
+                // 自定义主题：读取保存的双色并重建
+                auto& s = getUserSettings();
+                const juce::String primaryStr =
+                    s.getValue ("ui.customPrimary", "ffec4d85");
+                const juce::String secondaryStr =
+                    s.getValue ("ui.customSecondary", "ffffffff");
+                const juce::Colour primary =
+                    juce::Colour::fromString (primaryStr);
+                const juce::Colour secondary =
+                    juce::Colour::fromString (secondaryStr);
+                PinkXP::applyCustomTheme (primary, secondary);
             }
-            PinkXP::applyTheme (targetId);
+            else
+            {
+                const auto& themes = PinkXP::getAllThemes();
+                PinkXP::ThemeId targetId = PinkXP::ThemeId::winXP;
+                for (const auto& t : themes)
+                {
+                    if ((int) t.id == savedThemeRaw) { targetId = t.id; break; }
+                }
+                PinkXP::applyTheme (targetId);
+            }
         }
 
         // 1.2) 关键：在 createEditor 之前把上一次保存的 plugin state 恢复到 Processor。
@@ -742,6 +761,15 @@ private:
         //   · 主题在运行时被 ThemeSwatchBar::mouseDown → PinkXP::applyTheme 修改；
         //     这里只是在退出前快照一次 gCurrentThemeId。
         s.setValue ("ui.themeId", (int) PinkXP::getCurrentThemeId());
+
+        // 若当前为自定义主题，同步保存双色以便下次启动恢复
+        if (PinkXP::isCustomThemeActive())
+        {
+            s.setValue ("ui.customPrimary",
+                        PinkXP::getCustomPrimary().toString());
+            s.setValue ("ui.customSecondary",
+                        PinkXP::getCustomSecondary().toString());
+        }
     }
 
     // ----------------------------------------------------

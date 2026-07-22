@@ -74,6 +74,9 @@ public:
     void mouseExit(const juce::MouseEvent& e) override;
     void mouseDown(const juce::MouseEvent& e) override;
 
+    // 用户点击预览方块时触发，由父组件挂载以弹出取色器
+    std::function<void()> onPreviewClicked;
+
 private:
     juce::Rectangle<int> getPreviewBounds() const;
     juce::Rectangle<int> getSwatchBounds(int index) const;
@@ -240,6 +243,53 @@ private:
     juce::Rectangle<int> dragStartBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ModulePanel)
+};
+
+// ------------------------------------------------------------
+// CustomThemePicker —— 自定义主题双色取色器弹出面板
+//   位于 workspace 左下角，包含两个 RGB 色盘 + Apply/Cancel 按钮
+//   用户选择 primary（左上三角）和 secondary（右下三角）后点击 Apply 生成主题
+// ------------------------------------------------------------
+class CustomThemePicker : public juce::Component
+{
+public:
+    CustomThemePicker();
+    ~CustomThemePicker() override;
+
+    void paint(juce::Graphics& g) override;
+    void resized() override;
+
+    // 弹出取色器，传入当前双色
+    void show(juce::Colour primary, juce::Colour secondary,
+              std::function<void(juce::Colour, juce::Colour)> onApply);
+    void dismiss();
+
+    // 取色器是否正在显示中
+    bool isShowing() const noexcept { return visible_; }
+
+private:
+    void applyAndDismiss();
+    void createChildComponents();  // 延迟创建子控件（show时调用）
+
+    std::unique_ptr<juce::ColourSelector> primarySelector_;
+    std::unique_ptr<juce::ColourSelector> secondarySelector_;
+    juce::TextButton applyBtn_;
+    juce::TextButton cancelBtn_;
+    juce::Label primaryLabel_;
+    juce::Label secondaryLabel_;
+    juce::Label titleLabel_;
+
+    std::function<void(juce::Colour, juce::Colour)> onApplyCallback_;
+    bool visible_ = false;
+
+    // 全局点击外部关闭监听器（内部类，在 .cpp 中实现）
+    class DismissListener;
+    std::unique_ptr<DismissListener> dismissListener_;
+
+    void attachDismissListener();
+    void detachDismissListener();
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CustomThemePicker)
 };
 
 // ------------------------------------------------------------
@@ -556,6 +606,9 @@ private:
 
     // 底部工具栏里的主题选择器（XP 画图调色板样式）
     ThemeSwatchBar themeBar;
+
+    // 自定义主题双色取色器弹出面板（点击预览方块时在左下角弹出）
+    CustomThemePicker customThemePicker;
 
     // 底部工具栏里的音频信号源下拉（位于主题栏与 Hide 按钮之间）
     juce::ComboBox                 audioSourceBox;
