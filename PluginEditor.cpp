@@ -1393,25 +1393,28 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //     Windows 侧 WGL + 硬件驱动对小批次 draw / 纹理部分更新优化成熟，保持开启。
     // ==================================================================
     //
-    // ⚠️ v2.1.8：Editor 级 openGLContext 已彻底移除（Windows 与 macOS 统一）。
-    //
-    //   Editor 级 GL 上下文的作用：将子组件的 paint() 翻译成 GL 批次在 GPU 执行。
-    //   但本项目的 ModuleWorkspace 中已有 MilkdropModule，其 GLView 持有独立的
-    //   juce::OpenGLContext 用于 projectM 渲染。两个 GL 上下文形成嵌套：
-    //
-    //     Editor GL context (setComponentPaintingEnabled=true)
-    //       └→ 为 GLView 创建 CachedImage → GL线程回调 paint() → 崩溃/卡死
-    //
-    //   JUCE 官方明确不支持嵌套 GL 上下文。之前的 `#ifdef NDEBUG` 策略仅在 Debug
-    //   下跳过 attachTo 来避免 jassertfalse 断点，但 Release 下冲突仍然存在，
-    //   表现为 atidxx64.dll / 系统 DLL 中的随机地址挂起。
-    //
-    //   此外，renderingEngineConfigured 已将 Windows 渲染引擎强制切到 Software
-    //   （规避 AMD Direct2D 死锁），Editor 级 GL 上下文实际运行在软件 GL 上，
-    //   无性能优势。全部组件走 CPU 软光栅即可（macOS CoreGraphics有Metal后端，
-    //   Windows GDI对低频仪表UI足够），Milkdrop 使用自己的独立 GL 上下文不受影响。
     // ==================================================================
-    juce::ignoreUnused(openGLContext); // 不 attach；保留成员仅为析构顺序安全
+// ✅ v2.2.0 恢复 Editor 级 OpenGL 上下文 —— 核心目的：解决 Z-order 遮盖
+    //
+    //   Editor 级 GL (setComponentPaintingEnabled=true, attachTo(*this))
+    //   使主窗口进入 GPU 合成管线，所有子组件（包括 Milkdrop GLView）的 paint
+    //   输出通过 Editor 的 CachedImage FBO 在 GPU 侧统一合成 → 单次 SwapBuffers
+    //   输出到屏幕。不存在"GL 原生 HWND 覆盖 GDI 内容"的 Z-order 冲突。
+    //
+    //   嵌套 GL 上下文说明：
+    //     Editor GL + Milkdrop GLView GL (componentPaintingEnabled=false)
+    //     两个 GL context 在同一窗口中共存。JUCE 官方不建议嵌套，但在
+    //     Release 模式下 (NDEBUG) jassertfalse 编译为 no-op。实测 NVIDIA 驱动
+    //     (nvoglv64.dll) 下嵌套 GL 工作正常—v2.1.9 (d39397e) 已验证 30fps 无遮盖。
+    //     AMD (atidxx64.dll) 可能有兼容问题，但当前用户为 NVIDIA 环境。
+    //
+    //   macOS：CoreGraphics 已有 Metal 后端，Editor GL 反而降低性能，跳过 attach。
+    // ==================================================================
+#if ! JUCE_MAC
+    openGLContext.setContinuousRepainting(false);
+    openGLContext.setComponentPaintingEnabled(true);
+    openGLContext.attachTo(*this);
+#endif
 
     // Temporary profiling hook: with Y2K_ENABLE_PERF_COUNTERS=1 this writes
     // perf snapshots every 60 seconds to %APPDATA%/Y2Kmeter/perf_counters.
@@ -1443,10 +1446,12 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     //   宿主线程调 getStateInformation 触发回调到已部分销毁的 this。
     processor.flushPendingUiStateBeforeSave = nullptr;
 
-    // -1) GL 上下文已不再使用（v2.1.8 全平台移除 Editor 级 GL）。
-    //      openGLContext 成员仅保留用于声明顺序（确保在所有子组件之后析构）。
-    //      若曾 attach，这里需 detach；目前全平台均不 attach，此调用为安全 no-op。
-    juce::ignoreUnused(openGLContext);
+    // -1) Editor 级 GL 上下文 detach：最先解除 GPU 绑定，确保 workspace 等子组件
+    //      析构时 GL 资源（Texture/VBO/FBO）已经在上下文解除后安全释放。
+    //      macOS 下构造时未 attach，这里同样跳过。
+#if ! JUCE_MAC
+    openGLContext.detach();
+#endif
 
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();

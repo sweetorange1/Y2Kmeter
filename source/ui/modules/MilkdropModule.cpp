@@ -243,28 +243,19 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     static int paintCount = 0;
     ++paintCount;
 
-    // ---- Phase 1: 渲染主内容（GL 帧或兜底黑底） ----
+    // ---- Phase 1: 渲染主内容（GL 帧通过 GDI drawImageAt 1:1 绘制） ----
     if (glView != nullptr && ! glView->getBounds().isEmpty())
     {
         if (glView->isRenderInitialized())
         {
-          // projectM 已正常运行。GL 帧通过 g.drawImage 绘制到 GLView bounds。
+          // cachedGlFrame_ 为 Image::ARGB 格式，尺寸 == GLView 逻辑尺寸。
+          // drawImageAt 1:1 无缩放，仅触发 TransformedImageFill<RGB,ARGB>
+          // 单一路径（~1.1ms/帧），不存在 RGB 格式的双路径开销。
           std::lock_guard<std::mutex> lock(glView->getGlFrameMutex());
           auto& frame = glView->getCachedGlFrame();
           if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0) {
-            if (paintCount <= 10)
-              juce::Logger::writeToLog("[Milkdrop::paintContent] #" + juce::String(paintCount)
-                + " drawing frame " + juce::String(frame.getWidth()) + "x"
-                + juce::String(frame.getHeight())
-                + " at bounds " + glView->getBounds().toString());
-            g.drawImage(frame, glView->getBounds().toFloat());
-          } else {
-            if (paintCount <= 10)
-              juce::Logger::writeToLog("[Milkdrop::paintContent] #" + juce::String(paintCount)
-                + " frame is NOT valid or zero-size: valid="
-                + juce::String(frame.isValid() ? "yes" : "no")
-                + " w=" + juce::String(frame.getWidth())
-                + " h=" + juce::String(frame.getHeight()));
+            auto b = glView->getBounds();
+            g.drawImageAt(frame, b.getX(), b.getY(), false);
           }
         }
         else
@@ -385,9 +376,6 @@ void MilkdropModule::jumpToPresetIndex(int index)
 MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     : owner (owner_)
 {
-    hiddenHost = std::make_unique<juce::Component>();
-    hiddenHost->setOpaque(true);
-
     // 重要：不在构造时立即 attachTo。
     // juce::OpenGLContext 必须在宿主 Component 已经进入 peer（窗口句柄层级）
     // 且 isShowing() == true 时才能安全 attach，否则内部 CachedImage 会在
@@ -414,18 +402,12 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     glContext.setContinuousRepainting (true);
     glContext.setSwapInterval (1);             // vsync
 
-    // v2.1.12 Z-order 修复：setComponentPaintingEnabled(false)
-    //
-    //   false → GLView 拥有独立的原生 HWND 子窗口和独立 GL surface。
-    //   projectM 内部 glBindFramebuffer(0) 绑定的是 GLView 自己的 surface，
-    //   其 glClear 仅清除 GLView 自己的 back buffer，**不会污染主窗口 FBO 0**。
-    //   视频帧通过 glReadPixels 回读到 cachedGlFrame_，paintContent 用 GDI
-    //   绘制到正确 Z-order 位置。
-    //
-    //   HWND Z-order 问题：GLView 的原生子窗口默认在最上层，会遮挡其他模块。
-    //   在 scheduleAsyncAttach 中，attach 成功后通过 SetWindowPos 将 GLView
-    //   的 HWND 推到父窗口子控件 Z-order 最底层，让 GDI 绘制覆盖其上。
-    glContext.setComponentPaintingEnabled (false);
+// v2.2.0 直连 GL + Editor GL 合成架构：
+    //   componentPaintingEnabled(false) → GL context 直接挂到 GLView 原生 HWND，
+    //   projectM 渲染到 FBO 0，SwapBuffers GPU 直出（~50fps）。
+    //   Z-order 由 Editor 级 OpenGL 上下文（setComponentPaintingEnabled(true)）
+    //   保障——主窗口 GPU 合成管线内所有组件自然正确层叠，无需手动 Z-order 处理。
+    glContext.setComponentPaintingEnabled(false);
 
     // 扫描预设目录（UI 线程；GL 线程之后只读 presetPaths）
     auto presetsDir = findAssetsDir ("milkdrop_presets");
@@ -456,8 +438,6 @@ MilkdropModule::GLView::~GLView()
     // （detach 会等 GL 线程收尾并触发 openGLContextClosing → destroy handle）。
     if (glContext.isAttached())
         glContext.detach();
-
-    hiddenHost.reset();
 }
 
 void MilkdropModule::GLView::detachAndWait()
@@ -468,27 +448,18 @@ void MilkdropModule::GLView::detachAndWait()
 
 void MilkdropModule::GLView::attachIfNeeded()
 {
-    // 仅在 UI/消息线程调用，且必须确保 Component 已经进入桌面窗口层级。
-    // JUCE 的 OpenGLContext 会依赖宿主 Component 的 peer 建立 native GL surface；
-    // 若在 addToDesktop 之前 attach，其内部 CachedImage 会在渲染线程 tick
-    // 时试图回调 paint()，触发 juce_OpenGLContext.cpp:239 的 jassertfalse。
-    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     if (glContext.isAttached())
         return;
 
-    if (! isShowing() || getPeer() == nullptr)      // 还未挂到桌面（父窗未 show / 未 addAndMakeVisible）就直接返回
+    if (!isShowing() || getPeer() == nullptr)
         return;
 
-    // 到这一步：宿主已进入 peer 且 visible —— 可安全 attach。
-    if (!hiddenHost->isOnDesktop())
-    {
-        hiddenHost->addToDesktop(juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresKeyPresses);
-        hiddenHost->setVisible(true);
-        resized(); // 强制同步一次尺寸
-    }
-
-    glContext.attachTo (*hiddenHost);
+    // componentPaintingEnabled(false)：GL context 直接挂到 GLView 原生 HWND。
+    // projectM 渲染到此 HWND 的 FBO 0，SwapBuffers GPU 直出。
+    // Z-order 由 Editor 级 OpenGL 上下文保障：主窗口 GPU 合成管线内自然正确。
+    glContext.attachTo(*this);
 }
 
 void MilkdropModule::GLView::scheduleAsyncAttach()
@@ -530,13 +501,7 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
             if (self->isShowing() && self->getWidth() > 0 && self->getHeight() > 0
                 && self->getPeer() != nullptr)
             {
-                if (!self->hiddenHost->isOnDesktop())
-                {
-                    self->hiddenHost->addToDesktop(juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresKeyPresses);
-                    self->hiddenHost->setVisible(true);
-                    self->resized(); // 强制同步一次尺寸
-                }
-                self->glContext.attachTo(*(self->hiddenHost));
+                self->glContext.attachTo(*self);
             }
             else
             {
@@ -560,31 +525,11 @@ void MilkdropModule::GLView::visibilityChanged()
 
 void MilkdropModule::GLView::resized()
 {
-    const int w = getWidth();
-    const int h = getHeight();
+    if (const int w = getWidth(); w > 0)
+        logicalFrameW_.store(w);
+    if (const int h = getHeight(); h > 0)
+        logicalFrameH_.store(h);
 
-    if (hiddenHost != nullptr && hiddenHost->isOnDesktop())
-    {
-        float scale = 1.0f;
-        if (auto* peer = getPeer())
-            scale = peer->getPlatformScaleFactor();
-            
-        float hiddenScale = 1.0f;
-        if (auto* hiddenPeer = hiddenHost->getPeer())
-            hiddenScale = hiddenPeer->getPlatformScaleFactor();
-            
-        int pw = juce::roundToInt(w * scale);
-        int ph = juce::roundToInt(h * scale);
-        
-        hiddenHost->setBounds(-10000, -10000, 
-                              juce::jmax(1, juce::roundToInt(pw / hiddenScale)), 
-                              juce::jmax(1, juce::roundToInt(ph / hiddenScale)));
-    }
-
-    // 无条件尝试 attach（scheduleAsyncAttach 内部有递归重试 + 上限保护）。
-    // 这里不做 isShowing() 预判：在"手动添加模块"场景下，resized() 触发时
-    // 组件树的 native peer 可能尚未建立完毕，isShowing() 返回 false 是
-    // 正常的——scheduleAsyncAttach 会通过自递归 callAsync 等待 peer 就绪。
     scheduleAsyncAttach();
 }
 
@@ -857,61 +802,44 @@ void MilkdropModule::GLView::renderOpenGL()
     }
     else
     {
-      // projectM 内部强制 glBindFramebuffer(0) 渲染到默认 framebuffer。
-      // setComponentPaintingEnabled(false) 时，GLView 拥有独立的原生 HWND
-      // 和 GL surface，FBO 0 即为 GLView 自己的 back buffer——
-      // projectM glClear 只影响 GLView 自身，不污染主窗口。
-      //
-      // 策略：bind FBO 0 → projectM 渲染 → glReadPixels → cachedGlFrame_
-      // → paintContent 用 GDI g.drawImage 绘制到正确 Z-order 位置。
-
-      static int renderCount = 0;
-      ++renderCount;
-
-      if (renderCount <= 3)
-        juce::Logger::writeToLog("[Milkdrop::GL] renderOpenGL #" + juce::String(renderCount)
-          + " pw=" + juce::String(pw) + " ph=" + juce::String(ph));
+      // componentPaintingEnabled(false)：GL 直接 attach 到 GLView 原生 HWND。
+      // FBO 0 即为 GLView 自己的 back buffer，projectM 渲染后 SwapBuffers 直出。
+      // glReadPixels 回读 GPU→CPU，缓存到 ARGB Image，paintContent 用 drawImageAt 绘制。
 
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
       api.openglRenderFrame(pmHandle);
 
-      // 回读像素（FBO 0 → CPU buffer → cachedGlFrame_），支持降分辨率读取
       if (pw > 0 && ph > 0)
       {
-        const int scale = static_cast<int>(readback_scale_.load());
-        const int rw = pw / scale;
-        const int rh = ph / scale;
-        const int rwClamped = juce::jmax(1, rw);
-        const int rhClamped = juce::jmax(1, rh);
+        const int lw = juce::jmax(1, logicalFrameW_.load());
+        const int lh = juce::jmax(1, logicalFrameH_.load());
 
-        std::vector<uint8_t> pixels(
-            static_cast<size_t>(pw * ph * 4));
+        pixelBuffer_.resize(static_cast<size_t>(pw * ph * 4));
         juce::gl::glReadBuffer(juce::gl::GL_BACK);
         juce::gl::glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph,
                                juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
-                               pixels.data());
-
-        if (renderCount <= 3)
-          juce::Logger::writeToLog("[Milkdrop::GL] glReadPixels done"
-            + juce::String(" pixels[0..3]=") + juce::String(static_cast<int>(pixels[0]))
-            + "," + juce::String(static_cast<int>(pixels[1]))
-            + "," + juce::String(static_cast<int>(pixels[2]))
-            + "," + juce::String(static_cast<int>(pixels[3])));
+                               pixelBuffer_.data());
 
         std::lock_guard<std::mutex> lock(glFrameMutex_);
-        if (cachedGlFrame_.getWidth() != rwClamped
-            || cachedGlFrame_.getHeight() != rhClamped)
-          cachedGlFrame_ = juce::Image(juce::Image::ARGB, rwClamped, rhClamped, true);
+        if (cachedGlFrame_.getWidth() != lw
+            || cachedGlFrame_.getHeight() != lh)
+          cachedGlFrame_ = juce::Image(juce::Image::ARGB, lw, lh, true);
 
-        juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
-        for (int y = 0; y < rhClamped; ++y)
+        juce::Image::BitmapData bd(cachedGlFrame_,
+                                    juce::Image::BitmapData::writeOnly);
+
+        const float scaleX = static_cast<float>(pw) / static_cast<float>(lw);
+        const float scaleY = static_cast<float>(ph) / static_cast<float>(lh);
+        for (int y = 0; y < lh; ++y)
         {
-          const int srcY = ph - 1 - (y * scale + scale / 2);
-          const uint8_t* srcRow = pixels.data()
+          const int srcY = ph - 1
+              - juce::jlimit(0, ph - 1, static_cast<int>(y * scaleY + 0.5f * scaleY));
+          const uint8_t* srcRow = pixelBuffer_.data()
               + static_cast<size_t>(srcY * pw * 4);
-          for (int x = 0; x < rwClamped; ++x)
+          for (int x = 0; x < lw; ++x)
           {
-            const int srcX = x * scale + scale / 2;
+            const int srcX = juce::jlimit(0, pw - 1,
+                static_cast<int>(x * scaleX + 0.5f * scaleX));
             const int srcIdx = srcX * 4;
             *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
                 (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
@@ -956,9 +884,8 @@ void MilkdropModule::GLView::openGLContextClosing()
 
 void MilkdropModule::GLView::timerCallback()
 {
-  // GL 线程在 renderOpenGL 中以 ~60fps 更新 cachedGlFrame_，
-  // 本 Timer 在 UI 线程以 ~30Hz 唤醒 owner 的重绘管线，
-  // 使 paintContent 消费最新帧并覆盖 ModulePanel 底色。
+  // renderOpenGL（GL 线程 ~60fps）：projectM 渲染 + glReadPixels → cachedGlFrame_。
+  // 本 Timer（UI 线程 ~30Hz）驱动 repaint 使 paintContent 消费最新帧。
 
   if (!isRenderInitialized())
     return;
@@ -1675,7 +1602,7 @@ void MilkdropModule::showPresetJumpDialog()
     dlg->setBounds(getLocalBounds());
     addAndMakeVisible(dlg);
 
-    // setComponentPaintingEnabled(false) 使 GLView 拥有独立原生 HWND 子窗口，
+    // componentPaintingEnabled(false) 使 GLView 拥有独立原生 HWND 子窗口，
     // Z-order 高于 JUCE 普通 Component。模态对话框无法覆盖此原生窗口，
     // 导致对话框不可见且鼠标事件被 GL 窗口捕获（界面卡死）。
     // 解决方案：弹窗前隐藏 GLView，通过 ModalComponentManager::Callback

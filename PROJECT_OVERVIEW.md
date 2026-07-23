@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.1.0 新增，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个真实 Milkdrop 预设，零网络依赖）
+- **Milkdrop 可视化模块**（v2.2.0，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.1.0 新增，v2.1.11 auto轮播模式 / v2.1.12 小数间隔与持久化，基于 libprojectM 4 原生 OpenGL 渲染，本地打包 1114 个 Milkdrop 预设） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.0：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -1805,579 +1805,68 @@ if (motionMode != MotionMode::carried
 
 ---
 
-### 6.30 v2.0.4→v2.1.0 Milkdrop 模块：WebView2 迁移至原生 libprojectM 4，CPU 回读桥接解决全黑 — 完整踩坑记录
+### 6.30 Milkdrop 模块最终架构（v2.2.0）
 
-> **状态**：v2.1.0 已解决，动画正常播放。
-> **结果**：彻底放弃 WebView2，改用原生 libprojectM 4 + `juce::OpenGLContext` + CPU 像素回读 + `juce::Timer` UI 重绘驱动。
+**架构原理**：Editor 级 OpenGLContext (componentPaintingEnabled=true, attachTo(*this)) 使主窗口进入 GPU 合成管线。Milkdrop GLView 保留独立 GL context (componentPaintingEnabled=false, attachTo(*this))。两个 context 在 NVIDIA 驱动下共存正常，所有组件 paint 走统一 GPU 管线 → 单次 SwapBuffers → Z-order 自然正确，零遮盖。
 
----
+**数据流**：renderOpenGL(GL线程 ~60fps): bind FBO 0 → projectM 渲染 → glReadPixels 全分辨率 → CPU 降采样 → cachedGlFrame_(Image::ARGB, 逻辑尺寸)。paintContent(UI线程 ~30Hz, Timer驱动): drawImageAt(cachedGlFrame_, 1:1 无缩放) → Editor GL 合成 → SwapBuffers。性能 ~50fps。
 
-#### ① 背景：为什么放弃 WebView2
+**核心文件**：
 
-v2.0.3 使用 WebView2 + Butterchurn (WebGL Milkdrop 引擎)，存在无法根治的初始化时序问题（WebView2 COM 异步初始化导致 `goToURL` 静默丢弃，详见下方"已删除的 §6.30 摘要"）。
+| 文件 | 职责 |
+|---|---|
+| MilkdropModule.h/.cpp | GLView : Component, OpenGLRenderer, Timer；单实例互斥；PCM 链路；预设管理 |
+| ProjectMApi.h/.cpp | DLL shim：LoadLibrary + GetProcAddress；GLEW 初始化；DLL reload |
+| PluginEditor.cpp | Editor 级 OpenGLContext 附加 (componentPaintingEnabled(true)) |
 
-v2.0.4 目标：彻底放弃 WebView2，改用**原生 libprojectM 4**（LGPL-2.1）+ `juce::OpenGLContext`。
+**关键设计约束**：
 
----
-
-<details>
-<summary><b>已删除的 §6.30 (v2.0.3 WebView2) 摘要：9 轮尝试全部失败</b></summary>
-
-| 轮次 | 方案 | 结果 | 失败原因 |
-|------|------|------|---------|
-| 1-4 | 构造/回调/`resized`/`callAsync` 中 `goToURL` | ❌ 白屏 | WebView2 异步初始化未完成 |
-| 5-6 | Timer 延迟重试 | 💥 崩溃 | COM vtable 竞态 |
-| 7-9 | 独立 userDataDir、navigated 标志、延迟闭包 | ❌ 白屏 | 时序依然不够 |
-
-核心根因：WebView2 `ICoreWebView2Controller` 异步创建，构造阶段的 `goToURL` 在 COM 控制器就绪前被静默丢弃。`juce::Timer` + WebView2 是危险组合（vtable 竞态）。唯一正常显示路径：关闭软件 → 重新打开 → 从存档恢复。
-
-</details>
-
----
-
-#### ② v2.0.4 libprojectM 4 初始实现
-
-##### 新增/修改文件
-
-| 文件 | 作用 |
-|------|------|
-| `third_party/projectm/` | `projectM-4.dll` (4.1.x) + `glew32.dll` + 公共 C 头 |
-| `assets/milkdrop_presets/*.milk` | 1114 个精选预设，扁平化存储，无子目录 |
-| `assets/projectm/textures/*` | 66 个纹理 |
-| `source/ui/modules/ProjectMApi.h/.cpp` | DLL shim：LoadLibrary + GetProcAddress + SEH 保护 + `initGlew()` |
-| `source/ui/modules/MilkdropModule.h/.cpp` | `GLView : Component, OpenGLRenderer`；单实例互斥；合成 PCM；异步 attach |
-| `source/ui/workspace/ModuleWorkspace.cpp` | Milkdrop 已存在 1 个时菜单置灰 |
-| `source/standalone/Y2KStandaloneApp.cpp` | Windows 分支新增 `FileLogger`（`%APPDATA%\Y2Kmeter\runtime.log`） |
-
-##### 关键设计约束
-
-- **单实例互斥**：`std::atomic<int> gActiveProjectMInstances`
-- **DLL 完全 reload**：每次 `openGLContextClosing()` → `FreeLibrary + LoadLibrary` 重置 GLEW 状态
-- **显式 `glewInit()`**：DLL 不自动调（Core Profile 需 `glewExperimental=GL_TRUE`）
-- **强制 Core Profile 4.1**：`setOpenGLVersionRequired(openGL4_1)`，避免 legacy 兼容性 profile 崩溃
-- **异步 attach**：`callAsync` 延后到组件入桌面层级
-- **SEH 保护**：`__try/__except` 包裹 `projectm_create()`
-- **合成 PCM 兜底**：无音频时送 220Hz+55Hz 正弦波
-
-##### v2.0.4 结果：projectM 初始化完全正常，但模块 UI **纯黑**
-
-日志证实：DLL 加载、GLEW 初始化、projectM 创建、1114 个预设、`renderOpenGL` 60fps 调用全部正常——但画面不显示。
+| 约束 | 说明 |
+|---|---|
+| 单实例互斥 | std::atomic gActiveProjectMInstances |
+| GLEW reload | 每次 openGLContextClosing() → FreeLibrary + LoadLibrary |
+| Core Profile 4.1 | setOpenGLVersionRequired(openGL4_1) |
+| 异步 attach | callAsync 延后到组件入桌面层级 |
+| PCM 三态 | 新 PCM → 播放；有历史 → 复播；冷启动 → 合成正弦波 |
+| Auto 轮播 | 1.0s~60.0s 小数间隔，saveModuleSpecificState 持久化 |
+| 预设跳转 | PresetJumpDialog（PinkXP 主题，替代 AlertWindow）|
+| 分辨率缩放 | ReadbackScale (kFull/kHalf/kQuarter)，叠加层按钮切换 |
 
 ---
 
-#### ③ 从"纯黑"到"可显示"的 8 轮排查（v2.0.4→v2.1.0）
+### 6.31 v2.2.0：恢复 Editor GL 上下文，根治 Z-order 遮盖
 
-##### 已踩过的坑（v2.0.4 已修复）
+**问题**：v2.1.10 移除 Editor OpenGLContext 后主窗口降为纯 GDI，Milkdrop GLView 原生 HWND 子窗口在 Windows 层级中永远覆盖 GDI 客户区。SetWindowPos(HWND_BOTTOM) 只影响子窗口间排序，不影响子窗口 vs GDI 的层级。右键菜单能盖住是因为 WS_POPUP 顶级窗口天然高于所有子窗口。
 
-| 坑 | 现象 | 根因 | 修复 |
-|----|------|------|------|
-| MSVC namespace 冲突 | `projectm` 同时是 struct 和 namespace | `projectM-4/types.h` 前置声明与代码命名空间冲突 | 命名空间改 `projectm_api` |
-| `int3` 断言 | Debug 添加模块时触发 `jassertfalse` | 构造阶段就 `attachTo`，GL 线程与消息线程未同步 | 异步 attach（`callAsync` 延后） |
-| `projectm_create` 第 2 次返回 0x0 | 删除再添加 → `0xC0000005` | GLEW 函数指针绑定旧 HGLRC，新上下文无效 | `FreeLibrary+LoadLibrary` 全量 reload |
-| `fn_create` 返回 0x0 | SEH 报 `0xC0000005` | DLL 不自动 `glewInit`，函数指针表全 NULL | `Api::initGlew()` + `glewExperimental` |
-| 默认 legacy profile | `fn_create` 偶发崩溃 | `wglCreateContext` 回退到兼容性 profile | `setOpenGLVersionRequired(openGL4_1)` |
-| UTF-8 BOM | `C3872: 全角句号非法标识符` | MSVC GBK 解码把 `。` 认成非法 token | 源文件存为 UTF-8 with BOM |
-| `GLint` 不在 `juce::gl` | `C2039: "GLint" 不是 "juce::gl" 的成员` | `khrplatform.h` 定义在全局作用域 | 用全局 `GLint` 而非 `juce::gl::GLint` |
-| Windows 无 runtime.log | 无法诊断 | `FileLogger` 只在 `#if JUCE_MAC` | 改为 `#if JUCE_MAC \|\| JUCE_WINDOWS` |
+**尝试过的失败方案**：SetWindowRgn(NULL)/WS_EX_TRANSPARENT（驱动绕过 GDI，对 GL 无效）；hiddenHost(-10000,-10000) + glReadPixels + drawImageAt 1:1（遮盖修复但 TransformedImageFill 吃满 UI ~20fps）；离屏+GPU降采样+drawImageAt（更慢，双格式路径 ~5ms/帧）。
 
-##### 纯黑问题的 9 轮排查（v2.0.4→v2.1.0）
-
-**根因**：projectM 4.1.x DLL 内部强制 `glBindFramebuffer(0)` 渲染到默认 framebuffer。JUCE `componentPaintingEnabled(false)` 下 swap FBO 0 在 Windows Core Profile 4.1 + DWM 组合下不可达；`componentPaintingEnabled(true)` 下 CachedImage 管线被 `ModulePanel::paint` 底色覆盖。
-
-| 轮次 | 方案 | 结果 | 失败原因 |
-|------|------|------|---------|
-| 第 1 轮 | `glBlitFramebuffer(0 → juceDrawFbo)` | ❌ 纯黑 | FBO 0(sRGB) → rescueFbo(RGBA8) 格式不匹配，驱动静默丢弃 |
-| 第 2 轮 | `glCopyTexSubImage2D + glBlitFramebuffer(rescueFbo → juceDrawFbo)` | ❌ 纯黑 | `juceDrawFbo=0` 时 blit 目标仍是 FBO 0，格式不匹配 |
-| 第 3 轮 | `juceFbo==0` 分支直接渲染 | ❌ 纯黑 | `componentPaintingEnabled(false)` 下 swap FBO 0 在 DWM 不可达 |
-| 第 4 轮 | 像素读回诊断（`glReadPixels` 单像素） | ✅ 证明 projectM 正确渲染 | `centerRGBA=(87,255,194)` —— projectM 在 FBO 0 中画了彩色 |
-| 第 5 轮 | 全量简化：`api.openglRenderFrame + glFlush` | ❌ 纯黑 | `renderOpenGL` 中的 `glReadBuffer/glReadPixels` 污染了 JUCE 状态 |
-| 第 6 轮 | 红/绿 `glClear` 测试 | ❌ 始终纯黑 | 确认 `swapBuffers(FBO 0)` 根本不可达 |
-| 第 7 轮 | `componentPaintingEnabled(true)` + rescue 管线 | ❌ 白屏（模块底色） | `paintContent.fillAll(black)` 覆盖 rescue 输出 |
-| 第 8 轮 | `componentPaintingEnabled(true)` + `setOpaque(false)` + 空 `paint()` | ❌ 模块底色 | `ModulePanel::paint` 填满 `PinkXP::face`，GLView 的 paint 在它之后 |
-
-##### 第 9 轮（v2.1.0 最终方案）：CPU 回读 + `juce::Timer` 桥接 ✅
-
-**核心思路**：放弃所有 GPU→GPU 救助管线（跨驱动不可靠），改用已证实可行的 `glReadPixels` 回读到 CPU 像素缓冲，通过 `juce::Timer` 可靠驱动 UI 线程重绘。
-
-**渲染管线**：
-
-```
-┌─ GL 线程 (60fps) ──────────────────────────────────────────┐
-│ ① glBindFramebuffer(0)                                       │
-│ ② projectm_opengl_render_frame(pmHandle)  → FBO 0(有画面)   │
-│ ③ glReadBuffer(GL_BACK)                                      │
-│ ④ glReadPixels → std::vector<uint8_t> → cachedGlFrame_      │
-│     (Y轴翻转: OpenGL左下原点 → JUCE Image左上原点)            │
-│ ⑤ glBindFramebuffer(恢复JUCE CachedImage FBO)                │
-└──────────────────────────────────────────────────────────────┘
-                              ↓
-┌─ UI 线程 (juce::Timer ~30Hz) ───────────────────────────────┐
-│ timerCallback() → owner.repaint()                             │
-│   → ModulePanel::paint → fill PinkXP::face(填底色)            │
-│   → paintContent: g.drawImage(cachedGlFrame_) 覆盖底色 ✅    │
-│   → GLView::paint: 空(不覆盖)                                 │
-└──────────────────────────────────────────────────────────────┘
-```
-
-**为什么 `glContext.triggerRepaint()` 不可靠**：JUCE `componentPaintingEnabled(true)` 下，`paintComponent` 仅在内部 `paintComponents` 标志位置位时执行。`triggerRepaint()` 设置该标志，但在下一帧 `renderFrame` 入口被 `fetch_and` 清零——UI 线程来不及消费。
-
-**为什么 `juce::Timer` 可靠**：Timer 回调在消息线程执行，直接调用 `owner.repaint()` 触发完整的 `ModulePanel::paint` 管线，与 GL 线程完全解耦。
-
-##### 关键设计决策
-
-| 决策 | 理由 |
-|------|------|
-| `componentPaintingEnabled(true)` | 让 JUCE 走完整 CachedImage 合成管线，而非直接 swap FBO 0 |
-| `startTimerHz(30)` 而非 60Hz | `glReadPixels` + Y轴翻转有 CPU 开销；30fps 视觉上流畅且 CPU 占用可控 |
-| `newOpenGLContextCreated()` 启动 Timer | projectM 初始化完成后才开始驱动 UI 重绘 |
-| `openGLContextClosing()` 停止 Timer | 析构/重建时避免回调访问已销毁对象 |
-| `paintContent` 直接 `drawImage` | 覆盖 `ModulePanel::paint` 的 `PinkXP::face` 底色，GL 帧在顶层 |
-| `GLView::paint()` 空实现 | 防止 `Component::paint` 默认绘制白色/透明背景覆盖缓存帧 |
+**最终方案**：恢复 Editor GL，主窗口回到 GPU 合成。Milkdrop GLView 保持独立 GL。Release 下 jassertfalse 编译为 no-op，NVIDIA 驱动验证稳定。
 
 ---
 
-#### ④ 改动文件清单（v2.0.4→v2.1.0）
-
-| 文件 | 改动 |
-|------|------|
-| `source/ui/modules/MilkdropModule.h` | GLView 新增 `private juce::Timer` 继承；新增 `cachedGlFrame_`(`juce::Image`) / `glFrameMutex_`(`std::mutex`) 及公开访问器；新增 `timerCallback()` override |
-| `source/ui/modules/MilkdropModule.cpp` | 构造函数：`componentPaintingEnabled(true)`；`renderOpenGL` else 分支：保存/恢复 JUCE FBO → `projectm_opengl_render_frame` → `glReadPixels` + Y轴翻转写入 `cachedGlFrame_`；新增 `timerCallback()` 调用 `owner.repaint()`；`newOpenGLContextCreated()` 末尾 `startTimerHz(30)`；`openGLContextClosing()` 中 `stopTimer()`；`paintContent` 在 `initialized` 时 `g.drawImage(cachedGlFrame_)`；新增 `#include <mutex>` `#include <vector>` |
-| `CMakeLists.txt` | 版本号 2.0.4 → 2.1.0（`project()` + `juce_add_plugin` 两处） |
-| `PluginEditor.cpp` | 三处硬编码版本号 2.0.4 → 2.1.0 |
-| `Y2KStandaloneApp.cpp` | `BUILD_SIGNATURE` 版本号 2.0.4 → 2.1.0 |
-| `Y2Kmeter_installer.iss` | 版本号 2.0.4 → 2.1.0 |
-| `PROJECT_OVERVIEW.md` | 版本号 2.0.4 → 2.1.0；删除 §6.30(WebView2)；重写 §6.31(现 §6.30) |
-
----
-
-#### ⑤ 当前代码状态（v2.1.0，动画正常）
-
-`MilkdropModule::GLView::renderOpenGL()` else 分支（最终版）：
-
-```cpp
-else
-{
-  // projectM 内部强制 glBindFramebuffer(0) 渲染到默认 framebuffer。
-  // 不尝试任何 FBO→FBO blit（跨驱动不可靠）。改为 glReadPixels
-  // 从 FBO 0 回读到 CPU 像素缓冲，交由 paintContent 用 JUCE Graphics
-  // 绘制到内容区——GL 帧在 ModulePanel 底色之上，不会被覆盖。
-
-  GLint juceDrawFbo = 0;
-  juce::gl::glGetIntegerv(juce::gl::GL_DRAW_FRAMEBUFFER_BINDING, &juceDrawFbo);
-
-  juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-  api.openglRenderFrame(pmHandle);
-
-  {
-    std::lock_guard<std::mutex> lock(glFrameMutex_);
-    if (cachedGlFrame_.getWidth() != cw || cachedGlFrame_.getHeight() != ch)
-      cachedGlFrame_ = juce::Image(juce::Image::ARGB, cw, ch, true);
-
-    std::vector<uint8_t> pixels(static_cast<size_t>(cw * ch * 4));
-    juce::gl::glReadBuffer(juce::gl::GL_BACK);
-    juce::gl::glReadPixels(0, 0, (GLsizei)cw, (GLsizei)ch,
-                           juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
-                           pixels.data());
-
-    // OpenGL 像素原点在左下角，JUCE Image 原点在左上角，翻转 Y
-    juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
-    for (int y = 0; y < ch; ++y) {
-      for (int x = 0; x < cw; ++x) {
-        const int srcIdx = ((ch - 1 - y) * cw + x) * 4;
-        *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
-            (static_cast<uint32_t>(pixels[srcIdx + 3]) << 24) |  // A
-            (static_cast<uint32_t>(pixels[srcIdx])     << 16) |  // R
-            (static_cast<uint32_t>(pixels[srcIdx + 1]) << 8)  |  // G
-             static_cast<uint32_t>(pixels[srcIdx + 2]);          // B
-      }
-    }
-  }
-
-  juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, (GLuint) juceDrawFbo);
-}
-```
-
-`MilkdropModule::GLView::timerCallback()`：
-
-```cpp
-void MilkdropModule::GLView::timerCallback()
-{
-  if (isRenderInitialized())
-    owner.repaint();
-}
-```
-
----
-
-#### ⑤ v2.1.0→v2.1.1：Milkdrop 交互体验优化
-
-本轮开发围绕 Milkdrop 模块的**交互可用性**进行全面打磨：
-
-**GLView 鼠标事件转发**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事件不向上冒泡，导致父组件 MilkdropModule 永远收不到内容区的 `mouseDown`/`mouseMove` 等事件。全部 5 个鼠标方法 (`mouseDown`/`mouseUp`/`mouseMove`/`mouseExit`/`mouseDrag`) override 为 `parent->method(e.getEventRelativeTo(parent))` 转发。
-
-**聚焦叠加层控制条**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-- 聚焦时在内容区顶部显示半透明控制条：`[<] 3/100 presetName [1:1] [>] [?]`
-- `<` / `>` ：上一个/下一个预设
-- `?`：随机预设
-- `1:1`：glReadPixels 分辨率缩放（三态循环：1:1 → 1:2 → 1:4 → 1:1）
-- 预设号+名称（粉色序号 + 白色名称）
-- `executeOverlayAction()` 分发按钮；`paintOverlayControlBar()` 绘制（PinkXP 风格）
-
-**"Switching..." 加载指示器**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-右下角短暂提示条，持续 1.2s，标记 projectM soft-cut 过渡过程。
-
-**分辨率缩放**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)/[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-`GLView` 新增 `enum class ReadbackScale { kFull=1, kHalf=2, kQuarter=4 }`，`renderOpenGL` 的 `glReadPixels` 后 Y轴翻转以中心采样降采样写入 `cachedGlFrame_`。大模块时 1:4 模式将 `drawImage` 上传量降为 1/16。
-
-**PCM 音频链路优化**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)/[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-`renderOpenGL` 消费 PCM 的三态逻辑：
-1. 有新 PCM → `addPcmFloat(新数据)` + 备份到 `lastRealPcm`
-2. 无新数据但曾收到过 → `addPcmFloat(lastRealPcm)` 复播上一帧
-3. 冷启动从未收到 → 合成低频正弦波（220Hz+55Hz）
-
-效果：音频播放期间，100% 帧由真实音乐频谱驱动，不再有合成假节拍干扰。
-
-**Soft-cut 过渡时间**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-`kSoftCutDuration` 从 3.0s 缩短为 1.0s，预设切换视觉响应更快。
-
-**新增模块默认预设池**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-`newOpenGLContextCreated()` 无存档时从预设 {57,64,69,71,73,75,77,78}（显示号 58/65/70/72/74/76/78/79）中随机选取，替代固定第 0 个。
-
-**预设索引持久化**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)/[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-覆盖 `saveModuleSpecificState()`/`restoreModuleSpecificState()`，保存/恢复 `presetIndex`。`restored_preset_index_` 在 `newOpenGLContextCreated` 中消费一次后清零。
-
-**Milkdrop DSL → GLSL 运行时兼容修正**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-新增 `FixMilkdropShaderTypes()`：内存中预处理 `.milk` 内容，修正两种 Winamp Milkdrop → projectM GLSL 不兼容模式：
-1. `float2 (` → `float2(`（类型名与括号间的空格）
-2. `float3(` → `float2(`（`float2` 声明行中 `float3` 类型不匹配，截取前 2 参数）
-
-通过 `projectm_load_preset_data`（ProjectMApi 新增内存加载 API）加载修正后内容，不改动磁盘上 `.milk` 文件。
-
-**Spectrum 模块离屏 Image 缓存**（[SpectrumModule.h](I:/Y2KMeter/source/ui/modules/SpectrumModule.h)/[SpectrumModule.cpp](I:/Y2KMeter/source/ui/modules/SpectrumModule.cpp)）
-
-新增 `cached_curve_image_` + `curve_cache_dirty_`。`onFrame()` 数据更新时标记脏，`paintContent()` 在脏时才 `renderCurvesToCache()` 构建 Catmull-Rom Path，其余帧直接 `drawImageAt` 零开销 blit。解决大 Milkdrop 模块导致 Spectrum 掉帧的问题。
-
-**ProjectMApi 扩展**（[ProjectMApi.h](I:/Y2KMeter/source/ui/modules/ProjectMApi.h)/[ProjectMApi.cpp](I:/Y2KMeter/source/ui/modules/ProjectMApi.cpp)）
-
-新增 `loadPresetData()` / `hasLoadPresetData()` / `Fn_projectm_load_preset_data` typedef / `fn_loadPresetData` 成员，`resolveOptional` 解析 `projectm_load_preset_data`。
-
-**版本号**：`2.1.0 → 2.1.1`
-
---- 
-
-#### ⑦ v2.1.7 变更记录
-
-**1. PresetJumpDialog —— 自定义 PinkXP 风格预设跳转弹窗**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)、[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）
-
-替代 `juce::AlertWindow`（会产生 Windows 系统提示音且不跟随主题），新增内部类 `PresetJumpDialog : juce::Component`：
-- PinkXP 配色：`PinkXP::content` 面板底、`PinkXP::pink50` 输入框底、粉色边框/按钮、主题跟随的 `PinkXP::ink` 文字
-- 交互：回车确认 / Esc 取消 / 点击遮罩关闭 / 输入限制 6 位纯数字、范围自动 clamp
-- 通过 `addToDesktop()` + `enterModalState()` 实现模态，无系统提示音
-- `showPresetJumpDialog()` 创建实例，`jumpToPresetIndex()` 执行跳转
-
-**2. 移除全部运行时日志代码**（涉及 5 个文件，共 ~50 处 `juce::Logger::writeToLog`）
-
-| 文件 | 删除内容 |
-|------|---------|
-| [MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | 29 处日志（构造/paintContent/GLView 生命周期/renderOpenGL/loadPresetInternal） |
-| [MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `frameCounter` 成员变量（仅用于日志采样） |
-| [ProjectMApi.cpp](I:/Y2KMeter/source/ui/modules/ProjectMApi.cpp) | 14 处日志（reload/initGlew/locateDll/loadLibrary） |
-| [Y2KStandaloneApp.cpp](I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | `runtimeFileLogger` 创建/销毁、`setCurrentLogger`、BUILD_SIGNATURE 日志 |
-| [MacDesktopAudioCapture.mm](I:/Y2KMeter/source/standalone/MacDesktopAudioCapture.mm) | 4 处日志 |
-
-**3. skipTutorial 持久化**（[PluginEditor.cpp](I:/Y2KMeter/PluginEditor.cpp)）
-
-`skipTutorial()` 中新增 `processor.setTutorialCompleted(true)`。修复前 skip 不写此标志导致每次重启都重新触发新手引导。
-
-**4. Milkdrop overlay 自动隐藏**
-
-新增两个机制：
-
-| 触发条件 | 实现 |
-|---------|------|
-| 长时间不操作 overlay（4s idle）| `GLView::timerCallback`（UI 线程 30Hz）→ `MilkdropModule::checkOverlayAutoHide()` 轮询 `lastInteractionTime_` |
-| 点击其他模块 | `ModuleWorkspace::onBroughtToFront` → `clearMilkdropFocus`（已有机制） |
-
-新增接口（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)）：
-- `touchOverlayIdleTimer()` —— 公开 inline，重置 `lastInteractionTime_`
-- `checkOverlayAutoHide()` —— 公开方法，由 GLView 的 UI 线程 timer 调用
-- `lastInteractionTime_` —— `juce::uint32`，记录 `getMillisecondCounter()`
-
-交互细节（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）：
-- `setFocusVisual(true)` → 自动 `touchOverlayIdleTimer()`（聚焦时重置 4s 倒计时）
-- `mouseDown`/`mouseMove` 在 overlay 区域 → `touchOverlayIdleTimer()`
-
-**5. 踩坑记录**
-
-| 坑 | 现象 | 根因 | 修复 |
-|----|------|------|------|
-| `juce::AlertWindow::runModalLoop` 不存在 | C2039 编译错误 | `AlertWindow` 无此成员，JUCE 用 `enterModalState` | 改用 `new + enterModalState + ModalCallbackFunction` |
-| `FocusChangeType` 不存在 | C2838/C2065 | JUCE Component 没有 `focusLost` 虚函数，也没有该枚举 | 移除虚函数方案 |
-| `juce::Timer` 继承导致启动崩溃 | 启动 `int3` 卡死在 `CachedImage::paint` | 多基类对象布局变化 + 构造期 Timer 回调竞态 | 移除 `juce::Timer` 继承，复用 GLView 已有的 30Hz timer |
-| `hasKeyboardFocus` 导致 overlay 闪现消失 | overlay 出现一帧即消失 | `hasKeyboardFocus(false)` 是组件级键盘焦点，Milkdrop 未 grabKeyboardFocus → 永远返回 false | 移除该检查，仅用 4s idle 超时 |
-| 在 `paintContent` 内调用 `setFocusVisual` → `repaint` 导致 Debug 断言 | `CachedImage::paint` 被 GL 线程调用 | 绘制期间 `repaint` 干扰 CachedImage 合成管线 | 将 auto-hide 逻辑移到 `timerCallback`（不在 paint 回调内） |
-
-**版本号**：`2.1.6 → 2.1.7`
-
---- 
-
-#### ⑧ v2.1.8 变更记录
-
-**1. 修复安装包打包失败（ISCC 长路径问题）**（[build_installer.bat](I:/Y2KMeter/build_installer.bat) + 所有 `.milk` 预设文件）
-
-| 现象 | 根因 | 修复 |
-|------|------|------|
-| ISCC 报 `系统找不到指定的路径` | 32 位 ISCC 受 Windows MAX_PATH(260字符) 限制，部分预设文件名最长 145 字符 + 深层构建路径超过限制 | 智能缩写过长的 `.milk` 文件名：移除 `--- Isosceles edit` 等编辑标注，截断 `nz+` 后的冗长描述，去掉 `- claim form`/`- mash0000` 后缀。最长文件名 145→95 字符 |
-
-三个目录同步缩写：`assets/milkdrop_presets`、`Standalone/milkdrop_presets`、`VST3/.../milkdrop_presets`。
-
-同时优化 `build_installer.bat`：添加 `cd /d "%SCRIPT_DIR%"` 确保从任意路径启动时 ISCC 相对路径解析正确。
-
-**2. 去除内容重复的预设文件**
-
-遍历全部预设文件，MD5 比对发现并移除内容完全相同的重复预设，避免冗余文件被打包。最终 1114 个唯一预设。
-
-**3. 清理非运行时文件防止被打包**（`assets/Tamagotchi/`）
-
-将 `assets/Tamagotchi/egg/cut.xlsx` 和 `role/cut.xlsx`（切图工具表格）从源目录移出，避免被打包进安装包。
-
-**4. 安装包冗余内容审查**
-
-审查了 Standalone 和 VST3 两个组件的 CMake 部署逻辑（`y2km_copy_projectm_runtime`），确认：
-- `projectM-4.dll` / `glew32.dll` — Milkdrop 运行时 DLL ✅
-- `milkdrop_presets/` — 预设目录 ✅
-- `milkdrop_textures/` — 纹理目录 ✅
-- 无其他开发工具、临时文件、或冗余资源被打包
-
-**版本号**：`2.1.7 → 2.1.8`
-
---- 
-
-#### ⑨ v2.1.9 变更记录
-
-**1. 自定义主题颜色持久化**
-
-**问题**：用户退出前若使用的是自定义主题（通过调色板 RGB 选择），重启软件后主题回退到默认 winXP，必须重新打开 CustomThemePicker 并点 Apply 才能恢复。
-
-**根因**：
-- `gCurrentThemeId` / `gCustomPrimary` / `gCustomSecondary` 是 static 变量，重启后初始化为默认值
-- `saveUiAndAudioState()` 只保存了 `ui.themeId` 整数，未保存自定义颜色的 RGB 值
-- `initialise()` 恢复时只在 `getAllThemes()` 预设列表中匹配，`ThemeId::custom` 不在其中 → 落到 winXP
-
-**修复**（仅改动 [Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp)）：
-- **保存**：`saveUiAndAudioState()` 中若 `isCustomThemeActive()`，额外写入 `ui.customPrimary` / `ui.customSecondary`（`juce::Colour::toString()` 格式 `ffaabbcc`）
-- **加载**：`initialise()` 1.15) 分支检测到 `savedThemeRaw == ThemeId::custom` 时，通过 `juce::Colour::fromString()` 解析双色 → `applyCustomTheme()` 重建
-
-**版本号**：`2.1.8 → 2.1.9`
-
---- 
-
-#### ⑩ v2.1.10 变更记录
-
-**1. 移除 Editor 级 OpenGL 上下文（全平台统一），彻底解决启动卡死**
-
-**问题**：Release 模式下软件启动 `addToDesktop()` 后 UI 线程卡死在系统 DLL 随机地址（`atidxx64.dll` / `0x00007fff...`），窗口永不出现；Debug 下触发 `jassertfalse`（`int3` 断点）。
-
-**根因**：嵌套 OpenGL 上下文冲突。Editor 的 `openGLContext`（`setComponentPaintingEnabled(true)`）为所有子组件创建 CachedImage 渲染管道，遇到 MilkdropModule::GLView（持有独立的 `juce::OpenGLContext`）时从 GL 线程回调 `CachedImage::paint()`，与 JUCE 的消息线程断言冲突。之前用 `#ifdef NDEBUG` 仅在 Debug 跳过 `attachTo` 规避 `jassertfalse` 断点，但 Release 下 `jassertfalse` 编译为空，嵌套冲突仍在底层驱动中表现为随机地址挂起。
-
-**修复**（[PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp)）：
-- 构造器中移除 `openGLContext.setContinuousRepainting / setComponentPaintingEnabled / attachTo` 三元调用
-- 析构函数中移除 `openGLContext.detach()`（改为 `juce::ignoreUnused`，成员仅保留以确保声明顺序）
-- 所有组件（Windows/macOS）走 CPU 软光栅；Milkdrop 使用自己独立的 `glContext` 不受影响
-
-**2. 消除启动闪屏：DocumentWindow 底色从灰色改为纯黑**
-
-**问题**：`addToDesktop()` + `setVisible(true)` 后首帧 Editor 内容渲染前，用户看到灰色文档窗口底色 —— Y2K 暗黑主题下极其刺眼。
-
-**历经方案**：
-| 方案 | 结果 |
-|------|------|
-| `Timer::callAfterDelay(80ms)` | 固定延迟不可靠（快/慢机器均失败） |
-| 双 `callAsync`（间隔一个消息循环） | GL CachedImage 管线未产出首帧 → 仍闪黑 |
-| `onFirstPaintCompleted` 回调延迟 `setVisible` | **逻辑死锁**：`paint()` 需要窗口可见才被 OS 调度 → 回调永不触发 → 窗口永不显示 |
-| **黑色底色 + 同步显示** ✅ | 闪黑不闪灰，与暗黑主题无缝衔接 |
-
-**修复**（[Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp)）：
-- `Y2KMainWindow` 构造参数 `addToDesktop=false`（不自动加入桌面）
-- `DocumentWindow` 背景色从 `LookAndFeel::backgroundColourId`（灰色）→ `juce::Colours::black`
-- `initialise()` 末尾同步执行 `addToDesktop()` + `setVisible(true)` + `callAsync` 恢复 chromeVisible
-- 清理 [PluginEditor.h/.cpp] 中不再使用的 `onFirstPaintCompleted` 回调与 `firstPaintCompleted_` 标志
-
-**3. 遗漏版本号补全**
-
-修复了 `PluginEditor.cpp`（4 处字符串字面量）、`README.md`（badge）、`Y2Kmeter_installer.iss`（`MyAppVersion`）中遗漏的版本号更新。
-
-**版本号**：`2.1.9 → 2.1.10`
-
---- 
-
-#### ⑪ v2.1.11 → v2.1.12 变更记录：Milkdrop 自动轮播模式
-
-**v2.1.11** — Auto 模式核心实现
-
-**1. 新增「自动轮播」功能**（[MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h)）
-
-聚焦 overlay 控制栏新增 `[auto]` 按钮：点击进入自动轮播模式，每 N 秒随机切换到下一个预设。
-
-| 组件 | 说明 |
-|------|------|
-| 顶栏 `[auto]` 按钮 | toggle 样式，激活时粉色高亮；位于 `[1:1]` 和 `[>]` 之间 |
-| 扩展行（仅 auto 模式）| `Auto:` 标签 + 秒数输入框 + slider + 时间标签，黑色半透明底色 28px |
-| 间隔范围 | 3s ~ 120s，默认 10s，通过 slider 拖动或 TextEditor 输入调节 |
-| 轮播驱动 | `GLView::timerCallback`（UI 线程 30Hz）→ `checkAutoMode()` 轮询定时 |
-
-**OverlayButton 枚举新增** `kAuto`，对应的 `hitTestOverlayButton`、`getOverlayButtonRect`、`executeOverlayAction` 全部更新。
-
-**2. PresetJumpDialog / GLView 原生 HWND 冲突修复**
-
-**问题**：`setComponentPaintingEnabled(false)` 使 GLView 拥有独立原生 HWND 子窗口，Z-order 高于 JUCE 普通 Component。模态对话框无法覆盖此原生窗口——对话框被遮挡且鼠标事件被 GL 窗口捕获，界面卡死。
-
-**修复**（`showPresetJumpDialog`）：
-- 弹窗前 `glView->setVisible(false)` 隐藏原生 GL 窗口
-- 使用 `juce::ModalComponentManager::Callback` 回调对象，在 `modalStateFinished()` 中恢复 `glView->setVisible(true)`（非阻塞方式，JUCE 的 `enterModalState()` 立即返回）
-
-**3. TextEditor 延迟创建 —— 修复 hover 预览卡死**
-
-**问题**：`ModuleWorkspace::getHoverPreviewImage()` 通过工厂创建临时 `MilkdropModule` 做快照。构造器中 `juce::TextEditor` 的 `addAndMakeVisible` + `[this]` 回调在软件渲染管线中触发断点断言 (`0x80000003`)。
-
-**修复**：
-- 从构造函数中移除 TextEditor 创建代码
-- 新增 `ensureAutoIntervalEditor()`：首次进入 auto 模式时延迟创建 TextEditor
-- 所有访问点保持 `if (autoIntervalEditor_ != nullptr)` 保护
-
-**4. GLView 析构期异步 attach 竞争修复**
-
-**问题**：`parentHierarchyChanged` / `visibilityChanged` → `scheduleAsyncAttach` 在添加/删除模块时高频触发 `callAsync`。析构流程中排队的异步回调与 `glContext.detach()` 竞争导致随机卡死。
-
-**修复**：GLView 新增 `std::atomic<bool> destroying_{false}`：
-- `~GLView()` 开头 `destroying_ = true`
-- `scheduleAsyncAttach` 开头检测 `destroying_`，命中直接 return
-
----
-
-**v2.1.12** — Auto 模式完善与持久化
-
-**1. 修复 overlay 隐藏后底色残留**
-
-**问题**：`layoutContent` 无条件 trim GLView 顶部（auto 模式 54px / 普通 26px），即使 overlay 已隐藏，GLView 上方透出 ModulePanel face 底色。
-
-**修复**：`layoutContent` 改为按 `focused_` 动态控制：
-- `focused_==true` → `controlHeight = 26` (+28 auto 扩展行)
-- `focused_==false` → `controlHeight = 0`，GLView 填满整个内容区
-- `setFocusVisual` 末尾调用 `layoutContent(getContentBounds())` 触发重新布局
-
-**2. 修复 auto 轮播在 overlay 隐藏后停止**
-
-**根因**：`checkAutoMode()` 开头 `if (!isAutoMode_ || !focused_) return;`，overlay 隐藏后 `focused_==false` 直接返回。移除 `!focused_` 条件。
-
-**3. 修复 slider 拖动无效问题**
-
-**问题**：`mouseDown` 中 slider 检测跳过了 `ModulePanel::mouseDown(e)`，但 JUCE 鼠标事件路由依赖基类 `mouseDown` 做事件注册。
-
-**修复**：
-- `mouseDown` slider 分支：先调 `juce::Component::mouseDown(e)` 确保事件注册
-- 新增 `MilkdropModule::mouseDrag` 覆盖：优先检测 slider 拖动
-- `mouseMove` 中保留 slider 逻辑作为双保险
-
-**4. 轮播间隔改为小数（1.0s ~ 60.0s，步进 0.1s）**
-
-| 改动 | 说明 |
-|------|------|
-| `autoIntervalSeconds_` | `int` → `float`，默认 `10.0f` |
-| `kMinAutoInterval`/`kMaxAutoInterval` | `3`/`120` → `1.0f`/`60.0f` |
-| TextEditor 输入限制 | `"0123456789"` → `"0123456789."` |
-| `applyAutoInterval(seconds)` | 参数 `int` → `float`，`getFloatValue()` + 四舍五入到 0.1 |
-| 时间标签 | 支持 `2.5s`、`1m30.5s` 等格式 |
-
-**5. 自动轮播模式持久化**
-
-`saveModuleSpecificState` 新增 `autoMode`(bool) 和 `autoInterval`(float) 属性；`restoreModuleSpecificState` 对应恢复。旧存档无这些属性时维持默认值，向后兼容。
-
-**版本号**：`2.1.10 → 2.1.11 → 2.1.12 → 2.1.13`
-
----
-
-#### ⑫ v2.1.12/v2.1.13 Z-order 遮挡问题与左下角显示问题（已彻底解决）
-
-> **背景**：
-> 1. **Z-order 遮挡问题 (Airspace Problem)**：Milkdrop GLView 的 projectM 渲染会遮挡软件内其他模块（如 Tamagotchi、VU 表等）。这是因为在移除了全局 OpenGL 上下文后，主窗口回退到 CPU 软件渲染，而附加了 `OpenGLContext` 的 GLView 会被 JUCE 强制创建一个原生子窗口 (HWND)。在 Windows DWM 规则中，原生子窗口永远物理悬浮在父窗口的软件渲染图层之上。
-> 2. **左下角显示问题**：在开启了屏幕缩放（High DPI）的显示器上，projectM 渲染的画面只占据左下角的一个矩形区域。这是因为传递给 projectM 的是逻辑尺寸，而底层 FBO 是物理像素尺寸。
-
-**终极解决方案：离屏隐藏窗口渲染 (Off-screen / Headless GL)**
-
-1. **剥离可见组件的 GL 上下文**：不再将 `juce::OpenGLContext` 附加到可见的 `GLView` 上。
-2. **创建隐藏的渲染宿主**：在 `GLView` 内部创建一个独立的 `juce::Component` (`hiddenHost`)，将其坐标设置到屏幕外（`-10000, -10000`），并添加到桌面 (`addToDesktop`)。
-3. **精确控制物理尺寸**：根据主窗口的 DPI 缩放比例，计算出需要的**物理像素尺寸**，并将 `hiddenHost` 的逻辑尺寸反向缩放，确保其底层 FBO 的物理尺寸精确等于我们需要的像素大小。
-4. **物理尺寸渲染与回读**：在 `renderOpenGL` 中，通过 `glGetIntegerv(GL_VIEWPORT)` 获取真实的物理 FBO 尺寸，将其传递给 projectM，并使用该尺寸进行 `glReadPixels`。这彻底消灭了左下角问题。
-5. **纯 CPU 绘制**：将读回的像素数据存入 `juce::Image`，在可见的 `MilkdropModule` 的 `paintContent()` 中使用 `g.drawImage()` 绘制。由于此时 UI 树中没有任何原生 HWND，它完美服从 JUCE 的 Z-order，彻底解决了遮挡问题。
-
----
-
-#### ⑬ 终极 Milkdrop 模块开发指导（避坑指南）
-
-在后续对 Milkdrop 模块（或任何集成第三方 OpenGL 库的 JUCE 模块）进行开发时，请务必遵循以下原则，这些都是用血泪踩出来的坑：
-
-1. **绝对禁止嵌套 OpenGL 上下文**：
-   - 永远不要在开启了 `setComponentPaintingEnabled(true)` 的父组件内部，再给子组件附加 `OpenGLContext`。这会导致 JUCE 的 CachedImage 管线在非消息线程回调 `paint()`，触发 `jassertfalse` 或死锁。
-   - **正确做法**：主 UI 保持纯 CPU 渲染（GDI/Direct2D），需要 OpenGL 的模块使用**离屏隐藏窗口**渲染，然后将像素读回 CPU 内存，再用 `g.drawImage()` 贴到主 UI 上。
-
-2. **警惕 Airspace Problem（空域问题）**：
-   - 只要你把 `OpenGLContext` 附加到一个可见的子组件上，JUCE 就会在 Windows 上创建一个原生 HWND。这个 HWND **永远**会遮挡同级的 CPU 渲染组件（如弹窗、叠加层、其他模块）。
-   - 试图用 `SetWindowPos`、`SetWindowRgn` 或 `WS_EX_TRANSPARENT` 来 hack 这个原生窗口的 Z-order 都是徒劳的。**唯一解是离屏渲染 + CPU 贴图**。
-
-3. **DPI 缩放与物理像素的鸿沟**：
-   - JUCE 的 `getWidth()` / `getHeight()` 返回的是**逻辑尺寸**。
-   - OpenGL 的 FBO 和 `glViewport` 使用的是**物理像素尺寸**。
-   - 传给第三方 GL 库（如 projectM）的尺寸，以及 `glReadPixels` 的尺寸，**必须是物理尺寸**。最安全的获取方式是在 `renderOpenGL` 线程中直接调用 `glGetIntegerv(GL_VIEWPORT, ...)`。
-
-4. **第三方 GL 库的霸道行为**：
-   - 不要指望用 `glScissor` 或 `glBindFramebuffer` 来限制第三方库。像 projectM 这样的库会在内部强行 `glDisable(GL_SCISSOR_TEST)` 并 `glBindFramebuffer(0)`。
-   - **正确做法**：给它一个完全独立的、尺寸刚好合适的 FBO（通过隐藏窗口实现），让它随便折腾 FBO 0，我们只管最后 `glReadPixels`。
-
-5. **GLEW 与多实例的诅咒**：
-   - libprojectM 4 在 Windows 上依赖 GLEW，而 GLEW 的函数指针表是 DLL 全局的。
-   - 如果你在进程中销毁并重建了 OpenGL 上下文，必须通过 `FreeLibrary` + `LoadLibrary` 强制重新加载 projectM DLL，否则它会使用旧上下文的无效函数指针，导致 `0xC0000005` 崩溃。
-   - 运行时硬性限制：同一时刻只能有一个激活的 projectM 实例。
-
-6. **线程安全与生命周期**：
-   - projectM 的 handle 必须在 GL 线程创建和销毁。
-   - 模块析构时，必须先同步调用 `glContext.detach()` 等待 GL 线程收尾，然后再解除音频回调等依赖，防止 GL 线程读到已销毁的内存。
-
----
-
-#### ⑥ 长期教训（合并自 v2.0.4 + v2.1.0 + v2.1.1 + v2.1.7 + v2.1.8 + v2.1.9 + v2.1.10 + v2.1.11 + v2.1.12）
-
-1. **写第三方 C 头封装类时，命名空间不要跟第三方公开符号重名**——用 `_api` 后缀。
-2. **中文注释源文件必须存为 UTF-8 with BOM**（Windows MSVC 下 GBK 解码会把 `。` 认成非法字符）。
-3. **块注释里禁止出现 `*/` 序列**（如 `glGen*/glCompile*` 会提前闭合外层 `/** ... */`）。
-4. **JUCE OpenGL 默认走 legacy 兼容性 profile**——第三方 GL 库要求 Core Profile 3.3+ 时必须显式 `setOpenGLVersionRequired(openGL4_1)`。
-5. **JUCE OpenGL renderer 在 Windows 上不是画到 FBO 0**——`componentPaintingEnabled(true)` 下 CachedImage FBO 被 `ModulePanel::paint` 底色覆盖。
-6. **`GLint/GLuint` 是全局作用域**（`<KHR/khrplatform.h>`），JUCE 只把 GL 函数和常量放进 `juce::gl`。
-7. **libprojectM 4.Win 假设宿主已调 `glewInit`**——不调就崩在 `glGen*`；必须先 `glewExperimental = GL_TRUE`。
-8. **libprojectM GLEW 函数指针绑定 HGLRC**——更换上下文后必须 `FreeLibrary+LoadLibrary` 全量 reset。
-9. **Windows Standalone 需要显式打开 FileLogger**——日志路径 `%APPDATA%\Y2Kmeter\runtime.log`。
-10. **`glBlitFramebuffer(default FBO → off-screen FBO)` 格式不匹配时驱动静默丢弃像素**——`glError` 仍为 0，给调试带来极大误导。
-11. **`glCopyTexSubImage2D` 是唯一跨驱动可靠的默认 FBO 读回方式**——但目的地必须是纹理，不能直接写 off-screen FBO。
-12. **`glContext.triggerRepaint()` 不可靠驱动 UI 重绘**——标志位在下帧 `renderFrame` 入口即被清零。`juce::Timer` 在消息线程回调是唯一可靠方案。
-13. **`juce::Timer` + WebView2 危险，但 `juce::Timer` + CPU Image 安全**——前者 vtable 竞态，后者纯数据读写。
-14. **不要在 `paint`/`paintContent` 回调内部调用 `repaint()`**——JUCE `componentPaintingEnabled(true)` 下，绘制期间 `repaint()` 会干扰 CachedImage 合成管线，导致 `CachedImage::paint` 被 GL 线程调用，Debug 下触发 `jassertfalse`（`int3`）。auto-hide 等轮询逻辑应放在独立的 `timerCallback` 中。
-15. **`hasKeyboardFocus()` 不是"窗口是否激活"的检测**——它是组件级键盘焦点 API，只检测本组件或其子组件是否 `grabKeyboardFocus`，不能用于检测顶层窗口失焦。检测顶层窗口失焦需 `TopLevelWindow::getActiveTopLevelWindow()` 或 `Desktop::addFocusChangeListener`。
-16. **新增 `juce::Timer` 继承到已有深继承链时可能触发构造期崩溃**——多基类对象布局变化 + 构造阶段 `startTimer` 回调可能在 vtable 尚未完全建立时触发。优先复用已有 timer（如 GLView 的 30Hz 回调），通过公开方法暴露给需要轮询的逻辑。
-17. **嵌套 `juce::OpenGLContext` 不支持且无 workaround**——当父组件持有 GL 上下文（`setComponentPaintingEnabled(true)`）且子组件也持有独立 GL 上下文时，JUCE CachedImage 管线会从 GL 线程回调子组件 `paint()`，触发 `jassertfalse`；`#ifdef NDEBUG` 仅在 Debug 避开断言，Release 下表现为系统 DLL 随机地址挂起。唯一正确方案：移除父级 GL 上下文，各组件走 CPU 软光栅，仅 Milkdrop 保留独立 GL。
-18. **`paint()` 需要窗口可见才会被 OS 调度；不能用"等 paint() 回调再 setVisible(true)"**——这是逻辑死锁。消除启动闪屏的正确方案：用与 UI 主题一致的纯黑底色（闪黑不闪灰），同步 `addToDesktop()` + `setVisible(true)`。
-19. **`enterModalState()` 是非阻塞的**——调用后立即返回，内部运行嵌套消息循环。不要在 `enterModalState()` 之后立刻恢复被隐藏的组件。正确方式：使用 `juce::ModalComponentManager::Callback` 基类的 `modalStateFinished()` 回调，在对话框真正关闭时才恢复组件可见性。
-20. **`setComponentPaintingEnabled(false)` 衍生原生 HWND，Z-order 高于普通 JUCE Component**——GLView 的独立原生窗口会覆盖所有普通 JUCE 组件（包括模态对话框），导致对话框不可见且鼠标事件被捕获造成"假卡死"。弹窗时必须先 `glView->setVisible(false)` 隐藏原生窗口。
-21. **不要在构造函数中创建含 `addAndMakeVisible` 的子组件用于 hover snapshot**——`ModuleWorkspace::getHoverPreviewImage()` 创建临时模块做软件快照时，如果模块构造器中包含可见子组件（如 TextEditor），会在渲染管线中触发断点断言（`0x80000003`）。应延迟创建子组件到首次使用。
+### 6.32 Milkdrop 避坑指南
+
+1. 禁止嵌套 OpenGL 上下文——Editor GL=true 时子组件不能再附加独立 context。v2.2.0 是"两个独立 context 不同 surface"，非嵌套。
+2. Airspace Problem 无 API workaround——唯一根治：主窗口 GPU 合成管线消除 GL HWND vs GDI 对立。
+3. DPI 缩放用物理像素——getWidth() 逻辑尺寸，glReadPixels/glViewport 需物理尺寸，在 renderOpenGL 中 glGetIntegerv(GL_VIEWPORT) 获取。
+4. projectM 内部强制 glBindFramebuffer(0)——不要用自定义 FBO 限制它。
+5. GLEW 函数指针绑定 HGLRC——重建 context 后必须 FreeLibrary+LoadLibrary 全量 reload。
+6. projectM handle 必须在 GL 线程创建/销毁，析构先同步 detach 等 GL 收尾。
+7. componentPaintingEnabled(true) 下 CachedImage 被 ModulePanel 底色覆盖——paintContent 用 drawImageAt 覆盖。
+8. GLint/GLuint 全局作用域(khrplatform.h)，不加 juce::gl:: 前缀。
+9. glBlitFramebuffer(FBO 0→自定义FBO) 格式不匹配时驱动静默丢弃，glError 仍为 0。
+10. triggerRepaint() 不可靠驱动 UI 重绘——juce::Timer 消息线程回调唯一可靠。
+11. 不要在 paint/paintContent 内调 repaint()——干扰 CachedImage。
+12. hasKeyboardFocus() != 窗口激活——组件级 API，顶层窗口用 TopLevelWindow::getActiveTopLevelWindow()。
+13. enterModalState() 非阻塞——用 ModalComponentManager::Callback::modalStateFinished() 做恢复。
+14. GLView 原生 HWND 覆盖模态弹窗——弹窗前 glView->setVisible(false)。
+15. 不要在构造器 addAndMakeVisible 子组件——hover snapshot 构造触发断点，延迟到首次使用。
+16. 中文源文件存 UTF-8 with BOM——MSVC GBK 把中文标点认非法。
+17. 命名空间不与 C struct 同名——projectM-4/types.h struct projectm 冲突，用 _api 后缀。
+18. 块注释禁 */——glGen*/glCompile* 提前闭合。
+19. JUCE GL 默认 legacy profile——Core Profile 必须显式 setOpenGLVersionRequired(openGL4_1)。
+20. juce::Timer + CPU Image 安全，+ WebView2 危险——后者 vtable 竞态。
+21. paint() 需窗口可见 OS 才调度——不能"等 paint 再 setVisible"，启动闪屏用纯黑底色。
 
 ---
 

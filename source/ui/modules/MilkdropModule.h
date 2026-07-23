@@ -179,21 +179,20 @@ private:
         // 预设总数（UI 线程安全只读）。
         int getTotalPresetCount() const noexcept { return presetPaths.size(); }
 
-        // CPU 帧缓存访问器：GL 线程在 renderOpenGL 中通过 glReadPixels 写入，
-        // UI 线程在 GLView::paint 中通过 g.drawImage 绘制。调用者负责持锁。
-        juce::Image& getCachedGlFrame() { return cachedGlFrame_; }
-        std::mutex& getGlFrameMutex() { return glFrameMutex_; }
-
         // 最后一次预设切换的时间戳（毫秒，steady_clock）。GL 线程写，UI 线程读。
         // 用于在 soft-cut 过渡期间显示"Loading..."提示。
         int64_t getLastPresetSwitchTimeMs() const noexcept { return last_preset_switch_time_ms_.load(); }
+
+        // CPU 帧缓存访问器：GL 线程在 renderOpenGL 中通过 glReadPixels 写入，
+        // UI 线程在 paintContent 中通过 drawImageAt 绘制。调用者负责持锁。
+        juce::Image& getCachedGlFrame() { return cachedGlFrame_; }
+        std::mutex& getGlFrameMutex() { return glFrameMutex_; }
 
         // ---- 分辨率缩放（glReadPixels 降采样） ----
         enum class ReadbackScale { kFull = 1, kHalf = 2, kQuarter = 4 };
         ReadbackScale getReadbackScale() const noexcept { return readback_scale_.load(); }
         void cycleReadbackScale() noexcept
         {
-          // 三态循环: 1:1 → 1:2 → 1:4 → 1:1
           auto cur = readback_scale_.load();
           switch (cur)
           {
@@ -201,6 +200,7 @@ private:
           case ReadbackScale::kHalf:    readback_scale_.store(ReadbackScale::kQuarter); break;
           case ReadbackScale::kQuarter: readback_scale_.store(ReadbackScale::kFull);    break;
           }
+          resized();
         }
         juce::String getReadbackScaleLabel() const noexcept
         {
@@ -229,7 +229,7 @@ private:
 
     private:
         // Timer: UI 线程 30Hz。projectM 帧通过 glReadPixels → cachedGlFrame_
-        // → paintContent(g.drawImage) 显示。timer 驱动重绘、auto-hide 与 auto 轮播。
+        // → paintContent(drawImageAt 1:1) 显示。timer 驱动重绘、auto-hide 与 auto 轮播。
         void timerCallback() override;
         void loadPresetInternal();
         void attachIfNeeded();
@@ -238,8 +238,10 @@ private:
 
         MilkdropModule& owner;
         juce::OpenGLContext glContext;
-        std::unique_ptr<juce::Component> hiddenHost;
-        std::atomic<float> currentScale_ { 1.0f };
+
+        // GLView 的逻辑尺寸（UI 线程 resized 写入，GL 线程 renderOpenGL 读取）。
+        std::atomic<int>  logicalFrameW_ { 0 };
+        std::atomic<int>  logicalFrameH_ { 0 };
 
         // scheduleAsyncAttach 递归重试上限。
         // 每次 callAsync 间隔 ~16ms（Windows 消息循环），60 次 ≈ 1 秒。
@@ -286,7 +288,7 @@ private:
 
         // 分辨率缩放级别：GL 线程在 glReadPixels 时按此值降采样回读（1/2/4）。
         // UI 线程通过 cycleReadbackScale() 切换，GL 线程在 renderOpenGL 消费。
-        std::atomic<ReadbackScale> readback_scale_ { ReadbackScale::kFull };
+        std::atomic<ReadbackScale> readback_scale_ { ReadbackScale::kHalf };
 
         // 尺寸变化：UI 线程 setBounds 时置位，GL 线程 renderOpenGL 消费并
         // 调用 projectm_set_window_size —— projectM 的 fbo 会随之重建。
@@ -310,10 +312,11 @@ private:
         // 用于在 soft-cut 过渡期间显示"Loading..."提示。
         std::atomic<int64_t>     last_preset_switch_time_ms_ { 0 };
 
-        // 帧缓存：renderOpenGL（GL 线程）通过 glReadPixels 从 GLView 的 FBO 0 回读，
-        // paintContent（UI 线程）以 g.drawImage 绘制到界面。mutex 保护。
+        // 帧缓存：renderOpenGL（GL 线程）通过 glReadPixels 回读，
+        // paintContent（UI 线程）以 drawImageAt 1:1 绘制到界面。
         juce::Image              cachedGlFrame_;
         std::mutex               glFrameMutex_;
+        std::vector<uint8_t>     pixelBuffer_;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLView)
     };
