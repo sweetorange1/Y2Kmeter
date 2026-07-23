@@ -238,6 +238,8 @@ private:
 
         MilkdropModule& owner;
         juce::OpenGLContext glContext;
+        std::unique_ptr<juce::Component> hiddenHost;
+        std::atomic<float> currentScale_ { 1.0f };
 
         // scheduleAsyncAttach 递归重试上限。
         // 每次 callAsync 间隔 ~16ms（Windows 消息循环），60 次 ≈ 1 秒。
@@ -312,11 +314,6 @@ private:
         // paintContent（UI 线程）以 g.drawImage 绘制到界面。mutex 保护。
         juce::Image              cachedGlFrame_;
         std::mutex               glFrameMutex_;
-
-        // setComponentPaintingEnabled(false) 时 GLView 拥有独立原生 HWND 子窗口。
-        // 调用此方法将其推到父窗口子控件 Z-order 最底层 + WS_EX_TRANSPARENT，
-        // 让 GDI 绘制的其他模块覆盖在 GL HWND 之上。
-        void pushNativeWindowToBottom();
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLView)
     };

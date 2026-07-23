@@ -2303,62 +2303,55 @@ GLView 覆盖整个内容区，默认 `juce::Component` 会吞掉所有鼠标事
 
 `saveModuleSpecificState` 新增 `autoMode`(bool) 和 `autoInterval`(float) 属性；`restoreModuleSpecificState` 对应恢复。旧存档无这些属性时维持默认值，向后兼容。
 
-**版本号**：`2.1.10 → 2.1.11 → 2.1.12`
+**版本号**：`2.1.10 → 2.1.11 → 2.1.12 → 2.1.13`
 
 ---
 
-#### ⑫ v2.1.12 Z-order 遮挡问题调试记录（未解决）
+#### ⑫ v2.1.12/v2.1.13 Z-order 遮挡问题与左下角显示问题（已彻底解决）
 
-> **背景**：Milkdrop GLView 的 projectM 渲染会遮挡软件内其他模块（如 Tamagotchi、VU 表等），这是因为 projectM 在 `openglRenderFrame` 内部强制 `glBindFramebuffer(0)` 渲染到默认 framebuffer，并且会调用 `glDisable(GL_SCISSOR_TEST)` 清除全窗口内容。本问题经历多轮尝试仍未最终解决，当前代码状态为各尝试中的最新方案。
+> **背景**：
+> 1. **Z-order 遮挡问题 (Airspace Problem)**：Milkdrop GLView 的 projectM 渲染会遮挡软件内其他模块（如 Tamagotchi、VU 表等）。这是因为在移除了全局 OpenGL 上下文后，主窗口回退到 CPU 软件渲染，而附加了 `OpenGLContext` 的 GLView 会被 JUCE 强制创建一个原生子窗口 (HWND)。在 Windows DWM 规则中，原生子窗口永远物理悬浮在父窗口的软件渲染图层之上。
+> 2. **左下角显示问题**：在开启了屏幕缩放（High DPI）的显示器上，projectM 渲染的画面只占据左下角的一个矩形区域。这是因为传递给 projectM 的是逻辑尺寸，而底层 FBO 是物理像素尺寸。
 
-##### 尝试 1：`setComponentPaintingEnabled(true)` + `glScissor`
+**终极解决方案：离屏隐藏窗口渲染 (Off-screen / Headless GL)**
 
-**思路**：JUCE CachedImage FBO 合成模式下，通过设置 `glScissor` 限制 projectM 的渲染范围到 GLView 区域。
+1. **剥离可见组件的 GL 上下文**：不再将 `juce::OpenGLContext` 附加到可见的 `GLView` 上。
+2. **创建隐藏的渲染宿主**：在 `GLView` 内部创建一个独立的 `juce::Component` (`hiddenHost`)，将其坐标设置到屏幕外（`-10000, -10000`），并添加到桌面 (`addToDesktop`)。
+3. **精确控制物理尺寸**：根据主窗口的 DPI 缩放比例，计算出需要的**物理像素尺寸**，并将 `hiddenHost` 的逻辑尺寸反向缩放，确保其底层 FBO 的物理尺寸精确等于我们需要的像素大小。
+4. **物理尺寸渲染与回读**：在 `renderOpenGL` 中，通过 `glGetIntegerv(GL_VIEWPORT)` 获取真实的物理 FBO 尺寸，将其传递给 projectM，并使用该尺寸进行 `glReadPixels`。这彻底消灭了左下角问题。
+5. **纯 CPU 绘制**：将读回的像素数据存入 `juce::Image`，在可见的 `MilkdropModule` 的 `paintContent()` 中使用 `g.drawImage()` 绘制。由于此时 UI 树中没有任何原生 HWND，它完美服从 JUCE 的 Z-order，彻底解决了遮挡问题。
 
-**结果**：❌ 失败。日志显示 viewport 和 scissor 精确匹配，但遮挡依旧。**根因确认**：projectM 的 DLL 内部主动调用 `glDisable(GL_SCISSOR_TEST)`，导致我们的 scissor 限制被 projectM 自己解除。
+---
 
-##### 尝试 2：FBO 0 备份/还原 (`glBlitFramebuffer`)
+#### ⑬ 终极 Milkdrop 模块开发指导（避坑指南）
 
-**思路**：在 projectM 渲染前用 `glBlitFramebuffer` 将 FBO 0 全量备份到 off-screen FBO，projectM 污染 FBO 0 后从备份还原。
+在后续对 Milkdrop 模块（或任何集成第三方 OpenGL 库的 JUCE 模块）进行开发时，请务必遵循以下原则，这些都是用血泪踩出来的坑：
 
-**结果**：❌ 失败。
-- 第1轮：用 `GL_MAX_VIEWPORT_DIMS` 查询 FBO 0 尺寸 → 返回 32768（硬件极限，不是真实窗口尺寸）→ 创建 32K×32K FBO（4GB），blit 静默失败 → **纯黑**
-- 第2轮：改用 `GL_BACK_LEFT` renderbuffer 查询尺寸 → Windows WGL 上返回 0×0 → 备份 FBO 从未创建 → **遮挡依旧**
-- 第3轮：改用 JUCE `getTopLevelComponent() × getDesktopScaleFactor()` → 尺寸正确（2560×1440），但 `glBlitFramebuffer(default FBO → off-screen FBO)` 在 Windows 驱动上静默失败（格式不匹配，glError=0 无错误码）→ **纯黑**
+1. **绝对禁止嵌套 OpenGL 上下文**：
+   - 永远不要在开启了 `setComponentPaintingEnabled(true)` 的父组件内部，再给子组件附加 `OpenGLContext`。这会导致 JUCE 的 CachedImage 管线在非消息线程回调 `paint()`，触发 `jassertfalse` 或死锁。
+   - **正确做法**：主 UI 保持纯 CPU 渲染（GDI/Direct2D），需要 OpenGL 的模块使用**离屏隐藏窗口**渲染，然后将像素读回 CPU 内存，再用 `g.drawImage()` 贴到主 UI 上。
 
-##### 尝试 3：`setComponentPaintingEnabled(false)` + Win32 Z-order
+2. **警惕 Airspace Problem（空域问题）**：
+   - 只要你把 `OpenGLContext` 附加到一个可见的子组件上，JUCE 就会在 Windows 上创建一个原生 HWND。这个 HWND **永远**会遮挡同级的 CPU 渲染组件（如弹窗、叠加层、其他模块）。
+   - 试图用 `SetWindowPos`、`SetWindowRgn` 或 `WS_EX_TRANSPARENT` 来 hack 这个原生窗口的 Z-order 都是徒劳的。**唯一解是离屏渲染 + CPU 贴图**。
 
-**思路**：GLView 拥有独立原生 HWND，projectM 的 FBO 0 为 GLView 自己的 back buffer，不污染主窗口。通过 Win32 API 将 GL HWND 推到子窗口底层。
+3. **DPI 缩放与物理像素的鸿沟**：
+   - JUCE 的 `getWidth()` / `getHeight()` 返回的是**逻辑尺寸**。
+   - OpenGL 的 FBO 和 `glViewport` 使用的是**物理像素尺寸**。
+   - 传给第三方 GL 库（如 projectM）的尺寸，以及 `glReadPixels` 的尺寸，**必须是物理尺寸**。最安全的获取方式是在 `renderOpenGL` 线程中直接调用 `glGetIntegerv(GL_VIEWPORT, ...)`。
 
-**结果**：❌ 失败。
-- 第1轮：`SetWindowPos(hwnd, HWND_BOTTOM)` → `getPeer()->getNativeHandle()` 返回的是一级窗口 HWND 而非 GL 子窗口 HWND → 整个应用被推到桌面 Z-order 底层 → **app 消失到桌面下面**
-- 第2轮：`EnumChildWindows` 按坐标枚举定位 GL 子窗口 → `SetWindowRgn(NULL)` + `WS_EX_TRANSPARENT` → GL HWND 不可见但 GL 渲染和 `glReadPixels` 正常 → **遮挡依旧**（GL HWND 仍然物理覆盖其他组件区域）
+4. **第三方 GL 库的霸道行为**：
+   - 不要指望用 `glScissor` 或 `glBindFramebuffer` 来限制第三方库。像 projectM 这样的库会在内部强行 `glDisable(GL_SCISSOR_TEST)` 并 `glBindFramebuffer(0)`。
+   - **正确做法**：给它一个完全独立的、尺寸刚好合适的 FBO（通过隐藏窗口实现），让它随便折腾 FBO 0，我们只管最后 `glReadPixels`。
 
-##### 当前代码状态
+5. **GLEW 与多实例的诅咒**：
+   - libprojectM 4 在 Windows 上依赖 GLEW，而 GLEW 的函数指针表是 DLL 全局的。
+   - 如果你在进程中销毁并重建了 OpenGL 上下文，必须通过 `FreeLibrary` + `LoadLibrary` 强制重新加载 projectM DLL，否则它会使用旧上下文的无效函数指针，导致 `0xC0000005` 崩溃。
+   - 运行时硬性限制：同一时刻只能有一个激活的 projectM 实例。
 
-```cpp
-// Constructor
-glContext.setComponentPaintingEnabled(false);  // 独立原生 HWND
-
-// renderOpenGL else 分支：简化流程
-juce::gl::glBindFramebuffer(GL_FRAMEBUFFER, 0);
-api.openglRenderFrame(pmHandle);
-glReadPixels → cachedGlFrame_;
-
-// paintContent: g.drawImage(cachedGlFrame_) 绘制到 GDI
-
-// attach 成功后调用 pushNativeWindowToBottom():
-//   EnumChildWindows → 定位 GL 子 HWND
-//   SetWindowRgn(NULL) → 不可见
-//   WS_EX_TRANSPARENT → 鼠标穿透
-```
-
-**已知问题**：`SetWindowRgn(NULL)` 虽然让 GL HWND 像素不可见，但该 HWND 仍占据空间，Windows DWM 仍然将其视为覆盖其他子控件的矩形区域，导致 GDI 绘制的其他模块内容被其物理覆盖。遮挡问题未解决。
-
-**可能的未来方向**：
-- 尝试在 projectM 渲染前/后使用 `glCopyTexSubImage2D`（已知是唯一跨驱动可靠的默认 FBO 读回方式）
-- 更深入的 Win32 窗口层级操作（如 `SetWindowPos` 定位到真正的子 HWND 而不是一级窗口）
-- 考虑 patch/replace projectM DLL 中 `glDisable(GL_SCISSOR_TEST)` 的调用
+6. **线程安全与生命周期**：
+   - projectM 的 handle 必须在 GL 线程创建和销毁。
+   - 模块析构时，必须先同步调用 `glContext.detach()` 等待 GL 线程收尾，然后再解除音频回调等依赖，防止 GL 线程读到已销毁的内存。
 
 ---
 

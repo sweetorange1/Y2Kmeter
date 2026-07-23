@@ -152,7 +152,7 @@ namespace
     // libprojectM 4 (Windows/GLEW) 依赖进程全局的函数指针表，
     // 同一时刻跨多个 juce::OpenGLContext 共存会导致新挂的
     // context 里 GLEW 未重新初始化——表现为 projectm_create 内部跳到
-    // 0x0 崩溃。因此运行时硬限 1 个实例（UI 层的“菜单置灰”
+    // 0x0 崩溃。因此运行时硬限 1 个实例（UI 层的"菜单置灰"
     // 只是前置防御；即便布局反序列化或拖拽复制插入了第二个
     // Milkdrop，此处的计数也会拒绝挂 projectM，换为兑底提示。
     std::atomic<int> gActiveProjectMInstances { 0 };
@@ -385,11 +385,14 @@ void MilkdropModule::jumpToPresetIndex(int index)
 MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     : owner (owner_)
 {
+    hiddenHost = std::make_unique<juce::Component>();
+    hiddenHost->setOpaque(true);
+
     // 重要：不在构造时立即 attachTo。
     // juce::OpenGLContext 必须在宿主 Component 已经进入 peer（窗口句柄层级）
     // 且 isShowing() == true 时才能安全 attach，否则内部 CachedImage 会在
     // 非消息线程上被回调 paint()，命中 juce_OpenGLContext.cpp:239 的
-    // jassertfalse —— “添加模块就异常卡住”的元凶。
+    // jassertfalse —— "添加模块就异常卡住"的元凶。
     //
     // 正确时机—— parentHierarchyChanged() / visibilityChanged() 里检测 isShowing()
     // 后再调用 attachIfNeeded()。
@@ -453,6 +456,8 @@ MilkdropModule::GLView::~GLView()
     // （detach 会等 GL 线程收尾并触发 openGLContextClosing → destroy handle）。
     if (glContext.isAttached())
         glContext.detach();
+
+    hiddenHost.reset();
 }
 
 void MilkdropModule::GLView::detachAndWait()
@@ -472,12 +477,18 @@ void MilkdropModule::GLView::attachIfNeeded()
     if (glContext.isAttached())
         return;
 
-    if (! isShowing())      // 还未挂到桌面（父窗未 show / 未 addAndMakeVisible）就直接返回
+    if (! isShowing() || getPeer() == nullptr)      // 还未挂到桌面（父窗未 show / 未 addAndMakeVisible）就直接返回
         return;
 
     // 到这一步：宿主已进入 peer 且 visible —— 可安全 attach。
-    glContext.attachTo (*this);
-    pushNativeWindowToBottom();
+    if (!hiddenHost->isOnDesktop())
+    {
+        hiddenHost->addToDesktop(juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresKeyPresses);
+        hiddenHost->setVisible(true);
+        resized(); // 强制同步一次尺寸
+    }
+
+    glContext.attachTo (*hiddenHost);
 }
 
 void MilkdropModule::GLView::scheduleAsyncAttach()
@@ -519,8 +530,13 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
             if (self->isShowing() && self->getWidth() > 0 && self->getHeight() > 0
                 && self->getPeer() != nullptr)
             {
-                self->glContext.attachTo(*self);
-                self->pushNativeWindowToBottom();
+                if (!self->hiddenHost->isOnDesktop())
+                {
+                    self->hiddenHost->addToDesktop(juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresKeyPresses);
+                    self->hiddenHost->setVisible(true);
+                    self->resized(); // 强制同步一次尺寸
+                }
+                self->glContext.attachTo(*(self->hiddenHost));
             }
             else
             {
@@ -528,65 +544,6 @@ void MilkdropModule::GLView::scheduleAsyncAttach()
             }
         }
     });
-}
-
-void MilkdropModule::GLView::pushNativeWindowToBottom()
-{
-    // 使 GLView 的原生 HWND 完全不可见：不再通过 SetWindowPos 操作 Z-order
-    // （那会误伤一级窗口导致整个 app 跑到桌面底部），而是用 SetWindowRgn(NULL)
-    // 将 HWND 的可见区域设为零——OpenGL 仍能正常渲染和 glReadPixels，
-    // 但 Windows 不绘制任何像素，GDI 内容自然透出。
-   #if JUCE_WINDOWS
-    if (auto* peer = getPeer())
-    {
-        auto* parentHwnd = static_cast<HWND>(peer->getNativeHandle());
-        if (parentHwnd)
-        {
-            // 枚举父窗口子控件，找到与 GLView 位置/尺寸匹配的 HWND
-            struct FindCtx {
-                HWND parent;
-                RECT target;  // GLView 在父窗口客户区中的位置
-                HWND found;
-            } ctx;
-            ctx.parent = parentHwnd;
-            ctx.found  = nullptr;
-
-            auto localBounds = getBounds();
-            ctx.target.left   = localBounds.getX();
-            ctx.target.top    = localBounds.getY();
-            ctx.target.right  = localBounds.getRight();
-            ctx.target.bottom = localBounds.getBottom();
-
-            ::EnumChildWindows(parentHwnd,
-                [](HWND hwnd, LPARAM lp) -> BOOL {
-                    auto* c = reinterpret_cast<FindCtx*>(lp);
-                    RECT r;
-                    ::GetWindowRect(hwnd, &r);
-                    ::MapWindowPoints(HWND_DESKTOP, c->parent, (LPPOINT)&r, 2);
-
-                    // 匹配左上角坐标（容差 2px）
-                    if (abs(r.left - c->target.left) <= 2 &&
-                        abs(r.top  - c->target.top)  <= 2)
-                    {
-                        c->found = hwnd;
-                        return FALSE;  // 停止枚举
-                    }
-                    return TRUE;
-                },
-                reinterpret_cast<LPARAM>(&ctx));
-
-            if (ctx.found)
-            {
-                // 不可见 + 鼠标穿透
-                ::SetWindowRgn(ctx.found, nullptr, TRUE);
-
-                LONG exStyle = ::GetWindowLong(ctx.found, GWL_EXSTYLE);
-                if (!(exStyle & WS_EX_TRANSPARENT))
-                    ::SetWindowLong(ctx.found, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
-            }
-        }
-    }
-   #endif
 }
 
 void MilkdropModule::GLView::parentHierarchyChanged()
@@ -605,6 +562,24 @@ void MilkdropModule::GLView::resized()
 {
     const int w = getWidth();
     const int h = getHeight();
+
+    if (hiddenHost != nullptr && hiddenHost->isOnDesktop())
+    {
+        float scale = 1.0f;
+        if (auto* peer = getPeer())
+            scale = peer->getPlatformScaleFactor();
+            
+        float hiddenScale = 1.0f;
+        if (auto* hiddenPeer = hiddenHost->getPeer())
+            hiddenScale = hiddenPeer->getPlatformScaleFactor();
+            
+        int pw = juce::roundToInt(w * scale);
+        int ph = juce::roundToInt(h * scale);
+        
+        hiddenHost->setBounds(-10000, -10000, 
+                              juce::jmax(1, juce::roundToInt(pw / hiddenScale)), 
+                              juce::jmax(1, juce::roundToInt(ph / hiddenScale)));
+    }
 
     // 无条件尝试 attach（scheduleAsyncAttach 内部有递归重试 + 上限保护）。
     // 这里不做 isShowing() 预判：在"手动添加模块"场景下，resized() 触发时
@@ -767,20 +742,23 @@ void MilkdropModule::GLView::renderOpenGL()
     auto& api = projectm_api::Api::instance();
 
     // 1) 尺寸同步（Component 尺寸随时可能改变）
-    const int cw = getWidth();
-    const int ch = getHeight();
-    if (cw > 0 && ch > 0)
+    GLint viewport[4];
+    juce::gl::glGetIntegerv(juce::gl::GL_VIEWPORT, viewport);
+    const int pw = juce::jmax(1, viewport[2]);
+    const int ph = juce::jmax(1, viewport[3]);
+
+    if (pw > 0 && ph > 0)
     {
-        desiredWidth  = cw;
-        desiredHeight = ch;
+        desiredWidth  = pw;
+        desiredHeight = ph;
 
         // JUCE 的 GL context 会自动设置 viewport 匹配 Component 尺寸，
         // 但 projectM 内部有自己的 FBO 尺寸——必须显式通知它。
-        if (cw != lastAppliedWidth || ch != lastAppliedHeight)
+        if (pw != lastAppliedWidth || ph != lastAppliedHeight)
         {
-            api.setWindowSize(pmHandle, (std::size_t)cw, (std::size_t)ch);
-            lastAppliedWidth  = cw;
-            lastAppliedHeight = ch;
+            api.setWindowSize(pmHandle, (std::size_t)pw, (std::size_t)ph);
+            lastAppliedWidth  = pw;
+            lastAppliedHeight = ph;
         }
     }
 
@@ -892,24 +870,24 @@ void MilkdropModule::GLView::renderOpenGL()
 
       if (renderCount <= 3)
         juce::Logger::writeToLog("[Milkdrop::GL] renderOpenGL #" + juce::String(renderCount)
-          + " cw=" + juce::String(cw) + " ch=" + juce::String(ch));
+          + " pw=" + juce::String(pw) + " ph=" + juce::String(ph));
 
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
       api.openglRenderFrame(pmHandle);
 
       // 回读像素（FBO 0 → CPU buffer → cachedGlFrame_），支持降分辨率读取
-      if (cw > 0 && ch > 0)
+      if (pw > 0 && ph > 0)
       {
         const int scale = static_cast<int>(readback_scale_.load());
-        const int rw = cw / scale;
-        const int rh = ch / scale;
+        const int rw = pw / scale;
+        const int rh = ph / scale;
         const int rwClamped = juce::jmax(1, rw);
         const int rhClamped = juce::jmax(1, rh);
 
         std::vector<uint8_t> pixels(
-            static_cast<size_t>(cw * ch * 4));
+            static_cast<size_t>(pw * ph * 4));
         juce::gl::glReadBuffer(juce::gl::GL_BACK);
-        juce::gl::glReadPixels(0, 0, (GLsizei)cw, (GLsizei)ch,
+        juce::gl::glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph,
                                juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
                                pixels.data());
 
@@ -928,9 +906,9 @@ void MilkdropModule::GLView::renderOpenGL()
         juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
         for (int y = 0; y < rhClamped; ++y)
         {
-          const int srcY = ch - 1 - (y * scale + scale / 2);
+          const int srcY = ph - 1 - (y * scale + scale / 2);
           const uint8_t* srcRow = pixels.data()
-              + static_cast<size_t>(srcY * cw * 4);
+              + static_cast<size_t>(srcY * pw * 4);
           for (int x = 0; x < rwClamped; ++x)
           {
             const int srcX = x * scale + scale / 2;
