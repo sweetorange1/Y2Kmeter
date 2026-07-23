@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.2.1，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.2.2，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.1：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.2：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 + renderOpenGL 像素回读管线修复） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -1942,6 +1942,34 @@ if (motionMode != MotionMode::carried
 - 底色主题化：`backgroundColourId` → `PinkXP::content`，不再是 JUCE 默认深灰色
 - 标签文字固定黑色：`labelTextColourId` → `juce::Colours::black`，不受 base 颜色影响
 - 标签更新：left → `"Accent (Charts / Title)"`，right → `"Base (Background / UI)"`
+
+---
+
+### 6.38 v2.2.2：修复 Milkdrop renderOpenGL 像素回读管线，复原部分预设显示异常
+
+**问题**：从 v2.1.12 起，Milkdrop 部分预设（典型如 #574）能出图像但画面不正确——形变、拉伸、颜色错误。回退到 v2.1.11（`7d60e00`）正常。
+
+**根因**：解决 Z-order 问题的过程中，`renderOpenGL` 的像素回读管线经历了两次重写，每次引入不同问题。
+
+**演进路径**：
+
+| 版本 | `cachedGlFrame_` 尺寸 | 像素转换 | 问题 |
+|------|----------------------|---------|------|
+| **v2.1.11** ✅ | 物理像素 `vpW`×`vpH`（=`glGetIntegerv(GL_VIEWPORT)`） | 简单 Y-flip，无缩放 | — |
+| **086c2b6** ❌ | 逻辑像素 `cw`×`ch`（=`getWidth()/getHeight()`） | `glReadPixels(cw, ch)` 只读了逻辑尺寸 | HiDPI 下物理像素比逻辑像素大（如 150% DPI），只读到左下角 2/3 区域 → 画面被裁切 |
+| **8af86e6→b41f0a5** ❌ | 逻辑像素 `lw`×`lh`（`=logicalFrameW_.load()`） | `glReadPixels(pw, ph)` 全读 → 手动 nearest-neighbor 降采样到 `lw`×`lh` | (1) `hasOpenglRenderFrameFbo()` 为 true 时完全不回读 `cachedGlFrame_`，永不更新 → 首帧后画面冻结；(2) `logicalFrameW_` 由 UI 线程 `resized()` 写入、GL 线程 `renderOpenGL()` 读取，resize 时存在竞态窗口；（3）paintContent 改用 `drawImageAt` 1:1 无缩放，但 Image 已是逻辑像素，与 GLView bounds 尺寸一致看似正确，实则以最近邻替代了 GDI bilinear，视觉劣化 |
+
+**修复**（[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) + [MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h)）：
+
+1. **统一像素回读**：将 `glReadPixels` 从 `if/else` 分支内提到外层，无论 `hasOpenglRenderFrameFbo()` 走哪条路径都执行回读。这是最关键的修复 —— FBO 路径之前完全不更新 `cachedGlFrame_`。
+2. **回归物理像素尺寸**：`cachedGlFrame_` 恢复为 `pw`×`ph`（viewport 物理像素），配简单 Y-flip，与 viewport 始终一致，零跨线程依赖。
+3. **回归 GDI bilinear 缩放**：`paintContent` 中 `drawImageAt(frame, x, y, false)` → `drawImage(frame, bounds.toFloat())`，由 GDI 做 bilinear 缩放到逻辑像素，v2.1.11 验证过的可靠管线。
+4. **清理无用成员**：移除 `logicalFrameW_`/`logicalFrameH_`（header + `resized()` 写入），不再需要跨线程同步逻辑尺寸。
+
+**教训**：
+- 像素回读数据的尺寸选择是一个看似"都可以"但实际极易出错的点。物理像素 → 简单翻转 → GDI 缩放是 JUCE GL 场景下最安全的模式。
+- FBO 路径和非 FBO 路径如果只有渲染 API 不同、最终产物都在同一 surface，则读回逻辑应该统一，不应放在分支内。
+- 跨线程 atomic 传递尺寸信息（UI `resized` → GL `renderOpenGL`）引入了难以察觉的竞态窗口，能避免则避免。使用 GL viewport 查询即可自洽。
 
 ---
 

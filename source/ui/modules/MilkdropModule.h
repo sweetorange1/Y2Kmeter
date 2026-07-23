@@ -239,10 +239,6 @@ private:
         MilkdropModule& owner;
         juce::OpenGLContext glContext;
 
-        // GLView 的逻辑尺寸（UI 线程 resized 写入，GL 线程 renderOpenGL 读取）。
-        std::atomic<int>  logicalFrameW_ { 0 };
-        std::atomic<int>  logicalFrameH_ { 0 };
-
         // scheduleAsyncAttach 递归重试上限。
         // 每次 callAsync 间隔 ~16ms（Windows 消息循环），60 次 ≈ 1 秒。
         // 超过上限说明宿主窗口永远不会 visible，放弃并写入 renderErrorMessage。

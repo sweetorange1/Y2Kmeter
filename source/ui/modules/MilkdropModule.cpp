@@ -248,15 +248,13 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     {
         if (glView->isRenderInitialized())
         {
-          // cachedGlFrame_ 为 Image::ARGB 格式，尺寸 == GLView 逻辑尺寸。
-          // drawImageAt 1:1 无缩放，仅触发 TransformedImageFill<RGB,ARGB>
-          // 单一路径（~1.1ms/帧），不存在 RGB 格式的双路径开销。
+          // cachedGlFrame_ 为 Image::ARGB 格式，尺寸 == GL viewport 物理像素。
+          // drawImage 由 GDI 做 bilinear 缩放填充到 GLView 逻辑像素 bounds，
+          // 保持 v2.1.11 验证过的可靠管线。
           std::lock_guard<std::mutex> lock(glView->getGlFrameMutex());
           auto& frame = glView->getCachedGlFrame();
-          if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0) {
-            auto b = glView->getBounds();
-            g.drawImageAt(frame, b.getX(), b.getY(), false);
-          }
+          if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0)
+            g.drawImage(frame, glView->getBounds().toFloat());
         }
         else
         {
@@ -517,11 +515,6 @@ void MilkdropModule::GLView::visibilityChanged()
 
 void MilkdropModule::GLView::resized()
 {
-    if (const int w = getWidth(); w > 0)
-        logicalFrameW_.store(w);
-    if (const int h = getHeight(); h > 0)
-        logicalFrameH_.store(h);
-
     scheduleAsyncAttach();
 }
 
@@ -773,74 +766,53 @@ void MilkdropModule::GLView::renderOpenGL()
     }
 
     // 4) 让 projectM 出一帧
-    //
-    // 关键：JUCE 在调用 renderOpenGL 之前会把它的 CachedImage FBO
-    // 绑到 GL_FRAMEBUFFER（Windows 上非 0），期望我们把最终画面写入
-    // 这个 FBO；bufferSwapper.swap() 再把它送到 HWND。
-    //
-    // 但 projectM 4 内部渲染最终帧时会 glBindFramebuffer(GL_FRAMEBUFFER, 0)，
-    // 把画面写到了"系统默认 FBO"——JUCE 拿不到，屏幕就永远是黑的。
-    //
-    // projectM 4.2.0+ 提供 projectm_opengl_render_frame_fbo(handle, fbo)，
-    // 让调用方指定输出 FBO。我们查询 GL 当前 draw framebuffer binding，
-    // 把这个 ID 传给 projectM。
     if (api.hasOpenglRenderFrameFbo())
     {
         GLint currentDrawFbo = 0;
         juce::gl::glGetIntegerv(juce::gl::GL_DRAW_FRAMEBUFFER_BINDING, &currentDrawFbo);
-
         api.openglRenderFrameFbo(pmHandle, (uint32_t)currentDrawFbo);
         juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, (GLuint)currentDrawFbo);
     }
     else
     {
-      // componentPaintingEnabled(false)：GL 直接 attach 到 GLView 原生 HWND。
-      // FBO 0 即为 GLView 自己的 back buffer，projectM 渲染后 SwapBuffers 直出。
-      // glReadPixels 回读 GPU→CPU，缓存到 ARGB Image，paintContent 用 drawImageAt 绘制。
+        juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+        api.openglRenderFrame(pmHandle);
+    }
 
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-      api.openglRenderFrame(pmHandle);
-
-      if (pw > 0 && ph > 0)
-      {
-        const int lw = juce::jmax(1, logicalFrameW_.load());
-        const int lh = juce::jmax(1, logicalFrameH_.load());
-
+    // 统一回读像素（FBO 0 → CPU buffer → cachedGlFrame_）。
+    // componentPaintingEnabled(false) 时，两种渲染路径的最终产物都在 FBO 0。
+    // cachedGlFrame_ 使用 viewport 物理像素尺寸，由 paintContent 的
+    // drawImage 做 bilinear 缩放到逻辑像素 — 保持 v2.1.11 验证过的可靠管线。
+    if (pw > 0 && ph > 0)
+    {
         pixelBuffer_.resize(static_cast<size_t>(pw * ph * 4));
+        juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
         juce::gl::glReadBuffer(juce::gl::GL_BACK);
         juce::gl::glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph,
                                juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
                                pixelBuffer_.data());
 
+        // Y 轴翻转：OpenGL 原点在左下，Image 原点在左上
         std::lock_guard<std::mutex> lock(glFrameMutex_);
-        if (cachedGlFrame_.getWidth() != lw
-            || cachedGlFrame_.getHeight() != lh)
-          cachedGlFrame_ = juce::Image(juce::Image::ARGB, lw, lh, true);
+        if (cachedGlFrame_.getWidth() != pw || cachedGlFrame_.getHeight() != ph)
+            cachedGlFrame_ = juce::Image(juce::Image::ARGB, pw, ph, true);
 
-        juce::Image::BitmapData bd(cachedGlFrame_,
-                                    juce::Image::BitmapData::writeOnly);
-
-        const float scaleX = static_cast<float>(pw) / static_cast<float>(lw);
-        const float scaleY = static_cast<float>(ph) / static_cast<float>(lh);
-        for (int y = 0; y < lh; ++y)
+        juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
+        for (int y = 0; y < ph; ++y)
         {
-          const int srcY = ph - 1
-              - juce::jlimit(0, ph - 1, static_cast<int>(y * scaleY + 0.5f * scaleY));
-          const uint8_t* srcRow = pixelBuffer_.data()
-              + static_cast<size_t>(srcY * pw * 4);
-          for (int x = 0; x < lw; ++x)
-          {
-            const int srcX = juce::jlimit(0, pw - 1,
-                static_cast<int>(x * scaleX + 0.5f * scaleX));
-            const int srcIdx = srcX * 4;
-            *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
-                (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
-                | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
-                | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
-                | static_cast<uint32_t>(srcRow[srcIdx + 2]);
-          }
+            const int srcY = ph - 1 - y;
+            const uint8_t* srcRow = pixelBuffer_.data()
+                + static_cast<size_t>(srcY * pw * 4);
+            for (int x = 0; x < pw; ++x)
+            {
+                const int srcIdx = x * 4;
+                *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
+                    (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
+                    | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
+                    | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
+                    | static_cast<uint32_t>(srcRow[srcIdx + 2]);
+            }
         }
-      }
     }
 
     // 5) continuousRepainting=true 已由 JUCE GL 线程自持续驱动，
