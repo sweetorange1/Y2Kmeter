@@ -11,9 +11,9 @@ namespace
 
     juce::Colour meterColour(float db)
     {
-        if (db > -3.0f)  return juce::Colour(0xffec4d85);
-        if (db > -9.0f)  return juce::Colour(0xffffcc44);
-        return juce::Colour(0xff66cc88);
+        if (db > -3.0f)  return PinkXP::sel;      // accent：过载/削波警告
+        if (db > -9.0f)  return PinkXP::pink500;  // 基色中阶：接近临界
+        return PinkXP::pink200;                     // 基色浅阶：安全区
     }
 
     // 画一条横向像素风进度条（Y2K XP 风）：sunken 槽 + 像素格填充 + 右端高亮像素
@@ -42,11 +42,11 @@ namespace
         {
             const int x = inner.getX() + i * step;
             const float t = (float) i / (float) juce::jmax(1, totalCells - 1);
-            // 颜色：低值→浅粉，高值→深粉 / 红（广播表观感）
+            // 颜色：低值→基色浅阶，中高→基色深阶，峰值→accent（广播表观感）
             juce::Colour base;
             if (t < 0.7f)       base = PinkXP::pink300.interpolatedWith(PinkXP::pink600, t / 0.7f);
-            else if (t < 0.9f)  base = juce::Colour(0xffffcc44);
-            else                base = juce::Colour(0xffec4d85);
+            else if (t < 0.9f)  base = PinkXP::pink500;
+            else                base = PinkXP::sel;
 
             if (i < litCells)
             {
@@ -335,7 +335,7 @@ void PhaseCorrelationModule::paintContent(juce::Graphics& g, juce::Rectangle<int
     const float nx = cx - std::cos(th) * (R - 4.0f);
     const float ny = cy - std::sin(th) * (R - 4.0f);
 
-    g.setColour(corr < 0.0f ? juce::Colour(0xffec4d85) : PinkXP::pink600);
+    g.setColour(corr < 0.0f ? PinkXP::sel : PinkXP::pink600);
     g.drawLine(cx, cy, nx, ny, 2.0f);
     g.setColour(PinkXP::dark);
     g.fillEllipse(cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
@@ -1196,7 +1196,7 @@ void VuMeterModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content
     auto area = content.reduced(6);
     if (area.getWidth() < 40 || area.getHeight() < 40) return;
 
-    PinkXP::drawSunken(g, area, PinkXP::pink50);
+    PinkXP::drawSunken(g, area, PinkXP::content);
 
     // 表盘区域 = sunken 卡片内部（再减去一点内描边余量，和 drawDial 保持一致）
     auto dialArea = area;

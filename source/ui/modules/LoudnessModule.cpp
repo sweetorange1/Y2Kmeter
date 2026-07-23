@@ -93,16 +93,16 @@ float LoudnessModule::valueToNorm(float val, bool /*isLUFS*/) noexcept
 // ==========================================================
 juce::Colour LoudnessModule::lufsToColour(float lufs) noexcept
 {
-    if (lufs > -9.0f)  return juce::Colour(0xffec4d85);  // 红（过响）
-    if (lufs > -14.0f) return juce::Colour(0xffffcc44);  // 黄（适中）
-    return juce::Colour(0xff66cc88);                      // 绿（正常）
+    if (lufs > -9.0f)  return PinkXP::sel;      // accent：过响警告
+    if (lufs > -14.0f) return PinkXP::pink500;  // 基色中阶：适中
+    return PinkXP::pink200;                      // 基色浅阶：正常
 }
 
 juce::Colour LoudnessModule::dbToColour(float db) noexcept
 {
-    if (db > -3.0f)  return juce::Colour(0xffec4d85);
-    if (db > -9.0f)  return juce::Colour(0xffffcc44);
-    return juce::Colour(0xff66cc88);
+    if (db > -3.0f)  return PinkXP::sel;
+    if (db > -9.0f)  return PinkXP::pink500;
+    return PinkXP::pink200;
 }
 
 // ==========================================================

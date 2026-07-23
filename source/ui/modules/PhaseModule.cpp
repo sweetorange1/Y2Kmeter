@@ -286,7 +286,7 @@ void PhaseModule::drawCorrDial(juce::Graphics& g, juce::Rectangle<int> area) con
 
     // 指针本体
     juce::Colour needleCol = (smoothedCorr < 0.0f)
-                              ? juce::Colour(0xffec4d85)       // 红：反相
+                              ? PinkXP::sel       // accent：反相
                               : PinkXP::pink600;
     g.setColour(needleCol);
     g.drawLine(cx, cy, tip.x, tip.y, 2.0f);
@@ -346,9 +346,9 @@ void PhaseModule::drawWidthBar(juce::Graphics& g, juce::Rectangle<int> area) con
         const int h = innerBar.getHeight() - 2;
         const float t = (float) i / (float) juce::jmax(1, N - 1);
         juce::Colour base;
-        if (t < 0.6f)      base = juce::Colour(0xff66cc88);
-        else if (t < 0.85f) base = juce::Colour(0xffffcc44);
-        else                base = juce::Colour(0xffec4d85);
+        if (t < 0.6f)      base = PinkXP::pink200;
+        else if (t < 0.85f) base = PinkXP::pink500;
+        else                base = PinkXP::sel;
         g.setColour(i < litN ? base : base.withAlpha(0.18f));
         g.fillRect(x, y, cellSize, h);
     }

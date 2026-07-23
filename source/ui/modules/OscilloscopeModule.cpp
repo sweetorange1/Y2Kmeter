@@ -272,7 +272,7 @@ void OscilloscopeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> co
         if (frozen)
         {
             auto dot = juce::Rectangle<int>(canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
-            g.setColour(juce::Colour(0xffec4d85));
+            g.setColour(PinkXP::sel);
             g.fillEllipse(dot.toFloat());
             g.setColour(PinkXP::ink);
             g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
@@ -671,7 +671,7 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
     if (frozen)
     {
         auto dot = juce::Rectangle<int>(localCanvas.getRight() - 12, localCanvas.getY() + 6, 8, 8);
-        dg.setColour(juce::Colour(0xffec4d85));
+        dg.setColour(PinkXP::sel);
         dg.fillEllipse(dot.toFloat());
         dg.setColour(PinkXP::ink);
         dg.setFont(PinkXP::getFont(9.0f, juce::Font::bold));

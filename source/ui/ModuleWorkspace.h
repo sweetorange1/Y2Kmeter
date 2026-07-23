@@ -457,6 +457,7 @@ public:
     //   · Preset 3 = 下方横向铺满屏幕宽度（同 Preset 2 但窗口贴屏幕底部）
     //   · Preset 4 = Tiled：按用户 settings 的 1346×1087@(89,134)
     //                快照平铺布局（硬编码 XML）
+    //   · Preset 5 = MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
     //   · 选中某项时调用 onLayoutPresetChanged(index)，由 Editor
     //     负责真正的布局/窗口尺寸变更（ModuleWorkspace 本身不持有
     //     顶层窗口的引用，也不了解模块工厂细节，故把具体策略委托给 Editor）
@@ -466,7 +467,8 @@ public:
         defaultGrid      = 1, // 默认布局（七个默认模块 + 默认窗口大小）
         horizontalFull   = 2, // 横向铺满屏幕宽度（贴屏幕顶部）
         horizontalBottom = 3, // 横向铺满屏幕宽度（贴屏幕底部）
-        tiled            = 4  // Tiled：按 settings 快照还原 1346×1087 平铺布局
+        tiled            = 4, // Tiled：按 settings 快照还原 1346×1087 平铺布局
+        mv               = 5  // MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
     };
     std::function<void(LayoutPreset)> onLayoutPresetChanged;
 

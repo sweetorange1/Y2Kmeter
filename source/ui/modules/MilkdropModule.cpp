@@ -301,19 +301,11 @@ void MilkdropModule::layoutContent (juce::Rectangle<int> content)
 {
     if (glView != nullptr)
     {
-        // 顶部控制栏仅在 overlay 可见（focused_==true）时保留空间；
-        // 隐藏时 GLView 应填满整个内容区，避免留出无绘制的空白 bar。
-        int controlHeight = 0;
-        if (focused_)
-        {
-            controlHeight = 26;
-            if (isAutoMode_)
-                controlHeight += kAutoRowHeight;
-        }
-        glView->setBounds(content.withTrimmedTop(controlHeight));
+        // GLView 始终占满整个内容区；叠加控制栏通过 paintContent 中的 GDI 绘制
+        // 覆盖在 GL 帧之上，不挤压 GLView 显示区，避免 resize 导致的白闪。
+        glView->setBounds(content);
 
-
-        // 定位 auto 间隔输入框到顶栏下方的自动行内（"Auto:" 标签之后）
+        // 定位 auto 间隔输入框（悬浮在内容区上方，由 paintAutoControlRow 负责绘制背景）
         if (autoIntervalEditor_ != nullptr && isAutoMode_)
         {
             auto topBar = content.withHeight(26);
@@ -402,7 +394,7 @@ MilkdropModule::GLView::GLView (MilkdropModule& owner_)
     glContext.setContinuousRepainting (true);
     glContext.setSwapInterval (1);             // vsync
 
-// v2.2.0 直连 GL + Editor GL 合成架构：
+// v2.2.1 直连 GL + Editor GL 合成架构：
     //   componentPaintingEnabled(false) → GL context 直接挂到 GLView 原生 HWND，
     //   projectM 渲染到 FBO 0，SwapBuffers GPU 直出（~50fps）。
     //   Z-order 由 Editor 级 OpenGL 上下文（setComponentPaintingEnabled(true)）
@@ -1012,9 +1004,8 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
 
     repaint();
 
-    // 焦点切换会改变 GLView 顶部 trim 量（overlay 显示→留出控制栏空间，
-    // overlay 隐藏→GLView 填满整个内容区），触发重新布局。
-    layoutContent(getContentBounds());
+    // 叠加控制栏覆盖在 GLView 之上渲染，不再挤压 GLView 尺寸，
+    // 因此切换焦点时只需重绘，无需重新布局。
 }
 
 void MilkdropModule::checkOverlayAutoHide()

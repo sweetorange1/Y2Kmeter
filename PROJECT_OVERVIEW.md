@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.2.0，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.2.1，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.0：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.1：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -205,7 +205,8 @@
 ### 4.4 `ModuleWorkspace`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
 - **模块工厂**：`setModuleFactory(f)`，Editor 侧会按 `ModuleType` 构造具体 `ModulePanel` 派生类（见 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `createModule`）。
 - **底部 Toolbar 组件**（自左至右）：`ThemeSwatchBar` → 布局预设下拉 + Save/Load → Grid → FPS → GAIN → Source → Hide。
-- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / tiled=4`。
+- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / tiled=4 / mv=5`。
+  - **MV (Preset 5)**：窗口铺满当前显示器 userArea（视觉等同全屏），上方 180px 横向模块条（同 Preset 2 的 7 个默认模块），下方 Milkdrop 模块占满剩余 canvas 区域。代码位于 `applyLayoutPreset` case 5。
 - **拼豆像素画（PerlerImage）**：拖入图片 → 按 `cellSize`（默认 4，范围 1..15）降采样 + 每格取原图平均色 → 生成像素画 → 作为 canvas 底图；每张贴画对应一个 `PerlerImageLayer` 子 Component 与模块**同 z-order 层级**。
 - **P4 debounce**：`LayoutChangeCoalescer`（16ms 单发计时器），大量小改动只派发 1 次 `onLayoutChanged`。
 - **hit-test 挖洞**：`setHitTestHoles`，chrome 隐藏态下让浮层按钮的鼠标事件冒泡回 Editor。
@@ -299,8 +300,9 @@ main
   → workspace.hoverPreviewCache 全部失效（下次 hover 重新渲染）
 
 自定义主题创建：
-  用户点 ThemeSwatchBar 最左侧双三角方块 → 弹出 CustomThemePicker（RGB 色盘 ×2）
-  → 用户分别选取 primary（映射 sel/swatch）和 secondary（映射 hl/desktop2）
+  用户点 ThemeSwatchBar 最左侧双三角方块 → 弹出 CustomThemePicker（RGB 色盘 ×2，无 alpha 通道）
+  → 用户分别选取 primary/accent（左，映射 pink50-700 图表色阶/sel 标题栏/swatch/desktop2）
+    和 secondary/base（右，映射 desktop/content/btnFace/hl/face/shdw/dark/ink）
   → 点 Apply → PinkXP::applyCustomTheme(primary, secondary)
   → 内部根据双色派生完整 Theme 结构写入 gCustomTheme
   → gCurrentThemeId = ThemeId::custom
@@ -1867,6 +1869,79 @@ if (motionMode != MotionMode::carried
 19. JUCE GL 默认 legacy profile——Core Profile 必须显式 setOpenGLVersionRequired(openGL4_1)。
 20. juce::Timer + CPU Image 安全，+ WebView2 危险——后者 vtable 竞态。
 21. paint() 需窗口可见 OS 才调度——不能"等 paint 再 setVisible"，启动闪屏用纯黑底色。
+
+---
+
+### 6.33 v2.2.1：MV 布局预设（全屏 + 上方模块条 + 下方 Milkdrop）
+
+**需求**：新增预设 "MV"，窗口铺满当前显示器 userArea（视觉等同全屏），上方 250px 横向模块条（7 个默认模块，与 Horizontal Bar(T) 一致），下方 Milkdrop 模块占满剩余 canvas。
+
+**实现**：
+- `ModuleWorkspace.h`：`LayoutPreset` 枚举新增 `mv = 5`
+- `ModuleWorkspace.cpp`：Toolbar 下拉框添加 `"MV"` 选项
+- `PluginEditor.cpp`：`applyLayoutPreset` 新增 `case 5`：
+  - top→setBounds(userArea) 铺满屏幕
+  - 上方复用 preset 2 的加权宽度分配逻辑
+  - 下方 Milkdrop = createModule(Milkdrop) + setBounds(x0, milkY, usableW, milkH)
+- 技术说明：未使用 `setFullScreen()`（会创建独立 HWND 改变消息循环，与 auto-hide 冲突），改用普通窗口 setBounds 到 userArea
+
+---
+
+### 6.34 v2.2.1：自定义主题颜色映射重构
+
+**问题**：旧 `applyCustomTheme` 中 primary 同时控制 pink50-700 + sel + desktop + content + btnFace 等几乎所有颜色，secondary 仅控制 hl/desktop2。图表颜色（频谱曲线、波形、VU 表盘等）无法被用户独立控制。
+
+**新映射**（参考 Matcha Soda 双色逻辑）：
+
+| 控制器 | 角色 | 映射的 Theme 字段 |
+|--------|------|-------------------|
+| primary（左） | accent 强调色 | pink50-700（图表色阶）、sel（标题栏/推子）、swatch（Spectrogram 瀑布图主色）、desktop2（纹理）、selInk |
+| secondary（右） | base 基色 | desktop、content、btnFace、hl/face/shdw/dark（Win95 边框）、ink（正文墨色） |
+
+**关键实现细节**：
+- pink50-pink700 从 primary 拉伸派生（非 secondary），图表颜色跟随左控制器
+- selInk 基于 primary 亮度、ink 基于 secondary 亮度，各自独立自适应
+- swatch = primary（SpectrogramModule 通过 `getCurrentTheme().swatch` 取值）
+- `applyCustomTheme` 位于 [PinkXPStyle.cpp](I:/Y2KMeter/source/ui/PinkXPStyle.cpp)
+
+---
+
+### 6.35 v2.2.1：全局硬编码颜色 → PinkXP 主题色重构
+
+**问题**：FineSplitModules/DynamicsModule/LoudnessModule/PhaseModule/OscilloscopeModule/WaveformModule 等模块中存在大量硬编码 `0xffec4d85`（粉红）、`0xffffcc44`（黄）、`0xff66cc88`（绿），主题切换时不会跟随变化。
+
+**替换规则**：
+
+| 旧硬编码 | 新主题色 | 语义 |
+|----------|---------|------|
+| `0xffec4d85`（粉红） | `PinkXP::sel` | accent：过载/削波/反相警告 |
+| `0xffffcc44`（黄） | `PinkXP::pink500` | 基色中阶：接近临界 |
+| `0xff66cc88`（绿） | `PinkXP::pink200` | 基色浅阶：安全区 |
+
+受影响函数：`meterColour`（FineSplitModules/DynamicsModule）、`lufsToColour`/`dbToColour`（LoudnessModule）、`drawReadoutBar`（FineSplitModules/PhaseModule）、needleCol（PhaseModule）、freeze dot（OscilloscopeModule/WaveformModule）、PhaseCorrelationModule::paintContent 指针色。
+
+---
+
+### 6.36 v2.2.1：Milkdrop 叠加控制栏不再挤压 GLView（消除聚焦白闪）
+
+**问题**：聚焦 Milkdrop 时 `setFocusVisual(true)` → `layoutContent()` → `glView->setBounds(content.withTrimmedTop(26))` 缩小 GLView 触发 GL context resize + FBO 重建 → 闪现白色。
+
+**修复**：[MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)
+- `layoutContent`：删除 `controlHeight` / `withTrimmedTop` 逻辑，`glView->setBounds(content)` 始终占满内容区
+- `setFocusVisual`：移除末尾 `layoutContent(getContentBounds())`，只做 `repaint()`
+- 效果：叠加控制栏通过 GDI paintContent 覆盖在 GL 帧之上（自带半透明暗底 alpha=0.78），GLView 尺寸恒定不 resize
+
+---
+
+### 6.37 v2.2.1：VU 表底盘颜色 + 自定义取色器 UI 修复
+
+**VU 表底盘**：[FineSplitModules.cpp](I:/Y2KMeter/source/ui/modules/FineSplitModules.cpp) `VuMeterModule::paintContent` 中 `PinkXP::drawSunken(g, area, PinkXP::pink50)` → `PinkXP::content`。pink50 跟随 accent 导致 VU 表底色随左控制器，改为 content（base）后与其他模块画布底色一致。
+
+**自定义取色器 UI**：[ModuleWorkspace.cpp](I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) `CustomThemePicker::createChildComponents`：
+- 移除 alpha 通道：`ColourSelector` 构造函数 flags 不传 `showAlphaChannel`
+- 底色主题化：`backgroundColourId` → `PinkXP::content`，不再是 JUCE 默认深灰色
+- 标签文字固定黑色：`labelTextColourId` → `juce::Colours::black`，不受 base 颜色影响
+- 标签更新：left → `"Accent (Charts / Title)"`，right → `"Base (Background / UI)"`
 
 ---
 

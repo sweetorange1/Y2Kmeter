@@ -4,6 +4,7 @@
 #include <cmath>
 #include <array>
 #include "source/ui/ModuleWorkspace.h"
+#include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -80,9 +81,9 @@ private:
     }
     static juce::Colour dbToColour(float db)
     {
-        if (db > -3.0f)  return juce::Colour(0xffec4d85);
-        if (db > -9.0f)  return juce::Colour(0xffffcc44);
-        return juce::Colour(0xff66cc88);
+        if (db > -3.0f)  return PinkXP::sel;
+        if (db > -9.0f)  return PinkXP::pink500;
+        return PinkXP::pink200;
     }
 
     // ---- 成员 ----

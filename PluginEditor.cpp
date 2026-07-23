@@ -1394,7 +1394,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // ==================================================================
     //
     // ==================================================================
-// ✅ v2.2.0 恢复 Editor 级 OpenGL 上下文 —— 核心目的：解决 Z-order 遮盖
+// ✅ v2.2.1 恢复 Editor 级 OpenGL 上下文 —— 核心目的：解决 Z-order 遮盖
     //
     //   Editor 级 GL (setComponentPaintingEnabled=true, attachTo(*this))
     //   使主窗口进入 GPU 合成管线，所有子组件（包括 Milkdrop GLView）的 paint
@@ -2081,6 +2081,140 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
             workspace->addModule (std::move (panel), /*autoPosition*/ false);
 
             curX += slotW;
+        }
+    }
+    else if (presetId == 5)
+    {
+        // Preset 5 (MV): 全屏 + 上方横向模块条（同 Preset 2） + 下方 Milkdrop 占满
+        //
+        //   布局：
+        //     ┌────────────────────────────────────────────┐
+        //     │  SPECT3D | DYN | VU | OSC(L) | SPEC | ...  │  ← 横向模块条 (180px)
+        //     ├────────────────────────────────────────────┤
+        //     │                                            │
+        //     │              Milkdrop 模块                  │  ← 占满剩余 canvas
+        //     │                                            │
+        //     └────────────────────────────────────────────┘
+        //
+        //   注意：顶层窗口不需要全屏变动（DocumentWindow 的 setFullScreen 会创建
+        //   独立的全屏 HWND 并改变消息循环，与我们的 auto-hide 边界行为冲突）。
+        //   这里改为让窗口铺满当前显示器 userArea（任务栏之外的可用区），
+        //   视觉效果等同全屏但技术上仍是普通顶层窗口。
+
+        auto* top = getTopLevelComponent();
+        if (top == nullptr) top = this;
+
+        const auto display = juce::Desktop::getInstance()
+                                 .getDisplays()
+                                 .getDisplayForRect(top->getScreenBounds());
+        const auto userArea = (display != nullptr) ? display->userArea
+                                                   : juce::Rectangle<int>(1280, 720);
+        const int screenW = userArea.getWidth();
+        const int screenH = userArea.getHeight();
+
+        // -------- 第 1 步：全屏尺寸 ----------
+        // 先放开 resizeLimits 到足够宽松，确保 setBounds 不会被 constriner 夹回
+        if (auto* cbc0 = getConstrainer())
+        {
+            setResizeLimits(640, 420,
+                            juce::jmax(cbc0->getMaximumWidth(),  screenW),
+                            juce::jmax(cbc0->getMaximumHeight(), screenH));
+        }
+
+        if (top == this)
+        {
+            setSize(screenW, screenH);
+        }
+        else
+        {
+            top->setBounds(userArea.getX(), userArea.getY(), screenW, screenH);
+        }
+
+        // -------- 第 2 步：反推 overhead + 分配 canvas ----------
+        const int probeContainerH = (top == this) ? getHeight() : top->getHeight();
+
+        // 试探布局让 workspace 初始化 canvas
+        const int probeCanvasH = workspace->getCanvasArea().getHeight();
+        const int overheadH    = probeContainerH - probeCanvasH;
+
+        // 上方模块条目标高度（与 Horizontal Bar(T) 一致的 250px）
+        // 剩下部分全给 Milkdrop
+        constexpr int kTopStripHeight = 250;
+        const int topStripCanvasH = juce::jmax(80, kTopStripHeight - overheadH);
+
+        // 锁死 resizeLimits 到全屏尺寸（MV 模式下不同尺寸没意义）
+        if (auto* cbc = getConstrainer())
+        {
+            setResizeLimits(screenW, screenH, screenW, screenH);
+        }
+
+        // -------- 第 3 步：上方横向模块条（复用 preset 2 的布局逻辑）---------
+        const auto canvas = workspace->getCanvasArea();
+        constexpr int kGrid = 8;
+
+        static const ModuleType horizOrder[] = {
+            ModuleType::spectrogram3d,
+            ModuleType::dynamics,
+            ModuleType::vuMeter,
+            ModuleType::oscilloscope,
+            ModuleType::spectrum,
+            ModuleType::oscilloscopeWave,
+            ModuleType::waveform
+        };
+        constexpr int kHorizCount = 7;
+
+        static const float kWidthRatios[] = {
+            1.0f, 1.0f, 0.7f, 0.7f, 1.5f, 1.0f, 1.5f
+        };
+        static constexpr float kTotalRatio = 7.4f;
+
+        const int topY   = canvas.getY();
+        const int topH   = (topStripCanvasH / kGrid) * kGrid;  // 向下取整到 8px 网格
+        const int usableW = (canvas.getWidth()  / kGrid) * kGrid;
+        const int x0      = canvas.getX() + (canvas.getWidth() - usableW) / 2;
+
+        const int totalCells = usableW / kGrid;
+        int cellsForModule[kHorizCount] = {};
+        int cellsAllocated = 0;
+        for (int i = 0; i < kHorizCount; ++i)
+        {
+            int cells = (int)std::round((float)totalCells * kWidthRatios[i] / kTotalRatio);
+            cells = juce::jmax(1, cells);
+            cellsForModule[i] = cells;
+            cellsAllocated += cells;
+        }
+        cellsForModule[kHorizCount - 1] += totalCells - cellsAllocated;
+
+        int curX = x0;
+        for (int i = 0; i < kHorizCount; ++i)
+        {
+            auto panel = createModule(horizOrder[i]);
+            if (panel == nullptr) continue;
+
+            if (horizOrder[i] == ModuleType::oscilloscope)
+                if (auto* osc = dynamic_cast<OscilloscopeModule*>(panel.get()))
+                    osc->setDisplayMode(OscilloscopeModule::DisplayMode::lissajous);
+
+            const int cellsForThis = cellsForModule[i];
+            const int slotW = cellsForThis * kGrid;
+
+            const int w = juce::jmax(panel->getMinWidth(),  slotW);
+            const int h = juce::jmax(panel->getMinHeight(), topH);
+            panel->setBounds(curX, topY, w, h);
+            workspace->addModule(std::move(panel), /*autoPosition*/ false);
+
+            curX += slotW;
+        }
+
+        // -------- 第 4 步：下方 Milkdrop 占满剩余空间 ----------
+        const int milkY = topY + topH;
+        const int milkH = juce::jmax(80, (canvas.getBottom() / kGrid) * kGrid - milkY);
+
+        auto milkdrop = createModule(ModuleType::milkdrop);
+        if (milkdrop != nullptr)
+        {
+            milkdrop->setBounds(x0, milkY, usableW, milkH);
+            workspace->addModule(std::move(milkdrop), /*autoPosition*/ false);
         }
     }
 

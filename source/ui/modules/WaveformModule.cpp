@@ -397,7 +397,7 @@ void WaveformModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     if (frozen)
     {
         auto dot = juce::Rectangle<int> (canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
-        g.setColour (juce::Colour (0xffec4d85));
+        g.setColour (PinkXP::sel);
         g.fillEllipse (dot.toFloat());
         g.setColour (PinkXP::ink);
         g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));

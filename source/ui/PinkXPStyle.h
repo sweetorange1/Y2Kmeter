@@ -200,8 +200,10 @@ namespace PinkXP
     void applyTheme(ThemeId id);
 
     // 根据用户指定的双色生成并应用自定义主题
-    //   primary：预览方块左上三角色 → 映射到 sel / swatch
-    //   secondary：预览方块右下三角色 → 映射到 hl / desktop2
+    //   primary（左）：accent 强调色 → pink50-700（图表色階：频谱/波形/示波器）、sel（标题栏+
+    //                 推子轨道）、swatch（Spectrogram 瀑布图主色）、desktop2（纹理）
+    //   secondary（右）：base 基色 → desktop/content/btnFace（背景/画布/按钮）、
+    //                    hl/face/shdw/dark（Win95 边框）、ink（正文墨色）
     void applyCustomTheme(juce::Colour primary, juce::Colour secondary);
 
     // 获取当前自定义主题的两种颜色（供 ThemeSwatchBar 绘制预览方块）

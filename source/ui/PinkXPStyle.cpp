@@ -931,11 +931,14 @@ namespace PinkXP
         gCustomPrimary   = primary;
         gCustomSecondary = secondary;
 
-        // 判断 primary 是亮色还是暗色 → 决定文字色方向
-        const float brightness = primary.getBrightness();
-        const bool  isDark     = (brightness <= 0.45f);
+        // primary   = accent（强调色：标题栏、推子轨道、图表色階、图表高亮）
+        // secondary = base（基色：背景、按钮面、桌面、Win95 边框、正文墨色）
+        const float baseBrightness = secondary.getBrightness();
+        const bool  baseIsDark     = (baseBrightness <= 0.45f);
 
-        // pink50→pink700：以 primary 为 pivot(pink500)，向暗→亮两端拉伸 8 阶
+        // pink50→pink700：以 primary（accent）为 pivot(pink400)，向暗→亮两端拉伸 8 阶
+        //   所有模块图表（Spectrum 频谱曲线、Waveform 波形幅度、Oscilloscope 示波器
+        //   波形、Spectrogram 瀑布图格子等）通过 pinkXXX 取值，跟随左侧 accent 控制器。
         auto stretch = [](juce::Colour c, float f) {
             f = juce::jlimit(-1.0f, 1.0f, f);
             if (f < 0.0f) return c.darker(-f);  // f ∈ [-1,0) → darker(0..1]
@@ -952,45 +955,54 @@ namespace PinkXP
         const juce::Colour pk600 = stretch(primary,  0.25f);
         const juce::Colour pk700 = stretch(primary,  0.40f);
 
-        const juce::Colour hlCol   = secondary.brighter(0.08f);
-        const juce::Colour desCol  = primary.darker(0.35f);
-        const juce::Colour des2Col = secondary;
+        const juce::Colour desCol  = secondary.darker(0.35f);
+        const juce::Colour hlCol   = secondary.brighter(0.80f);
+        const juce::Colour des2Col = primary;           // 桌面纹理跟随 accent
 
-        // 桌面和基础底色由 primary 亮度决定走向
+        // Win95 边框四色由基色（secondary）派生
         const juce::Colour darkCol = desCol.darker(0.30f);
         const juce::Colour shdwCol = desCol.darker(0.18f);
         const juce::Colour faceCol = desCol.brighter(0.12f);
 
-        // 文字色自适应：暗底→亮字，亮底→暗字
-        const juce::Colour inkCol   = isDark ? juce::Colour(0xffe0e0e0)
-                                             : juce::Colour(0xff1a1a1a);
-        const juce::Colour selInkCol = isDark ? juce::Colour(0xff050505)
-                                              : juce::Colour(0xffffffff);
-        const juce::Colour btnFaceCol = isDark ? desCol.brighter(0.25f)
-                                               : primary.brighter(0.35f);
-        const juce::Colour contentCol = isDark ? desCol.brighter(0.08f)
-                                               : primary.brighter(0.65f);
+        // 文字色自适应：
+        //   ink    = 正文墨色，绘制在基色背景上 → 基于 secondary 亮度
+        //   selInk = 标题栏文字色，绘制在 accent 背景上 → 基于 primary 亮度
+        const float accentBrightness = primary.getBrightness();
+        const bool  accentIsDark     = (accentBrightness <= 0.45f);
+
+        const juce::Colour inkCol    = baseIsDark ? juce::Colour(0xffe0e0e0)
+                                                  : juce::Colour(0xff1a1a1a);
+        const juce::Colour selInkCol = accentIsDark ? juce::Colour(0xff050505)
+                                                    : juce::Colour(0xffffffff);
+        const juce::Colour btnFaceCol = baseIsDark ? desCol.brighter(0.25f)
+                                                   : secondary.brighter(0.35f);
+        const juce::Colour contentCol = baseIsDark ? desCol.brighter(0.08f)
+                                                   : secondary.brighter(0.65f);
 
         // 构建完整 Theme
+        //   primary   → pink50-700（图表色階）、sel（标题栏/推子）、swatch（Spectrogram主色）、
+        //               desktop2（纹理）、selInk
+        //   secondary → desktop、content、btnFace、hl/face/shdw/dark（Win95 边框）、
+        //               ink（正文墨色）
         gCustomTheme = Theme{
             ThemeId::custom,
             "Custom",
             "RGB / Your colors",
             pk50,  pk100, pk200, pk300, pk400, pk500, pk600, pk700,
-            hlCol,     // hl
-            faceCol,   // face
-            shdwCol,   // shdw
-            darkCol,   // dark
-            inkCol,    // ink
-            primary,   // sel → 标题栏用 primary
-            selInkCol, // selInk
-            desCol,    // desktop
-            des2Col,   // desktop2
-            contentCol,// content
-            btnFaceCol,// btnFace
-            primary,   // swatch
+            hlCol,        // hl      ← 基色高光
+            faceCol,      // face    ← 基色按钮面
+            shdwCol,      // shdw    ← 基色阴影
+            darkCol,      // dark    ← 基色最深边框
+            inkCol,       // ink     ← 基色正文墨色
+            primary,      // sel     ← accent（标题栏/推子轨道/图表高亮）
+            selInkCol,    // selInk  ← accent 上的文字色
+            desCol,       // desktop ← 基色桌面底色
+            des2Col,      // desktop2← accent 桌面纹理
+            contentCol,   // content ← 基色模块画布底色
+            btnFaceCol,   // btnFace ← 基色按钮面
+            primary,      // swatch  ← accent（SpectrogramModule 图表主色）
             DesktopPattern::checker,
-            "+"        // titleIconText
+            "+"           // titleIconText
         };
 
         // 走统一主题切换流程（复用 applyTheme 后半的写入 + 通知逻辑）

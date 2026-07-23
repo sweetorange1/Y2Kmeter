@@ -459,6 +459,7 @@ ModuleWorkspace::ModuleWorkspace()
     layoutPresetBox.addItem ("Default",             (int) LayoutPreset::defaultGrid);
     layoutPresetBox.addItem ("Horizontal Bar(T)",      (int) LayoutPreset::horizontalFull);
     layoutPresetBox.addItem ("Horizontal Bar(B)", (int) LayoutPreset::horizontalBottom);
+    layoutPresetBox.addItem ("MV",                (int) LayoutPreset::mv);
     layoutPresetBox.setLookAndFeel (&getPinkXPLookAndFeel());
     layoutPresetBox.onChange = [this]()
     {
@@ -3136,22 +3137,37 @@ void CustomThemePicker::createChildComponents()
         return;  // 已经创建过
 
     // ---- Primary 取色器 ----
-    primarySelector_ = std::make_unique<juce::ColourSelector>();
+    primarySelector_ = std::make_unique<juce::ColourSelector>(
+        juce::ColourSelector::showColourAtTop
+        | juce::ColourSelector::editableColour
+        | juce::ColourSelector::showSliders
+        | juce::ColourSelector::showColourspace,
+        4, 7);
     primarySelector_->setSize(240, 200);
+    // 内部面板底色跟随主题
+    primarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
+    primarySelector_->setColour(juce::ColourSelector::labelTextColourId, juce::Colours::black);
     addAndMakeVisible(*primarySelector_);
 
     // ---- Secondary 取色器 ----
-    secondarySelector_ = std::make_unique<juce::ColourSelector>();
+    secondarySelector_ = std::make_unique<juce::ColourSelector>(
+        juce::ColourSelector::showColourAtTop
+        | juce::ColourSelector::editableColour
+        | juce::ColourSelector::showSliders
+        | juce::ColourSelector::showColourspace,
+        4, 7);
     secondarySelector_->setSize(240, 200);
+    secondarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
+    secondarySelector_->setColour(juce::ColourSelector::labelTextColourId, juce::Colours::black);
     addAndMakeVisible(*secondarySelector_);
 
     // ---- 标签 ----
-    primaryLabel_.setText("Primary (Title / Accent)", juce::dontSendNotification);
+    primaryLabel_.setText("Accent (Charts / Title)", juce::dontSendNotification);
     primaryLabel_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
     primaryLabel_.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(primaryLabel_);
 
-    secondaryLabel_.setText("Secondary (Highlight / Texture)", juce::dontSendNotification);
+    secondaryLabel_.setText("Base (Background / UI)", juce::dontSendNotification);
     secondaryLabel_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
     secondaryLabel_.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(secondaryLabel_);
