@@ -3255,6 +3255,10 @@ void CustomThemePicker::show(juce::Colour primary, juce::Colour secondary,
     // 延迟创建子控件（首次 show 时才创建 ColourSelector 等复杂控件）
     createChildComponents();
 
+    // 每次弹出时刷新底色为当前 base 色（PinkXP::content 可能已因之前 Apply 而改变）
+    primarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
+    secondarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
+
     primarySelector_->setCurrentColour(primary);
     secondarySelector_->setCurrentColour(secondary);
     visible_ = true;

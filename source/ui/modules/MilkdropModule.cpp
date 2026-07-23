@@ -14,16 +14,6 @@
 
 #include "projectM-4/projectM.h"
 
-#if JUCE_WINDOWS
- #ifndef WIN32_LEAN_AND_MEAN
-  #define WIN32_LEAN_AND_MEAN
- #endif
- #ifndef NOMINMAX
-  #define NOMINMAX
- #endif
- #include <windows.h>
-#endif
-
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -240,9 +230,6 @@ void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
 
 void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> content)
 {
-    static int paintCount = 0;
-    ++paintCount;
-
     // ---- Phase 1: 渲染主内容（GL 帧通过 GDI drawImageAt 1:1 绘制） ----
     if (glView != nullptr && ! glView->getBounds().isEmpty())
     {

@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.2.2，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.2.3，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.2：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 + renderOpenGL 像素回读管线修复） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.3：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 + renderOpenGL 像素回读管线修复） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -1970,6 +1970,28 @@ if (motionMode != MotionMode::carried
 - 像素回读数据的尺寸选择是一个看似"都可以"但实际极易出错的点。物理像素 → 简单翻转 → GDI 缩放是 JUCE GL 场景下最安全的模式。
 - FBO 路径和非 FBO 路径如果只有渲染 API 不同、最终产物都在同一 surface，则读回逻辑应该统一，不应放在分支内。
 - 跨线程 atomic 传递尺寸信息（UI `resized` → GL `renderOpenGL`）引入了难以察觉的竞态窗口，能避免则避免。使用 GL viewport 查询即可自洽。
+
+---
+
+### 6.39 v2.2.3：正式版发布清理 — 移除所有测试/调试代码
+
+**目标**：打包正式版本前，清理所有仅用于开发测试的代码，确保最终用户看不到任何调试 UI 或日志。
+
+**清理项目**：
+
+| 位置 | 清理内容 | 说明 |
+|------|---------|------|
+| [Y2KStandaloneApp.cpp](I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) `initialise()` | 移除 `FileLogger::createDateStampedLogger` 整个代码块 | 之前每次启动在 exe 目录生成 `Y2Kmeter-YYYY-MM-DD-HH-MM-SS.log`，正式版不需要 |
+| [MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | 移除 `static int paintCount` 计数器、移除 `#include <windows.h>`（`WIN32_LEAN_AND_MEAN`/`NOMINMAX` 宏） | paintCount 用于调试 GL 帧率，正式版不需要；Windows.h 在 cpp 中已被 JUCE 间接包含，多余的头文件增加编译时间 |
+| [TamagotchiModule.h](I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | 移除测试按钮声明：`getTestButtonBounds`、`hitTestButton`、`applyTestButton`、`refreshDebugAnimTriggerItems`、`applyForcedMotionMode`、`triggerDebugAnimationById`；移除 `stateModeCombo`/`animTriggerCombo` 两个 `ComboBox` 成员；移除 `forceMotionModeEnabled`/`forcedMotionMode`；移除 `hoveredTestButton`/`pressedTestButton`、`testButtonCount` 常量 | 这些是开发期间用于手动操控拓麻歌子状态机（强制切换 MotionMode、触发特定动画 ID、增减饥饿/血量）的调试 UI，正式用户不应看到 |
+| [TamagotchiModule.cpp](I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) | 同步删除上述声明对应的全部实现代码（~320 行）：`getTestButtonBounds`、`hitTestButton`、`applyTestButton`、`paint()` 中测试按钮绘制逻辑、`mouseMove/mouseDown/mouseMove/mouseUp` 中测试按钮交互、`refreshDebugAnimTriggerItems`、`applyForcedMotionMode`、`triggerDebugAnimationById`；`resized()` 中 ComboBox 布局 | HUD 高度从 64 缩减为只保留饥饿/血量条，`paint()` 中 Clean up 测试按钮绘制循环 |
+| [ModuleWorkspace.cpp](I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) `CustomThemePicker::show()` | 新增 2 行：每次 `show()` 时刷新 `ColourSelector::backgroundColourId` 为当前 `PinkXP::content` | **非清理，而是修复**：自定义取色器底色之前只在首次 `createChildComponents` 设置一次，之后用户 Apply 改主题后底色不会跟随更新；现在每次弹出都重新取 base 色 |
+
+**影响**：
+- 拓麻歌子模块的 HUD 区域显著简化（只剩饥饿/血量两条 pixel bar，原来还有 4 个调试按钮 + 2 个下拉框）
+- 移除了 `evaluateAutoMotionMode`/`switchMotionMode` 中的 `forceMotionModeEnabled` 分支（之前如用户手动选了强制模式，自动评估会被跳过）——状态机现在完全由音频信号驱动，行为更可预测
+- `.log` 文件不再生成，减少用户困扰
+- 编译产物更干净，代码量减少约 370 行
 
 ---
 

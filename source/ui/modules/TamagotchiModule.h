@@ -172,15 +172,6 @@ private:
                        juce::StringRef label) const;
 
     juce::Rectangle<int> getHudBounds() const;
-    juce::Rectangle<int> getTestButtonBounds (int idx) const;
-    juce::Rectangle<int> getStateModeComboBounds() const;
-    juce::Rectangle<int> getAnimTriggerComboBounds() const;
-    int hitTestButton (juce::Point<int> pos) const;
-    void applyTestButton (int idx);
-
-    void refreshDebugAnimTriggerItems();
-    void applyForcedMotionMode();
-    void triggerDebugAnimationById (int triggerId);
 
     bool hasAnimation (int animId) const;
 
@@ -288,12 +279,6 @@ private:
     juce::Array<juce::Image> eggFrames;
     int eggStyleId = 1;
 
-    // 测试下拉框：状态机强制 + 动画触发
-    juce::ComboBox stateModeCombo;
-    juce::ComboBox animTriggerCombo;
-    bool forceMotionModeEnabled = false;
-    MotionMode forcedMotionMode = MotionMode::patrol;
-
     // fight 跳跃动作（2 秒内快速上下两次）
     bool jumpFightActive = false;
     int jumpFightTick = 0;
@@ -316,13 +301,8 @@ private:
     static constexpr int toiletDurationTicks = 120;
     int toiletTicksRemaining = 0;
 
-    // 顶部像素风 HUD 区域高度（条、测试按钮、调试下拉框）
+    // 顶部像素风 HUD 区域高度（饥饿/血量条）
     static constexpr int hudHeight = 64;
-
-    // 测试按钮（+H/-H/+HP/-HP）
-    static constexpr int testButtonCount = 4;
-    int hoveredTestButton = -1;
-    int pressedTestButton = -1;
 
     // 聚焦/删除按钮
     bool focused = false;

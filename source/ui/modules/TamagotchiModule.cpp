@@ -268,15 +268,7 @@ juce::String randomIdleSpeech()
     return lines[juce::Random::getSystemRandom().nextInt (lines.size())];
 }
 
-constexpr int dbgPatrolLookLeftSlow  = 101;
-constexpr int dbgPatrolLookRightSlow = 102;
-constexpr int dbgPatrolMoveLeftFast  = 103;
-constexpr int dbgPatrolMoveRightFast = 104;
-constexpr int dbgPatrolTalk          = 105;
-constexpr int dbgPatrolJumpFight     = 106;
-constexpr int dbgEggIdle             = 1001;
-constexpr int dbgEggHatching         = 1002;
-}
+} // namespace
 
 TamagotchiModule::TamagotchiModule()
     : ModulePanel (ModuleType::tamagotchi)
@@ -311,72 +303,7 @@ TamagotchiModule::TamagotchiModule()
     showSpeechBubble = false;
     jumpFightActive = false;
 
-    stateModeCombo.addItem ("Auto", 1);
-    stateModeCombo.addItem ("Egg", 2);
-    stateModeCombo.addItem ("Hatching", 3);
-    stateModeCombo.addItem ("Toilet", 4);
-    stateModeCombo.addItem ("Patrol", 5);
-    stateModeCombo.addItem ("StartledIntro", 6);
-    stateModeCombo.addItem ("Falling", 7);
-    stateModeCombo.addItem ("LandingFall", 8);
-    stateModeCombo.addItem ("Drowsy", 9);
-    stateModeCombo.addItem ("Sleeping", 10);
-    stateModeCombo.addItem ("Eating", 11);
-    stateModeCombo.addItem ("Hungry", 12);
-    stateModeCombo.addItem ("Starving", 13);
-    stateModeCombo.addItem ("Sick", 14);
-    stateModeCombo.addItem ("CriticalSick", 15);
-    stateModeCombo.addItem ("Dead", 16);
-    stateModeCombo.addItem ("Carried", 17);
-    stateModeCombo.setSelectedId (1, juce::dontSendNotification);
-    stateModeCombo.onChange = [this]
-    {
-        const int sel = stateModeCombo.getSelectedId();
-        forceMotionModeEnabled = (sel != 1);
-
-        switch (sel)
-        {
-            case 2: forcedMotionMode = MotionMode::egg; break;
-            case 3: forcedMotionMode = MotionMode::hatching; break;
-            case 4: forcedMotionMode = MotionMode::toilet; break;
-            case 5: forcedMotionMode = MotionMode::patrol; break;
-            case 6: forcedMotionMode = MotionMode::startledIntro; break;
-            case 7: forcedMotionMode = MotionMode::falling; break;
-            case 8: forcedMotionMode = MotionMode::landingFall; break;
-            case 9: forcedMotionMode = MotionMode::drowsy; break;
-            case 10: forcedMotionMode = MotionMode::sleeping; break;
-            case 11: forcedMotionMode = MotionMode::eating; break;
-            case 12: forcedMotionMode = MotionMode::hungry; break;
-            case 13: forcedMotionMode = MotionMode::starving; break;
-            case 14: forcedMotionMode = MotionMode::sick; break;
-            case 15: forcedMotionMode = MotionMode::criticalSick; break;
-            case 16: forcedMotionMode = MotionMode::dead; break;
-            case 17: forcedMotionMode = MotionMode::carried; break;
-            default: break;
-        }
-
-        applyForcedMotionMode();
-        refreshDebugAnimTriggerItems();
-    };
-    addAndMakeVisible (stateModeCombo);
-    stateModeCombo.setVisible (false);
-    stateModeCombo.setEnabled (false);
-
-    animTriggerCombo.setTextWhenNothingSelected ("Trigger animation...");
-    animTriggerCombo.onChange = [this]
-    {
-        const int sel = animTriggerCombo.getSelectedId();
-        if (sel > 0)
-            triggerDebugAnimationById (sel);
-
-        animTriggerCombo.setSelectedId (0, juce::dontSendNotification);
-    };
-    addAndMakeVisible (animTriggerCombo);
-    animTriggerCombo.setVisible (false);
-    animTriggerCombo.setEnabled (false);
-
     loadRandomRoleAnimations();
-    refreshDebugAnimTriggerItems();
 
     currentVisualHz = getTargetVisualHzForMode (motionMode);
     currentTickDtSec = 1.0f / (float) juce::jmax (1, currentVisualHz);
@@ -400,14 +327,10 @@ void TamagotchiModule::setFocusVisual (bool shouldFocus)
         deleteBtnHovered = false;
         deleteBtnPressed = false;
         dismissConfirmOverlay();
-        hoveredTestButton = -1;
-        pressedTestButton = -1;
         if (dragMode == DragMode::none)
             setMouseCursor (juce::MouseCursor::NormalCursor);
     }
 
-    stateModeCombo.setVisible (false);
-    animTriggerCombo.setVisible (false);
     repaintSelfAndParent();
 }
 
@@ -540,14 +463,6 @@ void TamagotchiModule::paint (juce::Graphics& g)
 
 void TamagotchiModule::resized()
 {
-    hoveredTestButton = -1;
-    pressedTestButton = -1;
-
-    stateModeCombo.setBounds (getStateModeComboBounds());
-    animTriggerCombo.setBounds (getAnimTriggerComboBounds());
-    stateModeCombo.setVisible (false);
-    animTriggerCombo.setVisible (false);
-
     const auto now = getLocalBounds();
 
     const bool grewByHeightOnly = (! lastLocalBounds.isEmpty())
@@ -678,7 +593,6 @@ void TamagotchiModule::mouseExit (const juce::MouseEvent& e)
 {
     juce::ignoreUnused (e);
     deleteBtnHovered = false;
-    hoveredTestButton = -1;
     if (dragMode == DragMode::none)
         setMouseCursor (juce::MouseCursor::NormalCursor);
     repaintSelfAndParent (getDeleteButtonBounds());
@@ -769,8 +683,7 @@ void TamagotchiModule::mouseDrag (const juce::MouseEvent& e)
         if (motionMode != MotionMode::carried
             && motionMode != MotionMode::egg
             && motionMode != MotionMode::hatching
-            && delta.getDistanceFromOrigin() >= kCarriedTriggerDistPx
-            && ! forceMotionModeEnabled)
+            && delta.getDistanceFromOrigin() >= kCarriedTriggerDistPx)
         {
             carriedPetWsX = (float) dragStartBounds.getX() + petPos.x;
             carriedPetWsY = (float) dragStartBounds.getY() + petPos.y;
@@ -877,8 +790,7 @@ void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
 
 void TamagotchiModule::timerCallback()
 {
-    const int targetHz = getTargetVisualHzForMode (forceMotionModeEnabled ? forcedMotionMode
-                                                                            : evaluateAutoMotionMode());
+    const int targetHz = getTargetVisualHzForMode (evaluateAutoMotionMode());
 
     if (targetHz != currentVisualHz)
     {
@@ -892,10 +804,7 @@ void TamagotchiModule::timerCallback()
 
     updateNeeds();
 
-    if (forceMotionModeEnabled)
-        switchMotionMode (forcedMotionMode);
-    else
-        switchMotionMode (evaluateAutoMotionMode());
+    switchMotionMode (evaluateAutoMotionMode());
 
     stepWander();
 
@@ -1292,7 +1201,6 @@ void TamagotchiModule::onAnimationFinished()
             break;
 
         case MotionMode::hatching:
-            if (! forceMotionModeEnabled)
                 switchMotionMode (MotionMode::patrol);
             break;
 
@@ -1305,7 +1213,6 @@ void TamagotchiModule::onAnimationFinished()
             break;
 
         case MotionMode::startledIntro:
-            if (! forceMotionModeEnabled)
                 switchMotionMode (MotionMode::falling);
             break;
 
@@ -1319,7 +1226,6 @@ void TamagotchiModule::onAnimationFinished()
             break;
 
         case MotionMode::landingFall:
-            if (! forceMotionModeEnabled)
                 switchMotionMode (MotionMode::patrol);
             break;
 
@@ -1485,136 +1391,6 @@ juce::Rectangle<int> TamagotchiModule::getHudBounds() const
     return b.removeFromTop (juce::jmin (hudHeight, b.getHeight()));
 }
 
-juce::Rectangle<int> TamagotchiModule::getTestButtonBounds (int idx) const
-{
-    const int safeIdx = juce::jlimit (0, testButtonCount - 1, idx);
-    auto hud = getHudBounds();
-    auto btnRow = hud.withTrimmedTop (16).removeFromTop (16).reduced (2, 1);
-
-    const int gap = 2;
-    const int totalGap = gap * (testButtonCount - 1);
-    const int cellW = juce::jmax (8, (btnRow.getWidth() - totalGap) / testButtonCount);
-    const int x = btnRow.getX() + safeIdx * (cellW + gap);
-    return { x, btnRow.getY(), cellW, juce::jmax (10, btnRow.getHeight()) };
-}
-
-juce::Rectangle<int> TamagotchiModule::getStateModeComboBounds() const
-{
-    auto hud = getHudBounds();
-    auto comboRow = hud.withTrimmedTop (32).removeFromTop (15).reduced (2, 0);
-    const int gap = 2;
-    const int leftW = juce::jmax (16, (comboRow.getWidth() - gap) / 2);
-    return { comboRow.getX(), comboRow.getY(), leftW, comboRow.getHeight() };
-}
-
-juce::Rectangle<int> TamagotchiModule::getAnimTriggerComboBounds() const
-{
-    auto hud = getHudBounds();
-    auto comboRow = hud.withTrimmedTop (32).removeFromTop (15).reduced (2, 0);
-    const int gap = 2;
-    const int leftW = juce::jmax (16, (comboRow.getWidth() - gap) / 2);
-    return { comboRow.getX() + leftW + gap, comboRow.getY(), comboRow.getWidth() - leftW - gap, comboRow.getHeight() };
-}
-
-void TamagotchiModule::refreshDebugAnimTriggerItems()
-{
-    animTriggerCombo.clear (juce::dontSendNotification);
-
-    if (forceMotionModeEnabled)
-    {
-        switch (forcedMotionMode)
-        {
-            case MotionMode::egg:
-                animTriggerCombo.addItem ("egg idle frame 1", dbgEggIdle);
-                break;
-
-            case MotionMode::hatching:
-                animTriggerCombo.addItem ("egg hatch 4 frames", dbgEggHatching);
-                break;
-
-            case MotionMode::toilet:
-                animTriggerCombo.addItem ("toiletSquat (2)", (int) PetAnim::toiletSquat);
-                break;
-
-            case MotionMode::patrol:
-                animTriggerCombo.addItem ("1) lookLeft 6s + slow left",  dbgPatrolLookLeftSlow);
-                animTriggerCombo.addItem ("2) lookLeft mirrored 6s + slow right", dbgPatrolLookRightSlow);
-                animTriggerCombo.addItem ("3) moveLeft 4s + fast left", dbgPatrolMoveLeftFast);
-                animTriggerCombo.addItem ("4) moveLeft mirrored 4s + fast right", dbgPatrolMoveRightFast);
-                animTriggerCombo.addItem ("5) talk(22/23/24) 6s + bubble", dbgPatrolTalk);
-                animTriggerCombo.addItem ("6) fight 2s + two hops", dbgPatrolJumpFight);
-                break;
-
-            case MotionMode::startledIntro:
-                animTriggerCombo.addItem ("startled (33)", (int) PetAnim::startled);
-                animTriggerCombo.addItem ("shocked (25)", (int) PetAnim::shocked);
-                break;
-            case MotionMode::falling:
-                animTriggerCombo.addItem ("startled (33)", (int) PetAnim::startled);
-                animTriggerCombo.addItem ("shocked (25)", (int) PetAnim::shocked);
-                animTriggerCombo.addItem ("fall (27)", (int) PetAnim::fall);
-                break;
-            case MotionMode::landingFall:
-                animTriggerCombo.addItem ("fall (27)", (int) PetAnim::fall);
-                animTriggerCombo.addItem ("shocked (25)", (int) PetAnim::shocked);
-                break;
-
-            case MotionMode::drowsy:
-                animTriggerCombo.addItem ("wantToEat (3)", (int) PetAnim::wantToEat);
-                animTriggerCombo.addItem ("depressed (15)", (int) PetAnim::depressed);
-                break;
-
-            case MotionMode::sleeping:
-                animTriggerCombo.addItem ("sleep (4)", (int) PetAnim::sleep);
-                animTriggerCombo.addItem ("dazeThenWalkLeft (28)", (int) PetAnim::dazeThenWalkLeft);
-                break;
-
-            case MotionMode::eating:
-                animTriggerCombo.addItem ("runLeftToFood (10)", (int) PetAnim::runLeftToFood);
-                animTriggerCombo.addItem ("runLeftToHate (11)", (int) PetAnim::runLeftToHate);
-                animTriggerCombo.addItem ("runLeftToLike (12)", (int) PetAnim::runLeftToLike);
-                animTriggerCombo.addItem ("eatLeft (13)", (int) PetAnim::eatLeft);
-                break;
-
-            case MotionMode::hungry:
-                animTriggerCombo.addItem ("depressed (15)", (int) PetAnim::depressed);
-                animTriggerCombo.addItem ("wantToEat (3)", (int) PetAnim::wantToEat);
-                break;
-
-            case MotionMode::starving:
-                animTriggerCombo.addItem ("talkVeryNegative (21)", (int) PetAnim::talkVeryNegative);
-                animTriggerCombo.addItem ("depressed (15)", (int) PetAnim::depressed);
-                break;
-
-            case MotionMode::sick:
-                animTriggerCombo.addItem ("almostSick (5)", (int) PetAnim::almostSick);
-                animTriggerCombo.addItem ("sick (6)", (int) PetAnim::sick);
-                break;
-
-            case MotionMode::criticalSick:
-                animTriggerCombo.addItem ("sick (6)", (int) PetAnim::sick);
-                animTriggerCombo.addItem ("nearDeath (7)", (int) PetAnim::nearDeath);
-                break;
-
-            case MotionMode::dead:
-                animTriggerCombo.addItem ("death (9)", (int) PetAnim::death);
-                animTriggerCombo.addItem ("nearDeath (7)", (int) PetAnim::nearDeath);
-                break;
-        }
-    }
-    else
-
-    {
-        animTriggerCombo.addItem ("lookAround (16)", (int) PetAnim::lookAround);
-        animTriggerCombo.addItem ("startled (33)", (int) PetAnim::startled);
-        animTriggerCombo.addItem ("fall (27)", (int) PetAnim::fall);
-        animTriggerCombo.addItem ("moveLeft (30)", (int) PetAnim::moveLeft);
-        animTriggerCombo.addItem ("talkHappy (19)", (int) PetAnim::talkHappy);
-    }
-
-    animTriggerCombo.setSelectedId (0, juce::dontSendNotification);
-}
-
 TamagotchiModule::MotionMode TamagotchiModule::evaluateAutoMotionMode() const
 {
     // egg/hatching 启动流程：蛋阶段等待音频，孵化阶段必须完整播放
@@ -1673,6 +1449,7 @@ TamagotchiModule::MotionMode TamagotchiModule::evaluateAutoMotionMode() const
 }
 
 void TamagotchiModule::switchMotionMode (MotionMode newMode)
+
 {
     if (motionMode == newMode)
         return;
@@ -1694,7 +1471,6 @@ void TamagotchiModule::switchMotionMode (MotionMode newMode)
     eatingLowSignalTicksRemaining = 0;
 
     switch (motionMode)
-
     {
         case MotionMode::egg:
             currentFrameIdx = 0;
@@ -1779,112 +1555,6 @@ void TamagotchiModule::switchMotionMode (MotionMode newMode)
     }
 
     enqueuePetDirtyRepaint (oldPetBounds.getUnion (getCurrentPetVisualBounds()));
-}
-
-void TamagotchiModule::applyForcedMotionMode()
-{
-    if (! forceMotionModeEnabled)
-        return;
-
-    switchMotionMode (forcedMotionMode);
-    flushVisualRepaintQueue (true);
-}
-
-void TamagotchiModule::triggerDebugAnimationById (int triggerId)
-{
-    if (forceMotionModeEnabled && forcedMotionMode == MotionMode::patrol)
-    {
-        switch (triggerId)
-        {
-            case dbgPatrolLookLeftSlow:  beginPatrolAction (PatrolAction::lookLeftSlow);  return;
-            case dbgPatrolLookRightSlow: beginPatrolAction (PatrolAction::lookRightSlow); return;
-            case dbgPatrolMoveLeftFast:  beginPatrolAction (PatrolAction::moveLeftFast);  return;
-            case dbgPatrolMoveRightFast: beginPatrolAction (PatrolAction::moveRightFast); return;
-            case dbgPatrolTalk:          beginPatrolAction (PatrolAction::talk);          return;
-            case dbgPatrolJumpFight:     beginPatrolAction (PatrolAction::jumpFight);     return;
-            default: break;
-        }
-    }
-
-    if (forceMotionModeEnabled)
-    {
-        if (forcedMotionMode == MotionMode::egg && triggerId == dbgEggIdle)
-        {
-            currentFrameIdx = 0;
-            enqueuePetDirtyRepaint (getCurrentPetVisualBounds());
-            flushVisualRepaintQueue (true);
-            return;
-        }
-
-        if (forcedMotionMode == MotionMode::hatching && triggerId == dbgEggHatching)
-        {
-            currentFrameIdx = 0;
-            enqueuePetDirtyRepaint (getCurrentPetVisualBounds());
-            flushVisualRepaintQueue (true);
-            return;
-        }
-    }
-
-    const int safeId = juce::jlimit (1, 33, triggerId);
-    if (! hasAnimation (safeId))
-        return;
-
-    const auto oldPetBounds = getCurrentPetVisualBounds();
-
-    if (safeId == (int) PetAnim::fight)
-
-    {
-        jumpFightActive = true;
-        jumpFightTick = 0;
-        jumpFightBaseY = petPos.y;
-    }
-
-    if (motionMode == MotionMode::patrol
-        && (safeId == (int) PetAnim::talkHappier
-            || safeId == (int) PetAnim::talkHappiest
-            || safeId == (int) PetAnim::talkShy
-            || safeId == (int) PetAnim::talkHappy
-            || safeId == (int) PetAnim::talkNormal
-            || safeId == (int) PetAnim::talkNegative
-            || safeId == (int) PetAnim::talkVeryNegative))
-    {
-        showSpeechBubble = true;
-        currentSpeechText = randomIdleSpeech();
-    }
-    else
-    {
-        showSpeechBubble = false;
-        currentSpeechText.clear();
-    }
-
-    forceAnimation (safeId, true);
-    enqueuePetDirtyRepaint (oldPetBounds.getUnion (getCurrentPetVisualBounds()));
-    flushVisualRepaintQueue (true);
-}
-
-int TamagotchiModule::hitTestButton (juce::Point<int> pos) const
-{
-    for (int i = 0; i < testButtonCount; ++i)
-        if (getTestButtonBounds (i).contains (pos))
-            return i;
-
-    return -1;
-}
-
-void TamagotchiModule::applyTestButton (int idx)
-{
-    switch (idx)
-    {
-        case 0: hunger += 10.0f; break; // +H
-        case 1: hunger -= 10.0f; break; // -H
-        case 2: health += 10.0f; break; // +HP
-        case 3: health -= 10.0f; break; // -HP
-        default: break;
-    }
-
-    hunger = juce::jlimit (0.0f, 100.0f, hunger);
-    health = juce::jlimit (0.0f, 100.0f, health);
-    repaintSelfAndParent (getHudBounds());
 }
 
 juce::Image TamagotchiModule::getCurrentFrame() const
@@ -2185,7 +1855,7 @@ void TamagotchiModule::stepPatrolAction()
     if (motionMode != MotionMode::patrol)
         return;
 
-    const bool allowMovement = (! focused) || forceMotionModeEnabled;
+    const bool allowMovement = ! focused;
 
     auto finishCurrentAction = [this]()
     {
