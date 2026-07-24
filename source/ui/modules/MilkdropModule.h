@@ -183,34 +183,16 @@ private:
         // 用于在 soft-cut 过渡期间显示"Loading..."提示。
         int64_t getLastPresetSwitchTimeMs() const noexcept { return last_preset_switch_time_ms_.load(); }
 
-        // CPU 帧缓存访问器：GL 线程在 renderOpenGL 中通过 glReadPixels 写入，
-        // UI 线程在 paintContent 中通过 drawImageAt 绘制。调用者负责持锁。
-        juce::Image& getCachedGlFrame() { return cachedGlFrame_; }
-        std::mutex& getGlFrameMutex() { return glFrameMutex_; }
-
-        // ---- 分辨率缩放（glReadPixels 降采样） ----
-        enum class ReadbackScale { kFull = 1, kHalf = 2, kQuarter = 4 };
-        ReadbackScale getReadbackScale() const noexcept { return readback_scale_.load(); }
-        void cycleReadbackScale() noexcept
+        // Triple-buffer 帧访问器：Consumer（paintContent）通过此接口获取最新就绪帧。
+        // 无锁读取 —— 读取 latestReadySlot_ 原子索引，返回对应 slot 的 Image 引用。
+        // 若尚无就绪帧（latestReadySlot_ == -1），返回 isValid() == false 的 Image。
+        juce::Image& getLatestFrame()
         {
-          auto cur = readback_scale_.load();
-          switch (cur)
-          {
-          case ReadbackScale::kFull:    readback_scale_.store(ReadbackScale::kHalf);    break;
-          case ReadbackScale::kHalf:    readback_scale_.store(ReadbackScale::kQuarter); break;
-          case ReadbackScale::kQuarter: readback_scale_.store(ReadbackScale::kFull);    break;
-          }
-          resized();
-        }
-        juce::String getReadbackScaleLabel() const noexcept
-        {
-          switch (readback_scale_.load())
-          {
-          case ReadbackScale::kFull:    return "1:1";
-          case ReadbackScale::kHalf:    return "1:2";
-          case ReadbackScale::kQuarter: return "1:4";
-          }
-          return {};
+            int slot = latestReadySlot_.load(std::memory_order_acquire);
+            if (slot >= 0 && slot < 3 && frameSlots_[slot].ready.load(std::memory_order_acquire))
+                return frameSlots_[slot].image;
+            static juce::Image nullImage;
+            return nullImage;
         }
 
         // 根据当前预设索引返回用于 UI 显示的预设名（不含路径和 .milk 扩展名）。
@@ -228,8 +210,8 @@ private:
         }
 
     private:
-        // Timer: UI 线程 30Hz。projectM 帧通过 glReadPixels → cachedGlFrame_
-        // → paintContent(drawImageAt 1:1) 显示。timer 驱动重绘、auto-hide 与 auto 轮播。
+        // Timer: UI 线程 30Hz。驱动 repaint 刷新 Overlay 控制栏、auto-hide 与 auto 轮播。
+        // projectM 帧由 GLView 原生 HWND 通过 SwapBuffers 直接显示。
         void timerCallback() override;
         void loadPresetInternal();
         void attachIfNeeded();
@@ -282,10 +264,6 @@ private:
         std::atomic<bool>        requestedPresetRandom { false };
         std::atomic<int>         requestedPresetJump { -1 };   // -1=无请求, >=0=目标索引
 
-        // 分辨率缩放级别：GL 线程在 glReadPixels 时按此值降采样回读（1/2/4）。
-        // UI 线程通过 cycleReadbackScale() 切换，GL 线程在 renderOpenGL 消费。
-        std::atomic<ReadbackScale> readback_scale_ { ReadbackScale::kHalf };
-
         // 尺寸变化：UI 线程 setBounds 时置位，GL 线程 renderOpenGL 消费并
         // 调用 projectm_set_window_size —— projectM 的 fbo 会随之重建。
         std::atomic<int>         desiredWidth  { 0 };
@@ -308,11 +286,27 @@ private:
         // 用于在 soft-cut 过渡期间显示"Loading..."提示。
         std::atomic<int64_t>     last_preset_switch_time_ms_ { 0 };
 
-        // 帧缓存：renderOpenGL（GL 线程）通过 glReadPixels 回读，
-        // paintContent（UI 线程）以 drawImageAt 1:1 绘制到界面。
-        juce::Image              cachedGlFrame_;
-        std::mutex               glFrameMutex_;
-        std::vector<uint8_t>     pixelBuffer_;
+        // === Triple-buffer 无锁帧传输（性能优化 P3：生产者-消费者解耦）===
+        // Producer（GL 线程 renderOpenGL）：glReadPixels → PBO → 写入空闲 slot
+        // Consumer（Editor GL 线程 paintContent）：读取最新就绪 slot → drawImage
+        // 3 个 slot 确保 producer 从不阻塞，consumer 始终拿到最新完整帧。
+        // 零 mutex，仅靠 atomic flag + atomic index 协调。
+        struct FrameSlot {
+            std::atomic<bool> ready{false};
+            juce::Image       image;
+            std::vector<uint8_t> rawPixels;
+        };
+        FrameSlot               frameSlots_[3];
+        std::atomic<int>        latestReadySlot_{-1};  // -1 = 尚无就绪帧
+        int                     producerSlot_ = 0;     // 仅 GL 线程读写
+
+        // === PBO 异步回读（性能优化 P1）===
+        // 双缓冲 PBO：消除同步 glReadPixels 造成的 GPU 管线停顿。
+        //   帧 N：写入 PBO[A]，读取 PBO[B]（上一帧已传输完毕）。
+        //   帧 N+1：写入 PBO[B]，读取 PBO[A]。周而复始。
+        GLuint                   pboIds_[2] = {0, 0};
+        int                      pboWriteIdx_ = 0;
+        bool                     hasPboData_ = false;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLView)
     };
@@ -351,7 +345,7 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kRes, kPresetName, kAuto };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
 

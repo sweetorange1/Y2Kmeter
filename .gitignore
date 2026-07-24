@@ -67,3 +67,10 @@ Thumbs.db
 *.backup
 
 .vscodenul
+
+# Test tools (keep scripts, ignore downloaded binaries)
+/test_tools/projectm_native/projectMSDL/
+/test_tools/projectm_native/src/
+/test_tools/projectm_native/install/
+/test_tools/projectm_native/vcpkg/
+/test_tools/*.zipnul

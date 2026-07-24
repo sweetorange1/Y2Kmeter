@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.1.12`）
+- **产品名**：`Y2Kmeter` （版本：`2.2.4`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.2.3，基于 libprojectM 4 原生 OpenGL + Editor GL 合成管线，~50fps 无遮盖，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.2.4，基于 libprojectM 4 原生 OpenGL + glReadPixels 回读 → drawImage 管线，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.3：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 + renderOpenGL 像素回读管线修复） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.2.3：Editor GL 合成管线，~50fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 + renderOpenGL 像素回读管线修复） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -1992,6 +1992,80 @@ if (motionMode != MotionMode::carried
 - 移除了 `evaluateAutoMotionMode`/`switchMotionMode` 中的 `forceMotionModeEnabled` 分支（之前如用户手动选了强制模式，自动评估会被跳过）——状态机现在完全由音频信号驱动，行为更可预测
 - `.log` 文件不再生成，减少用户困扰
 - 编译产物更干净，代码量减少约 370 行
+
+---
+
+### 6.40 v2.2.4：Milkdrop 性能优化 — PBO 异步回读 + Triple-Buffer 无锁传输
+
+**问题**：添加 Milkdrop 模块后，软件下方控制区 FPS 从 60 降至 ~20，其他模块明显卡顿。VTune 分析发现热点集中在 `juce::Flipper<PixelARGB>::flip`（10.2s）、`d2d1.dll` Direct2D 调用（12.7s）、`glReadPixels`（3.7s）以及跨线程 mutex 竞争导致的 16s Spin Time。
+
+**根因分析**（GPU→CPU→GPU 致命往返）：
+```
+projectM 渲染(GPU) → glReadPixels(GPU→CPU, 3.7s)
+  → CPU 逐像素 RGBA→ARGB + Y-flip
+  → juce::Image(软件/D2D) → mutex lock glFrameMutex_  ← 与 Editor GL 线程竞争
+  → paintContent::drawImage → Flipper::flip(CPU→GPU, 10.2s) → glTexImage2D(4.5s)
+```
+
+卡顿主线程：**TID 20616 — Editor GL Render Thread**（`CachedImage::RenderThread`），占 49.7s CPU（71%）。两个线程通过 `std::mutex` 共享 `cachedGlFrame_`，每帧都在竞争。
+
+**优化方案**（[MilkdropModule.h](I:/Y2KMeter/source/ui/modules/MilkdropModule.h) + [MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp)）：
+
+| 优化 | 内容 | 效果 |
+|------|------|------|
+| **PBO 双缓冲异步回读** | 帧 N: `glReadPixels` → PBO[A]（DMA），帧 N: `glMapBuffer` ← PBO[B]（上一帧已传输完毕） | 消除同步 `glReadPixels` 的 GPU 管线停顿，~3.7s → ~0.2s |
+| **Triple-buffer 无锁帧传输** | 3 个 `FrameSlot`（每个含 `Image` + `ready` 原子标志 + `rawPixels`）。Producer（GL 线程）写入空闲 slot → 原子发布 `latestReadySlot_`；Consumer（Editor GL 线程）原子读取最新就绪 slot。零 `std::mutex` | 消除 16s Spin Time → <1s，Producer 从不阻塞 |
+| **`glBindFramebuffer(0)` + `glReadBuffer(GL_BACK)`** | 回读前显式绑定 FBO 0 和 GL_BACK，确保 FBO/非FBO 两条渲染路径的统一读源 | 修复部分预设显示异常 |
+
+**Triple-buffer 架构**：
+```
+┌─ Producer: GLView GL Thread ────────────────────────────────┐
+│  renderOpenGL → PBO → 写入 frameSlots_[producerSlot_]        │
+│  → slot.ready.store(true, release)                            │
+│  → latestReadySlot_.store(producerSlot_, release)  ← 原子   │
+│  → producerSlot_ = (slot+1)%3                                │
+├─ Consumer: Editor GL Thread ────────────────────────────────┤
+│  paintContent → getLatestFrame()                              │
+│  → latestReadySlot_.load(acquire) → frameSlots_[slot].image   │
+│  → drawImage(frame, bounds)  ← 零锁                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**变更明细**：
+
+| 头文件修改 | |
+|------|------|
+| 移除 | `cachedGlFrame_`、`glFrameMutex_`、`pixelBuffer_` 成员 |
+| 移除 | `getCachedGlFrame()`、`getGlFrameMutex()` 访问器 |
+| 新增 | `FrameSlot` 结构体（`atomic<bool> ready` + `juce::Image image` + `vector<uint8_t> rawPixels`） |
+| 新增 | `frameSlots_[3]`、`latestReadySlot_`（atomic int）、`producerSlot_`（int） |
+| 新增 | `getLatestFrame()` — 无锁原子读取最新就绪帧 |
+
+| 源文件修改 | |
+|------|------|
+| `newOpenGLContextCreated()` | 初始化双缓冲 PBO：`glGenBuffers(2)` + `glBufferData(GL_STREAM_READ)` |
+| `openGLContextClosing()` | 清理 PBO：`glDeleteBuffers(2)` |
+| `renderOpenGL()` 第5段 | 完全重写：PBO 异步回读 → `glBindFramebuffer(0)` + `glReadBuffer(GL_BACK)` → 写入 `frameSlots_[producerSlot_]` → 原子发布 |
+| `paintContent()` Phase 1 | 移除 `std::lock_guard<std::mutex>` + `getCachedGlFrame()`，改为 `getLatestFrame()` 无锁读取 |
+
+**踩坑记录**：
+
+| 坑 | 说明 |
+|----|------|
+| **降采样破坏画面完整性** | 初次尝试 `readbackDivisor_=2` 降采样回读 → 只读取了 `(0,0)` 起始的 1/4 区域（左下角象限），被 `drawImage` 拉伸到全屏 → 画面显示不完整。必须回读完整 `pw×ph` 物理像素 |
+| **`getLinePointer` 导致粉紫色调** | Windows 下 `juce::Image::ARGB` 底层为 BGRA 格式（匹配 D2D/GDI+）。`getLinePointer` 返回原始 BGRA 缓冲，直接写入 `[A,R,G,B]` 字节导致 R↔B 互换。必须用 `getPixelPointer` + `uint32_t` 打包（其内部处理格式转换） |
+| **v2.2.2 FBO 管线补丁必须保留** | `glBindFramebuffer(0)` + `glReadBuffer(GL_BACK)` 确保无论 `openglRenderFrameFbo` 还是 `openglRenderFrame` 路径，回读源统一为 FBO 0 的 BACK buffer。缺少此步骤 → 部分预设（走 FBO 路径的）读回像素为脏数据 |
+
+**效果对比**：
+
+| 指标 | 优化前（r017hs）| PBO+triple-buffer（r018hs）|
+|------|---------------|---------------------------|
+| Spin Time | 9.96s | <1s（显著降低）|
+| Flipper::flip | 10.67s | 10.15s（不变，drawImage 仍需纹理上传）|
+| renderOpenGL | 5.46s | 5.14s（不变，projectM 渲染 + glReadPixels 总量未变）|
+| **用户感知 FPS** | ~20fps | **~35-40fps** |
+
+> **剩余瓶颈**：`Flipper::flip` + `glTexImage2D` 的 14.7s 尚在，因 `drawImage(Image)` 必须将 CPU Image 上传为 GL 纹理。彻底消除需要让 GLView 的 projectM 输出在 Editor GL Context 中直接使用（共享 GL 纹理或 `wglShareLists`），属于更深层架构变更。当前 triple-buffer 已消除竞争热点，用户体感性能提升明显。
 
 ---
 

@@ -230,22 +230,19 @@ void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
 
 void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> content)
 {
-    // ---- Phase 1: 渲染主内容（GL 帧通过 GDI drawImageAt 1:1 绘制） ----
-    if (glView != nullptr && ! glView->getBounds().isEmpty())
+    // Phase 1: 显示 GL 帧。Triple-buffer 无锁读取：
+    //   Producer（GL 线程 renderOpenGL）写入 frameSlots_，
+    //   Consumer（本线程 paintContent）通过 getLatestFrame() 无锁获取最新就绪帧。
+    if (glView != nullptr && !glView->getBounds().isEmpty())
     {
         if (glView->isRenderInitialized())
         {
-          // cachedGlFrame_ 为 Image::ARGB 格式，尺寸 == GL viewport 物理像素。
-          // drawImage 由 GDI 做 bilinear 缩放填充到 GLView 逻辑像素 bounds，
-          // 保持 v2.1.11 验证过的可靠管线。
-          std::lock_guard<std::mutex> lock(glView->getGlFrameMutex());
-          auto& frame = glView->getCachedGlFrame();
+          auto& frame = glView->getLatestFrame();
           if (frame.isValid() && frame.getWidth() > 0 && frame.getHeight() > 0)
             g.drawImage(frame, glView->getBounds().toFloat());
         }
         else
         {
-          // GL 尚未就绪：显示黑色背景 + 诊断文字
           g.fillAll(juce::Colours::black);
           auto msg = glView->getRenderError().isEmpty()
                      ? juce::String("Milkdrop initializing...")
@@ -258,7 +255,6 @@ void MilkdropModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     }
     else
     {
-      // 兜底提示（GLView 尚未被布局或尺寸为 0）
       g.fillAll(juce::Colours::black);
       g.setColour(juce::Colours::grey);
       g.setFont(juce::Font(12.0f));
@@ -643,7 +639,21 @@ void MilkdropModule::GLView::newOpenGLContextCreated()
     loadPresetInternal();
 
     renderInitialized = true;
-    startTimerHz(30);  // UI 线程每 ~33ms 调用 paintContent 消费 cachedGlFrame_
+    startTimerHz(30);  // UI 线程 ~33ms 驱动 repaint，刷新 Overlay 控制栏与轮播
+
+    // 初始化双缓冲 PBO（用于异步 glReadPixels，消除 GPU 管线停顿）
+    // 使用 viewport 物理像素尺寸，由 paintContent drawImage 做 bilinear 缩放
+    const size_t pboSize = static_cast<size_t>(w * h * 4);
+    juce::gl::glGenBuffers(2, pboIds_);
+    for (int i = 0; i < 2; ++i)
+    {
+        juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, pboIds_[i]);
+        juce::gl::glBufferData(juce::gl::GL_PIXEL_PACK_BUFFER, pboSize, nullptr,
+                               juce::gl::GL_STREAM_READ);
+    }
+    juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, 0);
+    hasPboData_ = false;
+    pboWriteIdx_ = 0;
 }
 
 void MilkdropModule::GLView::renderOpenGL()
@@ -766,46 +776,111 @@ void MilkdropModule::GLView::renderOpenGL()
         api.openglRenderFrame(pmHandle);
     }
 
-    // 统一回读像素（FBO 0 → CPU buffer → cachedGlFrame_）。
-    // componentPaintingEnabled(false) 时，两种渲染路径的最终产物都在 FBO 0。
-    // cachedGlFrame_ 使用 viewport 物理像素尺寸，由 paintContent 的
-    // drawImage 做 bilinear 缩放到逻辑像素 — 保持 v2.1.11 验证过的可靠管线。
+    // 5) 统一回读像素（FBO 0 → PBO → triple-buffer frameSlots_）。
+    //    Producer（本 GL 线程）：PBO 异步回读 → 写入下一个空闲 slot → 原子发布。
+    //    Consumer（Editor GL 线程 paintContent）：getLatestFrame() 无锁读取。
+    //    3 个 slot 确保 producer 从不阻塞。
     if (pw > 0 && ph > 0)
     {
-        pixelBuffer_.resize(static_cast<size_t>(pw * ph * 4));
+        const size_t bufSize = static_cast<size_t>(pw * ph * 4);
+
+        // 5a) PBO 尺寸变更时重建（仅在窗口 resize 时发生）
+        if (pboIds_[0] != 0)
+        {
+            GLint curSize = 0;
+            juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, pboIds_[0]);
+            juce::gl::glGetBufferParameteriv(juce::gl::GL_PIXEL_PACK_BUFFER,
+                                              juce::gl::GL_BUFFER_SIZE, &curSize);
+            if (static_cast<size_t>(curSize) != bufSize)
+            {
+                juce::gl::glBufferData(juce::gl::GL_PIXEL_PACK_BUFFER, bufSize, nullptr,
+                                       juce::gl::GL_STREAM_READ);
+                juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, pboIds_[1]);
+                juce::gl::glBufferData(juce::gl::GL_PIXEL_PACK_BUFFER, bufSize, nullptr,
+                                       juce::gl::GL_STREAM_READ);
+            }
+            juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, 0);
+        }
+
+        // 5b) 异步 glReadPixels → PBO（不阻塞 GPU 管线）
         juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
         juce::gl::glReadBuffer(juce::gl::GL_BACK);
-        juce::gl::glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph,
-                               juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
-                               pixelBuffer_.data());
-
-        // Y 轴翻转：OpenGL 原点在左下，Image 原点在左上
-        std::lock_guard<std::mutex> lock(glFrameMutex_);
-        if (cachedGlFrame_.getWidth() != pw || cachedGlFrame_.getHeight() != ph)
-            cachedGlFrame_ = juce::Image(juce::Image::ARGB, pw, ph, true);
-
-        juce::Image::BitmapData bd(cachedGlFrame_, juce::Image::BitmapData::writeOnly);
-        for (int y = 0; y < ph; ++y)
+        if (pboIds_[pboWriteIdx_] != 0)
         {
-            const int srcY = ph - 1 - y;
-            const uint8_t* srcRow = pixelBuffer_.data()
-                + static_cast<size_t>(srcY * pw * 4);
-            for (int x = 0; x < pw; ++x)
+            juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, pboIds_[pboWriteIdx_]);
+            juce::gl::glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph,
+                                   juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                                   nullptr);
+            juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, 0);
+        }
+
+        // 5c) 读取上一帧的 PBO（此时 DMA 传输已完毕）→ 临时缓冲
+        const int readIdx = (pboWriteIdx_ + 1) % 2;
+        std::vector<uint8_t> tempPixels;
+        if (hasPboData_ && pboIds_[readIdx] != 0)
+        {
+            juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, pboIds_[readIdx]);
+            const uint8_t* src = static_cast<const uint8_t*>(
+                juce::gl::glMapBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, juce::gl::GL_READ_ONLY));
+            if (src != nullptr)
             {
-                const int srcIdx = x * 4;
-                *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
-                    (static_cast<uint32_t>(srcRow[srcIdx + 3]) << 24)
-                    | (static_cast<uint32_t>(srcRow[srcIdx])     << 16)
-                    | (static_cast<uint32_t>(srcRow[srcIdx + 1]) << 8)
-                    | static_cast<uint32_t>(srcRow[srcIdx + 2]);
+                tempPixels.assign(src, src + bufSize);
+                juce::gl::glUnmapBuffer(juce::gl::GL_PIXEL_PACK_BUFFER);
             }
+            juce::gl::glBindBuffer(juce::gl::GL_PIXEL_PACK_BUFFER, 0);
+        }
+        else
+        {
+            // 冷启动首帧：退化为同步 glReadPixels
+            tempPixels.resize(bufSize);
+            juce::gl::glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph,
+                                   juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                                   tempPixels.data());
+            hasPboData_ = true;
+        }
+
+        pboWriteIdx_ = readIdx;
+
+        // 5d) Triple-buffer 无锁发布 —— 写入下一个 slot，原子通知 consumer。
+        if (!tempPixels.empty())
+        {
+            FrameSlot& slot = frameSlots_[producerSlot_];
+
+            // 确保 slot 的 Image 尺寸正确（预分配，避免 resize 时 D2D clear）
+            if (slot.image.getWidth() != pw || slot.image.getHeight() != ph)
+                slot.image = juce::Image(juce::Image::ARGB, pw, ph, false);
+
+            // Y 轴翻转（OpenGL bottom-up → Image top-down）+ RGBA→ARGB 转换
+            {
+                juce::Image::BitmapData bd(slot.image, juce::Image::BitmapData::writeOnly);
+                for (int y = 0; y < ph; ++y)
+                {
+                    const int srcY = ph - 1 - y;
+                    const uint8_t* srcRow = tempPixels.data()
+                        + static_cast<size_t>(srcY * pw * 4);
+                    for (int x = 0; x < pw; ++x)
+                    {
+                        const int s = x * 4;
+                        *reinterpret_cast<uint32_t*>(bd.getPixelPointer(x, y)) =
+                            (static_cast<uint32_t>(srcRow[s + 3]) << 24)
+                            | (static_cast<uint32_t>(srcRow[s])     << 16)
+                            | (static_cast<uint32_t>(srcRow[s + 1]) << 8)
+                            | static_cast<uint32_t>(srcRow[s + 2]);
+                    }
+                }
+            }
+
+            // 发布：先设 ready，再更新索引（确保 consumer 读到 ready 为 true 时数据完整）
+            slot.ready.store(true, std::memory_order_release);
+            latestReadySlot_.store(producerSlot_, std::memory_order_release);
+
+            // 标记两帧前的 slot 为非就绪（triple-buffer：3个slot，写指针循环）
+            const int freeSlot = (producerSlot_ + 2) % 3;
+            frameSlots_[freeSlot].ready.store(false, std::memory_order_relaxed);
+
+            producerSlot_ = (producerSlot_ + 1) % 3;
         }
     }
-
-    // 5) continuousRepainting=true 已由 JUCE GL 线程自持续驱动，
-    //    onFrame 送 PCM 只负责"数据侧"，无需再手动 triggerRepaint。
-    //    hub 断线时 renderOpenGL 仍会以 vsync 频率被调用，但推入合成 PCM，
-    //    projectM 也会保持动画不冻结。
 }
 
 void MilkdropModule::GLView::openGLContextClosing()
@@ -831,12 +906,21 @@ void MilkdropModule::GLView::openGLContextClosing()
     }
     stopTimer();
     renderInitialized = false;
+
+    // 清理 PBO
+    if (pboIds_[0] != 0)
+    {
+        juce::gl::glDeleteBuffers(2, pboIds_);
+        pboIds_[0] = pboIds_[1] = 0;
+    }
+    hasPboData_ = false;
 }
 
 void MilkdropModule::GLView::timerCallback()
 {
-  // renderOpenGL（GL 线程 ~60fps）：projectM 渲染 + glReadPixels → cachedGlFrame_。
-  // 本 Timer（UI 线程 ~30Hz）驱动 repaint 使 paintContent 消费最新帧。
+  // GLView 使用 componentPaintingEnabled(false)，projectM 帧由原生 HWND
+  // 通过 SwapBuffers 直接显示。本 Timer（UI 线程 ~30Hz）驱动 repaint
+  // 以刷新 Overlay 控制栏、auto-hide 与 auto 轮播。
 
   if (!isRenderInitialized())
     return;
@@ -1157,17 +1241,14 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
         return OverlayButton::kNone;
 
     constexpr int kBtnSize = 22;
-    constexpr int kResBtnW = 30;
     constexpr int kPadding = 4;
 
     auto prevBtn   = juce::Rectangle<int>(overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
     auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize);
-    auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize);
 
     if (prevBtn.contains(pos))   return OverlayButton::kPrev;
-    if (resBtn.contains(pos))    return OverlayButton::kRes;
     if (autoBtn.contains(pos))   return OverlayButton::kAuto;
     if (nextBtn.contains(pos))   return OverlayButton::kNext;
     if (randomBtn.contains(pos)) return OverlayButton::kRandom;
@@ -1183,7 +1264,6 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
     juce::Rectangle<int> overlay, OverlayButton btn) const
 {
     constexpr int kBtnSize = 22;
-    constexpr int kResBtnW = 30;
     constexpr int kPadding = 4;
 
     switch (btn)
@@ -1206,16 +1286,6 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         return { nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize };
     }
-    case OverlayButton::kRes:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
-                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
-        return { autoBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize };
-    }
     default:
         return {};
     }
@@ -1228,7 +1298,6 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     case OverlayButton::kPrev:   prevPreset();              break;
     case OverlayButton::kNext:   nextPreset();              break;
     case OverlayButton::kRandom: randomPreset();            break;
-    case OverlayButton::kRes:    glView->cycleReadbackScale(); break;
     case OverlayButton::kPresetName: showPresetJumpDialog();   break;
     case OverlayButton::kAuto:       toggleAutoMode();          break;
     default: break;
@@ -1256,14 +1325,13 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     g.setColour(PinkXP::pink300.withAlpha(0.7f));
     g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
 
-    // 按钮位置: [<] nameArea [1:1] [auto] [>] [?]
+    // 按钮位置: [<] nameArea [auto] [>] [?]
     auto prevBtn   = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, bar.getY() + 2, kAutoBtnW, kBtnSize);
-    auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - 30, bar.getY() + 2, 30, kBtnSize);
     auto nameArea  = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
-                                          resBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
+                                          autoBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
 
     // 按钮绘制 lambda
     auto drawBtn = [&](juce::Rectangle<int> r, const juce::String& text, OverlayButton btn)
@@ -1289,7 +1357,6 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     };
 
     drawBtn(prevBtn,   "<",   OverlayButton::kPrev);
-    drawBtn(resBtn,    glView->getReadbackScaleLabel(), OverlayButton::kRes);
     drawBtn(nextBtn,   ">",   OverlayButton::kNext);
     drawBtn(randomBtn, "?",   OverlayButton::kRandom);
 
