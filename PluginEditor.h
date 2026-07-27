@@ -53,6 +53,16 @@ public:
     int  GetMilkdropTotalPresets() const noexcept;
     juce::String GetMilkdropCurrentPresetName() const;
     int64_t GetMilkdropLastPresetSwitchTimeMs() const noexcept;
+
+    // ---- Spectrogram3D GPU 桥接（供 Spectrogram3DModule 调用）----
+    // 标记 GPU 渲染数据已脏，下一帧 renderOpenGL 重新上传纹理
+    void MarkSpectrogram3dDirty();
+    // 更新渲染参数（投影矩阵、颜色色板等），GL 线程读取
+    void UpdateSpectrogram3dParams(const float* projection,
+                                   const uint8_t* color_palette,
+                                   const float* history_data,
+                                   int bins, int rows,
+                                   float canvas_w, float canvas_h);
     Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcessor&);
     ~Y2KmeterAudioProcessorEditor() override;
 
@@ -476,6 +486,32 @@ private:
     std::vector<float>     milkdrop_last_real_pcm_;
     unsigned int           milkdrop_last_real_frames_ = 0;
     bool                   milkdrop_has_ever_received_pcm_ = false;
+
+    // ==============================================================
+    // Spectrogram3D GPU 渲染状态（Phase 2）
+    // ==============================================================
+    // GL 程序 + uniform 位置
+    GLuint spectro3d_program_       = 0;
+    GLint  spectro3d_u_history_     = -1;
+    GLint  spectro3d_u_palette_     = -1;
+    GLint  spectro3d_u_projection_  = -1;
+    GLint  spectro3d_u_canvas_size_ = -1;
+    GLint  spectro3d_u_bins_rows_   = -1;
+    // 纹理：history（R32F, bins×rows） + palette（RGBA8, 256×rows）
+    GLuint spectro3d_tex_history_   = 0;
+    GLuint spectro3d_tex_palette_   = 0;
+    // 参数缓冲（由 Spectrogram3DModule 在 UI 线程写入，renderOpenGL 读取）
+    std::mutex spectro3d_params_mutex_;
+    bool       spectro3d_params_dirty_ = true;
+    float      spectro3d_projection_[7];  // originX/Y, slantX/Y, binWidth, maxH, invRows
+    std::vector<uint8_t> spectro3d_palette_;  // RGBA × 256 × rows
+    std::vector<float>   spectro3d_history_;   // R32F: bins × rows
+    int        spectro3d_bins_ = 128;
+    int        spectro3d_rows_ = 150;
+    int        spectro3d_tex_w_ = 0;
+    int        spectro3d_tex_h_ = 0;
+    // 全屏四边形 VBO
+    GLuint spectro3d_vbo_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };

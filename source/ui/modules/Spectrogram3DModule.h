@@ -35,6 +35,16 @@ public:
     // AnalyserHub::FrameListener
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // 暴露内容区域边界（供 Editor GPU 渲染使用）
+    juce::Rectangle<int> GetContentLocalBounds() const {
+      return getContentBounds();
+    }
+
+    // Phase 2: GPU 桥接 —— 将 historyRing + 色板 + 投影参数上传给 Editor
+    //   用于 renderOpenGL 中的 GPU fragment shader 渲染。
+    //   调用时机：onFrame 末尾、canvas 尺寸变化时。
+    void PrepareGpuRender(class Y2KmeterAudioProcessorEditor& editor);
+
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
     void paintContent  (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

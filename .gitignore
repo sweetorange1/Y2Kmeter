@@ -55,6 +55,9 @@ Release/
 JUCE/
 JUCEArtwork/
 
+# Allow third_party/JUCE (local checkout, committed for cross-machine consistency)
+!/third_party/JUCE/
+
 # macOS specific
 .DS_Store
 
