@@ -9,13 +9,6 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/analysis/AnalyserHub.h"
 
-// projectM C API 类型定义（projectm_handle）
-#include "projectM-4/types.h"
-
-// 注：types.h 里声明了 struct projectm，不能再开同名 namespace，
-// 因此我们的 shim 单例放在 namespace projectm_api 下。
-namespace projectm_api { class Api; }
-
 // ==========================================================
 // MilkdropModule —— Y2Kmeter 内置 Milkdrop 可视化模块
 //
@@ -87,8 +80,15 @@ public:
     ~MilkdropModule() override;
 
     // === ModulePanel 覆写 ===
-    void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
-    void layoutContent (juce::Rectangle<int> contentBounds) override;
+    void paint(juce::Graphics& g) override;  // 跳过内容区填充，projectM已由Editor渲染
+    void paintContent(juce::Graphics& g,
+                      juce::Rectangle<int> contentBounds) override;
+    void layoutContent(juce::Rectangle<int> contentBounds) override;
+
+    // === Editor projectM 桥接 ===
+    // 返回本模块内容区在 MilkdropModule 自身坐标系中的矩形，
+    // 供 Editor::renderOpenGL 通过 getLocalArea 转换为 Editor-local 坐标设置 viewport。
+    juce::Rectangle<int> GetContentLocalBounds() const;
 
     // === 预设索引持久化 ===
     juce::ValueTree saveModuleSpecificState() const override;
@@ -120,195 +120,47 @@ public:
 
 private:
     // ------------------------------------------------------
-    // GLView：内嵌 OpenGL surface。负责 projectM handle 生命周期与渲染。
+    // GLView：纯 CPU 子组件（无 GL 上下文）。projectM 由 Editor GL 上下文直接渲染。
+    //   负责：鼠标事件转发、30Hz Timer 驱动 Overlay 刷新/auto-hide/auto 轮播。
     // ------------------------------------------------------
     class GLView : public juce::Component,
-                   public juce::OpenGLRenderer,
                    private juce::Timer
     {
     public:
-        explicit GLView (MilkdropModule& owner_);
+        explicit GLView(MilkdropModule& owner);
         ~GLView() override;
 
-        // OpenGLRenderer
-        void newOpenGLContextCreated() override;
-        void renderOpenGL() override;
-        void openGLContextClosing() override;
+        // Timer: UI 线程 30Hz
+        void timerCallback() override;
 
-        // Component
-        void paint(juce::Graphics&) override {}  // 不画任何东西——内容由 renderOpenGL 提供
-        void parentHierarchyChanged() override;
-        void visibilityChanged() override;
-        void resized() override;
-
-        // GLView 覆盖整个内容区，必须把鼠标事件转发给父组件 MilkdropModule，
-        // 否则焦点获取和叠加层按钮交互全部被 GLView 吞掉。
+        // 鼠标事件转发给 owner
         void mouseDown(const juce::MouseEvent& e) override;
         void mouseUp(const juce::MouseEvent& e) override;
         void mouseMove(const juce::MouseEvent& e) override;
         void mouseExit(const juce::MouseEvent& e) override;
         void mouseDrag(const juce::MouseEvent& e) override;
 
-        // 显式 detach —— 在 MilkdropModule 析构最前面调用，
-        // 保证 GL 线程完全收尾后再销毁 hub listener 等成员。
-        void detachAndWait();
+        // 推送 PCM 到 Editor（UI 线程安全）
+        void PushPcm(const float* interleaved_lr, unsigned int frame_count);
 
-        // 主动请求 GL 线程重绘一帧（下一次 vsync）。GL 线程内部
-        // 会自动在下次 buffer swap 中重新走 renderOpenGL()。
-        void triggerRepaint();
+        // Preset 请求 → Editor
+        void RequestPresetDelta(int delta);
+        void RequestPresetRandom();
+        void RequestPresetJump(int index);
+        void RequestRenderScale();  // 循环 1→2→4→1
 
-        // 供 owner 在 UI 线程 push PCM（内部加锁）。
-        void pushPcm (const float* interleavedLR, unsigned int frameCount);
-
-        // UI 线程调用；GL 线程会在下次 renderOpenGL 里消费这些请求。
-        // 采用原子累加：连点 next 多次，delta 累计到位。
-        void requestPresetDelta (int delta) noexcept { requestedPresetDelta.fetch_add (delta); triggerRepaint(); }
-        void requestPresetRandom() noexcept { requestedPresetRandom = true; triggerRepaint(); }
-        void requestPresetJump (int index) noexcept { requestedPresetJump.store (index); triggerRepaint(); }
-
-        // 诊断接口：供 owner 在 paintContent 中展示错误信息。
-        // 当 renderInitialized == false 时，说明 projectM 未能成功创建或已销毁；
-        // 此时 CPU 层应展示一段可读的报错文案而非静默黑屏。
-        bool isRenderInitialized() const noexcept { return renderInitialized; }
-        juce::String getRenderError() const { return juce::String (renderErrorMessage); }
-
-        // 预设索引：GL 线程在 loadPresetInternal 中写入，UI 线程在 paintContent
-        // 中读取以显示当前预设名。atomic 保证跨线程安全。
-        int getCurrentPresetIndex() const noexcept { return currentPresetIndexUi_.load(); }
-
-        // 预设总数（UI 线程安全只读）。
-        int getTotalPresetCount() const noexcept { return presetPaths.size(); }
-
-        // 最后一次预设切换的时间戳（毫秒，steady_clock）。GL 线程写，UI 线程读。
-        // 用于在 soft-cut 过渡期间显示"Loading..."提示。
-        int64_t getLastPresetSwitchTimeMs() const noexcept { return last_preset_switch_time_ms_.load(); }
-
-        // Triple-buffer 帧访问器：Consumer（paintContent）通过此接口获取最新就绪帧。
-        // 无锁读取 —— 读取 latestReadySlot_ 原子索引，返回对应 slot 的 Image 引用。
-        // 若尚无就绪帧（latestReadySlot_ == -1），返回 isValid() == false 的 Image。
-        juce::Image& getLatestFrame()
-        {
-            int slot = latestReadySlot_.load(std::memory_order_acquire);
-            if (slot >= 0 && slot < 3 && frameSlots_[slot].ready.load(std::memory_order_acquire))
-                return frameSlots_[slot].image;
-            static juce::Image nullImage;
-            return nullImage;
-        }
-
-        // 根据当前预设索引返回用于 UI 显示的预设名（不含路径和 .milk 扩展名）。
-        // 可在 UI 线程安全调用。
-        juce::String getCurrentPresetName() const
-        {
-            int idx = currentPresetIndexUi_.load();
-            if (idx >= 0 && idx < presetPaths.size())
-            {
-                return presetPaths[idx].fromLastOccurrenceOf("/", false, false)
-                                       .fromLastOccurrenceOf("\\", false, false)
-                                       .upToLastOccurrenceOf(".milk", false, false);
-            }
-            return {};
-        }
+        // 诊断（从 Editor proxy）
+        bool IsRenderReady() const;
+        juce::String GetError() const;
+        int  GetCurrentPresetIndex() const;
+        int  GetTotalPresetCount() const;
+        juce::String GetCurrentPresetName() const;
+        int64_t GetLastPresetSwitchTimeMs() const;
 
     private:
-        // Timer: UI 线程 30Hz。驱动 repaint 刷新 Overlay 控制栏、auto-hide 与 auto 轮播。
-        // projectM 帧由 GLView 原生 HWND 通过 SwapBuffers 直接显示。
-        void timerCallback() override;
-        void loadPresetInternal();
-        void attachIfNeeded();
-        void scheduleAsyncAttach();
-        static juce::File findAssetsDir (const juce::String& subdir);
-
-        MilkdropModule& owner;
-        juce::OpenGLContext glContext;
-
-        // scheduleAsyncAttach 递归重试上限。
-        // 每次 callAsync 间隔 ~16ms（Windows 消息循环），60 次 ≈ 1 秒。
-        // 超过上限说明宿主窗口永远不会 visible，放弃并写入 renderErrorMessage。
-        static constexpr int kMaxAttachRetries = 60;
-
-        // 递归重试计数器。scheduleAsyncAttach 每调度一次 callAsync 就 +1；
-        // callAsync 回调中条件不满足时递归调用 scheduleAsyncAttach 继续累加。
-        // 达到 kMaxAttachRetries 后放弃。仅在 UI 线程读写。
-        int attachRetries = 0;
-
-        // 析构保护标志：~GLView 开头置 true，scheduleAsyncAttach / callAsync
-        // 回调检查此标志立即返回，防止析构期间 post 的 callAsync 与
-        // glContext.detach() 形成竞态导致卡死。
-        std::atomic<bool> destroying_ { false };
-
-        // 首次焦点激活标志：render 就绪后仅自动激活一次焦点（展示预设名等控件），
-        // 之后不再自动激活。避免 auto 模式下 auto-hide 清除焦点后被 timer
-        // 立即恢复，造成控制栏闪烁。
-        bool first_focus_done_ { false };
-
-        // projectM handle —— 只在 GL 线程访问。
-        projectm_handle pmHandle = nullptr;
-
-        // GL 线程使用的最新 PCM 缓冲（LRLR 交错）。UI 线程写、GL 线程读。
-        std::mutex               pcmMutex;
-        std::vector<float>       pendingPcm;   // 长度 = 2 * frameCount
-        unsigned int             pendingFrames = 0;
-
-        // 上一次真实音频的备份（GL 线程独占）。当本帧没有新 PCM 到达时，
-        // 用此备份复播以保持 projectM 的频谱活力，避免合成假音频。
-        std::vector<float>       lastRealPcm;
-        unsigned int             lastRealFrames = 0;
-        bool                     hasEverReceivedRealPcm = false;
-
-        // 预设列表（构造 GL 时扫描一次；GL 线程也可读，UI 线程不再修改）
-        juce::StringArray        presetPaths;
-        int                      currentPresetIndex = -1;
-
-        // GL 线程侧的 preset 切换请求。UI 线程置位，GL 线程消费。
-        std::atomic<int>         requestedPresetDelta { 0 };   // -1 / +1 / 0
-        std::atomic<bool>        requestedPresetRandom { false };
-        std::atomic<int>         requestedPresetJump { -1 };   // -1=无请求, >=0=目标索引
-
-        // 尺寸变化：UI 线程 setBounds 时置位，GL 线程 renderOpenGL 消费并
-        // 调用 projectm_set_window_size —— projectM 的 fbo 会随之重建。
-        std::atomic<int>         desiredWidth  { 0 };
-        std::atomic<int>         desiredHeight { 0 };
-        int                      lastAppliedWidth  = 0;
-        int                      lastAppliedHeight = 0;
-
-        // 加载失败诊断（若 projectm.dll 不可用则赋值，由 owner 在 paintContent
-        // 中展示给用户）。
-        std::atomic<bool>        renderInitialized { false };
-        std::string              renderErrorMessage;
-
-        // 当前预设索引的 UI 线程可读镜像。GL 线程在 loadPresetInternal() 中
-        // store，UI 线程通过 getCurrentPresetIndex() load，用于显示预设名。
-        std::atomic<int>         currentPresetIndexUi_ { -1 };
-
-        // 最后一次预设切换的 steady_clock 毫秒时间戳。
-        // GL 线程在 renderOpenGL 消费切换请求时 store；
-        // UI 线程通过 getLastPresetSwitchTimeMs() load，
-        // 用于在 soft-cut 过渡期间显示"Loading..."提示。
-        std::atomic<int64_t>     last_preset_switch_time_ms_ { 0 };
-
-        // === Triple-buffer 无锁帧传输（性能优化 P3：生产者-消费者解耦）===
-        // Producer（GL 线程 renderOpenGL）：glReadPixels → PBO → 写入空闲 slot
-        // Consumer（Editor GL 线程 paintContent）：读取最新就绪 slot → drawImage
-        // 3 个 slot 确保 producer 从不阻塞，consumer 始终拿到最新完整帧。
-        // 零 mutex，仅靠 atomic flag + atomic index 协调。
-        struct FrameSlot {
-            std::atomic<bool> ready{false};
-            juce::Image       image;
-            std::vector<uint8_t> rawPixels;
-        };
-        FrameSlot               frameSlots_[3];
-        std::atomic<int>        latestReadySlot_{-1};  // -1 = 尚无就绪帧
-        int                     producerSlot_ = 0;     // 仅 GL 线程读写
-
-        // === PBO 异步回读（性能优化 P1）===
-        // 双缓冲 PBO：消除同步 glReadPixels 造成的 GPU 管线停顿。
-        //   帧 N：写入 PBO[A]，读取 PBO[B]（上一帧已传输完毕）。
-        //   帧 N+1：写入 PBO[B]，读取 PBO[A]。周而复始。
-        GLuint                   pboIds_[2] = {0, 0};
-        int                      pboWriteIdx_ = 0;
-        bool                     hasPboData_ = false;
-
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLView)
+        MilkdropModule& owner_;
+        bool first_focus_done_ = false;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GLView)
     };
 
     // ------------------------------------------------------
@@ -337,15 +189,15 @@ private:
     bool         hubRetained = false;       ///< 标记是否成功 retain（析构时 release）
     std::unique_ptr<GLView> glView;
 
-    // 从布局存档恢复的预设索引（-1 = 无存档，首次启动）。在 GL context 创建后
-    // newOpenGLContextCreated 中消费，消费后重置为 -1 防止重复覆盖。
+    // 从布局存档恢复的预设索引（-1 = 无存档，首次启动）。
+    // Editor::newOpenGLContextCreated 消费，消费后重置为 -1。
     int          restored_preset_index_ = -1;
 
     // ---- 焦点与叠加层控件 ----
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
 
@@ -386,6 +238,7 @@ private:
 
     static constexpr float kAutoRowHeight = 28.0f;
     static constexpr int   kAutoBtnW = 32;
+    static constexpr int   kResBtnW  = 32;  // [1:n] 渲染缩放按钮
     static constexpr float kMinAutoInterval = 1.0f;
     static constexpr float kMaxAutoInterval = 60.0f;
 

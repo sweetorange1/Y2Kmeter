@@ -4,6 +4,7 @@
 #include <juce_opengl/juce_opengl.h>
 #include "PluginProcessor.h"
 #include "BinaryData.h"
+#include "projectM-4/types.h"  // projectm_handle
 
 // 前向声明（把 ModuleWorkspace/ModulePanel/ModuleType 的头文件下沉到 .cpp，
 // 以规避 MSVC 多文件编译时 include guard 串扰的问题）
@@ -21,9 +22,37 @@ enum class ModuleType;
 // ==========================================================
 
 class Y2KmeterAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                     public juce::OpenGLRenderer,
                                      private juce::Timer
 {
 public:
+    // ==============================================================
+    // OpenGLRenderer —— projectM & GPU 模块在 Editor 上下文中渲染
+    //   · newOpenGLContextCreated: GLEW init → 扫描预设/纹理路径 → create handle
+    //   · renderOpenGL: projectM帧 + 未来 GPU 模块 → Editor CachedImage FBO
+    //   · openGLContextClosing: destroy handle → reload DLL
+    // ==============================================================
+    void newOpenGLContextCreated() override;
+    void renderOpenGL() override;
+    void openGLContextClosing() override;
+
+    // ---- projectM 桥接 API（供 MilkdropModule 调用）----
+    // PCM 推送（UI 线程安全，内部加锁）
+    void PushMilkdropPcm(const float* interleaved_lr, unsigned int frame_count);
+    // 预设切换请求（原子，renderOpenGL 消费）
+    void RequestMilkdropPresetDelta(int delta);
+    void RequestMilkdropPresetJump(int index);
+    void RequestMilkdropPresetRandom();
+    // 渲染缩放（循环 1→2→4→1，来自 MilkdropModule Overlay 的 [1:n] 按钮）
+    void RequestMilkdropRenderScale();
+    int  GetMilkdropRenderScale() const noexcept { return milkdrop_render_scale_; }
+    // 诊断
+    bool IsMilkdropRenderReady() const noexcept { return milkdrop_render_ready_; }
+    juce::String GetMilkdropError() const;
+    int  GetMilkdropCurrentPresetIndex() const noexcept;
+    int  GetMilkdropTotalPresets() const noexcept;
+    juce::String GetMilkdropCurrentPresetName() const;
+    int64_t GetMilkdropLastPresetSwitchTimeMs() const noexcept;
     Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcessor&);
     ~Y2KmeterAudioProcessorEditor() override;
 
@@ -412,6 +441,41 @@ private:
     void skipTutorial();                            // 用户切换预设时跳过引导
     void dismissTutorialOverlay();                  // 只隐藏覆盖层，不改变完成状态
     void checkTutorialStep2Condition();             // timer 中轮询：蛋是否孵化
+
+    // ==============================================================
+    // projectM 状态（由 Editor GL 上下文持有）
+    // ==============================================================
+    projectm_handle        milkdrop_pm_handle_ = nullptr;
+    bool                   milkdrop_render_ready_ = false;
+    std::string            milkdrop_error_;
+
+    // v2.3 GPU: projectM 渲染到独立 offscreen FBO → glBlitFramebuffer 搬运到
+    //   各模块正确位置。关键：使用 openglRenderFrameFbo(fbo_id) 让 projectM
+    //   渲染到独立 FBO（非 FBO 0），消除同一 FBO 上 blit 源/目重叠的未定义行为。
+    //   分辨率控制：内部降采样渲染 → GL_LINEAR 上采样填满，产生模糊降功耗效果。
+    GLuint milkdrop_render_fbo_   = 0;
+    GLuint milkdrop_render_tex_   = 0;
+    int    milkdrop_render_scale_ = 1;  // 1=全分辨率, 2=半分辨率, 4=1/4分辨率
+    int    milkdrop_last_fbo_w_   = 0;
+    int    milkdrop_last_fbo_h_   = 0;
+
+    // 预设
+    juce::StringArray      milkdrop_preset_paths_;
+    int                    milkdrop_current_preset_ = -1;
+    std::atomic<int>       milkdrop_current_preset_ui_{ -1 };
+    std::atomic<int>       milkdrop_requested_preset_delta_{ 0 };
+    std::atomic<bool>      milkdrop_requested_preset_random_{ false };
+    std::atomic<int>       milkdrop_requested_preset_jump_{ -1 };
+    std::atomic<int64_t>   milkdrop_last_preset_switch_ms_{ 0 };
+    void LoadMilkdropPresetInternal();
+    static juce::File FindMilkdropAssetsDir(const juce::String& subdir);
+    // PCM 缓冲（UI 线程写，GL 线程读）
+    std::mutex             milkdrop_pcm_mutex_;
+    std::vector<float>     milkdrop_pending_pcm_;
+    unsigned int           milkdrop_pending_frames_ = 0;
+    std::vector<float>     milkdrop_last_real_pcm_;
+    unsigned int           milkdrop_last_real_frames_ = 0;
+    bool                   milkdrop_has_ever_received_pcm_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };

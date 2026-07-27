@@ -1,6 +1,9 @@
 #include "PluginEditor.h"
 #include <JuceHeader.h>
+#include <chrono>
 #include <cmath>
+#include <functional>
+#include <mutex>
 #include "BinaryData.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/ModuleWorkspace.h"
@@ -17,6 +20,7 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/modules/TamagotchiModule.h"
 #include "source/ui/modules/MilkdropModule.h"
+#include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -70,7 +74,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.2.4");
+        const int versionW = versionFont.getStringWidth ("v2.3.0");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -111,10 +115,10 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.2.4";
+        const juce::String versionText = "v2.3.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
-        const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
+        const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
@@ -629,8 +633,23 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
       // Standalone 以外的一切情况我们都视为"插件宿主模式"。
       isPluginHost (p.wrapperType != juce::AudioProcessor::wrapperType_Standalone)
 {
-    // 0) 先加载 typeface / logo 到实例成员（避免 static 跨 DLL 卸载导致崩溃）
-    customTypeface = PinkXP::loadActiveTypeface();
+    // 0) 异步加载自定义字体。
+    //   VST3/AU 宿主在创建插件 Editor 时，Direct2D/DirectWrite 基础
+    //   设施可能尚未初始化。同步调用 createSystemTypefaceFor() 会触发
+    //   SharedResourcePointer<Direct2DFactories> 构造，若 DWrite 工厂
+    //   未就绪则访问违例崩溃。
+    //   改为 callAsync 延迟加载：消息循环就绪后 DWrite 已可用。
+    //   首帧使用系统字体渲染，异步回调完成后再切换为 Silkscreen。
+    juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<juce::Component>(this)] {
+        if (safeThis == nullptr) return;
+        auto* self = dynamic_cast<Y2KmeterAudioProcessorEditor*>(safeThis.getComponent());
+        if (self == nullptr) return;
+        self->customTypeface = PinkXP::loadActiveTypeface();
+        PinkXP::initCustomTypeface(self->customTypeface);
+        self->repaint();
+    });
+
+    // Logo 加载不受 DWrite 影响，保持同步加载
     logoImage = juce::ImageFileFormat::loadFrom(BinaryData::logo_png,
                                                  (size_t) BinaryData::logo_pngSize);
 
@@ -1411,6 +1430,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   macOS：CoreGraphics 已有 Metal 后端，Editor GL 反而降低性能，跳过 attach。
     // ==================================================================
 #if ! JUCE_MAC
+    openGLContext.setRenderer(this);
     openGLContext.setContinuousRepainting(false);
     openGLContext.setComponentPaintingEnabled(true);
     openGLContext.attachTo(*this);
@@ -2575,7 +2595,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.2.4";
+        const juce::String versionText = "v2.3.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2583,7 +2603,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.2.4");
+        const int versionW = versionFont.getStringWidth ("v2.3.0");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -3892,5 +3912,429 @@ void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float measuredFps)
     }
 }
 
-// FrameListener 的实际实现在文件顶端的 FpsFrameListener 嵌套类中定义，
-// 这里不再重复。
+// ================================================================
+// OpenGLRenderer — projectM 在 Editor GL 上下文中渲染
+// ================================================================
+
+namespace {
+  constexpr int kMilkdropTargetFps        = 60;
+  constexpr int kMilkdropDefaultMeshW     = 128;
+  constexpr int kMilkdropDefaultMeshH     = 80;
+  constexpr double kMilkdropPresetDuration = 20.0;
+  constexpr double kMilkdropSoftCut        = 1.0;
+  // 进程内 projectM handle 计数（libprojectM Windows/GLEW 全局指针表限制）
+  std::atomic<int> gEditorProjectMInstances{0};
+}  // namespace
+
+juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
+    const juce::String& subdir) {
+  juce::File exeDir = juce::File::getSpecialLocation(
+      juce::File::currentExecutableFile).getParentDirectory();
+  juce::Array<juce::File> candidates;
+  // 从 exe 所在目录向上逐层搜索 assets/<subdir>，最多 8 层，
+  // 覆盖 CMake build tree、IDE 输出目录、安装目录等各种布局
+  juce::File cur = exeDir;
+  for (int i = 0; i < 8; ++i) {
+    candidates.add(cur.getChildFile("assets").getChildFile(subdir));
+    cur = cur.getParentDirectory();
+  }
+  for (auto& f : candidates) {
+    if (f.exists() && f.isDirectory()) return f;
+  }
+  return {};
+}
+
+void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
+  auto& api = projectm_api::Api::instance();
+  if (!api.isAvailable()) {
+    milkdrop_error_ = api.loadError();
+    return;
+  }
+
+  // 单实例防护
+  int expected = 0;
+  if (!gEditorProjectMInstances.compare_exchange_strong(expected, 1)) {
+    milkdrop_error_ = "Only 1 Milkdrop instance allowed (libprojectM limit).";
+    return;
+  }
+
+  // GLEW init（Editor GL 上下文中，一次性）
+  if (!api.initGlew()) {
+    milkdrop_error_ = api.loadError();
+    gEditorProjectMInstances.store(0);
+    return;
+  }
+
+  milkdrop_pm_handle_ = api.create();
+  if (milkdrop_pm_handle_ == nullptr) {
+    milkdrop_error_ = "projectm_create() returned NULL.";
+    gEditorProjectMInstances.store(0);
+    return;
+  }
+
+  api.setMeshSize(milkdrop_pm_handle_,
+                  kMilkdropDefaultMeshW, kMilkdropDefaultMeshH);
+  api.setFps(milkdrop_pm_handle_, kMilkdropTargetFps);
+  api.setPresetDuration(milkdrop_pm_handle_, kMilkdropPresetDuration);
+  api.setSoftCutDuration(milkdrop_pm_handle_, kMilkdropSoftCut);
+  api.setHardCutEnabled(milkdrop_pm_handle_, false);
+
+  // 纹理搜索路径
+  auto texDir = FindMilkdropAssetsDir("milkdrop_textures");
+  if (texDir.exists()) {
+    std::vector<std::string> paths{texDir.getFullPathName().toStdString()};
+    api.setTextureSearchPaths(milkdrop_pm_handle_, paths);
+  }
+
+  // 扫描预设
+  auto presetsDir = FindMilkdropAssetsDir("milkdrop_presets");
+  if (presetsDir.exists()) {
+    auto files = presetsDir.findChildFiles(juce::File::findFiles,
+                                           false, "*.milk");
+    for (auto& f : files)
+      milkdrop_preset_paths_.add(f.getFullPathName());
+    milkdrop_preset_paths_.sort(false);
+  }
+
+  milkdrop_current_preset_ = 0;
+  LoadMilkdropPresetInternal();
+  milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+
+  // 创建 projectM 独立 offscreen FBO + 纹理附件。
+  // 配合 openglRenderFrameFbo(fbo_id) 使用，projectM 渲染到此 FBO
+  // 而非 FBO 0，随后 glBlitFramebuffer 跨 FBO 搬运到各模块位置，
+  // 彻底消除同 FBO 上 blit 源/目重叠的未定义行为。
+  juce::gl::glGenFramebuffers(1, &milkdrop_render_fbo_);
+  juce::gl::glGenTextures(1, &milkdrop_render_tex_);
+
+  milkdrop_render_ready_ = true;
+}
+
+void Y2KmeterAudioProcessorEditor::renderOpenGL() {
+  using namespace juce::gl;
+
+  if (!milkdrop_render_ready_ || milkdrop_pm_handle_ == nullptr) return;
+
+  auto& api = projectm_api::Api::instance();
+
+  // 消费预设切换请求
+  int jump_idx = milkdrop_requested_preset_jump_.exchange(-1);
+  int delta    = milkdrop_requested_preset_delta_.exchange(0);
+  bool random  = milkdrop_requested_preset_random_.exchange(false);
+  bool switched = false;
+
+  if (jump_idx >= 0 && jump_idx < milkdrop_preset_paths_.size()) {
+    milkdrop_current_preset_ = jump_idx;
+    switched = true;
+  } else if (random) {
+    if (!milkdrop_preset_paths_.isEmpty())
+      milkdrop_current_preset_ = juce::Random::getSystemRandom()
+          .nextInt(milkdrop_preset_paths_.size());
+    switched = true;
+  } else if (delta != 0 && !milkdrop_preset_paths_.isEmpty()) {
+    milkdrop_current_preset_ = (milkdrop_current_preset_ + delta)
+        % milkdrop_preset_paths_.size();
+    if (milkdrop_current_preset_ < 0)
+      milkdrop_current_preset_ += milkdrop_preset_paths_.size();
+    switched = true;
+  }
+
+  if (switched) {
+    LoadMilkdropPresetInternal();
+    milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+    milkdrop_last_preset_switch_ms_.store(
+        static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()));
+  }
+
+  // 消费 PCM
+  {
+    std::lock_guard<std::mutex> lock(milkdrop_pcm_mutex_);
+    if (milkdrop_pending_frames_ > 0) {
+      api.addPcmFloat(milkdrop_pm_handle_,
+                      milkdrop_pending_pcm_.data(),
+                      milkdrop_pending_frames_, true);
+      milkdrop_has_ever_received_pcm_ = true;
+      milkdrop_last_real_pcm_ = milkdrop_pending_pcm_;
+      milkdrop_last_real_frames_ = milkdrop_pending_frames_;
+      milkdrop_pending_frames_ = 0;
+    } else if (milkdrop_has_ever_received_pcm_) {
+      api.addPcmFloat(milkdrop_pm_handle_,
+                      milkdrop_last_real_pcm_.data(),
+                      milkdrop_last_real_frames_, true);
+    } else {
+      // 冷启动合成音
+      constexpr unsigned int kSynthFrames = 256;
+      float synth[kSynthFrames * 2];
+      for (unsigned int i = 0; i < kSynthFrames; ++i) {
+        const double t = static_cast<double>(i) / 44100.0;
+        float s = 0.25f * static_cast<float>(
+            std::sin(2.0 * juce::MathConstants<double>::pi * 220.0 * t))
+                + 0.10f * static_cast<float>(
+            std::sin(2.0 * juce::MathConstants<double>::pi * 55.0 * t));
+        synth[i * 2] = s;
+        synth[i * 2 + 1] = s;
+      }
+      api.addPcmFloat(milkdrop_pm_handle_, synth, kSynthFrames, true);
+    }
+  }
+
+  // projectM 渲染: openglRenderFrameFbo → offscreen FBO → 跨FBO blit 到各模块
+  //   关键 API：openglRenderFrameFbo(fbo_id)——projectM 渲染到指定 FBO。
+  //   openglRenderFrame() 内部 glBindFramebuffer(0)，外部 FBO 被绕过。
+  //   使用 openglRenderFrameFbo 直接将 projectM 渲染到 offscreen FBO，
+  //   再跨 FBO blit 到各模块在 FBO 0 (CachedImage) 上的正确位置。
+  GLint orig_viewport[4];
+  juce::gl::glGetIntegerv(juce::gl::GL_VIEWPORT, orig_viewport);
+
+  float dpi_scale = static_cast<float>(openGLContext.getRenderingScale());
+  int   editor_h  = getHeight();
+
+  // 收集最大模块尺寸 → projectM 窗口和 offscreen FBO 大小
+  int max_w = 256, max_h = 256;
+  {
+    std::function<void(juce::Component*)> measureMax =
+        [&](juce::Component* root) {
+      for (int i = 0; i < root->getNumChildComponents(); ++i) {
+        auto* child = root->getChildComponent(i);
+        if (child == nullptr) continue;
+        auto* milk = dynamic_cast<MilkdropModule*>(child);
+        if (milk != nullptr && milk->isVisible() && milk->isShowing()) {
+          auto cl = milk->GetContentLocalBounds();
+          if (cl.getWidth() > 0 && cl.getHeight() > 0) {
+            max_w = std::max(max_w, cl.getWidth());
+            max_h = std::max(max_h, cl.getHeight());
+          }
+        } else {
+          measureMax(child);
+        }
+      }
+    };
+    measureMax(this);
+  }
+
+  int fbo_w = static_cast<int>(max_w * dpi_scale) / milkdrop_render_scale_;
+  int fbo_h = static_cast<int>(max_h * dpi_scale) / milkdrop_render_scale_;
+  fbo_w = std::max(fbo_w, 1);
+  fbo_h = std::max(fbo_h, 1);
+
+  // 分配/重分配 offscreen FBO 纹理
+  bool need_realloc = (milkdrop_render_fbo_ != 0 && milkdrop_last_fbo_w_ == 0);
+  bool need_resize  = (milkdrop_render_fbo_ != 0
+                       && (fbo_w != milkdrop_last_fbo_w_
+                           || fbo_h != milkdrop_last_fbo_h_));
+  if (need_realloc) {
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
+    juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
+                           fbo_w, fbo_h, 0,
+                           juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                           nullptr);
+    juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                              juce::gl::GL_TEXTURE_MIN_FILTER,
+                              juce::gl::GL_LINEAR);
+    juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                              juce::gl::GL_TEXTURE_MAG_FILTER,
+                              juce::gl::GL_LINEAR);
+    juce::gl::glFramebufferTexture2D(juce::gl::GL_FRAMEBUFFER,
+                                     juce::gl::GL_COLOR_ATTACHMENT0,
+                                     juce::gl::GL_TEXTURE_2D,
+                                     milkdrop_render_tex_, 0);
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+  } else if (need_resize) {
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
+    juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
+                           fbo_w, fbo_h, 0,
+                           juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                           nullptr);
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
+  }
+  milkdrop_last_fbo_w_ = fbo_w;
+  milkdrop_last_fbo_h_ = fbo_h;
+
+  bool use_fbo_api = api.hasOpenglRenderFrameFbo();
+
+  // ================================================================
+  // 渲染 projectM
+  // ================================================================
+  if (use_fbo_api) {
+    // 主路径：projectM → offscreen FBO（openglRenderFrameFbo 接受 FBO ID）
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
+    juce::gl::glViewport(0, 0, fbo_w, fbo_h);
+    juce::gl::glScissor(0, 0, fbo_w, fbo_h);
+    juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
+    juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
+    api.setWindowSize(milkdrop_pm_handle_,
+                      static_cast<std::size_t>(fbo_w),
+                      static_cast<std::size_t>(fbo_h));
+    api.openglRenderFrameFbo(milkdrop_pm_handle_, milkdrop_render_fbo_);
+    juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
+  } else {
+    // 降级路径：projectM → FBO 0 (0,0)（openglRenderFrame 内部绑定 FBO 0）
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+    juce::gl::glViewport(0, 0, fbo_w, fbo_h);
+    juce::gl::glScissor(0, 0, fbo_w, fbo_h);
+    juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
+    juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
+    api.setWindowSize(milkdrop_pm_handle_,
+                      static_cast<std::size_t>(fbo_w),
+                      static_cast<std::size_t>(fbo_h));
+    api.openglRenderFrame(milkdrop_pm_handle_);
+    juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
+
+    // FBO 0 (0,0) → offscreen FBO（跨 FBO，安全）
+    juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
+    juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER,
+                                 milkdrop_render_fbo_);
+    juce::gl::glBlitFramebuffer(0, 0, fbo_w, fbo_h, 0, 0, fbo_w, fbo_h,
+                                 juce::gl::GL_COLOR_BUFFER_BIT,
+                                 juce::gl::GL_LINEAR);
+  }
+
+  // ================================================================
+  // 跨 FBO blit：offscreen FBO → FBO 0，搬运到各模块正确位置
+  // ================================================================
+  juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER,
+                               milkdrop_render_fbo_);
+  juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER, 0);
+
+  std::function<void(juce::Component*)> blitToModules =
+      [&](juce::Component* root) {
+    for (int i = 0; i < root->getNumChildComponents(); ++i) {
+      auto* child = root->getChildComponent(i);
+      if (!child) continue;
+      if (auto* milk = dynamic_cast<MilkdropModule*>(child)) {
+        if (!milk->isVisible() || !milk->isShowing()) continue;
+        auto cl = milk->GetContentLocalBounds();
+        auto tl = getLocalPoint(milk, cl.getPosition());
+        auto br = getLocalPoint(milk, cl.getBottomRight());
+        int lw = br.x - tl.x, lh = br.y - tl.y;
+        if (lw <= 0 || lh <= 0) continue;
+
+        int gx = static_cast<int>(tl.x * dpi_scale);
+        int gy = static_cast<int>((editor_h - (tl.y + lh)) * dpi_scale);
+        int gw = static_cast<int>(lw * dpi_scale);
+        int gh = static_cast<int>(lh * dpi_scale);
+
+        int sw = gw / milkdrop_render_scale_;
+        int sh = gh / milkdrop_render_scale_;
+        sw = std::max(sw, 1);
+        sh = std::max(sh, 1);
+
+        juce::gl::glBlitFramebuffer(0, 0, sw, sh,
+                                     gx, gy, gx + gw, gy + gh,
+                                     juce::gl::GL_COLOR_BUFFER_BIT,
+                                     juce::gl::GL_LINEAR);
+      } else {
+        blitToModules(child);
+      }
+    }
+  };
+  blitToModules(this);
+
+  juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
+
+  // 恢复原始 viewport，供 JUCE CPE 渲染子组件 CachedImage
+  juce::gl::glViewport(orig_viewport[0], orig_viewport[1],
+                        orig_viewport[2], orig_viewport[3]);
+}
+
+void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
+  if (milkdrop_pm_handle_ != nullptr) {
+    auto& api = projectm_api::Api::instance();
+    api.destroy(milkdrop_pm_handle_);
+    milkdrop_pm_handle_ = nullptr;
+    gEditorProjectMInstances.store(0);
+  }
+  if (milkdrop_render_fbo_ != 0) {
+    juce::gl::glDeleteFramebuffers(1, &milkdrop_render_fbo_);
+    milkdrop_render_fbo_ = 0;
+  }
+  if (milkdrop_render_tex_ != 0) {
+    juce::gl::glDeleteTextures(1, &milkdrop_render_tex_);
+    milkdrop_render_tex_ = 0;
+  }
+  milkdrop_last_fbo_w_ = 0;
+  milkdrop_last_fbo_h_ = 0;
+  milkdrop_render_ready_ = false;
+}
+
+void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {
+  if (milkdrop_pm_handle_ == nullptr) return;
+  if (milkdrop_current_preset_ < 0
+      || milkdrop_current_preset_ >= milkdrop_preset_paths_.size()) return;
+
+  auto& api = projectm_api::Api::instance();
+  auto path = milkdrop_preset_paths_[milkdrop_current_preset_];
+  if (api.hasLoadPresetData()) {
+    juce::File f(path);
+    if (f.existsAsFile()) {
+      auto data = f.loadFileAsString().toStdString();
+      api.loadPresetData(milkdrop_pm_handle_, data, true);
+    }
+  } else {
+    api.loadPresetFile(milkdrop_pm_handle_, path.toRawUTF8(), true);
+  }
+}
+
+// ---- Bridge APIs（供 MilkdropModule 调用）----
+
+void Y2KmeterAudioProcessorEditor::PushMilkdropPcm(
+    const float* interleaved_lr, unsigned int frame_count) {
+  std::lock_guard<std::mutex> lock(milkdrop_pcm_mutex_);
+  milkdrop_pending_pcm_.assign(interleaved_lr,
+                               interleaved_lr + frame_count * 2);
+  milkdrop_pending_frames_ = frame_count;
+}
+
+void Y2KmeterAudioProcessorEditor::RequestMilkdropPresetDelta(int delta) {
+  milkdrop_requested_preset_delta_.fetch_add(delta);
+}
+
+void Y2KmeterAudioProcessorEditor::RequestMilkdropPresetJump(int index) {
+  milkdrop_requested_preset_jump_.store(index);
+}
+
+void Y2KmeterAudioProcessorEditor::RequestMilkdropPresetRandom() {
+  milkdrop_requested_preset_random_.store(true);
+}
+
+juce::String Y2KmeterAudioProcessorEditor::GetMilkdropError() const {
+  return milkdrop_error_;
+}
+
+int Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetIndex()
+    const noexcept {
+  return milkdrop_current_preset_ui_.load();
+}
+
+int Y2KmeterAudioProcessorEditor::GetMilkdropTotalPresets() const noexcept {
+  return milkdrop_preset_paths_.size();
+}
+
+juce::String Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetName()
+    const {
+  int idx = milkdrop_current_preset_ui_.load();
+  if (idx >= 0 && idx < milkdrop_preset_paths_.size()) {
+    return milkdrop_preset_paths_[idx]
+        .fromLastOccurrenceOf("/", false, false)
+        .fromLastOccurrenceOf("\\", false, false)
+        .upToLastOccurrenceOf(".milk", false, false);
+  }
+  return {};
+}
+
+int64_t Y2KmeterAudioProcessorEditor::GetMilkdropLastPresetSwitchTimeMs()
+    const noexcept {
+  return milkdrop_last_preset_switch_ms_.load();
+}
+
+void Y2KmeterAudioProcessorEditor::RequestMilkdropRenderScale() {
+  // 循环 1 → 2 → 4 → 1
+  int s = milkdrop_render_scale_;
+  s = (s == 1) ? 2 : (s == 2) ? 4 : 1;
+  milkdrop_render_scale_ = s;
+}
