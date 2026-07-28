@@ -649,9 +649,23 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         self->repaint();
     });
 
-    // Logo 加载不受 DWrite 影响，保持同步加载
-    logoImage = juce::ImageFileFormat::loadFrom(BinaryData::logo_png,
-                                                 (size_t) BinaryData::logo_pngSize);
+    // Logo 加载不受 DWrite 影响，保持同步加载。
+    // 防御性 try-catch：3000×3000 RGBA 解码需 ~36MB 连续内存，
+    // 在内存碎片化或堆损坏场景可能失败，此时降级为空 Image 并记日志。
+    try {
+      logoImage = juce::ImageFileFormat::loadFrom(BinaryData::logo_png,
+                                                   (size_t)BinaryData::logo_pngSize);
+    } catch (const std::exception& e) {
+      DBG("!! Logo load failed (exception): " << e.what());
+      logoImage = juce::Image();
+    } catch (...) {
+      DBG("!! Logo load failed (unknown exception)");
+      logoImage = juce::Image();
+    }
+    if (logoImage.isNull()) {
+      DBG("!! Logo image is null after load: size="
+          << BinaryData::logo_pngSize << " bytes");
+    }
 
     initLookAndFeel();
 
@@ -4009,141 +4023,19 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
   milkdrop_render_ready_ = true;
 
-  // ================================================================
-  // Phase 2: Spectrogram3D GPU shader 编译
-  // ================================================================
-  {
-    const char* kVertSrc = R"(#version 330 core
-layout(location = 0) in vec2 aPos;
-out vec2 vTexCoord;
-void main() {
-  gl_Position = vec4(aPos, 0.0, 1.0);
-  vTexCoord = aPos * 0.5 + 0.5;
-}
-)";
-    const char* kFragSrc = R"(#version 330 core
-in vec2 vTexCoord;
-out vec4 fragColor;
-
-uniform sampler2D uHistory;       // R32F: bins x rows
-uniform sampler2D uPalette;       // RGBA8: 256 x rows
-uniform float uProj[7];           // originX, originY, slantX, slantY,
-                                  //   binWidth, maxH, invRows
-uniform vec2  uCanvasSize;        // canvas pixel dimensions
-
-void main() {
-  vec2 px = vTexCoord * uCanvasSize;
-
-  float originX = uProj[0];
-  float originY = uProj[1];
-  float slantX  = uProj[2];
-  float slantY  = uProj[3];
-  float binW    = uProj[4];
-  float maxH    = uProj[5];
-  float invRows = uProj[6];
-  float rows    = 1.0 / max(invRows, 1e-6);
-
-  // 从后往前遍历深度层，找到第一个覆盖此像素的层
-  vec4 outCol = vec4(0.03, 0.03, 0.09, 1.0);  // 深蓝黑背景
-  float yFlipped = uCanvasSize.y - px.y;       // flip Y to bottom-left origin
-
-  for (int d = int(rows) - 1; d >= 0; --d) {
-    float df = float(d);
-    float depthX = df * slantX;
-    float baseY  = originY - df * slantY;
-
-    // 此像素对应的频率 bin
-    float fx = (px.x - originX - depthX) / binW;
-    if (fx < 0.0 || fx >= 1.0) continue;
-
-    float binIdx = fx;  // 0..1
-    // 读取幅度（R32F 纹理，横轴=bins, 纵轴=depth rows）
-    float mag = texture(uHistory, vec2(binIdx, df * invRows)).r;
-    float topY = baseY - mag * maxH;
-
-    if (yFlipped >= topY && yFlipped <= baseY) {
-      // 查色板 (X=magnitude 0..1, Y=depth row)
-      vec4 col = texture(uPalette, vec2(mag, df * invRows));
-      outCol = col;
-      break;
-    }
-  }
-  fragColor = outCol;
-}
-)";
-
-    GLuint vs = juce::gl::glCreateShader(juce::gl::GL_VERTEX_SHADER);
-    juce::gl::glShaderSource(vs, 1, &kVertSrc, nullptr);
-    juce::gl::glCompileShader(vs);
-
-    GLuint fs = juce::gl::glCreateShader(juce::gl::GL_FRAGMENT_SHADER);
-    juce::gl::glShaderSource(fs, 1, &kFragSrc, nullptr);
-    juce::gl::glCompileShader(fs);
-
-    // 检查编译错误
-    auto checkShader = [](GLuint shader, const char* name) {
-      GLint ok = 0;
-      juce::gl::glGetShaderiv(shader, juce::gl::GL_COMPILE_STATUS, &ok);
-      if (!ok) {
-        char log[1024] = {};
-        juce::gl::glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        DBG("[Spectrogram3D] " << name << " compile FAILED: " << log);
-      } else {
-        DBG("[Spectrogram3D] " << name << " compiled OK");
-      }
-    };
-    checkShader(vs, "vertex");
-    checkShader(fs, "fragment");
-
-    GLuint prog = juce::gl::glCreateProgram();
-    juce::gl::glAttachShader(prog, vs);
-    juce::gl::glAttachShader(prog, fs);
-    juce::gl::glLinkProgram(prog);
-
-    // 检查链接错误
-    {
-      GLint ok = 0;
-      juce::gl::glGetProgramiv(prog, juce::gl::GL_LINK_STATUS, &ok);
-      if (!ok) {
-        char log[1024] = {};
-        juce::gl::glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-        DBG("[Spectrogram3D] program link FAILED: " << log);
-      } else {
-        DBG("[Spectrogram3D] GPU program linked OK");
-      }
-    }
-
-    juce::gl::glDeleteShader(vs);
-    juce::gl::glDeleteShader(fs);
-
-    spectro3d_program_ = prog;
-    if (prog != 0) {
-      spectro3d_u_history_     = juce::gl::glGetUniformLocation(prog, "uHistory");
-      spectro3d_u_palette_     = juce::gl::glGetUniformLocation(prog, "uPalette");
-      spectro3d_u_projection_  = juce::gl::glGetUniformLocation(prog, "uProj");
-      spectro3d_u_canvas_size_ = juce::gl::glGetUniformLocation(prog, "uCanvasSize");
-      spectro3d_u_bins_rows_   = juce::gl::glGetUniformLocation(prog, "uCanvasSize");
-    }
-
-    // 全屏四边形 VBO
-    const float kQuad[] = { -1.0f, -1.0f,  1.0f, -1.0f,  -1.0f,  1.0f,
-                            -1.0f,  1.0f,  1.0f, -1.0f,   1.0f,  1.0f };
-    juce::gl::glGenBuffers(1, &spectro3d_vbo_);
-    juce::gl::glBindBuffer(juce::gl::GL_ARRAY_BUFFER, spectro3d_vbo_);
-    juce::gl::glBufferData(juce::gl::GL_ARRAY_BUFFER, sizeof(kQuad),
-                           kQuad, juce::gl::GL_STATIC_DRAW);
-    juce::gl::glBindBuffer(juce::gl::GL_ARRAY_BUFFER, 0);
-
-    // 纹理
-    juce::gl::glGenTextures(1, &spectro3d_tex_history_);
-    juce::gl::glGenTextures(1, &spectro3d_tex_palette_);
-  }
 }
 
 void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   using namespace juce::gl;
 
-  if (!milkdrop_render_ready_ || milkdrop_pm_handle_ == nullptr) return;
+  // 保存原始 viewport 和 DPI 缩放（Milkdrop 和 Spectrogram3D 共用）
+  GLint orig_viewport[4];
+  juce::gl::glGetIntegerv(juce::gl::GL_VIEWPORT, orig_viewport);
+
+  float dpi_scale = static_cast<float>(openGLContext.getRenderingScale());
+  int   editor_h  = getHeight();
+
+  if (milkdrop_render_ready_ && milkdrop_pm_handle_ != nullptr) {
 
   auto& api = projectm_api::Api::instance();
 
@@ -4215,11 +4107,6 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   //   openglRenderFrame() 内部 glBindFramebuffer(0)，外部 FBO 被绕过。
   //   使用 openglRenderFrameFbo 直接将 projectM 渲染到 offscreen FBO，
   //   再跨 FBO blit 到各模块在 FBO 0 (CachedImage) 上的正确位置。
-  GLint orig_viewport[4];
-  juce::gl::glGetIntegerv(juce::gl::GL_VIEWPORT, orig_viewport);
-
-  float dpi_scale = static_cast<float>(openGLContext.getRenderingScale());
-  int   editor_h  = getHeight();
 
   // 收集最大模块尺寸 → projectM 窗口和 offscreen FBO 大小
   int max_w = 256, max_h = 256;
@@ -4367,145 +4254,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
 
   juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
 
-  // ================================================================
-  // Phase 2: Spectrogram3D GPU 渲染
-  //   对每个 Spectrogram3DModule，用 fragment shader 在单次 pass 中
-  //   渲染全部 150 层 × 128 bins 的 3D 频谱瀑布图到 offscreen FBO，
-  //   再 blit 到各模块位置。
-  // ================================================================
-  if (spectro3d_program_ != 0) {
-    // 上传纹理（mutex 保护，仅在 onFrame 推送新数据后执行）
-    bool has_data = false;
-    {
-      std::lock_guard<std::mutex> lock(spectro3d_params_mutex_);
-      if (spectro3d_params_dirty_ && spectro3d_bins_ > 0 && spectro3d_rows_ > 0) {
-        const int expected_size = spectro3d_bins_ * spectro3d_rows_;
-        if (static_cast<int>(spectro3d_history_.size()) >= expected_size) {
-          // 上传 history 纹理（R32F, bins×rows）
-          juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D,
-                                  spectro3d_tex_history_);
-          juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0,
-                                 juce::gl::GL_R32F,
-                                 spectro3d_bins_, spectro3d_rows_, 0,
-                                 juce::gl::GL_RED, juce::gl::GL_FLOAT,
-                                 spectro3d_history_.data());
-          juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                    juce::gl::GL_TEXTURE_MIN_FILTER,
-                                    juce::gl::GL_LINEAR);
-          juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                    juce::gl::GL_TEXTURE_MAG_FILTER,
-                                    juce::gl::GL_LINEAR);
-          juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                    juce::gl::GL_TEXTURE_WRAP_S,
-                                    juce::gl::GL_CLAMP_TO_EDGE);
-          juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                    juce::gl::GL_TEXTURE_WRAP_T,
-                                    juce::gl::GL_CLAMP_TO_EDGE);
-
-          // palette 纹理（RGBA8, 256×rows）——仅尺寸变化时重建
-          if (spectro3d_tex_w_ != 256
-              || spectro3d_tex_h_ != spectro3d_rows_) {
-            const int palette_expected = 256 * spectro3d_rows_ * 4;
-            if (static_cast<int>(spectro3d_palette_.size())
-                >= palette_expected) {
-              juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D,
-                                      spectro3d_tex_palette_);
-              juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0,
-                                     juce::gl::GL_RGBA8,
-                                     256, spectro3d_rows_, 0,
-                                     juce::gl::GL_RGBA,
-                                     juce::gl::GL_UNSIGNED_BYTE,
-                                     spectro3d_palette_.data());
-              juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                        juce::gl::GL_TEXTURE_MIN_FILTER,
-                                        juce::gl::GL_LINEAR);
-              juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                        juce::gl::GL_TEXTURE_MAG_FILTER,
-                                        juce::gl::GL_LINEAR);
-              juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                        juce::gl::GL_TEXTURE_WRAP_S,
-                                        juce::gl::GL_CLAMP_TO_EDGE);
-              juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                        juce::gl::GL_TEXTURE_WRAP_T,
-                                        juce::gl::GL_CLAMP_TO_EDGE);
-              juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
-              spectro3d_tex_w_ = 256;
-              spectro3d_tex_h_ = spectro3d_rows_;
-            }
-          }
-          has_data = true;
-        }
-        spectro3d_params_dirty_ = false;
-      }
-    }
-
-    // 仅在有效数据就绪后才执行渲染
-    if (has_data) {
-    // 对每个 Spectrogram3DModule 渲染
-    std::function<void(juce::Component*)> renderSpectro3d =
-        [&](juce::Component* root) {
-      for (int i = 0; i < root->getNumChildComponents(); ++i) {
-        auto* child = root->getChildComponent(i);
-        if (!child) continue;
-        if (auto* s3d = dynamic_cast<Spectrogram3DModule*>(child)) {
-          if (!s3d->isVisible() || !s3d->isShowing()) continue;
-
-          auto cl = s3d->GetContentLocalBounds();
-          auto tl = getLocalPoint(s3d, cl.getPosition());
-          auto br = getLocalPoint(s3d, cl.getBottomRight());
-          int lw = br.x - tl.x, lh = br.y - tl.y;
-          if (lw <= 0 || lh <= 0) continue;
-
-          int gx = static_cast<int>(tl.x * dpi_scale);
-          int gy = static_cast<int>((editor_h - (tl.y + lh)) * dpi_scale);
-          int gw = static_cast<int>(lw * dpi_scale);
-          int gh = static_cast<int>(lh * dpi_scale);
-
-          // 使用 shader 渲染到 FBO 0 的目标区域
-          juce::gl::glUseProgram(spectro3d_program_);
-          juce::gl::glUniform1i(spectro3d_u_history_, 0);
-          juce::gl::glUniform1i(spectro3d_u_palette_, 1);
-
-          {
-            std::lock_guard<std::mutex> lk(spectro3d_params_mutex_);
-            juce::gl::glUniform1fv(spectro3d_u_projection_, 7,
-                                   spectro3d_projection_);
-          }
-          juce::gl::glUniform2f(spectro3d_u_canvas_size_,
-                                static_cast<float>(gw),
-                                static_cast<float>(gh));
-
-          juce::gl::glActiveTexture(juce::gl::GL_TEXTURE0);
-          juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D,
-                                  spectro3d_tex_history_);
-          juce::gl::glActiveTexture(juce::gl::GL_TEXTURE1);
-          juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D,
-                                  spectro3d_tex_palette_);
-
-          juce::gl::glViewport(gx, gy, gw, gh);
-          juce::gl::glScissor(gx, gy, gw, gh);
-          juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
-
-          juce::gl::glBindBuffer(juce::gl::GL_ARRAY_BUFFER,
-                                 spectro3d_vbo_);
-          juce::gl::glVertexAttribPointer(0, 2, juce::gl::GL_FLOAT,
-                                          juce::gl::GL_FALSE, 0, nullptr);
-          juce::gl::glEnableVertexAttribArray(0);
-          juce::gl::glDrawArrays(juce::gl::GL_TRIANGLES, 0, 6);
-          juce::gl::glDisableVertexAttribArray(0);
-
-          juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
-          juce::gl::glUseProgram(0);
-          juce::gl::glActiveTexture(juce::gl::GL_TEXTURE0);
-          juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
-        } else {
-          renderSpectro3d(child);
-        }
-      }
-    };
-    renderSpectro3d(this);
-    } // if (has_data)
-  }
+  } // if Milkdrop ready
 
   // 恢复原始 viewport，供 JUCE CPE 渲染子组件 CachedImage
   juce::gl::glViewport(orig_viewport[0], orig_viewport[1],
@@ -4530,24 +4279,6 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
   milkdrop_last_fbo_w_ = 0;
   milkdrop_last_fbo_h_ = 0;
   milkdrop_render_ready_ = false;
-
-  // Phase 2: Spectrogram3D GPU 资源清理
-  if (spectro3d_program_ != 0) {
-    juce::gl::glDeleteProgram(spectro3d_program_);
-    spectro3d_program_ = 0;
-  }
-  if (spectro3d_vbo_ != 0) {
-    juce::gl::glDeleteBuffers(1, &spectro3d_vbo_);
-    spectro3d_vbo_ = 0;
-  }
-  if (spectro3d_tex_history_ != 0) {
-    juce::gl::glDeleteTextures(1, &spectro3d_tex_history_);
-    spectro3d_tex_history_ = 0;
-  }
-  if (spectro3d_tex_palette_ != 0) {
-    juce::gl::glDeleteTextures(1, &spectro3d_tex_palette_);
-    spectro3d_tex_palette_ = 0;
-  }
 }
 
 void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {
@@ -4627,42 +4358,3 @@ void Y2KmeterAudioProcessorEditor::RequestMilkdropRenderScale() {
   milkdrop_render_scale_ = s;
 }
 
-// ================================================================
-// Phase 2: Spectrogram3D GPU 桥接
-// ================================================================
-void Y2KmeterAudioProcessorEditor::MarkSpectrogram3dDirty() {
-  std::lock_guard<std::mutex> lock(spectro3d_params_mutex_);
-  spectro3d_params_dirty_ = true;
-}
-
-void Y2KmeterAudioProcessorEditor::UpdateSpectrogram3dParams(
-    const float* projection,
-    const uint8_t* color_palette,
-    const float* history_data,
-    int bins, int rows,
-    float canvas_w, float canvas_h) {
-  std::lock_guard<std::mutex> lock(spectro3d_params_mutex_);
-
-  for (int i = 0; i < 7; ++i)
-    spectro3d_projection_[i] = projection[i];
-
-  // invRows = 1.0f / rows，用于 fragment shader 查表
-  spectro3d_projection_[6] = (rows > 1) ? 1.0f / static_cast<float>(rows - 1) : 1.0f;
-
-  const int palette_size = 256 * rows * 4;  // RGBA
-  spectro3d_palette_.resize(static_cast<size_t>(palette_size));
-  if (color_palette != nullptr)
-    std::memcpy(spectro3d_palette_.data(), color_palette,
-                static_cast<size_t>(palette_size));
-
-  // 存储 history 数据
-  const int history_size = bins * rows;
-  spectro3d_history_.resize(static_cast<size_t>(history_size));
-  if (history_data != nullptr)
-    std::memcpy(spectro3d_history_.data(), history_data,
-                static_cast<size_t>(history_size * sizeof(float)));
-
-  spectro3d_bins_ = bins;
-  spectro3d_rows_ = rows;
-  spectro3d_params_dirty_ = true;
-}

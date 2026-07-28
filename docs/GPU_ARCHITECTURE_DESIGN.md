@@ -334,20 +334,77 @@ Fragment Shader 一次计算所有像素。详见原文档 Phase 2。
 
 ### Phase 1：Milkdrop 零拷贝 ✅ 已完成（v2.3.0）
 
-### Phase 2：Spectrogram3D GPU Shader
+### Phase 2：Spectrogram3D GPU Shader ❌ 已回退（v2.2.5）
 
-| # | 任务 | 文件 |
-|---|------|------|
-| 2.1 | 编写片段着色器 | 嵌入代码或资源文件 |
-| 2.2 | Spectrogram3DModule 实现 GPU 路径 | FineSplitModules.cpp |
+**状态**：经过 15+ 轮调试后回退至纯 CPU 实现。
 
-### Phase 3-7：Oscilloscope / Spectrum / Waveform / 其余模块
+**动机**：Spectrogram3D 在 CPU 路径下每帧渲染 19K+ fillRect + 300 strokePath。理论
+上 GPU fragment shader 可在一次 glDrawArrays 完成全部像素计算，消除 CPU→GPU 数据
+搬运开销。架构设计采用与 Milkdrop 一致的独立 offscreen FBO + glBlitFramebuffer 模式。
 
-参见原规划。
+**遇到的问题**：
+
+| 问题 | 类别 | 根因 |
+|------|------|------|
+| GPU 输出完全不可见（即使 shader 输出亮色） | JUCE 渲染管线 | `ModulePanel::paint()` 使用 `PinkXP::face` 不透明填充整个模块区域，CachedImage 合成阶段覆盖了 FBO 0 上的 GPU 渲染结果 |
+| 修复 paint() 透明后仍不可见 | FBO 配置 | `glScissor` 独立坐标系与 viewport 冲突，可能导致渲染区域被裁剪 |
+| 纯色背景 + 灰色地板可见，但无频谱柱状 | 着色器算法 | 1) `invRows = 1/(rows-1)` 差一错误导致丢掉末层数据 2) `heightRatio` 值反复调整（0.40→0.18→0.25→0.40）始终无法在"柱状可见"与"层次不压平"间取得平衡 3) 2× 诊断放大使 bar 过高，完全压平了层次感 |
+| 底极呈正规矩形而非平行四边形 | 着色器算法 | floor 底色与背景色几乎无视觉差异 + 无等距网格线强化平行四边形结构 |
+| Speed 控制条区被 GPU 暗色覆盖 | FBO 尺寸 | FBO 使用全内容区尺寸（含 Speed 条），着色器深色覆盖了右侧面板 |
+| 颜色硬编码不跟随主题 | 颜色预设 | 着色器直接使用 `(0.04,0.05,0.14)` 等硬编码 RGB，未绑定 PinkXP 颜色 |
+| 文字闪烁 | 绘制时序 | `paint()` 中用 `removeFromRight(42)` 裁剪 content 为 canvas 后，`paintContent()` 中又调用 `getCanvasBounds()` 二次 trim → 轴标签偏移 42px |
+| 增量编译缓存导致新旧代码混跑 | 构建系统 | `.obj` 手动清理不彻底，`Y2Kmeter_artefacts/` 子目录中的 `.exe` 长期未被删除 |
+
+**历时统计**：约 20 轮对话，修改涉及 4 个文件（Spectrogram3DModule.h/cpp、PluginEditor.h/cpp），
+新增约 600 行 GL 代码。问题分布：JUCE 合成管线 2 轮、着色器算法 8 轮、颜色/布局 4 轮、构建系统 3 轮。
+
+**回退决策理由**：
+
+1. **复杂度-收益不成比例**：CPU 版经 P1-P4 四层优化（repaint 节流、离屏 Image 缓存、magToIdx LUT、
+   depthPalettes 预计算、动态分辨率），在 340×157 模块下 CPU 占用 < 5%。GPU 化节省的
+   19K 次 function call 在绝对 CPU 时间维度上可忽略。
+2. **JUCE + 自定义 GL 的架构摩擦无法消除**：Milkdrop 成功依赖 projectM 作为独立 GL 渲染器
+   的隔离层；Spectrogram3D 在 JUCE 的 GL 上下文中裸跑自定义 shader，没有任何中间层隔离。
+3. **已有一个经过验证的 CPU 实现**：主干 b41f0a5 版本经过实际使用验证，回退不是放弃。
+
+**保留的财务**：Milkdrop GPU 路径、JUCE OpenGLRenderer 集成架构、Editor GL 合成管线均
+完整保留，后续如需为其他"像素级批量渲染"类模块引入 GPU，可直接参考 Milkdrop 的成功模板。
+
+### Phase 3-7：其余模块
+
+**已取消**。Spectrogram3D GPU 化的经验表明，除 Milkdrop（已有成熟第三方 GL 渲染器）外，
+JUCE 模块的 GPU 迁移不值得投入。后续开发将聚焦于 CPU 路径的性能优化（P1-P4 模式）。
 
 ---
 
-## 9. 实施约定
+## 9. Spectrogram3D GPU 迁移经验总结
+
+### 何时适合 GPU 化
+
+| 条件 | Spectrogram3D | Milkdrop |
+|------|:---:|:---:|
+| 像素级批量渲染（> 10K 绘制调用/帧） | ✅ | ✅ |
+| 有成熟的第三方 GL 渲染器隔离 | ❌ | ✅ (projectM) |
+| 不存在与 JUCE CachedImage 合成时序的冲突 | ❌ | ✅ (off-FBO+blit) |
+| 无复杂 UI 浮层（轴标签、Speed 控件等需叠加在 3D 视图上） | ❌ | ✅ |
+
+### 关键教训
+
+1. **JUCE CachedImage 是黑箱**：`renderOpenGL()` 返回后的合成行为不可控。透明 paint() 
+   是必要但不充分的条件——即使通过，CachedImage 的缓存策略仍可能在不同帧丢弃 GPU 输出。
+   
+2. **先验证最简路径**：应在第一轮就输出纯色诊断背景验证 GPU→FBO 0 的完整链路，而非
+   逐步调试复杂的频谱算法。
+   
+3. **构建产物深度清理**：Windows nmake 的增量编译在头文件变更时不可靠。修改头文件后
+   必须删除 `.exe` 本身（不仅是 `.obj`），因为 `Y2Kmeter_artefacts/` 子目录不在
+   常规 clean 路径内。
+
+4. **CPU 优化的 ROI 更高**：P1-P4 四层优化（约 200 行代码）在 2 轮修改内完成，性能
+   提升稳定可靠。GPU 化方案投入了约 600 行 GL 代码和 15+ 轮调试，始终未能达到同等
+   稳定性。
+
+### 实施约定
 
 1. **每完成一个 Phase，在 Intel 平台跑一次性能测试**，确认帧率改善。
 2. **每 Phase 独立可编译、可运行**。

@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.2.4 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.2.6 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -120,6 +120,22 @@ include(FetchContent)
 if (WIN32)
   set(JUCE_BUILD_HELPER_TOOLS ON CACHE BOOL
       "Build JUCE helper tools in the current configure pass" FORCE)
+endif()
+
+# ==========================================================
+# 本地 JUCE 检出自动检测
+#   如果 third_party/JUCE 目录存在（用户手动 clone 了一份 JUCE 8.0.12），
+#   则优先使用本地副本，避免每次 CMake 配置都从 GitHub 重新拉取。
+#   若要强制使用远程版本，传 -DFETCHCONTENT_SOURCE_DIR_JUCE="" 即可。
+# ==========================================================
+if (NOT DEFINED FETCHCONTENT_SOURCE_DIR_JUCE OR FETCHCONTENT_SOURCE_DIR_JUCE STREQUAL "")
+  set(_Y2K_LOCAL_JUCE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/JUCE")
+  if (EXISTS "${_Y2K_LOCAL_JUCE}/CMakeLists.txt")
+    set(FETCHCONTENT_SOURCE_DIR_JUCE "${_Y2K_LOCAL_JUCE}"
+        CACHE PATH "Local JUCE checkout" FORCE)
+    message(STATUS "Y2K: 使用本地 JUCE → ${_Y2K_LOCAL_JUCE}")
+  endif()
+  unset(_Y2K_LOCAL_JUCE)
 endif()
 
 FetchContent_Declare(
@@ -307,7 +323,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.2.4
+VERSION 2.2.6
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km

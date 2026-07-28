@@ -168,6 +168,9 @@ MilkdropModule::MilkdropModule (AnalyserHub* hub_)
     : ModulePanel (ModuleType::milkdrop),
       hub (hub_)
 {
+    // 默认初始尺寸 300×250 (宽×高)
+    setDefaultSize(400, 300);
+
     // 尝试激活 Hub 的 Oscilloscope 路径 —— 有 hub 才有 PCM 输入。
     if (hub != nullptr)
     {

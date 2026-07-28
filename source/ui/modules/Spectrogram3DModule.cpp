@@ -1,7 +1,6 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
-#include "PluginEditor.h"
 #include <cmath>
 #include <algorithm>
 #include <array>
@@ -298,19 +297,14 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         pushFrame (rowMagBuf);
     imageCacheDirty = true;
 
-    // repaint 节流（P1-1）：限制最短重绘间隔，降低宿主消息线程压力。
-    //   默认 384×256 模块下，每帧 150×127≈19k 次 fillRect 即使优化后
-    //   在 60fps 仍然吃 CPU。限制到 ~30fps 对视觉流动感几乎无影响。
+    // repaint 节流（P1-1）：限制最短重绘间隔为 20ms（~50fps），
+    //   与整体 UI 帧率对齐，消除频谱瀑布与其它模块的视觉帧率差。
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    if ((nowMs - lastRepaintMs) >= 33.0)
+    if ((nowMs - lastRepaintMs) >= 20.0)
     {
         lastRepaintMs = nowMs;
         repaint();
     }
-
-    // Phase 2: 通知 Editor 更新 GPU 渲染参数
-    if (auto* ed = findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-        PrepareGpuRender(*ed);
 }
 
 // ----------------------------------------------------------
@@ -339,11 +333,23 @@ void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> 
     const int effLen = juce::jmax (1, frameCount);
     if (effLen <= 0) return;
 
-    // Phase 2: GPU fragment shader 在 Editor::renderOpenGL 中渲染
-    //   3D 频谱瀑布图。这里仅绘制背景和轴标签浮层。
-    //   离屏 Image 缓存保留作为降级路径（当 GPU 不可用时）。
+    // 离屏 Image 缓存：数据脏或 canvas 尺寸变化时重建。
+    //   每层全量 strokePath（配 Path 复用）已消除 P6 降频的视觉回退。
+    if (imageCacheDirty || cached3DImage.isNull()
+        || cachedCanvasW != canvas.getWidth()
+        || cachedCanvasH != canvas.getHeight())
+    {
+        renderToImage(canvas);
+        imageCacheDirty = false;
+    }
+
+    // P4: 将降分辨率 Image 放大到 canvas 尺寸（单次 drawImage 完成上采样 blit）
+    g.drawImage (cached3DImage,
+                 canvas.getX(), canvas.getY(), canvas.getWidth(), canvas.getHeight(),
+                 0, 0, cached3DImage.getWidth(), cached3DImage.getHeight());
+
     // 轴标签浮绘在 3D 视图上方（不进入 Image，保证文字清晰度）
-    drawAxisLabels(g, plot);
+    drawAxisLabels (g, plot);
 }
 
 // ----------------------------------------------------------
@@ -464,8 +470,12 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     const float ox = (float) plot.getX();
     const float oy = (float) plot.getY();
 
-    juce::Graphics::ScopedSaveState ss (ig);
-    ig.reduceClipRegion (plot);
+    juce::Graphics::ScopedSaveState ss(ig);
+    ig.reduceClipRegion(plot);
+
+    // Path 对象复用：clear() 替代每层重建，避免 VTune 报告的 HeapAlloc 热点
+    juce::Path outline;
+    const juce::PathStrokeType outlineStroke(0.6f);
 
     for (int d = effRows - 1; d >= 0; --d)
     {
@@ -499,18 +509,17 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
             ig.fillRect (binX[(size_t) i], top, projBinWidth, h);
         }
 
-        // 顶部轮廓线
-        {
-            juce::Path outline;
-            outline.startNewSubPath (binX[0], baseY);
-            outline.lineTo          (binX[0], binTopY[0]);
-            for (int i = 0; i < numBins - 1; ++i)
-                outline.lineTo (binX[(size_t) i + 1], binTopY[(size_t) i + 1]);
-            outline.lineTo (binX[(size_t) (numBins - 1)], baseY);
+        // 顶部轮廓线：复用循环外 Path 对象，clear() 后重建，
+        //   避免每层分配/销毁的堆开销（VTune 显示 HeapAlloc 位居热点前列）
+        outline.clear();
+        outline.startNewSubPath(binX[0], baseY);
+        outline.lineTo         (binX[0], binTopY[0]);
+        for (int i = 0; i < numBins - 1; ++i)
+            outline.lineTo(binX[(size_t)i + 1], binTopY[(size_t)i + 1]);
+        outline.lineTo(binX[(size_t)(numBins - 1)], baseY);
 
-            ig.setColour (juce::Colours::white.withAlpha (0.25f));
-            ig.strokePath (outline, juce::PathStrokeType (0.6f));
-        }
+        ig.setColour(juce::Colours::white.withAlpha(0.25f));
+        ig.strokePath(outline, outlineStroke);
     }
 }
 
@@ -576,68 +585,8 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
         g.drawText (juce::String::fromUTF8 ("\xe2\x86\x97 older"),
                     canvas.getX() + 2, canvas.getY() + 2, ow, oh,
                     juce::Justification::centred, false);
-        g.drawText(juce::String::fromUTF8("newer \xe2\x86\x99"),
+        g.drawText (juce::String::fromUTF8 ("newer \xe2\x86\x99"),
                     canvas.getRight() - ow - 2, canvas.getBottom() - oh - 2, ow, oh,
                     juce::Justification::centred, false);
     }
-}
-
-// ================================================================
-// Phase 2: GPU 桥接 —— 将 historyRing + 色板 + 投影参数上传给 Editor
-// ================================================================
-void Spectrogram3DModule::PrepareGpuRender(
-    Y2KmeterAudioProcessorEditor& editor) {
-  const auto canvas = getCanvasBounds(getContentBounds());
-  const auto plot = canvas.reduced(2);
-  if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
-
-  recomputeProjection(plot.getWidth(), plot.getHeight());
-
-  const int effRows = juce::jmin(historyLen,
-                                  juce::jmin(frameCount, visibleRows));
-  if (effRows <= 0) return;
-
-  // 重建深度色板
-  if (depthPalettesDirty || depthPalettesRows != effRows)
-    rebuildDepthPalettes(effRows);
-
-  // 构建投影参数数组: originX, originY, slantX, slantY, binWidth, maxH, invRows
-  float proj[7];
-  proj[0] = projOriginX + static_cast<float>(plot.getX());
-  proj[1] = projOriginY + static_cast<float>(plot.getY());
-  proj[2] = projSlantX;
-  proj[3] = projSlantY;
-  proj[4] = projBinWidth;
-  proj[5] = projMaxH;
-  proj[6] = 0.0f;  // invRows 由 Editor::UpdateSpectrogram3dParams 计算
-
-  // 构建 history 纹理数据（R32F: bins × rows）
-  std::vector<float> historyData(static_cast<size_t>(numBins * effRows));
-  for (int d = 0; d < effRows; ++d) {
-    const int readIdx = (writeIdx - 1 - d + historyLen * 2) % historyLen;
-    const auto& row = historyRing[static_cast<size_t>(readIdx)];
-    for (int b = 0; b < numBins; ++b)
-      historyData[static_cast<size_t>(d * numBins + b)] = row[static_cast<size_t>(b)];
-  }
-
-  // 构建色板数据（RGBA8: 256 × rows）
-  std::vector<uint8_t> paletteData(static_cast<size_t>(256 * effRows * 4));
-  for (int d = 0; d < effRows; ++d) {
-    for (int i = 0; i < 256; ++i) {
-      const auto& c = depthPalettes[static_cast<size_t>(d)][static_cast<size_t>(i)];
-      const size_t base = static_cast<size_t>((d * 256 + i) * 4);
-      paletteData[base + 0] = c.getRed();
-      paletteData[base + 1] = c.getGreen();
-      paletteData[base + 2] = c.getBlue();
-      paletteData[base + 3] = c.getAlpha();
-    }
-  }
-
-  // 上传到 Editor
-  editor.UpdateSpectrogram3dParams(proj, paletteData.data(),
-                                   historyData.data(),
-                                   numBins, effRows,
-                                   static_cast<float>(plot.getWidth()),
-                                   static_cast<float>(plot.getHeight()));
-  editor.MarkSpectrogram3dDirty();
 }

@@ -1238,8 +1238,11 @@ juce::Font PinkXPLookAndFeel::getPopupMenuFont()
 juce::Typeface::Ptr PinkXPLookAndFeel::getTypefaceForFont (const juce::Font& f)
 {
     juce::ignoreUnused (f);
-    if (auto tf = PinkXP::loadActiveTypeface())
-        return tf;
+    // 使用已缓存的 Typeface 而非每次调用 loadActiveTypeface()。
+    // loadActiveTypeface() 内部会创建 SharedResourcePointer<Direct2DFactories>，
+    // 每次调用开销大且在 DWrite 未就绪时可能崩溃。
+    if (PinkXP::gTypeface != nullptr)
+        return PinkXP::gTypeface;
     return juce::LookAndFeel_V4::getTypefaceForFont (f);
 }
 

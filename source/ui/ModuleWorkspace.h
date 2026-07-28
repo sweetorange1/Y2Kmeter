@@ -190,6 +190,10 @@ protected:
     virtual void layoutContent(juce::Rectangle<int> contentBounds) { juce::ignoreUnused(contentBounds); }
 
     juce::Rectangle<int> getContentBounds() const;
+    juce::Rectangle<int> getCloseButtonBounds() const;
+    juce::Rectangle<int> getTitleBarBounds()   const;
+
+    juce::String titleText;  // 模块标题文字（protected，子类 paint() 可读取）
 
 private:
     enum class Edge { none, right, bottom, bottomRight };
@@ -199,7 +203,6 @@ private:
 
     ModuleType   moduleType;
     juce::String moduleId;
-    juce::String titleText;
 
     // 模块最小尺寸默认 64×64（= 1 个大格 / 8×8 个小方格，每小方格 8 像素）。
     //   · 之前默认 160×120 会在 HorizontalStrip 预设下把窗口的可用 canvas
@@ -220,9 +223,6 @@ private:
     static constexpr int titleBarHeight  = 22;
     static constexpr int closeButtonSize = 16;
     static constexpr int edgeHotSize     = 8;
-
-    juce::Rectangle<int> getCloseButtonBounds() const;
-    juce::Rectangle<int> getTitleBarBounds()   const;
 
     bool closeButtonHovered = false;
     bool closeButtonPressed = false;

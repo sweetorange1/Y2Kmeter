@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.2.4`）
+- **产品名**：`Y2Kmeter` （版本：`2.2.6`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -142,7 +142,7 @@
 | [DynamicsModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | `DynamicsModule`（Peak/RMS 四柱 + DR + Crest 历史） | `Dynamics` |
 | [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列） | `Oscilloscope` |
 | [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成） | `Spectrum` |
-| [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图，v1.9.0 P1~P3 三轮性能优化大幅降低 macOS CPU 占用，v1.9.4 P4 动态分辨率 + frequency axis 修复 + depthPalettes vector） | `Spectrum` |
+| [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.0：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
@@ -2089,6 +2089,86 @@ projectM 渲染(GPU) → glReadPixels(GPU→CPU, 3.7s)
 | 3 | `glClear` 在 FBO 0 上 | 黑块、重影、UI 撕裂 | FBO 0 = JUCE CachedImage 合成面 | ★ 永远不 clear FBO 0 |
 | 4 | `getScreenPosition()`/`localAreaToGlobal()` | 反复修正坐标仍不跟随移动 | screen/peer 坐标受 OS/DPI 污染 | `getLocalPoint(milk, point)` 纯组件树遍历 |
 | 5 | projectM 小尺寸渲染固有偏差 | <250px 时视觉中心略有偏移 | projectM 128×80 mesh + shader 精度限制 | 增大 mesh 或用 1:1 scale |
+
+---
+
+## 8. Spectrogram3D GPU 迁移与回退 + CPU 性能优化历程
+
+### 8.1 GPU 迁移（v2.2.4 → v2.2.5）
+
+**动机**：Spectrogram3D 每帧 19,200 次 `fillRect` + 300 条 `strokePath`（~16ms），理论可 GPU 化。
+
+**架构设计**：与 Milkdrop Phase 1 一致的独立 offscreen FBO + glBlitFramebuffer 模式。
+
+**结果**：❌ 15+ 轮调试后回退。详见 [GPU_ARCHITECTURE_DESIGN.md](/I:/Y2KMeter/docs/GPU_ARCHITECTURE_DESIGN.md) 第 8-9 章。
+
+| 问题类型 | 根因 |
+|----------|------|
+| JUCE 合成管线 | `ModulePanel::paint()` 不透明填充覆盖 FBO 0 上的 GPU 输出 |
+| 着色器算法 | `invRows=1/(rows-1)` 差一错误、heightRatio 无法平衡层次感 |
+| 颜色预设 | 着色器硬编码 RGB 而非绑定 PinkXP 主题色 |
+| 构建缓存 | `Y2Kmeter_artefacts/` 目录中 .exe 长期未被 clean 删除 |
+| 文字闪烁 | paint() 与 paintContent() 中 canvas 裁剪不一致导致轴标签偏移 |
+
+**教训**：
+- CPU→GPU 模块迁移的前提是"有成熟的第三方 GL 渲染器隔离"（如 projectM），直面 JUCE CachedImage 合成管线极难可靠。
+- 先验证最简路径（单色背景确认 GPU→FBO 0 链路），再逐步叠加算法。
+- Windows nmake 增量编译在头文件变更时不可靠，全量 rebuild 前必须删除 `.exe`。
+
+### 8.2 CPU 性能优化历程（v2.2.5 → v2.2.6）
+
+**数据源**：JUCE 性能计数器（`perf_counters`）+ VTune（`r027hs/_ai_reports`、`r028hs/_ai_reports`）。
+
+#### 优化前基线（v2.2.5，visibleRows=150，33ms repaint 节流）
+
+| 指标 | 值 |
+|------|:--:|
+| Spectro3D paint avg | 16ms |
+| 其他模块合计 | 7ms |
+| 帧分发 Hz | 36 |
+| 稳定帧率 | 30fps |
+
+#### P5：visibleRows 150→100 + repaint 节流 33→20ms + 移除 renderToImage 时间节流
+
+| 指标 | 优化后 |
+|------|:--:|
+| Spectro3D paint avg | ~10ms（50fps repaint 导致每帧都重建） |
+| 其他模块合计 | 7ms |
+| 帧分发 Hz | 49 |
+
+#### P6：Path 对象复用 + 回退 strokePath 降频
+
+VTune 报告 `RtlAllocateHeap` 0.063s 位居热点前列 → `juce::Path` 在 `for(d)` 循环内每层构造+析构 → 极出循环外，循环内 `clear()` 复用。
+
+| 优化项 | 说明 |
+|--------|------|
+| Path 循环外创建 | `juce::Path outline;` 在 `for(d)` 之前声明 |
+| 循环内 clear() | `outline.clear()` 替代每层 `new Path` |
+| strokePath 每层全量 | 100 层 × 128 bins 轮廓线，不降频 |
+| 线宽保持 0.6f | 不缩减显示质量 |
+
+#### 当前状态（v2.2.6）
+
+| 指标 | 值 |
+|------|:--:|
+| visibleRows | 100 |
+| repaint 节流 | 20ms（~50fps） |
+| renderToImage 重建 | 每次 paint 均执行（无时间节流） |
+| Path 分配/帧 | 0 次（复用） |
+| Spectro3D paint avg | ~10ms |
+| 实测帧率 | 50+ fps |
+| 视觉效果 | 丝滑流畅 |
+
+#### VTune 核心利用率分析（r028hs）
+
+| 同时活跃核心数 | 耗时 | 解读 |
+|:---:|:---|---|
+| 0 | 6.64s | UI 线程等待 vsync / 同步 |
+| 1 | 3.35s | 消息线程独占（paint + onFrame + renderOpenGL） |
+| 2 | 0.006s | D2D worker 短暂重叠 |
+| 3-20 | 0s | 从未三核同时计算 |
+
+"仅用 3 核"不是缺陷，而是 **JUCE 单线程 UI 模型的自然结果**。未实施的后台线程方案 A（Spectro3D `renderToImage` 卸到后台线程）存在 `juce::Graphics` 线程安全风险，不推荐在当前阶段引入。
 
 ---
 

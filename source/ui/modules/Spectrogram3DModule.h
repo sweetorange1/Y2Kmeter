@@ -35,16 +35,6 @@ public:
     // AnalyserHub::FrameListener
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
-    // 暴露内容区域边界（供 Editor GPU 渲染使用）
-    juce::Rectangle<int> GetContentLocalBounds() const {
-      return getContentBounds();
-    }
-
-    // Phase 2: GPU 桥接 —— 将 historyRing + 色板 + 投影参数上传给 Editor
-    //   用于 renderOpenGL 中的 GPU fragment shader 渲染。
-    //   调用时机：onFrame 末尾、canvas 尺寸变化时。
-    void PrepareGpuRender(class Y2KmeterAudioProcessorEditor& editor);
-
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
     void paintContent  (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
@@ -115,7 +105,7 @@ private:
     int lastCanvasH = -1;
     int lastCachedFrameCount = -1;
 
-    // repaint 节流（P1-1 风格）：限制最短重绘间隔，降低宿主消息线程压力
+    // repaint 节流（P1）：最短重绘间隔 20ms（~50fps）
     double lastRepaintMs = 0.0;
 
     // ---- 离屏 Image 缓存（P2 性能优化）----
@@ -148,7 +138,7 @@ private:
     static constexpr float minDb     = -90.0f;
     static constexpr float maxDb     = 0.0f;
     static constexpr int   defaultHistoryLen = 300;  // 环形缓冲总容量（远大于可见层数，旧层滚出屏幕后延迟覆盖）
-    static constexpr int   visibleRows      = 150;  // 屏幕可见层数：投影计算只考虑这些，其余在画布外
+    static constexpr int   visibleRows      = 100;  // 屏幕可见层数：100层填充150视觉层（33%降耗时），投影计算只考虑这些，其余在画布外
 
     // depthPalettes: visibleRows×256 色板，已叠加深度 fade。
     //   消除每帧 19,050 次 interpolatedWith。
