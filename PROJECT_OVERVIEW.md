@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.2.6`）
+- **产品名**：`Y2Kmeter` （版本：`2.3.1`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.3.0，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.3.1，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -38,14 +38,14 @@
 | 语言 | C++17（`CMAKE_CXX_STANDARD 17`，`CXX_EXTENSIONS OFF`） |
 | 框架 | **JUCE 8.0.12**（通过 `FetchContent` 自动拉取） |
 | DSP | `juce::dsp`（FFT、Windowing） |
-| GPU | `juce::juce_opengl`（Editor 挂 `OpenGLContext`，绘制走 GPU）；`WebView2`（Windows）/ `WebKit`（macOS）用于 Milkdrop 模块的 WebGL 渲染 |
+| GPU | `juce::juce_opengl`（Editor 挂 `OpenGLContext`，绘制走 GPU）；Milkdrop 模块使用 libprojectM 4 native OpenGL（详见 §6.41） |
 | 构建 | CMake ≥ 3.22 |
 | Windows CRT | 强制静态 CRT（`MultiThreaded`，避免依赖 VC_redist） |
 | macOS 语言扩展 | Objective-C++（`.mm` 文件走 ScreenCaptureKit 桌面音频采集） |
 | 安装器 | Inno Setup（[Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss)） |
 | 字体 | `Silkscreen-Regular.ttf`（像素英文字体，通过 `juce_add_binary_data` 打包） |
 | 项目性能特性 | 支持 **LTO/IPO** + **PGO**（`Y2K_ENABLE_LTO`、`Y2K_PGO_MODE`）|
-| 特殊宏 | `Y2K_ENABLE_PERF_COUNTERS=0`（发布版关闭性能计数）、`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1`（用自定义 Standalone 外壳）、`JUCE_WEB_BROWSER=1`（启用 WebBrowserComponent）|
+| 特殊宏 | `Y2K_ENABLE_PERF_COUNTERS=1`（发布版开启性能计数）、`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1`（用自定义 Standalone 外壳） |
 
 ---
 
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.0：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.1：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -362,7 +362,7 @@ main
 
 ### 6.5 GPU / OpenGL
 
-**v2.3.0 最终架构**（参见 [GPU_ARCHITECTURE_DESIGN.md](/I:/Y2KMeter/docs/GPU_ARCHITECTURE_DESIGN.md)）：
+**v2.3.1 最终架构**（参见 [GPU_ARCHITECTURE_DESIGN.md](/I:/Y2KMeter/docs/GPU_ARCHITECTURE_DESIGN.md)）：
 
 - Editor 类末尾持有 `juce::OpenGLContext openGLContext`，**必须放在类末尾**（保证反向析构顺序时最先 detach）。
 - 构造末尾 `openGLContext.attachTo(*this)`，析构最开始显式 `detach()` 兜底。
@@ -2076,9 +2076,67 @@ projectM 渲染(GPU) → glReadPixels(GPU→CPU, 3.7s)
 
 
 
+### 6.41 v2.3.1：Milkdrop 音频静音衰减修复 — 无信号时动画自然趋近静止
+
+**问题**：原生在 Winamp 中运行的 Milkdrop 引擎在音频暂停/停止后，画面会在 1-3 秒内逐渐减速趋近静止；但本软件即使在完全没有音频信号的情况下，画面仍然保持较高速度。
+
+**根因分析**：
+
+PCM 数据消费逻辑（[PluginEditor.cpp](I:/Y2KMeter/PluginEditor.cpp) `renderOpenGL()`）中的 `addPcmFloat` 调用存在三个路径：
+
+| 状态 | 条件 | 改前行为 | 问题 |
+|------|------|----------|------|
+| A — 正常 | `milkdrop_pending_frames_ > 0` | 送入实时 PCM | ✓ 正常 |
+| B — 无新PCM但有历史 | `milkdrop_has_ever_received_pcm_ == true` | **复读最后一帧有声音的 PCM** | ✗ projectM 内部 FFT 输出 bass/mid/treb 恒定高 → 动画永不休眠 |
+| C — 冷启动 | 其它 | **合成 220Hz+55Hz 正弦波** | ✗ 虚假音频自驱动，无音频时动画仍然活跃 |
+
+**修复方案**：
+
+将状态 B 和 C 的 PCM 输入改为**送入全零静音数据**：
+
+```
+状态 B（无新 PCM 但有历史）
+  改前：api.addPcmFloat(handle, lastRealPcm.data(), lastRealFrames, true)
+        → 重复播放最后一帧有声音的 PCM
+  改后：送入 kSilenceFrames=2048 全零静音 PCM
+        → projectM 内部音频缓冲自然被静音数据替换
+
+状态 C（冷启动）
+  改前：合成 0.25×220Hz + 0.10×55Hz 正弦波 → 自驱动动画
+  改后：送入 2048 帧全零静音 → 渲染 idle 预设
+```
+
+**效果对比**：
+
+| 场景 | 改前 | 改后 |
+|------|------|------|
+| 音频正常播放 | 实时 PCM，动画正常 | 不变 |
+| 音频突然停止 | bass/mid/treb 维持最后一帧水平，动画持续全速 | bass/mid/treb 随静音填充自然衰减，1-3 秒内趋近静止 |
+| 音频从静音恢复 | 已有实时 PCM，立即恢复 | 不变，实时 PCM 立刻到达，动画即时恢复 |
+| 冷启动无音频 | 220Hz+55Hz 正弦波自驱动 | 静音，渲染 idle 预设或 time-only 动画 |
+
+**控制链路**（完整数据流）：
+
+```
+实时 PCM → addPcmFloat → projectM 内部 FFT → bass/mid/treb 频带能量
+  → 预设 per_frame 方程 (如 wave_r = wave_r + 0.01*bass*mtime)
+  → mtime 累积速度由 bass/mid/treb 决定 → 动画帧间增量
+  → bash 图形变换 → OpenGL 渲染 → 用户看到的动画速度
+
+当 bass/mid/treb → 0（静音填充）：
+  → per_frame 方程中所有 bass/mid/treb 项归零
+  → mtime 停止累积（或仅由 time 项缓慢驱动）
+  → 动画逐帧增量接近 0 → 画面静止
+```
+
+**变更文件**：[PluginEditor.cpp](I:/Y2KMeter/PluginEditor.cpp) `renderOpenGL()` PCM 消费段
+
+> **关键教训**：projectM/Milkdrop 引擎的动画速度**完全由送入的 PCM 音频数据驱动**。如果持续送入非零 PCM（无论是重复历史片段还是合成信号），FFT 输出的频带能量就不会衰减，mtime 持续累积，画面永远不会"停下来"。正确的行为是：无真实音频时送入静音，让引擎自然衰减。
+
+
 ---
 
-## 7. v2.3.0：Milkdrop GPU 改造完整踩坑记录
+## 7. v2.3.1：Milkdrop GPU 改造完整踩坑记录
 
 详见 [GPU_ARCHITECTURE_DESIGN.md](/I:/Y2KMeter/docs/GPU_ARCHITECTURE_DESIGN.md) 第 7 章。关键教训摘要：
 

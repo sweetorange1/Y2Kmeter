@@ -55,7 +55,7 @@
 
 ---
 
-## 2. Milkdrop 最终实现（v2.3.0）
+## 2. Milkdrop 最终实现（v2.3.1）
 
 ### 2.1 Editor 实现 OpenGLRenderer
 
@@ -332,7 +332,7 @@ Fragment Shader 一次计算所有像素。详见原文档 Phase 2。
 
 ## 8. 实施计划
 
-### Phase 1：Milkdrop 零拷贝 ✅ 已完成（v2.3.0）
+### Phase 1：Milkdrop 零拷贝 ✅ 已完成（v2.3.1）
 
 ### Phase 2：Spectrogram3D GPU Shader ❌ 已回退（v2.2.5）
 

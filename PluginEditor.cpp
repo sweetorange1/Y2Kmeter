@@ -74,7 +74,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.3.0");
+        const int versionW = versionFont.getStringWidth ("v2.3.1");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -115,7 +115,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.0";
+        const juce::String versionText = "v2.3.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -2609,7 +2609,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.0";
+        const juce::String versionText = "v2.3.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2617,7 +2617,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.3.0");
+        const int versionW = versionFont.getStringWidth ("v2.3.1");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4082,23 +4082,18 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       milkdrop_last_real_frames_ = milkdrop_pending_frames_;
       milkdrop_pending_frames_ = 0;
     } else if (milkdrop_has_ever_received_pcm_) {
-      api.addPcmFloat(milkdrop_pm_handle_,
-                      milkdrop_last_real_pcm_.data(),
-                      milkdrop_last_real_frames_, true);
+      // 无新音频时送入静音，projectM 内部音频缓冲自然衰减，
+      // bass/mid/treb → 0，驱动动画逐渐趋近静止
+      constexpr unsigned int kSilenceFrames = 2048;
+      std::vector<float> silence(kSilenceFrames * 2, 0.0f);
+      api.addPcmFloat(milkdrop_pm_handle_, silence.data(),
+                      kSilenceFrames, true);
     } else {
-      // 冷启动合成音
-      constexpr unsigned int kSynthFrames = 256;
-      float synth[kSynthFrames * 2];
-      for (unsigned int i = 0; i < kSynthFrames; ++i) {
-        const double t = static_cast<double>(i) / 44100.0;
-        float s = 0.25f * static_cast<float>(
-            std::sin(2.0 * juce::MathConstants<double>::pi * 220.0 * t))
-                + 0.10f * static_cast<float>(
-            std::sin(2.0 * juce::MathConstants<double>::pi * 55.0 * t));
-        synth[i * 2] = s;
-        synth[i * 2 + 1] = s;
-      }
-      api.addPcmFloat(milkdrop_pm_handle_, synth, kSynthFrames, true);
+      // 冷启动：尚无真实音频，送静音让 projectM 渲染 idle 预设
+      constexpr unsigned int kSilenceFrames = 2048;
+      std::vector<float> silence(kSilenceFrames * 2, 0.0f);
+      api.addPcmFloat(milkdrop_pm_handle_, silence.data(),
+                      kSilenceFrames, true);
     }
   }
 
