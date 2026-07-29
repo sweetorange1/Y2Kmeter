@@ -3,6 +3,8 @@
 #include "PluginEditor.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/perf/PerformanceCounterSystem.h"
+#include "source/network/TelemetryClient.h"
+#include "source/network/UpdateChecker.h"
 
 // macOS Standalone 专属：音频转储调试器（Windows 构建下此头文件不被编译，
 // 且 CMakeLists 中 AudioDumpRecorder.cpp 仅在 APPLE 分支加入 target_sources）
@@ -32,6 +34,67 @@ Y2KmeterAudioProcessor::Y2KmeterAudioProcessor()
     ),
       analyserHub(std::make_unique<AnalyserHub>())
 {
+    // ================================================================
+    // VST3 遥测 + 更新检查（进程级去重，避免 DAW 扫描期重复触发）
+    //
+    // 策略：
+    //   · 使用 static atomic 确保同一进程内最多触发一次；
+    //   · 延迟 5 秒执行（DAW 扫描通常在 3 秒内完成加载+销毁）；
+    //   · 授权状态由安装包写入注册表，LoadFromRegistry() 读取；
+    //     默认未授权（不发送数据），VST3 无独立安装程序，
+    //     直接复用同一注册表键值；
+    //   · client_id 持久化到 %APPDATA%/Y2Kmeter.telemetry 文件，
+    //     作为 PropertiesFile 单 key 存根，与 Standalone 共享同一 UUID。
+    //   · sTelemetryProps 为 static 确保其生命周期覆盖所有异步回调
+    //     （callback / ShowUpdateDialog 中的 settings 指针不会悬空）。
+    // ================================================================
+    static std::atomic<bool> telemetryOnceFlag{false};
+    if (!telemetryOnceFlag.exchange(true, std::memory_order_acquire))
+    {
+        // ApplicationProperties 必须为 static，否则 callAfterDelay
+        // lambda 返回后被析构，导致 background thread / dialog
+        // callback 中 settings 指针 Use-After-Free 崩溃。
+        static juce::ApplicationProperties sTelemetryProps;
+        {
+            juce::PropertiesFile::Options opts;
+            opts.applicationName = "Y2Kmeter";
+            opts.filenameSuffix  = ".telemetry";
+            opts.folderName      = "";
+            opts.storageFormat   = juce::PropertiesFile::storeAsXML;
+            sTelemetryProps.setStorageParameters(opts);
+        }
+
+        juce::Timer::callAfterDelay(5000, [this]() {
+            auto* telemetrySettings =
+                sTelemetryProps.getUserSettings();
+
+            auto& tc = y2k::network::TelemetryClient::GetInstance();
+            tc.LoadFromRegistry();
+
+            tc.SendStartupPing(telemetrySettings, /*isPlugin=*/true);
+
+#if JUCE_WINDOWS
+            const juce::String platform = "win-x64";
+#elif JUCE_MAC
+            const juce::String platform = "macos";
+#elif JUCE_LINUX
+            const juce::String platform = "linux";
+#else
+            const juce::String platform = "unknown";
+#endif
+            y2k::network::CheckForUpdatesAsync(
+                juce::String(JucePlugin_VersionString),
+                platform,
+                telemetrySettings,
+                [telemetrySettings](
+                    const y2k::network::UpdateInfo& info) {
+                    if (info.has_update) {
+                        y2k::network::ShowUpdateDialog(
+                            info, telemetrySettings);
+                    }
+                });
+        });
+    }
 }
 
 Y2KmeterAudioProcessor::~Y2KmeterAudioProcessor() {}

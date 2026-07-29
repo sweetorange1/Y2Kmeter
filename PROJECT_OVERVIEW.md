@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.3.2`）
+- **产品名**：`Y2Kmeter` （版本：`2.3.3`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.3.2，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.3.3，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.3：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2251,6 +2251,66 @@ VTune 报告 `RtlAllocateHeap` 0.063s 位居热点前列 → `juce::Path` 在 `f
 | `assets/tamagotchi_assets.zip` | **新建**：预制作的 Tamagotchi 动画压缩包（~1.5 MB，内部含 `Tamagotchi/` 前缀） |
 
 **运行时兼容性**：无需修改 C++ 代码。`FindMilkdropAssetsDir()` 优先查找 AppData 路径，`findTamagotchiAssetsRoot()` 从 exe 同级向上搜索 `assets/Tamagotchi` —— 解压后路径完全匹配原有搜索逻辑。
+
+### 8.4 v2.3.3 遥测+更新检查 UAF 修复 & API 服务端部署
+
+**动机**：v2.3.2 引入的遥测（telemetry）和自动更新检查（update check）在 VST3 插件模式下存在两处 Use-After-Free 崩溃风险；同时 `iisaacbeats.cn` 的 API 服务端（Cloudflare Worker 方案）因域名 DNS 托管在腾讯云 DNSPod 而无法使用，需改为服务器本地部署方案。
+
+**核心改动（客户端 Crash 修复）**：
+
+| 文件 | 问题 | 修复 |
+|---|---|---|
+| [`UpdateChecker.cpp`](/I:/Y2KMeter/source/network/UpdateChecker.cpp) | `CheckForUpdatesAsync()` 的 `std::thread` 后台线程直接访问 `settings->getValue()`，但 `settings` 可能指向已析构的栈上 `ApplicationProperties` | 将 `ignoredVersion` 读取提升到**主调线程**，按值捕获传入 `std::thread` lambda，后台线程不再触碰 `settings` 指针 |
+| [`PluginProcessor.cpp`](/I:/Y2KMeter/PluginProcessor.cpp) | `telemetryProps` 是 `callAfterDelay` lambda 内的局部变量，lambda 返回后析构，导致后续 `ShowUpdateDialog` 的异步回调中 `settings` 指针悬空 | `telemetryProps` 改为 `static` 生命周期，注释明确标注其存活期需覆盖所有异步 callback |
+
+**根因时序图**（修复前）：
+```
+主线程                                  后台线程 (std::thread)
+  callAfterDelay lambda:
+    telemetryProps 构造（栈局部变量）
+    CheckForUpdatesAsync(settings=ptr)
+      → std::thread([settings]{
+                                          HTTP GET ...
+      })                                 
+  lambda 返回                             
+  telemetryProps 析构 ❌                   settings->getValue() ← UAF 崩溃！
+```
+
+**修复后**：`ignoredVersion` 在主线程预读 → 按值传递；`sTelemetryProps` 为 `static` → 回调执行时仍存活。
+
+**新增文件**（`iisaacbeats.cn` 仓库，API 服务端）：
+
+| 文件 | 说明 |
+|---|---|
+| `api/server.js` | Node.js HTTP 服务，监听 `127.0.0.1:3001`，替代原 Cloudflare Worker 方案。处理 `POST /api/telemetry/ping`（遥测心跳）和 `GET /api/update/check`（版本更新检查），数据存储于本地 SQLite |
+| `api/package.json` | npm 依赖声明（`better-sqlite3`） |
+| `api/init_db.js` | 一键初始化 SQLite 数据库（建表 + 种子数据） |
+| `API_SERVER_COMMANDS.md` | OrcaTerm 服务器运维手册，涵盖 PM2 进程管理、Git 操作、版本发布、用户数据统计 SQL、API 测试、Nginx 运维、故障排查等十大章节 |
+
+**服务端架构**：
+```
+Y2KMeter 客户端               用户浏览器
+  │                               │
+  │ POST /api/telemetry/ping      │ GET /api/update/check
+  ▼                               ▼
+https://iisaacbeats.cn (Nginx)
+  │ /       → 静态网页
+  │ /api/*  → proxy_pass 127.0.0.1:3001
+  ▼
+Node.js (PM2 守护, server.js)
+  │
+  ▼
+SQLite (api/data.db)
+  ├── telemetry (遥测记录)
+  └── releases  (版本发布)
+```
+
+**踩坑记录**：
+- DNS 托管在腾讯云 DNSPod 时，Cloudflare Workers 路由无法拦截流量，必须使用 VPS 本地 Node.js + Nginx 反代方案
+- Nginx 配置文件实际路径是 `/etc/nginx/nginx.conf`（而非宝塔面板的 `/www/server/panel/vhost/nginx/`），因为 `include` 只指向了 `/etc/nginx/conf.d/`（空目录）
+- vi 编辑器异常退出会残留 `.swp` 文件，再次打开会报 `E325: ATTENTION`，按 `D` 键删除 swap 即可
+- `server.js` 启动时执行 `INSERT OR IGNORE` 但 `releases` 表无 UNIQUE 约束，导致每次 `pm2 restart` 都插入重复记录，需将种子数据 INSERT 移除出 `server.js`，仅由 `init_db.js` 执行一次
+
 
 ---
 
