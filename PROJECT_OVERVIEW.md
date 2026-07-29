@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.3.1`）
+- **产品名**：`Y2Kmeter` （版本：`2.3.2`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.3.1，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.3.2，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -45,7 +45,7 @@
 | 安装器 | Inno Setup（[Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss)） |
 | 字体 | `Silkscreen-Regular.ttf`（像素英文字体，通过 `juce_add_binary_data` 打包） |
 | 项目性能特性 | 支持 **LTO/IPO** + **PGO**（`Y2K_ENABLE_LTO`、`Y2K_PGO_MODE`）|
-| 特殊宏 | `Y2K_ENABLE_PERF_COUNTERS=1`（发布版开启性能计数）、`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1`（用自定义 Standalone 外壳） |
+| 特殊宏 | `Y2K_ENABLE_PERF_COUNTERS=0`（发布版关闭性能计数）、`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1`（用自定义 Standalone 外壳） |
 
 ---
 
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.1：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2226,7 +2226,31 @@ VTune 报告 `RtlAllocateHeap` 0.063s 位居热点前列 → `juce::Path` 在 `f
 | 2 | 0.006s | D2D worker 短暂重叠 |
 | 3-20 | 0s | 从未三核同时计算 |
 
-"仅用 3 核"不是缺陷，而是 **JUCE 单线程 UI 模型的自然结果**。未实施的后台线程方案 A（Spectro3D `renderToImage` 卸到后台线程）存在 `juce::Graphics` 线程安全风险，不推荐在当前阶段引入。
+### 8.3 v2.3.2 安装包资源分发优化
+
+**动机**：v2.3.1 及之前，Inno Setup 安装器对 Tamagotchi 动画（2652 个 PNG）和 Milkdrop 纹理（66 个 jpg）采用逐个文件复制安装，导致安装过程耗时极长且产生大量冗余 I/O。
+
+**核心改动**：统一 ZIP 压缩包解压流程
+- 将需要大量零散文件的三类资源改为"预制作 ZIP → 安装阶段复制 → ssPostInstall 解压"流程，与 Milkdrop 预设（9927 个 .milk）处理方式完全一致。
+- 解压器从 PowerShell `Expand-Archive`（~30-60s/10000文件）升级为 Windows 内置 `tar.exe`（~2-5s/10000文件），保留 PowerShell 回退作为兼容路径。
+
+| 资源 | 文件数 | 旧方案 | 新方案 | 安装后位置 |
+|---|---|---|---|---|
+| `milkdrop_presets` | 9,927 `.milk` | ZIP（已有） | ZIP（不变） | `%APPDATA%\Y2Kmeter\milkdrop_presets` |
+| `milkdrop_textures` | 66 `.jpg` | 逐个复制 | `milkdrop_textures.zip` | `%APPDATA%\Y2Kmeter\milkdrop_textures` |
+| Tamagotchi 动画 | 2,652 `.png` | 逐个复制 | `tamagotchi_assets.zip` | `{app}\assets\Tamagotchi\` |
+
+**修改文件清单**：
+
+| 文件 | 改动 |
+|---|---|
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `[InstallDelete]` 新增旧版散装文件清理；`[Files]` Tamagotchi & 纹理改为 ZIP Source；`[Code]` 抽取 `ExtractZip()` 通用函数，`tar.exe` 优先 → PowerShell 回退 |
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | `y2km_copy_projectm_runtime` 新增 `SKIP_TEXTURES` 选项；Standalone post-build 跳过纹理拷贝（走安装包 ZIP） |
+| [`build_macos_installer.sh`](/I:/Y2KMeter/build_macos_installer.sh) | README.txt 新增"资源说明"章节，解释 macOS 自包含 Bundle 与 Windows ZIP 方案的差异 |
+| `assets/milkdrop_textures.zip` | **新建**：预制作的纹理压缩包（~3.2 MB） |
+| `assets/tamagotchi_assets.zip` | **新建**：预制作的 Tamagotchi 动画压缩包（~1.5 MB，内部含 `Tamagotchi/` 前缀） |
+
+**运行时兼容性**：无需修改 C++ 代码。`FindMilkdropAssetsDir()` 优先查找 AppData 路径，`findTamagotchiAssetsRoot()` 从 exe 同级向上搜索 `assets/Tamagotchi` —— 解压后路径完全匹配原有搜索逻辑。
 
 ---
 

@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "2.3.1"
+#define MyAppVersion   "2.3.2"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -62,15 +62,25 @@ Name: "vst3";       Description: "VST3 Plugin";                   Types: full cu
 [InstallDelete]
 ; Standalone：删除旧 EXE（若存在）
 Type: files; Name: "{app}\{#MyAppExeName}"; Components: standalone
-; Standalone：删除旧 Tamagotchi 动画资源目录（若存在）
+; Standalone：删除旧 Tamagotchi 动画资源目录（若存在，v2.3.1 及之前为散装文件安装）
 Type: filesandordirs; Name: "{app}\assets\Tamagotchi"; Components: standalone
-; Standalone：删除旧 Milkdrop 运行时（projectM DLL + glew32 + 预设/纹理目录，确保升级时全量覆盖）
+; Standalone：删除旧 Tamagotchi 压缩包（升级清理）
+Type: files; Name: "{app}\assets\tamagotchi_assets.zip"; Components: standalone
+; Standalone：删除旧 Milkdrop 运行时（projectM DLL + glew32 + 预设/纹理目录/压缩包，确保升级时全量覆盖）
 Type: files; Name: "{app}\projectM-4.dll"; Components: standalone
 Type: files; Name: "{app}\glew32.dll"; Components: standalone
-Type: filesandordirs; Name: "{app}\milkdrop_presets"; Components: standalone
-Type: filesandordirs; Name: "{app}\milkdrop_textures"; Components: standalone
+Type: filesandordirs; Name: "{app}\assets\milkdrop_presets"; Components: standalone
+Type: filesandordirs; Name: "{app}\assets\milkdrop_textures"; Components: standalone
+Type: files; Name: "{app}\assets\milkdrop_presets.zip"; Components: standalone
+; AppData 共享目录：删除旧版散装文件（若存在，v2.3.1 及之前为直接安装），升级时统一改为 ZIP 解压
+Type: filesandordirs; Name: "{userappdata}\Y2Kmeter\milkdrop_textures"; Components: standalone
+Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_textures.zip"; Components: standalone
+Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_presets.zip"; Components: standalone
 ; VST3：删除旧 bundle 目录（若存在），用户选择的目录由 [Code] 段 GetVst3Dir 决定
 Type: filesandordirs; Name: "{code:GetVst3Dir}\{#MyPluginBundle}"; Components: vst3
+; VST3：删除系统默认 VST3 路径下的旧版 Milkdrop 预设/纹理（迁移至 AppData 集中存储后不再随 VST3 bundle 分发）
+Type: filesandordirs; Name: "{commoncf}\VST3\iisaacbeats.cn\{#MyPluginBundle}\Contents\x86_64-win\milkdrop_presets"; Components: vst3
+Type: filesandordirs; Name: "{commoncf}\VST3\iisaacbeats.cn\{#MyPluginBundle}\Contents\x86_64-win\milkdrop_textures"; Components: vst3
 
 ; -----------------------------------------------------------------------
 ; 文件：按组件分别复制
@@ -82,10 +92,12 @@ Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone
     Flags: ignoreversion; \
     Components: standalone
 
-; Standalone Tamagotchi 动画资源（递归复制）
-Source: "assets\Tamagotchi\*"; \
-    DestDir: "{app}\assets\Tamagotchi"; \
-    Flags: ignoreversion recursesubdirs createallsubdirs; \
+; Standalone Tamagotchi 动画资源（打包为 ZIP 以加速安装，2652 个 PNG 文件合并为 1 个）
+;   · ZIP 预置于 assets/tamagotchi_assets.zip，更新动画资源后需重新手动打包
+;   · 内部路径保留 Tamagotchi/ 前缀，安装后由 [Code] CurStepChanged(ssPostInstall) 解压到 {app}\assets\
+Source: "assets\tamagotchi_assets.zip"; \
+    DestDir: "{app}\assets"; \
+    Flags: ignoreversion; \
     Components: standalone
 
 ; Standalone Milkdrop 运行时 DLL（projectM 渲染库 + OpenGL 扩展加载器）
@@ -98,23 +110,32 @@ Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone
     Flags: ignoreversion; \
     Components: standalone
 
-; Standalone Milkdrop 预设（~1000 个 .milk 文件，Milkdrop 可视化必需）
-Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone\milkdrop_presets\*"; \
-    DestDir: "{app}\milkdrop_presets"; \
-    Flags: ignoreversion recursesubdirs createallsubdirs; \
+; Standalone Milkdrop 预设（打包为单一 ZIP 以加速安装，9927 个 .milk 文件合并为 1 个）
+;   · ZIP 预置于 assets/milkdrop_presets.zip，更新预设后需重新手动打包
+;   · v2.3.1: 预设集中存放于 %APPDATA%\Y2Kmeter\，Standalone 和 VST3 共享同一份
+;   · 安装后由 [Code] CurStepChanged(ssPostInstall) 自动解压
+Source: "assets\milkdrop_presets.zip"; \
+    DestDir: "{userappdata}\Y2Kmeter"; \
+    Flags: ignoreversion; \
     Components: standalone
 
-; Standalone Milkdrop 纹理（projectM 渲染使用的 jpg 纹理）
-Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone\milkdrop_textures\*"; \
-    DestDir: "{app}\milkdrop_textures"; \
-    Flags: ignoreversion recursesubdirs createallsubdirs; \
+; Standalone Milkdrop 纹理（打包为 ZIP 以加速安装，66 个 jpg 文件合并为 1 个）
+;   · ZIP 预置于 assets/milkdrop_textures.zip，更新纹理后需重新手动打包
+;   · v2.3.1: 纹理集中存放于 %APPDATA%\Y2Kmeter\，Standalone 和 VST3 共享同一份
+;   · 安装后由 [Code] CurStepChanged(ssPostInstall) 自动解压
+Source: "assets\milkdrop_textures.zip"; \
+    DestDir: "{userappdata}\Y2Kmeter"; \
+    Flags: ignoreversion; \
     Components: standalone
 
 ; VST3（整个 .vst3 bundle 目录递归复制）
+;   v2.3.1: 排除 milkdrop_presets/ 和 milkdrop_textures/，预设和纹理已集中存放于
+;   %APPDATA%\Y2Kmeter\，Standalone 和 VST3 共享同一份，不再随 bundle 冗余分发。
 ; DestDir 走 [Code] 段 GetVst3Dir —— 用户在独立向导页里选择的路径
 Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\VST3\{#MyPluginBundle}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Excludes: "milkdrop_presets\*;milkdrop_textures\*"; \
     Components: vst3
 
 ; -----------------------------------------------------------------------
@@ -128,6 +149,7 @@ Name: "{autodesktop}\{#MyAppName}";  Filename: "{app}\{#MyAppExeName}"; Componen
 ; 安装后启动：仅 Standalone 组件
 ; -----------------------------------------------------------------------
 [Run]
+; 安装后启动
 Filename: "{app}\{#MyAppExeName}"; \
     Description: "启动 {#MyAppName}"; \
     Flags: nowait postinstall skipifsilent; \
@@ -211,6 +233,111 @@ begin
         'After installation, you may need to manually add this folder to your DAW''s VST3 plug-in paths and rescan, otherwise the plug-in might not be detected.',
         mbInformation, MB_OK);
       Vst3DirWarningShown := True;
+    end;
+  end;
+end;
+
+// ============================================================
+// 通用辅助：解压 ZIP 到目标目录
+//   · 优先使用 Windows 10 内置的 tar.exe（原生 C 工具，极快，自 build 17063 起所有 Win10+ 自带）
+//   · tar.exe 不可用时回退到 PowerShell Expand-Archive
+//   · 返回 True 表示解压成功
+// ============================================================
+function ExtractZip(const ZipPath, DestPath: String): Boolean;
+var
+  Cmd, TarExe: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  if not FileExists(ZipPath) then
+  begin
+    Log('WARNING: ZIP not found: ' + ZipPath);
+    Exit;
+  end;
+
+  WizardForm.StatusLabel.Caption := 'Extracting ' + ExtractFileName(ZipPath) + ' ...';
+  WizardForm.ProgressGauge.Style := npbstMarquee;
+
+  // 确保目标目录存在
+  if not DirExists(DestPath) then
+    CreateDir(DestPath);
+
+  // 策略 1：tar.exe（Windows 10+ 内置，原生速度最快，9927 文件仅需数秒）
+  //   路径：C:\Windows\System32\tar.exe（所有 Win10 build 17063+ 自带）
+  TarExe := ExpandConstant('{sys}\tar.exe');
+  if FileExists(TarExe) then
+  begin
+    Cmd := '-xf "' + ZipPath + '" -C "' + DestPath + '"';
+    if Exec(TarExe, Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      if ResultCode = 0 then
+      begin
+        Log('Extracted (tar): ' + ZipPath + ' -> ' + DestPath);
+        DeleteFile(ZipPath);
+        WizardForm.ProgressGauge.Style := npbstNormal;
+        Result := True;
+        Exit;
+      end
+      else
+        Log('WARNING: tar.exe exited with code ' + IntToStr(ResultCode) + ', falling back to PowerShell');
+    end
+    else
+      Log('WARNING: Failed to launch tar.exe, falling back to PowerShell');
+  end
+  else
+    Log('tar.exe not found, falling back to PowerShell');
+
+  // 策略 2：PowerShell Expand-Archive（兼容旧版 Windows / 非标环境）
+  Cmd := '-NoProfile -Command "Expand-Archive -LiteralPath ''' + ZipPath + ''' -DestinationPath ''' + DestPath + ''' -Force"';
+  if Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode = 0 then
+    begin
+      Log('Extracted (PS): ' + ZipPath + ' -> ' + DestPath);
+      DeleteFile(ZipPath);
+      Result := True;
+    end
+    else
+      Log('WARNING: PowerShell Expand-Archive exited with code ' + IntToStr(ResultCode) + ' for ' + ZipPath);
+  end
+  else
+    Log('ERROR: Failed to launch PowerShell for ZIP extraction: ' + ZipPath);
+
+  WizardForm.ProgressGauge.Style := npbstNormal;
+  WizardForm.StatusLabel.Caption := 'Finishing installation...';
+end;
+
+// ============================================================
+// ssPostInstall：文件复制完成后、[Run] 执行前，自动解压三个 ZIP
+//   · milkdrop_presets.zip   → %APPDATA%\Y2Kmeter\milkdrop_presets
+//   · milkdrop_textures.zip  → %APPDATA%\Y2Kmeter\milkdrop_textures
+//   · tamagotchi_assets.zip  → {app}\assets\ (内部含 Tamagotchi/ 前缀)
+//   · 注意：[Run] 中的 shell 命令在不可见窗口下可能静默失败；
+//     CurStepChanged(ssPostInstall) 由 Inno Setup 内部事件驱动，
+//     不依赖窗口消息循环，执行时序更可靠。
+// ============================================================
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ZipPath, DestPath: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if IsComponentSelected('standalone') then
+    begin
+      // 1) Milkdrop 预设（9927 个 .milk 文件）
+      ZipPath  := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_presets.zip';
+      DestPath := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_presets';
+      ExtractZip(ZipPath, DestPath);
+
+      // 2) Milkdrop 纹理（66 个 jpg 文件）
+      ZipPath  := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_textures.zip';
+      DestPath := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_textures';
+      ExtractZip(ZipPath, DestPath);
+
+      // 3) Tamagotchi 动画资源（2652 个 PNG 文件）
+      ZipPath  := ExpandConstant('{app}') + '\assets\tamagotchi_assets.zip';
+      DestPath := ExpandConstant('{app}') + '\assets';
+      ExtractZip(ZipPath, DestPath);
     end;
   end;
 end;

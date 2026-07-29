@@ -74,7 +74,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.3.1");
+        const int versionW = versionFont.getStringWidth ("v2.3.2");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -115,7 +115,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.1";
+        const juce::String versionText = "v2.3.2";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -1269,9 +1269,18 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     workspace->onFpsLimitChanged = [this](int hz)
     {
         // 记录用户期望值，并用自适应策略换算出当前实际下发的 hz。
-        userRequestedFpsLimit = juce::jlimit (15, 120, hz);
-        adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
-                                             : juce::jlimit (15, 120, userRequestedFpsLimit + 5);
+        // hz=0 表示无上限：直接下发 120Hz（analyser 内部允许的最大值），跳过自适应。
+        if (hz == 0)
+        {
+            userRequestedFpsLimit = 0;
+            adaptiveDispatchHz    = 120;
+        }
+        else
+        {
+            userRequestedFpsLimit = juce::jlimit (15, 120, hz);
+            adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
+                                                 : juce::jlimit (15, 120, userRequestedFpsLimit + 5);
+        }
         adaptiveRecoverTicks  = 0;
         adaptiveDropTicks     = 0;
 
@@ -1311,9 +1320,17 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
     // Phase F：启动全局 FrameDispatcher（默认 30Hz 统一滚 UI 分发、模块后续订阅）
     //   模块构造中的 retain() 已经让 refCounts 就绪，这里开 Timer 即可开始工作。
-    userRequestedFpsLimit = juce::jlimit (15, 120, workspace->getFpsLimit());
-    adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
-                                         : juce::jlimit (15, 120, userRequestedFpsLimit + 2);
+    userRequestedFpsLimit = workspace->getFpsLimit();
+    if (userRequestedFpsLimit == 0)
+    {
+        adaptiveDispatchHz = 120;
+    }
+    else
+    {
+        userRequestedFpsLimit = juce::jlimit (15, 120, userRequestedFpsLimit);
+        adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
+                                             : juce::jlimit (15, 120, userRequestedFpsLimit + 2);
+    }
     adaptiveRecoverTicks  = 0;
     adaptiveDropTicks     = 0;
     processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
@@ -1448,12 +1465,6 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     openGLContext.setContinuousRepainting(false);
     openGLContext.setComponentPaintingEnabled(true);
     openGLContext.attachTo(*this);
-#endif
-
-    // Temporary profiling hook: with Y2K_ENABLE_PERF_COUNTERS=1 this writes
-    // perf snapshots every 60 seconds to %APPDATA%/Y2Kmeter/perf_counters.
-#if  Y2K_ENABLE_PERF_COUNTERS    
-    processor.setPerfAutoExportEnabled (true);
 #endif
 
     // ==================================================================
@@ -2609,7 +2620,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.1";
+        const juce::String versionText = "v2.3.2";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2617,7 +2628,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.3.1");
+        const int versionW = versionFont.getStringWidth ("v2.3.2");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -3194,6 +3205,18 @@ void Y2KmeterAudioProcessorEditor::applyLayoutLocked (bool locked, bool initial)
     // 5) 视觉反馈：重绘标题栏，让 lock 按钮显示为 pressed-latched 或 raised。
     repaint (getTitleBarBounds());
 }
+void Y2KmeterAudioProcessorEditor::RestoreFpsLimit (int hz)
+{
+    if (workspace == nullptr) return;
+
+    // 先同步 workspace 内部的 fpsLimit 和按钮文案
+    workspace->setFpsLimit (hz);
+
+    // 再触发完整的 FPS 调度链路（等同用户手动点击按钮）
+    if (workspace->onFpsLimitChanged)
+        workspace->onFpsLimitChanged (workspace->getFpsLimit());
+}
+
 
 // 同步 workspace 的 hit-test 挖洞。
 //   · chrome 可见时：无挖洞（workspace 占据 y=titleBarHeight 以下区域，顶部 26px 是
@@ -3810,11 +3833,17 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
         const juce::int64 diff = cur - lastFrameCounterSample;
         const float fps = (float) (diff * 1000.0 / deltaMs);
 
-        float displayedFps = juce::jmin ((float) userRequestedFpsLimit, fps);
-        if (userRequestedFpsLimit == 30 && fps >= 28.0f)
+        float displayedFps;
+        if (userRequestedFpsLimit == 0)
+            displayedFps = fps;  // 无限模式直接显示实际帧率
+        else if (userRequestedFpsLimit == 30 && fps >= 28.0f)
             displayedFps = 30.0f;
         else if (userRequestedFpsLimit == 60 && fps >= 58.0f)
             displayedFps = 60.0f;
+        else if (userRequestedFpsLimit == 120 && fps >= 116.0f)
+            displayedFps = 120.0f;
+        else
+            displayedFps = juce::jmin ((float) userRequestedFpsLimit, fps);
 
         workspace->setMeasuredFps (displayedFps);
         applyAdaptiveFrameRate (fps);
@@ -3835,6 +3864,17 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
 void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float measuredFps)
 {
     auto& hub = processor.getAnalyserHub();
+
+    // 无上限模式：固定 120Hz，不做自适应降/升档
+    if (userRequestedFpsLimit == 0)
+    {
+        if (adaptiveDispatchHz != 120 || hub.getFrameDispatcherHz() != 120)
+        {
+            adaptiveDispatchHz = 120;
+            hub.startFrameDispatcher (120);
+        }
+        return;
+    }
 
     const int requested = juce::jlimit (15, 120, userRequestedFpsLimit);
     const int maxAllowedHz = isPluginHost ? juce::jmin (48, requested) : requested;
@@ -3942,6 +3982,16 @@ namespace {
 
 juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
     const juce::String& subdir) {
+  // v2.3.1: 预设/纹理集中存放在 %APPDATA%\Y2Kmeter\ 下，
+  //   Standalone 和 VST3 共享同一份，不再各自携带独立副本。
+  //   AppData 路径在所有搜索策略中拥有最高优先级。
+  juce::File appDataDir = juce::File::getSpecialLocation(
+      juce::File::userApplicationDataDirectory)
+      .getChildFile("Y2Kmeter")
+      .getChildFile(subdir);
+  if (appDataDir.exists() && appDataDir.isDirectory())
+    return appDataDir;
+
   juce::File exeDir = juce::File::getSpecialLocation(
       juce::File::currentExecutableFile).getParentDirectory();
   juce::Array<juce::File> candidates;
@@ -4010,7 +4060,16 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
     milkdrop_preset_paths_.sort(false);
   }
 
-  milkdrop_current_preset_ = 0;
+  // 检查是否有待处理的预设跳转请求（Standalone 启动恢复等）。
+  //   时序说明：GL 上下文可能异步创建，此时 4.5 恢复代码可能
+  //   已通过 RequestMilkdropPresetJump() 入队了跳转索引。
+  //   这里 atomically 取出并清零，避免后续 renderOpenGL() 重复处理。
+  int pending = milkdrop_requested_preset_jump_.exchange(-1);
+  if (pending >= 0 && pending < milkdrop_preset_paths_.size()) {
+    milkdrop_current_preset_ = pending;
+  } else {
+    milkdrop_current_preset_ = 0;
+  }
   LoadMilkdropPresetInternal();
   milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
 
