@@ -1,0 +1,14 @@
+{
+  "name": "milkdrop-tester",
+  "version": "1.0.0",
+  "description": "Local Milkdrop preset tester using butterchurn",
+  "private": true,
+  "dependencies": {
+    "butterchurn": "^2.6.7",
+    "milkdrop-preset-converter": "^0.1.2",
+    "milkdrop-preset-converter-aws": "^0.1.6"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

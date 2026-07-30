@@ -126,6 +126,12 @@ public:
     //   · 重绘标题栏以刷新按钮按下/抬起外观
     void setAlwaysOnTopActive (bool shouldBeOnTop);
 
+    // 从持久化恢复 FPS 限制值（Standalone 启动时调用）
+    void RestoreFpsLimit (int hz);
+
+    // 返回用户选择的 FPS 限制档位（30/60/120/0，0=无上限）
+    int  GetUserRequestedFpsLimit() const noexcept { return userRequestedFpsLimit; }
+
 private:
     // 初始化字体、LookAndFeel、ModuleWorkspace
     void initLookAndFeel();
@@ -350,14 +356,15 @@ private:
 
     // 自适应 FPS 调度状态：
     //   · userRequestedFpsLimit —— workspace 顶部 FPS 切换按钮设定的目标上限
+    //     （0=无上限，30/60/120=有上限）
     //   · adaptiveDispatchHz    —— 当前让 AnalyserHub 实际跑的频率（自适应降降升升的目标值）
     //   · adaptiveRecoverTicks  —— 测标持续达标后的连续计数，避免单帧抖动回升
     //   · adaptiveDropTicks     —— 测标持续低迷后的连续计数，避免一次纹理上传/窗口抖动直接降档
-    // 默认 FPS 上限从 30 提升到 60：
-    //   · P0~P3 优化后 macOS 多模块场景下也能稳定跑 60 Hz；
+    // 默认 FPS 上限 120：
+    //   · P0~P3 优化后 macOS 多模块场景下也能稳定跑 120 Hz；
     //   · 新用户首次启动直接获得更丝滑的体验；
-    //   · 用户点 FPS 按钮仍可切回 30（ModuleWorkspace::fpsBtn.onClick 里 30↔60 toggle）。
-    int                      userRequestedFpsLimit  = 60;
+    //   · 用户点 FPS 按钮仍可切回 30/60（ModuleWorkspace::fpsBtn.onClick 里循环切换）。
+    int                      userRequestedFpsLimit  = 120;
     int                      adaptiveDispatchHz     = 60;
     int                      adaptiveRecoverTicks   = 0;
     int                      adaptiveDropTicks      = 0;

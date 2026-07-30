@@ -164,8 +164,10 @@ Filename: "{app}\{#MyAppExeName}"; \
 ; -----------------------------------------------------------------------
 [Code]
 var
-  Vst3DirPage:        TInputDirWizardPage;
+  Vst3DirPage:         TInputDirWizardPage;
   Vst3DirWarningShown: Boolean;
+  TelemetryPage:       TInputOptionWizardPage;
+  TelemetryAgreed:     Boolean;
 
 function DefaultVst3Dir: string;
 begin
@@ -183,6 +185,68 @@ end;
 
 procedure InitializeWizard;
 begin
+  // ============================================================
+  // 隐私授权页：安装在选择目录后、选择组件前显示
+  //   · 锚点 wpSelectDir：内置页顺序为
+  //     Welcome → SelectDir → [本页] → SelectComponents → Ready
+  //   · 用户必须勾选 CheckBox 方可继续（NextButtonClick 阻止）
+  //   · 同意后会在 ssPostInstall 中写入注册表
+  //     HKCU\Software\iisaacbeats\Y2Kmeter\TelemetryEnabled = 1
+  //   · 不同意则注册表键不存在或为 0，软件默认不发送数据
+  //   · 软件安装后不提供界面开关，用户只能通过重装/卸载改变此设置
+  // ============================================================
+  TelemetryPage := CreateInputOptionPage(
+    wpSelectDir,
+    'Anonymous Usage Statistics',
+    'Help improve Y2Kmeter',
+    #13#10 +
+    'Y2Kmeter collects anonymous usage statistics to help us understand ' +
+    'how the software is being used and to improve future versions.' + #13#10#13#10 +
+
+    'The collected data includes:' + #13#10 +
+    '  • Software version and build type' + #13#10 +
+    '  • Operating system and CPU information' + #13#10 +
+    '  • Host application name (for VST3 plugin mode)' + #13#10 +
+    '  • Display count and primary screen resolution' + #13#10 +
+    '  • System language/region and timezone offset' + #13#10#13#10 +
+
+    'What we DO NOT collect:' + #13#10 +
+    '  • User name, host name, IP address, MAC address' + #13#10 +
+    '  • Audio file paths or content' + #13#10 +
+    '  • Any personally identifiable information' + #13#10#13#10 +
+
+    'This setting can only be changed by reinstalling the software.' + #13#10 +
+    'There is no toggle to disable this after installation.' + #13#10#13#10 +
+
+    '-------------------------------------------------------------' + #13#10#13#10 +
+
+    'Y2Kmeter 收集匿名使用统计数据，以帮助我们了解软件的使用情况' +
+    '并改进未来版本。' + #13#10#13#10 +
+
+    '收集的数据包括：' + #13#10 +
+    '  • 软件版本与构建类型' + #13#10 +
+    '  • 操作系统与 CPU 信息' + #13#10 +
+    '  • 宿主软件名称（VST3 插件模式）' + #13#10 +
+    '  • 显示器数量与主屏分辨率' + #13#10 +
+    '  • 系统语言/区域与时区偏移' + #13#10#13#10 +
+
+    '明确不会收集：' + #13#10 +
+    '  • 用户名、主机名、IP 地址、MAC 地址' + #13#10 +
+    '  • 音频文件路径或内容' + #13#10 +
+    '  • 任何个人身份信息' + #13#10#13#10 +
+
+    '此设置仅可通过重新安装软件来更改。安装完成后不提供关闭选项。',
+    False,  // False = 多选框模式（而非单选按钮）
+    False   // 不要求至少选中一项（但 NextButtonClick 会强制勾选才能继续）
+  );
+
+  // 添加唯一的复选框选项
+  TelemetryPage.Add(
+    'I agree to send anonymous usage statistics (发送匿名使用统计)');
+
+  // 默认不勾选
+  TelemetryPage.Values[0] := False;
+
   // 新建一个"选择 VST3 安装目录"的向导页。
   //   · 锚点必须是 wpSelectComponents，不是 wpSelectDir —— 内置页顺序是
   //     SelectDir 先于 SelectComponents，所以要想"先让用户勾 VST3 组件，
@@ -203,12 +267,14 @@ begin
   Vst3DirPage.Values[0] := DefaultVst3Dir;
 end;
 
-// 只有勾选了 vst3 组件才显示独立目录页；未勾选时直接跳过
+// 只有勾选了 vst3 组件才显示独立目录页；未勾选时直接跳过。
+// 隐私授权页始终显示（不可跳过）。
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   if (Vst3DirPage <> nil) and (PageID = Vst3DirPage.ID) then
     Result := not WizardIsComponentSelected('vst3');
+  // TelemetryPage 永不跳过
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -216,6 +282,21 @@ var
   ChosenPath: string;
 begin
   Result := True;
+
+  // 隐私授权页：必须勾选 CheckBox 才能继续安装
+  if (TelemetryPage <> nil) and (CurPageID = TelemetryPage.ID) then
+  begin
+    if not TelemetryPage.Values[0] then
+    begin
+      MsgBox(
+        'You must agree to send anonymous usage statistics to continue installation.' + #13#10#13#10 +
+        '您必须同意发送匿名使用统计才能继续安装。',
+        mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+    TelemetryAgreed := True;
+  end;
 
   // VST3 目录页：Next 时校验一下，若非默认路径则给出一次性提示
   if (Vst3DirPage <> nil) and (CurPageID = Vst3DirPage.ID) then
@@ -319,9 +400,24 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ZipPath, DestPath: String;
+  TelemetryValue: Cardinal;
 begin
   if CurStep = ssPostInstall then
   begin
+    // ---------- 遥测授权：写入注册表 ----------
+    // 只有用户在隐私授权页面勾选了"同意"才写入 TelemetryEnabled=1；
+    // 否则不写入（或写入 0），客户端默认视为未授权。
+    if TelemetryAgreed then
+      TelemetryValue := 1
+    else
+      TelemetryValue := 0;
+
+    RegWriteDWordValue(
+      HKEY_CURRENT_USER,
+      'Software\iisaacbeats\Y2Kmeter',
+      'TelemetryEnabled',
+      TelemetryValue);
+
     if IsComponentSelected('standalone') then
     begin
       // 1) Milkdrop 预设（9927 个 .milk 文件）

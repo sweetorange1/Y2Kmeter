@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Milkdrop Tester</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#000;color:#ccc;font-family:monospace;overflow:hidden}
+  #bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#111;
+       border-bottom:1px solid #333;flex-shrink:0;flex-wrap:wrap;z-index:10}
+  #bar select{max-width:320px;background:#222;color:#ddd;border:1px solid #444;
+             padding:3px 6px;font-size:13px;border-radius:3px}
+  #bar button{background:#333;color:#ddd;border:1px solid #555;padding:3px 10px;
+             font-size:13px;border-radius:3px;cursor:pointer}
+  #bar button:hover{background:#444}
+  #status{font-size:12px;margin-left:auto}
+  #wrap{flex:1;display:flex;align-items:center;justify-content:center;background:#000}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<div id="bar">
+  <select id="sel"></select>
+  <button id="prev">◀</button>
+  <button id="next">▶</button>
+  <button id="mic">🎤 麦克风</button>
+  <span id="status">加载中...</span>
+</div>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<script type="text/javascript" src="/butterchurn.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  // ========== EEL → JS 转换器 ==========
+  function eelToJs(code) {
+    if (!code || !code.trim()) return '';
+    var lines = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i], t = line.trim();
+      if (t === '' || t.indexOf('//') === 0) { out.push(line); continue; }
+      var cp = line, co = '';
+      var ci = line.indexOf('//');
+      if (ci >= 0) { cp = line.substring(0, ci); co = line.substring(ci); }
+      // if(cond,a,b) → (cond?a:b)  
+      var changed = true;
+      while (changed) {
+        changed = false;
+        var p = cp.lastIndexOf('if(');
+        if (p < 0) break;
+        var d = 0, e = -1;
+        for (var j = p + 3; j < cp.length; j++) {
+          if (cp[j] === '(') d++;
+          else if (cp[j] === ')') { if (d === 0) { e = j; break; } d--; }
+        }
+        if (e < 0) break;
+        var inner = cp.substring(p + 3, e);
+        var args = [], s = 0, ad = 0;
+        for (var k = 0; k < inner.length; k++) {
+          if (inner[k] === '(') ad++;
+          else if (inner[k] === ')') ad--;
+          else if (inner[k] === ',' && ad === 0 && args.length < 2) {
+            args.push(inner.substring(s, k).trim()); s = k + 1;
+            if (args.length === 2) { args.push(inner.substring(s).trim()); break; }
+          }
+        }
+        if (args.length === 3) {
+          cp = cp.substring(0, p) + '(' + args[0] + ' ? ' + args[1] + ' : ' + args[2] + ')' + cp.substring(e + 1);
+          changed = true;
+        } else break;
+      }
+      var mf = ['sin','cos','tan','asin','acos','atan','atan2','abs','floor','ceil','round','sqrt','log','exp','log10','log2','sinh','cosh','tanh'];
+      for (var m = 0; m < mf.length; m++) {
+        var re = new RegExp('(?<![a-zA-Z0-9_.])' + mf[m] + '\\s*\\(', 'g');
+        cp = cp.replace(re, 'Math.' + mf[m] + '(');
+      }
+      out.push(cp + co);
+    }
+    return out.join('\n');
+  }
+
+  function hlslToGlsl(s) {
+    if (!s) return null;
+    var o = s;
+    o = o.replace(/\bfloat([234])\b/g, 'vec$1');
+    o = o.replace(/\bhalf([234])\b/g, 'vec$1');
+    o = o.replace(/\btex2D\s*\(/g, 'texture(');
+    o = o.replace(/\blerp\s*\(/g, 'mix(');
+    o = o.replace(/\bfrac\s*\(/g, 'fract(');
+    o = o.replace(/\bGetBlur([123])\s*\(/g, 'getBlur$1(');
+    o = o.replace(/\bsaturate\s*\(([^)]+)\)/g, 'clamp($1, 0.0, 1.0)');
+    if (o.indexOf('shader_body') < 0) o = 'shader_body\n{\n' + o + '\n}';
+    return o;
+  }
+
+  // ========== 解析 .milk 文本 ==========
+  function parseMilk(text) {
+    // 简单但正确的解析：按节拆分
+    var result = { baseVals: {}, presetInit: '', perFrame: '', perVertex: '', waves: [], shapes: [], warp: null, comp: null };
+    var lines = text.split(/\r?\n/);
+    var section = 'header', waveIdx = -1, shapeIdx = -1;
+    var waveEqType = '';
+    var compLines = [], warpLines = [];
+
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+
+      // Comp shader backtick multiline
+      if (l.startsWith('comp_')) {
+        section = 'comp'; continue;
+      }
+      if (section === 'comp') {
+        if (l.endsWith('`')) { compLines.push(l.slice(0, -1)); section = 'header'; }
+        else compLines.push(l);
+        continue;
+      }
+      if (l.startsWith('warp_') || l === '`shader_body' || l === '`{') {
+        section = 'warp'; warpLines.push(l); continue;
+      }
+      if (section === 'warp') {
+        if (l.endsWith('`')) { warpLines.push(l.slice(0, -1)); section = 'header'; }
+        else warpLines.push(l);
+        continue;
+      }
+
+      // Wave code
+      var wm = l.match(/^wavecode_(\d+)_enabled=(.*)/);
+      if (wm) {
+        waveIdx = parseInt(wm[1]); section = 'wave_code';
+        while (result.waves.length <= waveIdx) result.waves.push({ baseVals: {}, init_eqs: '', frame_eqs: '', point_eqs: '' });
+        result.waves[waveIdx].baseVals.enabled = parseInt(wm[2]);
+        continue;
+      }
+      if (section === 'wave_code') {
+        var wbm = l.match(/^wavecode_\d+_(bAdditive|bSpectrum|bUseDots|bDrawThick|scaling|smoothing|r|g|b|a|samples|sep)=(.*)/);
+        if (wbm) { result.waves[waveIdx].baseVals[wbm[1]] = isNaN(wbm[2]) ? wbm[2] : parseFloat(wbm[2]); continue; }
+      }
+      var wpm = l.match(/^wave_(\d+)_per_(frame|point)(\d+)=(.*)/);
+      if (wpm) {
+        waveIdx = parseInt(wpm[1]); var wtype = wpm[2]; var eq = wpm[4];
+        while (result.waves.length <= waveIdx) result.waves.push({ baseVals: {}, init_eqs: '', frame_eqs: '', point_eqs: '' });
+        if (wtype === 'frame') result.waves[waveIdx].frame_eqs += eq + '\n';
+        else result.waves[waveIdx].point_eqs += eq + '\n';
+        section = 'wave_eq'; continue;
+      }
+      if (section === 'wave_eq') {
+        wpm = l.match(/^wave_\d+_per_(frame|point)(\d+)=(.*)/);
+        if (wpm) {
+          waveIdx = parseInt(wpm[0].match(/wave_(\d+)/)[1]); var wt2 = wpm[1];
+          if (wt2 === 'frame') result.waves[waveIdx].frame_eqs += wpm[3] + '\n';
+          else result.waves[waveIdx].point_eqs += wpm[3] + '\n';
+          continue;
+        } else { section = 'header'; }
+      }
+
+      // Shape code
+      var sm = l.match(/^shapecode_(\d+)_enabled=(.*)/);
+      if (sm) { shapeIdx = parseInt(sm[1]); section = 'shape_code';
+        while (result.shapes.length <= shapeIdx) result.shapes.push({ baseVals: {} });
+        result.shapes[shapeIdx].baseVals.enabled = parseInt(sm[2]); continue;
+      }
+      if (section === 'shape_code') {
+        var sbm = l.match(/^shapecode_\d+_(.*?)=(.*)/);
+        if (sbm) {
+          var sk = sbm[1], sv = sbm[2];
+          if (sk.indexOf('per_frame') >= 0) {
+            var sfm = sk.match(/per_frame(\d+)/);
+            if (sfm) { result.shapes[shapeIdx]['per_frame' + sfm[1]] = sv; }
+          } else {
+            result.shapes[shapeIdx].baseVals[sk] = isNaN(sv) ? sv : parseFloat(sv);
+          }
+          continue;
+        }
+        sbm = l.match(/^shape_(\d+)_per_frame(\d+)=(.*)/);
+        if (sbm) {
+          shapeIdx = parseInt(sbm[1]); var sn = sbm[2];
+          while (result.shapes.length <= shapeIdx) result.shapes.push({ baseVals: {} });
+          result.shapes[shapeIdx]['per_frame' + sn] = sbm[3];
+          continue;
+        }
+        section = 'header';
+      }
+
+      // per_frame / per_pixel / per_frame_init
+      var pfm = l.match(/^per_frame_(\d+)=(.*)/);
+      if (pfm) { result.perFrame += pfm[2] + '\n'; continue; }
+      var ppm = l.match(/^per_pixel_(\d+)=(.*)/);
+      if (ppm) { result.perVertex += ppm[2] + '\n'; continue; }
+      var pim = l.match(/^per_frame_init_(\d+)=(.*)/);
+      if (pim) { result.presetInit += pim[2] + '\n'; continue; }
+
+      // base vals
+      var bvm = l.match(/^(.+?)=(.+)/);
+      if (bvm && section === 'header') {
+        var bk = bvm[1], bv = bvm[2];
+        if (bk.indexOf('wavecode_') < 0 && bk.indexOf('wave_') < 0 && bk.indexOf('shapecode_') < 0 &&
+            bk.indexOf('comp_') < 0 && bk.indexOf('warp_') < 0 && bk.indexOf('per_') < 0 && bk.indexOf('shape_') < 0 &&
+            bk !== 'MILKDROP_PRESET_VERSION' && bk !== 'PSVERSION' && bk !== 'PSVERSION_WARP' && bk !== 'PSVERSION_COMP') {
+          result.baseVals[bk] = isNaN(bv) ? bv : parseFloat(bv);
+        }
+      }
+    }
+
+    if (compLines.length > 0) result.comp = compLines.join('\n');
+    if (warpLines.length > 0) result.warp = warpLines.join('\n');
+    return result;
+  }
+
+  function buildPreset(parsed) {
+    var p = {
+      baseVals: parsed.baseVals,
+      waves: parsed.waves.map(function(w) { return {
+        baseVals: w.baseVals,
+        init_eqs_str: eelToJs(w.init_eqs || ''),
+        frame_eqs_str: eelToJs(w.frame_eqs || ''),
+        point_eqs_str: eelToJs(w.point_eqs || '')
+      }; }),
+      shapes: parsed.shapes,
+      init_eqs_str: eelToJs(parsed.presetInit),
+      frame_eqs_str: eelToJs(parsed.perFrame),
+      pixel_eqs_str: eelToJs(parsed.perVertex),
+      warp: hlslToGlsl(parsed.warp),
+      comp: hlslToGlsl(parsed.comp)
+    };
+    return p;
+  }
+
+  // ========== 主逻辑 ==========
+  var cvs = document.getElementById('c');
+  var sel = document.getElementById('sel');
+  var statusEl = document.getElementById('status');
+  var list = [], current = -1;
+  var visualizer, audioCtx, osc, gain;
+
+  function resize() {
+    cvs.width = Math.max(document.getElementById('wrap').clientWidth, 1);
+    cvs.height = Math.max(document.getElementById('wrap').clientHeight, 1);
+  }
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    osc = audioCtx.createOscillator();
+    osc.type = 'sawtooth'; osc.frequency.value = 55;
+    gain = audioCtx.createGain(); gain.gain.value = 0.0;
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start();
+  }
+
+  function useMic() {
+    if (!audioCtx) initAudio();
+    navigator.mediaDevices.getUserMedia({audio:true}).then(function(s) {
+      var src = audioCtx.createMediaStreamSource(s);
+      var g = audioCtx.createGain(); g.gain.value = 1.25;
+      src.connect(g);
+      visualizer.connectAudio(g);
+      status('麦克风已连接');
+    }).catch(function(){ status('麦克风失败', 1); });
+  }
+
+  function status(msg, err) { statusEl.textContent = msg; statusEl.style.color = err ? '#f66' : '#6f6'; }
+
+  async function loadPreset(idx, blend) {
+    if (typeof blend !== 'number') blend = 2.7;
+    var name = list[idx];
+    status('加载: ' + name);
+    try {
+      var resp = await fetch('/api/preset/' + encodeURIComponent(name));
+      var text = await resp.text();
+      var parsed = parseMilk(text);
+      var preset = buildPreset(parsed);
+      visualizer.loadPreset(preset, blend);
+      current = idx; sel.value = idx;
+      status(name);
+    } catch(e) {
+      status('失败: ' + e.message, 1);
+      console.error(e);
+    }
+  }
+
+  function nav(dir) {
+    var n = list.length;
+    if (n === 0) return;
+    loadPreset(((current + dir) % n + n) % n);
+  }
+
+  async function init() {
+    resize(); window.addEventListener('resize', resize);
+    initAudio();
+
+    // 加载预设列表
+    var resp = await fetch('/api/presets');
+    list = await resp.json();
+    sel.innerHTML = list.map(function(f,i) { return '<option value="'+i+'">'+f+'</option>'; }).join('');
+
+    // 创建 visualizer
+    visualizer = butterchurn.default.createVisualizer(audioCtx, cvs, {
+      width: cvs.width, height: cvs.height,
+      pixelRatio: window.devicePixelRatio || 1, textureRatio: 1
+    });
+    visualizer.connectAudio(gain);
+
+    // 渲染循环
+    (function loop() { requestAnimationFrame(loop); visualizer.render(); })();
+
+    // 默认加载第 77 号（1-based index 76）
+    current = 76;
+    if (current >= list.length) current = 0;
+    await loadPreset(current, 0);
+
+    // 事件
+    document.getElementById('prev').onclick = function(){ nav(-1); };
+    document.getElementById('next').onclick = function(){ nav(1); };
+    document.getElementById('mic').onclick = useMic;
+    sel.onchange = function(){ loadPreset(parseInt(sel.value)); };
+    document.onkeydown = function(e) {
+      if (e.target.tagName === 'SELECT') return;
+      if (e.key === 'ArrowLeft') nav(-1);
+      if (e.key === 'ArrowRight') nav(1);
+    };
+  }
+
+  init().catch(function(e){ status('错误: ' + e.message, 1); console.error(e); });
+})();
+</script>
+</body>
+</html>

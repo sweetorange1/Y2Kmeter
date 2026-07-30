@@ -5,8 +5,8 @@
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
-//   只覆盖 getTextButtonFont，把"30FPS / 60FPS"的字号下调几 pt，
-//   让 52px 宽的按钮里三个字母不再挤在一起。其它绘制（背景/文字颜色/
+//   只覆盖 getTextButtonFont，把"30FPS/60FPS/120FPS/∞FPS"的字号下调几 pt，
+//   让按钮里多个字母/符号不挤在一起。其它绘制（背景/文字颜色/
 //   hover/pressed 等）完全沿用 PinkXP 风格。
 // ==========================================================
 namespace
@@ -370,16 +370,20 @@ ModuleWorkspace::ModuleWorkspace()
     addAndMakeVisible(hideBtn);
 
     // 左下角：FPS 限制按钮 + 实时 FPS 标签
-    //   · 按钮文案："30 FPS" / "60 FPS"（点击切换）
-    //   · 标签文案："-- fps" / "29.8 fps" 之类，由 Editor 定期计算后 setMeasuredFps
-    fpsBtn.setButtonText ("60FPS");
-    fpsBtn.setTooltip    ("Click to toggle target frame rate (30 / 60 FPS)");
+    //   · 按钮文案循环："30FPS" → "60FPS" → "120FPS" → "∞FPS"
+    fpsBtn.setButtonText ("120FPS");
+    fpsBtn.setTooltip    ("Click to cycle target frame rate (30 / 60 / 120 / Unlimited)");
     fpsBtn.onClick = [this]()
     {
-        setFpsLimit (fpsLimit == 30 ? 60 : 30);
+        int next;
+        if      (fpsLimit == 30)  next = 60;
+        else if (fpsLimit == 60)  next = 120;
+        else if (fpsLimit == 120) next = 0;
+        else                      next = 30;
+        setFpsLimit (next);
         if (onFpsLimitChanged) onFpsLimitChanged (fpsLimit);
     };
-    // 专用 mini LookAndFeel：把 "30FPS/60FPS" 渲染得更紧凑（仅影响此按钮）
+    // 专用 mini LookAndFeel：把 "30FPS/60FPS/120FPS/∞FPS" 渲染得更紧凑（仅影响此按钮）
     fpsMiniLnf = std::make_unique<FpsMiniLookAndFeel>();
     fpsBtn.setLookAndFeel (fpsMiniLnf.get());
     addAndMakeVisible (fpsBtn);
@@ -2156,13 +2160,12 @@ void ModuleWorkspace::resized()
         tb.removeFromRight (4);
 
         // 5) 紧邻分隔线 #1 的左侧：FPS 按钮 + FPS 标签（FPS 标签靠近下拉，按钮更靠左）
-        //   · FPS 按钮与 Hide 按钮同宽（btnW=52），文字用紧凑格式避免被截断
+        //   · FPS 按钮文字："30FPS"/"60FPS"/"120FPS"/"∞FPS"
         constexpr int fpsLabelW = 64;
         auto fpsLblArea = tb.removeFromRight (fpsLabelW);
         fpsLabel.setBounds (fpsLblArea.withSizeKeepingCentre (fpsLabelW, btnH));
-        // FPS 按钮单独比通用 btnW 再宽 6px，容纳"30FPS/60FPS"文字不挤；
-        //   文字靠 withSizeKeepingCentre 自然居中（JUCE 的 TextButton 默认居中绘制）
-        constexpr int fpsBtnW = btnW + 6; // 52 + 6 = 58
+        // FPS 按钮比通用 btnW 再宽 12px，容纳最长文字"120FPS"不挤
+        constexpr int fpsBtnW = btnW + 12; // 52 + 12 = 64
         auto fpsBtnArea = tb.removeFromRight (fpsBtnW + 4);
         fpsBtn.setBounds (fpsBtnArea.withSizeKeepingCentre (fpsBtnW, btnH));
 
@@ -2505,11 +2508,18 @@ void ModuleWorkspace::setSaveLoadUiVisible (bool shouldBeVisible)
 // ==========================================================
 void ModuleWorkspace::setFpsLimit (int hz)
 {
-    // 仅允许 30 / 60 两档（其他值归一到离得近的那个，避免越权设置）
-    const int clamped = (hz >= 45 ? 60 : 30);
+    // 仅允许 30 / 60 / 120 / 0 四档（0 = 无上限）
+    int clamped;
+    if      (hz <= 0)   clamped = 0;
+    else if (hz <= 45)  clamped = 30;
+    else if (hz <= 90)  clamped = 60;
+    else                clamped = 120;
     if (fpsLimit == clamped) return;
     fpsLimit = clamped;
-    fpsBtn.setButtonText (juce::String (fpsLimit) + "FPS");
+    if (clamped == 0)
+        fpsBtn.setButtonText (juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x9e")) + "FPS");
+    else
+        fpsBtn.setButtonText (juce::String (fpsLimit) + "FPS");
 }
 
 void ModuleWorkspace::setMeasuredFps (float fps)

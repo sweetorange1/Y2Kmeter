@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.3.3 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.3.4 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -323,7 +323,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.3.3
+VERSION 2.3.4
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -450,6 +450,10 @@ target_sources(Y2Kmeter PRIVATE
   #     驱动下 onFrame 重绘；但源文件先入库，便于后续分阶段迁移。
   source/ui/UiFrameClock.h
   source/ui/UiFrameClock.cpp
+
+  # === 自定义弹窗组件 ===
+  source/ui/UpdateDialog.h
+  source/ui/UpdateDialog.cpp
 
   # === 分析模块 ===
   source/ui/modules/EqModule.h

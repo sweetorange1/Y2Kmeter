@@ -428,12 +428,13 @@ public:
     void setSaveLoadUiVisible (bool shouldBeVisible);
 
 
-    //   · 点击可在 30 / 60 FPS 之间切换（默认 30）
+    //   · 点击可在 30 / 60 / 120 / ∞ FPS 之间循环切换（默认 60）
     //   · 回调由 Editor 订阅，真正修改 AnalyserHub 的 FrameDispatcher 频率
     //   · 旁边显示实时帧率（由 Editor 统计后通过 setMeasuredFps 下发）
     // ======================================================
     int  getFpsLimit() const noexcept { return fpsLimit; }
-    void setFpsLimit (int hz);                 // 外部可调用（例如恢复上次设置）
+    void setFpsLimit (int hz);                 // 外部可调用（例如恢复上次设置），
+                                               // 有效值：30 / 60 / 120 / 0（0=无上限）
     void setMeasuredFps (float fps);           // Editor 每秒更新一次显示
 
     // 用户点击 FPS 按钮切换后的回调
@@ -650,12 +651,13 @@ private:
     bool             chromeTransitionActive = false;
 
     // FPS 限制按钮 + 实时 FPS 标签（右下角，Hide 按钮左侧）
+    //   · 按钮文案循环："30FPS" → "60FPS" → "120FPS" → "∞FPS"
     juce::TextButton fpsBtn;
     juce::Label      fpsLabel;
-    int              fpsLimit = 60;  // 默认 60 FPS（P0~P3 优化后已可稳定承载）
+    int              fpsLimit = 120; // 30 / 60 / 120 / 0（0=无上限）
 
-    // FPS 按钮专用的 mini LookAndFeel：仅重写 getTextButtonFont 把"30FPS / 60FPS"
-    //   渲染得比全局按钮字号更小一点（52px 宽 + 像素字体下不显挤）。
+    // FPS 按钮专用的 mini LookAndFeel：仅重写 getTextButtonFont 把 "30FPS" / "60FPS"
+    //   / "120FPS" / "∞FPS" 渲染得比全局按钮字号更小一点。
     //   具体类型在 .cpp 里定义（轻量封装 juce::LookAndFeel_V4），这里用 pimpl
     //   前向指针避免把实现细节暴露到头文件。
     std::unique_ptr<juce::LookAndFeel> fpsMiniLnf;

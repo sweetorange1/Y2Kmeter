@@ -77,3 +77,7 @@ Thumbs.db
 /test_tools/projectm_native/install/
 /test_tools/projectm_native/vcpkg/
 /test_tools/*.zipnul
+
+# Windows reserved device names (cannot be tracked by git)
+nul
+tools/milkdrop_tester/nul

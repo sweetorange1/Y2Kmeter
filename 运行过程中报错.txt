@@ -1,0 +1,56 @@
+Jul 23 2026 13:33:40 Result finalization has completed with warnings that may affect the representation of the analysis data. Please see details below.
+
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\dsound.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\Windows.UI.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\CRYPT32.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\USER32.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\dxcore.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\KERNEL32.DLL'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\dxgi.dll'.
+Cannot locate debugging information for file `C:\Windows\WinSxS\amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.8521_none_3e08b75ce33403b3\COMCTL32.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\KERNELBASE.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\ole32.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\OPENGL32.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\d3d11.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\textinputframework.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\d2d1.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\ControlLib.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\MSVCP140.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\winmmbase.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\WINMM.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\iigd_dch.inf_amd64_70f42768c613d94d\IntelControlLib.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\IMM32.dll'.
+Cannot locate debugging information for file `I:\Y2KMeter\cmake-build-relwithdebinfo-visual-studio\Y2Kmeter_artefacts\RelWithDebInfo\Standalone\projectM-4.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\WINTRUST.DLL'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\directxdatabasehelper.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\DWrite.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\nvaki.inf_amd64_e1036de3829fbeb6\nvldumdx.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\win32u.dll'.
+Cannot locate file `pincrt.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\MSCTF.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\shcore.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\gdi32full.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\GDI32.dll'.
+Cannot locate debugging information for file `C:\Windows\system32\nvspcap64.dll'.
+Cannot locate debugging information for file `C:\Program Files (x86)\Intel\oneAPI\vtune\2026.3\bin64\tpsstool.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\MMDevAPI.DLL'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\AUDIOSES.DLL'.
+Cannot locate debugging information for file `C:\Windows\System32\imagehlp.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\iigd_dch.inf_amd64_70f42768c613d94d\igd10umt64xe.DLL'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\ntdll.dll'.
+Cannot locate debugging information for file `C:\Users\echotcxu\Documents\VTune\Samples\matrix\VCRUNTIME140.dll'.
+Cannot locate debugging information for file `C:\Program Files (x86)\iOA\module\DataProtection\TxUmon64.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\iigd_dch.inf_amd64_70f42768c613d94d\igd10iumd64.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\msvcrt.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\iigd_dch.inf_amd64_70f42768c613d94d\igdgmm64.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\RPCRT4.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\ucrtbase.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\windows.storage.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\combase.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\MSASN1.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\SHELL32.dll'.
+Cannot locate debugging information for file `C:\Windows\system32\uxtheme.dll'.
+Cannot locate debugging information for file `C:\Windows\SYSTEM32\dwmapi.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\nvaki.inf_amd64_e1036de3829fbeb6\nvgpucomp64.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\nvaki.inf_amd64_e1036de3829fbeb6\nvoglv64.dll'.
+Cannot locate debugging information for file `C:\Windows\System32\DriverStore\FileRepository\nvaki.inf_amd64_e1036de3829fbeb6\nvwgf2umx.dll'.

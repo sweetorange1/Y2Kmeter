@@ -247,6 +247,14 @@ Y2Kmeter ${VERSION} · macOS 安装说明
       若该路径因权限问题拒绝写入，可改放：
           ~/Library/Audio/Plug-Ins/Components/
 
+资源说明：
+  · Tamagotchi 动画资源与 Milkdrop 预设/纹理已内置于各 Bundle 中。
+  · macOS 使用自包含 Bundle 体系，无需额外安装步骤。
+  · 首次启动时，若 Tamagotchi 或 Milkdrop 模块提示资源缺失，
+    请确认已将对应 Bundle 拖放至正确的系统路径并完整拷贝。
+  · Windows 版使用 ZIP 压缩包 + 安装后解压方式加速部署，
+    macOS 因 DMG 镜像特性无需此类优化。
+
 首次打开注意：
   本包采用本地 ad-hoc 签名，未经过 Apple 公证。若打开 ${APP_BUNDLE_NAME}
   时系统提示"无法验证开发者"，请在 Finder 中右键点击 → 选择"打开"，

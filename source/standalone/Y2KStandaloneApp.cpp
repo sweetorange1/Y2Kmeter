@@ -42,6 +42,10 @@
 // 主题持久化：从 settings 读取/写回 PinkXP 全局主题 id
 #include "../ui/PinkXPStyle.h"
 
+// 网络遥测 + 自动更新检查
+#include "../network/TelemetryClient.h"
+#include "../network/UpdateChecker.h"
+
 // WASAPI Loopback 采集器（捕捉系统混音输出）
 #include "WasapiLoopbackCapture.h"
 
@@ -280,6 +284,22 @@ public:
                     const bool savedAlwaysOnTop = getUserSettings()
                         .getBoolValue ("ui.alwaysOnTop", true);
                     y2kEditor->setAlwaysOnTopActive (savedAlwaysOnTop);
+
+                    // 4.4) 恢复 FPS 限制档位（默认 120）
+                    const int savedFpsLimit = getUserSettings()
+                        .getIntValue ("ui.fpsLimit", 120);
+                    y2kEditor->RestoreFpsLimit (savedFpsLimit);
+
+                    // 4.5) 恢复 Milkdrop 预设索引。即使预设尚未加载
+                    //     （GL 上下文异步初始化），也直接入队跳转请求；
+                    //     newOpenGLContextCreated() 会在初始化时检查
+                    //     是否有待处理跳转，避免闪一帧预设 0。
+                    const int savedMilkdropPreset = getUserSettings()
+                        .getIntValue ("milkdrop.currentPreset", -1);
+                    if (savedMilkdropPreset >= 0)
+                    {
+                        y2kEditor->RequestMilkdropPresetJump (savedMilkdropPreset);
+                    }
                 }
             }
         }
@@ -329,6 +349,43 @@ public:
                 const bool savedChrome = getUserSettings()
                     .getBoolValue("ui.chromeVisible", true);
                 cachedEditor->setChromeVisible(savedChrome);
+            });
+        }
+
+        // 异步触发遥测 + 更新检查（延迟 3 秒，避免与首帧渲染争抢资源）
+        //   · 授权状态由安装包写入注册表，LoadFromRegistry() 读取；
+        //   · 默认未授权（不发送数据），仅安装时勾选同意后才启用。
+        {
+            y2k::network::TelemetryClient::GetInstance().LoadFromRegistry();
+
+            juce::Timer::callAfterDelay(3000, [this]() {
+                auto& settings = getUserSettings();
+                const bool isPlugin = false;
+
+                // 1) 启动心跳（若未授权则内部跳过）
+                y2k::network::TelemetryClient::GetInstance()
+                    .SendStartupPing(&settings, isPlugin);
+
+                // 2) 异步检查更新
+#if JUCE_WINDOWS
+                const juce::String platform = "win-x64";
+#elif JUCE_MAC
+                const juce::String platform = "macos";
+#elif JUCE_LINUX
+                const juce::String platform = "linux";
+#else
+                const juce::String platform = "unknown";
+#endif
+                y2k::network::CheckForUpdatesAsync(
+                    juce::String(JucePlugin_VersionString),
+                    platform,
+                    &settings,
+                    [&settings](const y2k::network::UpdateInfo& info) {
+                        if (info.has_update) {
+                            y2k::network::ShowUpdateDialog(
+                                info, &settings);
+                        }
+                    });
             });
         }
     }
@@ -558,8 +615,10 @@ private:
             "window.x", "window.y", "window.w", "window.h",
             "ui.chromeVisible",
             "ui.alwaysOnTop",
+            "ui.fpsLimit",
             "ui.themeId",
             "audio.sourceId",
+            "milkdrop.currentPreset",
             "filterState"     // 插件状态（EQ/布局 XML）— 保证用当前值重写
         };
         for (auto* k : managedKeys)
@@ -776,6 +835,12 @@ private:
             s.setValue ("ui.customSecondary",
                         PinkXP::getCustomSecondary().toString());
         }
+
+        // 保存 FPS 限制档位（30/60/120/0=无上限）
+        s.setValue ("ui.fpsLimit", (int) cachedEditor->GetUserRequestedFpsLimit());
+
+        // 保存当前 Milkdrop 预设索引（-1 表示尚未加载）
+        s.setValue ("milkdrop.currentPreset", cachedEditor->GetMilkdropCurrentPresetIndex());
     }
 
     // ----------------------------------------------------

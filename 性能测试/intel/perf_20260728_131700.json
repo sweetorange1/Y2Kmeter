@@ -1,0 +1,52 @@
+{
+  "timestamp": "2026-07-28T13:17:00.824+08:00",
+  "windowSeconds": 60.069971,
+  "partitionCpuShare": [
+    {"partition": "audioAnalysis", "totalNs": 912450600, "cpuShare": 0.0227},
+    {"partition": "uiRendering", "totalNs": 39205469800, "cpuShare": 0.9773},
+    {"partition": "dataCommunication", "totalNs": 0, "cpuShare": 0.0000},
+    {"partition": "memoryManagement", "totalNs": 0, "cpuShare": 0.0000}
+  ],
+  "threadCpuShare": [
+    {"threadRole": "unknown", "totalNs": 0, "calls": 0, "cpuShare": 0.0000},
+    {"threadRole": "audio", "totalNs": 912450600, "calls": 37444, "cpuShare": 0.0227},
+    {"threadRole": "ui", "totalNs": 39205469800, "calls": 81298, "cpuShare": 0.9773},
+    {"threadRole": "worker", "totalNs": 0, "calls": 0, "cpuShare": 0.0000}
+  ],
+  "hotFunctions": [
+    {"function": "uiModulePanelPaint", "calls": 12169, "totalNs": 37657901600, "avgNs": 3094576.514, "maxNs": 118027300, "callHz": 202.580, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "uiFrameDispatcher", "calls": 1808, "totalNs": 616498700, "avgNs": 340983.794, "maxNs": 13959500, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "uiFrameAssemble", "calls": 1808, "totalNs": 608232000, "avgNs": 336411.504, "maxNs": 13951500, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "analyserPushTotal", "calls": 6006, "totalNs": 458273600, "avgNs": 76302.631, "maxNs": 480300, "callHz": 99.983, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "uiOnFrameDispatch", "calls": 16272, "totalNs": 322837500, "avgNs": 19840.063, "maxNs": 3690800, "callHz": 270.884, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "analyserSpectrum", "calls": 6006, "totalNs": 280200300, "avgNs": 46653.397, "maxNs": 441400, "callHz": 99.983, "frequencyClass": "high", "lockWaitTotalNs": 62300, "lockWaitMaxNs": 200},
+    {"function": "analyserLoudness", "calls": 6006, "totalNs": 155582700, "avgNs": 25904.545, "maxNs": 152200, "callHz": 99.983, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "analyserDynamics", "calls": 6006, "totalNs": 13326800, "avgNs": 2218.914, "maxNs": 77800, "callHz": 99.983, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "analyserOscilloscope", "calls": 6006, "totalNs": 5067200, "avgNs": 843.690, "maxNs": 48900, "callHz": 99.983, "frequencyClass": "high", "lockWaitTotalNs": 1178800, "lockWaitMaxNs": 11500},
+    {"function": "uiFrameListenerFanout", "calls": 16272, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 270.884, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "uiRepaintRequest", "calls": 15225, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 253.454, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "lockOsc", "calls": 7814, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 130.082, "frequencyClass": "high", "lockWaitTotalNs": 1342600, "lockWaitMaxNs": 11500},
+    {"function": "dataGetLatestFrame", "calls": 3280, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 54.603, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "lockSpec", "calls": 3216, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 53.538, "frequencyClass": "high", "lockWaitTotalNs": 118900, "lockWaitMaxNs": 200},
+    {"function": "dataPublishLatestFrame", "calls": 1808, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "dataListenerListCopy", "calls": 1808, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "lockLatestFrame", "calls": 1808, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 61300, "lockWaitMaxNs": 100},
+    {"function": "lockFrameListeners", "calls": 1808, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 92100, "lockWaitMaxNs": 200},
+    {"function": "memoryFrameSnapshotAlloc", "calls": 1808, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0},
+    {"function": "memoryFrameSnapshotRecycle", "calls": 1808, "totalNs": 0, "avgNs": 0.000, "maxNs": 0, "callHz": 30.098, "frequencyClass": "high", "lockWaitTotalNs": 0, "lockWaitMaxNs": 0}
+  ],
+  "uiModulePaint": [
+    {"moduleTypeId": 2, "module": "oscilloscope", "paintCalls": 1869, "paintTotalNs": 6002454900, "paintAvgNs": 3211586.356, "paintMaxNs": 118027300, "paintOver8msCount": 8, "paintOver16msCount": 3, "repaintRequests": 2037, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 131, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 1869, "dirtyAreaRatioAvg": 0.961763},
+    {"moduleTypeId": 3, "module": "spectrum", "paintCalls": 1216, "paintTotalNs": 2363019200, "paintAvgNs": 1943272.368, "paintMaxNs": 15802600, "paintOver8msCount": 2, "paintOver16msCount": 0, "repaintRequests": 1211, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 65, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 1216, "dirtyAreaRatioAvg": 0.824906},
+    {"moduleTypeId": 5, "module": "dynamics", "paintCalls": 1865, "paintTotalNs": 556684000, "paintAvgNs": 298490.080, "paintMaxNs": 3880500, "paintOver8msCount": 0, "paintOver16msCount": 0, "repaintRequests": 2033, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 131, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 1865, "dirtyAreaRatioAvg": 0.961432},
+    {"moduleTypeId": 8, "module": "oscilloscopeWave", "paintCalls": 1869, "paintTotalNs": 4674334400, "paintAvgNs": 2500981.487, "paintMaxNs": 11980700, "paintOver8msCount": 3, "paintOver16msCount": 0, "repaintRequests": 2037, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 131, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 1869, "dirtyAreaRatioAvg": 0.961515},
+    {"moduleTypeId": 14, "module": "waveform", "paintCalls": 1867, "paintTotalNs": 816167200, "paintAvgNs": 437154.365, "paintMaxNs": 1149800, "paintOver8msCount": 0, "paintOver16msCount": 0, "repaintRequests": 1867, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 299, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 1867, "dirtyAreaRatioAvg": 0.601469},
+    {"moduleTypeId": 15, "module": "vuMeter", "paintCalls": 2088, "paintTotalNs": 565594400, "paintAvgNs": 270878.544, "paintMaxNs": 707800, "paintOver8msCount": 0, "paintOver16msCount": 0, "repaintRequests": 2206, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 888, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 2088, "dirtyAreaRatioAvg": 0.986872},
+    {"moduleTypeId": 17, "module": "spectrogram3d", "paintCalls": 1395, "paintTotalNs": 22679647500, "paintAvgNs": 16257811.828, "paintMaxNs": 44570500, "paintOver8msCount": 1388, "paintOver16msCount": 790, "repaintRequests": 1472, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 112, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 1395, "dirtyAreaRatioAvg": 0.871448},
+    {"moduleTypeId": 18, "module": "tamagotchi", "paintCalls": 0, "paintTotalNs": 0, "paintAvgNs": 0.000, "paintMaxNs": 0, "paintOver8msCount": 0, "paintOver16msCount": 0, "repaintRequests": 537, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 51, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 0, "dirtyAreaRatioAvg": 0.000000},
+    {"moduleTypeId": 19, "module": "unknown(19)", "paintCalls": 0, "paintTotalNs": 0, "paintAvgNs": 0.000, "paintMaxNs": 0, "paintOver8msCount": 0, "paintOver16msCount": 0, "repaintRequests": 1825, "repaintSkippedInvisible": 0, "repaintCoalescedCount": 133, "repaintDroppedOffscreenCount": 0, "dirtyAreaSampleCount": 0, "dirtyAreaRatioAvg": 0.000000}
+  ],
+  "memoryStats": {"allocCount": 1808, "freeCount": 1808, "allocBytes": 67966336, "freeBytes": 67966336, "allocHz": 30.098, "freeHz": 30.098},
+  "frameListenerCountDistribution": {"sampleCount": 1808, "min": 9, "avg": 9.000000, "p95": 9, "max": 9},
+  "lockContention": {"totalWaitNs": 2856000, "maxSingleWaitNs": 11500}
+}

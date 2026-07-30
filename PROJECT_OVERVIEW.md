@@ -2312,6 +2312,79 @@ SQLite (api/data.db)
 - `server.js` 启动时执行 `INSERT OR IGNORE` 但 `releases` 表无 UNIQUE 约束，导致每次 `pm2 restart` 都插入重复记录，需将种子数据 INSERT 移除出 `server.js`，仅由 `init_db.js` 执行一次
 
 
+### 8.5 v2.3.4 自定义更新弹窗 & FPS 四档扩展 & 预设清理
+
+**动机**：v2.3.3 引入的 `NativeMessageBox::showAsync()` 更新弹窗存在三个痛点——(1) 风格与 PinkXP 主题不一致；(2) 携带"Ignore This Version"按钮导致需要维护 `settings["update.ignoredVersion"]` 持久化逻辑；(3) Standalone 模式下 `PluginProcessor.ctor` 与 `StandaloneApp::initialise()` 各自独立触发 `CheckForUpdatesAsync`，导致重复 HTTP 请求和重复弹窗。
+
+**核心改动**：
+
+#### 1. 自定义 PinkXP 风格 UpdateDialog（新建文件）
+
+| 文件 | 说明 |
+|---|---|
+| [`UpdateDialog.h`](/I:/Y2KMeter/source/ui/UpdateDialog.h) | 弹窗声明：480×340 固定尺寸、`addToDesktop` 独立原生窗口、`setAlwaysOnTop` 置顶、标题栏拖拽、`drawHardShadow` + `drawPixelCorners` 视觉装饰 |
+| [`UpdateDialog.cpp`](/I:/Y2KMeter/source/ui/UpdateDialog.cpp) | 弹窗实现：PinkXP 凸起边框 + 粉色标题栏 + 左侧状态图标 + 版本信息 + 更新日志区 + 两个按钮（Download / Remind Me Later）+ 四角 L 形像素角标 |
+
+**架构演进（四次迭代）**：
+```
+v1: enterModalState(true) + grabKeyboardFocus
+    → 全局模态阻塞 + Windows beep 音
+
+v2: enterModalState(false) + hitTest穿透 + toFront
+    → ResizableWindow 子组件 Z 序冲突 + Windows beep 音
+
+v3: addToDesktop 全屏 WS_POPUP + hitTest穿透
+    → 窗口激活消费首次点击(需双击) + 失焦遮罩吞没主界面 + 边界裁剪
+
+v4 (最终): addToDesktop 小窗口(480×340) + setAlwaysOnTop
+    → 独立原生窗口，居中于屏幕，无遮罩层，单次点击响应 ✅
+```
+
+#### 2. UpdateChecker 重构
+
+| 文件 | 变更 |
+|---|---|
+| [`UpdateChecker.h`](/I:/Y2KMeter/source/network/UpdateChecker.h) | 移除 `IgnoreVersion()` 函数声明；更新所有注释（三按钮→两按钮，移除 ignoredVersion 描述） |
+| [`UpdateChecker.cpp`](/I:/Y2KMeter/source/network/UpdateChecker.cpp) | (1) `CheckForUpdatesAsync` 开头新增 `static atomic` 进程级去重守卫 → 同一进程仅执行一次更新检查；(2) 移除 `kIgnoredVersionKey` 常量和 `settings->getValue()` 预读逻辑；(3) 移除 `ignoredVersion == latest_version → has_update=false` 后台比较；(4) 移除 `IgnoreVersion()` 函数定义；(5) `ShowUpdateDialog` 优先使用自定义 `UpdateDialog`，找不到父组件时回退 `NativeMessageBox` |
+
+**重复弹窗根因与修复**：
+```
+Standalone 模式下：
+  PluginProcessor.ctor()  → callAfterDelay(5000ms) → CheckForUpdatesAsync #1
+  StandaloneApp::init()   → callAfterDelay(3000ms) → CheckForUpdatesAsync #2
+  telemetryOnceFlag 仅保护 PluginProcessor 路径 → 两次独立的弹窗
+
+修复：CheckForUpdatesAsync 开头 static atomic exchange → 第二个调用方直接返回空结果
+```
+
+#### 3. FPS 限制档位扩展（30/60 → 30/60/120/∞）
+
+| 文件 | 变更 |
+|---|---|
+| [`ModuleWorkspace.cpp`](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | `setFpsLimit()` 从两档 `{30, 60}` 扩展为四档 `{30, 60, 120, 0}`（0=无上限）；`fpsBtn.onClick` 循环切换；按钮宽度 +6px 容纳"120FPS"；∞ 符号使用 UTF-8 编码 |
+| [`ModuleWorkspace.h`](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | `fpsLimit` 默认值 60→120；注释更新 |
+| [`PluginEditor.h`](/I:/Y2KMeter/source/ui/PluginEditor.h) | `userRequestedFpsLimit` 默认 60→120；新增 `RestoreFpsLimit()` 和 `GetUserRequestedFpsLimit()` 公开接口 |
+
+#### 4. Standalone 持久化完善
+
+| 文件 | 变更 |
+|---|---|
+| [`Y2KStandaloneApp.cpp`](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | (1) 启动时恢复 `ui.fpsLimit`（`RestoreFpsLimit`）、`milkdrop.currentPreset`（`RequestMilkdropPresetJump`）；(2) `shutdown` 时 `persistAllSettings` 保存 `ui.fpsLimit` 和 `milkdrop.currentPreset`；(3) `managedKeys` 列表新增两项；(4) 新增遥测+更新检查触发（3 秒延迟） |
+
+#### 5. 其他
+
+| 文件 | 变更 |
+|---|---|
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | `target_sources` 新增 `UpdateDialog.h/cpp` |
+| `assets/milkdrop_presets/` | 删除 ~1000+ 个重复/低质量 `.milk` 预设文件，减少安装包体积 |
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | 版本号 `2.3.3` → `2.3.4`（6 处） |
+
+**踩坑记录**：
+- `ResizableWindow::addAndMakeVisible()` 在 Debug 下触发 `jassertfalse`，Release 下虽可执行但 `contentComponent` 内部子组件会竞争 Z 序 → 弹窗被推到背后。解决：使用 `addToDesktop` 完全脱离子组件体系
+- `enterModalState(false)` + `hitTest()` 穿透搭配在 Windows 上会导致 `ModalComponentManager::sendMouseEvent()` 路由失败 → 系统 beep 音。解决：彻底移除 `enterModalState`，改为纯 `addToDesktop` 独立窗口
+- Windows `WS_POPUP` 全屏覆盖层在失焦时仍覆盖主界面，导致主界面被遮罩"吞没"。解决：放弃全屏覆盖层，改为小窗口方案
+
+
 ---
 
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

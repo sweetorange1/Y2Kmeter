@@ -100,7 +100,6 @@ PerformanceCounterSystem::PerformanceCounterSystem()
     windowStartNs.store(nowNs(), std::memory_order_relaxed);
 #if Y2K_ENABLE_PERF_COUNTERS
     maybeStartWorker();
-    setAutoExportEnabled(true);  // 性能诊断：自动每 60 秒导出 JSON/CSV
 #endif
 }
 
