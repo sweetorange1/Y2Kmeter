@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "2.3.2"
+#define MyAppVersion   "2.3.5"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -166,7 +166,9 @@ Filename: "{app}\{#MyAppExeName}"; \
 var
   Vst3DirPage:         TInputDirWizardPage;
   Vst3DirWarningShown: Boolean;
-  TelemetryPage:       TInputOptionWizardPage;
+  TelemetryPage:       TWizardPage;
+  TelemetryMemo:       TNewMemo;
+  TelemetryCheckBox:   TNewCheckBox;
   TelemetryAgreed:     Boolean;
 
 function DefaultVst3Dir: string;
@@ -189,17 +191,29 @@ begin
   // 隐私授权页：安装在选择目录后、选择组件前显示
   //   · 锚点 wpSelectDir：内置页顺序为
   //     Welcome → SelectDir → [本页] → SelectComponents → Ready
+  //   · 使用标准用户协议页布局：上方可滚动文本区 + 下方同意勾选框
   //   · 用户必须勾选 CheckBox 方可继续（NextButtonClick 阻止）
   //   · 同意后会在 ssPostInstall 中写入注册表
   //     HKCU\Software\iisaacbeats\Y2Kmeter\TelemetryEnabled = 1
   //   · 不同意则注册表键不存在或为 0，软件默认不发送数据
   //   · 软件安装后不提供界面开关，用户只能通过重装/卸载改变此设置
   // ============================================================
-  TelemetryPage := CreateInputOptionPage(
+  TelemetryPage := CreateCustomPage(
     wpSelectDir,
     'Anonymous Usage Statistics',
-    'Help improve Y2Kmeter',
-    #13#10 +
+    'Help improve Y2Kmeter'
+  );
+
+  // 可滚动文本区域 —— 展示完整的隐私政策说明（中英双语）
+  TelemetryMemo := TNewMemo.Create(WizardForm);
+  TelemetryMemo.Parent := TelemetryPage.Surface;
+  TelemetryMemo.Left := 0;
+  TelemetryMemo.Top := 0;
+  TelemetryMemo.Width := TelemetryPage.SurfaceWidth;
+  TelemetryMemo.Height := TelemetryPage.SurfaceHeight - ScaleY(40);
+  TelemetryMemo.ReadOnly := True;
+  TelemetryMemo.ScrollBars := ssVertical;
+  TelemetryMemo.Lines.Text :=
     'Y2Kmeter collects anonymous usage statistics to help us understand ' +
     'how the software is being used and to improve future versions.' + #13#10#13#10 +
 
@@ -235,17 +249,16 @@ begin
     '  • 音频文件路径或内容' + #13#10 +
     '  • 任何个人身份信息' + #13#10#13#10 +
 
-    '此设置仅可通过重新安装软件来更改。安装完成后不提供关闭选项。',
-    False,  // False = 多选框模式（而非单选按钮）
-    False   // 不要求至少选中一项（但 NextButtonClick 会强制勾选才能继续）
-  );
+    '此设置仅可通过重新安装软件来更改。安装完成后不提供关闭选项。';
 
-  // 添加唯一的复选框选项
-  TelemetryPage.Add(
-    'I agree to send anonymous usage statistics (发送匿名使用统计)');
-
-  // 默认不勾选
-  TelemetryPage.Values[0] := False;
+  // 同意勾选框 —— 位于页面底部，用户必须勾选才能继续
+  TelemetryCheckBox := TNewCheckBox.Create(WizardForm);
+  TelemetryCheckBox.Parent := TelemetryPage.Surface;
+  TelemetryCheckBox.Left := 0;
+  TelemetryCheckBox.Top := TelemetryPage.SurfaceHeight - ScaleY(24);
+  TelemetryCheckBox.Width := TelemetryPage.SurfaceWidth;
+  TelemetryCheckBox.Caption := 'I agree to send anonymous usage statistics (我同意发送匿名使用统计)';
+  TelemetryCheckBox.Checked := False;
 
   // 新建一个"选择 VST3 安装目录"的向导页。
   //   · 锚点必须是 wpSelectComponents，不是 wpSelectDir —— 内置页顺序是
@@ -286,7 +299,7 @@ begin
   // 隐私授权页：必须勾选 CheckBox 才能继续安装
   if (TelemetryPage <> nil) and (CurPageID = TelemetryPage.ID) then
   begin
-    if not TelemetryPage.Values[0] then
+    if not TelemetryCheckBox.Checked then
     begin
       MsgBox(
         'You must agree to send anonymous usage statistics to continue installation.' + #13#10#13#10 +

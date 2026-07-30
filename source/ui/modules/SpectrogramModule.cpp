@@ -47,7 +47,15 @@ SpectrogramModule::SpectrogramModule (AnalyserHub& h)
         speedSlider.setColour (juce::Slider::textBoxTextColourId,  PinkXP::ink);
         speedLabel.repaint();
         speedSlider.repaint();
+
+        // 刷新 Spectrogram 瀑布图 base/accent 颜色并失效 Image 缓存，
+        // 下一帧 paint 会全量重绘为新配色。
+        refreshSpectrogramColours();
+        imageBuf = juce::Image();
     });
+
+    // 根据初始主题设置 Spectrogram 瀑布图配色
+    refreshSpectrogramColours();
 
     addAndMakeVisible (speedSlider);
     addAndMakeVisible (speedLabel);
@@ -142,76 +150,32 @@ void SpectrogramModule::ensureGrid (int canvasW, int canvasH)
 }
 
 // ----------------------------------------------------------
-// 色彩：跟随当前主题，从深 (pink700) 到浅 (pink100) 的 7 段线性渐变
-//   · t = 0 → 低电平 → 深
-//   · t = 1 → 高电平 → 浅
-//   · 每次 paint 都重新取 PinkXP::pinkXXX，切换主题后自然跟随。
+// 色彩：从 base 色（无信号/低幅度）到 accent 色（满信号）的线性渐变
+//   · t = 0 → base   → 无信号底色（custom: secondary 基色；预设: content）
+//   · t = 1 → accent → 满信号主色（custom: primary 强调色；预设: swatch）
+//
+//   切换主题时 refreshSpectrogramColours() 会更新 base/accent 成员，
+//   同时 invalidate imageBuf 强制全量重绘，确保颜色立即切换。
 // ----------------------------------------------------------
+void SpectrogramModule::refreshSpectrogramColours()
+{
+    if (PinkXP::isCustomThemeActive())
+    {
+        spectrogramBaseColour_   = PinkXP::getCustomSecondary();
+        spectrogramAccentColour_ = PinkXP::getCustomPrimary();
+    }
+    else
+    {
+        const auto& theme = PinkXP::getCurrentTheme();
+        spectrogramBaseColour_   = theme.content;
+        spectrogramAccentColour_ = theme.swatch;
+    }
+}
+
 juce::Colour SpectrogramModule::intensityToColour (float t) noexcept
 {
     t = juce::jlimit (0.0f, 1.0f, t);
-
-    // ============================================================
-    // 单色色谱 —— 完全跟随当前主题主色调，绝不混入其他强调色
-    //
-    // 为什么不用 pinkXXX？
-    //   · Matcha Soda 等多个主题把 pink500/pink300 留给"强调桃粉"，
-    //     只有 pink700/dark 才是主色调的深色。
-    //   · Crimson Noir / Void Grey 等深色主题把 pink50..pink700 反向排序
-    //     （暗→亮），用 pink50 作"近白"会在某些主题里变成深色——不可靠。
-    //
-    // 在所有主题下语义稳定的只有这几个符号：
-    //   dark     → 最外层深色边框色（所有主题都是主色调的极深值）
-    //   shdw     → 内层阴影色（中深主色调）
-    //   swatch   → 主色调"色票"（每个主题最具代表性的一色）
-    //   hl       → 高光白（或深色主题里的类亮色）
-    //
-    // 例：
-    //   Matcha Soda :  dark=墨绿  shdw=深绿  swatch=主绿  → 全绿单色
-    //   Bubblegum   :  dark=深紫红 shdw=阴影粉 swatch=主粉 → 全粉单色
-    //   Tangerine   :  dark=墨棕  shdw=深橘  swatch=主橘  → 全橘单色
-    //   Crimson     :  dark=纯黑  shdw=近黑  swatch=血红  → 黑-红单色
-    // ============================================================
-
-    // swatch 不是 PinkXP 命名空间的全局变量，而是 Theme 结构体里的字段
-    //   —— 通过 getCurrentTheme() 取当前主题的主色票，切换主题自动跟随
-    const juce::Colour themeSwatch = PinkXP::getCurrentTheme().swatch;
-
-    const juce::Colour cDark   = PinkXP::dark;
-    const juce::Colour cShdw   = PinkXP::shdw;
-    const juce::Colour cMain   = themeSwatch;
-    const juce::Colour cBright = themeSwatch.brighter (0.5f);
-    const juce::Colour cTop    = PinkXP::hl;
-
-    // ----- 非线性映射：0.00~0.50 均为极深，0.80 附近开始突变亮 -----
-    //   stops 按 t 阈值分段，每段内 RGB 线性插值
-    //   0.00 → dark       · 无信号背景
-    //   0.50 → dark       · 同色——这一段线性插值“从dark到dark”仍是纯 dark
-    //   0.70 → shdw       · 开始出现深主色调
-    //   0.82 → swatch     · 主色登场（0.8 附近突变亮）
-    //   0.95 → swatch.brighter(0.5)  · 再提亮
-    //   1.00 → hl                   · 白色爆点
-    struct Stop { float t; juce::Colour c; };
-    const Stop stops[] = {
-        { 0.00f, cDark   },
-        { 0.50f, cDark   },   // 0~0.5 均为极深
-        { 0.70f, cShdw   },
-        { 0.82f, cMain   },   // 0.8 附近突变亮
-        { 0.95f, cBright },
-        { 1.00f, cTop    }
-    };
-    constexpr int N = (int) (sizeof (stops) / sizeof (stops[0]));
-
-    for (int i = 0; i < N - 1; ++i)
-    {
-        if (t <= stops[i + 1].t)
-        {
-            const float span = juce::jmax (1.0e-6f, stops[i + 1].t - stops[i].t);
-            const float u    = juce::jlimit (0.0f, 1.0f, (t - stops[i].t) / span);
-            return stops[i].c.interpolatedWith (stops[i + 1].c, u);
-        }
-    }
-    return stops[N - 1].c;
+    return spectrogramBaseColour_.interpolatedWith (spectrogramAccentColour_, t);
 }
 
 // ----------------------------------------------------------

@@ -164,6 +164,25 @@ private:
     };
 
     // ------------------------------------------------------
+    // AutoIntervalDialog：自定义 PinkXP 风格自动轮播间隔设置对话框
+    //   点击 auto 行中的时间数值时弹出，允许用户直接输入间隔秒数。
+    // ------------------------------------------------------
+    class AutoIntervalDialog : public juce::Component
+    {
+    public:
+        AutoIntervalDialog(MilkdropModule& owner_, float current,
+                           std::function<void(float)> onResult);
+        void paint(juce::Graphics& g) override;
+        void resized() override;
+        void mouseDown(const juce::MouseEvent& e) override;
+
+    private:
+        MilkdropModule& owner_;
+        std::function<void(float)> onResult_;
+        juce::TextEditor editor_;
+    };
+
+    // ------------------------------------------------------
     // PresetJumpDialog：自定义 PinkXP 风格预设跳转对话框
     //   替代 juce::AlertWindow，消除 Windows 系统提示音，
     //   并保持与插件整体 UI 风格一致。
@@ -214,7 +233,7 @@ private:
     void showPresetJumpDialog();
 
     // ---- 自动轮播控制行 ----
-    void ensureAutoIntervalEditor();  ///< 延迟创建 TextEditor（首次进入 auto 模式时调用）
+    void showAutoIntervalDialog();  ///< 弹出自动轮播间隔输入对话框
     void paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int> topBar);
     juce::Rectangle<int> getAutoRowBounds(juce::Rectangle<int> topBar) const;
     juce::Rectangle<int> getSliderBounds(juce::Rectangle<int> autoRow) const;
@@ -233,8 +252,8 @@ private:
     bool isAutoMode_ { false };
     float autoIntervalSeconds_ { 10.0f };
     juce::uint32 lastAutoSwitchTime_ { 0 };
-    std::unique_ptr<juce::TextEditor> autoIntervalEditor_;
     bool isDraggingSlider_ { false };
+    juce::Rectangle<int> cachedAutoTimeLabel_;  ///< 缓存 auto 行时间标签区域，供 hit-test 使用
 
     static constexpr float kAutoRowHeight = 28.0f;
     static constexpr int   kAutoBtnW = 32;

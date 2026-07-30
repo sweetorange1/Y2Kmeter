@@ -395,13 +395,14 @@ namespace PinkXP
                            juce::Rectangle<int> iconArea,
                            const juce::String& iconText,
                            juce::Colour colour,
+                           juce::Colour shadowColour,
                            float fontHeight)
     {
         if (iconArea.getWidth() <= 2 || iconArea.getHeight() <= 2)
             return;
 
         g.setFont(getFont(fontHeight, juce::Font::bold));
-        g.setColour(colour.contrasting().withAlpha(0.55f));
+        g.setColour(shadowColour.withAlpha(0.55f));
         g.drawText(iconText, iconArea.translated(1, 1), juce::Justification::centred, false);
 
         g.setColour(colour);
@@ -432,14 +433,17 @@ namespace PinkXP
         auto iconRect = juce::Rectangle<int>(bounds.getX() + 5,
                                              bounds.getY() + (bounds.getHeight() - 14) / 2,
                                              16, 14);
-        drawTitleIconText(g, iconRect, juce::String::fromUTF8(th.titleIconText), selInk, fontHeight + 0.6f);
+        drawTitleIconText(g, iconRect, juce::String::fromUTF8(th.titleIconText), selInk, sel.darker(0.50f), fontHeight + 0.6f);
 
         // 标题文字（跟随主题 selInk）
         g.setFont(getFont(fontHeight, juce::Font::bold));
         auto textRect = bounds.reduced(6, 0);
         textRect.removeFromLeft(19); // 给左侧图标留空间
 
-        g.setColour(selInk.contrasting().withAlpha(0.55f));
+        // 阴影：始终比标题栏底色 (sel) 更暗 → 一致的"凸起 bevel"效果
+        //   旧实现用 selInk.contrasting()，当自定义主题 selInk 为深色时
+        //   阴影会变成亮色光晕，视觉上破坏文字垂直居中。
+        g.setColour(sel.darker(0.50f).withAlpha(0.55f));
         g.drawText(title, textRect.translated(1, 1), juce::Justification::centredLeft, false);
 
         g.setColour(selInk);

@@ -83,10 +83,12 @@ namespace PinkXP
                                           float fontHeight = 11.0f);
 
     // 在 iconArea 中央以 colour 绘制一个文本符号图标（由主题配置）
+    // shadowColour 是阴影/bevel 底色，应从标题栏背景衍生以保持一致的凸起效果
     void drawTitleIconText(juce::Graphics& g,
                            juce::Rectangle<int> iconArea,
                            const juce::String& iconText,
                            juce::Colour colour,
+                           juce::Colour shadowColour,
                            float fontHeight = 12.0f);
 
     // ==========================================================

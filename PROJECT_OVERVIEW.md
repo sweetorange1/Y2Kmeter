@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.3.3`）
+- **产品名**：`Y2Kmeter` （版本：`2.3.5`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.3.3，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.3.5，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.3：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.5：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2384,6 +2384,45 @@ Standalone 模式下：
 - `enterModalState(false)` + `hitTest()` 穿透搭配在 Windows 上会导致 `ModalComponentManager::sendMouseEvent()` 路由失败 → 系统 beep 音。解决：彻底移除 `enterModalState`，改为纯 `addToDesktop` 独立窗口
 - Windows `WS_POPUP` 全屏覆盖层在失焦时仍覆盖主界面，导致主界面被遮罩"吞没"。解决：放弃全屏覆盖层，改为小窗口方案
 
+
+---
+
+### 8.6 v2.3.5 Milkdrop 控制交互优化 & Spectrogram 配色重构 & 标题栏阴影修复
+
+#### 1. Milkdrop 自动轮播精度与交互优化
+
+| 文件 | 变更 |
+|---|---|
+| [`MilkdropModule.h`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | 移除 `ensureAutoIntervalEditor()` 和 `autoIntervalEditor_` 成员；新增 `AutoIntervalDialog` 嵌套类（PinkXP 风格弹出式间隔输入对话框，参照 `PresetJumpDialog`）；新增 `showAutoIntervalDialog()`、`cachedAutoTimeLabel_` 成员 |
+| [`MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | (1) `applyAutoInterval` 精度从 `*10/10` 改为 `*1000/1000`（支持 0.001s）；(2) `paintAutoControlRow` 所有 `juce::String(..., 1)` → `3`；(3) 内联 TextEditor 方案废弃，改为弹出 `AutoIntervalDialog`；(4) `PaintLoadingIndicator` 自动轮播模式下跳过 "Switching..." 提示；(5) `getSliderBounds` 滑块左端紧贴 "AUTO:" 标签（移除 36px 编辑器占位）；(6) 控制区全部文本亮化（黑底适配）；(7) 弹窗确认按钮 `Go` → `OK`；(8) `applyAutoInterval` 始终重置计时器（不论值是否变化） |
+
+#### 2. Spectrogram（2D 瀑布图）配色重构
+
+| 文件 | 变更 |
+|---|---|
+| [`SpectrogramModule.h`](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `intensityToColour` 从 `static` 改为成员函数；新增 `spectrogramBaseColour_`、`spectrogramAccentColour_` 成员和 `refreshSpectrogramColours()` 方法 |
+| [`SpectrogramModule.cpp`](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.cpp) | (1) `intensityToColour` 从 6 段非线性多级渐变（dark→shdw→swatch→hl）简化为 `base.interpolatedWith(accent, t)` 线性插值；(2) Custom 主题下 `base=secondary(右侧基色)`、`accent=primary(左侧强调色)`；(3) 预设主题下 `base=content`、`accent=swatch`；(4) 构造函数初始化颜色 + 主题切换回调刷新颜色并失效 Image 缓存 |
+
+#### 3. 标题栏文字阴影修复
+
+| 文件 | 变更 |
+|---|---|
+| [`PinkXPStyle.h`](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | `drawTitleIconText` 签名新增 `shadowColour` 参数 |
+| [`PinkXPStyle.cpp`](/I:/Y2KMeter/source/ui/PinkXPStyle.cpp) | (1) `drawPinkTitleBar` 标题文字阴影从 `selInk.contrasting()` 改为 `sel.darker(0.50f)`；(2) `drawTitleIconText` 阴影从 `colour.contrasting()` 改为显式传入的 `shadowColour` 参数；(3) 调用处传入 `sel.darker(0.50f)` |
+
+**根因**：自定义主题下 `selInk` 可能为深色（如 `0xff050505`），`contrasting()` 返回亮色光晕，视觉上破坏标题文字垂直居中。改为从标题栏背景色 `sel` 衍生阴影，确保任何主题下均为一致的凸起 bevel。
+
+#### 4. 版本号
+
+| 文件 | 变更 |
+|---|---|
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 `2.3.4` → `2.3.5`（2 处） |
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `#define MyAppVersion "2.3.4"` → `"2.3.5"` |
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | 版本号 `v2.3.4` → `v2.3.5`（4 处） |
+
+**踩坑记录**：
+- `juce::Colour::contrasting()` 在文字阴影场景下不可靠：白色文字 → 黑色阴影（正常），深色文字 → 白色光晕（视觉偏移）。阴影颜色应从背景色而非文字色衍生。
+- `replace_in_file` 对短字符串（如 `"v2.3.4"`）会因匹配多次而失败，需为每处提供包含周围足够多唯一行上下文的 `old_string`。
 
 ---
 

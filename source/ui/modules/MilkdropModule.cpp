@@ -310,19 +310,6 @@ void MilkdropModule::layoutContent (juce::Rectangle<int> content)
         // GLView 始终占满整个内容区；叠加控制栏通过 paintContent 中的 GDI 绘制
         // 覆盖在 GL 帧之上，不挤压 GLView 显示区，避免 resize 导致的白闪。
         glView->setBounds(content);
-
-        // 定位 auto 间隔输入框（悬浮在内容区上方，由 paintAutoControlRow 负责绘制背景）
-        if (autoIntervalEditor_ != nullptr && isAutoMode_)
-        {
-            auto topBar = content.withHeight(26);
-            auto autoRow = getAutoRowBounds(topBar);
-            constexpr int kEditorW = 36;
-            constexpr int kEditorH = 20;
-            // "Auto:" 标签从 x+6 起宽 38px，编辑器紧跟其后
-            autoIntervalEditor_->setBounds(
-                autoRow.getX() + 48, autoRow.getY() + (autoRow.getHeight() - kEditorH) / 2,
-                kEditorW, kEditorH);
-        }
     }
 }
 
@@ -507,19 +494,10 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
     {
         hoveredOverlayBtn_ = OverlayButton::kNone;
         pressedOverlayBtn_ = OverlayButton::kNone;
-        // overlay 隐藏时同步隐藏 auto 行 TextEditor
-        if (autoIntervalEditor_ != nullptr && isAutoMode_)
-        {
-            autoIntervalEditor_->giveAwayKeyboardFocus();
-            autoIntervalEditor_->setVisible(false);
-        }
     }
     else
     {
         touchOverlayIdleTimer();  // 聚焦时重置 4 秒倒计时
-        // overlay 显示时恢复 auto 行 TextEditor
-        if (autoIntervalEditor_ != nullptr && isAutoMode_)
-            autoIntervalEditor_->setVisible(true);
     }
 
     repaint();
@@ -568,6 +546,15 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             updateAutoIntervalFromSlider(proportion);
             repaint(autoRow);
             return;  // 不调用基类，避免 ModulePanel::mouseDown 启动标题栏/边缘拖拽
+        }
+        // ---- auto 行时间标签点击检测（弹出间隔输入对话框） ----
+        if (cachedAutoTimeLabel_.contains(e.getPosition()))
+        {
+            if (!focused_)
+                setFocusVisual(true);
+            touchOverlayIdleTimer();
+            showAutoIntervalDialog();
+            return;
         }
     }
 
@@ -658,6 +645,11 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
                 setMouseCursor(juce::MouseCursor::IBeamCursor);
             else
                 setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        }
+        else if (isAutoMode_ && cachedAutoTimeLabel_.contains(e.getPosition()))
+        {
+            touchOverlayIdleTimer();
+            setMouseCursor(juce::MouseCursor::PointingHandCursor);
         }
         else if (overlay.contains(e.getPosition()))
         {
@@ -840,13 +832,13 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
             PinkXP::drawRaised(g, r, PinkXP::pink200);
         else
         {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.12f));
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
             g.fillRect(r);
-            g.setColour(PinkXP::pink300.withAlpha(0.4f));
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
             g.drawRect(r, 1);
         }
 
-        g.setColour(PinkXP::ink);
+        g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
         g.drawText(text, r, juce::Justification::centred, false);
     };
@@ -876,13 +868,13 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
             PinkXP::drawRaised(g, autoBtn, PinkXP::pink200);
         else
         {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.12f));
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
             g.fillRect(autoBtn);
-            g.setColour(PinkXP::pink300.withAlpha(0.4f));
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
             g.drawRect(autoBtn, 1);
         }
 
-        g.setColour(active ? PinkXP::pink300 : PinkXP::ink);
+        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
         g.drawText("auto", autoBtn, juce::Justification::centred, false);
     }
@@ -921,11 +913,11 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
         g.fillRect(nameArea.getX(), nameArea.getBottom() - 1, nameArea.getWidth(), 1);
     }
 
-    g.setColour(PinkXP::pink300.withAlpha(namePressed ? 1.0f : 0.85f));
+    g.setColour(PinkXP::pink300.withAlpha(namePressed ? 1.0f : 0.95f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(idxPart, idxRect, juce::Justification::centredLeft, true);
 
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.9f));
+    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE).withAlpha(0.95f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
     g.drawText(presetDisplay.substring(idxPart.length()), nameRect, juce::Justification::centredLeft, true);
 }
@@ -934,6 +926,10 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
 void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content)
 {
+  // 自动轮播模式下不显示切换提示，避免右下角频繁闪烁
+  if (isAutoMode_)
+    return;
+
   // projectM soft-cut 过渡在 1-2 秒内完成，指示器只需短暂提示"正在切换"，
   // 不应延长到过渡结束之后。连续点击会不断重置时间戳、保持指示器可见。
   constexpr int64_t kIndicatorDurationMs = 1200;
@@ -973,6 +969,140 @@ void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<in
   g.setColour(PinkXP::pink300.withAlpha(alpha));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
   g.drawText("Switching...", bar, juce::Justification::centred, false);
+}
+
+// ==========================================================
+// AutoIntervalDialog：自定义 PinkXP 风格自动轮播间隔设置对话框
+// ==========================================================
+MilkdropModule::AutoIntervalDialog::AutoIntervalDialog(
+    MilkdropModule& owner_, float current,
+    std::function<void(float)> onResult)
+    : owner_(owner_), onResult_(std::move(onResult))
+{
+    setOpaque(false);
+    setInterceptsMouseClicks(true, true);
+
+    editor_.setText(juce::String(current, 3));
+    editor_.setFont(PinkXP::getFont(11.0f, juce::Font::plain));
+    editor_.setColour(juce::TextEditor::backgroundColourId,
+                      PinkXP::pink50);
+    editor_.setColour(juce::TextEditor::textColourId, PinkXP::ink);
+    editor_.setColour(juce::TextEditor::outlineColourId,
+                      PinkXP::pink600.withAlpha(0.6f));
+    editor_.setColour(juce::TextEditor::focusedOutlineColourId,
+                      PinkXP::pink500.withAlpha(0.9f));
+    editor_.setInputRestrictions(8, "0123456789.");
+    editor_.setSelectAllWhenFocused(true);
+    AutoIntervalDialog* self = this;
+    editor_.onReturnKey = [this, self] {
+        float val = juce::jlimit(kMinAutoInterval, kMaxAutoInterval,
+                                 editor_.getText().getFloatValue());
+        val = std::round(val * 1000.0f) / 1000.0f;
+        onResult_(val);
+        exitModalState(1);
+        setVisible(false);
+        juce::MessageManager::callAsync([self] { delete self; });
+    };
+    editor_.onEscapeKey = [this, self] {
+        exitModalState(0);
+        setVisible(false);
+        juce::MessageManager::callAsync([self] { delete self; });
+    };
+    addAndMakeVisible(editor_);
+}
+
+void MilkdropModule::AutoIntervalDialog::paint(juce::Graphics& g)
+{
+    // 半透明暗色遮罩
+    g.fillAll(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.55f));
+
+    // 对话框主体位置（居中）
+    constexpr int kDlgW = 290;
+    constexpr int kDlgH = 130;
+    auto dlg = juce::Rectangle<int>(
+        (getWidth() - kDlgW) / 2, (getHeight() - kDlgH) / 2,
+        kDlgW, kDlgH);
+
+    // 面板底色跟随主题
+    g.setColour(PinkXP::content.withAlpha(0.95f));
+    g.fillRoundedRectangle(dlg.toFloat(), 4.0f);
+    g.setColour(PinkXP::pink300.withAlpha(0.7f));
+    g.drawRoundedRectangle(dlg.toFloat().reduced(0.5f), 4.0f, 1.5f);
+
+    // 标题
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+    g.drawText("Set Auto Interval",
+               dlg.getX() + 14, dlg.getY() + 8,
+               dlg.getWidth() - 28, 20,
+               juce::Justification::centredLeft, false);
+
+    // 提示文字
+    g.setColour(PinkXP::pink700.withAlpha(0.75f));
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
+    g.drawText("Enter interval (1.0-60.0 seconds):",
+               dlg.getX() + 14, dlg.getY() + 28,
+               dlg.getWidth() - 28, 18,
+               juce::Justification::centredLeft, false);
+
+    // OK 按钮（右侧）
+    auto goRect = juce::Rectangle<int>(
+        dlg.getRight() - 66, dlg.getBottom() - 34, 54, 22);
+    PinkXP::drawRaised(g, goRect, PinkXP::btnFace);
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText("OK", goRect, juce::Justification::centred, false);
+
+    // Cancel 按钮
+    auto cancelRect = juce::Rectangle<int>(
+        goRect.getX() - 62, dlg.getBottom() - 34, 54, 22);
+    PinkXP::drawRaised(g, cancelRect, PinkXP::btnFace);
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText("Cancel", cancelRect, juce::Justification::centred, false);
+}
+
+void MilkdropModule::AutoIntervalDialog::resized()
+{
+    constexpr int kDlgW = 290;
+    constexpr int kDlgH = 130;
+    auto dlgX = (getWidth() - kDlgW) / 2;
+    auto dlgY = (getHeight() - kDlgH) / 2;
+
+    // TextEditor 位于提示文字下方
+    editor_.setBounds(dlgX + 14, dlgY + 48, kDlgW - 28, 24);
+}
+
+void MilkdropModule::AutoIntervalDialog::mouseDown(const juce::MouseEvent&)
+{
+    constexpr int kDlgW = 290;
+    constexpr int kDlgH = 130;
+    auto dlgX = (getWidth() - kDlgW) / 2;
+    auto dlgY = (getHeight() - kDlgH) / 2;
+
+    // OK 按钮区域
+    auto goRect = juce::Rectangle<int>(
+        dlgX + kDlgW - 66, dlgY + kDlgH - 34, 54, 22);
+    if (goRect.contains(getMouseXYRelative())) {
+      float val = juce::jlimit(kMinAutoInterval, kMaxAutoInterval,
+                               editor_.getText().getFloatValue());
+      val = std::round(val * 1000.0f) / 1000.0f;
+      onResult_(val);
+      exitModalState(1);
+      setVisible(false);
+      juce::MessageManager::callAsync([self = this] { delete self; });
+      return;
+    }
+
+    // Cancel 按钮区域
+    auto cancelRect = juce::Rectangle<int>(
+        goRect.getX() - 62, dlgY + kDlgH - 34, 54, 22);
+    if (cancelRect.contains(getMouseXYRelative())) {
+      exitModalState(0);
+      setVisible(false);
+      juce::MessageManager::callAsync([self = this] { delete self; });
+      return;
+    }
 }
 
 // ==========================================================
@@ -1137,61 +1267,34 @@ void MilkdropModule::showPresetJumpDialog()
     dlg->enterModalState(true, new GlViewRestorer(*glView));
 }
 
+void MilkdropModule::showAutoIntervalDialog()
+{
+    if (glView == nullptr)
+        return;
+
+    auto* dlg = new AutoIntervalDialog(*this, autoIntervalSeconds_,
+        [this](float result) {
+            applyAutoInterval(result);
+        });
+    dlg->setBounds(getLocalBounds());
+    addAndMakeVisible(dlg);
+
+    glView->setVisible(false);
+    dlg->enterModalState(true, new GlViewRestorer(*glView));
+}
+
 // ==========================================================
 // Auto 轮播模式
 // ==========================================================
-
-void MilkdropModule::ensureAutoIntervalEditor()
-{
-  if (autoIntervalEditor_ != nullptr)
-    return;
-
-  autoIntervalEditor_ = std::make_unique<juce::TextEditor>();
-  autoIntervalEditor_->setInputRestrictions(5, "0123456789.");
-  autoIntervalEditor_->setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-  autoIntervalEditor_->setColour(juce::TextEditor::backgroundColourId,
-                                 PinkXP::pink50);
-  autoIntervalEditor_->setColour(juce::TextEditor::textColourId, PinkXP::ink);
-  autoIntervalEditor_->setColour(juce::TextEditor::outlineColourId,
-                                 PinkXP::pink600.withAlpha(0.6f));
-  autoIntervalEditor_->setColour(juce::TextEditor::focusedOutlineColourId,
-                                 PinkXP::pink500.withAlpha(0.9f));
-  autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1));
-  autoIntervalEditor_->onReturnKey = [this] {
-    float val = autoIntervalEditor_->getText().getFloatValue();
-    applyAutoInterval(val);
-  };
-  autoIntervalEditor_->onEscapeKey = [this] {
-    autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1), false);
-    autoIntervalEditor_->giveAwayKeyboardFocus();
-  };
-  autoIntervalEditor_->onFocusLost = [this] {
-    float val = autoIntervalEditor_->getText().getFloatValue();
-    applyAutoInterval(val);
-  };
-  autoIntervalEditor_->setVisible(false);
-  addAndMakeVisible(autoIntervalEditor_.get());
-}
 
 void MilkdropModule::toggleAutoMode()
 {
   isAutoMode_ = !isAutoMode_;
   if (isAutoMode_)
   {
-    ensureAutoIntervalEditor();
     lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
-    autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1));
-    autoIntervalEditor_->setVisible(focused_);
   }
-  else
-  {
-    if (autoIntervalEditor_ != nullptr)
-    {
-      autoIntervalEditor_->giveAwayKeyboardFocus();
-      autoIntervalEditor_->setVisible(false);
-    }
-  }
-  // 重新布局以调整 GLView 尺寸和 editor 位置
+  // 重新布局并重绘
   layoutContent(getContentBounds());
   repaint();
 }
@@ -1213,15 +1316,11 @@ void MilkdropModule::checkAutoMode()
 void MilkdropModule::applyAutoInterval(float seconds)
 {
   seconds = juce::jlimit(kMinAutoInterval, kMaxAutoInterval, seconds);
-  // 四舍五入到 0.1
-  seconds = std::round(seconds * 10.0f) / 10.0f;
-  if (seconds != autoIntervalSeconds_)
-  {
-    autoIntervalSeconds_ = seconds;
-    lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
-  }
-  if (autoIntervalEditor_ != nullptr)
-    autoIntervalEditor_->setText(juce::String(autoIntervalSeconds_, 1), false);
+  // 四舍五入到 0.001
+  seconds = std::round(seconds * 1000.0f) / 1000.0f;
+  autoIntervalSeconds_ = seconds;
+  // 用户确认间隔时始终重置计时器，从此刻起算经过完整间隔后执行第一次切换
+  lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
   repaint();
 }
 
@@ -1231,14 +1330,12 @@ void MilkdropModule::updateAutoIntervalFromSlider(float proportion)
   float seconds = kMinAutoInterval
                   + proportion * (kMaxAutoInterval - kMinAutoInterval);
   seconds = juce::jlimit(kMinAutoInterval, kMaxAutoInterval, seconds);
-  // 四舍五入到 0.1
-  seconds = std::round(seconds * 10.0f) / 10.0f;
+  // 四舍五入到 0.001
+  seconds = std::round(seconds * 1000.0f) / 1000.0f;
 
   if (seconds != autoIntervalSeconds_)
   {
     autoIntervalSeconds_ = seconds;
-    if (autoIntervalEditor_ != nullptr)
-      autoIntervalEditor_->setText(juce::String(seconds, 1), false);
     // 不重置计时器：用户拖动期间不触发自动切换
   }
 }
@@ -1253,8 +1350,8 @@ juce::Rectangle<int> MilkdropModule::getSliderBounds(juce::Rectangle<int> autoRo
 {
   constexpr int kSliderPadR = 44;
   constexpr int kSliderH = 8;
-  // 布局: "Auto:"(x+6, 38px) + gap(4px) + editor(36px) + gap(8px) + slider
-  int sliderX = autoRow.getX() + 6 + 38 + 4 + 36 + 8;
+  // 布局: "Auto:"(x+6, 38px) + gap(4px) + slider
+  int sliderX = autoRow.getX() + 6 + 38 + 4;
   int sliderW = autoRow.getWidth() - sliderX - kSliderPadR;
   return juce::Rectangle<int>(sliderX,
                               autoRow.getY() + (autoRow.getHeight() - kSliderH) / 2,
@@ -1274,7 +1371,7 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
   g.fillRect(autoRow.getX(), autoRow.getBottom(), autoRow.getWidth(), 1);
 
   // "Auto:" 标签（左侧）
-  g.setColour(PinkXP::pink300.withAlpha(0.85f));
+  g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
   g.drawText("Auto:", autoRow.getX() + 6, autoRow.getY(),
              38, autoRow.getHeight(), juce::Justification::centredLeft, false);
@@ -1285,14 +1382,14 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
                      / static_cast<float>(kMaxAutoInterval - kMinAutoInterval);
 
   // 轨道底色
-  g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.1f));
+  g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
   g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
 
   // 已填充部分
   int fillW = static_cast<int>(sliderBounds.getWidth() * proportion);
   if (fillW > 0)
   {
-    g.setColour(PinkXP::pink300.withAlpha(0.55f));
+    g.setColour(PinkXP::pink300.withAlpha(0.7f));
     g.fillRoundedRectangle(
         juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(),
                              fillW, sliderBounds.getHeight()).toFloat(), 2.0f);
@@ -1309,7 +1406,7 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
   g.setColour(PinkXP::pink600);
   g.drawRect(knobBounds, 1);
 
-  // 右侧时间标签（如 "10.0s"、"1m30.0s"）
+  // 右侧时间标签（如 "10.000s"、"1m30.000s"）—— 可点击弹出输入对话框
   juce::String timeLabel;
   if (autoIntervalSeconds_ >= 60.0f)
   {
@@ -1317,17 +1414,28 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
     float secs = std::fmod(autoIntervalSeconds_, 60.0f);
     timeLabel = juce::String(mins) + "m";
     if (secs > 0.05f)
-      timeLabel += juce::String(secs, 1) + "s";
+      timeLabel += juce::String(secs, 3) + "s";
   }
   else
   {
-    timeLabel = juce::String(autoIntervalSeconds_, 1) + "s";
+    timeLabel = juce::String(autoIntervalSeconds_, 3) + "s";
   }
 
-  g.setColour(PinkXP::pink300.withAlpha(0.75f));
+  auto timeLabelRect = juce::Rectangle<int>(
+      sliderBounds.getRight() + 4, autoRow.getY(),
+      40, autoRow.getHeight());
+  cachedAutoTimeLabel_ = timeLabelRect;  // 供 mouseDown/mouseMove hit-test
+
+  // hover 时微亮底色，提示可点击
+  bool timeHovered = timeLabelRect.contains(
+      getMouseXYRelative() - juce::Point<int>(0, 0));
+  if (timeHovered)
+  {
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.08f));
+    g.fillRoundedRectangle(timeLabelRect.toFloat().reduced(2, 4), 2.0f);
+  }
+
+  g.setColour(PinkXP::pink300.withAlpha(timeHovered ? 1.0f : 0.9f));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
-  g.drawText(timeLabel,
-             sliderBounds.getRight() + 4, autoRow.getY(),
-             40, autoRow.getHeight(),
-             juce::Justification::centredLeft, false);
+  g.drawText(timeLabel, timeLabelRect, juce::Justification::centredLeft, false);
 }

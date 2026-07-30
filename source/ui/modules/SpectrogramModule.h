@@ -71,8 +71,8 @@ private:
     //   —— 不论 Hub 30/60 Hz 分发，画面横向推进速度始终目标押到
     //   pixelsPerSecond 列/秒。
 
-    // 强度 t∈[0,1] → 色彩：跟随主题的 pink700..pink100 深→浅渐变
-    static juce::Colour intensityToColour (float t) noexcept;
+    // 强度 t∈[0,1] → 色彩：从 base 色（无信号）到 accent 色（满信号）的线性渐变
+    juce::Colour intensityToColour (float t) noexcept;
 
     // 频率 → 网格行号（0 = 顶 = 高频；rows-1 = 底 = 低频）
     static int freqToGridRow (double freqHz, double minHz, double maxHz, int rows) noexcept;
@@ -139,6 +139,15 @@ private:
     static constexpr float maxFreqHz = 20000.0f;
     static constexpr float minDb     = -90.0f; // 最暗端
     static constexpr float maxDb     =   0.0f; // 最亮端
+
+    // ---- Spectrogram 配色：base（无信号底色）→ accent（满信号主色）线性渐变 ----
+    //   跟随当前主题，custom 主题下 base=secondary（右侧基色）、accent=primary（左侧强调色）；
+    //   预设主题下 base=content（模块画布底色）、accent=swatch（主题色票）。
+    juce::Colour spectrogramBaseColour_;
+    juce::Colour spectrogramAccentColour_;
+
+    // 根据当前主题刷新 spectrogramBaseColour_ / spectrogramAccentColour_
+    void refreshSpectrogramColours();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrogramModule)
 };
