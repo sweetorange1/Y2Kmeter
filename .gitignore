@@ -95,7 +95,5 @@ tools/milkdrop_tester/nul
 # milkdrop3 引擎运行时用户偏好（暗色/pin 状态等），属于运行时状态，不入库
 /assets/milkdrop_presets/settings.ini
 
-# third_party/milkdrop3 目前是本地 clone 的开源引擎（含 .git），暂不作为 submodule/直接
-# 提交处理，先由个人保持本地，待用户决策后再统一提交或改为 git submodule。
-# 这样避免"embedded git repository"警告和空 gitlink 造成 CI/新机器 clone 失败。
-/third_party/milkdrop3/
+# 说明：third_party/milkdrop3/ 已作为一手源码整体纳入版本管理，与 third_party/JUCE/
+# 保持一致的入库方式（删除内部 .git 后直接提交），后续修改直接就地进行 commit。
