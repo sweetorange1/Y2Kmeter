@@ -2,6 +2,7 @@
 #define PBEQ_MODULE_WORKSPACE_H_INCLUDED
 
 #include <JuceHeader.h>
+#include <atomic>
 #include <unordered_map>
 
 // ============================================================
@@ -47,7 +48,10 @@ enum class ModuleType
     tamagotchi,
 
     // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
-    milkdrop
+    milkdrop,
+
+    // MilkDrop3 D3D9 可视化模块（milkdrop2077/MilkDrop3 原生引擎）
+    milkdrop3
 };
 
 juce::String getModuleDisplayName(ModuleType t);
@@ -352,6 +356,9 @@ public:
     void setLayoutLocked (bool locked) noexcept { layoutLocked = locked; }
     bool isLayoutLocked() const noexcept { return layoutLocked; }
 
+    // GL 渲染抑制状态（>0 = 组件树正在被 add/remove/clear 修改，GL 渲染线程应跳过遍历）
+    bool isGlRenderSuppressed() const noexcept { return glRenderSuppressed.load() > 0; }
+
     // chrome 可见性变化回调（例如 Editor 订阅 → 顶部 TitleBar 做半透明）
     std::function<void(bool visible)> onChromeVisibleChanged;
 
@@ -514,6 +521,11 @@ public:
     void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
 
+    /** 组件有效可见性变化时回调。
+     *  首次真正可见（isShowing()==true）时激活延迟初始化的 ComboBox，
+     *  避免 setContentNonOwned 中间态的 hierarchy changed 引发堆竞争死锁。 */
+    void visibilityChanged() override;
+
     // P7：将 canvas 底色的 drawSunken + 网格点阵 + Grid 叠加线烘焙到离屏 Image 缓存，
     //   避免每帧 paint() 中 ~13000 次 fillRect(1,1) 的循环绘制。
     void rebuildCanvasBgCacheIfNeeded();
@@ -638,12 +650,19 @@ private:
     // 右下角的 Hide/Show 按钮（隐藏白色底框 + 控制区）
     HideChromeButton hideBtn;
     bool             chromeVisible = true;
+    bool             combos_initialized_ = false;  // visibilityChanged() 首次可见时置 true
 
     // 布局锁定态（v1.8.3）：true = 一切拖动/resize 交互均早退。由 Editor 在
     //   锁定按钮切换时同步下发。本标志不参与 workspace 自己的 XML 序列化（
     //   避免与旧 layout XML 无此字段的兼容性问题），而是由 Processor 统一持久化。
     bool             layoutLocked = false;
     bool             autoHideActive = false;  // v1.8.6：auto-hide 模式下按钮始终显示 "Show"
+
+    // GL 渲染抑制计数器（>0 = 抑制 Milkdrop/projectM 的 renderOpenGL 中组件树遍历）。
+    //   在 addModule / removeModule / clearAllModules 期间 ++，结束时 --。
+    //   renderOpenGL 检测到 >0 时跳过 measureMax/blitToModules 等遍历组件树逻辑，
+    //   避免与主线程的 addAndMakeVisible / setBounds / toFront 形成数据竞争。
+    std::atomic<int> glRenderSuppressed { 0 };
 
     // Chrome 切换过渡期标志（由 beginChromeTransition/endChromeTransition 设置）
     //   · true 期间，resized() 末尾的"模块越界 clamp"会被跳过，
@@ -787,7 +806,8 @@ private:
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 
         ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest,
-        ModuleType::milkdrop
+        ModuleType::milkdrop,
+        ModuleType::milkdrop3
     };
 
     int nextIdCounter = 1;

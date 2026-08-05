@@ -2,6 +2,7 @@
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/modules/TamagotchiModule.h"
 #include "source/ui/modules/MilkdropModule.h"
+#include "source/ui/modules/Milkdrop3Module.h"
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
@@ -32,6 +33,18 @@ namespace
 
             if (auto* milkdrop = dynamic_cast<MilkdropModule*> (m))
                 milkdrop->setFocusVisual (false);
+        }
+    }
+
+    void clearMilkdrop3Focus (juce::OwnedArray<ModulePanel>& modules)
+    {
+        for (auto* m : modules)
+        {
+            if (m == nullptr || m->getModuleType() != ModuleType::milkdrop3)
+                continue;
+
+            if (auto* milkdrop3 = dynamic_cast<Milkdrop3Module*> (m))
+                milkdrop3->SetFocusVisual (false);
         }
     }
 
@@ -143,6 +156,7 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::spectrogram3d:    return "spectrogram3d";
         case ModuleType::tamagotchi:        return "tamagotchi";
         case ModuleType::milkdrop:         return "milkdrop";
+        case ModuleType::milkdrop3:        return "milkdrop3";
     }
 
     return "eq";
@@ -176,6 +190,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "spectrogram3d",     ModuleType::spectrogram3d },
         { "tamagotchi",         ModuleType::tamagotchi },
         { "milkdrop",          ModuleType::milkdrop },
+        { "milkdrop3",          ModuleType::milkdrop3 },
     };
     for (auto& p : kv)
         if (s == p.k)
@@ -335,7 +350,10 @@ ModuleWorkspace::ModuleWorkspace()
                 safe->onAudioSourceChanged (sourceId, isLoopback);
         });
     };
-    addAndMakeVisible (audioSourceBox);
+    // 不在构造函数中加入组件树，避免 setContentNonOwned 中间态触发
+    // internalHierarchyChanged → parentHierarchyChanged → lookAndFeelChanged
+    // 第2次调用（第1次在后续 visibilityChanged 的 addChildComponent 中）。
+    // addChildComponent + setVisible(true) 统一延迟到 visibilityChanged()。
 
     // 右下角 Hide 按钮：默认"显示态"不透明
     hideBtn.setButtonText("Hide");
@@ -483,7 +501,9 @@ ModuleWorkspace::ModuleWorkspace()
             safe->layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
         });
     };
-    addAndMakeVisible (layoutPresetBox);
+    // 不在构造函数中加入组件树（同 audioSourceBox 注释）。
+    // addChildComponent + setVisible(true) 统一延迟到 visibilityChanged()。
+
 
     // 布局预设 Save/Load 按钮（紧邻 layoutPresetBox 左侧）
     //   · 按钮样式跟随全局 LookAndFeel（与 gridBtn / fpsBtn 一致，像素化 TextButton）
@@ -894,6 +914,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     {
         clearTamagotchiFocusVisuals (modules);
         clearMilkdropFocus (modules);
+        clearMilkdrop3Focus (modules);
 
         if (focusedPerlerIdx >= 0)
         {
@@ -971,14 +992,33 @@ ModulePanel* ModuleWorkspace::addModuleByType(ModuleType t)
         jassertfalse;
         return nullptr;
     }
+
+    // 抑制 GL 渲染线程的 renderOpenGL（项目M 路径），覆盖 factory 构造函数 +
+    // addAndMakeVisible + setBounds + layoutContent 全流程，避免模块添加过程
+    // 中 CachedImage FBO 状态变更与项目M 的 openglRenderFrame 在 FBO 0 上
+    // 产生 GPU 驱动级竞争/死锁。
+    // 清零通过 callAsync 延迟到下一个主线程消息迭代执行，确保 addModule 后的
+    // 第一个 renderFrame 也跳过项目M 渲染，给 CachedImage 一帧时间稳定。
+    ++glRenderSuppressed;
+
     auto panel = factory(t);
     if (panel == nullptr)
+    {
+        juce::MessageManager::callAsync([this] { --glRenderSuppressed; });
         return nullptr;
-    return &addModule(std::move(panel));
+    }
+    auto* result = &addModule(std::move(panel));
+
+    // 延迟清零：renderOpenGL 在下一次 acquire MessageManager::Lock 时
+    // 仍会看到 glRenderSuppressed > 0，跳过项目M 渲染。
+    juce::MessageManager::callAsync([this] { --glRenderSuppressed; });
+
+    return result;
 }
 
 void ModuleWorkspace::removeModule(ModulePanel& panel)
 {
+    ++glRenderSuppressed;
     for (int i = modules.size(); --i >= 0;)
     {
         if (modules.getUnchecked(i) == &panel)
@@ -986,9 +1026,11 @@ void ModuleWorkspace::removeModule(ModulePanel& panel)
             modules.remove(i);  // OwnedArray 会自动 delete
             repaint();
             notifyLayoutChanged();
+            juce::MessageManager::callAsync([this] { --glRenderSuppressed; });
             return;
         }
     }
+    juce::MessageManager::callAsync([this] { --glRenderSuppressed; });
 }
 
 // ----------------------------------------------------------
@@ -998,6 +1040,7 @@ void ModuleWorkspace::removeModule(ModulePanel& panel)
 // ----------------------------------------------------------
 void ModuleWorkspace::clearAllModules()
 {
+    ++glRenderSuppressed;
     // OwnedArray 析构时会自动 delete 每个 ModulePanel
     for (int i = modules.size(); --i >= 0;)
         modules.remove (i);
@@ -1010,6 +1053,7 @@ void ModuleWorkspace::clearAllModules()
     resizingPerlerIdx  = -1;
     activeResizeHandle = ResizeHandle::none;
     repaint();
+    juce::MessageManager::callAsync([this] { --glRenderSuppressed; });
 }
 
 // ----------------------------------------------------------
@@ -1132,18 +1176,21 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
     int maxItemW = menuMinWidth;
 
     // ------------------------------------------------------------
-    // 单例限制：Milkdrop 模块底层 libprojectM 4 (Windows) 内部依赖
-    //   进程全局的 GLEW 状态，第二个 juce::OpenGLContext 尝试挂载 projectM
-    //   时会因 GLEW 函数指针错乱直接跳到 0x0 崩溃。
-    //   —— 因此工作区内同一时刻只允许存在 1 个 MilkdropModule；
-    //   若已有一个，则在"添加模块"菜单里把 Milkdrop 项置灰。
+    // 单例限制：
+    //   · Milkdrop 模块底层 libprojectM 4 (Windows) 内部依赖进程全局的
+    //     GLEW 状态，第二个 juce::OpenGLContext 尝试挂载 projectM 时会因
+    //     GLEW 函数指针错乱直接跳到 0x0 崩溃。
+    //   · MilkDrop3 模块内部独占 D3D9 设备与 CPlugin 全局引擎实例，不支持
+    //     多实例并存。
+    //   —— 因此工作区内同一时刻只允许存在 1 个 Milkdrop(MilkDrop3)Module；
+    //   若已有一个，则在"添加模块"菜单里把该项置灰。
     // ------------------------------------------------------------
     auto isTypeAtInstanceLimit = [this] (ModuleType t) -> bool
     {
-        if (t != ModuleType::milkdrop)
+        if (t != ModuleType::milkdrop && t != ModuleType::milkdrop3)
             return false;
         for (auto* m : modules)
-            if (m != nullptr && m->getModuleType() == ModuleType::milkdrop)
+            if (m != nullptr && m->getModuleType() == t)
                 return true;
         return false;
     };
@@ -1289,9 +1336,11 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
 
 // ----------------------------------------------------------
 // getDefaultSizeForType —— 按模块类型取它在构造器里通过 setDefaultSize
-//   声明的默认尺寸。因为 paintOverChildren / hover 脏区计算等场景只有
-//   ModuleType（没有 panel 实例），这里通过 factory 懒造临时 panel
-//   读取 getDefaultWidth/Height 并缓存。
+//   声明的默认尺寸。优先走硬编码表（零开销），未命中则通过 factory 懒造临时
+//   panel 读取 getDefaultWidth/Height 并缓存。
+//   · 硬编码表覆盖所有已知模块类型，避免 mouseEnter 事件中构造重量级临时
+//     模块实例（如 Milkdrop3Module 的 AnalyserHub retain/release/FrameListener
+//     注册等）导致锁竞争乃至死锁。
 //   · factory 未绑定 / 构造失败 → 回退为 ModulePanel 基类默认 320×220
 // ----------------------------------------------------------
 juce::Point<int> ModuleWorkspace::getDefaultSizeForType (ModuleType t)
@@ -1301,6 +1350,38 @@ juce::Point<int> ModuleWorkspace::getDefaultSizeForType (ModuleType t)
     auto it = hoverPreviewSizeCache.find (key);
     if (it != hoverPreviewSizeCache.end())
         return it->second;
+
+    // 硬编码尺寸表：避免为取默认尺寸而构造完整模块实例
+    static const std::unordered_map<ModuleType, juce::Point<int>> kKnownSizes = {
+        { ModuleType::eq,               { 384, 256 } },
+        { ModuleType::loudness,         { 320, 256 } },
+        { ModuleType::lufsRealtime,     { 320, 256 } },
+        { ModuleType::truePeak,         { 256, 192 } },
+        { ModuleType::vuMeter,          { 320, 224 } },
+        { ModuleType::oscilloscope,     { 384, 256 } },
+        { ModuleType::oscilloscopeWave, { 384, 256 } },
+        { ModuleType::spectrum,         { 384, 256 } },
+        { ModuleType::phase,            { 320, 192 } },
+        { ModuleType::phaseCorrelation, { 192, 128 } },
+        { ModuleType::phaseBalance,     { 192, 128 } },
+        { ModuleType::dynamics,         { 384, 256 } },
+        { ModuleType::dynamicsMeters,   { 256, 256 } },
+        { ModuleType::dynamicsDr,       { 320, 256 } },
+        { ModuleType::dynamicsCrest,    { 384, 256 } },
+        { ModuleType::waveform,         { 384, 256 } },
+        { ModuleType::spectrogram,      { 384, 224 } },
+        { ModuleType::spectrogram3d,    { 384, 256 } },
+        { ModuleType::tamagotchi,       { 128, 128 } },
+        { ModuleType::milkdrop,         { 400, 300 } },
+        { ModuleType::milkdrop3,        { 640, 480 } },
+    };
+
+    auto known = kKnownSizes.find(t);
+    if (known != kKnownSizes.end())
+    {
+        hoverPreviewSizeCache.emplace(key, known->second);
+        return known->second;
+    }
 
     juce::Point<int> sz { 320, 220 }; // 回退值：与 ModulePanel 基类 default 一致
 
@@ -1326,6 +1407,11 @@ juce::Point<int> ModuleWorkspace::getDefaultSizeForType (ModuleType t)
 //   · 渲染出的 Image 会被缓存，后续 hover 直接返回
 //   · 各模块在无音频输入 / 无历史数据时的 paint 本身就是"空态样式"
 //     （比如空的波形区、无数值的仪表），正是我们想要的预览外观
+//
+//   ⚠ 例外：milkdrop / milkdrop3 模块的构造函数会 retain/addFrameListener 到
+//     AnalyserHub（涉及 mutex），析构时又会 removeFrameListener/release；在
+//     paintOverChildren（渲染线程上下文）中执行这些操作可能与音频线程形成
+//     mutex 死锁。因此这两个模块使用静态占位图，不创建临时实例。
 // ----------------------------------------------------------
 const juce::Image& ModuleWorkspace::getHoverPreviewImage (ModuleType t)
 {
@@ -1339,6 +1425,42 @@ const juce::Image& ModuleWorkspace::getHoverPreviewImage (ModuleType t)
     auto it = hoverPreviewCache.find (key);
     if (it != hoverPreviewCache.end() && it->second.isValid())
         return it->second;
+
+    // ---- 重量级模块（GPU 资源 / AnalyserHub 锁）：使用静态占位图 ----
+    if (t == ModuleType::milkdrop3 || t == ModuleType::milkdrop)
+    {
+        const juce::Point<int> sz = getDefaultSizeForType(t);
+        const juce::String name = getModuleDisplayName(t);
+
+        juce::Image placeholder(juce::Image::ARGB, sz.x, sz.y, true);
+        {
+            juce::Graphics g(placeholder);
+            // 暗底
+            g.fillAll(juce::Colour(0xFF1A1A1A));
+            // 粉色边框（模拟 PinkXP 面板风格）
+            g.setColour(juce::Colour(0xFFCC6688));
+            g.drawRect(0.5f, 0.5f,
+                       static_cast<float>(sz.x - 1),
+                       static_cast<float>(sz.y - 1), 1.0f);
+            // 模块名居中
+            g.setColour(juce::Colour(0xFFDDDDDD));
+            g.setFont(juce::Font(14.0f, juce::Font::bold));
+            g.drawText(name,
+                       juce::Rectangle<int>(0, 0, sz.x, sz.y),
+                       juce::Justification::centred, false);
+            // 副标题提示
+            g.setColour(juce::Colour(0xFF888888));
+            g.setFont(juce::Font(10.0f));
+            g.drawText("preview not available",
+                       juce::Rectangle<int>(0, sz.y * 2 / 3, sz.x, sz.y / 3),
+                       juce::Justification::centred, false);
+        }
+
+        auto [ins, ok] = hoverPreviewCache.emplace(key, std::move(placeholder));
+        return ins->second;
+    }
+
+    // ---- 普通模块：构造临时实例 + 快照 ----
 
     // 懒构造
     auto panel = factory (t);
@@ -2334,6 +2456,20 @@ void ModuleWorkspace::resized()
 
     // P7：窗口尺寸变化 → 画布背景缓存下次 paint 时重建
     canvasBgCacheDirty = true;
+}
+void ModuleWorkspace::visibilityChanged()
+{
+    if (!isShowing()) return;
+    if (combos_initialized_) return;
+    combos_initialized_ = true;
+
+    // 组件树已完全稳定（mainWindow->setVisible(true) 之后），此时将 ComboBox
+    // 首次加入组件树是安全的：不会再有 setContentNonOwned 中间态的 hierarchy
+    // changed 二次触发。先 addChildComponent 建立父子关系，再 setVisible(true) 激活。
+    addChildComponent(audioSourceBox);
+    addChildComponent(layoutPresetBox);
+    audioSourceBox.setVisible(true);
+    layoutPresetBox.setVisible(true);
 }
 void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
 {

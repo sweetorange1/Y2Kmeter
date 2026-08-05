@@ -59,6 +59,11 @@ public:
     Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcessor&);
     ~Y2KmeterAudioProcessorEditor() override;
 
+    // Standalone 模式下，将 OpenGL 上下文挂载延迟到窗口内容完全就绪
+    // （setContent + setVisible）之后调用，避免在组件树构建期与 GL 渲染
+    // 线程产生堆锁死锁。插件模式在构造函数内已完成 attach，此调用无操作。
+    void attachOpenGLContext();
+
     void paint(juce::Graphics&) override;
     void resized() override;
     void visibilityChanged() override;

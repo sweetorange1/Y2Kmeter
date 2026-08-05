@@ -1,3 +1,4 @@
+#define NOMINMAX  // 必须在任何 Windows 头之前，防止 min/max 宏破坏 std::min/std::max
 #include "PluginEditor.h"
 #include <JuceHeader.h>
 #include <chrono>
@@ -20,6 +21,8 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/modules/TamagotchiModule.h"
 #include "source/ui/modules/MilkdropModule.h"
+#include "source/ui/modules/Milkdrop3Module.h"
+#include "source/ui/modules/Md3DebugLog.h"
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
 
@@ -74,7 +77,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.3.5");
+        const int versionW = versionFont.getStringWidth ("v2.3.6");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -115,7 +118,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.5";
+        const juce::String versionText = "v2.3.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -717,7 +720,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::tamagotchi,
 
         // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
-        ModuleType::milkdrop
+        ModuleType::milkdrop,
+
+        // MilkDrop3 D3D9 原生可视化模块（milkdrop2077/MilkDrop3 引擎）
+        ModuleType::milkdrop3
     });
 
     addAndMakeVisible(*workspace);
@@ -1307,8 +1313,17 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         repaint();
     });
 
-    // 应用默认主题（会把全局配色重写一次，确保状态一致）
-    PinkXP::applyTheme(PinkXP::getCurrentThemeId());
+    // 应用默认主题（会把全局配色重写一次，确保状态一致）。
+    //
+    //  **必须在 callAsync 中延迟执行**：applyTheme 会触发全局 LookAndFeel
+    //   广播 → ModuleWorkspace 的订阅回调 → audioSourceBox/layoutPresetBox
+    //   的 sendLookAndFeelChange() → ComboBox::lookAndFeelChanged() →
+    //   createComboBoxTextBox()。若在构造函数内同步执行，此时整个组件树
+    //   处于半初始化态（消息循环未启动），JUCE 内部创建 ComboBox 文本
+    //   编辑器的逻辑可能访问未就绪状态导致死锁或访问违例崩溃。
+    juce::MessageManager::callAsync([] {
+        PinkXP::applyTheme(PinkXP::getCurrentThemeId());
+    });
 
     // 构造阶段 isShowing() 可能仍为 false，先确保分析链启动；
     // 后续由 visibilityChanged() 继续做可见性联动。
@@ -1464,7 +1479,12 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     openGLContext.setRenderer(this);
     openGLContext.setContinuousRepainting(false);
     openGLContext.setComponentPaintingEnabled(true);
-    openGLContext.attachTo(*this);
+    // Standalone：延迟到窗口 setContent + setVisible 之后再 attachOpenGLContext()，
+    // 避免 GL 渲染线程在组件树 hierarchyChanged（ComboBox::lookAndFeelChanged
+    // → repaint → malloc）期间与主线程争抢 Windows 堆锁导致死锁。
+    // 插件（VST3/AU）：DAW 要求构造完即就绪，保持立即 attach。
+    if (isPluginHost)
+        openGLContext.attachTo(*this);
 #endif
 
     // ==================================================================
@@ -1478,6 +1498,16 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // 首次启动检测：非插件模式且 processor 未记录完成 → 启动引导
     if (! isPluginHost && ! processor.isTutorialCompleted())
         startTutorial();
+}
+
+void Y2KmeterAudioProcessorEditor::attachOpenGLContext() {
+#if ! JUCE_MAC
+  // 仅在 Standalone 模式且尚未 attach 时执行。
+  // 插件模式在构造函数中已调用 attachTo，此处跳过避免重复 attach。
+  if (!isPluginHost && openGLContext.getTargetComponent() == nullptr) {
+    openGLContext.attachTo(*this);
+  }
+#endif
 }
 
 Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
@@ -2356,6 +2386,12 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
         case ModuleType::milkdrop:
             return std::make_unique<MilkdropModule>(&processor.getAnalyserHub());
 
+        case ModuleType::milkdrop3:
+            {
+              MD3_LOG("PluginEditor factory: creating Milkdrop3Module");
+              return std::make_unique<Milkdrop3Module>(&processor.getAnalyserHub());
+            }
+
         default:
             jassertfalse; // 暂未实现
             return nullptr;
@@ -2620,7 +2656,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.5";
+        const juce::String versionText = "v2.3.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2628,7 +2664,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.3.5");
+        const int versionW = versionFont.getStringWidth ("v2.3.6");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4094,7 +4130,8 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   float dpi_scale = static_cast<float>(openGLContext.getRenderingScale());
   int   editor_h  = getHeight();
 
-  if (milkdrop_render_ready_ && milkdrop_pm_handle_ != nullptr) {
+  if (milkdrop_render_ready_ && milkdrop_pm_handle_ != nullptr
+      && workspace && !workspace->isGlRenderSuppressed()) {
 
   auto& api = projectm_api::Api::instance();
 

@@ -81,3 +81,21 @@ Thumbs.db
 # Windows reserved device names (cannot be tracked by git)
 nul
 tools/milkdrop_tester/nul
+
+# AI 协作过程中偶发生成的编译辅助脚本 / 日志，不入库
+/build_output.txt
+/build_skill_verify.bat
+/build_temp.bat
+/incr_build.bat
+
+# 旧版单文件 skill 打包产物（已被 docs/skills/milkdrop3-dev-guard/ 目录版本替代）
+/docs/skills/milkdrop3-dev-guard.md
+/docs/skills/milkdrop3-dev-guard.zip
+
+# milkdrop3 引擎运行时用户偏好（暗色/pin 状态等），属于运行时状态，不入库
+/assets/milkdrop_presets/settings.ini
+
+# third_party/milkdrop3 目前是本地 clone 的开源引擎（含 .git），暂不作为 submodule/直接
+# 提交处理，先由个人保持本地，待用户决策后再统一提交或改为 git submodule。
+# 这样避免"embedded git repository"警告和空 gitlink 造成 CI/新机器 clone 失败。
+/third_party/milkdrop3/

@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.3.5 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.3.6 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -323,7 +323,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-  VERSION 2.3.5
+  VERSION 2.3.6
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -384,6 +384,17 @@ set(Y2KM_PROJECTM_INCLUDE "${Y2KM_PROJECTM_DIR}/include")
 set(Y2KM_PROJECTM_BIN     "${Y2KM_PROJECTM_DIR}/bin")
 set(Y2KM_MILKDROP_PRESETS "${CMAKE_CURRENT_SOURCE_DIR}/assets/milkdrop_presets")
 set(Y2KM_MILKDROP_TEXTURES "${CMAKE_CURRENT_SOURCE_DIR}/assets/milkdrop_textures")
+# ==========================================================
+# MilkDrop3 (milkdrop2077/MilkDrop3) —— 独立 D3D9 可视化引擎
+#   · third_party/milkdrop3/code/ —— 引擎源码，编译期静态链接
+#   · 与 projectM 并行共存，各自使用独立的渲染后端 (D3D9 vs OGL)
+#   · 定义 MD3_Y2KMETER=1 跳过 Winamp DLL 入口和 WASAPI 音频捕获
+# ==========================================================
+set(Y2KM_MILKDROP3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/milkdrop3/code")
+if (NOT EXISTS "${Y2KM_MILKDROP3_DIR}/vis_milk2/plugin.h")
+  message(FATAL_ERROR "缺少 MilkDrop3 引擎源码：${Y2KM_MILKDROP3_DIR}/vis_milk2/plugin.h\n"
+                      "请运行 git clone https://github.com/milkdrop2077/MilkDrop3.git third_party/milkdrop3")
+endif()
 if (NOT EXISTS "${Y2KM_PROJECTM_INCLUDE}/projectM-4/projectM.h")
   message(FATAL_ERROR "缺少 libprojectM 头文件：${Y2KM_PROJECTM_INCLUDE}/projectM-4/projectM.h\n"
                       "请参考 third_party/projectm/README.md 重新拉取。")
@@ -412,6 +423,9 @@ target_compile_definitions(Y2Kmeter
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
     # Milkdrop 模块现在使用 libprojectM（native OpenGL）而不是 WebView2；
     # 因此不再启用 JUCE_WEB_BROWSER。如果未来其他模块需要，可以按需重新打开。
+
+    # MilkDrop3 (milkdrop2077/MilkDrop3) 独立 D3D9 编译标志
+    MD3_Y2KMETER=1
 )
 
 # MSVC: 强制按 UTF-8 解析源码，支持中文注释与字符串
@@ -485,6 +499,55 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/ui/modules/ProjectMApi.h
   source/ui/modules/ProjectMApi.cpp
 
+  # === MilkDrop3 独立 D3D9 可视化模块（自 v2.4.0 起） ===
+  source/ui/modules/Md3DebugLog.h
+  source/ui/modules/Md3DebugLog.cpp
+  source/ui/modules/Milkdrop3Api.h
+  source/ui/modules/Milkdrop3Api.cpp
+  source/ui/modules/Milkdrop3Module.h
+  source/ui/modules/Milkdrop3Module.cpp
+
+  # === MilkDrop3 引擎源码 (third_party/milkdrop3/code/) ===
+  # ns-eel2 表达式编译器/VM
+  third_party/milkdrop3/code/ns-eel2/nseel-caltab.c
+  third_party/milkdrop3/code/ns-eel2/nseel-cfunc.c
+  third_party/milkdrop3/code/ns-eel2/nseel-compiler.c
+  third_party/milkdrop3/code/ns-eel2/nseel-eval.c
+  third_party/milkdrop3/code/ns-eel2/nseel-lextab.c
+  third_party/milkdrop3/code/ns-eel2/nseel-ram.c
+  third_party/milkdrop3/code/ns-eel2/nseel-yylex.c
+  third_party/milkdrop3/code/ns-eel2/asm-nseel-x86-msvc.c
+  # 核心渲染引擎 (vis_milk2)
+  third_party/milkdrop3/code/vis_milk2/plugin.h
+  third_party/milkdrop3/code/vis_milk2/plugin.cpp
+  third_party/milkdrop3/code/vis_milk2/pluginshell.h
+  third_party/milkdrop3/code/vis_milk2/pluginshell.cpp
+  third_party/milkdrop3/code/vis_milk2/state.h
+  third_party/milkdrop3/code/vis_milk2/state.cpp
+  third_party/milkdrop3/code/vis_milk2/dxcontext.h
+  third_party/milkdrop3/code/vis_milk2/dxcontext.cpp
+  third_party/milkdrop3/code/vis_milk2/fft.h
+  third_party/milkdrop3/code/vis_milk2/fft.cpp
+  third_party/milkdrop3/code/vis_milk2/texmgr.h
+  third_party/milkdrop3/code/vis_milk2/texmgr.cpp
+  third_party/milkdrop3/code/vis_milk2/textmgr.h
+  third_party/milkdrop3/code/vis_milk2/textmgr.cpp
+  third_party/milkdrop3/code/vis_milk2/menu.h
+  third_party/milkdrop3/code/vis_milk2/menu.cpp
+  third_party/milkdrop3/code/vis_milk2/support.h
+  third_party/milkdrop3/code/vis_milk2/support.cpp
+  third_party/milkdrop3/code/vis_milk2/utility.h
+  third_party/milkdrop3/code/vis_milk2/utility.cpp
+  third_party/milkdrop3/code/vis_milk2/md_defines.h
+  third_party/milkdrop3/code/vis_milk2/shell_defines.h
+  third_party/milkdrop3/code/vis_milk2/defines.h
+  third_party/milkdrop3/code/vis_milk2/wasabi.h
+  third_party/milkdrop3/code/vis_milk2/wasabi.cpp
+  third_party/milkdrop3/code/vis_milk2/milkdropfs.cpp
+  # 音频缓冲区 (仅保留 audiobuf，去掉 WASAPI 捕获)
+  third_party/milkdrop3/code/audio/audiobuf.h
+  third_party/milkdrop3/code/audio/audiobuf.cpp
+
   # === Standalone 自定义入口（仅 Standalone 构建时启用，内部已用宏保护）===
 
   source/standalone/Y2KStandaloneApp.cpp
@@ -515,9 +578,80 @@ if (APPLE)
   )
 endif()
 
+# ==========================================================
+# MilkDrop3 依赖: Direct3D 9 + D3DX9 (HLSL Shader 编译)
+#   · d3d9.h   —— 已随 Windows SDK 提供
+#   · d3dx9.h  —— 自 Windows 8 SDK 起不再随附，需单独安装：
+#      (A) Microsoft DirectX SDK (June 2010):
+#          https://www.microsoft.com/en-us/download/details.aspx?id=6812
+#      (B) vcpkg: vcpkg install directx9:x64-windows
+#              (若通过 CMAKE_TOOLCHAIN_FILE 集成则自动发现)
+#      (C) 手动设置 D3DX9_ROOT 环境变量指向 SDK 根目录
+# ==========================================================
+find_path(D3DX9_INCLUDE_DIR d3dx9.h
+  PATHS
+    # 优先使用项目自带的 D3DX9 头文件（来自 Microsoft.DXSDK.D3DX NuGet 包）
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/d3dx9_headers"
+    "$ENV{D3DX9_ROOT}/Include"
+    "$ENV{DXSDK_DIR}/Include"
+    "C:/Program Files (x86)/Microsoft DirectX SDK (June 2010)/Include"
+    "C:/Program Files/Microsoft DirectX SDK (June 2010)/Include"
+  DOC "DirectX SDK include directory (for d3dx9.h)"
+)
+
+find_library(D3DX9_LIBRARY d3dx9
+  PATHS
+    # 优先使用项目自带的 d3dx9.lib（与 third_party/d3dx9_headers/include 配套）
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/d3dx9_headers/lib/x64"
+    "$ENV{D3DX9_ROOT}/Lib/x64"
+    "$ENV{DXSDK_DIR}/Lib/x64"
+    "C:/Program Files (x86)/Microsoft DirectX SDK (June 2010)/Lib/x64"
+    "C:/Program Files/Microsoft DirectX SDK (June 2010)/Lib/x64"
+  DOC "d3dx9.lib import library"
+)
+
+if (NOT D3DX9_LIBRARY)
+  message(FATAL_ERROR
+    "未找到 d3dx9.lib 导入库 —— MilkDrop3 链接依赖此库。\n"
+    "项目内嵌路径已检查: third_party/d3dx9_headers/lib/x64/\n"
+    "\n"
+    "请确认该目录下存在 d3dx9.lib。若缺失，请运行:\n"
+    "  git checkout third_party/d3dx9_headers/lib/x64/\n"
+  )
+endif()
+
+message(STATUS "MilkDrop3: D3DX9 library → ${D3DX9_LIBRARY}")
+
+if (NOT D3DX9_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "缺少 d3dx9.h 头文件 —— MilkDrop3 HLSL Shader 编译依赖此头文件。\n"
+    "请选择以下任一方案安装 DirectX SDK：\n"
+    "\n"
+    "  (A) 下载 Microsoft DirectX SDK (June 2010):\n"
+    "      https://www.microsoft.com/en-us/download/details.aspx?id=6812\n"
+    "      安装后设置环境变量:\n"
+    "        set D3DX9_ROOT=C:\\Program Files (x86)\\Microsoft DirectX SDK (June 2010)\n"
+    "\n"
+    "  (B) 使用 vcpkg 安装 directx9 包:\n"
+    "      vcpkg install directx9:x64-windows\n"
+    "\n"
+    "  (C) 或手动设置 D3DX9_ROOT 环境变量指向包含 Include/d3dx9.h 的目录。\n"
+  )
+endif()
+
+message(STATUS "MilkDrop3: D3DX9 include → ${D3DX9_INCLUDE_DIR}")
+message(STATUS "MilkDrop3: D3DX9 library → ${D3DX9_LIBRARY}")
+
 target_include_directories(Y2Kmeter PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${Y2KM_PROJECTM_INCLUDE}
+# MilkDrop3 引擎 include 路径
+  ${Y2KM_MILKDROP3_DIR}
+  ${Y2KM_MILKDROP3_DIR}/vis_milk2
+  ${Y2KM_MILKDROP3_DIR}/ns-eel2
+  ${Y2KM_MILKDROP3_DIR}/audio
+  # D3DX9 头文件（若 CMake 搜索到则追加；见下方 find_path 逻辑）
+  ${D3DX9_INCLUDE_DIR}
 )
 
 target_link_libraries(Y2Kmeter PRIVATE
@@ -541,6 +675,13 @@ target_link_libraries(Y2Kmeter PRIVATE
 #                      减少 loopback 丢帧；未启用 loopback 时不会调用，纯开销 0）
 if (WIN32)
   target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt)
+  # MilkDrop3: Direct3D 9 + D3DX (HLSL Shader 编译)
+  target_link_libraries(Y2Kmeter PRIVATE d3d9 ${D3DX9_LIBRARY})
+  # MilkDrop3: Shcore.lib 提供 GetDpiForMonitor (创建 WS_POPUP 时获取物理 DPI)
+  target_link_libraries(Y2Kmeter PRIVATE Shcore)
+  if (D3DX9_LIBRARY)
+    message(STATUS "MilkDrop3: linking D3DX9 → ${D3DX9_LIBRARY}")
+  endif()
 endif()
 
 # ==========================================================
@@ -578,7 +719,7 @@ if (MSVC)
   )
 
   target_compile_options(Y2Kmeter PRIVATE
-    $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /Gy /Gw>
+    $<$<CONFIG:Release>:/O2 /Oi /Ot /Gy /Gw>
   )
 
   target_link_options(Y2Kmeter PRIVATE
@@ -875,4 +1016,39 @@ if (WIN32 AND TARGET Y2Kmeter_VST3)
 
   # 预设/纹理不再随 VST3 部署到系统目录；改为集中存放在
   # {userappdata}\Y2Kmeter\，由安装包一次性解压，Standalone 和 VST3 共享。
+endif()
+
+# ==========================================================
+# MilkDrop3: 构建时复制 HLSL Shader (.fx) 到输出目录 data/
+#   · ReadFileToString() 以 m_szMilkdrop2Path + "data\\*.fx" 查找
+#   · m_szMilkdrop2Path 在运行时指向 EXE 所在目录
+#   · 因此需确保 {CMAKE_BINARY_DIR}/data/*.fx 在编译产物旁就位
+# ==========================================================
+set(MD3_SHADER_SRC_DIR "${Y2KM_MILKDROP3_DIR}/resources/Milkdrop2/data")
+set(MD3_SHADER_DST_DIR "${CMAKE_BINARY_DIR}/data")
+
+file(MAKE_DIRECTORY "${MD3_SHADER_DST_DIR}")
+
+file(GLOB MD3_FX_FILES "${MD3_SHADER_SRC_DIR}/*.fx")
+foreach(fx_file ${MD3_FX_FILES})
+  get_filename_component(fx_name "${fx_file}" NAME)
+  configure_file("${fx_file}" "${MD3_SHADER_DST_DIR}/${fx_name}" COPYONLY)
+endforeach()
+
+message(STATUS "MilkDrop3: Copied HLSL shaders → ${MD3_SHADER_DST_DIR}/")
+
+# ==========================================================
+# MilkDrop3: Post-build 将 HLSL Shader (data/*.fx) 部署到 EXE 输出目录
+#   · m_szMilkdrop2Path 在运行时指向 EXE 所在目录
+#   · ReadFileToString() 以 m_szMilkdrop2Path + "data\\*.fx" 查找
+#   · 因此必须确保 {EXE输出目录}/data/*.fx 在编译后即就位
+# ==========================================================
+if (WIN32 AND TARGET Y2Kmeter_Standalone)
+  add_custom_command(TARGET Y2Kmeter_Standalone POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${MD3_SHADER_SRC_DIR}"
+            "$<TARGET_FILE_DIR:Y2Kmeter_Standalone>/data"
+    COMMENT "Y2Kmeter[Standalone]: deploy MilkDrop3 HLSL shaders → data/"
+    VERBATIM
+  )
 endif()

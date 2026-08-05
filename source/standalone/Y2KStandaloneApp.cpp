@@ -57,6 +57,18 @@
  #include "AudioDumpRecorder.h"
 #endif
 
+// JUCE 在 juce_IncludeSystemHeaders.h 中强制 _WIN32_WINNT=0x500，
+// 导致 <shellscalingapi.h> 无法通过 NTDDI_VERSION 守卫暴露 PMv2 API。
+// 此处直接声明所需原型和常量，完全绕过版本宏的干扰。
+#if JUCE_WINDOWS
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)
+#endif
+extern "C" {
+BOOL WINAPI SetProcessDpiAwarenessContext(HANDLE);
+}
+#endif
+
 namespace y2k
 {
 
@@ -81,6 +93,24 @@ public:
         setResizable (true, false);
         setDropShadowEnabled (false);
     }
+
+    // 重写：返回 0 厚度边框。JUCE 的 ResizableBorderComponent 依赖此值绘制
+    // ResizableWindow 的边框装饰线（默认 4px 黑色）。Y2Kmeter 期望完全无边框的
+    // 窗口外观（WS_POPUP），边框由 Editor::paint 中的 PinkXP 抬头栏与关闭按钮
+    // 自行绘制。0 厚度仍保留 ResizableBorderComponent 作为子组件以辅助鼠标
+    // zone 检测，但 paint 不绘制任何像素（borderSize == 0）。
+    // 窗口缩放由 Windows 原生 WM_NCHITTEST（windowIsResizable 标志）处理。
+    juce::BorderSize<int> getBorderThickness() const override
+    {
+        return {};
+    }
+
+    // 重写：跳过 ResizableWindow::paint() 的 fillResizableWindowBackground 黑色
+    // 填充。当 getBorderThickness() 返回 0 时，Editor 填满整个窗口（0,0,w,h），
+    // 但 ResizableWindow::paint() 仍会用 Colours::black 填充全窗——这个黑色底
+    // 在 Editor OpenGL 渲染边缘可能露出 1px，产生"左侧有边、右侧无"的视觉不对称。
+    // 窗口内容完全由 Editor 及其子组件（workspace、titleBar）自绘，无需额外 fill。
+    void paint(juce::Graphics&) override {}
 
     // 用户点击系统任务栏"关闭"/ Alt+F4 / Editor 上的关闭按钮最终都会走这里
     void closeButtonPressed() override
@@ -127,106 +157,76 @@ public:
     // --------------------------------------------------
     void initialise (const juce::String&) override
     {
+       #if JUCE_WINDOWS
+        // ---- 进程级 PerMonitorV2 DPI 感知 ----
+        // 必须在创建任何窗口之前调用；MilkDrop3 的 WS_POPUP 嵌入窗口依赖统一
+        // 的进程 DPI 上下文，避免主窗口与嵌入 popup 在不同缩放屏幕之间的坐标
+        // 换算失配。除此 API 外，本函数保持与 v2.3.4 完全一致的启动序列
+        // （pluginHolder → mainWindow → addToDesktop + setVisible(true)），
+        // 严禁在此处插入任何窗口创建或 TimerThread 预热之类的 workaround，
+        // 否则会引发 setVisible(true) → toFront → LdrLockLoaderLock 死锁。
+        ::SetProcessDpiAwarenessContext(
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+       #endif
+
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
-            appProperties.getUserSettings(),   // 设置持久化
-            false,                             // takeOwnershipOfSettings
-            juce::String{},                    // preferredDefaultDeviceName
-            nullptr,                           // preferredSetupOptions
+            appProperties.getUserSettings(),
+            false,
+            juce::String{},
+            nullptr,
             juce::Array<juce::StandalonePluginHolder::PluginInOuts>{},
-            false                              // shouldAutoOpenMidiDevices
+            false
         );
 
-        // 1.0) 关键：关闭 JUCE Standalone 默认的"静音输入"开关
-        //      StandalonePluginHolder 为了"防新手把麦克风 → 扬声器的反馈"，首次启动时把
-        //      shouldMuteInput 默认置 true（桌面端 isInterAppAudioConnected() == false → !false = true）。
-        //      后果：即便你选了任何输入设备，JUCE audio callback 在 line 563 会把
-        //      inputChannelData 硬替换成零 buffer → processBlock 始终收到全 0 →
-        //      AnalyserHub 没有信号，所有模块像死的一样。
-        //      我们这边 Processor 已经在 processBlock 里强制清空输出 buffer（杜绝回放），
-        //      不再需要这层"保险"，所以这里强制关掉。
-        //      同时显式写原子 muteInput（shouldMuteInput 是 UI Value，通过 valueChanged
-        //      异步写 muteInput；在第一次回调到来前我们直接写原子位以绝后患）。
         pluginHolder->shouldMuteInput.setValue (false);
         pluginHolder->muteInput.store (false);
 
-        // 1.1) 防止 processor 的输出回路造成反馈：Holder 默认把 processor 的输出直接送回
-        //      默认扬声器。我们用 muteInput=true 让 Holder 静音"送进 processor 的输入"，
-        //      同时 Processor::processBlock 里也已显式清空所有输出 buffer → 双保险：
-        //      扬声器/耳机不会再接收到 processor 产生的任何声音（防止 loopback 模式下的循环）。
-        //      注：这里 shouldMuteInput 影响的是"喂给 processor 的 input buffer"，
-        //         我们真正依赖的其实是 Processor::processBlock 的输出清零；muteInput 同时
-        //         开启可避免 AudioDeviceManager 的硬件输入被 Player 回灌到 processor。
-        //         —— 但普通模式下我们仍要走硬件输入 → 不能全局 mute。
-        //      折中：保持 shouldMuteInput=false（默认），依赖 Processor 输出清零来断反馈。
-
-        // 1.15) 恢复上次选择的 UI 主题（PinkXP ThemeId）
-        //       · 必须在 createEditor() 之前应用：否则 Editor 构造里所有子组件会先
-        //         用默认 winXP 配色构建一遍，再被主题订阅回调刷新——中间会有一
-        //         帧明显的"先粉后变色"，且部分缓存（LookAndFeel ColourScheme 等）
-        //         以构造时的配色固化后需要额外 sendLookAndFeelChange 才能彻底刷新。
-        //       · settings 里存整数（强转 ThemeId），缺键/越界兜底为 winXP。
-        //       · ThemeId 枚举的数值顺序不会被动（新主题追加到末尾），因此存值稳定。
-        //       · 自定义主题（custom）需要额外读取双色并调用 applyCustomTheme。
+        // 恢复 UI 主题（必须在 createEditor 之前）
         {
             const int savedThemeRaw = getUserSettings()
                 .getIntValue ("ui.themeId", (int) PinkXP::ThemeId::winXP);
-
             if (savedThemeRaw == (int) PinkXP::ThemeId::custom)
             {
-                // 自定义主题：读取保存的双色并重建
                 auto& s = getUserSettings();
-                const juce::String primaryStr =
-                    s.getValue ("ui.customPrimary", "ffec4d85");
-                const juce::String secondaryStr =
-                    s.getValue ("ui.customSecondary", "ffffffff");
                 const juce::Colour primary =
-                    juce::Colour::fromString (primaryStr);
+                    juce::Colour::fromString(s.getValue("ui.customPrimary", "ffec4d85"));
                 const juce::Colour secondary =
-                    juce::Colour::fromString (secondaryStr);
-                PinkXP::applyCustomTheme (primary, secondary);
+                    juce::Colour::fromString(s.getValue("ui.customSecondary", "ffffffff"));
+                PinkXP::applyCustomTheme(primary, secondary);
             }
             else
             {
                 const auto& themes = PinkXP::getAllThemes();
                 PinkXP::ThemeId targetId = PinkXP::ThemeId::winXP;
                 for (const auto& t : themes)
-                {
                     if ((int) t.id == savedThemeRaw) { targetId = t.id; break; }
-                }
-                PinkXP::applyTheme (targetId);
+                PinkXP::applyTheme(targetId);
             }
         }
 
-        // 1.2) 关键：在 createEditor 之前把上一次保存的 plugin state 恢复到 Processor。
-        //      StandalonePluginHolder::reloadPluginState() 会读 settings 里的 "filterState"
-        //      并调 processor->setStateInformation() → 反序列化 savedLayoutXml。
-        //      只有这样 Editor 构造里的 loadInitialModules() 才能读到 savedLayoutXml，
-        //      走"恢复上次布局"分支而不是默认瀑布布局。
         pluginHolder->reloadPluginState();
 
         // 2) 构建无边框窗口
         //    背景色用纯黑而非 LookAndFeel 默认灰色——Y2K 界面本身是暗黑风格，
         //    黑色底色在首帧渲染前的瞬间几乎是不可感知的（而灰色会很明显地闪现）。
         //    这是消除启动闪屏的最简方式：闪黑不闪灰。
+        //    ⚠ 此时**不**调用 addToDesktop() / setVisible(true)——必须在下方
+        //    restoreBounds 之后、initialise() 尾部一次性完成，保证与 v2.3.4 序列
+        //    完全一致。切勿在此提前 addToDesktop 或做 setVisible(false)+setVisible(true)
+        //    的分裂显示，会引发 setVisible(true) → toFront → LdrLockLoaderLock 死锁。
         mainWindow = std::make_unique<Y2KMainWindow> (getApplicationName(),
                                                       juce::Colours::black);
 
-        // 3) 取插件自己的 Editor 作为窗口内容
-        //    关键：使用 setContentNonOwned —— 由本 App 管理 editor 的生命周期。
-        //    因为 AudioProcessorEditor 析构时会断言 processor.getActiveEditor() != this，
-        //    必须在 delete editor 之前显式调用 processor->editorBeingDeleted(editor)
-        //    让 processor 清掉它内部的 activeEditor 指针。
+        // ---- 3) 创建编辑器并挂载到窗口（HWND 已就绪，只修改组件树） ----
+        // setContentNonOwned 此时只调整组件树，不触发 native 资源创/毁。
         if (auto* proc = pluginHolder->processor.get())
         {
             if (auto* editor = proc->createEditorIfNeeded())
             {
-                pluginEditor.reset (editor);
+                pluginEditor.reset(editor);
                 mainWindow->setContentNonOwned (editor, /*resizeToFit*/ true);
 
-                // 4) 填充 Editor 底部的"音频源"下拉框
-                //    · 首项为 System Output (Loopback) 占位（真实切换后续任务实现）
-                //    · 其后枚举所有输入设备（名称 + 设备类型名）
                 if (auto* y2kEditor = dynamic_cast<Y2KmeterAudioProcessorEditor*> (editor))
                 {
                     cachedEditor = y2kEditor;
@@ -234,84 +234,38 @@ public:
 
                     y2kEditor->onAudioSourceChanged = [this](const juce::String& sourceId,
                                                              bool isLoopback)
-                    {
-                        handleAudioSourceChanged (sourceId, isLoopback);
-                    };
+                    { handleAudioSourceChanged (sourceId, isLoopback); };
 
-                    // 预设 Save/Load —— 由 ModuleWorkspace 的 Save/Load 按钮触发，
-                    //   Editor 透传过来。真正的 settings 文件读写只能在 Standalone App
-                    //   这边做（PropertiesFile 的 storage 参数归这里持有）。
                     y2kEditor->onSaveSettingsRequested = [this](juce::File dest)
-                    {
-                        handleExportSettings (dest);
-                    };
+                    { handleExportSettings (dest); };
                     y2kEditor->onLoadSettingsRequested = [this](juce::File src)
-                    {
-                        handleImportSettings (src);
-                    };
+                    { handleImportSettings (src); };
 
-                    // 监听 AudioDeviceManager 变化（包括外部 Options 面板、
-                    //   热插拔等）→ 自动刷新下拉框内容与选中项
                     if (pluginHolder != nullptr)
                         pluginHolder->deviceManager.addChangeListener (this);
 
                    #if ! JUCE_WINDOWS
-                    // 非 Windows 下的 "Output" 语义通过"虚拟回环输入设备"实现
-                    // （BlackHole / Loopback / Soundflower / VB-Cable ...）
-                    // 读取上次命中的设备名，切换时优先复用。
-                    lastVirtualLoopbackInputName = getUserSettings().getValue ("audio.virtualLoopbackInputName", {});
+                    lastVirtualLoopbackInputName = getUserSettings()
+                        .getValue ("audio.virtualLoopbackInputName", {});
                    #endif
 
-                    // 4.1) 恢复上次的 audio source（默认 "loopback:default"）
-                    const auto savedSource = getUserSettings()
-                        .getValue ("audio.sourceId", "loopback:default");
-                    const bool savedLoopback = savedSource.startsWith ("loopback");
-                    handleAudioSourceChanged (savedSource, savedLoopback);
-                    syncDropdownToCurrentDevice (*y2kEditor);
-
-                    // 4.2) 【已移到下面 mainWindow->setVisible(true) 之后】
-                    //      原因：setChromeVisible 走"标准 Hide 路径"需要 editor.isShowing()=true，
-                    //      而此处 mainWindow 还没 setVisible(true)。
-                    //      改到下方统一在窗口可见后执行，确保 Hide 收缩窗口、Show 还原窗口
-                    //      这一对操作在整个生命周期里都走同一条路径，严格幂等。
-
-                    // 4.3) 恢复"固定置顶"（pin）按钮状态（默认 true — 首次启动就置顶）
-                    //     · 用 setAlwaysOnTopActive 统一接口，内部会显式强推一次
-                    //       setAlwaysOnTop(false)→setAlwaysOnTop(true) 绕开 JUCE 的
-                    //       flag 早退，保证按钮视觉态与系统 HWND_TOPMOST 真实一致。
-                    //     · 此时 editor 尚未 setVisible(true)，顶层是 mainWindow，
-                    //       getTopLevelComponent() 能返回到 Y2KMainWindow。
                     const bool savedAlwaysOnTop = getUserSettings()
                         .getBoolValue ("ui.alwaysOnTop", true);
                     y2kEditor->setAlwaysOnTopActive (savedAlwaysOnTop);
 
-                    // 4.4) 恢复 FPS 限制档位（默认 120）
                     const int savedFpsLimit = getUserSettings()
                         .getIntValue ("ui.fpsLimit", 120);
                     y2kEditor->RestoreFpsLimit (savedFpsLimit);
 
-                    // 4.5) 恢复 Milkdrop 预设索引。即使预设尚未加载
-                    //     （GL 上下文异步初始化），也直接入队跳转请求；
-                    //     newOpenGLContextCreated() 会在初始化时检查
-                    //     是否有待处理跳转，避免闪一帧预设 0。
                     const int savedMilkdropPreset = getUserSettings()
                         .getIntValue ("milkdrop.currentPreset", -1);
                     if (savedMilkdropPreset >= 0)
-                    {
                         y2kEditor->RequestMilkdropPresetJump (savedMilkdropPreset);
-                    }
                 }
             }
         }
 
-        // 5) 恢复窗口 bounds（若 settings 里有合法记录且落在当前桌面范围内）
-        //    注意：此时持久化的 bounds 始终是"show 态等效尺寸"——
-        //    saveMainWindowBounds 在退出时如果窗口处于 hide 态，会先把尺寸
-        //    反算成 show 态（h+=62, 贴底时 y-=62）再写入，保证重启恢复
-        //    的窗口永远对应"show 态"。随后 setChromeVisible(false) 会用
-        //    标准 Hide 路径在该 show 态尺寸上收缩一次，得到正确的 hide 态。
-        //    若不存在历史 bounds（首次启动），默认贴到当前屏幕 userArea 顶部，
-        //    与默认 horizontal bar(t) 预设的定位语义保持一致（不再居中）。
+        // ---- 4) 恢复窗口位置/尺寸 ----
         if (! restoreMainWindowBounds())
         {
             const auto& displays = juce::Desktop::getInstance().getDisplays();
@@ -325,66 +279,66 @@ public:
             mainWindow->setBounds (userArea.getX(), userArea.getY(), w, h);
         }
 
-        // 6) 窗口显示。
+        // ---- 5) 显示窗口 ----
+        //   addToDesktop() 必须在 initialise() 中同步执行（不能 defer 到 callAsync）：
+        //   addToDesktop 创建原生 HWND → peer 可用 → parentHierarchyChanged 触发
+        //   → renderingEngineConfigured 检测到 peer → 强制切 Software 渲染器 →
+        //   AMD atidxx64.dll Direct2D 死锁被从根上规避。
         //
-        //    addToDesktop() 必须在 initialise() 中同步执行（不能 defer 到 callAsync）：
-        //    addToDesktop 创建原生 HWND → peer 可用 → parentHierarchyChanged 触发
-        //    → renderingEngineConfigured 检测到 peer → 强制切 Software 渲染器 →
-        //    AMD atidxx64.dll Direct2D 死锁被从根上规避。
+        //   setVisible(true) 紧接其后：窗口立即显示，底色为纯黑，与 Editor 首帧
+        //   渲染的暗黑背景无缝衔接，用户感知不到任何闪屏。
         //
-        //    setVisible(true) 紧接其后：窗口立即显示，底色为纯黑（见上方"构建无
-        //    边框窗口"部分），与 Editor 首帧渲染的暗黑背景无缝衔接，用户感知不到
-        //    任何闪屏。之所以不再"等 paint() 回调再 setVisible"——因为 paint()
-        //    需要窗口可见才会被系统调度，等它等于死等。
-        //
-        //    chromeVisible 恢复通过 callAsync 延迟：setChromeVisible 内部依赖
-        //    editor.isShowing() 和 canResizeWindow 的标准路径，必须在窗口可见后执行。
+        //   ⚠ 严禁把 addToDesktop / setVisible(false) 提前到 pluginHolder 创建之前，
+        //   或者在中间穿插 pluginHolder / createEditor 等重型初始化：这会让
+        //   setVisible(true) → visibilityChanged → toFront → peer->toFront →
+        //   SetForegroundWindow 走原生路径时，与 WASAPI/COM 线程持有的
+        //   LdrLockLoaderLock 竞争，出现 0x00007ffcdffcd9f8 堆栈死锁。
         mainWindow->addToDesktop();
         mainWindow->setVisible(true);
 
+        // ---- 6) 异步恢复任务 ----
         if (cachedEditor != nullptr)
         {
             juce::MessageManager::callAsync([this]() {
                 if (cachedEditor == nullptr) return;
+
+                const auto savedSource = getUserSettings()
+                    .getValue("audio.sourceId", "loopback:default");
+                const bool savedLoopback = savedSource.startsWith("loopback");
+                handleAudioSourceChanged(savedSource, savedLoopback);
+                syncDropdownToCurrentDevice(*cachedEditor);
+
                 const bool savedChrome = getUserSettings()
                     .getBoolValue("ui.chromeVisible", true);
                 cachedEditor->setChromeVisible(savedChrome);
+
+                cachedEditor->attachOpenGLContext();
             });
         }
 
-        // 异步触发遥测 + 更新检查（延迟 3 秒，避免与首帧渲染争抢资源）
-        //   · 授权状态由安装包写入注册表，LoadFromRegistry() 读取；
-        //   · 默认未授权（不发送数据），仅安装时勾选同意后才启用。
+        // ---- 7) 异步遥测 + 更新检查 ----
         {
             y2k::network::TelemetryClient::GetInstance().LoadFromRegistry();
-
             juce::Timer::callAfterDelay(3000, [this]() {
                 auto& settings = getUserSettings();
-                const bool isPlugin = false;
-
-                // 1) 启动心跳（若未授权则内部跳过）
                 y2k::network::TelemetryClient::GetInstance()
-                    .SendStartupPing(&settings, isPlugin);
+                    .SendStartupPing(&settings, false);
 
-                // 2) 异步检查更新
+                const juce::String platform =
 #if JUCE_WINDOWS
-                const juce::String platform = "win-x64";
+                    "win-x64";
 #elif JUCE_MAC
-                const juce::String platform = "macos";
+                    "macos";
 #elif JUCE_LINUX
-                const juce::String platform = "linux";
+                    "linux";
 #else
-                const juce::String platform = "unknown";
+                    "unknown";
 #endif
                 y2k::network::CheckForUpdatesAsync(
-                    juce::String(JucePlugin_VersionString),
-                    platform,
-                    &settings,
+                    juce::String(JucePlugin_VersionString), platform, &settings,
                     [&settings](const y2k::network::UpdateInfo& info) {
-                        if (info.has_update) {
-                            y2k::network::ShowUpdateDialog(
-                                info, &settings);
-                        }
+                        if (info.has_update)
+                            y2k::network::ShowUpdateDialog(info, &settings);
                     });
             });
         }

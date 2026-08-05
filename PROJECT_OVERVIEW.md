@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.3.5`）
+- **产品名**：`Y2Kmeter` （版本：`2.3.6`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -2423,6 +2423,133 @@ Standalone 模式下：
 **踩坑记录**：
 - `juce::Colour::contrasting()` 在文字阴影场景下不可靠：白色文字 → 黑色阴影（正常），深色文字 → 白色光晕（视觉偏移）。阴影颜色应从背景色而非文字色衍生。
 - `replace_in_file` 对短字符串（如 `"v2.3.4"`）会因匹配多次而失败，需为每处提供包含周围足够多唯一行上下文的 `old_string`。
+
+---
+
+### 8.7 v2.3.6 Milkdrop3 模块交互 bug 全面修复 + `milkdrop3-dev-guard` Skill v1.2.0
+
+本轮共修复 3 个稳定态 bug + 1 个跨模块回归，聚焦 `Milkdrop3Module` 与 `ControlBarOverlay`（抬头控件栏）、`D3dChildWindow`（视频子窗口），并在此过程中把踩坑经验反哺到 `milkdrop3-dev-guard` Skill。
+
+#### 1. 修复的核心 bug
+
+| # | 症状 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 展开预设跳转弹窗后，点击视频区域整个抬头控件栏会消失，且无法通过重新点击恢复；只有挪动模块位置或切走再切回才恢复 | `D3dChildWindow::WndProc` 处理 `WM_LBUTTONDOWN` 时把 `SetWindowPos` 的 `hWndInsertAfter` 传成了 `d3d_child_hwnd_`——Win32 语义是"置于其下"，overlay 被塞到 D3D popup 之下 | 改为 `SetWindowPos(overlay, HWND_TOP, ...)`；同时统一"点击 D3D popup 时保持 focused_/visible_ 不变"，只有点击模块外区域才 `SetFocusVisual(false)` |
+| 2 | 抬头控件栏颜色跟随软件主题预设，与视频区黑底冲突 | `UpdateThemeColors()` 直接引用 `PinkXP::pink100/200/…` 系列 | 全部改为固定灰阶：`RGB(0x1E,0x1E,0x1E)/0x33/0x66/0xCC/0xF0`，与主题解耦 |
+| 3 | 预设跳转弹窗内输入编号并回车后，预设编号变了但未真正切换（需重新聚焦模块才能看到 index 改变） | `EditSubclassProc` 在 `WM_CHAR` 里检测 `VK_RETURN`，单行 EDIT 中此路径不可靠 | 将 `VK_RETURN` 处理搬到 `WM_KEYDOWN`，与 `VK_ESCAPE` 保持一致 |
+| 4 | 一度出现全软件外框黑边、标题栏文字变小圆圈、右侧边不对称 | 中间尝试修复 D3D9 popup 偏移时误改了 `third_party/JUCE/modules/juce_gui_basics/native/juce_Windowing_windows.cpp`（`UWPUIViewSettings` / renderer / `DwmSetWindowAttribute` / `getBorderThickness`） | `git checkout -- third_party/JUCE` 完整回滚；milkdrop3 DPI 问题只在 milkdrop3 内部用 `logicalToPhysical` 解决 |
+
+#### 2. 关键文件变更
+
+| 文件 | 变更 |
+|---|---|
+| [`source/ui/modules/Milkdrop3Module.cpp`](/I:/Y2KMeter/source/ui/modules/Milkdrop3Module.cpp) | `ControlBarOverlay::SetVisible/Reposition` 使用 `HWND_TOP` 而非 D3D HWND；`UpdateThemeColors()` 改为固定灰阶；`EditSubclassProc` 的 `VK_RETURN` 从 `WM_CHAR` 搬到 `WM_KEYDOWN`；跳转弹窗按钮绘制块作用域内变量独立命名（`oldPnCn/nullBrCn/oldBrCn`） |
+| [`third_party/JUCE/**`](/I:/Y2KMeter/third_party/JUCE) | ⚠️ **无变更**（本轮中间尝试修改后已完整回滚，禁止再次触碰） |
+| [`docs/skills/milkdrop3-dev-guard/**`](/I:/Y2KMeter/docs/skills/milkdrop3-dev-guard) | Skill 升级到 v1.2.0：SKILL.md 新增触发条件、12 项前置检查、12 问自检；forbidden-list.md 追加 F11-F15 五条禁令；symbol-facts.md 追加 §10 ModulePanel 成员可见性 + §11 Win32 API 语义速查；lessons.md 追加 v23 章节；compile-verify.md 追加 3 条编译错误、2 条运行时故障、§8 AI 编译验证协作原则；新增 `scripts/check_forbidden_patterns.py` 自动扫描器 |
+| [`.codebuddy/skills/milkdrop3-dev-guard/**`](/I:/Y2KMeter/.codebuddy/skills/milkdrop3-dev-guard) | 与 docs/ 下 Skill 完全同步（CodeBuddy 平台加载路径） |
+
+#### 3. Skill 优化（v1.1.0 → v1.2.0）核心新增
+
+- **触发条件**：新增"修改 `ControlBarOverlay` / `D3dChildWindow::WndProc`"、"新增 EDIT 子控件"、"排查全软件外框回归"、"关键词 `UWPUIViewSettings` / `juce_Windowing_windows.cpp` / `closeButtonPressed`"。
+- **前置检查（12 项）**：新增 4 项——`ModulePanel::closeButtonPressed/closeButtonHovered` private 事实、`SetWindowPos hWndInsertAfter` 语义、EDIT 控件 `VK_RETURN` 只在 `WM_KEYDOWN`、`third_party/JUCE/**` 禁区。
+- **禁止事项（F11-F15）**：JUCE 窗口框架禁区、`ModulePanel` private 成员误用、`SetWindowPos` 语义反向、`EDIT + WM_CHAR + VK_RETURN`、C++ 块作用域跨块复用局部变量。
+- **自检（12 问）**：新增 4 问对应上述 4 类新禁令。
+- **静态扫描脚本**：新增 [`check_forbidden_patterns.py`](/I:/Y2KMeter/docs/skills/milkdrop3-dev-guard/scripts/check_forbidden_patterns.py)（8 条判定：F2/F3/F5/F6/F7/F11/F12/F13/F14），配合原有 [`check_init_sequence.py`](/I:/Y2KMeter/docs/skills/milkdrop3-dev-guard/scripts/check_init_sequence.py) 组成"启动序列 + 禁令双检"。当前代码状态：两脚本均 `[OK]`。
+
+#### 4. 版本号
+
+| 文件 | 变更 |
+|---|---|
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 `2.3.5` → `2.3.6`（2 处） |
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `#define MyAppVersion "2.3.5"` → `"2.3.6"` |
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | 版本号 `v2.3.5` → `v2.3.6`（4 处） |
+| Skill YAML `metadata.version` | `1.1.0` → `1.2.0` |
+
+#### 5. 踩坑记录（v23 新增，已并入 Skill lessons.md）
+
+- **`SetWindowPos(hwnd, other_hwnd, ...)` 反向陷阱**：`hWndInsertAfter=other_hwnd` = 把本窗口放到 other 之后（下方），要置顶必须 `HWND_TOP`。首次修复时踩到此坑导致"抬头控件栏彻底不可见"额外多花一轮排查。
+- **单行 EDIT 中 Enter 键必须在 `WM_KEYDOWN` 处理**：`WM_CHAR` 中 `VK_RETURN` 依赖父窗口是否为 dialog / 是否有 `IsDialogMessage` 循环，milkdrop3 都不满足。
+- **JUCE 原生窗口代码是全软件共享资源**：milkdrop3 相关 DPI 问题诱惑改 `juce_Windowing_windows.cpp`（`UWPUIViewSettings` / renderer / `DwmSetWindowAttribute`），结果全软件外框、标题栏、右侧边全部回归。铁律：milkdrop3 的所有修复只能在 milkdrop3 目录内。
+- **`ModulePanel::closeButtonPressed / closeButtonHovered` 是 private**：子类不可直接引用（MSVC C2065）。若要在子类里自定义标题栏绘制，要么让基类 `paint(g)` 走默认，要么子类自己维护 hover/press 状态。
+- **C++ 块作用域**：copy-paste 复用绘制代码时，相邻 `if` 块内的 `HPEN oldPn` 等局部变量不能跨块使用（本轮"Go 按钮"→"Cancel 按钮"5 处 C2065）。
+- **AI 命令行编译验证不可靠**：Git Bash 里 `cmd //c` 路径转义反复失败会浪费大量轮次；正确协作方式是 AI 只做静态自检（`read_lints` + `check_init_sequence.py` + `check_forbidden_patterns.py`），完整编译交给用户在 CLion 里跑。
+
+---
+
+## 9. MilkDrop3 模块 v19+v20：坐标空间修复 + 音频接入 + UI 精简
+
+### 9.1 背景
+
+MilkDrop3 (`milkdrop2077/MilkDrop3` 升级版) 被作为独立模块 `Milkdrop3Module` 集成到 Y2Kmeter，使用独立 D3D9 popup 承载渲染（与 JUCE OpenGL 上下文隔离）。v0.1–v0.14 完成初步集成；v0.15（v19）修复了持续 18 轮排查未果的"渲染画面向左上偏移"Bug；v0.16（v20）本轮完成"让模块真正跑起来"的功能补全 + 死代码清理。
+
+### 9.2 关键修改文件与接口
+
+| 文件 | 关键内容 |
+|---|---|
+| [`third_party/milkdrop3/code/vis_milk2/pluginshell.h`](/I:/Y2KMeter/third_party/milkdrop3/code/vis_milk2/pluginshell.h) | **新增 public 成员** `bool m_bY2kExternalSpectrumValid`、`float m_y2kExternalSpectrum[2][NUM_FREQUENCIES]`，供宿主注入外部频谱 |
+| [`third_party/milkdrop3/code/vis_milk2/pluginshell.cpp`](/I:/Y2KMeter/third_party/milkdrop3/code/vis_milk2/pluginshell.cpp) | `AnalyzeNewSound()` 内 `time_to_frequency_domain(...)` 之后：若外部 spectrum 有效则 `memcpy` 覆盖 `m_sound.fSpectrum` 并 consume-once 清标志 |
+| [`source/ui/modules/Milkdrop3Api.h`](/I:/Y2KMeter/source/ui/modules/Milkdrop3Api.h) / [`.cpp`](/I:/Y2KMeter/source/ui/modules/Milkdrop3Api.cpp) | 单例接口，5-phase 初始化 + `FeedPcm / FeedSpectrum / AddPreRenderInjector / RemovePreRenderInjector / EnablePresetInfoOverlay / ShowPresetTitleAnim / LoadPreset / Next/Prev/RandomPreset`；删除 `Initialize / CreateRenderWindow / SetPresetDir / CycleRenderScale / ApplyRenderScale / render_scale_` 等死代码 |
+| [`source/ui/modules/Milkdrop3Module.h`](/I:/Y2KMeter/source/ui/modules/Milkdrop3Module.h) / [`.cpp`](/I:/Y2KMeter/source/ui/modules/Milkdrop3Module.cpp) | JUCE 模块类；D3D9 popup（`WS_POPUP` owned by root，物理坐标）；`onFrame` 加锁快照；pre-render injector 集中投喂 PCM+Spectrum；标题栏 `< ? > i` 四按钮；左键交互全部内敛 |
+| [`source/ui/modules/Md3DebugLog.h`](/I:/Y2KMeter/source/ui/modules/Md3DebugLog.h) / [`.cpp`](/I:/Y2KMeter/source/ui/modules/Md3DebugLog.cpp) | 日志工具，写 `%TEMP%/milkdrop3_debug.log` + OutputDebugString。仅保留错误路径使用 |
+| [`docs/MilkDrop3_Integration.md`](/I:/Y2KMeter/docs/MilkDrop3_Integration.md) | 精简后仅保留 v19 最终修复分析与 v20 变更详情 |
+
+### 9.3 数据流
+
+```
+AnalyserHub (audio thread → hub timer)
+   │
+   │  addFrameListener(this)
+   ▼
+Milkdrop3Module::onFrame(frame)      [UI thread]
+   │  加锁写 AudioSnapshot { LR interleaved, specL, specR, sample_rate }
+   ▼
+Milkdrop3Module Timer (33ms)          [UI thread]
+   ├─ Reposition popup if screenPos changed
+   └─ Milkdrop3Api::RenderFrame()
+        ├─ RunPreRenderInjectors()   →  Milkdrop3Module::FeedEngineFromSnapshot()
+        │                                   ├─ api_.FeedPcm(interleaved, 2048)
+        │                                   └─ api_.FeedSpectrum(specL, specR, 1024, sr)
+        │                                          → plugin_->m_y2kExternalSpectrum[..]
+        │                                          → plugin_->m_bY2kExternalSpectrumValid = true
+        └─ plugin_->PluginRender(pcmL, pcmR)
+             ├─ AnalyzeNewSound()  → 外部 spectrum override 生效
+             ├─ RenderFrame()
+             └─ D3D9 Present → popup 显示
+```
+
+### 9.4 UI 交互
+
+- **标题栏按钮**（JUCE 绘制，popup 未覆盖区）：`<` 上一预设、`?` 随机、`>` 下一预设、`i`/`-` 切换 `m_bShowPresetInfo`。
+- **内容区（popup 内）左键**：`D3dChildWindow::WndProc::WM_LBUTTONDOWN` → `MessageManager::callAsync([]{ NextPreset(); })`；不向 JUCE 父窗口转发。
+- **键盘**：`←/→` 上/下一预设，`Space` 随机。
+- **预设名 overlay**：由引擎自己在 D3D9 surface 内绘制（`m_bShowPresetInfo` 右上角常显 + `LaunchSongTitleAnim` 中央大字弹出），因而不受 popup z-order 遮挡限制。
+- **右键**：本模块**不处理任何右键**，回退到基类 `ModulePanel::mouseDown` 默认行为（弹出 workspace"添加模块"菜单）。
+
+### 9.5 v19 踩坑总结（PMv2 坐标空间）—— 长期规则
+
+进程被 `SetProcessDpiAwarenessContext(PMv2)` 感知化之后：
+
+- **JUCE 坐标系 = 逻辑 DIP**（比如 1080p × 125% → JUCE 认为屏幕是 1536×864）。
+- **Win32 API 坐标系 = 物理像素**（1920×1080）。
+- 两者只在 100% 缩放的主屏原点附近相等，其他位置的差异 = `(x - 0) × (scale - 1)`，随距离原点线性累积，多屏混合缩放场景差异更明显。
+
+**长期规则**（后续任何模块凡与原生 Win32 窗口交互都必须遵守）：
+
+- **JUCE → Win32**（如 `CreateWindowExW / SetWindowPos / MoveWindow` 的坐标或尺寸参数）：必须先经 `juce::Desktop::getInstance().getDisplays().logicalToPhysical(Rectangle)` 或 `logicalToPhysical(Point)` 转换。
+- **Win32 → JUCE**（如 `GetWindowRect` 结果反哺 JUCE 布局）：走 `physicalToLogical(...)` 反向转换。
+- **反例**：`GetDpiForWindow(hwnd) × 逻辑尺寸` 只在单屏或同一缩放下正确，跨屏后 DPI 值会取错，切勿使用。
+
+### 9.6 v20 踩坑总结（引擎侧音频接入）
+
+- **`addFrameListener` 遗漏**：类声明继承 `AnalyserHub::FrameListener` 且实现 `onFrame` 却忘调 `addFrameListener(this)` → `onFrame` 永远不被调用，视觉效果为"静音"。以后为任何模块加音频依赖，都必须核对：**构造 → retain(Kind) + addFrameListener；析构 → removeFrameListener + release(Kind)**。
+- **z-order 与叠加**：任何 `WS_POPUP` 的原生子窗口都会盖住 JUCE 绘制内容，因此模块内 UI 只能在**标题栏**（popup 未覆盖）画，或由引擎自己在 popup 内画。JUCE `Graphics` 想叠 D3D9 popup 之上不可行。
+- **外部数据注入采用"consume-once"模式**：宿主每帧写入 + 置标志 = true，引擎读取后清标志。这样可以简单避免"宿主没调用时也用了旧数据"的问题，如果宿主停投喂会自动回退到引擎内建 FFT。
+- **`unsigned char` PCM 的正确转换**：MilkDrop 内部走 `pWaveL[i] ^ 128 - 128` 还原为 `[-128, +127]`，因此宿主投喂 float 应该做 `clamp × 127 + 128` 而不是靠 int8→uint8 的隐式 wraparound（虽然结果偶合，但依赖 UB）。
+
+### 9.7 待办
+
+- ✅ 用户已确认 v20 音频接入 + v23 交互 bug 修复稳定，已执行 v2.3.5 → v2.3.6 版本号升级并 git commit + push。
+- 目前 `spectrumMag` 是混音单声道，两声道传的是同一份；若后续 `AnalyserHub` 增加独立 L/R 频谱，只需在 `Milkdrop3Module::onFrame` 里分别拷贝即可（`FeedSpectrum` 接口本身已支持 L/R 分离）。
 
 ---
 
