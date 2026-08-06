@@ -355,3 +355,37 @@ start "Y2K-Skill-Build" /MIN cmd /c "cd /d I:\Y2KMeter && I:\Y2KMeter\docs\skill
 - 增量构建：最多 poll 6 次（每次间隔 10 秒 ≈ 1 分钟）。
 
 若达到上限仍无 `[PASS]`/`[FAIL]`，应假设后台进程异常退出，`rm -rf build/skill-verify` 后重试全量构建。
+
+### 9.6 CLion 构建产物缓存导致增量不生效
+
+**现象**：AI 侧 `read_lints` + `skill-verify` 增量构建均通过，但用户在 CLion 中运行仍表现为旧行为（修改未生效），或 CLion 自己编译也通过但二进制行为异常。
+
+**根因**：CMake + NMake 的依赖扫描依赖头文件时间戳和 `#include` 依赖图。以下场景下，NMake 可能**不**重新编译某些看起来"无关"的 translation unit，导致链接产物中包含旧 object：
+
+1. **宏定义变更**：某 `.h` 中的 `#define` 被修改，但包含该 `.h` 的 `.cpp` 通过 `#include` 间接引用，NMake 的 `.d` 依赖文件可能未记录这条间接链。
+2. **模板/内联函数变更**：修改了头文件中定义的模板函数或内联函数，编译器不一定检测到所有使用者（取决于编译器实现和 precompiled header 策略）。
+3. **pimpl / 前向声明绕过的间接依赖**：类 A 的 `.h` 前向声明了类 B，类 A 的 `.cpp` 中 `#include` 了 B 的完整头文件。修改 B 的 `.h` 后，NMake 可能只重编了 A 的 `.cpp` 但未重编依赖 A 的其它 `.cpp`。
+4. **CMake 角色切换回退**：代码从 `.h` 移到 `.cpp`（或反之），CMake dependency graph 未更新。
+
+**解决方案**：删除 CLion 的构建输出目录（而非 `build/skill-verify`），强制全量重新编译：
+
+```bash
+# CLion 默认 RelWithDebInfo 构建输出目录
+rm -rf cmake-build-relwithdebinfo-visual-studio
+```
+
+然后在 CLion 中重新 Build（或通过 CMake → Reload CMake Project 后 Build）。
+
+**注意**：不要同时删除 `build/skill-verify`——skill 的构建脚本使用独立目录，与 CLion 构建目录互不干扰。用户的测试始终应在 CLion 构建的二进制上进行，`skill-verify` 仅用于 AI 侧的快速编译验证。
+
+**判断是否需要清除 CLion 构建产物的自检清单**：
+
+| # | 问题 | 答"是"则需清除 |
+|---|---|---|
+| 1 | 本次修改涉及 `.h` 文件（类声明、宏定义、模板、内联函数）？ | ✅ |
+| 2 | 本次修改移动了函数/类的声明位置（.h ↔ .cpp）？ | ✅ |
+| 3 | 本次修改影响了 `CMakeLists.txt`（链接库、编译选项、源文件列表）？ | ✅ |
+| 4 | 用户反馈"skill-verify 通过了但实际运行还是旧行为"？ | ✅ |
+| 5 | 只有 `.cpp` 实现代码变更（不涉及任何头文件）？ | ❌ 不需要（增量足够） |
+
+**AI 行为规范**：当满足上述清单任一条件时，在提交代码后应主动提醒用户手动执行 `rm -rf cmake-build-relwithdebinfo-visual-studio` 后在 CLion 中全量重新构建。不要用 `terminal` 工具代劳——该目录是用户的 CLion 工作目录，由用户自行管理更安全。

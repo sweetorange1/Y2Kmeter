@@ -350,9 +350,10 @@ ModuleWorkspace::ModuleWorkspace()
                 safe->onAudioSourceChanged (sourceId, isLoopback);
         });
     };
-    addAndMakeVisible (audioSourceBox);
-    // 标记组合框已初始化，visibilityChanged() 中不再重复添加。
-    combos_initialized_ = true;
+    // 不在构造函数中加入组件树，避免 setContentNonOwned 中间态触发
+    // internalHierarchyChanged → parentHierarchyChanged → lookAndFeelChanged →
+    // LoadLibrary → LdrLockLoaderLock 死锁（与 audio 线程竞争）。
+    // 初始化延迟到 parentHierarchyChanged() 中通过 callAsync 安全执行。
 
     // 右下角 Hide 按钮：默认"显示态"不透明
     hideBtn.setButtonText("Hide");
@@ -500,7 +501,8 @@ ModuleWorkspace::ModuleWorkspace()
             safe->layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
         });
     };
-    addAndMakeVisible (layoutPresetBox);
+    // 不在构造函数中加入组件树（同 audioSourceBox 注释）。
+    // 初始化延迟到 parentHierarchyChanged() 中通过 callAsync 安全执行。
 
 
     // 布局预设 Save/Load 按钮（紧邻 layoutPresetBox 左侧）
@@ -756,6 +758,10 @@ juce::Rectangle<int> ModuleWorkspace::snapRect(juce::Rectangle<int> r) const
 
 void ModuleWorkspace::snapToGrid(ModulePanel& panel)
 {
+    // milkdrop3 模块支持弹出为浮动窗口，不受 canvas 边界约束
+    if (panel.getModuleType() == ModuleType::milkdrop3)
+        return;
+
     auto canvas = getCanvasArea();
 
     // 1) 先做网格对齐
@@ -2418,6 +2424,11 @@ void ModuleWorkspace::resized()
     {
         for (auto* m : modules)
         {
+            // milkdrop3 模块支持弹出为浮动窗口，可拖出主界面外，
+            // 不受 canvas 边界约束。交由其内部 FloatWindow 自行管理位置。
+            if (m->getModuleType() == ModuleType::milkdrop3)
+                continue;
+
             auto b = m->getBounds();
 
             // 1) 尺寸超 canvas：缩到 canvas 内（否则接下来 jlimit 会把 upper < lower，挤到原点）
@@ -2455,24 +2466,25 @@ void ModuleWorkspace::resized()
     // P7：窗口尺寸变化 → 画布背景缓存下次 paint 时重建
     canvasBgCacheDirty = true;
 }
-void ModuleWorkspace::visibilityChanged()
+void ModuleWorkspace::parentHierarchyChanged()
 {
-    if (!isShowing()) return;
-    if (combos_initialized_) return;
-    combos_initialized_ = true;
+    // 首次挂载到父组件时，通过 callAsync 延迟到下一个消息循环，
+    // 安全地将 ComboBox 加入组件树。避开 setContentNonOwned 中间态
+    // 的 internalHierarchyChanged 级联（会触发 ComboBox::lookAndFeelChanged
+    // → LoadLibrary → 与 audio 线程竞争 LdrLockLoaderLock → 死锁）。
+    if (combos_initialized_ || getParentComponent() == nullptr)
+        return;
 
-    // 安全兜底：若构造期 addAndMakeVisible 因某种原因未生效
-    // （极罕见：isShowing() 在构造期即为 true），在此补加。
-    if (audioSourceBox.getParentComponent() == nullptr)
+    combos_initialized_ = true;
+    juce::Component::SafePointer<ModuleWorkspace> safe(this);
+    juce::MessageManager::callAsync([safe]
     {
-        addChildComponent(audioSourceBox);
-        audioSourceBox.setVisible(true);
-    }
-    if (layoutPresetBox.getParentComponent() == nullptr)
-    {
-        addChildComponent(layoutPresetBox);
-        layoutPresetBox.setVisible(true);
-    }
+        if (safe == nullptr) return;
+        safe->addChildComponent(safe->audioSourceBox);
+        safe->addChildComponent(safe->layoutPresetBox);
+        safe->audioSourceBox.setVisible(true);
+        safe->layoutPresetBox.setVisible(true);
+    });
 }
 void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
 {
@@ -2729,12 +2741,14 @@ void ModuleWorkspace::updateDragPreview(ModulePanel& movingPanel)
     dragPreviewHGuides.clearQuick();
     r = snapToNeighbours(r, &movingPanel, dragPreviewVGuides, dragPreviewHGuides);
 
-    // 裁剪到工作区
-    auto canvas = getCanvasArea();
-    r.setX(juce::jlimit(canvas.getX(), juce::jmax(canvas.getX(),
-            canvas.getRight()  - r.getWidth()),  r.getX()));
-    r.setY(juce::jlimit(canvas.getY(), juce::jmax(canvas.getY(),
-            canvas.getBottom() - r.getHeight()), r.getY()));
+    // 裁剪到工作区（milkdrop3 模块可拖出主界面，跳过 clamp）
+    if (movingPanel.getModuleType() != ModuleType::milkdrop3) {
+      auto canvas = getCanvasArea();
+      r.setX(juce::jlimit(canvas.getX(), juce::jmax(canvas.getX(),
+              canvas.getRight()  - r.getWidth()),  r.getX()));
+      r.setY(juce::jlimit(canvas.getY(), juce::jmax(canvas.getY(),
+              canvas.getBottom() - r.getHeight()), r.getY()));
+    }
 
     dragPreview    = r;
     hasDragPreview = true;

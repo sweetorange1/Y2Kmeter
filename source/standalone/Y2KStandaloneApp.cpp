@@ -205,7 +205,12 @@ public:
             }
         }
 
-        pluginHolder->reloadPluginState();
+        // pluginHolder->reloadPluginState() 已移至 callAsync 回调中，
+        // 在 addToDesktop + setVisible 之后执行。布局恢复（含 milkdrop3 模块
+        // 创建）会触发 ModuleWorkspace 重绘，此时 CachedImage::RenderThread
+        // 会尝试创建 OpenGL 上下文 → LoadLibrary(GPU 驱动 DLL) → 若 audio
+        // 线程正持有 LdrLockLoaderLock 则死锁。
+        // 延迟到 addToDesktop 之后确保 audio 线程已完成 DLL 加载，安全无竞争。
 
         // 2) 构建无边框窗口
         //    背景色用纯黑而非 LookAndFeel 默认灰色——Y2K 界面本身是暗黑风格，
@@ -279,22 +284,35 @@ public:
             mainWindow->setBounds (userArea.getX(), userArea.getY(), w, h);
         }
 
-        // ---- 5) 显示窗口 ----
-        //   addToDesktop() 必须在 initialise() 中同步执行（不能 defer 到 callAsync）：
-        //   addToDesktop 创建原生 HWND → peer 可用 → parentHierarchyChanged 触发
-        //   → renderingEngineConfigured 检测到 peer → 强制切 Software 渲染器 →
-        //   AMD atidxx64.dll Direct2D 死锁被从根上规避。
+        // ---- 5a) 显示窗口 + GPU 预热（Phase 1）----
+        //   addToDesktop() 创建 UWPUIViewSettings → LoadLibrary(DWM/UXTheme)。
+        //   attachOpenGLContext() 在主线程创建 GL 上下文并启动 RenderThread。
+        //   repaint() 驱动 RenderThread 首帧渲染：创建共享 GL 上下文、渲染
+        //   首个 CachedImage → GPU 驱动 DLL（nvoglv64/atioglxx 等）在此阶段
+        //   被全部加载、GL 扩展指针已解析、LdrLockLoaderLock 已释放。
         //
-        //   setVisible(true) 紧接其后：窗口立即显示，底色为纯黑，与 Editor 首帧
-        //   渲染的暗黑背景无缝衔接，用户感知不到任何闪屏。
-        //
-        //   ⚠ 严禁把 addToDesktop / setVisible(false) 提前到 pluginHolder 创建之前，
-        //   或者在中间穿插 pluginHolder / createEditor 等重型初始化：这会让
-        //   setVisible(true) → visibilityChanged → toFront → peer->toFront →
-        //   SetForegroundWindow 走原生路径时，与 WASAPI/COM 线程持有的
-        //   LdrLockLoaderLock 竞争，出现 0x00007ffcdffcd9f8 堆栈死锁。
-        mainWindow->addToDesktop();
-        mainWindow->setVisible(true);
+        //   此阶段**不**执行 reloadPluginState()——避免模块恢复触发的额外
+        //   repaint 在 RenderThread 完成 GPU 初始化前就进入 renderOpenGL()
+        //   → LoadLibrary(GPU驱动) + 持有 MessageManager::Lock → 死锁。
+        juce::MessageManager::callAsync([this] {
+            if (mainWindow) {
+                mainWindow->addToDesktop();
+                mainWindow->setVisible(true);
+            }
+            if (cachedEditor != nullptr) {
+                cachedEditor->attachOpenGLContext();
+                cachedEditor->repaint();
+            }
+        });
+
+        // ---- 5b) 布局恢复（Phase 2，首帧渲染完成之后）----
+        //   独立 callAsync，在第一阶段 repaint → RenderThread 首帧完成后执行。
+        //   此时 GPU 驱动已载入、loader lock 已释放，模块创建触发的后续 repaint
+        //   进入 renderOpenGL() 均安全无竞争。
+        juce::MessageManager::callAsync([this] {
+            if (pluginHolder)
+                pluginHolder->reloadPluginState();
+        });
 
         // ---- 6) 异步恢复任务 ----
         if (cachedEditor != nullptr)
@@ -311,8 +329,6 @@ public:
                 const bool savedChrome = getUserSettings()
                     .getBoolValue("ui.chromeVisible", true);
                 cachedEditor->setChromeVisible(savedChrome);
-
-                cachedEditor->attachOpenGLContext();
             });
         }
 

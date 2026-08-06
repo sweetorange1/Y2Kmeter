@@ -467,13 +467,15 @@ void ModulePanel::mouseDrag(const juce::MouseEvent& e)
     if (dragMode == DragMode::move)
     {
         auto newTopLeft = dragStartBounds.getTopLeft() + delta;
-        // 不出父容器
-        if (auto* parent = getParentComponent())
-        {
-            const int maxX = juce::jmax(0, parent->getWidth()  - getWidth());
-            const int maxY = juce::jmax(0, parent->getHeight() - getHeight());
-            newTopLeft.x = juce::jlimit(0, maxX, newTopLeft.x);
-            newTopLeft.y = juce::jlimit(0, maxY, newTopLeft.y);
+        // 不出父容器（milkdrop3 除外：支持拖出软件窗口边界）
+        if (getModuleType() != ModuleType::milkdrop3) {
+            if (auto* parent = getParentComponent())
+            {
+                const int maxX = juce::jmax(0, parent->getWidth()  - getWidth());
+                const int maxY = juce::jmax(0, parent->getHeight() - getHeight());
+                newTopLeft.x = juce::jlimit(0, maxX, newTopLeft.x);
+                newTopLeft.y = juce::jlimit(0, maxY, newTopLeft.y);
+            }
         }
         setTopLeftPosition(newTopLeft);
     }

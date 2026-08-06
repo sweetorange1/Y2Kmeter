@@ -4,34 +4,41 @@
   Milkdrop3Module.h
   Y2Kmeter — MilkDrop3 独立 D3D9 可视化模块（自 v2.4.0 起）。
 
-  架构
+  架构（v2.4.0+：外部窗口模式）
   --------------------------------------------------------------------------
-  D3D9 popup（WS_POPUP owned by JUCE root）始终占据整个模块内容区，
-  不再因控件栏显隐而改变尺寸。控件栏以独立 HWND overlay（GDI 渲染）
-  悬浮于 D3D9 popup 之上，聚焦时显示、失焦时隐藏，避免 D3D9 设备重置闪烁。
+  模块渲染始终在独立的 NativeExternalWindow（WS_POPUP | WS_EX_TOOLWINDOW，
+  owned by 主窗口 root HWND）中进行，彻底摆脱 JUCE 父容器裁剪限制。
+  D3D9 popup 与 ControlBarOverlay 保持 root-owned，通过屏幕物理坐标与外部窗口对齐。
 
-    ┌─ Milkdrop3Module (ModulePanel) ─────────────────────────────┐
-    │  JUCE 标题栏："MilkDrop3"                          [×]       │
-    ├─────────────────────────────────────────────────────────── ┤
-    │  ┌─ Overlay HWND（聚焦可见，GDI 渲染，位于 D3D9 popup 之上）─┐ │
-    │  │ [<]  nameArea  [A] [>] [?]                              │ │
-    │  └─────────────────────────────────────────────────────────┘ │
-    │  ┌────────────────────────────────────────────────────────┐ │
-    │  │ D3D9 popup (WS_POPUP, 固定全尺寸，不再因焦点而 resize)  │ │
-    │  │  ├─ D3D9 Device / BackBuffer                          │ │
-    │  │  └─ Milkdrop3Api::RenderFrame() → Present             │ │
-    │  └────────────────────────────────────────────────────────┘ │
-    └──────────────────────────────────────────────────────────────┘
+    ┌─ NativeExternalWindow (owned by root, WS_EX_TOOLWINDOW) ─────────┐
+    │  GDI Title Bar (26px): "MilkDrop3"                      [×]      │
+    │  ─────────────────── 2px border ──────────────────────────────── │
+    │  ┌─ ControlBarOverlay HWND（GDI，悬浮于 D3D9 popup 上方）─────┐ │
+    │  │ [<]  nameArea  [A] [>] [?]                                 │ │
+    │  └────────────────────────────────────────────────────────────┘ │
+    │  ┌─ D3D9 popup (root-owned, screen coords) ──────────────────┐ │
+    │  │  ├─ D3D9 Device / BackBuffer                              │ │
+    │  │  └─ Milkdrop3Api::RenderFrame() → Present                 │ │
+    │  └───────────────────────────────────────────────────────────┘ │
+    └──────────────────────────────────────────────────────────────────┘
 
-  交互逻辑（与 MilkdropModule 统一）
+    ┌─ Milkdrop3Module (ModulePanel placeholder in Workspace) ─────────┐
+    │  JUCE Title Bar: "MilkDrop3"                            [×]      │
+    │  ────────────────────────────────────────────────────────────── │
+    │  "MilkDrop3 — External Window"  (灰色占位面板)                   │
+    └──────────────────────────────────────────────────────────────────┘
+
+  交互逻辑
   --------------------------------------------------------------------------
-  · 控件栏 overlay 悬浮于 D3D9 popup 之上，聚焦时显示、非聚焦时隐藏。
-  · 鼠标进入模块内容区 / 点击 D3D9 popup 时自动聚焦；4 秒无交互自动隐藏。
-  · 预设名以 "3/100 presetName" 格式显示在 overlay 内（不再依赖 D3D9 引擎 overlay）。
-  · overlay 内原生 EDIT 控件处理预设跳转输入（不再依赖 JUCE TextEditor）。
-  · overlay 不挤占 D3D9 布局空间，视频窗尺寸始终保持固定，无界面刷新频闪。
+  · 外部窗口中：D3D9 视频渲染 + GDI 控件栏覆盖层始终可见可交互。
+  · 点击外部窗口标题栏拖拽至任意位置/显示器，不受主窗口边界限制。
+  · 外部窗口 × 按钮关闭模块；主窗口最小化时外部窗口自动隐藏。
+  · JUCE placeholder 在 Workspace 中可拖拽（clamp 已对 milkdrop3 跳过），
+    外部窗口位置自动跟随 JUCE placeholder 位置。
+  · 预设名以 "3/100 presetName" 在 overlay 内显示。
+  · overlay 内原生 EDIT 控件处理预设跳转输入。
 
-  数据流（引擎所需数据全部经 pre-render injector 通道，方便扩展）
+  数据流（引擎所需数据全部经 pre-render injector 通道）
   --------------------------------------------------------------------------
     AnalyserHub::FrameListener::onFrame()
       → cache latest PCM + spectrum snapshot (thread-safe)
@@ -92,6 +99,9 @@ public:
   // === 焦点与叠加层交互（与 MilkdropModule 统一）===
   void SetFocusVisual(bool shouldFocus);
 
+  // === 外部窗口同步（自 v2.4.0）===
+  void SyncExternalWindowChildren();  ///< 将 D3D9/overlay 对齐到外部窗口
+
   // === 键盘交互 ===
   bool keyPressed(const juce::KeyPress& key) override;
 
@@ -117,6 +127,10 @@ private:
   // ---- 控件栏覆盖层（独立 HWND，悬浮于 D3D9 popup 之上）----
   class ControlBarOverlay;
   std::unique_ptr<ControlBarOverlay> overlay_;
+
+  // ---- 外部独立窗口（自 v2.4.0，替代 JUCE 内嵌渲染）----
+  class NativeExternalWindow;
+  std::unique_ptr<NativeExternalWindow> external_window_;
 
   // ---- 引擎 API 单例引用 ----
   milkdrop3_api::Api& api_;
@@ -172,6 +186,7 @@ private:
 
   // ---- 焦点与显隐（与 MilkdropModule 统一）----
   bool         focused_               = true;
+  HWND         root_hwnd_             = nullptr;  ///< 主窗口 root HWND，最小化同步
 
   // ---- 预设名称变更检测（避免异步加载中读取旧名称）----
   std::wstring last_announced_name_;

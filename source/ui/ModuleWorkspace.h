@@ -521,10 +521,10 @@ public:
     void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
 
-    /** 组件有效可见性变化时回调。
-     *  首次真正可见（isShowing()==true）时激活延迟初始化的 ComboBox，
-     *  避免 setContentNonOwned 中间态的 hierarchy changed 引发堆竞争死锁。 */
-    void visibilityChanged() override;
+    /** 首次挂载到父组件层级时，通过 callAsync 安全延迟将 ComboBox
+     *  加入组件树，避开 setContentNonOwned 中间态的 hierarchy changed
+     *  级联（会触发 LoadLibrary 导致与 audio 线程的 loader lock 死锁）。 */
+    void parentHierarchyChanged() override;
 
     // P7：将 canvas 底色的 drawSunken + 网格点阵 + Grid 叠加线烘焙到离屏 Image 缓存，
     //   避免每帧 paint() 中 ~13000 次 fillRect(1,1) 的循环绘制。

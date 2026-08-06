@@ -100,6 +100,17 @@ class Milkdrop3Module::D3dChildWindow {
     }
   }
 
+  // 外部窗口模式：以屏幕物理坐标直接定位（不经过 JUCE DPI 转换）
+  void RepositionScreen(int physX, int physY, int physW, int physH) {
+    if (!hwnd_) return;
+    SetWindowPos(hwnd_, nullptr,
+                 physX, physY, physW, physH,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    if (owner_.initialized_) {
+      milkdrop3_api::Api::Instance().OnResize(physW, physH);
+    }
+  }
+
   HWND GetHwnd() const { return hwnd_; }
 
  private:
@@ -221,20 +232,42 @@ class Milkdrop3Module::ControlBarOverlay {
   void Reposition(int x, int y, int w) {
     if (!hwnd_ || !visible_) return;
 
-    const juce::Point<int> logicalGlobalPt =
-        owner_.localPointToGlobal(juce::Point<int>(x, y));
-    const juce::Rectangle<int> physRect =
-        juce::Desktop::getInstance().getDisplays().logicalToPhysical(
-            juce::Rectangle<int>(logicalGlobalPt.x, logicalGlobalPt.y,
-                                 w, bar_height_));
-
-    width_ = physRect.getWidth();
-    SetWindowPos(hwnd_, nullptr,
-                 physRect.getX(), physRect.getY(),
-                 width_, physRect.getHeight(),
-                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    if (use_screen_coords_) {
+      // 外部窗口模式：x, y, w 已是屏幕物理坐标
+      width_ = w;
+      SetWindowPos(hwnd_, HWND_TOP,
+                   x, y,
+                   width_, bar_height_,
+                   SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    } else {
+      // 内嵌模式：x, y, w 来自 JUCE 逻辑坐标，必须转换为物理坐标
+      const juce::Point<int> physPt =
+          juce::Desktop::getInstance().getDisplays().logicalToPhysical(
+              owner_.localPointToGlobal(juce::Point<int>(x, y)));
+      const int physW =
+          juce::Desktop::getInstance().getDisplays().logicalToPhysical(
+              juce::Rectangle<int>(0, 0, w, 1)).getWidth();
+      width_ = physW;
+      SetWindowPos(hwnd_, nullptr,
+                   physPt.x, physPt.y,
+                   width_, bar_height_,
+                   SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
   }
+
+  // 外部窗口模式：以屏幕物理坐标直接定位（不经过 JUCE DPI 转换）
+  void RepositionAtScreenPos(int physX, int physY, int physW) {
+    if (!hwnd_ || !visible_) return;
+    width_ = physW;
+    SetWindowPos(hwnd_, HWND_TOP,
+                 physX, physY,
+                 width_, bar_height_,
+                 SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+  }
+
+  void SetUseScreenCoords(bool use) { use_screen_coords_ = use; }
 
   void Invalidate() {
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
@@ -283,8 +316,19 @@ class Milkdrop3Module::ControlBarOverlay {
     bar_height_ = kControlBarHeight + kJumpDlgHeight;
     if (visible_) {
       // 重新定位以适配新高度
-      const auto content = owner_.getContentBounds();
-      Reposition(content.getX(), content.getY(), content.getWidth());
+      if (use_screen_coords_) {
+        // 外部窗口模式：保持 x 不变，仅更新高度
+        RECT rc; GetWindowRect(hwnd_, &rc);
+        width_ = rc.right - rc.left;
+        SetWindowPos(hwnd_, nullptr,
+                     rc.left, rc.top,
+                     width_, bar_height_,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+      } else {
+        const auto content = owner_.getContentBounds();
+        Reposition(content.getX(), content.getY(), content.getWidth());
+      }
     }
 
     // 创建原生 EDIT 控件作为 overlay 的子窗口。
@@ -328,8 +372,18 @@ class Milkdrop3Module::ControlBarOverlay {
     // 收缩 overlay 高度
     bar_height_ = kControlBarHeight;
     if (visible_) {
-      const auto content = owner_.getContentBounds();
-      Reposition(content.getX(), content.getY(), content.getWidth());
+      if (use_screen_coords_) {
+        RECT rc; GetWindowRect(hwnd_, &rc);
+        width_ = rc.right - rc.left;
+        SetWindowPos(hwnd_, nullptr,
+                     rc.left, rc.top,
+                     width_, bar_height_,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+      } else {
+        const auto content = owner_.getContentBounds();
+        Reposition(content.getX(), content.getY(), content.getWidth());
+      }
     }
   }
 
@@ -851,6 +905,7 @@ class Milkdrop3Module::ControlBarOverlay {
 
   bool visible_ = false;
   bool jump_dialog_open_ = false;
+  bool use_screen_coords_ = false;  ///< 外部窗口模式时 overlay x/y 已是物理像素
 
   OverlayButton hovered_btn_ = OverlayButton::kNone;
   OverlayButton pressed_btn_ = OverlayButton::kNone;
@@ -868,6 +923,245 @@ class Milkdrop3Module::ControlBarOverlay {
 
   HFONT font_bold_  = nullptr;
   HFONT font_plain_ = nullptr;
+};
+
+// ==========================================================================
+// NativeExternalWindow —— 独立外部窗口（自 v2.4.0）
+//
+// WS_POPUP | WS_EX_TOOLWINDOW 顶层窗口，owned by 主窗口 root HWND，
+// 不生成任务栏图标。GDI 自绘标题栏(26px) + 2px 边框，
+// 包裹 D3D9 popup 和 ControlBarOverlay 提供完整窗口 chrome。
+//
+// D3D9 popup 与 overlay 保持原有 root-owned 关系不变（避免 D3D9 device
+// recreate），仅通过屏幕物理坐标与外部窗口对齐。外部窗口通过
+// WM_NCHITTEST→HTCAPTION 支持系统级拖拽，可自由移动到任意显示器。
+//
+// 最小化同步由 Milkdrop3Module::timerCallback 轮询 IsIconic 实现。
+// 关闭(×)按钮触发模块关闭回调。
+// ==========================================================================
+
+class Milkdrop3Module::NativeExternalWindow {
+ public:
+  explicit NativeExternalWindow(Milkdrop3Module& owner) : owner_(owner) {}
+  ~NativeExternalWindow() { Destroy(); }
+
+  using CloseCallback = std::function<void()>;
+
+  bool Create(HWND rootOwner, int physX, int physY, int physW, int physH) {
+    static bool s_class_registered = false;
+    if (!s_class_registered) {
+      WNDCLASSEXW wc = {};
+      wc.cbSize        = sizeof(wc);
+      wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+      wc.lpfnWndProc   = &NativeExternalWindow::StaticWndProc;
+      wc.cbWndExtra    = sizeof(NativeExternalWindow*);
+      wc.hInstance     = GetModuleHandleW(nullptr);
+      wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+      wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+      wc.lpszClassName = L"Y2Kmeter_MD3_ExtWin";
+      if (!RegisterClassExW(&wc)) return false;
+      s_class_registered = true;
+    }
+
+    root_owner_ = rootOwner;
+    content_w_ = physW;
+    content_h_ = physH;
+
+    const int totalW = physW + kBorderW * 2;
+    const int totalH = physH + kTitleBarH + kBorderW;
+
+    hwnd_ = CreateWindowExW(
+        WS_EX_TOOLWINDOW, L"Y2Kmeter_MD3_ExtWin", L"",
+        WS_POPUP | WS_CLIPCHILDREN,
+        physX - kBorderW, physY - kTitleBarH,
+        totalW, totalH,
+        rootOwner, nullptr, GetModuleHandleW(nullptr), this);
+
+    if (!hwnd_) return false;
+
+    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    return true;
+  }
+
+  void Destroy() {
+    if (hwnd_) {
+      DestroyWindow(hwnd_);
+      hwnd_ = nullptr;
+    }
+  }
+
+  void SetCloseCallback(CloseCallback cb) { on_close_ = std::move(cb); }
+
+  HWND GetHwnd() const { return hwnd_; }
+  int GetContentX() const {
+    RECT rc; GetWindowRect(hwnd_, &rc); return rc.left + kBorderW;
+  }
+  int GetContentY() const {
+    RECT rc; GetWindowRect(hwnd_, &rc); return rc.top + kTitleBarH;
+  }
+  int GetContentW() const { return content_w_; }
+  int GetContentH() const { return content_h_; }
+
+  void SetVisible(bool visible) {
+    if (!hwnd_) return;
+    ShowWindow(hwnd_, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+  }
+
+ private:
+  static constexpr int kTitleBarH = 26;
+  static constexpr int kBorderW   = 2;
+
+  static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg,
+                                        WPARAM wparam, LPARAM lparam) {
+    NativeExternalWindow* self = nullptr;
+    if (msg == WM_NCCREATE) {
+      auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
+      self = static_cast<NativeExternalWindow*>(cs->lpCreateParams);
+      SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                        reinterpret_cast<LONG_PTR>(self));
+    } else {
+      self = reinterpret_cast<NativeExternalWindow*>(
+          GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+    if (self) return self->WndProc(hwnd, msg, wparam, lparam);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+  }
+
+  LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    switch (msg) {
+      case WM_NCHITTEST: {
+        // 标题栏区域 → 系统拖拽
+        POINT pt = { static_cast<int>(static_cast<short>(LOWORD(lparam))),
+                     static_cast<int>(static_cast<short>(HIWORD(lparam))) };
+        ScreenToClient(hwnd, &pt);
+        if (pt.y >= 0 && pt.y < kTitleBarH) {
+          RECT crc; GetClientRect(hwnd, &crc);
+          // 关闭按钮区域(右侧 28px)保留给 WM_LBUTTONDOWN 处理
+          if (pt.x >= crc.right - 28)
+            return HTCLIENT;
+          return HTCAPTION;
+        }
+        return HTCLIENT;
+      }
+
+      case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        OnPaint(hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+      }
+
+      case WM_ERASEBKGND:
+        return 1;
+
+      case WM_CLOSE:
+        if (on_close_) on_close_();
+        return 0;
+
+      case WM_LBUTTONDOWN: {
+        POINT pt = { static_cast<int>(static_cast<short>(LOWORD(lparam))),
+                     static_cast<int>(static_cast<short>(HIWORD(lparam))) };
+        if (pt.y < kTitleBarH) {
+          RECT crc; GetClientRect(hwnd, &crc);
+          if (pt.x >= crc.right - 28) {
+            if (on_close_) on_close_();
+            return 0;
+          }
+        }
+        break;
+      }
+
+      case WM_WINDOWPOSCHANGED:
+        // 拖拽后通知 owner 同步 D3D9/overlay 位置
+        juce::MessageManager::callAsync(
+            [owner_ptr = &owner_] { owner_ptr->SyncExternalWindowChildren(); });
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+  }
+
+  void OnPaint(HDC hdc) {
+    RECT rc; GetClientRect(hwnd_, &rc);
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+    HBITMAP oldBmp = static_cast<HBITMAP>(SelectObject(memDC, memBmp));
+
+    // 内容区底色（D3D9 popup 覆盖，实际由 D3D9 Present 填充）
+    HBRUSH contentBg = CreateSolidBrush(RGB(0x00, 0x00, 0x00));
+    RECT contentRc = { kBorderW, kTitleBarH, w - kBorderW, h - kBorderW };
+    FillRect(memDC, &contentRc, contentBg);
+    DeleteObject(contentBg);
+
+    // ---- 标题栏 ----
+    RECT titleRc = { kBorderW, 0, w - kBorderW, kTitleBarH };
+    HBRUSH titleBg = CreateSolidBrush(RGB(0x2A, 0x2A, 0x2A));
+    FillRect(memDC, &titleRc, titleBg);
+    DeleteObject(titleBg);
+
+    SetBkMode(memDC, TRANSPARENT);
+
+    // 标题文字
+    SetTextColor(memDC, RGB(0xF0, 0xF0, 0xF0));
+    HFONT titleFont = CreateFontW(-12, 0, 0, 0, FW_BOLD,
+                                   FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                   OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                   L"Tahoma");
+    HFONT oldF = static_cast<HFONT>(SelectObject(memDC, titleFont));
+    RECT textRc = { kBorderW + 6, 0, w - kBorderW - 32, kTitleBarH };
+    DrawTextW(memDC, L"MilkDrop3", -1, &textRc,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(memDC, oldF);
+    DeleteObject(titleFont);
+
+    // 关闭按钮 (×)
+    RECT closeRc = { w - kBorderW - 28, 0, w - kBorderW, kTitleBarH };
+    SetTextColor(memDC, RGB(0xCC, 0xCC, 0xCC));
+    HFONT closeFont = CreateFontW(-14, 0, 0, 0, FW_BOLD,
+                                   FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                   OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                   L"Tahoma");
+    oldF = static_cast<HFONT>(SelectObject(memDC, closeFont));
+    DrawTextW(memDC, L"\u00D7", -1, &closeRc,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(memDC, oldF);
+    DeleteObject(closeFont);
+
+    // ---- 边框 (2px) ----
+    HPEN borderPen = CreatePen(PS_SOLID, kBorderW, RGB(0x4A, 0x4A, 0x4A));
+    HPEN oldPen = static_cast<HPEN>(SelectObject(memDC, borderPen));
+    HBRUSH nullBr = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
+    HBRUSH oldBr = static_cast<HBRUSH>(SelectObject(memDC, nullBr));
+    ::Rectangle(memDC, 0, 0, w, h);
+    SelectObject(memDC, oldPen);
+    SelectObject(memDC, oldBr);
+    DeleteObject(borderPen);
+
+    // 标题栏下沿分割线
+    HPEN divPen = CreatePen(PS_SOLID, 1, RGB(0x66, 0x66, 0x66));
+    oldPen = static_cast<HPEN>(SelectObject(memDC, divPen));
+    MoveToEx(memDC, kBorderW, kTitleBarH, nullptr);
+    LineTo(memDC, w - kBorderW, kTitleBarH);
+    SelectObject(memDC, oldPen);
+    DeleteObject(divPen);
+
+    BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+    SelectObject(memDC, oldBmp);
+    DeleteObject(memBmp);
+    DeleteDC(memDC);
+  }
+
+  Milkdrop3Module& owner_;
+  HWND hwnd_      = nullptr;
+  HWND root_owner_ = nullptr;
+  int content_w_   = 0;
+  int content_h_   = 0;
+  CloseCallback on_close_;
 };
 
 // ==========================================================================
@@ -895,6 +1189,9 @@ Milkdrop3Module::Milkdrop3Module(AnalyserHub* hub)
 }
 
 Milkdrop3Module::~Milkdrop3Module() {
+  // 0) 销毁外部窗口（若存在），释放原生资源
+  external_window_.reset();
+
   // 1) 反注册 pre-render injector，防止 Api 在销毁过程中回调本对象。
   if (audio_injector_token_ != 0) {
     api_.RemovePreRenderInjector(audio_injector_token_);
@@ -952,6 +1249,34 @@ void Milkdrop3Module::paint(juce::Graphics& g) {
 
   if (error_state_) {
     g.fillAll(juce::Colours::black);
+    return;
+  }
+
+  // 外部窗口模式：JUCE 组件仅显示占位面板，实际渲染在 NativeExternalWindow 中
+  if (initialized_ && external_window_) {
+    const auto bounds = getLocalBounds();
+    PinkXP::drawRaised(g, bounds, juce::Colours::transparentBlack);
+
+    auto tb = getTitleBarBounds();
+    PinkXP::drawPinkTitleBar(g, tb, titleText, 12.0f);
+    g.setColour(PinkXP::dark);
+    g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 1);
+
+    auto cb = getCloseButtonBounds();
+    PinkXP::drawRaised(g, cb, PinkXP::btnFace);
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+    auto cbText = cb;
+    cbText.translate(-1, -1);
+    g.drawText("x", cbText, juce::Justification::centred, false);
+
+    auto content = getContentBounds();
+    g.setColour(juce::Colour(0xFF1E1E1E));
+    g.fillRect(content);
+    g.setColour(juce::Colour(0xFF888888));
+    g.setFont(13.0f);
+    g.drawText("MilkDrop3 — External Window\nDrag title bar to reposition",
+               content, juce::Justification::centred, false);
     return;
   }
 
@@ -1242,6 +1567,25 @@ void Milkdrop3Module::mouseExit(const juce::MouseEvent& e) {
 }
 
 // ==========================================================================
+// 外部窗口同步
+// ==========================================================================
+
+void Milkdrop3Module::SyncExternalWindowChildren() {
+  if (!external_window_ || !d3d_window_) return;
+
+  const int cx = external_window_->GetContentX();
+  const int cy = external_window_->GetContentY();
+  const int cw = external_window_->GetContentW();
+  const int ch = external_window_->GetContentH();
+
+  d3d_window_->RepositionScreen(cx, cy, cw, ch);
+
+  if (overlay_ && overlay_->IsVisible()) {
+    overlay_->RepositionAtScreenPos(cx, cy, cw);
+  }
+}
+
+// ==========================================================================
 // 焦点与叠加层显隐（与 MilkdropModule 统一）
 // ==========================================================================
 
@@ -1264,8 +1608,15 @@ void Milkdrop3Module::SetFocusVisual(bool shouldFocus) {
     overlay_->SetVisible(focused_);
     if (focused_) {
       // 显示时同步位置 + 刷新预设名
-      const auto content = getContentBounds();
-      overlay_->Reposition(content.getX(), content.getY(), content.getWidth());
+      if (external_window_) {
+        overlay_->RepositionAtScreenPos(
+            external_window_->GetContentX(),
+            external_window_->GetContentY(),
+            external_window_->GetContentW());
+      } else {
+        const auto content = getContentBounds();
+        overlay_->Reposition(content.getX(), content.getY(), content.getWidth());
+      }
       SyncOverlayContent();
     }
   }
@@ -1448,19 +1799,53 @@ void Milkdrop3Module::timerCallback() {
   if (initialized_) {
     if (!isShowing()) return;
 
+    // 外部窗口最小化同步：主窗口最小化时隐藏外部窗口
+    if (external_window_ && root_hwnd_) {
+      external_window_->SetVisible(!IsIconic(root_hwnd_));
+    }
+
     // 模块被拖动时同步 popup 位置（layoutContent 不因拖动被回调）
     const auto sp = getScreenPosition();
     if (sp.x != last_screen_x_ || sp.y != last_screen_y_) {
       last_screen_x_ = sp.x;
       last_screen_y_ = sp.y;
-      if (d3d_window_ && last_content_w_ > 0 && last_content_h_ > 0) {
-        d3d_window_->Reposition(last_content_x_, last_content_y_,
-                                 last_content_w_, last_content_h_);
-      }
-      // overlay 也跟随移动
-      if (overlay_ && overlay_->IsVisible()) {
-        const auto content = getContentBounds();
-        overlay_->Reposition(content.getX(), content.getY(), content.getWidth());
+      // 外部窗口模式下，JUCE placeholder 位置变化 → 同步外部窗口
+      if (external_window_) {
+        // 将 JUCE 逻辑坐标转换为屏幕物理坐标，移动外部窗口
+        const juce::Point<int> physTopLeft =
+            juce::Desktop::getInstance().getDisplays().logicalToPhysical(
+                sp);
+        const int physContentW =
+            juce::Desktop::getInstance().getDisplays().logicalToPhysical(
+                juce::Rectangle<int>(0, 0, last_content_w_, 1)).getWidth();
+        const int physContentH =
+            juce::Desktop::getInstance().getDisplays().logicalToPhysical(
+                juce::Rectangle<int>(0, 0, 1, last_content_h_)).getHeight();
+
+        // external window 的 content (没有标题栏和边框) 位于 (physX, physY)
+        RECT ewRc; GetWindowRect(external_window_->GetHwnd(), &ewRc);
+        const int border = 2;
+        const int titleH = 26;
+        const int targetX = physTopLeft.x - border;
+        const int targetY = physTopLeft.y - titleH;
+
+        if (targetX != ewRc.left || targetY != ewRc.top) {
+          SetWindowPos(external_window_->GetHwnd(), nullptr,
+                       targetX, targetY,
+                       physContentW + border * 2,
+                       physContentH + titleH + border,
+                       SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+        }
+      } else {
+        if (d3d_window_ && last_content_w_ > 0 && last_content_h_ > 0) {
+          d3d_window_->Reposition(last_content_x_, last_content_y_,
+                                   last_content_w_, last_content_h_);
+        }
+        // overlay 也跟随移动
+        if (overlay_ && overlay_->IsVisible()) {
+          const auto content = getContentBounds();
+          overlay_->Reposition(content.getX(), content.getY(), content.getWidth());
+        }
       }
     }
 
@@ -1488,6 +1873,8 @@ void Milkdrop3Module::timerCallback() {
       // 等待 JUCE native peer 就绪
       HWND parent_hwnd = reinterpret_cast<HWND>(getWindowHandle());
       if (!parent_hwnd) return;
+
+      root_hwnd_ = GetAncestor(parent_hwnd, GA_ROOT);
 
       // 精确物理尺寸（用模块 top-left 所在屏幕的缩放）
       const juce::Point<int> logicalGlobalTL =
@@ -1602,20 +1989,55 @@ void Milkdrop3Module::timerCallback() {
       last_screen_x_  = getScreenPosition().x;
       last_screen_y_  = getScreenPosition().y;
 
-      if (d3d_window_) {
-        d3d_window_->Reposition(init_x_, init_y_, init_width_, init_height_);
+      // 创建控件栏 overlay（先于外部窗口创建，以便获取其 HWND）
+      {
+        overlay_ = std::make_unique<ControlBarOverlay>(*this);
+        if (!overlay_->Create(root_hwnd_)) {
+          overlay_.reset();
+        } else {
+          overlay_->UpdateThemeColors();
+        }
       }
 
-      // 创建控件栏 overlay（在 D3D9 popup 之后创建以获得更高 z-order）
+      // 创建外部窗口（self-drawn GDI chrome，WS_EX_TOOLWINDOW）
+      // D3D9 popup 由 root_hwnd_ own，随外部窗口位置对齐。
       {
-        HWND rootOwner = GetAncestor(
-            reinterpret_cast<HWND>(getWindowHandle()), GA_ROOT);
-        overlay_ = std::make_unique<ControlBarOverlay>(*this);
-        if (overlay_->Create(rootOwner)) {
-          overlay_->UpdateThemeColors();
+        // 计算 D3D9 popup 当前物理坐标（与外部窗口内容区对齐）
+        const juce::Point<int> d3dLogicalTL =
+            localPointToGlobal(juce::Point<int>(init_x_, init_y_));
+        const juce::Rectangle<int> physContentRect =
+            juce::Desktop::getInstance().getDisplays().logicalToPhysical(
+                juce::Rectangle<int>(d3dLogicalTL.x, d3dLogicalTL.y,
+                                      init_width_, init_height_));
+
+        external_window_ = std::make_unique<NativeExternalWindow>(*this);
+        if (external_window_->Create(root_hwnd_,
+                                      physContentRect.getX(),
+                                      physContentRect.getY(),
+                                      physContentRect.getWidth(),
+                                      physContentRect.getHeight())) {
+          external_window_->SetCloseCallback([this] {
+            juce::MessageManager::callAsync([this] {
+              if (onCloseClicked) onCloseClicked(*this);
+            });
+          });
+
+          // overlay 使用屏幕坐标模式
+          if (overlay_) {
+            overlay_->SetUseScreenCoords(true);
+          }
         } else {
-          overlay_.reset();
+          external_window_.reset();
         }
+      }
+
+      // 将 D3D9 popup 对齐到外部窗口内容区
+      if (d3d_window_ && external_window_) {
+        d3d_window_->RepositionScreen(
+            external_window_->GetContentX(),
+            external_window_->GetContentY(),
+            external_window_->GetContentW(),
+            external_window_->GetContentH());
       }
 
       // 关闭引擎自带的预设名 D3D9 overlay
@@ -1632,13 +2054,15 @@ void Milkdrop3Module::timerCallback() {
       api_.RenderFrame();
       AnnouncePresetNameToEngine();
 
-      // 初始化完成后显式同步 overlay 显隐状态。
-      // SetFocusVisual 内部在 focused_==shouldFocus 时是 no-op，
-      // 但初始化时 overlay 刚刚创建（隐藏状态），必须显式唤醒。
+      // 初始化完成后显式同步 overlay 显隐状态
       if (overlay_ && focused_) {
         overlay_->SetVisible(true);
-        const auto content = getContentBounds();
-        overlay_->Reposition(content.getX(), content.getY(), content.getWidth());
+        if (external_window_) {
+          overlay_->RepositionAtScreenPos(
+              external_window_->GetContentX(),
+              external_window_->GetContentY(),
+              external_window_->GetContentW());
+        }
         SyncOverlayContent();
       }
 
