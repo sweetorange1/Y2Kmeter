@@ -89,6 +89,13 @@ public:
             app->systemRequestedQuit();
     }
 
+    // 重写以消除 ResizableWindow 默认的 4px 边框：本窗口是无边框设计，
+    // 所有 UI chrome 由 Editor 内部的 PinkXP 标题栏 + 关闭按钮自行绘制。
+    juce::BorderSize<int> getBorderThickness() const override
+    {
+        return {};
+    }
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Y2KMainWindow)
 };
 
