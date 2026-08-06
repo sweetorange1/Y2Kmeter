@@ -82,6 +82,9 @@ Thumbs.db
 nul
 tools/milkdrop_tester/nul
 
+# AI 编辑器 skills（仅供 IDE 本地使用，不入库；远端仅维护 docs/skills/）
+.codebuddy/
+
 # AI 协作过程中偶发生成的编译辅助脚本 / 日志，不入库
 /build_output.txt
 /build_skill_verify.bat

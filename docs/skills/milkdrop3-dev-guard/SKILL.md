@@ -5,8 +5,8 @@ description: |
   Milkdrop3Api.*、Md3DebugLog.*、Y2KStandaloneApp.cpp（启动序列）以及第三方引擎
   third_party/milkdrop3/code/vis_milk2/pluginshell.h/cpp 的功能迭代与维护。
   包含 6 条架构铁律（数据流/坐标/z-order/线程/生命周期/启动序列）、引擎修改白名单、
-  禁止事项清单（含加载器锁陷阱）、关键符号事实核对表、修改后 8 项自检、
-  RelWithDebInfo 编译验证与启动序列静态检查脚本。
+  禁止事项清单（含加载器锁陷阱）、关键符号事实核对表、修改后 12 项自检、
+  RelWithDebInfo 编译验证（日志驱动模式，含增量构建）与双静态检查脚本。
   触发场景：修改 milkdrop3 相关代码、排查渲染偏移、排查引擎音频接入、新增预设交互按钮、
   变更模块尺寸/预览、回滚 D3D9 窗口层级、修改 pluginshell 引擎侧字段、
   改动 Y2KStandaloneApp::initialise 启动序列、排查 setVisible 卡死或 LdrLockLoaderLock 死锁、
@@ -20,7 +20,7 @@ compatibility: |
   CLion 或命令行 Git Bash / cmd；构建类型 RelWithDebInfo；生成器 NMake Makefiles。
 metadata:
   author: y2kmeter-team
-  version: "1.2.0"
+  version: "1.3.1"
   data-classification: internal
   audit-level: medium
   scope:
@@ -72,13 +72,13 @@ Y2Kmeter 项目 `milkdrop3` 模块的 AI 开发防呆规范。将 `docs/MilkDrop
 
 ## 3. 执行步骤
 
-1. **完成前置检查**（§2）：并行 `grep_search` 核对全部 6 项事实。
+1. **完成前置检查**（§2）：并行 `grep_search` 核对全部 12 项事实。
 2. **对照适用范围与白名单**（§4.1）：确认修改文件在白名单内，否则先向用户确认。
 3. **遵循 6 条架构铁律**（§4.2）：详见 [references/architecture-rules.md](references/architecture-rules.md)。
 4. **规避禁止事项**（§4.3）：详见 [references/forbidden-list.md](references/forbidden-list.md)。
 5. **编辑代码**：遵循项目 C++17 编码规范。
-6. **修改后自检**（§5）：逐项回答 6 个问题。
-7. **编译验证**（§6）：运行 `scripts/build_skill_verify.bat`。
+6. **修改后自检**（§5）：逐项回答 12 个问题。
+7. **编译验证**（§6）：先静态自检（`read_lints` + `py -3 ...check_init_sequence.py` + `py -3 ...check_forbidden_patterns.py`），再用 `_bg_build.bat` 或 `_bg_incremental_build.bat` 后台启动构建，最后轮询日志 `build\skill-verify\_build_log.txt` 直到出现 `[PASS]` / `[FAIL]`。完整四步闭环见 [compile-verify.md §8](references/compile-verify.md)。
 8. **文档同步**：追加轮次记录到 `docs/MilkDrop3_Integration.md` 附录 D/E。
 9. **不擅自升级版本号 / commit / push**：仅在用户明确确认稳定后再执行。
 
@@ -152,36 +152,57 @@ Y2Kmeter 项目 `milkdrop3` 模块的 AI 开发防呆规范。将 `docs/MilkDrop
 | L | 若新加了 EDIT 子控件的键盘处理：`VK_RETURN` 是否在 `WM_KEYDOWN` 中检测（不是 `WM_CHAR`）？ | 必须 `WM_KEYDOWN`，与 `VK_ESCAPE` 保持一致 |
 
 **自动化检查**：
-- `python docs/skills/milkdrop3-dev-guard/scripts/check_init_sequence.py` — 扫描启动序列反模式（铁律 6）
-- `python docs/skills/milkdrop3-dev-guard/scripts/check_forbidden_patterns.py` — 扫描 milkdrop3 侧禁止事项（JUCE 触碰、右键、调试痕迹、私有成员访问、`hWndInsertAfter` 语义错用、`WM_CHAR + VK_RETURN`）
+- `py -3 docs/skills/milkdrop3-dev-guard/scripts/check_init_sequence.py` — 扫描启动序列反模式（铁律 6）
+- `py -3 docs/skills/milkdrop3-dev-guard/scripts/check_forbidden_patterns.py` — 扫描 milkdrop3 侧禁止事项（JUCE 触碰、右键、调试痕迹、私有成员访问、`hWndInsertAfter` 语义错用、`WM_CHAR + VK_RETURN`）
 
 ## 6. 编译验证
 
-CLion 使用 CMake `RelWithDebInfo` + VS 工具链 + `NMake Makefiles`。**必须**使用独立目录 `build/skill-verify` 避免污染 CLion 目录。
+CLion 使用 CMake `RelWithDebInfo` + VS 工具链 + `NMake Makefiles`。构建脚本使用独立目录 `build/skill-verify` 避免污染 CLion 目录。
 
-### 6.1 一键脚本
+### 6.1 后台启动构建（不阻塞 AI 终端）
+
+AI 的 `terminal` 工具有超时限制（完整编译 2~5 分钟远超限制），因此**必须**使用后台启动器——构建脚本在独立的最小化 cmd 窗口中运行，AI 终端立即恢复控制权：
 
 ```bash
-# 从 I:/Y2KMeter/ 执行
-cmd //c docs/skills/milkdrop3-dev-guard/scripts/build_skill_verify.bat
+# 完整构建（含 CMake configure；适用于首次构建或修改 .h / CMakeLists.txt）
+cmd //c "docs\skills\milkdrop3-dev-guard\scripts\_bg_build.bat"
+
+# 增量构建（跳过 configure；仅适用于只改 .cpp 且 cache 已存在）
+cmd //c "docs\skills\milkdrop3-dev-guard\scripts\_bg_incremental_build.bat"
 ```
 
-### 6.2 期望输出
+**禁止**直接调用 `build_skill_verify.bat` 或 `_incremental_build.bat`——它们会让 `terminal` 工具超时。
 
-```
-[100%] Built target Y2Kmeter_Standalone
-[100%] Built target Y2Kmeter_VST3
+### 6.2 AI 轮询日志判定结果
+
+后台构建启动后（终端看到 `[SKILL-BUILD] Background build launched.`），AI 需**反复轮询日志文件**等待结果。每次间隔 5~10 秒：
+
+```bash
+# 快速查看日志尾部（推荐，不会超时）
+tail -10 build/skill-verify/_build_log.txt
+
+# 或用 grep 搜索结论标记
+grep -E "\[PASS\]|\[FAIL\]" build/skill-verify/_build_log.txt
 ```
 
-产物：`build/skill-verify/Y2Kmeter_artefacts/RelWithDebInfo/{Standalone,VST3}/...`
+轮询期间日志尾部进度示例：
+```
+[SKILL-BUILD] [1/3] Initializing VS 2026 toolchain...   → 继续等待（VS 初始化中）
+[SKILL-BUILD] [3/3] Building with NMake...               → 等待 10 秒再查（编译中）
+[SKILL-BUILD] [PASS] All targets built successfully.     → ✅ 成功
+[SKILL-BUILD] [FAIL] Build FAILED ...                    → ❌ 失败，定位错误
+```
+
+若 poll 2~3 分钟后仍未出现 `[PASS]`/`[FAIL]`，说明后台构建进程可能异常退出。此时应检查日志文件大小是否持续增长（`wc -c build/skill-verify/_build_log.txt`），若停滞不动则重新启动后台构建。
 
 ### 6.3 何时跳过完整编译
 
 - 仅改 `.md` 文档 → 跳过
-- 仅改 `.cpp` 且 `read_lints` 通过 → 增量 build
-- 涉及 `.h` / `pluginshell.h/cpp` / `CMakeLists.txt` → **必须**完整编译
+- 仅改 `.cpp` 且 `read_lints` 通过 → 增量 build（`_bg_incremental_build.bat`）
+- 涉及 `.h` / `pluginshell.h` / `CMakeLists.txt` → **必须**完整编译（`_bg_build.bat`）
+- 仅改 `.cpp`（含 `pluginshell.cpp`）且 `read_lints` 通过 + CMake cache 存在 → 增量 build（`_bg_incremental_build.bat`）
 
-**环境细节、失败对照表、Ninja/VS 多配置切换** → [references/compile-verify.md](references/compile-verify.md)
+**完整流程、后台原理与错误定位 →** [references/compile-verify.md](references/compile-verify.md)，尤其是 §8「AI 编译验证协作流程（四步闭环）」
 
 ## 7. 示例
 
@@ -221,6 +242,7 @@ cmd //c docs/skills/milkdrop3-dev-guard/scripts/build_skill_verify.bat
 | `C2065 'closeButtonPressed'/'closeButtonHovered' 未声明的标识符`（在 Milkdrop3Module.cpp） | 基类 `ModulePanel` 的 private 成员，子类不可访问。删除自定义标题栏绘制，或让 `paint(g)` 调用 `ModulePanel::paint(g)` |
 | `C2065 'oldPn'/'nullBr'/'oldBr2' 未声明的标识符`（在 `PaintJumpDialog` Cancel 按钮段） | copy-paste 从 Go 按钮得来；块作用域局内变量不能跨块使用，重新声明（或重命名） |
 | `C2061 语法错误: 标识符 'hdc'/'FillRect'`（成员函数内大面积） | 方法体多/少一个 `}`，导致后续代码脱离类作用域。用 `read_file` 逐段校对括号匹配 |
+| `C2440: '<function-style-cast>': 无法从'std::wstring'转换为'juce::String'` | `std::wstring` 不能隐式构造 `juce::String`，`juce::String` 接受 `const wchar_t*` 但不接受 `std::wstring`。用 `.c_str()` 获取原始指针：`juce::String(wstr.c_str())` 或 `juce::String(wstr.data())` |
 
 完整表 → [references/compile-verify.md](references/compile-verify.md)
 
@@ -248,9 +270,9 @@ cmd //c docs/skills/milkdrop3-dev-guard/scripts/build_skill_verify.bat
 ## 9. 关联资源
 
 - **详细规范**：[architecture-rules](references/architecture-rules.md) · [forbidden-list](references/forbidden-list.md) · [symbol-facts](references/symbol-facts.md) · [compile-verify](references/compile-verify.md) · [lessons](references/lessons.md)
-- **编译脚本**：[scripts/build_skill_verify.bat](scripts/build_skill_verify.bat)
+- **编译脚本**：[scripts/build_skill_verify.bat](scripts/build_skill_verify.bat) · [scripts/_bg_build.bat](scripts/_bg_build.bat)（后台启动器）
 - **主项目文档**：[docs/MilkDrop3_Integration.md](../../MilkDrop3_Integration.md)（历史踩坑详录）· [PROJECT_OVERVIEW.md](../../../PROJECT_OVERVIEW.md)
 
 ---
 
-**最后更新**：2026-08-05（v1.2.0，基于 milkdrop3 模块 bug 修复完整对话（控件栏显隐 z-order / 固定黑白灰主题 / 预设跳转 Enter / JUCE 窗口回归黑边 / MSVC 块作用域 / ModulePanel private 成员错用 / `hWndInsertAfter` 语义反向）提炼，已在 v2.3.6 验证）
+**最后更新**：2026-08-06（v1.3.1：compile-verify.md 新增 §9「已知限制与排查指南」记录 vcvars 句柄继承锁、%~dp0 跨环境、start /MIN 监控盲区；§4 与 SKILL.md §6.3 细分 pluginshell.h 与 .cpp 构建触发条件；§5.2 与 SKILL.md §8.1 补充 C2440 std::wstring→juce::String 错误案例；lessons.md 新增 v24 章节；§2 与 §6.2 消除 AI 不可执行的"检查任务栏"指引）

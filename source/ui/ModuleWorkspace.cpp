@@ -350,10 +350,9 @@ ModuleWorkspace::ModuleWorkspace()
                 safe->onAudioSourceChanged (sourceId, isLoopback);
         });
     };
-    // 不在构造函数中加入组件树，避免 setContentNonOwned 中间态触发
-    // internalHierarchyChanged → parentHierarchyChanged → lookAndFeelChanged
-    // 第2次调用（第1次在后续 visibilityChanged 的 addChildComponent 中）。
-    // addChildComponent + setVisible(true) 统一延迟到 visibilityChanged()。
+    addAndMakeVisible (audioSourceBox);
+    // 标记组合框已初始化，visibilityChanged() 中不再重复添加。
+    combos_initialized_ = true;
 
     // 右下角 Hide 按钮：默认"显示态"不透明
     hideBtn.setButtonText("Hide");
@@ -501,8 +500,7 @@ ModuleWorkspace::ModuleWorkspace()
             safe->layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
         });
     };
-    // 不在构造函数中加入组件树（同 audioSourceBox 注释）。
-    // addChildComponent + setVisible(true) 统一延迟到 visibilityChanged()。
+    addAndMakeVisible (layoutPresetBox);
 
 
     // 布局预设 Save/Load 按钮（紧邻 layoutPresetBox 左侧）
@@ -2463,13 +2461,18 @@ void ModuleWorkspace::visibilityChanged()
     if (combos_initialized_) return;
     combos_initialized_ = true;
 
-    // 组件树已完全稳定（mainWindow->setVisible(true) 之后），此时将 ComboBox
-    // 首次加入组件树是安全的：不会再有 setContentNonOwned 中间态的 hierarchy
-    // changed 二次触发。先 addChildComponent 建立父子关系，再 setVisible(true) 激活。
-    addChildComponent(audioSourceBox);
-    addChildComponent(layoutPresetBox);
-    audioSourceBox.setVisible(true);
-    layoutPresetBox.setVisible(true);
+    // 安全兜底：若构造期 addAndMakeVisible 因某种原因未生效
+    // （极罕见：isShowing() 在构造期即为 true），在此补加。
+    if (audioSourceBox.getParentComponent() == nullptr)
+    {
+        addChildComponent(audioSourceBox);
+        audioSourceBox.setVisible(true);
+    }
+    if (layoutPresetBox.getParentComponent() == nullptr)
+    {
+        addChildComponent(layoutPresetBox);
+        layoutPresetBox.setVisible(true);
+    }
 }
 void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
 {

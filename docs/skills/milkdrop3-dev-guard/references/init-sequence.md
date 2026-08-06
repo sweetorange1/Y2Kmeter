@@ -74,7 +74,7 @@ Windows 上每个进程有**一把全局 DLL 加载器锁**（loader lock）。�
 
 ## 如何验证
 
-**自动化**：运行 `python docs/skills/milkdrop3-dev-guard/scripts/check_init_sequence.py`。脚本会静态扫描 `Y2KStandaloneApp.cpp`，命中上述反模式则返回非零退出码。
+**自动化**：运行 `py -3 docs/skills/milkdrop3-dev-guard/scripts/check_init_sequence.py`。脚本会静态扫描 `Y2KStandaloneApp.cpp`，命中上述反模式则返回非零退出码。
 
 **手工**：
 ```bash

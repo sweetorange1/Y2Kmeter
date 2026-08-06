@@ -6,9 +6,9 @@ check_init_sequence.py
 
 静态扫描 Y2Kmeter 项目的 Standalone 启动序列，命中反模式返回非零退出码。
 
-用法（从项目根 I:/Y2KMeter/ 执行）::
+用法（从项目根 I:/Y2KMeter/ 执行，注意：本机须用 py -3 而非 python）::
 
-    python docs/skills/milkdrop3-dev-guard/scripts/check_init_sequence.py
+    py -3 docs/skills/milkdrop3-dev-guard/scripts/check_init_sequence.py
 
 判定规则（对应 milkdrop3-dev-guard Skill 铁律 6）::
 

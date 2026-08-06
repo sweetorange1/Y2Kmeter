@@ -71,7 +71,18 @@
 - **改 `juce_Windowing_windows.cpp` 是禁区** —— 本轮用户报 D3D9 popup 偏移，AI 一度去改 UWPUIViewSettings / DwmSetWindowAttribute / renderer 后端，结果把全软件外框搞出黑边、标题栏文字变成小圆圈、右侧边不对称。**JUCE 是共享资源**：milkdrop3 相关 DPI 问题只能在 milkdrop3 内部用 `logicalToPhysical` 解决，不要碰 JUCE。
 - **块作用域局部变量不能跨块使用** —— 复制"Go 按钮"代码得到"Cancel 按钮"时，两块的 `HPEN oldPn` / `HBRUSH oldBr2` 是各自 `if` 内的局部变量，跨块直接引用会 C2065。写完复用代码后必须重命名或提到外层块。
 - **成员函数中的 `PaintJumpDialog` 类内定义要小心括号平衡** —— 一个多余的 `}` 就能让方法体脱离类作用域，导致后续所有成员变量"未声明"。写完大段绘制代码后必须用 `read_file` 从起始 `void PaintJumpDialog(...)` 到结束 `}` 逐段核对。
-- **AI 不要在编译验证上试超时** —— 本轮末期 AI 反复 `cmd //c` 各种路径转义都失败，浪费了两轮。正确做法：一旦发现命令行编译不稳定（Git Bash 里 `cmd //c` 的 Windows 路径转义常炸），立刻把编译交回用户在 CLion 里做，AI 只做**静态自检**（`read_lints` + `check_init_sequence.py` + `check_forbidden_patterns.py`）。
+- **AI 命令行编译验证已解决（v1.3.0）**：早期反复 `cmd //c` 同步构建会导致终端超时。v1.3.0 引入 `_bg_build.bat` / `_bg_incremental_build.bat` 后台启动器（`start /MIN` 独立进程），AI 终端立即恢复控制权后轮询 `_build_log.txt` 即可获知结果。详见 [compile-verify.md §8](compile-verify.md)。
+
+---
+
+## v24（本轮：编译脚本 Bug 修复 + 后台构建轮询机制落地验证）
+
+- **vcvars 子进程句柄继承锁文件 Bug**（`build_skill_verify.bat` / `_incremental_build.bat`）：`call "%VCVARS%" >> "%LOG%" 2>&1` 导致 vcvars 的子进程（`vcvarsall.bat` 等）继承了 `_build_log.txt` 的文件句柄，锁住文件造成后续所有 `>>` 重定向静默写入失败。**症状**：终端看到 `[PASS]` 但 build 目录下仅有日志文件而无实际产物（exit code 被误报为 0）。**修复**：vcvars 输出重定向至 `nul`（`>nul 2>&1`），仅记录成功/失败标记到日志。详见 [compile-verify.md §9.1](compile-verify.md)。
+- **`_bg_*.bat` 中 `%~dp0` 在 Git Bash 下不可靠**：当 AI 通过 `cmd //c` 从 Git Bash 调用批处理时，`%~dp0` 解析的路径可能不是预期的脚本所在目录，导致 `cd /d` 失败或 `start /MIN` 的子进程找不到正确的构建脚本。**修复**：`_bg_build.bat` 和 `_bg_incremental_build.bat` 全部使用硬编码绝对路径 `I:\Y2KMeter` 替代 `%~dp0..\..\..\..`。详见 [compile-verify.md §9.2](compile-verify.md)。
+- **`std::wstring` 无法隐式构造 `juce::String`（C2440）**：`juce::String` 接受 `const wchar_t*` 和 `const char*`，但不接受 `std::wstring` 的直接构造。当 API 返回 `std::wstring` 时（如 `GetCurrentPresetName()`），必须显式调用 `.c_str()` 或 `.data()`。已补充进 [compile-verify.md §5.2](compile-verify.md) 和 [SKILL.md §8.1](../SKILL.md)。
+- **后台构建窗口 AI 无法直接感知**：`start /MIN` 创建的独立 cmd 窗口在 AI 工具环境下不可见（`tasklist //fi "WINDOWTITLE eq ..."` 匹配不稳定）。AI 必须完全依赖日志轮询判定结果，而非检查窗口。若 poll 超时（全量 >5min，增量 >2min）且日志无更新 → 重新触发后台构建。详见 [compile-verify.md §9.3](compile-verify.md)。
+- **pluginshell.cpp 不需要全量重构**：之前的 skill 文档将 `pluginshell.h/cpp` 一并标记为"必须完整编译"，但 `.cpp` 文件变更仅需增量构建，只有 `.h` 或 `CMakeLists.txt` 变更才需要 cmake reconfigure。已修正 compile-verify.md §4 和 SKILL.md §6.3 的表述。
+- **验证结论**：v1.3.0 后台构建 + 轮询日志方案通过了实际测试——成功捕获 `Milkdrop3Window.cpp:1056` 处的真实编译错误（C2440），修复后的增量构建也正确输出 `[PASS]`。整套流程已可全套 AI 自闭环。
 
 ---
 

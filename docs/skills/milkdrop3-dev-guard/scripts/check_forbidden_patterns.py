@@ -7,9 +7,9 @@ check_forbidden_patterns.py
 静态扫描 Y2Kmeter 项目里 milkdrop3 模块相关代码是否命中 milkdrop3-dev-guard
 Skill §4.3 禁止事项清单。命中任何一条 → 输出违规并 exit(1)。
 
-用法（从项目根 I:/Y2KMeter/ 执行）::
+用法（从项目根 I:/Y2KMeter/ 执行，注意：本机须用 py -3 而非 python）::
 
-    python docs/skills/milkdrop3-dev-guard/scripts/check_forbidden_patterns.py
+    py -3 docs/skills/milkdrop3-dev-guard/scripts/check_forbidden_patterns.py
 
 判定规则（每条对应 forbidden-list.md 的 F 编号）::
 

@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.3.6`）
+- **产品名**：`Y2Kmeter` （版本：`2.3.7`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -2473,6 +2473,60 @@ Standalone 模式下：
 - **`ModulePanel::closeButtonPressed / closeButtonHovered` 是 private**：子类不可直接引用（MSVC C2065）。若要在子类里自定义标题栏绘制，要么让基类 `paint(g)` 走默认，要么子类自己维护 hover/press 状态。
 - **C++ 块作用域**：copy-paste 复用绘制代码时，相邻 `if` 块内的 `HPEN oldPn` 等局部变量不能跨块使用（本轮"Go 按钮"→"Cancel 按钮"5 处 C2065）。
 - **AI 命令行编译验证不可靠**：Git Bash 里 `cmd //c` 路径转义反复失败会浪费大量轮次；正确协作方式是 AI 只做静态自检（`read_lints` + `check_init_sequence.py` + `check_forbidden_patterns.py`），完整编译交给用户在 CLion 里跑。
+
+---
+
+### 8.8 v2.3.7 底部 Toolbar 下拉选择框交互丢失修复
+
+#### 问题现象
+
+软件下方控制台（底部 Toolbar）的两个下拉选择框交互完全丢失：
+- **布局预设选择框**（"preasent"）：位于 Grid 按钮左侧，用于选择 `Default / Horizontal Bar(T) / Horizontal Bar(B) / MV` 布局预设。
+- **音频源选择框**（"Source"）：位于 Hide 按钮左侧，用于选择 WASAPI loopback / 物理音频输入设备。
+
+下拉框仍然可见（`setVisible(true)` 在 `resized()` 中生效），但点击无响应、无法弹出下拉菜单。
+
+#### 根因
+
+v2.3.6（commit `fb2e0cde`）中，`audioSourceBox` 和 `layoutPresetBox` 的 `addAndMakeVisible` 被从 `ModuleWorkspace` 构造函数中移除，改为延迟到 `visibilityChanged()` 中通过 `addChildComponent` + `setVisible(true)` 添加。
+
+但 `visibilityChanged()` 的关键前置判断 `if (!isShowing()) return;` 在 JUCE 窗口显示时序中存在一个窗口：
+
+- 构造期 `ModuleWorkspace` 的 `isShowing()` 为 `false`，`visibilityChanged()` 早早返回；
+- 当 `mainWindow->setVisible(true)` 触发顶层窗口真正显示时，JUCE 内部**可能不再递归调用子组件的 `visibilityChanged()`**（子组件自身的 `visibleFlag` 并未改变，仅是祖先的可见性变了）；
+- 导致 `combos_initialized_` 永远无法被设为 `true`，两个下拉框永远没有被加入组件树（`getParentComponent() == nullptr`），`resized()` 中的 `setVisible(true)` 无法使不在组件树中的控件获得事件分发。
+
+`savePresetBtn` / `loadPresetBtn` / `hideBtn` 等其他 bottom toolbar 控件不受影响——它们仍在构造函数中使用 `addAndMakeVisible`，一开始就正确加入了组件树。
+
+#### 修复方案
+
+在 [ModuleWorkspace.cpp](I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) 中做三处修改：
+
+1. **恢复 `audioSourceBox` 的 `addAndMakeVisible`**：在构造函数中所有属性设置完毕后立即加入组件树，并同步设置 `combos_initialized_ = true`。
+
+2. **恢复 `layoutPresetBox` 的 `addAndMakeVisible`**：同上。
+
+3. **`visibilityChanged()` 改为安全兜底**：使用 `getParentComponent() == nullptr` 检查组件是否已加入树，仅在极端边缘情况下（构造期 `isShowing()` 即为 `true` 且 `addAndMakeVisible` 失效）才会补加。正常路径中 `combos_initialized_` 已在构造期置 `true`，此方法直接跳过。
+
+#### 关键文件变更
+
+| 文件 | 变更 |
+|---|---|
+| [`source/ui/ModuleWorkspace.cpp`](I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | `audioSourceBox` 和 `layoutPresetBox` 恢复构造期 `addAndMakeVisible` + `combos_initialized_ = true`；`visibilityChanged()` 改为 `getParentComponent() == nullptr` 安全兜底 |
+
+#### 版本号
+
+| 文件 | 变更 |
+|---|---|
+| [`CMakeLists.txt`](I:/Y2KMeter/CMakeLists.txt) | 版本号 `2.3.6` → `2.3.7`（2 处） |
+| [`Y2Kmeter_installer.iss`](I:/Y2KMeter/Y2Kmeter_installer.iss) | `#define MyAppVersion "2.3.6"` → `"2.3.7"` |
+| [`PluginEditor.cpp`](I:/Y2KMeter/PluginEditor.cpp) | 版本号 `v2.3.6` → `v2.3.7`（4 处） |
+
+#### 踩坑总结
+
+- **JUCE `visibilityChanged()` 不能作为延迟初始化的可靠挂钩**：子组件 `isShowing()` 的返回值依赖于祖先链的可见状态；祖先从不可见到可见时，子组件的 `visibilityChanged()` 可能不会被再次触发。正确的延迟初始化应使用 `parentHierarchyChanged()` 或直接在构造函数中 `addAndMakeVisible`。
+- **`addAndMakeVisible` 在构造期调用是安全的**：前一个版本移除它的理由是担心 `setContentNonOwned` 中间态触发 `internalHierarchyChanged` → `parentHierarchyChanged` → `lookAndFeelChanged` 的二次触发。但实际上 `ModuleWorkspace` 构造时尚未被 `setContentNonOwned` 挂载，不会触发该路径。即便触发，`lookAndFeelChanged()` 对 ComboBox 的副作用（刷新 `ColourScheme` 缓存）也是幂等的，不存在数据竞争。
+- **`combos_initialized_` 标志位的语义需要清晰**：构造期 `addAndMakeVisible` 成功后立即置 `true`，`visibilityChanged()` 作为安全兜底检查 `getParentComponent()` 而非仅依赖 `combos_initialized_`。
 
 ---
 
