@@ -579,18 +579,13 @@ ModuleWorkspace::ModuleWorkspace()
 
 ModuleWorkspace::~ModuleWorkspace()
 {
-    // P4：如有 debounce 中待决的布局变更通知，析构前先 flush，避免
-    //   "用户刚松开鼠标就关窗"场景下最后一次布局丢写。
-    //   注意：必须先 stopTimer 再同步派发，防止析构期间 timer 再次触发。
-    //   onLayoutChanged 回调通常走到 Processor::setSavedLayoutXml（字符串赋值），
-    //   此时 Editor/Processor 仍然存活，flush 是安全的。
+    // P4：停止 debounce 计时器，防止析构后 timer 回调到已销毁对象。
+    //   不再在此处 flush 待决的 onLayoutChanged —— Editor 析构已在 dock 操作
+    //   前显式保存最终布局并清零 onLayoutChanged，此处的 flush 是多余的且可能
+    //   因 getChildren() 在销毁途中状态不一致导致崩溃。
+    //   注：stopTimer 仍必须调用，否则 timer 可能在析构中途回调到已销毁的 this。
     layoutChangeCoalescer.stopTimer();
-    if (layoutChangePending)
-    {
-        layoutChangePending = false;
-        if (! suspendNotifications && onLayoutChanged)
-            onLayoutChanged();
-    }
+    layoutChangePending = false;
 
     // 如果析构时 gainPopup 仍处打开态（监听器还挂在 topLevel），必须先摘下来，
     // 否则后续 mouseDown 会回调到已销毁的 this → 崩溃。
@@ -877,6 +872,10 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
         updateDragPreview(p);
     };
     panel.onCloseClicked   = [this](ModulePanel& p) { removeModule(p); };
+    // 弹出按钮：回调到 popOutModule，再由 Editor 订阅 onModulePopOutRequested 创建浮动窗口
+    panel.onPopOutClicked  = [this](ModulePanel& p) { popOutModule(p); };
+    // 同步当前弹出功能开关（插件模式下 popOutEnabled_=false 会隐藏所有按钮）
+    panel.setPopOutEnabled(popOutEnabled_);
     // 模块上任意位置右键 → 弹出"添加模块"菜单
     panel.onRightClick = [this](ModulePanel& p, juce::Point<int> localPos)
     {
@@ -992,6 +991,94 @@ void ModuleWorkspace::removeModule(ModulePanel& panel)
 }
 
 // ----------------------------------------------------------
+// 模块弹出 / 停靠
+// ----------------------------------------------------------
+void ModuleWorkspace::setPopOutEnabled(bool enabled)
+{
+    if (popOutEnabled_ == enabled)
+        return;
+    popOutEnabled_ = enabled;
+    // 同步更新所有已存在模块的按钮可见性
+    for (auto* m : modules)
+        m->setPopOutEnabled(enabled);
+}
+
+ModulePanel* ModuleWorkspace::popOutModule(ModulePanel& panel)
+{
+    for (int i = modules.size(); --i >= 0;)
+    {
+        if (modules.getUnchecked(i) == &panel)
+        {
+            // 保存模块在 workspace 中的原始位置（供 dockModule 还原）
+            const auto savedBounds = panel.getBounds();
+            // 从 OwnedArray 取出但不 delete
+            auto* raw = modules.removeAndReturn(i);
+            jassert(raw == &panel);
+            juce::ignoreUnused(raw);
+
+            // ★ 记录脱离态（含模块类型），供 saveLayoutTree 持久化。
+            // 若这是布局恢复流程中的再次 popOut，同一 moduleId 的 screenBounds
+            // 已由 loadLayoutFromTree 读入；这里必须保留它，不能用脱离瞬间的
+            // workspace bounds 覆盖掉用户上次退出前的浮动窗口屏幕坐标。
+            auto existingState = floatingModuleStates_.find(panel.getModuleId());
+            juce::Rectangle<int> existingScreenBounds;
+            juce::ValueTree existingModuleState;
+            if (existingState != floatingModuleStates_.end())
+            {
+                existingScreenBounds = existingState->second.screenBounds;
+                existingModuleState = existingState->second.moduleState;
+            }
+            if (!existingModuleState.isValid())
+                existingModuleState = panel.saveModuleSpecificState();
+            floatingModuleStates_[panel.getModuleId()] = {
+                panel.getModuleType(), savedBounds, existingScreenBounds, existingModuleState };
+
+            repaint();
+            notifyLayoutChanged();
+
+            // 通知 Editor 创建浮动窗口
+            if (onModulePopOutRequested)
+                onModulePopOutRequested(&panel, savedBounds);
+
+            return &panel;
+        }
+    }
+    jassertfalse;  // 模块不在 modules 中
+    return nullptr;
+}
+
+void ModuleWorkspace::dockModule(ModulePanel& panel, juce::Rectangle<int> savedBounds)
+{
+    // 重新挂载到 workspace 子组件树
+    addAndMakeVisible(panel);
+    hookPanel(panel);
+
+    // 恢复原始位置与尺寸，并 clamp 到当前 canvas 内（防止窗口大小变化后越界）
+    auto canvas = getCanvasArea();
+    auto clamped = savedBounds;
+    if (clamped.getRight() > canvas.getRight())
+        clamped.setX(juce::jmax(canvas.getX(), canvas.getRight() - clamped.getWidth()));
+    if (clamped.getBottom() > canvas.getBottom())
+        clamped.setY(juce::jmax(canvas.getY(), canvas.getBottom() - clamped.getHeight()));
+    clamped.setX(juce::jmax(canvas.getX(), clamped.getX()));
+    clamped.setY(juce::jmax(canvas.getY(), clamped.getY()));
+    panel.setBounds(snapRect(clamped));
+
+    modules.add(&panel);
+    panel.toFront(false);
+
+    // dock 后模块回到嵌入态，更新按钮外观
+    panel.setFloating(false);
+    panel.setPopOutEnabled(popOutEnabled_);
+
+    // ★ Bug3修复：从脱离态记录中移除
+    floatingModuleStates_.erase(panel.getModuleId());
+
+    repaint();
+    notifyLayoutChanged();
+}
+
+// ----------------------------------------------------------
 // 清空所有模块 + 拼豆贴画（用于布局预设切换）
 //   · 不触发 onLayoutChanged：切换过程由外部负责重新填充，避免中间态
 //     把"空布局"错误写回 Processor 的 savedLayoutXml
@@ -1001,6 +1088,9 @@ void ModuleWorkspace::clearAllModules()
     // OwnedArray 析构时会自动 delete 每个 ModulePanel
     for (int i = modules.size(); --i >= 0;)
         modules.remove (i);
+
+    // ★ Bug3修复：清空脱离态记录（预设切换时所有模块归零）
+    floatingModuleStates_.clear();
 
     // 同步清理拼豆贴画：先清 layer（子 Component）再清数据结构，避免 layer->img 野指针
     perlerLayers.clear();
@@ -2678,6 +2768,11 @@ static const juce::Identifier kPropOpacity  ("perlerOpacity");
 static const juce::Identifier kPropTamaRoleName ("tamaRoleName");
 static const juce::Identifier kPropTamaHunger   ("tamaHunger");
 static const juce::Identifier kPropTamaHealth   ("tamaHealth");
+static const juce::Identifier kPropFloating     ("floating");  // 模块是否处于脱离态（Standalone 模式）
+static const juce::Identifier kPropScreenX  ("sx");  // 浮动窗口屏幕 X 坐标（持久化用）
+static const juce::Identifier kPropScreenY  ("sy");  // 浮动窗口屏幕 Y 坐标（持久化用）
+static const juce::Identifier kPropScreenW  ("sw");  // 浮动窗口屏幕宽度（持久化用）
+static const juce::Identifier kPropScreenH  ("sh");  // 浮动窗口屏幕高度（持久化用）
 
 juce::ValueTree ModuleWorkspace::saveLayoutTree() const
 {
@@ -2762,6 +2857,33 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
         // 其他 chrome 子组件（按钮 / 下拉 / themeBar / 浮层等）不持久化
     }
 
+    // ★ Bug3修复：写入脱离态模块节点（它们不在 getChildren() 中）
+    //   脱离态模块由 Editor 的 FloatingModuleWindow 持有，不在此组件树内，
+    //   但 floatingModuleStates_ 记录了它们的 moduleId 和脱离前的原始 bounds。
+    for (const auto& [id, state] : floatingModuleStates_)
+    {
+        juce::ValueTree node(kLayoutModule);
+        node.setProperty(kPropFloating, true, nullptr);
+        node.setProperty(kPropType, moduleTypeToString(state.type), nullptr);
+        node.setProperty(kPropId,   id,      nullptr);
+        // workspace 内坐标（dock 回位用）
+        node.setProperty(kPropX, state.bounds.getX(),      nullptr);
+        node.setProperty(kPropY, state.bounds.getY(),      nullptr);
+        node.setProperty(kPropW, state.bounds.getWidth(),  nullptr);
+        node.setProperty(kPropH, state.bounds.getHeight(), nullptr);
+        // 浮动窗口屏幕坐标（持久化用，resize 后更新）
+        if (!state.screenBounds.isEmpty())
+        {
+            node.setProperty(kPropScreenX, state.screenBounds.getX(),      nullptr);
+            node.setProperty(kPropScreenY, state.screenBounds.getY(),      nullptr);
+            node.setProperty(kPropScreenW, state.screenBounds.getWidth(),  nullptr);
+            node.setProperty(kPropScreenH, state.screenBounds.getHeight(), nullptr);
+        }
+        if (state.moduleState.isValid())
+            node.appendChild(state.moduleState, nullptr);
+        tree.appendChild(node, nullptr);
+    }
+
     return tree;
 }
 
@@ -2790,9 +2912,12 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
     if (tree.hasProperty ("inputGainDb"))
         setInputGainDb ((float) (double) tree.getProperty ("inputGainDb", 0.0));
 
-    // 清空现有模块 + 拼豆贴画
+    // 清空现有模块、脱离态记录 + 拼豆贴画。
+    // loadLayoutFromTree 会从传入的布局树完整重建 floatingModuleStates_；
+    // 若不先清空，旧布局中的浮动模块会残留并在下一次保存/恢复时重复实例化。
     for (int i = modules.size(); --i >= 0;)
         modules.remove(i);
+    floatingModuleStates_.clear();
     // 同步清理拼豆贴画：先清 layer（子 Component）再清数据结构
     perlerLayers.clear();
     perlerImages.clear();
@@ -2839,6 +2964,42 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
         }
 
         if (! node.hasType(kLayoutModule)) continue;
+
+        // Bug3修复：floating=true 的节点仅记录为脱离态信息，不立即加入 workspace
+        // 它们将在 Editor 完成所有模块加载后，通过 floatingModuleStates_ 恢复
+        const bool isFloating = (bool) node.getProperty(kPropFloating, false);
+        if (isFloating)
+        {
+            const auto idStr = node.getProperty(kPropId).toString();
+            if (idStr.isNotEmpty())
+            {
+                maxId = juce::jmax(maxId, idStr.getIntValue());
+                const int x = (int) node.getProperty(kPropX, 0);
+                const int y = (int) node.getProperty(kPropY, 0);
+                const int w = (int) node.getProperty(kPropW, 320);
+                const int h = (int) node.getProperty(kPropH, 220);
+                bool typeOk = false;
+                const auto ftStr = node.getProperty(kPropType).toString();
+                const auto ftType = stringToModuleType(ftStr, &typeOk);
+                const ModuleType storedType = typeOk ? ftType : ModuleType::eq;
+                FloatingState fState{ storedType, { x, y, w, h }, {}, {} };
+                auto stateChild = node.getChildWithName("state");
+                if (stateChild.isValid())
+                    fState.moduleState = stateChild;
+                // 读取屏幕坐标（存在表示脱离后用户调整过窗口位置/大小）
+                if (node.hasProperty(kPropScreenX) && node.hasProperty(kPropScreenY))
+                {
+                    fState.screenBounds = {
+                        (int) node.getProperty(kPropScreenX, x),
+                        (int) node.getProperty(kPropScreenY, y),
+                        (int) node.getProperty(kPropScreenW, w),
+                        (int) node.getProperty(kPropScreenH, h)
+                    };
+                }
+                floatingModuleStates_[idStr] = fState;
+            }
+            continue;
+        }
 
         bool ok = false;
         const auto typeStr = node.getProperty(kPropType).toString();

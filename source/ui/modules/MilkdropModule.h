@@ -6,8 +6,11 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include "projectM-4/types.h"
 #include "source/ui/ModuleWorkspace.h"
 #include "source/analysis/AnalyserHub.h"
+
+class Y2KmeterAudioProcessorEditor;  // 前向声明，用于 Milkdrop 脱离后仍能桥接项目M状态
 
 // ==========================================================
 // MilkdropModule —— Y2Kmeter 内置 Milkdrop 可视化模块
@@ -75,8 +78,10 @@ public:
     /**
      * @param hub 供拿 PCM 样本用。可选：若为 nullptr，模块显示"无音频输入"，
      *            但 projectM 仍会用其内部静音路径渲染 idle 预设。
+     * @param editor Editor 引用，用于 projectM 桥接（脱离/浮动模式仍可用）
      */
-    explicit MilkdropModule (AnalyserHub* hub);
+    explicit MilkdropModule (AnalyserHub* hub,
+                             Y2KmeterAudioProcessorEditor* editor);
     ~MilkdropModule() override;
 
     // === ModulePanel 覆写 ===
@@ -120,10 +125,12 @@ public:
 
 private:
     // ------------------------------------------------------
-    // GLView：纯 CPU 子组件（无 GL 上下文）。projectM 由 Editor GL 上下文直接渲染。
-    //   负责：鼠标事件转发、30Hz Timer 驱动 Overlay 刷新/auto-hide/auto 轮播。
+    // GLView：嵌入态为纯 CPU 子组件，浮动态挂载独立 OpenGLContext。
+    //   嵌入态 projectM 仍由 Editor GL 上下文直接渲染；浮动态使用自身
+    //   native surface，避免画面受 Editor 主窗口 framebuffer 尺寸裁剪。
     // ------------------------------------------------------
     class GLView : public juce::Component,
+                   private juce::OpenGLRenderer,
                    private juce::Timer
     {
     public:
@@ -133,6 +140,15 @@ private:
         // Timer: UI 线程 30Hz
         void timerCallback() override;
 
+        void parentHierarchyChanged() override;
+        void visibilityChanged() override;
+        void resized() override;
+
+        // OpenGLRenderer：仅浮动态 attach 后会被调用
+        void newOpenGLContextCreated() override;
+        void renderOpenGL() override;
+        void openGLContextClosing() override;
+
         // 鼠标事件转发给 owner
         void mouseDown(const juce::MouseEvent& e) override;
         void mouseUp(const juce::MouseEvent& e) override;
@@ -140,25 +156,48 @@ private:
         void mouseExit(const juce::MouseEvent& e) override;
         void mouseDrag(const juce::MouseEvent& e) override;
 
-        // 推送 PCM 到 Editor（UI 线程安全）
+        // 推送 PCM 到 Editor 与浮动态本地 renderer（UI 线程安全）
         void PushPcm(const float* interleaved_lr, unsigned int frame_count);
 
-        // Preset 请求 → Editor
+        // Preset 请求
         void RequestPresetDelta(int delta);
         void RequestPresetRandom();
         void RequestPresetJump(int index);
         void RequestRenderScale();  // 循环 1→2→4→1
 
-        // 诊断（从 Editor proxy）
+        // 诊断
         bool IsRenderReady() const;
         juce::String GetError() const;
         int  GetCurrentPresetIndex() const;
+        void SyncOwnerPresetIndexFromRenderer() const;
         int  GetTotalPresetCount() const;
         juce::String GetCurrentPresetName() const;
         int64_t GetLastPresetSwitchTimeMs() const;
 
     private:
+        void UpdateOpenGLAttachment();
+        void DetachOpenGL();
+        void ScanPresetFiles();
+        void LoadCurrentPreset();
+        void ConsumePresetRequests();
+        void ConsumePcm();
+
         MilkdropModule& owner_;
+        juce::OpenGLContext open_gl_context_;
+        projectm_handle local_pm_handle_ = nullptr;
+        bool local_render_ready_ = false;
+        juce::String local_error_;
+        juce::StringArray local_preset_paths_;
+        int local_current_preset_ = -1;
+        int local_render_scale_ = 1;
+        std::atomic<int> requested_preset_delta_{0};
+        std::atomic<int> requested_preset_jump_{-1};
+        std::atomic<bool> requested_preset_random_{false};
+        std::mutex pcm_mutex_;
+        std::vector<float> pending_pcm_;
+        unsigned int pending_frames_ = 0;
+        int64_t last_preset_switch_ms_ = 0;
+        bool attached_ = false;
         bool first_focus_done_ = false;
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GLView)
     };
@@ -206,11 +245,13 @@ private:
     // === 私有成员 ===
     AnalyserHub* hub;                       ///< 可为 nullptr（无音频源）
     bool         hubRetained = false;       ///< 标记是否成功 retain（析构时 release）
+    Y2KmeterAudioProcessorEditor* editor_;  ///< Editor 引用，脱离浮动窗口后仍可用于桥接 projectM
     std::unique_ptr<GLView> glView;
 
-    // 从布局存档恢复的预设索引（-1 = 无存档，首次启动）。
-    // Editor::newOpenGLContextCreated 消费，消费后重置为 -1。
-    int          restored_preset_index_ = -1;
+    // 从布局存档恢复或浮动 renderer 同步来的预设索引（-1 = 无存档，首次启动）。
+    // 作为持久化快照缓存使用；saveModuleSpecificState() 为 const，但需要在保存前
+    // 从浮动态 GLView 同步最新索引，因此该字段允许在 const 上下文更新。
+    mutable int  restored_preset_index_ = -1;
 
     // ---- 焦点与叠加层控件 ----
     bool focused_ { false };

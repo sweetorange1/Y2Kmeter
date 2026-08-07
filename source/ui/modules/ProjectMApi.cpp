@@ -168,13 +168,17 @@ void Api::resetSymbols()
 
 void Api::reload()
 {
-    // 调用侧已确保无存活 handle（MilkdropModule 中在 openGLContextClosing
-    // 里destroy() -> reload()）。这里直接卸载、重新加载、重新解析。
+    // 调用侧已确保无存活 handle。这里直接卸载、重新加载、重新解析。
     unloadLibrary();
     // unloadLibrary 已把 glewInitialized 置 false，下一次 initGlew() 会在新上下文重新初始化。
     loadLibrary();
     if (moduleHandle != nullptr)
         resolveSymbols();
+}
+
+void Api::resetGlewInitialization() noexcept
+{
+    glewInitialized = false;
 }
 
 // ============================================================

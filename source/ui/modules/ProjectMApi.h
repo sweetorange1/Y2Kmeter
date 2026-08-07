@@ -127,6 +127,16 @@ public:
      */
     void reload();
 
+    /**
+     * @brief 仅复位 GLEW 初始化标记，不卸载 projectM / GLEW DLL。
+     *
+     * OpenGL context 关闭或在 Editor / 浮动窗口之间切换渲染所有权时，需要让
+     * 下一个 context 重新执行 glewInit()。但在 JUCE 正在释放 OpenGL cached image
+     * 的回调里 FreeLibrary(projectM-4.dll / glew32.dll) 会导致退出卡死，因此这些
+     * GL 生命周期回调只能使用本轻量复位。
+     */
+    void resetGlewInitialization() noexcept;
+
     // --- Core -------------------------------------------------------------
     projectm_handle create() const;
     void destroy (projectm_handle instance) const;

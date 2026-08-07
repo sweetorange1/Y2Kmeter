@@ -159,17 +159,44 @@ namespace
         void modalStateFinished(int) override { view.setVisible(true); }
         juce::Component& view;
     };
+
+    static juce::File FindMilkdropAssetsDirForModule(const juce::String& subdir)
+    {
+      juce::File appDataDir = juce::File::getSpecialLocation(
+          juce::File::userApplicationDataDirectory)
+          .getChildFile("Y2Kmeter")
+          .getChildFile(subdir);
+      if (appDataDir.exists() && appDataDir.isDirectory())
+        return appDataDir;
+
+      juce::File exeDir = juce::File::getSpecialLocation(
+          juce::File::currentExecutableFile).getParentDirectory();
+      juce::File cur = exeDir;
+      for (int i = 0; i < 8; ++i)
+      {
+        auto candidate = cur.getChildFile("assets").getChildFile(subdir);
+        if (candidate.exists() && candidate.isDirectory())
+          return candidate;
+        cur = cur.getParentDirectory();
+      }
+      return {};
+    }
 }
 
 // ==========================================================
 // MilkdropModule
 // ==========================================================
-MilkdropModule::MilkdropModule (AnalyserHub* hub_)
+MilkdropModule::MilkdropModule (AnalyserHub* hub_,
+                               Y2KmeterAudioProcessorEditor* editor)
     : ModulePanel (ModuleType::milkdrop),
-      hub (hub_)
+      hub (hub_),
+      editor_ (editor)
 {
     // 默认初始尺寸 300×250 (宽×高)
     setDefaultSize(400, 300);
+    // 最小尺寸保护：模块高度低于此值会导致 projectM 内容区（扣除 22px 标题栏
+    // 和边框后）过小甚至为 0，GL FBO/纹理分配失败，模块进入纯黑不可用状态。
+    setMinSize(160, 70);
 
     // 尝试激活 Hub 的 Oscilloscope 路径 —— 有 hub 才有 PCM 输入。
     if (hub != nullptr)
@@ -205,12 +232,11 @@ MilkdropModule::~MilkdropModule()
 juce::ValueTree MilkdropModule::saveModuleSpecificState() const
 {
   juce::ValueTree s("state");
-  if (glView != nullptr)
-  {
-    int idx = glView->GetCurrentPresetIndex();
-    if (idx >= 0)
-      s.setProperty("presetIndex", idx, nullptr);
-  }
+  if (glView != nullptr && (isFloating() || restored_preset_index_ < 0))
+    glView->SyncOwnerPresetIndexFromRenderer();
+  const int idx = restored_preset_index_;
+  if (idx >= 0)
+    s.setProperty("presetIndex", idx, nullptr);
   s.setProperty("autoMode", isAutoMode_, nullptr);
   s.setProperty("autoInterval", autoIntervalSeconds_, nullptr);
   return s;
@@ -255,14 +281,34 @@ void MilkdropModule::paint(juce::Graphics& g) {
   g.setColour(PinkXP::dark);
   g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 1);
 
-  // 3. 关闭按钮（×）—— 始终画默认状态；hover/press 由基类鼠标事件处理，仅影响 button 的 hit area 逻辑
+  // 3. 关闭按钮（×）—— 借用基类的 pressed/hover 标志，与 ModulePanel 风格一致
   auto cb = getCloseButtonBounds();
-  PinkXP::drawRaised(g, cb, PinkXP::btnFace);
+  if (closeButtonPressed)
+    PinkXP::drawPressed(g, cb, PinkXP::pink100);
+  else
+    PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
   g.setColour(PinkXP::ink);
   g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
   auto cbText = cb;
   cbText.translate(-1, -1);
+  if (closeButtonPressed) cbText.translate(1, 1);
   g.drawText("x", cbText, juce::Justification::centred, false);
+
+  // 3.5. 弹出/停靠按钮
+  if (isPopOutEnabled() || isFloating())
+  {
+    auto popBtn = getPopOutButtonBounds();
+    if (popOutButtonPressed_)
+      PinkXP::drawPressed(g, popBtn, PinkXP::pink100);
+    else
+      PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
+    g.setColour(PinkXP::ink);
+    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+    auto popBtnText = popBtn;
+    popBtnText.translate(-1, -1);
+    if (popOutButtonPressed_) popBtnText.translate(1, 1);
+    g.drawText(isFloating() ? "=" : "-", popBtnText, juce::Justification::centred, false);
+  }
 
   // 4. 内容区叠加控件（不填充背景 — projectM 帧已由 GPU 渲染）
   auto content = getContentBounds();
@@ -275,7 +321,16 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
   // 本模块内容区对应的屏幕区域。paintContent 仅负责：
   //   · 未就绪时的兜底黑屏 + 错误提示
   //   · 加载指示器 / 叠加控制栏（top bar、auto 控件等）
-  if (glView != nullptr) {
+  //   · 浮动态：读取 Editor 共享帧（glReadPixels 抓取的离线 FBO 内容）
+
+  // 浮动态由 GLView 自己的 native OpenGL surface 直接渲染 projectM。
+  // 不再绘制 Editor 共享帧，避免画面继续受主窗口 FBO 0 尺寸裁剪。
+  if (isFloating())
+  {
+    if (glView == nullptr || !glView->IsRenderReady())
+      g.fillAll(juce::Colours::black);
+  }
+  else if (glView != nullptr) {
     if (!glView->IsRenderReady()) {
       g.fillAll(juce::Colours::black);
       auto msg = glView->GetError().isEmpty()
@@ -307,9 +362,16 @@ void MilkdropModule::layoutContent (juce::Rectangle<int> content)
 {
     if (glView != nullptr)
     {
-        // GLView 始终占满整个内容区；叠加控制栏通过 paintContent 中的 GDI 绘制
-        // 覆盖在 GL 帧之上，不挤压 GLView 显示区，避免 resize 导致的白闪。
-        glView->setBounds(content);
+        auto viewBounds = content;
+        if (isFloating() && focused_)
+        {
+            int reserved = 26;
+            if (isAutoMode_)
+                reserved += static_cast<int>(kAutoRowHeight);
+            reserved = juce::jmin(reserved, content.getHeight());
+            viewBounds = content.withTrimmedTop(reserved);
+        }
+        glView->setBounds(viewBounds);
     }
 }
 
@@ -360,82 +422,334 @@ void MilkdropModule::jumpToPresetIndex(int index)
 // ==========================================================
 MilkdropModule::GLView::GLView(MilkdropModule& owner)
     : owner_(owner) {
-  // 纯 CPU 子组件。projectM 由 Editor GL 上下文在 renderOpenGL 中直接渲染，
-  // 本组件仅负责：① 鼠标事件转发 ② 30Hz Timer 驱动 Overlay 刷新
-  //     ③ auto-hide 检测 ④ auto 轮播 ⑤ PCM 和 preset 请求桥接到 Editor
+  open_gl_context_.setRenderer(this);
+  open_gl_context_.setComponentPaintingEnabled(false);
+  open_gl_context_.setContinuousRepainting(true);
   startTimerHz(30);
 }
 
 MilkdropModule::GLView::~GLView() {
   stopTimer();
+  DetachOpenGL();
 }
 
-// ---- GLView: 所有 projectM 状态现在由 Editor 持有，这里只做桥接 ----
+void MilkdropModule::GLView::parentHierarchyChanged() {
+  UpdateOpenGLAttachment();
+}
+
+void MilkdropModule::GLView::visibilityChanged() {
+  UpdateOpenGLAttachment();
+}
+
+void MilkdropModule::GLView::resized() {
+  if (attached_)
+    open_gl_context_.triggerRepaint();
+}
+
+void MilkdropModule::GLView::UpdateOpenGLAttachment() {
+  const bool should_attach = owner_.isFloating() && isShowing() && getWidth() > 0 && getHeight() > 0;
+  if (should_attach == attached_)
+    return;
+
+  if (should_attach) {
+    if (owner_.editor_ != nullptr)
+      owner_.editor_->SuspendMilkdropEditorRendererForFloating();
+    open_gl_context_.attachTo(*this);
+    attached_ = true;
+  } else {
+    DetachOpenGL();
+  }
+}
+
+void MilkdropModule::GLView::DetachOpenGL() {
+  if (!attached_)
+    return;
+
+  SyncOwnerPresetIndexFromRenderer();
+  const bool should_resume_editor_renderer = !owner_.isFloating();
+
+  open_gl_context_.detach();
+  attached_ = false;
+  if (owner_.editor_ != nullptr && should_resume_editor_renderer) {
+    const int preset_index = owner_.restored_preset_index_;
+    if (preset_index >= 0)
+      owner_.editor_->RequestMilkdropPresetJump(preset_index);
+    owner_.editor_->ResumeMilkdropEditorRendererAfterFloating();
+  }
+}
+
+void MilkdropModule::GLView::ScanPresetFiles() {
+  local_preset_paths_.clear();
+  auto presets_dir = FindMilkdropAssetsDirForModule("milkdrop_presets");
+  if (!presets_dir.exists())
+    return;
+
+  auto files = presets_dir.findChildFiles(juce::File::findFiles, false, "*.milk");
+  for (auto& file : files)
+    local_preset_paths_.add(file.getFullPathName());
+  local_preset_paths_.sort(false);
+}
+
+void MilkdropModule::GLView::LoadCurrentPreset() {
+  if (local_pm_handle_ == nullptr || local_preset_paths_.isEmpty())
+    return;
+  if (local_current_preset_ < 0 || local_current_preset_ >= local_preset_paths_.size())
+    return;
+
+  auto& api = projectm_api::Api::instance();
+  auto path = local_preset_paths_[local_current_preset_];
+  if (api.hasLoadPresetData()) {
+    juce::File file(path);
+    if (file.existsAsFile()) {
+      auto data = file.loadFileAsString().toStdString();
+      api.loadPresetData(local_pm_handle_, FixMilkdropShaderTypes(data), true);
+    }
+  } else {
+    api.loadPresetFile(local_pm_handle_, path.toRawUTF8(), true);
+  }
+}
+
+void MilkdropModule::GLView::newOpenGLContextCreated() {
+  auto& api = projectm_api::Api::instance();
+  api.resetGlewInitialization();
+  if (!api.isAvailable()) {
+    local_error_ = api.loadError();
+    return;
+  }
+  if (!api.initGlew()) {
+    local_error_ = api.loadError();
+    return;
+  }
+
+  local_pm_handle_ = api.create();
+  if (local_pm_handle_ == nullptr) {
+    local_error_ = "projectm_create() returned NULL.";
+    return;
+  }
+
+  api.setMeshSize(local_pm_handle_, kDefaultMeshWidth, kDefaultMeshHeight);
+  api.setFps(local_pm_handle_, kTargetFps);
+  api.setPresetDuration(local_pm_handle_, kPresetDuration);
+  api.setSoftCutDuration(local_pm_handle_, kSoftCutDuration);
+  api.setHardCutEnabled(local_pm_handle_, false);
+
+  auto tex_dir = FindMilkdropAssetsDirForModule("milkdrop_textures");
+  if (tex_dir.exists()) {
+    std::vector<std::string> paths{tex_dir.getFullPathName().toStdString()};
+    api.setTextureSearchPaths(local_pm_handle_, paths);
+  }
+
+  ScanPresetFiles();
+  int pending = owner_.restored_preset_index_;
+  owner_.restored_preset_index_ = -1;
+  local_current_preset_ = (pending >= 0 && pending < local_preset_paths_.size()) ? pending : 0;
+  LoadCurrentPreset();
+  last_preset_switch_ms_ = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+  local_render_ready_ = true;
+}
+
+void MilkdropModule::GLView::openGLContextClosing() {
+  SyncOwnerPresetIndexFromRenderer();
+  if (local_pm_handle_ != nullptr) {
+    auto& api = projectm_api::Api::instance();
+    api.destroy(local_pm_handle_);
+    local_pm_handle_ = nullptr;
+    api.resetGlewInitialization();
+  }
+  local_render_ready_ = false;
+}
+
+void MilkdropModule::GLView::ConsumePresetRequests() {
+  int jump = requested_preset_jump_.exchange(-1);
+  int delta = requested_preset_delta_.exchange(0);
+  bool random = requested_preset_random_.exchange(false);
+  bool switched = false;
+
+  if (jump >= 0 && jump < local_preset_paths_.size()) {
+    local_current_preset_ = jump;
+    switched = true;
+  } else if (random && !local_preset_paths_.isEmpty()) {
+    local_current_preset_ = juce::Random::getSystemRandom().nextInt(local_preset_paths_.size());
+    switched = true;
+  } else if (delta != 0 && !local_preset_paths_.isEmpty()) {
+    local_current_preset_ = (local_current_preset_ + delta) % local_preset_paths_.size();
+    if (local_current_preset_ < 0)
+      local_current_preset_ += local_preset_paths_.size();
+    switched = true;
+  }
+
+  if (switched) {
+    LoadCurrentPreset();
+    last_preset_switch_ms_ = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+  }
+}
+
+void MilkdropModule::GLView::ConsumePcm() {
+  std::vector<float> pcm;
+  unsigned int frames = 0;
+  {
+    std::lock_guard<std::mutex> lock(pcm_mutex_);
+    pcm.swap(pending_pcm_);
+    frames = pending_frames_;
+    pending_frames_ = 0;
+  }
+  if (!pcm.empty() && local_pm_handle_ != nullptr)
+    projectm_api::Api::instance().addPcmFloat(local_pm_handle_, pcm.data(), frames, true);
+}
+
+void MilkdropModule::GLView::renderOpenGL() {
+  juce::OpenGLHelpers::clear(juce::Colours::black);
+  if (!local_render_ready_ || local_pm_handle_ == nullptr)
+    return;
+
+  auto scale = static_cast<float>(open_gl_context_.getRenderingScale());
+  int render_w = juce::jmax(1, static_cast<int>(getWidth() * scale));
+  int render_h = juce::jmax(1, static_cast<int>(getHeight() * scale));
+
+  auto& api = projectm_api::Api::instance();
+  ConsumePresetRequests();
+  ConsumePcm();
+  api.setWindowSize(local_pm_handle_, static_cast<std::size_t>(render_w), static_cast<std::size_t>(render_h));
+  juce::gl::glViewport(0, 0, render_w, render_h);
+  juce::gl::glScissor(0, 0, render_w, render_h);
+  juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
+  api.openglRenderFrame(local_pm_handle_);
+  juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
+}
 
 void MilkdropModule::GLView::PushPcm(const float* interleaved_lr,
                                       unsigned int frame_count) {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    ed->PushMilkdropPcm(interleaved_lr, frame_count);
+  if (owner_.editor_ != nullptr && !owner_.isFloating())
+    owner_.editor_->PushMilkdropPcm(interleaved_lr, frame_count);
+
+  std::lock_guard<std::mutex> lock(pcm_mutex_);
+  pending_pcm_.assign(interleaved_lr, interleaved_lr + frame_count * 2);
+  pending_frames_ = frame_count;
 }
 
 void MilkdropModule::GLView::RequestPresetDelta(int delta) {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    ed->RequestMilkdropPresetDelta(delta);
+  if (owner_.isFloating()) {
+    requested_preset_delta_.fetch_add(delta);
+  } else if (owner_.editor_ != nullptr) {
+    owner_.restored_preset_index_ = -1;
+    owner_.editor_->RequestMilkdropPresetDelta(delta);
+  }
 }
 
 void MilkdropModule::GLView::RequestPresetRandom() {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    ed->RequestMilkdropPresetRandom();
+  if (owner_.isFloating()) {
+    if (!local_preset_paths_.isEmpty())
+      requested_preset_jump_.store(juce::Random::getSystemRandom().nextInt(local_preset_paths_.size()));
+  } else if (owner_.editor_ != nullptr) {
+    owner_.restored_preset_index_ = -1;
+    owner_.editor_->RequestMilkdropPresetRandom();
+  }
 }
 
 void MilkdropModule::GLView::RequestPresetJump(int index) {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    ed->RequestMilkdropPresetJump(index);
+  if (owner_.isFloating()) {
+    requested_preset_jump_.store(index);
+  } else if (owner_.editor_ != nullptr) {
+    owner_.restored_preset_index_ = -1;
+    owner_.editor_->RequestMilkdropPresetJump(index);
+  }
 }
 
 void MilkdropModule::GLView::RequestRenderScale() {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    ed->RequestMilkdropRenderScale();
+  if (owner_.isFloating()) {
+    local_render_scale_ = (local_render_scale_ == 1) ? 2 : (local_render_scale_ == 2 ? 4 : 1);
+  } else if (owner_.editor_ != nullptr) {
+    owner_.editor_->RequestMilkdropRenderScale();
+  }
 }
 
 bool MilkdropModule::GLView::IsRenderReady() const {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    return ed->IsMilkdropRenderReady();
+  if (owner_.isFloating())
+    return local_render_ready_;
+  if (owner_.editor_ != nullptr)
+    return owner_.editor_->IsMilkdropRenderReady();
   return false;
 }
 
 juce::String MilkdropModule::GLView::GetError() const {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    return ed->GetMilkdropError();
+  if (owner_.isFloating())
+    return local_error_;
+  if (owner_.editor_ != nullptr)
+    return owner_.editor_->GetMilkdropError();
   return "Editor not found";
 }
 
 int MilkdropModule::GLView::GetCurrentPresetIndex() const {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    return ed->GetMilkdropCurrentPresetIndex();
+  if (owner_.isFloating() || attached_) {
+    const int total = local_preset_paths_.size();
+    if (total <= 0)
+      return local_current_preset_;
+
+    const int jump = requested_preset_jump_.load();
+    if (jump >= 0 && jump < total)
+      return jump;
+
+    const int delta = requested_preset_delta_.load();
+    if (delta != 0) {
+      int current = local_current_preset_;
+      if (current < 0 || current >= total)
+        current = 0;
+      current = (current + delta) % total;
+      if (current < 0)
+        current += total;
+      return current;
+    }
+
+    return local_current_preset_;
+  }
+  if (owner_.editor_ != nullptr)
+    return owner_.editor_->GetMilkdropCurrentPresetIndex();
   return -1;
 }
 
+void MilkdropModule::GLView::SyncOwnerPresetIndexFromRenderer() const {
+  const int preset_index = GetCurrentPresetIndex();
+  if (preset_index >= 0)
+    owner_.restored_preset_index_ = preset_index;
+}
+
 int MilkdropModule::GLView::GetTotalPresetCount() const {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    return ed->GetMilkdropTotalPresets();
+  if (owner_.isFloating())
+    return local_preset_paths_.size();
+  if (owner_.editor_ != nullptr)
+    return owner_.editor_->GetMilkdropTotalPresets();
   return 0;
 }
 
 juce::String MilkdropModule::GLView::GetCurrentPresetName() const {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    return ed->GetMilkdropCurrentPresetName();
+  if (owner_.isFloating()) {
+    if (local_current_preset_ >= 0 && local_current_preset_ < local_preset_paths_.size()) {
+      return local_preset_paths_[local_current_preset_]
+          .fromLastOccurrenceOf("/", false, false)
+          .fromLastOccurrenceOf("\\", false, false)
+          .upToLastOccurrenceOf(".milk", false, false);
+    }
+    return {};
+  }
+  if (owner_.editor_ != nullptr)
+    return owner_.editor_->GetMilkdropCurrentPresetName();
   return {};
 }
 
 int64_t MilkdropModule::GLView::GetLastPresetSwitchTimeMs() const {
-  if (auto* ed = owner_.findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-    return ed->GetMilkdropLastPresetSwitchTimeMs();
+  if (owner_.isFloating())
+    return last_preset_switch_ms_;
+  if (owner_.editor_ != nullptr)
+    return owner_.editor_->GetMilkdropLastPresetSwitchTimeMs();
   return 0;
 }
 
 void MilkdropModule::GLView::timerCallback() {
-  // 检查 Editor projectM 是否就绪（代替旧的 isRenderInitialized）
+  UpdateOpenGLAttachment();
   if (!IsRenderReady()) return;
 
   // ---- 首次自动激活焦点（仅一次）----
@@ -500,10 +814,13 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
         touchOverlayIdleTimer();  // 聚焦时重置 4 秒倒计时
     }
 
+    if (isFloating())
+        layoutContent(getContentBounds());
     repaint();
 
-    // 叠加控制栏覆盖在 GLView 之上渲染，不再挤压 GLView 尺寸，
-    // 因此切换焦点时只需重绘，无需重新布局。
+    // 嵌入态：叠加控制栏覆盖在 Editor GL 帧之上，不挤压 GLView。
+    // 浮动态：GLView 是 native OpenGL 子 surface，会盖住父组件 CPU 绘制，
+    // 因此聚焦时需要让 GLView 临时避开控制区，保证按钮可见且可点击。
 }
 
 void MilkdropModule::checkOverlayAutoHide()
@@ -520,10 +837,11 @@ void MilkdropModule::checkOverlayAutoHide()
 
 void MilkdropModule::mouseDown(const juce::MouseEvent& e)
 {
-    // 右键 → 冒泡给 workspace 弹出"添加模块"菜单
+    // 右键 → 仅嵌入态允许冒泡给 workspace 弹出"添加模块"菜单。
+    // 浮动窗口内禁用添加菜单，避免脱离后右键误触发主窗口菜单。
     if (e.mods.isPopupMenu())
     {
-        if (onRightClick)
+        if (!isFloating() && onRightClick)
             onRightClick(*this, e.getPosition());
         return;
     }
@@ -850,8 +1168,8 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     // 渲染分辨率按钮 [1:n]
     {
       int s = 1;
-      if (auto* ed = findParentComponentOfClass<Y2KmeterAudioProcessorEditor>())
-        s = ed->GetMilkdropRenderScale();
+      if (editor_ != nullptr)
+        s = editor_->GetMilkdropRenderScale();
       juce::String label = juce::String("1:") + juce::String(s);
       drawBtn(resBtn, label, OverlayButton::kRenderScale);
     }

@@ -167,11 +167,20 @@ public:
     int  getDefaultWidth()  const noexcept { return defaultW; }
     int  getDefaultHeight() const noexcept { return defaultH; }
 
+    // 弹出/停靠状态管理（由 ModuleWorkspace / FloatingModuleWindow 调用）
+    void setFloating(bool floating) noexcept;
+    bool isFloating() const noexcept { return isFloating_; }
+    void setFloatingLayoutLocked(bool locked) noexcept;
+    bool isFloatingLayoutLocked() const noexcept { return floatingLayoutLocked_; }
+    void setPopOutEnabled(bool enabled) noexcept;
+    bool isPopOutEnabled() const noexcept { return popOutEnabled_; }
+
     std::function<void(ModulePanel&)> onBoundsChangedByUser;
     std::function<void(ModulePanel&)> onBoundsDragging;   // 拖拽过程中持续回调（吸附预览用）
     std::function<void(ModulePanel&)> onCloseClicked;
     std::function<void(ModulePanel&)> onBroughtToFront;
     std::function<void(ModulePanel&, juce::Point<int> localPos)> onRightClick;  // 右键模块任意位置 → 弹出添加菜单
+    std::function<void(ModulePanel&)> onPopOutClicked;  // 弹出/停靠按钮被点击
 
     void paint(juce::Graphics& g) override;
     // CPU 小字绘制在所有子组件之上（子组件如 EQ 的 PixelEqGraph 会填满整个
@@ -191,9 +200,16 @@ protected:
 
     juce::Rectangle<int> getContentBounds() const;
     juce::Rectangle<int> getCloseButtonBounds() const;
+    juce::Rectangle<int> getPopOutButtonBounds() const;  // 弹出/停靠按钮边界
     juce::Rectangle<int> getTitleBarBounds()   const;
 
     juce::String titleText;  // 模块标题文字（protected，子类 paint() 可读取）
+
+    // 按钮状态标志（protected，子类自定义 paint 时需读取 hover/press 状态）
+    bool closeButtonHovered = false;
+    bool closeButtonPressed = false;
+    bool popOutButtonHovered_ = false;
+    bool popOutButtonPressed_ = false;
 
 private:
     enum class Edge { none, right, bottom, bottomRight };
@@ -222,10 +238,16 @@ private:
 
     static constexpr int titleBarHeight  = 22;
     static constexpr int closeButtonSize = 16;
+    static constexpr int popOutButtonSize = 16;
     static constexpr int edgeHotSize     = 8;
 
-    bool closeButtonHovered = false;
-    bool closeButtonPressed = false;
+private:
+    bool isFloating_ = false;      // 当前是否处于浮动窗口态
+    bool floatingLayoutLocked_ = false; // 浮动窗口态下由 Editor 下发的全局布局锁定状态
+    bool popOutEnabled_ = true;    // 弹出按钮是否可用（插件模式下由 workspace 关闭）
+
+    // 浮动窗口拖拽器（模块脱离到独立窗口后，标题栏拖拽 = 移动顶层窗口）
+    juce::ComponentDragger floatingWindowDragger_;
 
     // 右下角 CPU 小字（单位：%，已从 [0..1] 乘 100）
     float cpuPercent = 0.0f;
@@ -311,6 +333,71 @@ public:
     ModulePanel* addModuleByType(ModuleType t);
 
     void removeModule(ModulePanel& panel);
+
+    // ======================================================
+    // 模块弹出 / 停靠（Standalone 模式下将模块脱离到独立浮动窗口）
+    //   · popOutModule：从 OwnedArray 中取出（不 delete），返回裸指针给调用方；
+    //     同时保存模块在 workspace 中的原始位置，供后续 dockModule 还原。
+    //   · dockModule：将之前弹出的模块重新加入 OwnedArray 并恢复原始位置。
+    //   · popOutEnabled：控制所有模块标题栏弹出按钮的可见性（插件模式下设为 false）。
+    // ======================================================
+    void setPopOutEnabled (bool enabled);
+    bool isPopOutEnabled() const noexcept { return popOutEnabled_; }
+    ModulePanel* popOutModule (ModulePanel& panel);
+    void dockModule (ModulePanel& panel, juce::Rectangle<int> savedBounds);
+
+    // 脱离态模块追踪数据结构：moduleId → (moduleType, 脱离前的 workspace 内 bounds)
+    // popOutModule 写入，dockModule 移除，saveLayoutTree 读取以持久化脱离状态
+    struct FloatingState {
+      ModuleType type;
+      juce::Rectangle<int> bounds;       // 脱离前 workspace 内坐标（dock 回位用）
+      juce::Rectangle<int> screenBounds; // 浮动窗口实际屏幕坐标（resize 时更新，持久化用）
+      juce::ValueTree moduleState;       // 脱离态模块的业务状态（模式/参数/预设等）
+    };
+
+    // 获取当前处于脱离态的模块信息（moduleId → type+bounds）
+    // 供 saveLayoutTree 持久化使用
+    std::map<juce::String, juce::Rectangle<int>> getFloatingModuleStates() const noexcept {
+        std::map<juce::String, juce::Rectangle<int>> result;
+        for (const auto& [id, state] : floatingModuleStates_)
+            result[id] = state.bounds;
+        return result;
+    }
+    const std::map<juce::String, FloatingState>& getFloatingModuleStatesRaw() const noexcept { return floatingModuleStates_; }
+    void setFloatingModuleStates(const std::map<juce::String, juce::Rectangle<int>>& states) {
+        floatingModuleStates_.clear();
+        for (const auto& [id, bounds] : states)
+            floatingModuleStates_[id] = { ModuleType::eq, bounds, {}, {} };
+    }
+
+    // 更新脱离态模块的浮动窗口屏幕位置，供 FloatingModuleWindow::handleAsyncUpdate 调用
+    // 确保 saveLayoutTree 写入的是用户调整后的实际窗口位置，而非脱离时刻的旧坐标
+    void updateFloatingStateScreenBounds(const juce::String& id, juce::Rectangle<int> screenBounds)
+    {
+        auto it = floatingModuleStates_.find(id);
+        if (it != floatingModuleStates_.end() && it->second.screenBounds != screenBounds)
+        {
+            it->second.screenBounds = screenBounds;
+            notifyLayoutChanged();
+        }
+    }
+
+    void updateFloatingStateModuleState(const juce::String& id, const juce::ValueTree& moduleState)
+    {
+        auto it = floatingModuleStates_.find(id);
+        if (it != floatingModuleStates_.end())
+            it->second.moduleState = moduleState;
+    }
+
+    void removeFloatingState(const juce::String& id)
+    {
+        if (floatingModuleStates_.erase(id) > 0)
+            notifyLayoutChanged();
+    }
+
+    // 模块弹出请求回调（参数：待弹出的模块裸指针 + 弹出前的 workspace 内 bounds）
+    //   由 Editor 订阅来创建 FloatingModuleWindow 并接管模块生命周期。
+    std::function<void(ModulePanel*, juce::Rectangle<int>)> onModulePopOutRequested;
 
     int getNumModules() const noexcept { return modules.size(); }
     ModulePanel* getModule(int idx) const noexcept { return modules[idx]; }
@@ -606,6 +693,13 @@ private:
     void hookPanel(ModulePanel& panel);
 
     juce::OwnedArray<ModulePanel> modules;
+
+    // 模块弹出功能开关（Standalone=true，插件模式=false）
+    bool popOutEnabled_ = true;
+
+    // 脱离态模块追踪：moduleId → (moduleType, 脱离前的 workspace 内 bounds)
+    // popOutModule 写入，dockModule 移除，saveLayoutTree 读取以持久化脱离状态
+    std::map<juce::String, FloatingState> floatingModuleStates_;
 
     // 底部工具栏里的主题选择器（XP 画图调色板样式）
     ThemeSwatchBar themeBar;

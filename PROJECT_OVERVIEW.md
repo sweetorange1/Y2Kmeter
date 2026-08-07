@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.3.5`）
+- **产品名**：`Y2Kmeter` （版本：`2.5.0`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.3.5，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设）
+- **Milkdrop 可视化模块**（v2.5.0，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设；新增 Standalone 脱离/浮动窗口支持）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.3.5：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 降级为纯 Timer 组件；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.0：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2423,6 +2423,151 @@ Standalone 模式下：
 **踩坑记录**：
 - `juce::Colour::contrasting()` 在文字阴影场景下不可靠：白色文字 → 黑色阴影（正常），深色文字 → 白色光晕（视觉偏移）。阴影颜色应从背景色而非文字色衍生。
 - `replace_in_file` 对短字符串（如 `"v2.3.4"`）会因匹配多次而失败，需为每处提供包含周围足够多唯一行上下文的 `old_string`。
+
+---
+
+### 8.7 v2.3.6 Standalone 窗口 4px 黑边修复
+
+#### 1. 根因
+
+`Y2KMainWindow` 继承自 `DocumentWindow` → `ResizableWindow`。JUCE 的 `ResizableWindow::getBorderThickness()` 在窗口可调整大小时返回 `BorderSize<int>(4)`，导致窗口内容和边缘之间有 4px 间隙。而 `Y2KMainWindow` 背景色为 `juce::Colours::black`（用于消除启动闪屏），这 4px 边框被填充为黑色，形成可见黑边。
+
+关键代码路径：
+- `juce_ResizableWindow.cpp:168`：`return BorderSize<int>((resizableBorder != nullptr && !isFullScreen()) ? 4 : 1);`
+- `juce_ResizableWindow.cpp:217`：`contentComponent->setBoundsInset(getContentComponentBorder())` —— 内容组件被内缩 4px
+
+#### 2. 修复
+
+| 文件 | 变更 |
+|---|---|
+| [`Y2KStandaloneApp.cpp`](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | `Y2KMainWindow` 新增 `getBorderThickness() override` 返回 `BorderSize<int>(0)` |
+
+`Y2KMainWindow` 本身就是无边框设计，所有 UI chrome 由 Editor 内部的 PinkXP 标题栏 + 关闭按钮自行绘制，不需要 ResizableWindow 的默认边框。
+
+#### 3. 版本号
+
+| 文件 | 变更 |
+|---|---|
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 `2.3.5` → `2.3.6`（2 处） |
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | 版本号 `v2.3.5` → `v2.3.6`（4 处） |
+
+**踩坑记录**：
+- JUCE `ResizableWindow` 的 `getBorderThickness()` 在可 resize 时始终返回 4px，即使是自定义无边框窗口也不受影响。重写为返回 0 即可消除。
+- `replace_in_file` 对重复出现的短字符串需提供足够长的唯一上下文行来区分每处匹配。
+
+---
+
+### 8.8 v2.5.0 Standalone Milkdrop 脱离态与浮动窗口全链路修复
+
+#### 总体目标
+
+修复 Standalone 模式 Milkdrop 模块脱离/浮动完整生命周期一致性问题：
+- 嵌入态 ↔ 浮动态只改变窗口载体，不重置预设上下文；
+- 浮动态预设与内部状态稳定保存/恢复；
+- 浮动模块序列化无重复、无残留、无翻倍。
+
+#### 阶段一：初始 Standalone 脱离态与浮动窗口问题
+
+**现象**：
+1. Milkdrop 脱离开后浮动窗口黑块；
+2. 存档还原后浮动模块位置/大小错误；
+3. 预设控制区显示异常、脱离重置预设、浮动状态未存档、右键误触发菜单、L 锁定未限制浮动模块。
+
+**根因**：
+- 嵌入态 renderer 由 `PluginEditor` 共享 OpenGL 上下文驱动，浮动态需要独立 native peer。
+- 浮动模块从 workspace 取出后，布局持久化缺少脱离态 screenBounds 与 moduleState。
+- 浮动态下部分 hit-test/右键/锁定逻辑仍按嵌入态处理。
+
+**修改**：
+- `MilkdropModule`：增加浮动态本地 `GLView` projectM handle 生命周期。
+- `PluginEditor`：增加浮动窗口创建/dock/close/置顶/锁定回调，`SuspendMilkdropEditorRendererForFloating()` / `ResumeMilkdropEditorRendererAfterFloating()`。
+- `ModuleWorkspace`：增加 `floatingModuleStates_` 容器与 `FloatingState` 结构，支持脱离态持久化。
+- `ModulePanel`：浮动态下按钮、右键、锁定分支处理。
+- `TamagotchiModule`：同步添加浮动按钮绘制。
+
+#### 阶段二：脱离→嵌入重置预设 & 脱离态重启丢失预设
+
+**现象**：
+1. dock 回嵌入态后预设恢复为默认，不继承浮动期间预设；
+2. 浮动态退出/重启后预设丢失。
+
+**根因**：
+- 浮动态本地 handle 预设索引未在 detach 前回灌到模块 `restored_preset_index_`。
+- 浮动态预设切换通过原子请求交 GL 线程消费，保存时直接读 `local_current_preset_` 可能读到旧值。
+
+**修改**：
+- `GLView::DetachOpenGL()`：detach 前读当前预设，写回 `restored_preset_index_`，仅在真正 dock 时向 Editor 投递 `RequestMilkdropPresetJump()`。
+- `GLView::GetCurrentPresetIndex()`：浮动态下合并 pending jump/delta 请求。
+- `GLView::RequestPresetRandom()`：UI 侧立即确定目标索引写入 jump。
+- `saveModuleSpecificState()`：保存前从浮动态 renderer 同步当前预设。
+- 嵌入态用户主动切换预设时清 `restored_preset_index_`，避免陈旧索引污染。
+
+#### 阶段三：重启恢复不稳定 & 预设号翻三倍 & 重复模块
+
+**现象**：
+1. 脱离态重启后预设多数回默认，偶尔恢复（竞态）；
+2. 恢复浮动窗口时预设被重复应用三次；
+3. 存档含 Milkdrop 时重启多出大量重复模块。
+
+**根因**：
+1. `restored_preset_index_` 被 GL 初始化消费清空后，退出保存未重新同步实际 renderer 状态；
+2. 浮动窗口恢复/销毁/重建时误向 Editor renderer 投递 `RequestMilkdropPresetJump()`；
+3. `loadLayoutFromTree()` 加载前未清空旧 `floatingModuleStates_`；
+4. 恢复浮动模块遍历内部 map 同时 `popOutModule()` 修改同一 map；
+5. 浮动模块关闭未移除持久化 floating state；
+6. 析构阶段先保存真实浮动态布局，随后 dock 清理后又覆盖为临时嵌入态布局。
+
+**修改**：
+- `GLView` 新增 `SyncOwnerPresetIndexFromRenderer()`；
+- `saveModuleSpecificState()` 保存前条件同步；
+- `openGLContextClosing()` 销毁本地 handle 前同步一次；
+- `GetCurrentPresetIndex()` 在 dock 过渡期仍读本地 renderer；
+- `DetachOpenGL()` 仅在非浮动态时恢复 Editor renderer；
+- dock 路径：保存业务状态→切嵌入态→拆窗口；
+- `loadLayoutFromTree()` 加载前清空 `floatingModuleStates_`；
+- 恢复浮动模块用 map 快照；
+- `ModuleWorkspace` 新增 `removeFloatingState()`；
+- 移除 `PluginEditor` 析构后的最终布局覆盖保存。
+
+#### 阶段四：切回非脱离模式总预设数量翻两倍
+
+**现象**：Milkdrop 脱离→dock 后总预设数从 N 变成 2N。
+
+**根因**：`PluginEditor::newOpenGLContextCreated()` 扫描预设时只 `add()` 不先 `clear()`，每次 dock 恢复重复追加。
+
+**修改**：
+- `newOpenGLContextCreated()` 扫描前 `milkdrop_preset_paths_.clear()`。
+- `openGLContextClosing()` 关闭时同步清理列表和索引状态。
+
+#### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | 浮动窗口生命周期；Milkdrop renderer 暂停/恢复；浮动模块恢复（快照）；预设路径去重 |
+| [`PluginEditor.h`](/I:/Y2KMeter/PluginEditor.h) | `SuspendMilkdropEditorRendererForFloating()` / `ResumeMilkdropEditorRendererAfterFloating()` |
+| [`ModuleWorkspace.cpp`](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | `FloatingState` 容器；`popOutModule()`/`dockModule()`；布局序列化清空 |
+| [`ModuleWorkspace.h`](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | `FloatingState`；`removeFloatingState()`；`updateFloatingState*()` |
+| [`ModulePanel.cpp`](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 浮动态按钮、右键与锁定分支 |
+| [`MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | `GLView` 浮动态 projectM 生命周期；`SyncOwnerPresetIndexFromRenderer()` |
+| [`MilkdropModule.h`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `SyncOwnerPresetIndexFromRenderer()` 声明；`restored_preset_index_` mutable |
+| [`ProjectMApi.cpp`](/I:/Y2KMeter/source/ui/modules/ProjectMApi.cpp) | `resetGlewInitialization()` 轻量复位 |
+| [`ProjectMApi.h`](/I:/Y2KMeter/source/ui/modules/ProjectMApi.h) | `resetGlewInitialization()` 声明 |
+| [`TamagotchiModule.cpp`](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) | 浮动按钮绘制 |
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 `2.3.6` → `2.5.0` |
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | 版本号 `2.3.5` → `2.5.0` |
+
+#### 约束
+
+- 所有脱离/浮动逻辑仅 Standalone 模式启用；插件模式 `isPluginHost == true` 下脱离入口保持隐藏/禁用。
+- 不重新引入已清理调试日志（`POPOUT_LOG` / `PopoutLog` / `popout_debug_log.txt`）。
+
+#### 踩坑记录
+
+- **GLEW 与 projectM DLL 卸载死锁**：JUCE `OpenGLContext` 关闭回调中若 `FreeLibrary(projectM-4.dll)`，会与系统 loader lock 死锁；改为仅 `resetGlewInitialization()` 轻量复位，DLL 卸载留给进程退出。
+- **析构布局覆盖**：析构阶段 dock 回 workspace 只是资源释放手段，不应再保存一次嵌入态布局覆盖真实浮动态布局。
+- **遍历内部容器同时修改**：`getFloatingModuleStatesRaw()` 返回引用，循环中 `popOutModule()` 修改同一 map → 改为复制快照。
+- **preset path 重复追加**：`newOpenGLContextCreated()` 每次 dock 恢复都会执行，必须在扫描前 `clear()`。
+- **`replace_in_file` 短字符串匹配**：版本号等短字符串需提供足够唯一上下文行区分每处匹配。
 
 ---
 

@@ -337,6 +337,18 @@ void TamagotchiModule::setFocusVisual (bool shouldFocus)
 void TamagotchiModule::paint (juce::Graphics& g)
 
 {
+    // 弹出/停靠按钮（=），绘制于标题栏右上角
+    if (isPopOutEnabled() || isFloating())
+    {
+        auto popBtn = getPopOutButtonBounds();
+        PinkXP::drawRaised(g, popBtn, PinkXP::btnFace);
+        g.setColour(PinkXP::ink);
+        g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+        auto popBtnText = popBtn;
+        popBtnText.translate(-1, -1);
+        g.drawText(isFloating() ? "=" : "-", popBtnText, juce::Justification::centred, false);
+    }
+
     auto bounds = getLocalBounds();
 
     auto hud = getHudBounds();

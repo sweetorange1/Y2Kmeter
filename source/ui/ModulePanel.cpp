@@ -9,6 +9,11 @@ namespace
     //   · dynamic_cast 开销可忽略（仅在 mouseMove/Down 上下文发生）。
     bool isPanelLayoutLocked (const juce::Component& panel) noexcept
     {
+        if (auto* module = dynamic_cast<const ModulePanel*> (&panel))
+        {
+            if (module->isFloatingLayoutLocked())
+                return true;
+        }
         if (auto* ws = dynamic_cast<const ModuleWorkspace*> (panel.getParentComponent()))
             return ws->isLayoutLocked();
         return false;
@@ -110,6 +115,51 @@ juce::Rectangle<int> ModulePanel::getCloseButtonBounds() const
     return juce::Rectangle<int>(tb.getRight() - 4 - closeButtonSize, y, closeButtonSize, closeButtonSize);
 }
 
+juce::Rectangle<int> ModulePanel::getPopOutButtonBounds() const
+{
+    auto cb = getCloseButtonBounds();
+    constexpr int gap = 2;
+    return juce::Rectangle<int>(cb.getX() - gap - popOutButtonSize,
+                                 cb.getY(), popOutButtonSize, popOutButtonSize);
+}
+
+void ModulePanel::setFloating(bool floating) noexcept
+{
+    if (isFloating_ == floating)
+        return;
+    isFloating_ = floating;
+    if (!isFloating_)
+        floatingLayoutLocked_ = false;
+    repaint(getTitleBarBounds());
+}
+
+void ModulePanel::setFloatingLayoutLocked(bool locked) noexcept
+{
+    if (floatingLayoutLocked_ == locked)
+        return;
+
+    floatingLayoutLocked_ = locked;
+    if (locked)
+    {
+        dragMode = DragMode::none;
+        resizeEdge = Edge::none;
+        closeButtonHovered = false;
+        closeButtonPressed = false;
+        popOutButtonHovered_ = false;
+        popOutButtonPressed_ = false;
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+    }
+    repaint();
+}
+
+void ModulePanel::setPopOutEnabled(bool enabled) noexcept
+{
+    if (popOutEnabled_ == enabled)
+        return;
+    popOutEnabled_ = enabled;
+    repaint(getTitleBarBounds());
+}
+
 juce::Rectangle<int> ModulePanel::getContentBounds() const
 {
     // 去掉外边框 2px + 标题栏高度 + 1px 分割线
@@ -178,6 +228,23 @@ void ModulePanel::paint(juce::Graphics& g)
     cbText.translate(-1, -1);
     if (closeButtonPressed) cbText.translate(1, 1);
     g.drawText("x", cbText, juce::Justification::centred, false);
+
+    // 3.5. 弹出/停靠按钮（仅在 Standalone 模式或已处于浮动态时绘制）
+    if (popOutEnabled_ || isFloating_)
+    {
+        auto popBtn = getPopOutButtonBounds();
+        if (popOutButtonPressed_)
+            PinkXP::drawPressed(g, popBtn, PinkXP::pink100);
+        else
+            PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
+
+        g.setColour(PinkXP::ink);
+        g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+        auto popBtnText = popBtn;
+        popBtnText.translate(-1, -1);
+        if (popOutButtonPressed_) popBtnText.translate(1, 1);
+        g.drawText(isFloating_ ? "=" : "-", popBtnText, juce::Justification::centred, false);
+    }
 
     // 4. 内容区（默认白底凹陷，子类可覆盖 paintContent 重绘）
     auto content = getContentBounds();
@@ -375,8 +442,11 @@ void ModulePanel::mouseEnter(const juce::MouseEvent& e)
 void ModulePanel::mouseExit(const juce::MouseEvent&)
 {
     closeButtonHovered = false;
+    popOutButtonHovered_ = false;
     setMouseCursor(juce::MouseCursor::NormalCursor);
     repaint(getCloseButtonBounds());
+    if (popOutEnabled_ || isFloating_)
+        repaint(getPopOutButtonBounds());
 }
 
 void ModulePanel::mouseMove(const juce::MouseEvent& e)
@@ -392,14 +462,27 @@ void ModulePanel::mouseMove(const juce::MouseEvent& e)
         repaint(getCloseButtonBounds());
     }
 
-    // 边缘缩放 cursor（锁定态下不变光标）
-    if (locked)
+    // 弹出按钮悬浮
+    const bool popShow = (popOutEnabled_ || isFloating_);
+    bool popHovered = false;
+    if (popShow && ! locked)
+    {
+        popHovered = getPopOutButtonBounds().contains(e.getPosition());
+        if (popHovered != popOutButtonHovered_)
+        {
+            popOutButtonHovered_ = popHovered;
+            repaint(getPopOutButtonBounds());
+        }
+    }
+
+    // 边缘缩放 cursor（锁定态下不变光标；浮动态下也不启用模块自身 resize —— 由窗口边框处理）
+    if (locked || isFloating_)
     {
         setMouseCursor (juce::MouseCursor::NormalCursor);
         return;
     }
 
-    if (!hovered)
+    if (!hovered && !popHovered)
         updateCursorFor(detectEdge(e.getPosition()));
     else
         setMouseCursor(juce::MouseCursor::NormalCursor);
@@ -407,10 +490,11 @@ void ModulePanel::mouseMove(const juce::MouseEvent& e)
 
 void ModulePanel::mouseDown(const juce::MouseEvent& e)
 {
-    // 右键 → 冒泡给 workspace 弹出"添加模块"菜单（任何位置均可）
+    // 右键 → 仅嵌入态模块允许冒泡给 workspace 弹出"添加模块"菜单。
+    // 浮动窗口内没有添加模块语义，避免脱离后右键误触发主窗口菜单。
     if (e.mods.isPopupMenu())
     {
-        if (onRightClick)
+        if (!isFloating_ && onRightClick)
             onRightClick (*this, e.getPosition());
         return;
     }
@@ -431,6 +515,23 @@ void ModulePanel::mouseDown(const juce::MouseEvent& e)
     {
         closeButtonPressed = true;
         repaint(getCloseButtonBounds());
+        return;
+    }
+
+    // 1.5) 点击弹出/停靠按钮
+    if ((popOutEnabled_ || isFloating_) && getPopOutButtonBounds().contains(pos))
+    {
+        popOutButtonPressed_ = true;
+        repaint(getPopOutButtonBounds());
+        return;
+    }
+
+    // 浮动态：标题栏区域（非按钮）用于拖拽整个浮动窗口
+    if (isFloating_ && getTitleBarBounds().contains(pos))
+    {
+        if (auto* topLevel = getTopLevelComponent())
+            floatingWindowDragger_.startDraggingComponent(
+                topLevel, e.getEventRelativeTo(topLevel));
         return;
     }
 
@@ -457,6 +558,17 @@ void ModulePanel::mouseDown(const juce::MouseEvent& e)
 
 void ModulePanel::mouseDrag(const juce::MouseEvent& e)
 {
+    if (isPanelLayoutLocked(*this))
+        return;
+
+    // 浮动态：标题栏拖拽 → 移动顶层窗口
+    if (isFloating_)
+    {
+        if (auto* topLevel = getTopLevelComponent())
+            floatingWindowDragger_.dragComponent(topLevel, e.getEventRelativeTo(topLevel), nullptr);
+        return;
+    }
+
     if (dragMode == DragMode::none)
         return;
 
@@ -501,6 +613,17 @@ void ModulePanel::mouseDrag(const juce::MouseEvent& e)
 
 void ModulePanel::mouseUp(const juce::MouseEvent& e)
 {
+    if (isPanelLayoutLocked(*this))
+    {
+        closeButtonPressed = false;
+        popOutButtonPressed_ = false;
+        dragMode = DragMode::none;
+        resizeEdge = Edge::none;
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+        repaint(getTitleBarBounds());
+        return;
+    }
+
     // 关闭按钮点击判定：按下和抬起都在按钮上
     if (closeButtonPressed)
     {
@@ -510,6 +633,20 @@ void ModulePanel::mouseUp(const juce::MouseEvent& e)
 
         if (stillOnCloseBtn && onCloseClicked)
             onCloseClicked(*this);
+        return;
+    }
+
+    // 弹出/停靠按钮点击判定
+    if (popOutButtonPressed_)
+    {
+        popOutButtonPressed_ = false;
+        const bool stillOnBtn = getPopOutButtonBounds().contains(e.getPosition());
+        repaint(getPopOutButtonBounds());
+
+        if (stillOnBtn && onPopOutClicked)
+        {
+            onPopOutClicked(*this);
+        }
         return;
     }
 

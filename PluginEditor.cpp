@@ -24,6 +24,116 @@
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
+// FloatingModuleWindow —— 模块弹出独立窗口实现
+//   无系统标题栏，ModulePanel 自身的 PinkXP 标题栏作为窗口 chrome。
+//   关闭按钮触发 dock 回 workspace。
+// ==========================================================
+Y2KmeterAudioProcessorEditor::FloatingModuleWindow::FloatingModuleWindow(
+    const juce::String& name,
+    ModulePanel& module,
+    juce::Rectangle<int> savedBounds,
+    std::function<void(ModulePanel&, juce::Rectangle<int>)> onDock,
+    Y2KmeterAudioProcessorEditor* editor)
+    : juce::DocumentWindow(name,
+                            PinkXP::face,  // 背景色匹配模块底色
+                            juce::DocumentWindow::minimiseButton,
+                            false)
+    , module_(module)
+    , savedBounds_(savedBounds)
+    , onDock_(std::move(onDock))
+    , editor_(editor)
+{
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::closeButtonPressed()
+{
+    cancelAsyncUpdates();  // 取消 resize 触发的 pending async update，防止引用已删除窗口
+    if (onDock_)
+        onDock_(module_, savedBounds_);
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::resized()
+{
+    DocumentWindow::resized();
+    if (auto* content = getContentComponent())
+    {
+        content->setBounds(getLocalBounds());
+        // resize → 更新持久化 screenBounds；Milkdrop 还会借此触发 GL 重绘更新共享帧。
+        if (editor_ != nullptr)
+            triggerAsyncUpdate();
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::handleAsyncUpdate()
+{
+    if (editor_ == nullptr) return;
+
+    // 触发 GL 线程重绘（renderOpenGL → measureMax 重新扫描浮动窗口尺寸 →
+    //   更新 FBO → 捕获新尺寸共享帧 → callAsync 通知浮动窗口 repaint）
+    editor_->repaint();
+
+    // 更新 workspace 浮动状态屏幕坐标（持久化用）
+    if (editor_->workspace)
+        editor_->workspace->updateFloatingStateScreenBounds(
+            module_.getModuleId(), getScreenBounds());
+}
+
+juce::BorderSize<int> Y2KmeterAudioProcessorEditor::FloatingModuleWindow::getBorderThickness() const
+{
+    // 无边框设计：窗口内容（ModulePanel）紧贴窗口边缘
+    return {};
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setLayoutLocked(bool locked)
+{
+    module_.setFloatingLayoutLocked(locked);
+
+    auto* cbc = getConstrainer();
+    if (cbc == nullptr)
+        return;
+
+    if (locked)
+    {
+        if (!floatingLockLimitsValid_)
+        {
+            floatingLockMinW_ = cbc->getMinimumWidth();
+            floatingLockMinH_ = cbc->getMinimumHeight();
+            floatingLockMaxW_ = cbc->getMaximumWidth();
+            floatingLockMaxH_ = cbc->getMaximumHeight();
+            floatingLockLimitsValid_ = true;
+        }
+
+        const int w = juce::jmax(1, getWidth());
+        const int h = juce::jmax(1, getHeight());
+        setResizeLimits(w, h, w, h);
+    }
+    else if (floatingLockLimitsValid_)
+    {
+        setResizeLimits(floatingLockMinW_, floatingLockMinH_, floatingLockMaxW_, floatingLockMaxH_);
+        floatingLockLimitsValid_ = false;
+    }
+}
+
+juce::ValueTree Y2KmeterAudioProcessorEditor::FloatingModuleWindow::saveModuleSpecificState() const
+{
+    return module_.saveModuleSpecificState();
+}
+
+void Y2KmeterAudioProcessorEditor::syncFloatingWindowStatesToWorkspace()
+{
+    if (workspace == nullptr) return;
+
+    for (auto& wnd : floatingWindows_)
+    {
+        if (wnd == nullptr) continue;
+        auto* panel = dynamic_cast<ModulePanel*>(wnd->getContentComponent());
+        if (panel == nullptr) continue;
+        workspace->updateFloatingStateScreenBounds(panel->getModuleId(), wnd->getScreenBounds());
+        workspace->updateFloatingStateModuleState(panel->getModuleId(), wnd->saveModuleSpecificState());
+    }
+}
+
+// ==========================================================
 // FpsFrameListener——嵌套实现（封装在 .cpp 以绕开 AnalyserHub 完整头
 //   在 PluginEditor.h 里暴露时导致的 MSVC include guard 串扰问题）
 // ==========================================================
@@ -74,7 +184,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.3.6");
+        const int versionW = versionFont.getStringWidth ("v2.5.0");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -115,7 +225,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.6";
+        const juce::String versionText = "v2.5.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -795,6 +905,210 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         processor.setSavedLayoutXml(workspace->saveLayoutAsXml());
     };
 
+    // 4.0) 模块弹出请求 → 创建浮动窗口（仅 Standalone 模式）
+    workspace->onModulePopOutRequested = [this](ModulePanel* panel,
+                                                 juce::Rectangle<int> savedBounds)
+    {
+        if (panel == nullptr) return;
+
+        // 设置模块为浮动态前先把当前业务状态回灌到模块自身。
+        // Milkdrop 嵌入态的当前预设在 Editor renderer 中，浮动态会新建本地 renderer；
+        // 若不先写入 restored state，新 renderer 会从预设 0 启动。
+        auto currentModuleState = panel->saveModuleSpecificState();
+        if (currentModuleState.isValid())
+            panel->restoreModuleSpecificState(currentModuleState);
+
+        // 设置模块为浮动态（按钮图标从 □→←）
+        panel->setFloating(true);
+
+        // ★ 重新绑定 onPopOutClicked：浮动态下点击按钮 → 触发停靠回 workspace
+        panel->onPopOutClicked = [this, panel, savedBounds](ModulePanel&)
+        {
+            // 查找包含此模块的浮动窗口并关闭
+            for (auto it = floatingWindows_.begin();
+                 it != floatingWindows_.end(); ++it)
+            {
+                if ((*it) != nullptr && (*it)->getContentComponent() == panel)
+                {
+                    auto wnd = std::move(*it);
+                    floatingWindows_.erase(it);
+                    if (auto state = panel->saveModuleSpecificState(); state.isValid())
+                        panel->restoreModuleSpecificState(state);
+                    panel->setFloating(false);
+                    if (panel->getModuleType() == ModuleType::milkdrop)
+                        --floating_milkdrop_count_;
+                    wnd->setContentNonOwned(panel, false);
+                    wnd.reset();  // 销毁浮动窗口
+
+                    if (workspace != nullptr)
+                        workspace->dockModule(*panel, savedBounds);
+
+                    return;
+                }
+            }
+        };
+
+        // ★ 重新绑定 onCloseClicked：浮动态下关闭模块 → 销毁浮动窗口 + 删除模块
+        panel->onCloseClicked = [this, panel](ModulePanel&)
+        {
+            for (auto it = floatingWindows_.begin();
+                 it != floatingWindows_.end(); ++it)
+            {
+                if ((*it) != nullptr && (*it)->getContentComponent() == panel)
+                {
+                    // 取消 resize 触发的 pending async update，
+                    // 防止 handleAsyncUpdate 访问即将被删除的窗口
+                    (*it)->cancelAsyncUpdates();
+                    auto wnd = std::move(*it);
+                    floatingWindows_.erase(it);
+                    if (workspace != nullptr)
+                        workspace->removeFloatingState(panel->getModuleId());
+                    if (panel->getModuleType() == ModuleType::milkdrop)
+                        --floating_milkdrop_count_;
+                    wnd->setContentNonOwned(panel, false);
+                    wnd.reset();
+                    // 浮动模块直接 delete（生命周期由调用方管理）
+                    delete panel;
+                    return;
+                }
+            }
+            // 后备：不在浮动列表中（异常情况），直接删除模块
+            delete panel;
+        };
+
+        // 获取模块脱离前在屏幕上的真实位置和大小（savedBounds 是 workspace 相对坐标，
+        // 需用 localAreaToGlobal 转换为屏幕坐标；此时模块已脱离 tree，必须用 workspace 转换）
+        auto screenBounds = workspace->localAreaToGlobal(savedBounds);
+
+        // Clamp screen bounds 到可见屏幕区域，防止窗口被创建在屏幕外侧
+        {
+          auto& desktop = juce::Desktop::getInstance();
+          auto totalArea = desktop.getDisplays().getTotalBounds(true);  // true=包含所有显示器
+          if (screenBounds.getX() < totalArea.getX())
+            screenBounds.setX(totalArea.getX());
+          if (screenBounds.getY() < totalArea.getY())
+            screenBounds.setY(totalArea.getY());
+          if (screenBounds.getRight() > totalArea.getRight())
+            screenBounds.setX(juce::jmax(totalArea.getX(),
+                                          totalArea.getRight() - screenBounds.getWidth()));
+          if (screenBounds.getBottom() > totalArea.getBottom())
+            screenBounds.setY(juce::jmax(totalArea.getY(),
+                                          totalArea.getBottom() - screenBounds.getHeight()));
+        }
+
+        auto name = panel->getTitleText() + " - Y2Kmeter";
+        auto* window = new FloatingModuleWindow(
+            name, *panel, savedBounds,
+            [this](ModulePanel& p, juce::Rectangle<int> bounds)
+            {
+                // 停靠回调：从浮动窗口列表中移除，dock 回 workspace
+                for (auto it = floatingWindows_.begin();
+                     it != floatingWindows_.end(); ++it)
+                {
+                    if ((*it) != nullptr && (*it)->getContentComponent() == &p)
+                    {
+                        auto wnd = std::move(*it);
+                        floatingWindows_.erase(it);
+                        if (auto state = p.saveModuleSpecificState(); state.isValid())
+                            p.restoreModuleSpecificState(state);
+                        p.setFloating(false);
+                        wnd->setContentNonOwned(&p, false);
+                        wnd.reset();
+
+                        if (workspace != nullptr)
+                            workspace->dockModule(p, bounds);
+
+                        return;
+                    }
+                }
+            },
+            this);
+
+        floatingWindows_.push_back(std::unique_ptr<FloatingModuleWindow>(window));
+
+        // 浮动 Milkdrop 窗口计数：renderOpenGL 仅在有浮动 Milkdrop 时才做帧捕获
+        if (panel->getModuleType() == ModuleType::milkdrop)
+            ++floating_milkdrop_count_;
+
+        window->setUsingNativeTitleBar(false);
+        window->setTitleBarHeight(0);
+        window->setResizable(true, false);
+        window->setDropShadowEnabled(false);
+        window->setLookAndFeel(&getPinkXPLookAndFeel()); // Bug 修复：防止脱离后 LookAndFeel 链断裂导致子控件回退为系统默认样式
+        window->setContentNonOwned(panel, false);
+        // 模块脱离 tree 后 bounds 可能被清零，显式恢复到脱离前尺寸
+        panel->setBounds(savedBounds.withPosition(0, 0));
+        window->setBounds(screenBounds);
+        window->setLayoutLocked(layoutLocked);
+
+        window->addToDesktop();               // 创建 native peer → 触发 resized() → 模块填满窗口
+        window->setVisible(true);             // ★ DocumentWindow ctor addToDesktop=false 时 isVisible=false，
+                                              //    addToDesktop() 仅创建 peer 不保证 setVisible(true)
+
+        window->setAlwaysOnTop(true);         // native peer 已存在，置顶生效
+
+        // screenBounds 不在此处记录：popOutModule 创建的窗口位置尚未被 restore 逻辑
+        // 修正（restore 时会在 setBounds 后立即更新），且首个 handleAsyncUpdate 会覆盖。
+
+    };
+
+    // ★ Bug2修复：恢复上一次会话中处于脱离态的模块（仅在 Standalone 模式）
+    //   必须在 onModulePopOutRequested 设置完毕和 onLayoutPresetChanged 设置之前执行，
+    //   因为需要 onModulePopOutRequested 回调来创建 FloatingModuleWindow。
+    if (!isPluginHost && workspace != nullptr)
+    {
+        const auto floatingStates = workspace->getFloatingModuleStatesRaw();
+        if (!floatingStates.empty())
+        {
+            // 恢复脱离态模块：先复制快照，再逐个创建并弹出。
+            // popOutModule 会更新 workspace 内部 floatingModuleStates_，不能边遍历
+            // getFloatingModuleStatesRaw() 返回的原始 map 边修改，否则会造成重复恢复。
+            for (const auto& [id, state] : floatingStates)
+            {
+                // 通过 Editor 自身的 createModule 工厂创建模块
+                auto panel = createModule(state.type);
+                if (panel == nullptr)
+                    continue;
+
+                panel->setModuleId(id);
+                if (state.moduleState.isValid())
+                    panel->restoreModuleSpecificState(state.moduleState);
+                panel->setBounds(state.bounds);
+                auto* raw = panel.get();
+
+                // addModule 接管所有权（加入 modules OwnedArray + hookPanel 绑定回调），
+                // autoPosition=false 配合已设置的 bounds 避免自动排序覆盖原始位置
+                workspace->addModule(std::move(panel), false);
+
+                // popOutModule 从 modules 中取出（不 delete），通知 Editor 创建浮动窗口
+                workspace->popOutModule(*raw);
+
+                // popOutModule 会用当前模块状态重写浮动状态；恢复流程必须重新写回
+                // 存档中的业务状态，防止首次保存时丢失恢复前的 moduleState。
+                if (state.moduleState.isValid())
+                    workspace->updateFloatingStateModuleState(id, state.moduleState);
+
+                // ★ Bug1修复：若存档中存在 screenBounds（即用户脱离后调整过窗口位置/大小），
+                // 则覆盖 popOutModule 自动计算的窗口位置，精确还原至用户离开时的状态
+                if (!state.screenBounds.isEmpty() && !floatingWindows_.empty())
+                {
+                    auto* wnd = floatingWindows_.back().get();
+                    wnd->setLayoutLocked(false);
+                    wnd->setBounds(state.screenBounds);
+                    wnd->setLayoutLocked(layoutLocked);
+                }
+
+                // ★ 无论是否从存档恢复 screenBounds，立即同步到 floatingModuleStates_。
+                // popOutModule 记录的 workspace 坐标在 restore 时已不再准确；
+                // 此调用确保首次 saveLayoutTree 写入的是浮动窗口实际屏幕位置。
+                if (workspace != nullptr && !floatingWindows_.empty())
+                    workspace->updateFloatingStateScreenBounds(
+                        id, floatingWindows_.back()->getScreenBounds());
+
+            }
+        }
+    }
+
     // 4.b) P4：host 调用 getStateInformation 前，Processor 会触发此钩子，
     //      把 ModuleWorkspace 里 debounce 合并中的变更立即 flush，并
     //      同步回写最新 XML 到 savedLayoutXml，避免保存到工程的布局
@@ -803,6 +1117,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     {
         if (workspace != nullptr)
         {
+            syncFloatingWindowStatesToWorkspace();
             workspace->flushPendingLayoutChange();
             // flushPendingLayoutChange 内部若有待决通知会同步回调
             // onLayoutChanged → setSavedLayoutXml；若无待决，这里兜底
@@ -823,6 +1138,29 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //         · 切换后手动 notifyLayoutChanged 以把新布局回写 Processor。
     workspace->onLayoutPresetChanged = [this](ModuleWorkspace::LayoutPreset preset)
     {
+        // ★ Bug4修复：切换布局预设前，强制归位所有脱离态模块
+        //   否则新旧布局混杂，切换后的模块与残留浮动窗口并存
+        if (workspace != nullptr && !floatingWindows_.empty())
+        {
+            // 先保存当前布局（包含浮动模块的干净布局）
+            processor.setSavedLayoutXml(workspace->saveLayoutAsXml());
+
+            for (auto& wnd : floatingWindows_)
+            {
+                if (wnd != nullptr)
+                {
+                    if (auto* content = dynamic_cast<ModulePanel*>(wnd->getContentComponent()))
+                    {
+                        const auto savedBounds = wnd->getSavedBounds();
+                        wnd->setContentNonOwned(content, false);
+                        workspace->dockModule(*content, savedBounds);
+                    }
+                    wnd.reset();
+                }
+            }
+            floatingWindows_.clear();
+        }
+
         // 切换布局预设期间抑制 auto-show，避免窗口瞬间跳动到屏幕边缘时
         // 鼠标被判定为"进入窗口"而触发临时 chrome 展开，挤占模块区域。
         ++suppressAutoShowCounter;
@@ -986,7 +1324,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             const auto topScreenBounds = (topComp == this) ? getScreenBounds() : topComp->getScreenBounds();
             const auto* display = juce::Desktop::getInstance()
                                      .getDisplays()
-                                     .getDisplayForRect (topScreenBounds);
+                                     .getDisplayForPoint(topScreenBounds.getCentre());
             const auto userArea = (display != nullptr) ? display->userArea
                                                         : juce::Rectangle<int> (1280, 720);
             const int windowCenterY = topScreenBounds.getCentreY();
@@ -1363,6 +1701,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             //   预设文件（与 Standalone Save 出的 .settings 互通）。按钮独立贴在
             //   Grid 左侧显示。
             workspace->setSaveLoadUiVisible (true);
+
+            // 插件模式下不提供模块弹出功能（无法创建独立顶层窗口）
+            workspace->setPopOutEnabled (false);
         }
 
         // 插件模式下 Save/Load 不经过 Standalone App，直接由 Editor 就地处理：
@@ -1486,6 +1827,42 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     //   嵌入子窗口时塞给我们的 ~175×85 极小中间态）都不应被 resized() 回写到
     //   Processor.savedEditorSize，否则下次打开窗口会恢复成异常小尺寸。
     editorBeingDestructed = true;
+
+    // -3) 先把所有浮动窗口里的模块 dock 回 workspace，并在停靠前后各存一次布局。
+    //   关键：dock 前先清零 onLayoutChanged，防止 dockModule → notifyLayoutChanged
+    //   把 pending 标志留在 workspace 析构函数里调用 onLayoutChanged → saveLayoutTree
+    //   时因为 children 状态不一致而崩溃。
+    if (workspace != nullptr)
+    {
+        // 先同步所有浮动窗口真实屏幕 bounds，再保存脱离态布局。
+        syncFloatingWindowStatesToWorkspace();
+        workspace->flushPendingLayoutChange();
+        processor.setSavedLayoutXml(workspace->saveLayoutAsXml());
+        // 清零回调，后续 dock 操作不再触发保存
+        workspace->onLayoutChanged = nullptr;
+    }
+
+    for (auto& wnd : floatingWindows_)
+    {
+        if (wnd != nullptr)
+        {
+            if (auto* content = dynamic_cast<ModulePanel*>(wnd->getContentComponent()))
+            {
+                const auto savedBounds = wnd->getSavedBounds();
+                wnd->setContentNonOwned(content, false);
+                if (workspace != nullptr)
+                    workspace->dockModule(*content, savedBounds);
+            }
+            wnd.reset();
+        }
+    }
+    floatingWindows_.clear();
+
+    // ★ 析构安全：dock 完成后重置 Milkdrop 浮动计数器（防止 renderOpenGL 在析构中途访问已释放的 FBO）
+    floating_milkdrop_count_ = 0;
+
+    // 这里不能再保存 dock 后的临时布局：关闭前已经保存了包含 floating=true 的真实布局，
+    // 析构阶段 dock 只是为了安全释放窗口资源，若再次写回会把脱离态存档覆盖成嵌入态。
 
     // P4：先解绑 Processor → Editor 的 flush 钩子，避免析构阶段里
     //   宿主线程调 getStateInformation 触发回调到已部分销毁的 this。
@@ -1940,7 +2317,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
-                                 .getDisplayForRect (top->getScreenBounds());
+                                 .getDisplayForPoint(top->getScreenBounds().getCentre());
         const auto userArea = (display != nullptr) ? display->userArea
                                                    : juce::Rectangle<int> (1280, 720);
         const int screenW = userArea.getWidth();
@@ -2151,11 +2528,13 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
-                                 .getDisplayForRect(top->getScreenBounds());
-        const auto userArea = (display != nullptr) ? display->userArea
-                                                   : juce::Rectangle<int>(1280, 720);
-        const int screenW = userArea.getWidth();
-        const int screenH = userArea.getHeight();
+                                 .getDisplayForPoint(top->getScreenBounds().getCentre());
+        // 全屏预设使用 totalArea（完整显示器尺寸含任务栏），
+        // 在旋转/翻转显示器上 totalArea 会正确反映逻辑坐标，避免交互错位
+        const auto area = (display != nullptr) ? display->totalArea
+                                              : juce::Rectangle<int>(1280, 720);
+        const int screenW = area.getWidth();
+        const int screenH = area.getHeight();
 
         // -------- 第 1 步：全屏尺寸 ----------
         // 先放开 resizeLimits 到足够宽松，确保 setBounds 不会被 constriner 夹回
@@ -2172,7 +2551,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         }
         else
         {
-            top->setBounds(userArea.getX(), userArea.getY(), screenW, screenH);
+            top->setBounds(area.getX(), area.getY(), screenW, screenH);
         }
 
         // -------- 第 2 步：反推 overhead + 分配 canvas ----------
@@ -2354,7 +2733,7 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
             return std::make_unique<TamagotchiModule>();
 
         case ModuleType::milkdrop:
-            return std::make_unique<MilkdropModule>(&processor.getAnalyserHub());
+            return std::make_unique<MilkdropModule>(&processor.getAnalyserHub(), this);
 
         default:
             jassertfalse; // 暂未实现
@@ -2620,7 +2999,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.3.6";
+        const juce::String versionText = "v2.5.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -2628,7 +3007,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.3.6");
+        const int versionW = versionFont.getStringWidth ("v2.5.0");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -3150,10 +3529,15 @@ void Y2KmeterAudioProcessorEditor::applyLayoutLocked (bool locked, bool initial)
     // 1) 复位任何进行中的窗口拖拽（避免用户按住鼠标切锁的边缘态）
     draggingWindow = false;
 
-    // 2) 同步 workspace（模块 tile / 贴画所在层）；也让子组件的关闭按钮 hover/press
-    //    在锁定态下不响应（由 ModulePanel/TamagotchiModule 内部检查 workspace 锁定态）。
+    // 2) 同步 workspace（模块 tile / 贴画所在层）和所有浮动窗口；也让子组件的
+    //    关闭按钮 hover/press 在锁定态下不响应。
     if (workspace != nullptr)
         workspace->setLayoutLocked (locked);
+    for (auto& wnd : floatingWindows_)
+    {
+        if (wnd != nullptr)
+            wnd->setLayoutLocked(locked);
+    }
 
     // 3) 顶层窗口尺寸约束：使用 setResizeLimits 而非 setResizable，避免 peer 重建。
     //    · 首次进入锁定前先备份当前 min/max，解锁时还原；
@@ -4050,7 +4434,9 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
     api.setTextureSearchPaths(milkdrop_pm_handle_, paths);
   }
 
-  // 扫描预设
+  // 扫描预设。newOpenGLContextCreated() 在脱离态 dock 回嵌入态时会再次执行，
+  // 因此每次扫描前必须清空旧列表，避免总预设数被重复追加成 2N、3N。
+  milkdrop_preset_paths_.clear();
   auto presetsDir = FindMilkdropAssetsDir("milkdrop_presets");
   if (presetsDir.exists()) {
     auto files = presetsDir.findChildFiles(juce::File::findFiles,
@@ -4164,6 +4550,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
 
   // 收集最大模块尺寸 → projectM 窗口和 offscreen FBO 大小
   int max_w = 256, max_h = 256;
+  int floating_cw = 0, floating_ch = 0;  // 浮动 Milkdrop 模块 content 尺寸（独立追踪）
   {
     std::function<void(juce::Component*)> measureMax =
         [&](juce::Component* root) {
@@ -4183,6 +4570,25 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       }
     };
     measureMax(this);
+
+    // 同时扫描浮动窗口，记录其 content 尺寸供共享帧捕获
+    for (auto& wnd : floatingWindows_)
+    {
+        if (wnd != nullptr)
+        {
+            if (auto* content = dynamic_cast<MilkdropModule*>(wnd->getContentComponent()))
+            {
+                auto cl = content->GetContentLocalBounds();
+                if (cl.getWidth() > 0 && cl.getHeight() > 0)
+                {
+                    floating_cw = std::max(floating_cw, cl.getWidth());
+                    floating_ch = std::max(floating_ch, cl.getHeight());
+                    max_w = std::max(max_w, cl.getWidth());
+                    max_h = std::max(max_h, cl.getHeight());
+                }
+            }
+        }
+    }
   }
 
   int fbo_w = static_cast<int>(max_w * dpi_scale) / milkdrop_render_scale_;
@@ -4306,6 +4712,82 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   };
   blitToModules(this);
 
+  // ================================================================
+  // 浮动 Milkdrop 窗口共享帧捕获
+  //   离线 FBO → glReadPixels → juce::Image（线程安全写入）
+  //   浮动窗口的 MilkdropModule::paintContent() 读取此帧并绘制
+  // ================================================================
+  if (floating_milkdrop_count_ > 0)
+  {
+    juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, milkdrop_render_fbo_);
+    // ★ 共享帧捕获使用浮动模块自身 content 尺寸（与 measureMax 中追踪的
+    //   floating_cw/floating_ch 一致），而非整个 FBO 尺寸。因 FBO 基于所有
+    //   模块的 max_w/max_h，不同模块长宽比可能不同，直接捕整个 FBO 会导致
+    //   paintContent 中 stretchToFit 非等比拉伸 → STALE_FRAME → 黑屏。
+    const int capture_w = juce::jmax(
+        static_cast<int>(floating_cw * dpi_scale) / milkdrop_render_scale_, 1);
+    const int capture_h = juce::jmax(
+        static_cast<int>(floating_ch * dpi_scale) / milkdrop_render_scale_, 1);
+    {
+      std::lock_guard<std::mutex> lock(milkdrop_shared_frame_mutex_);
+
+      // 确保共享帧 Image 尺寸匹配
+      const bool frameNeedsResize = (milkdrop_shared_frame_.getWidth() != capture_w
+          || milkdrop_shared_frame_.getHeight() != capture_h
+          || milkdrop_shared_frame_.isNull());
+      if (frameNeedsResize)
+      {
+        milkdrop_shared_frame_ = juce::Image(juce::Image::ARGB, capture_w, capture_h, true);
+        milkdrop_capture_buf_size_ = 0;  // 强制重新分配
+      }
+
+      // 预分配原始 RGBA 缓冲区（只分配一次，尺寸不变时复用）
+      const int bufSize = capture_w * capture_h * 4;
+      if (milkdrop_capture_buf_size_ < bufSize)
+      {
+        milkdrop_capture_buf_.reset(new uint8_t[bufSize]);
+        milkdrop_capture_buf_size_ = bufSize;
+      }
+
+      // 同步回读 FBO → CPU 缓冲区（仅在浮动 Milkdrop 存在时执行）
+      juce::gl::glReadPixels(0, 0, capture_w, capture_h,
+                              juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                              milkdrop_capture_buf_.get());
+
+      // RGBA → ARGB 像素交换并写入 juce::Image。
+      // GL 帧的 alpha 在不同显卡/驱动下可能为 0 或未定义；浮动窗口使用 JUCE
+      // 2D 合成绘制时必须强制为不透明，否则放大后的新增区域会表现为透明或纯色块。
+      {
+        juce::Image::BitmapData bd(milkdrop_shared_frame_,
+                                    juce::Image::BitmapData::writeOnly);
+        auto* src = milkdrop_capture_buf_.get();
+        for (int y = 0; y < capture_h; ++y)
+        {
+          auto* dst = bd.data + y * bd.lineStride;
+          for (int x = 0; x < capture_w; ++x)
+          {
+            dst[0] = src[2];  // R
+            dst[1] = src[1];  // G
+            dst[2] = src[0];  // B
+            dst[3] = 0xff;    // A：强制不透明
+            src += 4;
+            dst += 4;
+          }
+        }
+      }
+    }
+    juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
+
+    juce::MessageManager::callAsync([this]() {
+        for (auto& wnd : floatingWindows_) {
+            if (wnd != nullptr
+                && dynamic_cast<MilkdropModule*>(wnd->getContentComponent()) != nullptr) {
+                wnd->getContentComponent()->repaint();
+            }
+        }
+    });
+  }
+
   juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
 
   } // if Milkdrop ready
@@ -4321,6 +4803,7 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
     api.destroy(milkdrop_pm_handle_);
     milkdrop_pm_handle_ = nullptr;
     gEditorProjectMInstances.store(0);
+    api.resetGlewInitialization();
   }
   if (milkdrop_render_fbo_ != 0) {
     juce::gl::glDeleteFramebuffers(1, &milkdrop_render_fbo_);
@@ -4330,9 +4813,29 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
     juce::gl::glDeleteTextures(1, &milkdrop_render_tex_);
     milkdrop_render_tex_ = 0;
   }
+  milkdrop_preset_paths_.clear();
+  milkdrop_current_preset_ = 0;
+  milkdrop_current_preset_ui_.store(-1);
   milkdrop_last_fbo_w_ = 0;
   milkdrop_last_fbo_h_ = 0;
   milkdrop_render_ready_ = false;
+}
+
+void Y2KmeterAudioProcessorEditor::SuspendMilkdropEditorRendererForFloating() {
+  if (!openGLContext.isAttached()) return;
+
+  openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
+    openGLContextClosing();
+  }, true);
+}
+
+void Y2KmeterAudioProcessorEditor::ResumeMilkdropEditorRendererAfterFloating() {
+  if (editorBeingDestructed || !openGLContext.isAttached()) return;
+
+  openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
+    if (!milkdrop_render_ready_ && milkdrop_pm_handle_ == nullptr)
+      newOpenGLContextCreated();
+  }, false);
 }
 
 void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {

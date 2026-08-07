@@ -53,8 +53,12 @@ public:
     int  GetMilkdropTotalPresets() const noexcept;
     juce::String GetMilkdropCurrentPresetName() const;
     int64_t GetMilkdropLastPresetSwitchTimeMs() const noexcept;
-
-
+    // 浮动窗口共享帧：renderOpenGL 抓取离线 FBO → 浮动 MilkdropModule 读取绘制
+    const juce::Image& GetMilkdropSharedFrame() const noexcept { return milkdrop_shared_frame_; }
+    // 浮动态 Milkdrop 使用自身 native OpenGL surface 渲染时，临时释放 Editor
+    // 持有的 projectM handle，避免 Windows/GLEW 下跨上下文多 handle 崩溃。
+    void SuspendMilkdropEditorRendererForFloating();
+    void ResumeMilkdropEditorRendererAfterFloating();
 
     Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcessor&);
     ~Y2KmeterAudioProcessorEditor() override;
@@ -429,6 +433,50 @@ private:
     std::unique_ptr<AutoHideChildWatcher> autoHideChildWatcher;
 
     // ================================================================
+    // 模块浮动窗口（Standalone 模式下的模块弹出/脱离功能）
+    //   · FloatingModuleWindow 封装一个独立的 DocumentWindow，
+    //     内部持有已脱离的 ModulePanel。
+    //   · 关闭浮动窗口时自动将模块 dock 回 workspace 原始位置。
+    //   · floatingWindows_ 由 Editor 统一管理生命周期。
+    // ================================================================
+    class FloatingModuleWindow : public juce::DocumentWindow,
+                                 private juce::AsyncUpdater
+    {
+    public:
+        FloatingModuleWindow(const juce::String& name,
+                             ModulePanel& module,
+                             juce::Rectangle<int> savedBounds,
+                             std::function<void(ModulePanel&, juce::Rectangle<int>)> onDock,
+                             Y2KmeterAudioProcessorEditor* editor);
+        void closeButtonPressed() override;
+        void resized() override;
+        juce::BorderSize<int> getBorderThickness() const override;
+        juce::Rectangle<int> getSavedBounds() const noexcept { return savedBounds_; }
+        void setLayoutLocked(bool locked);
+        juce::ValueTree saveModuleSpecificState() const;
+
+        // 取消 resize/move 触发的 pending async update（关闭窗口前调用）
+        void cancelAsyncUpdates() { cancelPendingUpdate(); }
+
+    private:
+        void handleAsyncUpdate() override;
+        ModulePanel& module_;
+        juce::Rectangle<int> savedBounds_;
+        std::function<void(ModulePanel&, juce::Rectangle<int>)> onDock_;
+        Y2KmeterAudioProcessorEditor* editor_;  // 用于 Milkdrop resize 时触发 GL 重绘
+        bool floatingLockLimitsValid_ = false;
+        int floatingLockMinW_ = 0;
+        int floatingLockMinH_ = 0;
+        int floatingLockMaxW_ = 0;
+        int floatingLockMaxH_ = 0;
+    };
+
+    std::vector<std::unique_ptr<FloatingModuleWindow>> floatingWindows_;
+
+    // 将当前所有浮动窗口的真实屏幕 bounds 同步到 ModuleWorkspace 的持久化状态。
+    void syncFloatingWindowStatesToWorkspace();
+
+    // ================================================================
     // v1.9.x：新手引导（仅 Standalone 模式生效，插件宿主模式忽略）
     //   · step_hidden:      不显示引导
     //   · step1_rightClick: 右键点击画布添加拓麻歌子
@@ -468,6 +516,13 @@ private:
     int    milkdrop_render_scale_ = 1;  // 1=全分辨率, 2=半分辨率, 4=1/4分辨率
     int    milkdrop_last_fbo_w_   = 0;
     int    milkdrop_last_fbo_h_   = 0;
+
+    // 浮动窗口共享帧：renderOpenGL 抓取离线 FBO 内容 → 浮动 Milkdrop 读取
+    juce::Image       milkdrop_shared_frame_;
+    std::mutex        milkdrop_shared_frame_mutex_;
+    int               floating_milkdrop_count_ = 0;  // 浮动 Milkdrop 窗口计数
+    std::unique_ptr<uint8_t[]> milkdrop_capture_buf_;      // 预分配 glReadPixels 缓冲区
+    int                        milkdrop_capture_buf_size_ = 0;
 
     // 预设
     juce::StringArray      milkdrop_preset_paths_;
