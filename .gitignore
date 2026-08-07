@@ -81,3 +81,13 @@ Thumbs.db
 # Windows reserved device names (cannot be tracked by git)
 nul
 tools/milkdrop_tester/nul
+tools/MilkDrop 3.33
+.codebuddy
+/third_party/MilkDrop3-main/
+/build_output.txt
+/docs/skills/milkdrop3-dev-guard/
+/docs/skills/project-maintenance-guard.zip
+/build_skill_verify.bat
+/build_temp.bat
+/incr_build.bat
+
