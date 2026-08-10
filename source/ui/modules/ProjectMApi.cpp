@@ -14,6 +14,8 @@
  #define WIN32_LEAN_AND_MEAN
  #define NOMINMAX
  #include <windows.h>
+#elif defined (__APPLE__)
+ #include <dlfcn.h>
 #endif
 
 namespace projectm_api
@@ -36,7 +38,7 @@ static juce::File findExistingFile (const juce::StringArray& candidates)
 }
 
 /**
- * @brief 猜测 projectM-4.dll 的位置。
+ * @brief 猜测 projectM-4.dll 的位置（Windows）。
  *
  * 顺序：
  *   1) 与当前模块（exe 或 vst3）同目录 —— 生产期由 CMake Post-build 拷贝。
@@ -110,6 +112,61 @@ static juce::File locateProjectMDll()
     return findExistingFile (candidates);
 }
 
+#if defined (__APPLE__)
+/**
+ * @brief 猜测 libprojectM-4.dylib 的位置（macOS）。
+ *
+ * 顺序：
+ *   1) .app bundle 的 Contents/Frameworks/ —— 生产期由 CMake Post-build 拷贝。
+ *   2) .vst3 / .component bundle 的 Contents/Frameworks/ —— 插件场景。
+ *   3) 与当前可执行文件同目录 —— 开发期从 IDE 直接跑 Standalone。
+ *   4) 源码树 third_party/projectm/bin —— 开发期兜底。
+ */
+static juce::File locateProjectMDylib()
+{
+    juce::StringArray candidates;
+
+    // 1) .app bundle Contents/Frameworks/（Standalone 生产部署）
+    {
+        auto appFile = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
+        // currentApplicationFile 在 .app bundle 里指向 .app 本身
+        auto frameworks = appFile.getChildFile ("Contents/Frameworks");
+        candidates.add (frameworks.getChildFile ("libprojectM-4.dylib").getFullPathName());
+    }
+
+    // 2) 从当前可执行文件向上找 bundle 根，再进 Contents/Frameworks/
+    {
+        auto exeFile = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        // 可执行文件在 Contents/MacOS/，向上两级到 bundle 根
+        auto bundleRoot = exeFile.getParentDirectory().getParentDirectory();
+        candidates.add (bundleRoot.getChildFile ("Contents/Frameworks/libprojectM-4.dylib").getFullPathName());
+    }
+
+    // 3) 与可执行文件同目录（开发期 IDE 直接运行）
+    {
+        auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+        candidates.add (exeDir.getChildFile ("libprojectM-4.dylib").getFullPathName());
+    }
+
+    // 4) 源码树 third_party/projectm/bin/macos（开发期兜底）
+    {
+        auto up = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        for (int i = 0; i < 10 && up.exists(); ++i)
+        {
+            auto guess = up.getChildFile ("third_party/projectm/bin/macos/libprojectM-4.dylib");
+            if (guess.existsAsFile())
+            {
+                candidates.add (guess.getFullPathName());
+                break;
+            }
+            up = up.getParentDirectory();
+        }
+    }
+
+    return findExistingFile (candidates);
+}
+#endif
+
 Api& Api::instance()
 {
     static Api singleton;
@@ -140,6 +197,12 @@ void Api::unloadLibrary()
     {
         ::FreeLibrary ((HMODULE) glewModule);
         glewModule = nullptr;
+    }
+   #elif defined (__APPLE__)
+    if (moduleHandle != nullptr)
+    {
+        ::dlclose (moduleHandle);
+        moduleHandle = nullptr;
     }
    #endif
     glewInitialized = false;
@@ -265,6 +328,28 @@ void Api::loadLibrary()
         errorMessage = "LoadLibraryExW(projectM-4.dll) failed, Win32 error code = "
                      + juce::String ((int) err).toStdString();
     }
+   #elif defined (__APPLE__)
+    auto dylib = locateProjectMDylib();
+
+    if (! dylib.existsAsFile())
+    {
+        errorMessage = "Cannot find libprojectM-4.dylib. "
+                       "Expected in the app bundle's Contents/Frameworks/, "
+                       "or next to the executable, "
+                       "or in third_party/projectm/bin/. "
+                       "Please rebuild with latest CMake install rules.";
+        return;
+    }
+
+    // RTLD_NOW: 立即解析所有符号，便于在加载时发现缺失依赖。
+    // RTLD_LOCAL: 不把符号导出到全局命名空间，避免与其他插件冲突。
+    moduleHandle = ::dlopen (dylib.getFullPathName().toRawUTF8(), RTLD_NOW | RTLD_LOCAL);
+    if (moduleHandle == nullptr)
+    {
+        const char* err = ::dlerror();
+        errorMessage = std::string ("dlopen(libprojectM-4.dylib) failed: ")
+                     + (err != nullptr ? err : "unknown error");
+    }
    #else
     errorMessage = "libprojectM dynamic loading is not implemented on this platform.";
    #endif
@@ -275,6 +360,9 @@ void* Api::resolveOptional (const char* name)
    #if defined (_WIN32)
     if (moduleHandle == nullptr) return nullptr;
     return (void*) ::GetProcAddress ((HMODULE) moduleHandle, name);
+   #elif defined (__APPLE__)
+    if (moduleHandle == nullptr) return nullptr;
+    return ::dlsym (moduleHandle, name);
    #else
     (void) name;
     return nullptr;

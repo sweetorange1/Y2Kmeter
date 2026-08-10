@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.5.2 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.5.3 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -323,7 +323,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-  VERSION 2.5.2
+  VERSION 2.5.3
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -374,14 +374,16 @@ juce_add_binary_data(Y2Kmeter_BinaryData
 
 # ==========================================================
 # libprojectM (Milkdrop 模块运行时依赖，LGPL-2.1-or-later)
-#   · third_party/projectm/bin/*.dll —— 运行时通过 LoadLibraryW 显式加载
-#   · third_party/projectm/include   —— C API 头文件，仅用于类型定义 /
-#     函数指针 typedef；不会在链接期依赖任何 .lib
+#   · third_party/projectm/bin/*.dll      —— Windows：运行时通过 LoadLibraryW 显式加载
+#   · third_party/projectm/bin/macos/*.dylib —— macOS：运行时通过 dlopen 显式加载
+#   · third_party/projectm/include        —— C API 头文件，仅用于类型定义 /
+#     函数指针 typedef；不会在链接期依赖任何 .lib / .dylib
 #   · 见 source/ui/modules/ProjectMApi.{h,cpp}
 # ==========================================================
 set(Y2KM_PROJECTM_DIR     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/projectm")
 set(Y2KM_PROJECTM_INCLUDE "${Y2KM_PROJECTM_DIR}/include")
 set(Y2KM_PROJECTM_BIN     "${Y2KM_PROJECTM_DIR}/bin")
+set(Y2KM_PROJECTM_BIN_MACOS "${Y2KM_PROJECTM_DIR}/bin/macos")
 set(Y2KM_MILKDROP_PRESETS "${CMAKE_CURRENT_SOURCE_DIR}/assets/milkdrop_presets")
 set(Y2KM_MILKDROP_TEXTURES "${CMAKE_CURRENT_SOURCE_DIR}/assets/milkdrop_textures")
 if (NOT EXISTS "${Y2KM_PROJECTM_INCLUDE}/projectM-4/projectM.h")
@@ -391,6 +393,11 @@ endif()
 if (WIN32 AND NOT EXISTS "${Y2KM_PROJECTM_BIN}/projectM-4.dll")
   message(FATAL_ERROR "缺少 libprojectM 运行时：${Y2KM_PROJECTM_BIN}/projectM-4.dll\n"
                       "请参考 third_party/projectm/README.md 重新拉取。")
+endif()
+if (APPLE AND NOT EXISTS "${Y2KM_PROJECTM_BIN_MACOS}/libprojectM-4.dylib")
+  message(FATAL_ERROR "缺少 libprojectM macOS 运行时：${Y2KM_PROJECTM_BIN_MACOS}/libprojectM-4.dylib\n"
+                      "请从源码编译 projectM 4 并将 libprojectM-4.dylib 放入 third_party/projectm/bin/macos/。\n"
+                      "参考：cmake -S <projectm-src> -B <build> -DBUILD_SHARED_LIBS=ON -DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' && cmake --install <build> --prefix <install>")
 endif()
 
 target_compile_definitions(Y2Kmeter
@@ -761,6 +768,79 @@ if (APPLE)
 
   if (TARGET Y2Kmeter_Standalone)
     y2km_copy_tamagotchi_into_bundle(Y2Kmeter_Standalone "Y2Kmeter.app")
+  endif()
+endif()
+
+# ==========================================================
+# libprojectM dylib + Milkdrop 预设/纹理 —— macOS Post-build 部署
+#   · Standalone (.app)：把 libprojectM-4.dylib 拷贝到
+#     Y2Kmeter.app/Contents/Frameworks/，并用 install_name_tool 修正
+#     dylib 内嵌的 @rpath 为 @executable_path/../Frameworks，
+#     让 dlopen("@executable_path/../Frameworks/libprojectM-4.dylib") 能找到它。
+#   · 预设/纹理：打包进 Contents/Resources/assets/ 供
+#     FindMilkdropAssetsDirForModule 的 bundle 路径搜索逻辑读取。
+#   · VST3 / AU bundle：同理，dylib 放 Contents/Frameworks/，
+#     资源放 Contents/Resources/assets/。
+# ==========================================================
+if (APPLE)
+  set(Y2KM_PROJECTM_DYLIB "${Y2KM_PROJECTM_BIN_MACOS}/libprojectM-4.dylib")
+
+  # 辅助函数：把 projectM dylib + 预设/纹理打包进指定 bundle target
+  function(y2km_deploy_projectm_into_bundle tgt)
+    if (NOT TARGET ${tgt})
+      return()
+    endif()
+
+    # 1) 创建 Frameworks 目录并拷贝 dylib
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Frameworks"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${Y2KM_PROJECTM_DYLIB}"
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Frameworks/libprojectM-4.dylib"
+      COMMENT "Y2Kmeter[${tgt}]: copy libprojectM-4.dylib into bundle Frameworks/"
+      VERBATIM
+    )
+
+    # 2) 修正 dylib 内的 install name，使其可通过 @rpath 被 dlopen 找到
+    #    同时把 bundle 内 dylib 的 id 改为 @rpath/libprojectM-4.dylib
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND install_name_tool
+              -id "@rpath/libprojectM-4.dylib"
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Frameworks/libprojectM-4.dylib"
+      COMMENT "Y2Kmeter[${tgt}]: fix dylib install name"
+      VERBATIM
+    )
+
+    # 3) 预设目录
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${Y2KM_MILKDROP_PRESETS}"
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/milkdrop_presets"
+      COMMENT "Y2Kmeter[${tgt}]: sync milkdrop_presets into bundle Resources/"
+      VERBATIM
+    )
+
+    # 4) 纹理目录
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${Y2KM_MILKDROP_TEXTURES}"
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/milkdrop_textures"
+      COMMENT "Y2Kmeter[${tgt}]: sync milkdrop_textures into bundle Resources/"
+      VERBATIM
+    )
+  endfunction()
+
+  if (TARGET Y2Kmeter_Standalone)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_Standalone)
+  endif()
+  if (TARGET Y2Kmeter_VST3)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_VST3)
+  endif()
+  if (TARGET Y2Kmeter_AU)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_AU)
   endif()
 endif()
 

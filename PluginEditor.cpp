@@ -4283,6 +4283,44 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
   if (appDataDir.exists() && appDataDir.isDirectory())
     return appDataDir;
 
+ #if defined (__APPLE__)
+  // macOS bundle 内置路径（优先级高于向上遍历）：
+  //   可执行文件位于 Y2Kmeter.app/Contents/MacOS/Y2Kmeter，
+  //   资源打包在    Y2Kmeter.app/Contents/Resources/assets/<subdir>
+  //   currentExecutableFile → .../Contents/MacOS/Y2Kmeter
+  //   getParentDirectory()  → .../Contents/MacOS/
+  //   getParentDirectory()  → .../Contents/
+  {
+    auto contentsDir = juce::File::getSpecialLocation(
+        juce::File::currentExecutableFile)
+        .getParentDirectory()   // MacOS/
+        .getParentDirectory();  // Contents/
+    auto bundleCandidate = contentsDir
+        .getChildFile("Resources")
+        .getChildFile("assets")
+        .getChildFile(subdir);
+    if (bundleCandidate.exists() && bundleCandidate.isDirectory())
+      return bundleCandidate;
+  }
+  // VST3 / AU bundle 内置路径：
+  //   currentApplicationFile 在插件场景下指向 .vst3/.component bundle 根，
+  //   资源打包在 <bundle>/Contents/Resources/assets/<subdir>
+  {
+    auto appFile = juce::File::getSpecialLocation(
+        juce::File::currentApplicationFile);
+    auto pluginContents = appFile.getChildFile("Contents");
+    if (pluginContents.isDirectory())
+    {
+      auto pluginCandidate = pluginContents
+          .getChildFile("Resources")
+          .getChildFile("assets")
+          .getChildFile(subdir);
+      if (pluginCandidate.exists() && pluginCandidate.isDirectory())
+        return pluginCandidate;
+    }
+  }
+ #endif
+
   juce::File exeDir = juce::File::getSpecialLocation(
       juce::File::currentExecutableFile).getParentDirectory();
   juce::Array<juce::File> candidates;
