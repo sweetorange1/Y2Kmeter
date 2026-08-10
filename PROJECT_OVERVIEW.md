@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.5.1`）
+- **产品名**：`Y2Kmeter` （版本：`2.5.2`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.5.1，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设；新增 Standalone 脱离/浮动窗口支持）
+- **Milkdrop 可视化模块**（v2.5.2，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设；新增 Standalone 脱离/浮动窗口支持）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -145,7 +145,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.1：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2568,6 +2568,58 @@ Standalone 模式下：
 - **遍历内部容器同时修改**：`getFloatingModuleStatesRaw()` 返回引用，循环中 `popOutModule()` 修改同一 map → 改为复制快照。
 - **preset path 重复追加**：`newOpenGLContextCreated()` 每次 dock 恢复都会执行，必须在扫描前 `clear()`。
 - **`replace_in_file` 短字符串匹配**：版本号等短字符串需提供足够唯一上下文行区分每处匹配。
+
+---
+
+### 8.9 v2.5.2 FPS 管理系统语义修正 —— target → cap
+
+#### 背景
+
+v2.3.4 将 FPS 限制从两档 `{30, 60}` 扩展为 `{30, 60, 120, 0}`（0=∞），但实现上将"FPS 限制"解释为 **目标值（target）** 语义——系统努力向设定值调度 `FrameDispatcher`，追不上就自适应降档。预期应为 **封顶（cap）** 语义——未触及上限时自由运行，超出才限制。
+
+v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 时实测仅 ~40 FPS，切换到"无上限"即恢复 ~100 FPS。
+
+#### 根因
+
+1. **插件 48 Hz 硬上限**：`maxAllowedHz = isPluginHost ? juce::jmin(48, requested)` —— VST/AU 下无论 UI 选多少，`FrameDispatcher` 最高仅 48 Hz。
+2. **自适应降档死亡螺旋**：插件分支阈值 `currentHz × 0.84` 触发降档。48 Hz 时 `48 × 0.84 = 40.32`，实测 ~40 FPS 正好触发 → 降至 44 Hz → 回升需要 `44 × 0.92 = 40.48`，差一点点 → 在 44↔48 之间反复振荡。
+3. **语义错位**：`adaptiveDispatchHz` 初始值为 60（而非跟随默认上限 120），Standalone 下还有 `+5` / `+2` Hz 偏移，把"封顶"当"目标"追赶。
+
+#### 修改方案：完全移除自适应降档，统一封顶语义
+
+**决策**：选择完全移除自适应降档（选项 A），因在"封顶"语义下 `FrameDispatcher` 以 120 Hz 运行但系统只能渲染 40 FPS 不会造成问题——多余调度仅空转，开销极小。
+
+**核心变更**：
+
+| 文件 | 变更 |
+|---|---|
+| [`PluginEditor.h`](I:/Y2KMeter/PluginEditor.h) | `adaptiveDispatchHz` → `activeDispatchHz`（初始值 60→120）；移除 `adaptiveRecoverTicks` / `adaptiveDropTicks` |
+| [`PluginEditor.cpp`](I:/Y2KMeter/PluginEditor.cpp) | `onFpsLimitChanged` 回调：移除 `isPluginHost ? jmin(48, …)` 插件硬上限；移除 Standalone `+5` Hz 偏移；`activeDispatchHz` 直接跟随上限 |
+| [`PluginEditor.cpp`](I:/Y2KMeter/PluginEditor.cpp) | Phase F 初始化：同上统一处理；移除 `+2` Hz 偏移 |
+| [`PluginEditor.cpp`](I:/Y2KMeter/PluginEditor.cpp) | `applyAdaptiveFrameRate`：160+ 行复杂自适应降档/回升逻辑 → 12 行极简实现；无上限→120 Hz，有上限→直接等于上限；永不自动降档 |
+
+**行为变化**：
+
+| 场景 | 修改前 | 修改后 |
+|---|---|---|
+| 插件选 120 FPS | FrameDispatcher 最高 48 Hz | FrameDispatcher = 120 Hz |
+| 插件选 60 FPS | FrameDispatcher 最高 48 Hz | FrameDispatcher = 60 Hz |
+| Standalone 选 120 | FrameDispatcher = 125 Hz（+5 偏移） | FrameDispatcher = 120 Hz |
+| 无上限 | FrameDispatcher = 120 Hz（不变） | FrameDispatcher = 120 Hz（不变） |
+
+#### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`PluginEditor.h`](I:/Y2KMeter/PluginEditor.h) | `activeDispatchHz`（原 `adaptiveDispatchHz`，初始 60→120）；移除 `adaptiveRecoverTicks`/`adaptiveDropTicks` |
+| [`PluginEditor.cpp`](I:/Y2KMeter/PluginEditor.cpp) | `onFpsLimitChanged` lambda 统一化；Phase F 初始化统一化；`applyAdaptiveFrameRate` 极简化 |
+| [`PROJECT_OVERVIEW.md`](I:/Y2KMeter/PROJECT_OVERVIEW.md) | 新增本章节 |
+
+#### 约束
+
+- VST/AU 插件与 Standalone 模式使用完全相同的 FPS 管理代码路径，不再区分 `isPluginHost`。
+- FPS 显示逻辑保持原有"接近上限时显示上限值"策略（决策保持选项 A）。
+- 不破坏现有渲染、脱离/回归、布局存档等功能。
 
 ---
 

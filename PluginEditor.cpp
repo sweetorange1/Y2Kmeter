@@ -184,7 +184,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.5.1");
+        const int versionW = versionFont.getStringWidth ("v2.5.2");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1612,24 +1612,21 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // 4.3) FPS 限制按钮切换 → 修改 AnalyserHub 的 FrameDispatcher 频率
     workspace->onFpsLimitChanged = [this](int hz)
     {
-        // 记录用户期望值，并用自适应策略换算出当前实际下发的 hz。
-        // hz=0 表示无上限：直接下发 120Hz（analyser 内部允许的最大值），跳过自适应。
+        // FPS 限制采用"封顶"语义：FrameDispatcher 固定以用户选择的上限频率调度。
+        // hz=0 表示无上限：下发 120Hz（analyser 内部允许的最大值）。
         if (hz == 0)
         {
             userRequestedFpsLimit = 0;
-            adaptiveDispatchHz    = 120;
+            activeDispatchHz      = 120;
         }
         else
         {
             userRequestedFpsLimit = juce::jlimit (15, 120, hz);
-            adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
-                                                 : juce::jlimit (15, 120, userRequestedFpsLimit + 5);
+            activeDispatchHz      = userRequestedFpsLimit;
         }
-        adaptiveRecoverTicks  = 0;
-        adaptiveDropTicks     = 0;
 
-        processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
-        // 立即重置统计起点，避免切换后站显示跨区间的均值
+        processor.getAnalyserHub().startFrameDispatcher (activeDispatchHz);
+        // 立即重置统计起点，避免切换后显示跨区间的均值
         frameCounter.store (0, std::memory_order_relaxed);
         lastFrameCounterSample = 0;
         lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
@@ -1662,22 +1659,18 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   右下角标签，同时计算实际 FPS 下发给 workspace 的 FPS 标签
     startTimerHz (10);
 
-    // Phase F：启动全局 FrameDispatcher（默认 30Hz 统一滚 UI 分发、模块后续订阅）
-    //   模块构造中的 retain() 已经让 refCounts 就绪，这里开 Timer 即可开始工作。
+    // Phase F：启动全局 FrameDispatcher（模块构造中的 retain() 已让 refCounts 就绪）
     userRequestedFpsLimit = workspace->getFpsLimit();
     if (userRequestedFpsLimit == 0)
     {
-        adaptiveDispatchHz = 120;
+        activeDispatchHz = 120;
     }
     else
     {
         userRequestedFpsLimit = juce::jlimit (15, 120, userRequestedFpsLimit);
-        adaptiveDispatchHz    = isPluginHost ? juce::jmin (48, userRequestedFpsLimit)
-                                             : juce::jlimit (15, 120, userRequestedFpsLimit + 2);
+        activeDispatchHz      = userRequestedFpsLimit;
     }
-    adaptiveRecoverTicks  = 0;
-    adaptiveDropTicks     = 0;
-    processor.getAnalyserHub().startFrameDispatcher (adaptiveDispatchHz);
+    processor.getAnalyserHub().startFrameDispatcher (activeDispatchHz);
 
     // 订阅帧分发，以计算实际 FPS（内部辅助类，避免 header 对 AnalyserHub 的硬依赖）
     fpsListener = std::make_unique<FpsFrameListener> (*this);
@@ -3005,7 +2998,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.5.1";
+        const juce::String versionText = "v2.5.2";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3013,7 +3006,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.5.1");
+        const int versionW = versionFont.getStringWidth ("v2.5.2");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4244,115 +4237,23 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
 }
 
 // ==========================================================
-// applyAdaptiveFrameRate —— 根据测得 FPS 动态下调 / 回升 FrameDispatcher
-//   · 插件宿主更容易受 UI 消息循环节流，上限 48Hz，分档降帧；持续 4 tick
-    //   达标才回升。
-//   · Standalone 贴近用户设定，低于 60% 下调，持续 2 tick 达标即回升。
-//   · 只在目标值真变化或当前 Hub hz 不一致时才调 startFrameDispatcher，
-//     双保险避免频繁 startTimerHz。
+// applyAdaptiveFrameRate —— 保持 FrameDispatcher 与用户设定上限一致
+//   · 采用"封顶"语义：未触及上限前不做干预，触及上限时 FrameDispatcher 即起限制作用。
+//   · 插件与 Standalone 统一逻辑，不再区分宿主模式。
 // ==========================================================
-void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float measuredFps)
+void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float /*measuredFps*/)
 {
+    // FPS 限制采用"封顶"语义：FrameDispatcher 固定以用户选择的上限频率调度，
+    // 不再根据实测帧率动态降档。若系统渲染能力不足以达到上限，多余的调度
+    // 仅为空转（开销极小），不会造成功能性问题。
     auto& hub = processor.getAnalyserHub();
 
-    // 无上限模式：固定 120Hz，不做自适应降/升档
-    if (userRequestedFpsLimit == 0)
+    const int targetHz = (userRequestedFpsLimit == 0) ? 120 : userRequestedFpsLimit;
+
+    if (activeDispatchHz != targetHz || hub.getFrameDispatcherHz() != targetHz)
     {
-        if (adaptiveDispatchHz != 120 || hub.getFrameDispatcherHz() != 120)
-        {
-            adaptiveDispatchHz = 120;
-            hub.startFrameDispatcher (120);
-        }
-        return;
-    }
-
-    const int requested = juce::jlimit (15, 120, userRequestedFpsLimit);
-    const int maxAllowedHz = isPluginHost ? juce::jmin (48, requested) : requested;
-    const int currentHz = juce::jlimit (15, maxAllowedHz, adaptiveDispatchHz);
-    int targetHz = currentHz;
-
-    // 插件宿主里更容易受 UI 消息循环节流，优先保证稳定感而非硬追目标帧。
-    if (isPluginHost)
-    {
-        int requestedDropHz = currentHz;
-        if (measuredFps < (float) currentHz * 0.55f)
-        {
-            requestedDropHz = juce::jmax (15, currentHz - 12);
-        }
-        else if (measuredFps < (float) currentHz * 0.70f)
-        {
-            requestedDropHz = juce::jmax (16, currentHz - 8);
-        }
-        else if (measuredFps < (float) currentHz * 0.84f)
-        {
-            requestedDropHz = juce::jmax (18, currentHz - 4);
-        }
-
-        if (requestedDropHz < currentHz)
-        {
-            adaptiveRecoverTicks = 0;
-            if (++adaptiveDropTicks >= 3)
-            {
-                targetHz = requestedDropHz;
-                adaptiveDropTicks = 0;
-            }
-        }
-        else if (currentHz < maxAllowedHz && measuredFps >= (float) currentHz * 0.92f)
-        {
-            adaptiveDropTicks = 0;
-            ++adaptiveRecoverTicks;
-            if (adaptiveRecoverTicks >= 4)
-            {
-                targetHz = juce::jmin (maxAllowedHz, currentHz + 6);
-                adaptiveRecoverTicks = 0;
-            }
-        }
-        else
-        {
-            adaptiveDropTicks = 0;
-            adaptiveRecoverTicks = 0;
-        }
-    }
-    else
-    {
-        // standalone 优先贴近用户设定，但在重负载瞬间允许轻微降帧。
-        if (measuredFps < (float) currentHz * 0.70f)
-        {
-            adaptiveRecoverTicks = 0;
-            if (++adaptiveDropTicks >= 2)
-            {
-                targetHz = juce::jmax (20, currentHz - 6);
-                adaptiveDropTicks = 0;
-            }
-        }
-        else if (currentHz < maxAllowedHz && measuredFps >= (float) currentHz * 0.92f)
-        {
-            adaptiveDropTicks = 0;
-            ++adaptiveRecoverTicks;
-            if (adaptiveRecoverTicks >= 2)
-            {
-                targetHz = juce::jmin (maxAllowedHz, currentHz + 6);
-                adaptiveRecoverTicks = 0;
-            }
-        }
-        else if (currentHz >= maxAllowedHz)
-        {
-            adaptiveDropTicks = 0;
-            adaptiveRecoverTicks = 0;
-        }
-        else
-        {
-            adaptiveDropTicks = 0;
-            adaptiveRecoverTicks = 0;
-        }
-    }
-
-    targetHz = juce::jlimit (15, maxAllowedHz, targetHz);
-
-    if (targetHz != adaptiveDispatchHz || hub.getFrameDispatcherHz() != targetHz)
-    {
-        adaptiveDispatchHz = targetHz;
-        hub.startFrameDispatcher (adaptiveDispatchHz);
+        activeDispatchHz = targetHz;
+        hub.startFrameDispatcher (activeDispatchHz);
     }
 }
 

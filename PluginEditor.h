@@ -196,9 +196,9 @@ private:
     //   避免 N 个模块各自每帧查一次 getCpuLoad()。
     void timerCallback() override;
 
-    // 根据实际 FPS 与宿主模式动态调整 FrameDispatcher 频率。
-    //   · 插件宿主（VST3/AU）下上限 48Hz，measuredFps 低于目标分档下调；
-    //   · Standalone 下贴近用户设定，仅在 <60% 的重负载瞬间轻微降帧。
+    // 保持 FrameDispatcher 与用户设定上限一致。
+    //   · 采用"封顶"语义：未触及上限前不做干预，超出上限时 FrameDispatcher 即起限制作用。
+    //   · 插件（VST3/AU）与 Standalone 统一逻辑，不再区分宿主模式。
     void applyAdaptiveFrameRate (float measuredFps);
 
     // 模块工厂（仅 Phase A：支持 EQ；其他类型为 Phase B-D 预留）
@@ -358,20 +358,14 @@ private:
     juce::int64              lastFrameCounterSample = 0;
     double                   lastFpsTimeMs          = 0.0;
 
-    // 自适应 FPS 调度状态：
-    //   · userRequestedFpsLimit —— workspace 顶部 FPS 切换按钮设定的目标上限
-    //     （0=无上限，30/60/120=有上限）
-    //   · adaptiveDispatchHz    —— 当前让 AnalyserHub 实际跑的频率（自适应降降升升的目标值）
-    //   · adaptiveRecoverTicks  —— 测标持续达标后的连续计数，避免单帧抖动回升
-    //   · adaptiveDropTicks     —— 测标持续低迷后的连续计数，避免一次纹理上传/窗口抖动直接降档
-    // 默认 FPS 上限 120：
-    //   · P0~P3 优化后 macOS 多模块场景下也能稳定跑 120 Hz；
-    //   · 新用户首次启动直接获得更丝滑的体验；
-    //   · 用户点 FPS 按钮仍可切回 30/60（ModuleWorkspace::fpsBtn.onClick 里循环切换）。
+    // FPS 上限控制状态：
+    //   · userRequestedFpsLimit —— 用户通过 UI 按钮设定的目标上限
+    //     （0=无上限，30/60/120=有上限），默认 120。
+    //   · activeDispatchHz     —— 下发到 AnalyserHub FrameDispatcher 的实际频率，
+    //     始终等于 userRequestedFpsLimit（0 对 120）。采用"封顶"语义：
+    //     未触及上限时系统自由运行，仅超出时才被 FrameDispatcher 的频率限制。
     int                      userRequestedFpsLimit  = 120;
-    int                      adaptiveDispatchHz     = 60;
-    int                      adaptiveRecoverTicks   = 0;
-    int                      adaptiveDropTicks      = 0;
+    int                      activeDispatchHz       = 120;
 
     // Tamagotchi 信号保活：仅当工作区存在 Tamagotchi 模块时，
     // 才临时 retain(Loudness) 以驱动孵化/行为状态机；无 Tamagotchi 时立刻 release。
