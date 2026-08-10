@@ -530,8 +530,11 @@ void ModulePanel::mouseDown(const juce::MouseEvent& e)
     if (isFloating_ && getTitleBarBounds().contains(pos))
     {
         if (auto* topLevel = getTopLevelComponent())
+        {
             floatingWindowDragger_.startDraggingComponent(
                 topLevel, e.getEventRelativeTo(topLevel));
+            isDraggingFloatingWindow_ = true;
+        }
         return;
     }
 
@@ -561,11 +564,14 @@ void ModulePanel::mouseDrag(const juce::MouseEvent& e)
     if (isPanelLayoutLocked(*this))
         return;
 
-    // 浮动态：标题栏拖拽 → 移动顶层窗口
+    // 浮动态：标题栏拖拽 → 移动顶层窗口（仅当从标题栏 mouseDown 启动的拖拽）
     if (isFloating_)
     {
-        if (auto* topLevel = getTopLevelComponent())
-            floatingWindowDragger_.dragComponent(topLevel, e.getEventRelativeTo(topLevel), nullptr);
+        if (isDraggingFloatingWindow_)
+        {
+            if (auto* topLevel = getTopLevelComponent())
+                floatingWindowDragger_.dragComponent(topLevel, e.getEventRelativeTo(topLevel), nullptr);
+        }
         return;
     }
 
@@ -619,6 +625,7 @@ void ModulePanel::mouseUp(const juce::MouseEvent& e)
         popOutButtonPressed_ = false;
         dragMode = DragMode::none;
         resizeEdge = Edge::none;
+        isDraggingFloatingWindow_ = false;
         setMouseCursor(juce::MouseCursor::NormalCursor);
         repaint(getTitleBarBounds());
         return;
@@ -650,10 +657,11 @@ void ModulePanel::mouseUp(const juce::MouseEvent& e)
         return;
     }
 
-    if (dragMode != DragMode::none)
+    if (dragMode != DragMode::none || isDraggingFloatingWindow_)
     {
         dragMode = DragMode::none;
         resizeEdge = Edge::none;
+        isDraggingFloatingWindow_ = false;
         setMouseCursor(juce::MouseCursor::NormalCursor);
 
         if (onBoundsChangedByUser)

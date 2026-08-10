@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.5.2`）
+- **产品名**：`Y2Kmeter` （版本：`2.5.4`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -2620,6 +2620,62 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 - VST/AU 插件与 Standalone 模式使用完全相同的 FPS 管理代码路径，不再区分 `isPluginHost`。
 - FPS 显示逻辑保持原有"接近上限时显示上限值"策略（决策保持选项 A）。
 - 不破坏现有渲染、脱离/回归、布局存档等功能。
+
+---
+
+### v2.5.4：macOS MilkDrop 高开销预设自动限制 + 控制台叠加化 + 性能定位方法论
+
+本章记录 v2.5.4 版本针对 macOS MilkDrop 模块的一次深度性能治理与交互修复，
+关键教训是**运行时线程采样（`sample <pid>`）+ 对照实验**才是性能定位的决定性证据，
+静态代码分析（"这段循环看起来很慢"）很容易走弯路。
+
+#### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/modules/MilkdropModule.h`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | 新增 `class OverlayView` 内嵌类声明；`kMaxNumInst=96` / `kMaxTotalNumInst=192` / `kMaxWaveSamples=256` / `kMaxWarpGetPixel=4` 阈值常量；`FixMilkdropShaderTypes(std::string&)` 接口 |
+| [`source/ui/modules/MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | +691 行；`OverlayView` 实现（覆盖 GLView 的控制条）；`FixMilkdropShaderTypes()` 实现（macOS-only 归一化算法）；`RequestRenderScale()` 在 macOS 强制 =1；`PaintOverlayControlBar()` macOS 不绘制分辨率按钮 |
+| [`source/ui/ModulePanel.cpp`](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 拖窗判定的 hit-test 白名单逻辑从 `#if JUCE_WINDOWS` 扩到 macOS 共用，修复"脱离模式下点内部子组件也在拖窗"的回归 |
+| [`source/ui/ModuleWorkspace.h`](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | 补 friend 声明配合上面 |
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 2.5.2 → 2.5.4 |
+| [`MACOS_ADAPTATION_DIFFS.md`](/I:/Y2KMeter/MACOS_ADAPTATION_DIFFS.md) | 追加 v2.5.4 章节 |
+
+#### 关键根因：macOS Intel 集显 draw call 提交是 mach_msg 内核陷入
+
+- **问题预设**：`5185_FXSetting -  New Definitons For Milk With  Anandamide - Martin - AdamFX - Geiss Ft Flexi n EoS - Glow3.milk` 等 → 加载后帧率从 110fps 骤降到 10fps；切下一预设立即恢复 110fps。
+- **`sample <pid> 3 -file /tmp/x.txt`** 抓取 3 秒线程调用栈发现：
+  - OpenGL Renderer 线程 76.6% 在 `libprojectM::ProjectM::RenderFrame()`
+  - 其中 **33% 在 `CustomShape::Draw() → glDrawArrays → glrIntelRenderVertexArray → intelSubmitCommands → mach_msg2_trap`**
+  - 主线程 69% 阻塞在 `MessageManager::Lock::BlockingMessage → __psynch_cvwait`（被 GL 线程锁拖累 → 全局 UI 跟着掉帧）
+- **对照实验**：正常预设 `5187_Goody + martin - crystal palace - Aqua Lumens.milk`（4 shape 全 `enabled=0`，`wavecode_samples=512×4` 更高但都禁用 shape）→ 110fps。**唯一差异是 `shapecode_N_enabled` 与 `num_inst`**，直接排除 wave samples 是瓶颈。
+- **真正根因**：macOS Intel 集显 GL 驱动每次 `glDrawArrays` = 一次 IOKit `mach_msg` 内核陷入（30~60µs/次），projectM `CustomShape::Draw()` 每 instance 一次 draw call，num_inst=1939 时每帧 ~2000 次陷入 → 单纯命令提交就 60~100ms → 10fps。Windows 独显 draw call 成本低一个数量级（1~3µs），完全不受影响。
+
+#### 修复方案
+
+1. **`FixMilkdropShaderTypes()` 预处理 `.milk` 文本**（仅 macOS 生效，`#if JUCE_MAC`）：
+   - Step 1：每个 `shapecode_N_num_inst` clamp 到 `kMaxNumInst=96`
+   - Step 2：若所有启用 shape 的 clamped 合计 > `kMaxTotalNumInst=192`，按比例整体缩减，保底每 shape 至少 1
+   - `wavecode_N_samples` clamp 到 256（轻度限制，实测非主瓶颈）
+   - warp shader 中的 `GetPixel(` 调用超过 4 次时替换为常量，降低采样负载
+2. **OverlayView 覆盖层设计**：预设控制条改为 `MilkdropModule` 的子组件 `OverlayView`，与 GLView 同尺寸叠加，聚焦切换仅 `setVisible()`，不再触发 GLView 重建/黑屏，跨平台修复底色透明问题
+3. **分辨率按钮 macOS 阉割**：`RequestRenderScale()` 强制 =1，`PaintOverlayControlBar()` 不绘制分辨率按钮。Windows 保留完整功能
+4. **脱离模式拖窗 hit-test 白名单**：从 `#if JUCE_WINDOWS` 扩到 macOS 共用，修复内部子组件被拖窗吃掉的回归
+
+#### 效果
+
+`5185_FXSetting` 归一化：`512, 92, 311, 1024`（合计 1939）→ clamp 96：`96, 92, 96, 96`（380）→ 按比例缩：`≈49, 46, 49, 49`（~193），draw call 数量减少 **~90%**，帧率从 10fps → 60~80fps。
+
+#### 教训沉淀（追加到第 6 章"特殊约定与注意事项"）
+
+| 类别 | 教训 |
+|------|------|
+| **性能定位方法** | 静态分析容易踩坑（本轮曾误判 wave samples 是瓶颈）；**运行时采样才是决定性证据**：macOS 上 `sample <pid> 3 -file /tmp/x.txt` + `ps -M <pid>` 一次搞定 |
+| **对照实验优先** | "换个预设就恢复"是最强的排除性证据。定位性能问题时**先找到一个正常样本 + 一个异常样本，逐维度对比**，比先跑 profiler 更快锁定假设 |
+| **macOS Intel GL draw call 成本** | 单次 `glDrawArrays` = 一次 `mach_msg2_trap` 内核陷入，30~60µs；Windows 独显 1~3µs，差一个数量级。**Milkdrop / projectM 类依赖大量 per-instance draw call 的库在 macOS 集显上必须做 draw call 数量控制** |
+| **JUCE Message 锁全局效应** | JUCE OpenGL 渲染线程每帧调用 `MessageManager::Lock`，与主线程强耦合。GL 线程慢 → 主线程等锁 → 全局 UI 卡顿。macOS 上一个 GL 模块慢会连累整个应用帧率，Windows 上模块分离较好一般不会 |
+| **UI 覆盖层设计** | GLView 之上叠加可交互 UI 时，**用同尺寸的 JUCE 子组件覆盖**而不是重排布局，避免每次可见性切换都重建 GL context |
+| **功能阉割优先于修复** | macOS 上 FBO 尺寸变更 + `glBlitFramebuffer` 拉伸兼容问题投入产出比极低，直接阉割分辨率按钮反而干净 |
+| **预设文本预处理** | `.milk` 是纯文本 KV 格式，加载前直接做正则/字符串替换是最简单有效的兼容层。`shapecode_N_num_inst=` / `wavecode_N_samples=` / `warp_N=\`...\`` 都是稳定字段命名 |
 
 ---
 

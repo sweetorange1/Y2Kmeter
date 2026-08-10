@@ -164,6 +164,7 @@ private:
         void RequestPresetRandom();
         void RequestPresetJump(int index);
         void RequestRenderScale();  // 循环 1→2→4→1
+        int  GetLocalRenderScale() const noexcept { return local_render_scale_; }
 
         // 诊断
         bool IsRenderReady() const;
@@ -174,6 +175,10 @@ private:
         juce::String GetCurrentPresetName() const;
         int64_t GetLastPresetSwitchTimeMs() const;
 
+        // 最后一帧快照（UI 线程读取，GL 线程写入，互斥锁保护）
+        // 用于在 detach/attach 重建期间显示上一帧画面，消除切换模式时的黑屏闪烁。
+        juce::Image GetLastFrameSnapshot() const;
+
     private:
         void UpdateOpenGLAttachment();
         void DetachOpenGL();
@@ -181,6 +186,7 @@ private:
         void LoadCurrentPreset();
         void ConsumePresetRequests();
         void ConsumePcm();
+        void CaptureLastFrame();  ///< 在 GL 线程（openGLContextClosing）中抓取最后一帧
 
         MilkdropModule& owner_;
         juce::OpenGLContext open_gl_context_;
@@ -199,6 +205,24 @@ private:
         int64_t last_preset_switch_ms_ = 0;
         bool attached_ = false;
         bool first_focus_done_ = false;
+
+        // 最后一帧快照（GL 线程写，UI 线程读，snapshot_mutex_ 保护）
+        mutable std::mutex snapshot_mutex_;
+        juce::Image last_frame_snapshot_;
+
+        // 降分辨率离屏 FBO（GL 线程独占，仅在 local_render_scale_ > 1 时使用）
+        // 流程：projectM 渲染到 scale_fbo_（小尺寸），再 blit 到默认 framebuffer（全屏）
+        GLuint scale_fbo_     = 0;   ///< 离屏 framebuffer object
+        GLuint scale_texture_ = 0;   ///< 附加到 scale_fbo_ 的颜色纹理
+        int    scale_fbo_w_   = 0;   ///< 当前 FBO 宽度（像素）
+        int    scale_fbo_h_   = 0;   ///< 当前 FBO 高度（像素）
+
+        /// 确保离屏 FBO 尺寸与 render_w×render_h 匹配，必要时重建。
+        /// 必须在 GL 线程调用。
+        void EnsureScaleFbo(int render_w, int render_h);
+        /// 销毁离屏 FBO 及纹理，必须在 GL 线程调用。
+        void DestroyScaleFbo();
+
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GLView)
     };
 
@@ -242,11 +266,52 @@ private:
         juce::TextEditor editor_;
     };
 
+#if JUCE_MAC
+    // ------------------------------------------------------
+    // OverlayView（仅 macOS）：以独立顶层原生窗口（NSWindow）形式悬浮在
+    //   MilkdropModule 内容区上方，专门负责绘制控制栏（overlay control bar）。
+    //
+    //   为什么必须用顶层窗口？
+    //   macOS 上 juce::OpenGLContext::attachTo(GLView) 会为 GLView 创建
+    //   一个原生 NSOpenGLView 作为子层。原生 NSView 的 Z-order 永远高于
+    //   同一 NSWindow 内的所有 JUCE 组件绘制（后者只是 NSView 内的
+    //   CoreGraphics 合成层）。即使启用 setComponentPaintingEnabled(true)，
+    //   JUCE 层的 paintContent 依然会被 GL 帧覆盖，控制栏永远不可见。
+    //   唯一可靠的解法：将 OverlayView 提升为独立 NSWindow（addToDesktop
+    //   + setAlwaysOnTop），操作系统的窗口合成器保证其 Z-order 高于插件
+    //   主窗口内嵌的任何子 NSView（含 NSOpenGLView）。
+    //
+    //   鼠标事件走位：
+    //   OverlayView 设 setInterceptsMouseClicks(false, false)，鼠标事件
+    //   透传到下方，由 MilkdropModule 的 mouseDown/Move/Up 处理。
+    //   MilkdropModule 的 hit-test 走 JUCE 组件树，不受 native Z-order 影响。
+    // ------------------------------------------------------
+    class OverlayView : public juce::Component
+    {
+    public:
+        explicit OverlayView(MilkdropModule& owner) : owner_(owner)
+        {
+            setInterceptsMouseClicks(false, false);
+            setOpaque(false);
+        }
+        void paint(juce::Graphics& g) override;
+    private:
+        MilkdropModule& owner_;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OverlayView)
+    };
+#endif
+
     // === 私有成员 ===
     AnalyserHub* hub;                       ///< 可为 nullptr（无音频源）
     bool         hubRetained = false;       ///< 标记是否成功 retain（析构时 release）
     Y2KmeterAudioProcessorEditor* editor_;  ///< Editor 引用，脱离浮动窗口后仍可用于桥接 projectM
     std::unique_ptr<GLView> glView;
+#if JUCE_MAC
+    std::unique_ptr<OverlayView> overlayView_;  ///< macOS：顶层悬浮窗口，绘制控制栏
+    /// 将 overlayView_ 的屏幕位置同步到 MilkdropModule 内容区顶部 26px 处；
+    /// 若 !focused_ 或 !isShowing() 则隐藏。UI 线程调用（每帧、聚焦切换、resize 时）。
+    void UpdateOverlayViewPlacement();
+#endif
 
     // 从布局存档恢复或浮动 renderer 同步来的预设索引（-1 = 无存档，首次启动）。
     // 作为持久化快照缓存使用；saveModuleSpecificState() 为 const，但需要在保存前

@@ -260,6 +260,7 @@ private:
     enum class DragMode { none, move, resize };
     DragMode dragMode = DragMode::none;
     Edge     resizeEdge = Edge::none;
+    bool     isDraggingFloatingWindow_ = false;  // 浮动态：是否从标题栏启动了窗口拖拽
 
     juce::Point<int>     dragStartMouse;
     juce::Rectangle<int> dragStartBounds;

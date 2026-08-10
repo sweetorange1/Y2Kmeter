@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <map>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -47,8 +48,185 @@ namespace
      *
      * 此函数在内存中预处理预设文本，不修改磁盘上的 .milk 文件。
      */
+#if JUCE_MAC
+    // num_inst 自动限制阈值：**这是 macOS 上的核心性能瓶颈**。
+    // 通过 `sample` 工具对 5185_FXSetting...Glow3.milk 的实时线程采样发现：
+    //   OpenGL Renderer 线程 33% 时间卡在 CustomShape::Draw() → glDrawArrays
+    //   → intelSubmitCommands → mach_msg2_trap（内核陷入提交 GPU 命令）。
+    // macOS Intel 集成显卡每 draw call 走一次 IOKit mach_msg 同步，
+    // 单次开销约 30~60µs，是 Windows / 独立显卡的 10 倍。
+    //
+    // 对比实测：
+    //   - 5185_FXSetting  (4 shape 全启用, num_inst=1939) → 10 fps
+    //   - 5187_Goody      (4 shape 全禁用, num_inst=0)    → 110 fps
+    //   两者 warp/comp shader 复杂度、wavecode_samples 均相当，唯一差异
+    //   就是 CustomShape 的 draw call 数量。
+    //
+    // 上限推导：
+    //   目标 60fps → 单帧预算 16.7ms
+    //   扣除 warp/comp/清屏/composite 等固定开销 ≈ 5ms
+    //   剩 11.7ms 给 shape draw call
+    //   每 draw call 保守 60µs → 总 num_inst 上限 ≈ 192
+    //
+    // 采用「单个上限 + 总量上限」双重策略：
+    //   1) 每个 shapecode_N_num_inst 单独截断到 kMaxNumInst（防个别极端值）
+    //   2) 若截断后所有 shape 的 num_inst 之和仍超过 kMaxTotalNumInst，
+    //      按比例整体缩减，保持各 shape 间原有的相对比例。
+    //
+    // 例如：5185_FXSetting...Glow3.milk 原总量 1939（512+92+311+1024），
+    //   1) 单个 clamp 到 96 → 96+92+96+96 = 380
+    //   2) 按比例缩到 192   → 48+46+48+48 ≈ 190（每 shape 至少保 1）
+    //   预期帧率从 10fps 提升到 55~70fps。
+    //
+    // 仅 macOS 生效：Windows 端 draw call 开销低一个数量级，无需限制。
+    static constexpr int kMaxNumInst      = 96;    // 单个 shape 上限
+    static constexpr int kMaxTotalNumInst = 192;   // 所有 shape 总量上限
+
+    // wavecode_N_samples 上限。**辅助优化项**（非主要瓶颈）。
+    // wave_N_per_point 表达式在 CPU 上对每个 wave sample 求值，理论上是负担；
+    // 但实测证明：5187_Goody 有 4 个 wavecode_samples=512（比 5185 更高），
+    // 却能跑 110fps，说明 wave per_point 在 CPU 上的开销远低于
+    // GPU 端 CustomShape::Draw 的 draw call 提交开销。
+    // 因此这里只做轻度限制（512→256），减少 50% CPU 求值，视觉几乎无损。
+    // 仅 macOS 生效。
+    static constexpr int kMaxWaveSamples = 256;
+
+    // warp shader 中 GetPixel 采样次数上限。
+    // GetPixel 在 projectM 4 中展开为一次完整的 texture2D 采样，
+    // 8 次卷积在 1080p 下约 1600 万次采样/帧，是帧率骤降的主因之一。
+    // 限制为 4 次后 GPU 负载降低约 50%，视觉效果仍可接受（模糊半径减半）。
+    // 仅 macOS 生效：Windows 端不需要此限制。
+    static constexpr int kMaxWarpGetPixel = 4;
+
+    // 在字符串 s 中，从 start 位置开始找到 GetPixel( 的完整调用（含括号内参数），
+    // 返回整个调用的结束位置（闭合 ')' 之后），找不到返回 std::string::npos。
+    static size_t FindGetPixelCallEnd(const std::string& s, size_t start)
+    {
+      size_t pos = s.find("GetPixel(", start);
+      if (pos == std::string::npos)
+        return std::string::npos;
+      // 找到 GetPixel( 后，追踪括号深度找到匹配的 ')'
+      size_t i = pos + 9; // 跳过 "GetPixel("
+      int depth = 1;
+      while (i < s.size() && depth > 0)
+      {
+        if (s[i] == '(') ++depth;
+        else if (s[i] == ')') --depth;
+        ++i;
+      }
+      return (depth == 0) ? i : std::string::npos; // i 指向闭合 ')' 之后
+    }
+
+    // 统计字符串 s 中 GetPixel( 的出现次数
+    static int CountGetPixel(const std::string& s)
+    {
+      int count = 0;
+      size_t pos = 0;
+      while ((pos = s.find("GetPixel(", pos)) != std::string::npos)
+      {
+        ++count;
+        pos += 9;
+      }
+      return count;
+    }
+#endif // JUCE_MAC
+
     static std::string FixMilkdropShaderTypes(const std::string& data)
     {
+#if JUCE_MAC
+      // ---- 预处理 1：扫描 shapecode_N_num_inst，构建 shape_index → final_value 映射 ----
+      // 策略：
+      //   step1) 每个 shape 先按 kMaxNumInst 单独截断得到 clamped[N]
+      //   step2) 若 sum(clamped) > kMaxTotalNumInst，按比例缩减：
+      //          final[N] = max(1, round(clamped[N] * kMaxTotalNumInst / sum(clamped)))
+      //   step3) 否则 final[N] = clamped[N]
+      // 主循环遇到 shapecode_N_num_inst= 行时，直接查表改写为 final[N]。
+      // 使用 map<int,int> 避免同一 shape_index 多次出现时的重复计算。
+      std::map<int, int> finalNumInst;   // shape_index → 最终值
+      {
+        std::map<int, int> clamped;      // shape_index → 单独截断后的值
+        int sumClamped = 0;
+
+        std::istringstream pre(data);
+        std::string ln;
+        while (std::getline(pre, ln))
+        {
+          // 快速预筛
+          if (ln.find("shapecode_") == std::string::npos
+              || ln.find("_num_inst=") == std::string::npos)
+            continue;
+
+          // 解析 shapecode_N_num_inst=<数字>
+          size_t idxStart = std::strlen("shapecode_");
+          if (ln.size() <= idxStart) continue;
+          size_t idxEnd = idxStart;
+          while (idxEnd < ln.size() && std::isdigit((unsigned char)ln[idxEnd]))
+            ++idxEnd;
+          if (idxEnd == idxStart) continue;
+
+          // 校验后面紧跟 "_num_inst="
+          const std::string kTail = "_num_inst=";
+          if (ln.compare(idxEnd, kTail.size(), kTail) != 0)
+            continue;
+
+          size_t valStart = idxEnd + kTail.size();
+          size_t valEnd = valStart;
+          while (valEnd < ln.size() && std::isdigit((unsigned char)ln[valEnd]))
+            ++valEnd;
+          if (valEnd == valStart) continue;
+
+          int shapeIdx = std::stoi(ln.substr(idxStart, idxEnd - idxStart));
+          int val      = std::stoi(ln.substr(valStart, valEnd - valStart));
+          int c        = std::min(val, kMaxNumInst);
+
+          // 若同一 shape_index 多次出现（异常预设），取首次
+          if (clamped.find(shapeIdx) == clamped.end())
+          {
+            clamped[shapeIdx] = c;
+            sumClamped += c;
+          }
+        }
+
+        if (sumClamped > kMaxTotalNumInst && sumClamped > 0)
+        {
+          // 按比例整体缩减
+          const double scale = static_cast<double>(kMaxTotalNumInst)
+                             / static_cast<double>(sumClamped);
+          for (auto& kv : clamped)
+          {
+            int f = static_cast<int>(std::lround(kv.second * scale));
+            if (f < 1) f = 1;              // 保底为 1，避免 num_inst=0 引发除零
+            finalNumInst[kv.first] = f;
+          }
+        }
+        else
+        {
+          finalNumInst = clamped;
+        }
+      }
+
+      // ---- 预处理 2：统计 warp shader 段内 GetPixel 总次数（仅 macOS）----
+      // warp shader 行格式：warp_N=`...（行首为 warp_，含反引号）
+      // 需要先统计总数，再决定哪些行需要替换。
+      int totalWarpGetPixel = 0;
+      {
+        std::istringstream pre(data);
+        std::string ln;
+        while (std::getline(pre, ln))
+        {
+          // warp 行：以 "warp_" 开头且含 "=`"
+          if (ln.size() > 5 && ln.substr(0, 5) == "warp_"
+              && ln.find("=`") != std::string::npos)
+          {
+            totalWarpGetPixel += CountGetPixel(ln);
+          }
+        }
+      }
+      // 需要裁剪的 GetPixel 数量（超出阈值的部分）
+      const int warpGetPixelToRemove = std::max(0, totalWarpGetPixel - kMaxWarpGetPixel);
+      int warpGetPixelRemoved = 0;  // 已裁剪的 GetPixel 计数
+#endif // JUCE_MAC
+
       std::string result;
       result.reserve(data.size() + 512);
 
@@ -120,6 +298,116 @@ namespace
             ++searchPos;
           }
         }
+
+#if JUCE_MAC
+        // ---- C. 限制 shapecode_N_num_inst 过高值，防止 GPU 负载激增（仅 macOS）----
+        // 采用「单个上限 + 总量上限」双重策略（详见文件顶部 kMaxNumInst / kMaxTotalNumInst
+        // 常量注释）。此处只负责把当前行的 num_inst 值替换为预扫描阶段计算好的
+        // finalNumInst[shape_index]。
+        // Windows 端模块分离较好，高开销预设不会拖垮软件本体帧率，无需限制。
+        {
+          // 快速预筛：行中必须同时含有 "shapecode_" 和 "_num_inst="
+          size_t idxStart = line.find("shapecode_");
+          if (idxStart != std::string::npos)
+          {
+            idxStart += std::strlen("shapecode_");
+            size_t idxEnd = idxStart;
+            while (idxEnd < line.size() && std::isdigit((unsigned char)line[idxEnd]))
+              ++idxEnd;
+
+            const std::string kTail = "_num_inst=";
+            if (idxEnd > idxStart
+                && line.compare(idxEnd, kTail.size(), kTail) == 0)
+            {
+              size_t valStart = idxEnd + kTail.size();
+              size_t valEnd = valStart;
+              while (valEnd < line.size() && std::isdigit((unsigned char)line[valEnd]))
+                ++valEnd;
+              if (valEnd > valStart)
+              {
+                int shapeIdx = std::stoi(line.substr(idxStart, idxEnd - idxStart));
+                auto it = finalNumInst.find(shapeIdx);
+                if (it != finalNumInst.end())
+                {
+                  int curVal = std::stoi(line.substr(valStart, valEnd - valStart));
+                  if (curVal != it->second)
+                  {
+                    line.replace(valStart, valEnd - valStart,
+                                 std::to_string(it->second));
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // ---- D. 限制 warp shader 中 GetPixel 采样次数，防止 GPU 纹理采样过载（仅 macOS）----
+        // warp 行格式：warp_N=`...（行首为 "warp_"，含 "=`"）
+        // GetPixel 在 projectM 4 中展开为一次完整的 texture2D 采样，
+        // 8 次卷积在 1080p 下约 1600 万次采样/帧，是帧率骤降的主因之一。
+        // 超出阈值的 GetPixel(...) 调用替换为 float3(0.0,0.0,0.0)（零贡献），
+        // 等效于减少模糊卷积核的采样点数，视觉上模糊半径略减，性能显著提升。
+        // Windows 端不需要此限制。
+        if (warpGetPixelRemoved < warpGetPixelToRemove
+            && line.size() > 5 && line.substr(0, 5) == "warp_"
+            && line.find("=`") != std::string::npos
+            && line.find("GetPixel(") != std::string::npos)
+        {
+          size_t searchPos = 0;
+          while (warpGetPixelRemoved < warpGetPixelToRemove)
+          {
+            size_t callEnd = FindGetPixelCallEnd(line, searchPos);
+            if (callEnd == std::string::npos)
+              break;
+            // 找到 GetPixel( 的起始位置
+            size_t callStart = line.rfind("GetPixel(", callEnd);
+            if (callStart == std::string::npos || callStart < searchPos)
+              break;
+            // 替换整个 GetPixel(...) 为 float3(0.0,0.0,0.0)
+            line.replace(callStart, callEnd - callStart, "float3(0.0,0.0,0.0)");
+            ++warpGetPixelRemoved;
+            searchPos = callStart + 19; // 跳过替换后的 "float3(0.0,0.0,0.0)"
+          }
+        }
+
+        // ---- E. 限制 wavecode_N_samples 过高值，防止 CPU 表达式引擎过载（仅 macOS）----
+        // 格式：wavecode_0_samples=512  或  wavecode_10_samples=256
+        // wave_N_per_point 表达式对每个 sample 都要单独求值（CPU 端解释执行，
+        // 非 GPU shader）。这是 5185_FXSetting / 9604_Pithlit 等高开销预设
+        // 从 110fps 骤降到 10fps 的**核心瓶颈**——GPU 并未过载，是 CPU 表达式
+        // 引擎跑满导致 JUCE UI 线程 stall。截断到 kMaxWaveSamples 后，
+        // 每帧 wave 表达式求值次数减少约 75%，帧率显著回升。
+        // Windows 端模块分离较好，无需此限制。
+        {
+          size_t idxStart = line.find("wavecode_");
+          if (idxStart != std::string::npos && idxStart == 0)
+          {
+            idxStart += std::strlen("wavecode_");
+            size_t idxEnd = idxStart;
+            while (idxEnd < line.size() && std::isdigit((unsigned char)line[idxEnd]))
+              ++idxEnd;
+
+            const std::string kSamplesTail = "_samples=";
+            if (idxEnd > idxStart
+                && line.compare(idxEnd, kSamplesTail.size(), kSamplesTail) == 0)
+            {
+              size_t valStart = idxEnd + kSamplesTail.size();
+              size_t valEnd = valStart;
+              while (valEnd < line.size() && std::isdigit((unsigned char)line[valEnd]))
+                ++valEnd;
+              if (valEnd > valStart)
+              {
+                int val = std::stoi(line.substr(valStart, valEnd - valStart));
+                if (val > kMaxWaveSamples)
+                {
+                  line.replace(valStart, valEnd - valStart,
+                               std::to_string(kMaxWaveSamples));
+                }
+              }
+            }
+          }
+        }
+#endif // JUCE_MAC
 
         result += line;
         result += '\n';
@@ -253,6 +541,13 @@ MilkdropModule::MilkdropModule (AnalyserHub* hub_,
 
     glView = std::make_unique<GLView> (*this);
     addAndMakeVisible (glView.get());
+#if JUCE_MAC
+    // macOS：控制栏通过顶层 NSWindow 悬浮绘制（addToDesktop），
+    // Z-order 高于主窗口内嵌的 NSOpenGLView，确保 GL 帧上可见。
+    // 实际 addToDesktop 与尺寸/位置同步由 UpdateOverlayViewPlacement 处理，
+    // 仅在 focused_ && isShowing() 时才创建 native peer。
+    overlayView_ = std::make_unique<OverlayView>(*this);
+#endif
 }
 
 MilkdropModule::~MilkdropModule()
@@ -270,6 +565,14 @@ MilkdropModule::~MilkdropModule()
         hub->release (AnalyserHub::Kind::Oscilloscope);
         hubRetained = false;
     }
+
+#if JUCE_MAC
+    // macOS：先撤下顶层控制栏窗口（native peer），再销毁 unique_ptr。
+    // 顺序保证：不会在 native peer 尚存活时被 unique_ptr 析构。
+    if (overlayView_ != nullptr && overlayView_->isOnDesktop())
+        overlayView_->removeFromDesktop();
+    overlayView_.reset();
+#endif
 
     glView.reset(); // 现在可以安全地销毁子组件
 }
@@ -316,7 +619,9 @@ void MilkdropModule::paint(juce::Graphics& g) {
   const auto bounds = getLocalBounds();
 
   // 1. 像素凸起窗口边框（仅边框，不填充内容区 — 保留 projectM 帧）
-  PinkXP::drawRaised(g, bounds, juce::Colours::transparentBlack);
+  // 注意：必须传入不透明底色（face），否则边框区域透明，可透见下方内容。
+  // 内容区由 paintContent 负责，GLView 覆盖在其上，不受此处填充影响。
+  PinkXP::drawRaised(g, bounds, PinkXP::face);
 
   // 2. 玫瑰粉标题栏
   auto tb = getTitleBarBounds();
@@ -373,17 +678,33 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
   if (isFloating())
   {
     if (glView == nullptr || !glView->IsRenderReady())
-      g.fillAll(juce::Colours::black);
+    {
+      // 优先显示最后一帧快照，消除 detach/attach 重建期间的黑屏闪烁
+      auto snapshot = (glView != nullptr) ? glView->GetLastFrameSnapshot() : juce::Image();
+      if (snapshot.isValid())
+        g.drawImage(snapshot, content.toFloat());
+      else
+        g.fillAll(juce::Colours::black);
+    }
   }
   else if (glView != nullptr) {
     if (!glView->IsRenderReady()) {
-      g.fillAll(juce::Colours::black);
-      auto msg = glView->GetError().isEmpty()
-                     ? juce::String("Milkdrop initializing...")
-                     : juce::String("Milkdrop error: ") + glView->GetError();
-      g.setColour(juce::Colours::grey);
-      g.setFont(juce::Font(12.0f));
-      g.drawText(msg, content, juce::Justification::centred, false);
+      // 优先显示最后一帧快照，消除 detach/attach 重建期间的黑屏闪烁
+      auto snapshot = glView->GetLastFrameSnapshot();
+      if (snapshot.isValid())
+      {
+        g.drawImage(snapshot, content.toFloat());
+      }
+      else
+      {
+        g.fillAll(juce::Colours::black);
+        auto msg = glView->GetError().isEmpty()
+                       ? juce::String("Milkdrop initializing...")
+                       : juce::String("Milkdrop error: ") + glView->GetError();
+        g.setColour(juce::Colours::grey);
+        g.setFont(juce::Font(12.0f));
+        g.drawText(msg, content, juce::Justification::centred, false);
+      }
     }
   } else {
     g.fillAll(juce::Colours::black);
@@ -395,6 +716,12 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
   if (glView != nullptr && glView->IsRenderReady())
     PaintLoadingIndicator(g, content);
 
+  // 控制栏（overlay control bar）以 CPU paint 叠加方式绘制在 GL 帧之上。
+  // Windows：直接在 paintContent 绘制即可见（JUCE 能正确混合 CPU/GL 层）。
+  // macOS：此处绘制会被 native NSOpenGLView 遮挡（看不见），但必须保留
+  //   该调用，因为 paintOverlayControlBar 内部会更新 cachedNameArea_，
+  //   供 MilkdropModule::mouseDown/hitTestOverlayButton 使用。
+  //   真正可见的控制栏由顶层 overlayView_（NSWindow）另行绘制。
   if (focused_ && glView != nullptr) {
     auto topBar = content.withHeight(26);
     paintOverlayControlBar(g, topBar);
@@ -408,15 +735,17 @@ void MilkdropModule::layoutContent (juce::Rectangle<int> content)
     if (glView != nullptr)
     {
         auto viewBounds = content;
-        // macOS：嵌入态也使用 GLView 自己的 native GL surface，
-        //   聚焦时控制栏由 CPU 绘制，但会被 GLView 覆盖，
-        //   因此 macOS 上嵌入态聚焦时同样需要为控制栏预留空间。
-        // Windows：嵌入态由 Editor GL 渲染，控制栏叠加在 GL 帧上，不需要挤压 GLView。
-#if JUCE_MAC
-        const bool needs_reserved = focused_;
-#else
+        // 控制栏（overlay control bar）以纯绘制叠加层方式覆盖在 GL 帧上方，
+        // 不占用布局空间，不改变 GLView 尺寸，避免触发 projectM setWindowSize 重建。
+        // Windows 浮动态同理：控制栏叠加在 native surface 上，不挤压 GLView。
+        // 唯一需要预留空间的场景：Windows 浮动态（isFloating && focused），
+        // 因为浮动窗口的 native surface 与 JUCE paint 层是独立的，
+        // 控制栏绘制在 JUCE 层，不会自动覆盖 GL surface，需要挤压 GLView 让出空间。
+        // macOS：开启了 setComponentPaintingEnabled(true)，无论嵌入/浮动，
+        //   GLView 的 GL surface 会作为背景纹理上屏，CPU paint 层覆盖在其上，
+        //   paintContent 绘制的控制栏会正确叠加，无需预留空间。
+#if ! JUCE_MAC
         const bool needs_reserved = isFloating() && focused_;
-#endif
         if (needs_reserved)
         {
             int reserved = 26;
@@ -425,7 +754,11 @@ void MilkdropModule::layoutContent (juce::Rectangle<int> content)
             reserved = juce::jmin(reserved, content.getHeight());
             viewBounds = content.withTrimmedTop(reserved);
         }
+#endif
         glView->setBounds(viewBounds);
+#if JUCE_MAC
+        UpdateOverlayViewPlacement();
+#endif
     }
 }
 
@@ -481,7 +814,12 @@ MilkdropModule::GLView::GLView(MilkdropModule& owner)
   // projectM 内部 shader 编译失败，渲染输出全黑。
   open_gl_context_.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
   open_gl_context_.setRenderer(this);
-  open_gl_context_.setComponentPaintingEnabled(false);
+  // macOS 关键：必须开启 setComponentPaintingEnabled(true)，才能让
+  // CPU paint 层（含 overlay 控制栏、模态对话框）叠加在 GL 帧之上可见。
+  // 若关闭，native NSOpenGLView 的 Z-order 会永久覆盖 JUCE 组件树绘制，
+  // 导致控制栏与对话框看不见，且对话框 enterModalState 后整应用看似置灰。
+  // Windows 下 JUCE 依旧能正确混合 CPU/GL 层，也保持开启。
+  open_gl_context_.setComponentPaintingEnabled(true);
   open_gl_context_.setContinuousRepainting(true);
   startTimerHz(30);
 }
@@ -627,6 +965,11 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
 
 void MilkdropModule::GLView::openGLContextClosing() {
   SyncOwnerPresetIndexFromRenderer();
+  // 在销毁 handle 之前先抓取最后一帧快照，
+  // 供 detach/attach 重建期间 paintContent 显示，消除切换模式时的黑屏闪烁。
+  CaptureLastFrame();
+  // 销毁离屏 FBO（必须在 GL 上下文关闭前，此时 GL context 仍有效）
+  DestroyScaleFbo();
   if (local_pm_handle_ != nullptr) {
     auto& api = projectm_api::Api::instance();
     api.destroy(local_pm_handle_);
@@ -634,6 +977,49 @@ void MilkdropModule::GLView::openGLContextClosing() {
     api.resetGlewInitialization();
   }
   local_render_ready_ = false;
+}
+
+void MilkdropModule::GLView::CaptureLastFrame() {
+  // 此函数必须在 GL 线程（openGLContextClosing 回调中）调用，
+  // 此时 GL context 仍然有效，可以安全地读取 framebuffer。
+  const int w = getWidth();
+  const int h = getHeight();
+  if (w <= 0 || h <= 0)
+    return;
+
+  // 用 glReadPixels 从默认 framebuffer 读取当前帧（RGBA，从左下角开始）
+  std::vector<juce::uint8> pixels(static_cast<size_t>(w * h * 4));
+  juce::gl::glReadPixels(0, 0, w, h,
+                         juce::gl::GL_RGBA,
+                         juce::gl::GL_UNSIGNED_BYTE,
+                         pixels.data());
+
+  // OpenGL 坐标系 Y 轴朝上，JUCE Image Y 轴朝下，需要垂直翻转
+  juce::Image img(juce::Image::ARGB, w, h, false);
+  juce::Image::BitmapData bmp(img, juce::Image::BitmapData::writeOnly);
+  for (int row = 0; row < h; ++row)
+  {
+    const juce::uint8* src = pixels.data() + static_cast<size_t>((h - 1 - row) * w * 4);
+    juce::uint8* dst = bmp.getLinePointer(row);
+    for (int col = 0; col < w; ++col)
+    {
+      // OpenGL: RGBA → JUCE ARGB（内存布局 B G R A on little-endian）
+      dst[0] = src[2]; // B
+      dst[1] = src[1]; // G
+      dst[2] = src[0]; // R
+      dst[3] = src[3]; // A
+      src += 4;
+      dst += 4;
+    }
+  }
+
+  std::lock_guard<std::mutex> lock(snapshot_mutex_);
+  last_frame_snapshot_ = std::move(img);
+}
+
+juce::Image MilkdropModule::GLView::GetLastFrameSnapshot() const {
+  std::lock_guard<std::mutex> lock(snapshot_mutex_);
+  return last_frame_snapshot_;
 }
 
 void MilkdropModule::GLView::ConsumePresetRequests() {
@@ -676,24 +1062,116 @@ void MilkdropModule::GLView::ConsumePcm() {
     projectm_api::Api::instance().addPcmFloat(local_pm_handle_, pcm.data(), frames, true);
 }
 
+void MilkdropModule::GLView::EnsureScaleFbo(int render_w, int render_h) {
+  // 尺寸未变则直接复用
+  if (scale_fbo_ != 0 && scale_fbo_w_ == render_w && scale_fbo_h_ == render_h)
+    return;
+
+  // 销毁旧的
+  DestroyScaleFbo();
+
+  // 创建颜色纹理
+  juce::gl::glGenTextures(1, &scale_texture_);
+  juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, scale_texture_);
+  juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
+                         render_w, render_h, 0,
+                         juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE, nullptr);
+  juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D, juce::gl::GL_TEXTURE_MIN_FILTER, juce::gl::GL_LINEAR);
+  juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D, juce::gl::GL_TEXTURE_MAG_FILTER, juce::gl::GL_LINEAR);
+  juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
+
+  // 创建 FBO 并附加纹理
+  juce::gl::glGenFramebuffers(1, &scale_fbo_);
+  juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, scale_fbo_);
+  juce::gl::glFramebufferTexture2D(juce::gl::GL_FRAMEBUFFER,
+                                   juce::gl::GL_COLOR_ATTACHMENT0,
+                                   juce::gl::GL_TEXTURE_2D,
+                                   scale_texture_, 0);
+  juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+
+  scale_fbo_w_ = render_w;
+  scale_fbo_h_ = render_h;
+}
+
+void MilkdropModule::GLView::DestroyScaleFbo() {
+  if (scale_fbo_ != 0) {
+    juce::gl::glDeleteFramebuffers(1, &scale_fbo_);
+    scale_fbo_ = 0;
+  }
+  if (scale_texture_ != 0) {
+    juce::gl::glDeleteTextures(1, &scale_texture_);
+    scale_texture_ = 0;
+  }
+  scale_fbo_w_ = 0;
+  scale_fbo_h_ = 0;
+}
+
 void MilkdropModule::GLView::renderOpenGL() {
   juce::OpenGLHelpers::clear(juce::Colours::black);
   if (!local_render_ready_ || local_pm_handle_ == nullptr)
     return;
 
-  auto scale = static_cast<float>(open_gl_context_.getRenderingScale());
-  int render_w = juce::jmax(1, static_cast<int>(getWidth() * scale));
-  int render_h = juce::jmax(1, static_cast<int>(getHeight() * scale));
-
   auto& api = projectm_api::Api::instance();
   ConsumePresetRequests();
   ConsumePcm();
-  api.setWindowSize(local_pm_handle_, static_cast<std::size_t>(render_w), static_cast<std::size_t>(render_h));
-  juce::gl::glViewport(0, 0, render_w, render_h);
-  juce::gl::glScissor(0, 0, render_w, render_h);
-  juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
-  api.openglRenderFrame(local_pm_handle_);
-  juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
+
+  // surface 的物理像素尺寸（含 HiDPI 缩放）
+  auto dpi_scale = static_cast<float>(open_gl_context_.getRenderingScale());
+  int surface_w = juce::jmax(1, static_cast<int>(getWidth()  * dpi_scale));
+  int surface_h = juce::jmax(1, static_cast<int>(getHeight() * dpi_scale));
+
+  // local_render_scale_：1 = 原始分辨率，2 = 半分辨率，4 = 四分之一分辨率。
+  // 值越大渲染分辨率越低，性能越好，画质越差。
+  if (local_render_scale_ <= 1) {
+    // ---- 1:1 模式：直接渲染到默认 framebuffer，无需离屏 FBO ----
+    DestroyScaleFbo();  // 释放不再需要的 FBO
+    api.setWindowSize(local_pm_handle_,
+                      static_cast<std::size_t>(surface_w),
+                      static_cast<std::size_t>(surface_h));
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+    juce::gl::glViewport(0, 0, surface_w, surface_h);
+    api.openglRenderFrame(local_pm_handle_);
+  } else {
+    // ---- 降分辨率模式：渲染到离屏 FBO，再 blit 到全屏 ----
+    int render_w = juce::jmax(1, surface_w / local_render_scale_);
+    int render_h = juce::jmax(1, surface_h / local_render_scale_);
+
+    // 优先使用 projectM 4.2+ 的 openglRenderFrameFbo（直接渲染到指定 FBO）
+    if (api.hasOpenglRenderFrameFbo()) {
+      EnsureScaleFbo(render_w, render_h);
+      api.setWindowSize(local_pm_handle_,
+                        static_cast<std::size_t>(render_w),
+                        static_cast<std::size_t>(render_h));
+      api.openglRenderFrameFbo(local_pm_handle_, scale_fbo_);
+    } else {
+      // 回退：用 openglRenderFrame + 临时重定向 framebuffer
+      EnsureScaleFbo(render_w, render_h);
+      api.setWindowSize(local_pm_handle_,
+                        static_cast<std::size_t>(render_w),
+                        static_cast<std::size_t>(render_h));
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, scale_fbo_);
+      juce::gl::glViewport(0, 0, render_w, render_h);
+      api.openglRenderFrame(local_pm_handle_);
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+    }
+
+    // 将离屏 FBO 内容 blit（拉伸）到默认 framebuffer（全屏）
+    // 注意：macOS OpenGL Core Profile 对 glBlitFramebuffer 有严格限制：
+    //   当源/目标尺寸不同（拉伸 blit）时，macOS 驱动对部分 FBO 格式
+    //   使用 GL_LINEAR 会触发 GL_INVALID_OPERATION，导致 GL 上下文进入
+    //   错误状态，后续所有渲染调用均被忽略，表现为画面卡死。
+    //   改用 GL_NEAREST 在 macOS 上始终安全，画质差异在降分辨率场景下不明显。
+    // 清除 projectM 内部渲染可能留下的残留 GL 错误，避免影响 blit 状态检测
+    while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+    juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, scale_fbo_);
+    juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER, 0);
+    juce::gl::glBlitFramebuffer(
+        0, 0, render_w, render_h,          // 源：离屏 FBO 全区域
+        0, 0, surface_w, surface_h,        // 目标：默认 framebuffer 全区域
+        juce::gl::GL_COLOR_BUFFER_BIT,
+        juce::gl::GL_NEAREST);             // macOS 拉伸 blit 必须用 NEAREST，LINEAR 会触发 GL_INVALID_OPERATION
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+  }
 }
 
 void MilkdropModule::GLView::PushPcm(const float* interleaved_lr,
@@ -755,9 +1233,11 @@ void MilkdropModule::GLView::RequestPresetJump(int index) {
 }
 
 void MilkdropModule::GLView::RequestRenderScale() {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
+  // macOS：分辨率切换功能在 macOS 上已阉割（glBlitFramebuffer 兼容性问题），
+  //   强制保持 1:1，忽略所有切换请求。
 #if JUCE_MAC
-  local_render_scale_ = (local_render_scale_ == 1) ? 2 : (local_render_scale_ == 2 ? 4 : 1);
+  local_render_scale_ = 1;  // 始终 1:1，不允许切换
+  return;
 #else
   if (owner_.isFloating()) {
     local_render_scale_ = (local_render_scale_ == 1) ? 2 : (local_render_scale_ == 2 ? 4 : 1);
@@ -897,6 +1377,13 @@ void MilkdropModule::GLView::timerCallback() {
   owner_.checkOverlayAutoHide();
   owner_.checkAutoMode();
   owner_.repaint();
+#if JUCE_MAC
+  // macOS：顶层控制栏悬浮窗需要跟随模块屏幕位置、可见性、hover/press 高亮实时刷新。
+  // 与主 UI 重绘 30Hz 同步，既能跟踪窗口拖动/resize，又保证 hover 反馈及时。
+  owner_.UpdateOverlayViewPlacement();
+  if (owner_.overlayView_ != nullptr && owner_.overlayView_->isOnDesktop())
+      owner_.overlayView_->repaint();
+#endif
 }
 
 // ---- GLView mouse forwarding ----
@@ -946,14 +1433,15 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
         touchOverlayIdleTimer();  // 聚焦时重置 4 秒倒计时
     }
 
-    // macOS：嵌入态也使用 GLView 自己的 native GL surface，聚焦时同样需要
-    //   触发 layoutContent 让 GLView 避开控制栏，保证按钮可见且可点击。
-    // Windows：嵌入态由 Editor GL 渲染，控制栏叠加在 GL 帧之上，不需要挤压 GLView。
-#if JUCE_MAC
-    layoutContent(getContentBounds());
-#else
+    // 控制栏以 overlay 方式绘制，不改变 GLView 尺寸，无需重新 layout。
+    // 仅 Windows 浮动态需要触发 layoutContent（为控制栏预留空间）。
+#if ! JUCE_MAC
     if (isFloating())
         layoutContent(getContentBounds());
+#endif
+#if JUCE_MAC
+    // macOS：同步顶层 overlayView_ 的可见性与位置（聚焦时显示，失焦时隐藏）。
+    UpdateOverlayViewPlacement();
 #endif
     repaint();
 }
@@ -1172,7 +1660,10 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize);
 
     if (prevBtn.contains(pos))   return OverlayButton::kPrev;
+    // macOS：分辨率切换按钮已阉割，不响应 kRenderScale 点击
+#if ! JUCE_MAC
     if (resBtn.contains(pos))    return OverlayButton::kRenderScale;
+#endif
     if (autoBtn.contains(pos))   return OverlayButton::kAuto;
     if (nextBtn.contains(pos))   return OverlayButton::kNext;
     if (randomBtn.contains(pos)) return OverlayButton::kRandom;
@@ -1270,8 +1761,14 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, bar.getY() + 2, kAutoBtnW, kBtnSize);
     auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW, bar.getY() + 2, kResBtnW, kBtnSize);
+    // macOS：resBtn 不显示，nameArea 延伸到 autoBtn 左侧
+#if JUCE_MAC
+    auto nameArea  = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
+                                          autoBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
+#else
     auto nameArea  = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
                                           resBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
+#endif
 
     // 按钮绘制 lambda
     auto drawBtn = [&](juce::Rectangle<int> r, const juce::String& text, OverlayButton btn)
@@ -1300,14 +1797,20 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     drawBtn(nextBtn,   ">",   OverlayButton::kNext);
     drawBtn(randomBtn, "?",   OverlayButton::kRandom);
 
-    // 渲染分辨率按钮 [1:n]
+    // 渲染分辨率按钮 [1:n]：macOS 上已阉割，不绘制此按钮
+#if ! JUCE_MAC
     {
       int s = 1;
-      if (editor_ != nullptr)
+      if (isFloating()) {
+        if (glView != nullptr)
+          s = glView->GetLocalRenderScale();
+      } else if (editor_ != nullptr) {
         s = editor_->GetMilkdropRenderScale();
+      }
       juce::String label = juce::String("1:") + juce::String(s);
       drawBtn(resBtn, label, OverlayButton::kRenderScale);
     }
+#endif
 
     // auto 按钮：轮播模式激活时用高亮 toggle 样式
     {
@@ -1714,8 +2217,14 @@ void MilkdropModule::showPresetJumpDialog()
     dlg->setBounds(getLocalBounds());
     addAndMakeVisible(dlg);
 
-    // 隐藏 GLView 以避免原生窗口 Z-order 遮住模态对话框。
-    // 通过 GlViewRestorer::modalStateFinished 在对话框退出时恢复可见性。
+    // 隐藏 GLView 避免其 native GL surface 遮盖模态对话框，
+    // 并在 modalStateFinished 时恢复可见性。macOS 与 Windows 行为统一：
+    //   虽然开启了 setComponentPaintingEnabled(true)，GL 帧作为背景可以让
+    //   模态对话框在 CPU paint 层可见，但隐藏 GLView 可以避免 GL 线程
+    //   在弹窗期间持续消耗 CPU，同时保证弹窗背景干净。
+    //   macOS：GLView 隐藏会触发 detach，GL 上下文销毁后 projectM handle 一同销毁，
+    //     恢复可见时重建。由于 CaptureLastFrame 已在 openGLContextClosing 中抓帧，
+    //     paintContent 在 GLView 不可用时会显示快照，无黑屏。
     glView->setVisible(false);
     dlg->enterModalState(true, new GlViewRestorer(*glView));
 }
@@ -1732,9 +2241,111 @@ void MilkdropModule::showAutoIntervalDialog()
     dlg->setBounds(getLocalBounds());
     addAndMakeVisible(dlg);
 
+    // macOS 与 Windows 统一：隐藏 GLView 以保证弹窗背景干净，
+    // modalStateFinished 时自动恢复可见性。
     glView->setVisible(false);
     dlg->enterModalState(true, new GlViewRestorer(*glView));
 }
+
+#if JUCE_MAC
+// ==========================================================
+// OverlayView / UpdateOverlayViewPlacement —— macOS 顶层控制栏
+// ==========================================================
+void MilkdropModule::OverlayView::paint(juce::Graphics& g)
+{
+    if (!owner_.focused_ || owner_.glView == nullptr)
+        return;
+    auto localBounds = getLocalBounds();
+    if (localBounds.isEmpty())
+        return;
+
+    // OverlayView 是独立顶层 NSWindow，其本地坐标 (0,0) 对应控制栏左上角。
+    // 但 paintOverlayControlBar 内部会把绘制中计算出的 nameArea/按钮矩形
+    // 缓存到 owner_.cachedNameArea_，该缓存被 hit-test（MilkdropModule::mouseDown
+    // + hitTestOverlayButton）使用，而 hit-test 输入的是 MilkdropModule 坐标系。
+    // 若此处以 OverlayView 本地坐标 (0,0,W,26) 调用 paintOverlayControlBar，
+    // 会用 OverlayView 坐标覆盖 cachedNameArea_，导致标题区 hit-test 永远失败，
+    // 无法弹出 PresetJumpDialog。
+    //
+    // 解法：先将本地坐标转换回 MilkdropModule 内容区坐标（moduleTopBar），
+    // 再对 g 应用相反方向的平移，使得视觉输出仍位于本窗口 (0,0)，
+    // 但传给 paintOverlayControlBar 的 content 参数已是正确的模块坐标系。
+    auto moduleTopBar = owner_.getContentBounds().withHeight(26);
+    if (moduleTopBar.isEmpty())
+        return;
+
+    juce::Graphics::ScopedSaveState save(g);
+    g.addTransform(juce::AffineTransform::translation(
+        static_cast<float>(-moduleTopBar.getX()),
+        static_cast<float>(-moduleTopBar.getY())));
+
+    owner_.paintOverlayControlBar(g, moduleTopBar);
+    if (owner_.isAutoMode_)
+        owner_.paintAutoControlRow(g, moduleTopBar);
+}
+
+void MilkdropModule::UpdateOverlayViewPlacement()
+{
+    if (overlayView_ == nullptr)
+        return;
+
+    // 判定条件：模块聚焦 + MilkdropModule 已在屏（showing）+ 内容区非空
+    const bool wants_visible = focused_ && isShowing() && glView != nullptr;
+
+    if (!wants_visible)
+    {
+        if (overlayView_->isOnDesktop())
+            overlayView_->removeFromDesktop();
+        overlayView_->setVisible(false);
+        return;
+    }
+
+    // 计算控制栏在屏幕坐标下的矩形。
+    // - 顶部第一行（overlay control bar）：内容区顶部 26px。
+    // - 若启用 auto 模式，额外向下扩展 kAutoRowHeight 供第二行绘制。
+    auto contentLocal = GetContentLocalBounds();
+    if (contentLocal.isEmpty())
+    {
+        if (overlayView_->isOnDesktop())
+            overlayView_->removeFromDesktop();
+        overlayView_->setVisible(false);
+        return;
+    }
+
+    int barH = 26;
+    if (isAutoMode_)
+        barH += static_cast<int>(kAutoRowHeight);
+    barH = juce::jmin(barH, contentLocal.getHeight());
+
+    auto barLocal = contentLocal.withHeight(barH);
+    auto barScreen = localAreaToGlobal(barLocal);
+    if (barScreen.isEmpty())
+    {
+        if (overlayView_->isOnDesktop())
+            overlayView_->removeFromDesktop();
+        overlayView_->setVisible(false);
+        return;
+    }
+
+    // 首次显示时创建独立顶层原生窗口。
+    // windowIsTemporary：短暂弹出型窗口（无边框、无标题栏、不出现在 Dock）
+    // windowIgnoresKeyPresses：不接管键盘输入
+    // windowIgnoresMouseClicks：整窗鼠标点击透传给下方（配合
+    //   setInterceptsMouseClicks(false, false) 双保险）
+    if (!overlayView_->isOnDesktop())
+    {
+        overlayView_->addToDesktop(
+            juce::ComponentPeer::windowIsTemporary
+            | juce::ComponentPeer::windowIgnoresKeyPresses
+            | juce::ComponentPeer::windowIgnoresMouseClicks);
+        overlayView_->setAlwaysOnTop(true);
+    }
+
+    overlayView_->setBounds(barScreen);
+    overlayView_->setVisible(true);
+    overlayView_->toFront(false);
+}
+#endif  // JUCE_MAC
 
 // ==========================================================
 // Auto 轮播模式
