@@ -3,6 +3,8 @@
 /out/
 /dist/
 build
+# 放行 JUCE 的 extras/Build（包含 CMake 构建支撑文件，不可忽略）
+!/third_party/JUCE/extras/Build/
 /build-clangd/
 /compile_commands.json
 # macOS 适配：build_macos_installer.sh 默认使用 build/ 与 build_*/ 作为构建输出目录
@@ -36,6 +38,8 @@ cmake_install.cmake
 CMakeFiles/
 Makefile
 *.cmake
+# 放行 JUCE 的 .cmake 构建支撑文件，不可忽略
+!/third_party/JUCE/**/*.cmake
 
 # Compiled objects and libraries
 *.o
