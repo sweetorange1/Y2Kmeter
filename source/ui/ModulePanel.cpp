@@ -225,7 +225,7 @@ void ModulePanel::paint(juce::Graphics& g)
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
     auto cbText = cb;
-    cbText.translate(-1, -1);
+    cbText.translate(0, -1);
     if (closeButtonPressed) cbText.translate(1, 1);
     g.drawText("x", cbText, juce::Justification::centred, false);
 
@@ -241,7 +241,7 @@ void ModulePanel::paint(juce::Graphics& g)
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
         auto popBtnText = popBtn;
-        popBtnText.translate(-1, -1);
+        popBtnText.translate(0, -1);
         if (popOutButtonPressed_) popBtnText.translate(1, 1);
         g.drawText(isFloating_ ? "=" : "-", popBtnText, juce::Justification::centred, false);
     }

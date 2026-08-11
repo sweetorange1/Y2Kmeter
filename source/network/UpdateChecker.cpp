@@ -61,8 +61,10 @@ void ShowUpdateDialog(const UpdateInfo& info,
 
   // 优先使用自定义 PinkXP 风格弹窗。
   // VST3 插件模式下 Editor 可能尚未打开，若找不到父组件则回退到系统原生对话框。
-  if (y2k::ui::UpdateDialog::ShowInComponent(
-          /*parentComponent=*/nullptr, info, settings) != nullptr) {
+  auto* dlg = y2k::ui::UpdateDialog::ShowInComponent(
+          /*parentComponent=*/nullptr, info, settings);
+  juce::Logger::writeToLog("[UpdateCheck] ShowInComponent returned: " + juce::String(dlg ? "DIALOG" : "NULL"));
+  if (dlg != nullptr) {
     return;
   }
 
@@ -88,12 +90,19 @@ void ShowUpdateDialog(const UpdateInfo& info,
       .withButton("Download")
       .withButton("Remind Me Later"),
     [info](int result) {
-      if (result == 1) {
+      juce::Logger::writeToLog("[UpdateCheck] NativeMessageBox result=" + juce::String(result));
+      // JUCE NativeMessageBox::showAsync 使用 plainIndex 模式（0-based）：
+      //   0 = 第一个按钮 (Download)，也可能表示关闭对话框
+      //   1 = 第二个按钮 (Remind Me Later)
+      if (result == 0) {
+        juce::Logger::writeToLog("[UpdateCheck] Download button pressed (or dialog closed), opening URL");
         if (info.download_url.isNotEmpty()) {
           juce::URL(info.download_url).launchInDefaultBrowser();
         } else {
           juce::URL("https://iisaacbeats.cn").launchInDefaultBrowser();
         }
+      } else {
+        juce::Logger::writeToLog("[UpdateCheck] Remind Me Later / dismissed, no action");
       }
     });
 }
@@ -121,23 +130,16 @@ void CheckForUpdatesAsync(
     return;
   }
 
-  if (!TelemetryClient::GetInstance().IsEnabled()) {
-    if (callback) {
-      juce::MessageManager::callAsync([callback]() {
-        callback(UpdateInfo{});
-      });
-    }
-    return;
-  }
-
   juce::String urlStr =
     "https://iisaacbeats.cn/api/update/check";
   urlStr << "?version=" << juce::URL::addEscapeChars(current_version, false)
          << "&platform=" << juce::URL::addEscapeChars(platform, false);
   const auto url = juce::URL(urlStr);
 
+  juce::Logger::writeToLog("[UpdateCheck] URL: " + urlStr);
+
   // 后台线程执行 HTTP GET
-  std::thread([url, callback]() {
+  std::thread([url, callback, current_version]() {
     UpdateInfo info;
 
     auto opts = juce::URL::InputStreamOptions(
@@ -148,21 +150,32 @@ void CheckForUpdatesAsync(
 
     if (auto stream = url.createInputStream(opts)) {
       const auto body = stream->readEntireStreamAsString();
+      juce::Logger::writeToLog("[UpdateCheck] Response body: " + body);
 
       if (body.isNotEmpty()) {
         const auto json = juce::JSON::parse(body);
         info = ParseUpdateResponse(json);
+        juce::Logger::writeToLog("[UpdateCheck] Parsed: has_update=" + juce::String((bool)info.has_update ? "1" : "0")
+            + " latest_version=" + info.latest_version);
       }
+    } else {
+      juce::Logger::writeToLog("[UpdateCheck] HTTP request FAILED (stream is null)");
     }
 
     if (info.has_update && info.latest_version.isNotEmpty()) {
       const int cmp = CompareVersionStrings(
-          juce::String(JucePlugin_VersionString),
+          current_version,
           info.latest_version);
+      juce::Logger::writeToLog("[UpdateCheck] Compare: current=" + current_version
+          + " latest=" + info.latest_version + " cmp=" + juce::String(cmp));
       if (cmp >= 0) {
         info.has_update = false;
+        juce::Logger::writeToLog("[UpdateCheck] has_update set to FALSE (current >= latest)");
       }
     }
+
+    juce::Logger::writeToLog("[UpdateCheck] Final: has_update=" + juce::String((bool)info.has_update ? "1" : "0")
+        + " firing callback=" + juce::String(callback ? "YES" : "NO"));
 
     if (callback) {
       juce::MessageManager::callAsync(

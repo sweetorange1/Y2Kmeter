@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.5.4 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.5.5 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -323,7 +323,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-  VERSION 2.5.4
+  VERSION 2.5.5
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -508,9 +508,10 @@ source/ui/modules/OscilloscopeWaveModule.cpp
 )
 
 # ==========================================================
-# macOS 专属源文件：桌面音频采集 + 音频转储调试
+# macOS 专属源文件：桌面音频采集 + 音频转储调试 + Milkdrop 子窗口绑定
 #   · MacDesktopAudioCapture.h/.mm —— ScreenCaptureKit 桌面音频采集
 #   · AudioDumpRecorder.h/.cpp     —— macOS Standalone 调试用音频转储
+#   · MilkdropModule_mac.h/.mm     —— overlay NSWindow 绑定为父窗口子窗口
 #   · Windows 构建中完全不编译这些文件，保持主干零影响。
 # ==========================================================
 if (APPLE)
@@ -519,6 +520,8 @@ if (APPLE)
     source/standalone/MacDesktopAudioCapture.mm
     source/standalone/AudioDumpRecorder.h
     source/standalone/AudioDumpRecorder.cpp
+    source/ui/modules/MilkdropModule_mac.h
+    source/ui/modules/MilkdropModule_mac.mm
   )
 endif()
 
@@ -726,6 +729,32 @@ endif()
 if (APPLE AND TARGET Y2Kmeter_Standalone)
   set_target_properties(Y2Kmeter_Standalone PROPERTIES
     MACOSX_BUNDLE_ICON_FILE "Icon.icns"
+  )
+
+  # 注入 ATS（App Transport Security）例外：允许 iisaacbeats.cn 的 HTTPS 连接
+  # 即使在开发/非签名构建或 VPN SSL 中间人环境下也不被 NSURLSession 拦截。
+  # 仅针对该单个域名放行，不影响其他 HTTPS 连接。
+  add_custom_command(TARGET Y2Kmeter_Standalone POST_BUILD
+    COMMAND /usr/libexec/PlistBuddy
+      -c "Add :NSAppTransportSecurity dict" 
+      "$<TARGET_BUNDLE_DIR:Y2Kmeter_Standalone>/Contents/Info.plist" 2>/dev/null || true
+    COMMAND /usr/libexec/PlistBuddy
+      -c "Add :NSAppTransportSecurity:NSExceptionDomains dict"
+      "$<TARGET_BUNDLE_DIR:Y2Kmeter_Standalone>/Contents/Info.plist" 2>/dev/null || true
+    COMMAND /usr/libexec/PlistBuddy
+      -c "Add :NSAppTransportSecurity:NSExceptionDomains:iisaacbeats.cn dict"
+      "$<TARGET_BUNDLE_DIR:Y2Kmeter_Standalone>/Contents/Info.plist" 2>/dev/null || true
+    COMMAND /usr/libexec/PlistBuddy
+      -c "Add :NSAppTransportSecurity:NSExceptionDomains:iisaacbeats.cn:NSExceptionAllowsInsecureHTTPLoads bool true"
+      "$<TARGET_BUNDLE_DIR:Y2Kmeter_Standalone>/Contents/Info.plist" 2>/dev/null || true
+    COMMAND /usr/libexec/PlistBuddy
+      -c "Add :NSAppTransportSecurity:NSExceptionDomains:iisaacbeats.cn:NSIncludesSubdomains bool true"
+      "$<TARGET_BUNDLE_DIR:Y2Kmeter_Standalone>/Contents/Info.plist" 2>/dev/null || true
+    COMMAND /usr/libexec/PlistBuddy
+      -c "Add :NSAppTransportSecurity:NSExceptionDomains:iisaacbeats.cn:NSTemporaryExceptionAllowsInsecureHTTPLoads bool true"
+      "$<TARGET_BUNDLE_DIR:Y2Kmeter_Standalone>/Contents/Info.plist" 2>/dev/null || true
+    COMMENT "Y2Kmeter[Standalone]: inject ATS exception for iisaacbeats.cn"
+    VERBATIM
   )
 endif()
 

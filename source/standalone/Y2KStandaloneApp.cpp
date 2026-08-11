@@ -383,12 +383,16 @@ public:
 #else
                 const juce::String platform = "unknown";
 #endif
+                juce::Logger::writeToLog("[UpdateCheck] SENDING version=" + juce::String(JucePlugin_VersionString) + " platform=" + platform);
                 y2k::network::CheckForUpdatesAsync(
                     juce::String(JucePlugin_VersionString),
                     platform,
                     &settings,
                     [&settings](const y2k::network::UpdateInfo& info) {
+                        juce::Logger::writeToLog("[UpdateCheck] callback: has_update=" + juce::String((bool)info.has_update ? "1" : "0")
+                            + " latest=" + info.latest_version);
                         if (info.has_update) {
+                            juce::Logger::writeToLog("[UpdateCheck] calling ShowUpdateDialog");
                             y2k::network::ShowUpdateDialog(
                                 info, &settings);
                         }

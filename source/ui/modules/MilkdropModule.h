@@ -277,9 +277,11 @@ private:
     //   同一 NSWindow 内的所有 JUCE 组件绘制（后者只是 NSView 内的
     //   CoreGraphics 合成层）。即使启用 setComponentPaintingEnabled(true)，
     //   JUCE 层的 paintContent 依然会被 GL 帧覆盖，控制栏永远不可见。
-    //   唯一可靠的解法：将 OverlayView 提升为独立 NSWindow（addToDesktop
-    //   + setAlwaysOnTop），操作系统的窗口合成器保证其 Z-order 高于插件
-    //   主窗口内嵌的任何子 NSView（含 NSOpenGLView）。
+    //   唯一可靠的解法：将 OverlayView 提升为独立 NSWindow（addToDesktop），
+    //   并通过 addChildWindow:ordered:NSWindowAbove 绑定为主窗口的子窗口。
+    //   操作系统的窗口合成器保证子窗口 Z-order 高于父窗口内嵌的任何子
+    //   NSView（含 NSOpenGLView），同时子窗口跟随父窗口层级，不会盖住
+    //   其他应用的窗口。
     //
     //   鼠标事件走位：
     //   OverlayView 设 setInterceptsMouseClicks(false, false)，鼠标事件

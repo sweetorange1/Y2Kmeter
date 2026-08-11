@@ -273,3 +273,131 @@ static constexpr int kMaxWarpGetPixel = 4;     // warp shader 中 GetPixel 采�
 | **UI 覆盖层设计** | 需要在 GLView 之上叠加可交互 UI（预设控制条、Tooltip 等）时，**用同尺寸的 JUCE 子组件覆盖**而不是重排布局，避免每次可见性切换都重建 GL context。JUCE 的 z-order 会自动把普通 Component 画在 OpenGLContext 之上。 |
 | **功能阉割优先于修复** | macOS 上 FBO 尺寸变更 + `glBlitFramebuffer` 拉伸的兼容问题投入产出比极低，直接阉割分辨率按钮反而干净。用户能接受"macOS 上少一个开关"，接受不了"点了就卡死"。 |
 | **预设文本预处理** | `.milk` 是纯文本 KV 格式，加载前直接做正则替换是最简单有效的兼容层，不需要碰 projectM 内部实现。`shapecode_N_num_inst=` / `wavecode_N_samples=` / `warp_N=\`...\`` 都是稳定的字段命名。 |
+
+---
+
+## macOS 更新检查 & Overlay z-order 修复 + 按钮微调（v2.5.5）
+
+本次迭代在 v2.5.4 完成 Milkdrop 性能治理的基础上，聚焦解决 macOS 更新弹窗不可见、
+Milkdrop 控制台 z-order 过高（盖住其他应用）、以及模块标题栏按钮对齐等问题。
+
+涉及文件：
+
+- `source/network/UpdateChecker.cpp`：更新检查链路修复与调试日志
+- `source/ui/UpdateDialog.cpp`：弹窗 z-order 与调试日志
+- `source/standalone/Y2KStandaloneApp.cpp`：调试日志（版本号临时测试后已还原）
+- `source/ui/modules/MilkdropModule.h`：OverlayView 设计注释更新
+- `source/ui/modules/MilkdropModule.cpp`：子窗口绑定替代 setAlwaysOnTop；按钮右移
+- **新增** `source/ui/modules/MilkdropModule_mac.h`：ObjC 子窗口绑定 C 桥接声明
+- **新增** `source/ui/modules/MilkdropModule_mac.mm`：`addChildWindow:ordered:NSWindowAbove` 实现
+- `source/ui/ModulePanel.cpp`：标题栏按钮图案右移 1px
+- `CMakeLists.txt`：添加 .mm 源文件 + ATS SSL 例外注入；版本号 2.5.4 → 2.5.5
+
+### 修复 1：macOS 更新检查被遥测开关拦截
+
+**现象**：macOS Standalone 启动后不弹出更新弹窗，但 Windows 侧正常。
+
+**根因**：`CheckForUpdatesAsync()` 在发起 HTTP 请求前检查 `TelemetryClient::GetInstance().IsEnabled()`，
+而 macOS 上 `LoadFromRegistry()` 因无 Windows 注册表直接 `SetEnabled(false)`，
+导致更新检查被整个跳过，连 HTTP 请求都没发出。
+
+**修复**（`source/network/UpdateChecker.cpp`）：
+- 删除 `if (!TelemetryClient::GetInstance().IsEnabled()) { return; }` 拦截逻辑。
+  更新检查和匿 名遥测是两个独立功能，不应捆绑授权。
+
+### 修复 2：版本比较 lambda 未捕获 current_version
+
+**现象**：`CheckForUpdatesAsync` 中 `std::thread` lambda 未捕获 `current_version` 导致编译错误，
+后续修复后又因使用 `JucePlugin_VersionString`（2.5.4）而非传入参数（测试期 1.0.0）导致本地校验拦截服务端返回的更新。
+
+**修复**（`source/network/UpdateChecker.cpp`）：
+- lambda 捕获列表加入 `current_version`（按值捕获，因线程被 detach）
+- `CompareVersionStrings` 改为使用 `current_version` 参数而非 `JucePlugin_VersionString`
+
+### 修复 3：NativeMessageBox 按钮索引错误（0-based vs 1-based）
+
+**现象**：VST/AU 插件模式下走 `NativeMessageBox` 回退路径，点击 "Remind Me Later" 也会打开浏览器。
+
+**根因**：JUCE `NativeMessageBox::showAsync` 使用 `plainIndex` 模式（0-based），
+macOS `NSAlertFirstButtonReturn → 0`（Download），`NSAlertSecondButtonReturn → 1`（Remind Me Later）。
+代码判断 `if (result == 1)` 实际匹配的是**第二个按钮** Remind Me Later，而非 Download。
+
+**修复**（`source/network/UpdateChecker.cpp`）：
+```cpp
+// 修改前：if (result == 1) → 匹配 Remind Me Later
+// 修改后：if (result == 0) → 匹配 Download
+if (result == 0) {
+    juce::URL(info.download_url).launchInDefaultBrowser();
+}
+```
+
+### 修复 4：UpdateDialog z-order 被 Milkdrop OverlayView 覆盖
+
+**现象**：更新弹窗弹出后被 Milkdrop 预设控制台覆盖，必须点击弹窗聚焦才能显示。
+
+**根因**：`OverlayView::UpdateOverlayViewPlacement()` 每帧调用 `toFront(false)`，持续将 overlay
+推到同层级最前，覆盖刚弹出的 UpdateDialog。
+
+**修复**（`source/ui/UpdateDialog.cpp` + `source/ui/modules/MilkdropModule.cpp`）：
+- UpdateDialog：`addToDesktop` 后新增 `toFront(true)`（`orderFrontRegardless` 强推到最前）
+- OverlayView：`toFront(false)` 移入 `if (!isOnDesktop())` 首次创建块，不再每帧调用
+- OverlayView：`setVisible(true)` 改为条件调用 `if (!isVisible())`，避免每帧触发 NSWindow `orderFront:`
+
+### 修复 5：Milkdrop OverlayView z-order 过高（盖住其他应用）
+
+**现象**：OverlayView 使用 `setAlwaysOnTop(true)`，将 overlay NSWindow 推到 `NSFloatingWindowLevel`（层级 3），
+高于所有普通应用窗口（`NSNormalWindowLevel`=0），导致系统其他软件的窗口也被 overlay 盖住。
+
+**根因**：`NSFloatingWindowLevel` 是系统级浮动层，所有 `setAlwaysOnTop` 窗口都在此层。
+
+**修复方案**：用 macOS 原生**子窗口**（`addChildWindow:ordered:NSWindowAbove`）替代 `setAlwaysOnTop`：
+
+- 子窗口永悬浮于父窗口上方（覆盖 GL NSOpenGLView），但跟随父窗口层级
+- 父窗口在前台时 overlay 在最上；父窗口被其他应用盖住时 overlay 也被盖住
+
+**实现**（新增 `MilkdropModule_mac.h/.mm`）：
+```objc
+// 获取 overlay 和 parent 的 NSWindow
+[parentWin addChildWindow:overlayWin ordered:NSWindowAbove];
+```
+
+**编译问题解决**（`MilkdropModule_mac.mm`）：
+- **JUCE OpenGL 头文件顺序**：`MilkdropModule_mac.h` → `<JuceHeader.h>` → `juce_opengl.h` 必须在 `<AppKit/AppKit.h>`（会间接引入 `<OpenGL/gl.h>`）之前，否则触发 JUCE 的 `"gltypes.h included before juce_gl.h"` static_assert
+- **Carbon 类型冲突**：`<AppKit>` 伞形头文件间接引入 `MacTypes.h` 的 `Point` 和 `Components.h` 的 `Component`，与 JUCE 的 `juce::Point` / `juce::Component` 冲突。解决方案是 `#define Point JUCE_CARBON_Point` / `#define Component JUCE_CARBON_Component` 在 `#import <AppKit>` 前后暂存/还原
+
+**CMakeLists.txt**：`target_sources` 的 `if(APPLE)` 分支加入新文件。
+
+### 修复 6：模块标题栏按钮图案右移 1px
+
+**改动**（`source/ui/ModulePanel.cpp`、`source/ui/modules/MilkdropModule.cpp`）：
+```cpp
+// 修改前：translate(-1, -1) → 左上偏移
+// 修改后：translate(0, -1)  → 仅垂直偏移，向右移 1px
+```
+关闭按钮（X）和脱离/停靠按钮（-/=）均生效，所有模块统一。
+
+### 修复 7：macOS ATS SSL 例外注入
+
+**背景**：测试期间发现 `iisaacbeats.cn` 的 HTTPS 连接被 macOS NSURLSession 拦截（`errSSLPeerAuthCompleted` -9836），
+尤其在 VPN 环境下证书验证失败导致更新检查 HTTP 请求失败。
+
+**修复**（`CMakeLists.txt`）：
+- 在 `Y2Kmeter_Standalone` 的 `POST_BUILD` 中用 `PlistBuddy` 注入 `NSAppTransportSecurity` 例外，
+  仅针对 `iisaacbeats.cn` 域名放行，不影响其他 HTTPS 连接。
+
+### 调试工具改进
+
+全局将 `DBG()` 替换为 `juce::Logger::writeToLog()`，因为 `DBG()` 在 Release 构建下展开为空宏，
+导致调试日志无法输出。`juce::Logger::writeToLog()` 不受构建类型影响，始终写入 stderr。
+
+### 关键教训与注意事项（v2.5.5 追加）
+
+| 类别 | 教训 |
+|------|------|
+| **平台差异 · 遥测与更新检查解耦** | macOS 上遥测默认禁用（无注册表 = `LoadFromRegistry()` 返回 false），但更新检查不应依赖遥测开关。两个功能应当独立授权，否则 macOS 用户永远收不到更新通知。 |
+| **JUCE NativeMessageBox 按钮索引** | `NativeMessageBox::showAsync` 使用 `plainIndex` 模式（0-based），macOS `NSAlertFirstButtonReturn→0`，Windows `TaskDialogIndirect` 返回的 buttonIndex 也是 0-based。`if (result == 1)` 在很多场景下匹配的是第二个按钮，不是第一个。 |
+| **平台差异 · NSWindow z-order** | `setAlwaysOnTop` → `NSFloatingWindowLevel` 高于所有普通窗口，适用场景极少（如全局浮动工具条）。需要"在父窗口上方但不盖住其他应用"的语义时，应使用 `addChildWindow:ordered:NSWindowAbove`。子窗口的 z-order 跟随父窗口，这是 macOS 唯一正确的方案。 |
+| **ObjC++ 编译 · Carbon 类型冲突** | `.mm` 文件中同时使用 `<AppKit>` 和 JUCE 时，Carbon 的全局 `Point` / `Component` 类型会与 `juce::Point` / `juce::Component` 产生命名歧义。标准解法是用 `#define` 暂存/还原，因为 AppKit 自身不依赖这些 Carbon C 类型。 |
+| **ObjC++ 编译 · OpenGL 头文件顺序** | JUCE 的 `juce_opengl.h` 必须严格在系统 `<OpenGL/gl.h>` 之前加载，否则 `static_assert("gltypes.h included before juce_gl.h")`。`.mm` 文件中应先 `#include` JUCE 头，再 `#import <AppKit>`。 |
+| **CMake 增量编译不完整** | 修改调用方代码后，有时即使 touch 文件，cmake 也不会检测到变更。最可靠的排查手段是在怀疑未被重编译的函数内部**直接硬编码关键参数**作为应急,同时在调用方添加 `juce::Logger::writeToLog` 签名日志确认执行路径。 |
+| **DBG vs Logger** | `DBG()` 在 Release 构建下被编译器干掉了。调试生产环境问题时必须使用 `juce::Logger::writeToLog()`，它在所有构建类型下都输出到 stderr。 |

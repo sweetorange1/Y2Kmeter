@@ -10,6 +10,9 @@
 */
 #include "MilkdropModule.h"
 #include "ProjectMApi.h"
+#if JUCE_MAC
+#include "MilkdropModule_mac.h"
+#endif
 #include "source/ui/PinkXPStyle.h"
 #include "PluginEditor.h"
 
@@ -640,7 +643,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
   g.setColour(PinkXP::ink);
   g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
   auto cbText = cb;
-  cbText.translate(-1, -1);
+  cbText.translate(0, -1);
   if (closeButtonPressed) cbText.translate(1, 1);
   g.drawText("x", cbText, juce::Justification::centred, false);
 
@@ -655,7 +658,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
     auto popBtnText = popBtn;
-    popBtnText.translate(-1, -1);
+    popBtnText.translate(0, -1);
     if (popOutButtonPressed_) popBtnText.translate(1, 1);
     g.drawText(isFloating() ? "=" : "-", popBtnText, juce::Justification::centred, false);
   }
@@ -2327,23 +2330,34 @@ void MilkdropModule::UpdateOverlayViewPlacement()
         return;
     }
 
-    // 首次显示时创建独立顶层原生窗口。
+    // 首次显示时创建独立顶层原生窗口并绑定为父窗口的子窗口。
     // windowIsTemporary：短暂弹出型窗口（无边框、无标题栏、不出现在 Dock）
     // windowIgnoresKeyPresses：不接管键盘输入
     // windowIgnoresMouseClicks：整窗鼠标点击透传给下方（配合
     //   setInterceptsMouseClicks(false, false) 双保险）
+    //
+    // 子窗口（addChildWindow:ordered:NSWindowAbove）vs setAlwaysOnTop：
+    //   · setAlwaysOnTop → NSFloatingWindowLevel (3)，高于所有普通窗口，
+    //     会盖住系统其他应用的窗口。
+    //   · 子窗口 → 跟随父窗口的 NSNormalWindowLevel (0)，永悬浮于父
+    //     窗口上方，但父窗口被其他应用盖住时也跟着被盖。
     if (!overlayView_->isOnDesktop())
     {
         overlayView_->addToDesktop(
             juce::ComponentPeer::windowIsTemporary
             | juce::ComponentPeer::windowIgnoresKeyPresses
             | juce::ComponentPeer::windowIgnoresMouseClicks);
-        overlayView_->setAlwaysOnTop(true);
+        // 将 overlay NSWindow 绑定为父窗口（editor）的子窗口，
+        // Z-order 高于主窗口内的 GL NSOpenGLView，但不高于其他应用。
+        y2k::ui::MacAttachOverlayToParent(overlayView_.get(), this);
     }
 
     overlayView_->setBounds(barScreen);
-    overlayView_->setVisible(true);
-    overlayView_->toFront(false);
+    // setVisible(true) 在 JUCE macOS 上会触发 NSWindow orderFront:，
+    // 若每帧无脑调用则覆盖同层级的 UpdateDialog。
+    // 仅当 overlay 当前不可见时才调用，避免抢占弹窗 z-order。
+    if (!overlayView_->isVisible())
+        overlayView_->setVisible(true);
 }
 #endif  // JUCE_MAC
 
