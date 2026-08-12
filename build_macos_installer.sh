@@ -143,12 +143,22 @@ log "  · VST3     : ${VST3_BUNDLE}"
 log "  · AU       : ${AU_BUNDLE}"
 
 # ---- Step 2: ad-hoc 代码签名 --------------------------------------------------
+# 注意：**不要**加 `--options runtime`。
+#   hardened runtime 会强制校验：主进程与它 dlopen 的所有 dylib 必须拥有
+#   一致的 Team ID。而 ad-hoc 签名的 dylib 会得到一个基于内容哈希的"隐式
+#   Team ID"（例如 libprojectM 会被算成 A060AF26-12D3-3E02-...），与主
+#   binary 的 Team ID 不相同，dyld 会拒绝加载并报：
+#     "code signature ... not valid for use in process: mapping process
+#      and mapped file (non-platform) have different Team IDs"
+#   这直接导致 Milkdrop 模块 dlopen libprojectM-4.dylib 失败、界面纯黑。
+#   只有走 Apple Developer ID + notarization 的正式签名，才应该配合
+#   `--options runtime` 使用。本脚本走 ad-hoc，因此必须去掉这个选项。
 if [[ "${DO_SIGN}" -eq 1 ]]; then
-  log "Step 2/5 ad-hoc 代码签名 (codesign --sign -)"
+  log "Step 2/5 ad-hoc 代码签名 (codesign --sign -，不启用 hardened runtime)"
   sign_bundle() {
     local bundle="$1"
+    # 先深度签内部所有 Mach-O（dylib / helper / framework），再签外壳 bundle
     codesign --force --deep --sign - \
-      --options runtime \
       --timestamp=none \
       "${bundle}"
     codesign --verify --deep --strict --verbose=2 "${bundle}" || true
@@ -247,13 +257,20 @@ Y2Kmeter ${VERSION} · macOS 安装说明
       若该路径因权限问题拒绝写入，可改放：
           ~/Library/Audio/Plug-Ins/Components/
 
-资源说明：
-  · Tamagotchi 动画资源与 Milkdrop 预设/纹理已内置于各 Bundle 中。
-  · macOS 使用自包含 Bundle 体系，无需额外安装步骤。
-  · 首次启动时，若 Tamagotchi 或 Milkdrop 模块提示资源缺失，
-    请确认已将对应 Bundle 拖放至正确的系统路径并完整拷贝。
-  · Windows 版使用 ZIP 压缩包 + 安装后解压方式加速部署，
-    macOS 因 DMG 镜像特性无需此类优化。
+资源说明（v2.4+ Milkdrop 预设共享机制）：
+  · Milkdrop 预设仅内置于 ${APP_BUNDLE_NAME}（Standalone）中，
+    VST3 / AU bundle 已剥离预设副本以瘦身安装包。
+  · 首次运行 Standalone 并添加 Milkdrop 模块时，程序会把 bundle 内的
+    预设一次性复制到共享目录：
+        ~/Library/Application Support/Y2Kmeter/milkdrop_presets/
+    该过程约耗时 3-5 秒（复制约 200 MB）。之后 Standalone / VST3 / AU
+    三端都从此共享目录读取预设，用户手动增删预设立即对三端生效。
+  · Milkdrop 纹理（milkdrop_textures，约 3 MB）三端 bundle 各自内置。
+  · Tamagotchi 动画资源三端 bundle 各自内置。
+  · 因此若只安装 VST3 / AU 而不安装 Standalone，Milkdrop 预设无法自动
+    seed，请先安装并运行一次 ${APP_BUNDLE_NAME}，或手动把预设目录放到
+        ~/Library/Application Support/Y2Kmeter/milkdrop_presets/
+    然后重启 DAW。
 
 首次打开注意：
   本包采用本地 ad-hoc 签名，未经过 Apple 公证。若打开 ${APP_BUNDLE_NAME}

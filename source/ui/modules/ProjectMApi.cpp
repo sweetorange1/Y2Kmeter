@@ -9,6 +9,7 @@
 #include "ProjectMApi.h"
 
 #include <juce_core/juce_core.h>
+#include <iostream>
 
 #if defined (_WIN32)
  #define WIN32_LEAN_AND_MEAN
@@ -178,6 +179,9 @@ Api::Api()
     loadLibrary();
     if (moduleHandle != nullptr)
         resolveSymbols();
+    std::cerr << "[ProjectMApi] Api::Api() done: moduleHandle=" << moduleHandle
+              << " available=" << available
+              << " errorMessage='" << errorMessage << "'" << std::endl;
 }
 
 Api::~Api()
@@ -330,6 +334,9 @@ void Api::loadLibrary()
     }
    #elif defined (__APPLE__)
     auto dylib = locateProjectMDylib();
+    std::cerr << "[ProjectMApi] loadLibrary: locate dylib -> '"
+              << dylib.getFullPathName().toStdString()
+              << "' exists=" << dylib.existsAsFile() << std::endl;
 
     if (! dylib.existsAsFile())
     {
@@ -338,6 +345,7 @@ void Api::loadLibrary()
                        "or next to the executable, "
                        "or in third_party/projectm/bin/. "
                        "Please rebuild with latest CMake install rules.";
+        std::cerr << "[ProjectMApi] loadLibrary FAIL: " << errorMessage << std::endl;
         return;
     }
 
@@ -349,6 +357,11 @@ void Api::loadLibrary()
         const char* err = ::dlerror();
         errorMessage = std::string ("dlopen(libprojectM-4.dylib) failed: ")
                      + (err != nullptr ? err : "unknown error");
+        std::cerr << "[ProjectMApi] loadLibrary FAIL: " << errorMessage << std::endl;
+    }
+    else
+    {
+        std::cerr << "[ProjectMApi] loadLibrary OK: dlopen handle=" << moduleHandle << std::endl;
     }
    #else
     errorMessage = "libprojectM dynamic loading is not implemented on this platform.";

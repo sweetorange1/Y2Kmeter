@@ -37,7 +37,7 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
-project(Y2Kmeter VERSION 2.5.5 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.5.6 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -323,7 +323,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-  VERSION 2.5.5
+  VERSION 2.5.6
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -342,6 +342,19 @@ Y2Kmeter
         # LoadLibrary 动态加载，见 source/ui/modules/ProjectMApi.cpp。
         VST3_AUTO_MANIFEST FALSE
         COPY_PLUGIN_AFTER_BUILD TRUE
+        # macOS：必须显式声明 Info.plist 里的 NSMicrophoneUsageDescription。
+        #   · 没有这个描述项时，macOS 15 上会出现一种"半残"授权状态：
+        #     TCC.db 里能看到 Y2Kmeter 条目，但 csreq 不会随 ad-hoc 签名
+        #     变化而更新，导致装新版本后即使用户点"是"授权，运行时校验依然
+        #     失败——只有用系统设置里的 "-" 手动删除条目再重新授权才行。
+        #   · 加上 MICROPHONE_PERMISSION_ENABLED + TEXT 后，JUCE 的
+        #     juceaide 会自动往 Info.plist 写入 NSMicrophoneUsageDescription
+        #     键，macOS 会走完整、稳定的授权/校验路径，配合
+        #     tccutil reset 就能实现"装完新版本 → 弹一次授权 → 立即可用"。
+        #   · 屏幕录制权限（NSSystemAdmin/ScreenCapture）不需要 Info.plist
+        #     描述项，仅在运行时由 JUCE 的截屏 API 触发即可。
+        MICROPHONE_PERMISSION_ENABLED TRUE
+        MICROPHONE_PERMISSION_TEXT "Y2Kmeter 需要访问麦克风或音频输入设备，才能对输入信号进行电平/频谱/相位等实时分析。"
 )
 
 juce_generate_juce_header(Y2Kmeter)
@@ -815,10 +828,20 @@ if (APPLE)
   set(Y2KM_PROJECTM_DYLIB "${Y2KM_PROJECTM_BIN_MACOS}/libprojectM-4.dylib")
 
   # 辅助函数：把 projectM dylib + 预设/纹理打包进指定 bundle target
+  #
+  # 参数：
+  #   tgt          —— 目标 bundle target 名
+  #   SKIP_PRESETS —— 可选开关：若指定，则不拷贝 milkdrop_presets/ 目录
+  #                    （用于 VST3 / AU：预设从 Standalone.app 首次运行时
+  #                     seed 到 ~/Library/Application Support/Y2Kmeter/ ，
+  #                     VST3 / AU 直接读 AppData 共享目录，DMG 可瘦身约 500 MB）
   function(y2km_deploy_projectm_into_bundle tgt)
     if (NOT TARGET ${tgt})
       return()
     endif()
+
+    set(options SKIP_PRESETS)
+    cmake_parse_arguments(ARG "${options}" "" "" ${ARGN})
 
     # 1) 创建 Frameworks 目录并拷贝 dylib
     add_custom_command(TARGET ${tgt} POST_BUILD
@@ -841,18 +864,28 @@ if (APPLE)
       VERBATIM
     )
 
-    # 3) 预设目录
-    add_custom_command(TARGET ${tgt} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E make_directory
-              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory
-              "${Y2KM_MILKDROP_PRESETS}"
-              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/milkdrop_presets"
-      COMMENT "Y2Kmeter[${tgt}]: sync milkdrop_presets into bundle Resources/"
-      VERBATIM
-    )
+    # 3) 预设目录（仅 Standalone 内置作为 seed 源；VST3/AU 跳过以瘦身 DMG）
+    if (NOT ARG_SKIP_PRESETS)
+      add_custom_command(TARGET ${tgt} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${Y2KM_MILKDROP_PRESETS}"
+                "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/milkdrop_presets"
+        COMMENT "Y2Kmeter[${tgt}]: sync milkdrop_presets into bundle Resources/"
+        VERBATIM
+      )
+    else()
+      # VST3 / AU: 显式移除任何残留的 milkdrop_presets/ 目录（增量构建卫生）
+      add_custom_command(TARGET ${tgt} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
+                "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/milkdrop_presets"
+        COMMENT "Y2Kmeter[${tgt}]: strip milkdrop_presets/ (uses shared AppData)"
+        VERBATIM
+      )
+    endif()
 
-    # 4) 纹理目录
+    # 4) 纹理目录（体积小 ~3MB，三端 bundle 各自内置，无需 seed 共享）
     add_custom_command(TARGET ${tgt} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_directory
               "${Y2KM_MILKDROP_TEXTURES}"
@@ -866,10 +899,10 @@ if (APPLE)
     y2km_deploy_projectm_into_bundle(Y2Kmeter_Standalone)
   endif()
   if (TARGET Y2Kmeter_VST3)
-    y2km_deploy_projectm_into_bundle(Y2Kmeter_VST3)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_VST3 SKIP_PRESETS)
   endif()
   if (TARGET Y2Kmeter_AU)
-    y2km_deploy_projectm_into_bundle(Y2Kmeter_AU)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_AU SKIP_PRESETS)
   endif()
 endif()
 

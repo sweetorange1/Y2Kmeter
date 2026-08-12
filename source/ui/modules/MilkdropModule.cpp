@@ -20,6 +20,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <random>
@@ -453,14 +454,56 @@ namespace
 
     static juce::File FindMilkdropAssetsDirForModule(const juce::String& subdir)
     {
+      // 判断路径 A 是否是"有效"的资源目录：
+      //   · milkdrop_presets: 至少存在 1 个 .milk 文件
+      //   · milkdrop_textures: 至少存在 1 个子文件
+      // 这个判空规则保证："AppData 目录存在但是空的（例如旧版本残留）"
+      // 不会屏蔽掉 bundle 内合法的资源目录。
+      auto isValidAssetsDir = [&](const juce::File& d) -> bool {
+        if (!d.exists() || !d.isDirectory()) return false;
+        if (subdir == "milkdrop_presets") {
+          return d.findChildFiles(juce::File::findFiles, false, "*.milk").size() > 0;
+        }
+        return d.getNumberOfChildFiles(juce::File::findFiles) > 0;
+      };
+
       // 1) 用户数据目录（macOS: ~/Library/Application Support/Y2Kmeter/，
-      //    Windows: %APPDATA%\Y2Kmeter\）—— 最高优先级，允许用户自行替换预设
+      //    Windows: %APPDATA%\Y2Kmeter\）—— 最高优先级，允许用户自行替换预设。
+      //    仅当目录"有效"（含 .milk / 子文件）时才使用；空目录会继续 fallback，
+      //    避免旧版本残留空目录屏蔽 bundle 内合法资源。
       juce::File appDataDir = juce::File::getSpecialLocation(
           juce::File::userApplicationDataDirectory)
           .getChildFile("Y2Kmeter")
           .getChildFile(subdir);
-      if (appDataDir.exists() && appDataDir.isDirectory())
+      if (isValidAssetsDir(appDataDir))
         return appDataDir;
+
+     #if defined (__APPLE__)
+      // macOS Seed 机制（v2.4+）：
+      //   VST3/AU bundle 中不再内置 milkdrop_presets（DMG 瘦身约 500 MB），
+      //   而是由 Standalone 首次启动时把 bundle 内的 presets 复制到 AppData，
+      //   三端（Standalone / VST3 / AU）通过 AppData 共享同一份预设，
+      //   用户手动增删预设立即对三端生效。
+      //   此 lambda：若 bundle 内 srcDir 有效且 AppData 目标目录为空/不存在，
+      //   同步复制到 AppData 并返回 AppData 路径；否则返回原 srcDir。
+      auto seedToAppDataIfNeeded = [&](const juce::File& srcDir) -> juce::File {
+        if (!isValidAssetsDir(srcDir))
+          return srcDir;
+        // 只对 milkdrop_presets 做 seed（textures 三端 bundle 各自内置，无需共享）
+        if (subdir != "milkdrop_presets")
+          return srcDir;
+        // AppData 已有有效内容 —— 上面已经 return 了，这里 AppData 一定无效
+        // （不存在 / 空目录 / 无 .milk）。触发一次性 seed 复制。
+        auto parent = appDataDir.getParentDirectory();
+        if (!parent.exists())
+          parent.createDirectory();
+        // copyDirectoryTo 会在目标不存在时创建目标目录。若目标存在（空目录），
+        // 会把源目录内容合并进去。macOS 上大约需要 3-5 秒复制 ~200 MB。
+        if (srcDir.copyDirectoryTo(appDataDir) && isValidAssetsDir(appDataDir))
+          return appDataDir;
+        return srcDir;
+      };
+     #endif
 
      #if defined (__APPLE__)
       // 2) macOS bundle 内置路径：
@@ -478,18 +521,19 @@ namespace
             .getChildFile("Resources")
             .getChildFile("assets")
             .getChildFile(subdir);
-        if (bundleCandidate.exists() && bundleCandidate.isDirectory())
-          return bundleCandidate;
+        if (isValidAssetsDir(bundleCandidate))
+          return seedToAppDataIfNeeded(bundleCandidate);
       }
       // 3) VST3 / AU bundle 内置路径：
       //    Y2Kmeter.vst3/Contents/MacOS/Y2Kmeter.vst3（或 .component）
       //    资源打包在 Y2Kmeter.vst3/Contents/Resources/assets/<subdir>
       //    同上逻辑，currentApplicationFile 指向 bundle 根，
       //    再进入 Contents/Resources/assets/
+      //    注意：v2.4+ VST3/AU bundle 已剥离 milkdrop_presets（走共享 AppData），
+      //    只保留 milkdrop_textures 副本；此分支仅对 textures 命中。
       {
         auto appFile = juce::File::getSpecialLocation(
             juce::File::currentApplicationFile);
-        // currentApplicationFile 在插件场景下指向 .vst3/.component bundle 根
         auto pluginContents = appFile.getChildFile("Contents");
         if (pluginContents.isDirectory())
         {
@@ -497,8 +541,8 @@ namespace
               .getChildFile("Resources")
               .getChildFile("assets")
               .getChildFile(subdir);
-          if (pluginCandidate.exists() && pluginCandidate.isDirectory())
-            return pluginCandidate;
+          if (isValidAssetsDir(pluginCandidate))
+            return seedToAppDataIfNeeded(pluginCandidate);
         }
       }
      #endif
@@ -511,7 +555,7 @@ namespace
       for (int i = 0; i < 8; ++i)
       {
         auto candidate = cur.getChildFile("assets").getChildFile(subdir);
-        if (candidate.exists() && candidate.isDirectory())
+        if (isValidAssetsDir(candidate))
           return candidate;
         cur = cur.getParentDirectory();
       }
@@ -544,6 +588,13 @@ MilkdropModule::MilkdropModule (AnalyserHub* hub_,
 
     glView = std::make_unique<GLView> (*this);
     addAndMakeVisible (glView.get());
+
+    // 卡顿感缓解：在主线程预扫预设目录（磁盘 IO，9000+ .milk 文件）。
+    // 此时 GL 上下文尚未 attach，GL 线程未启动，local_preset_paths_
+    // 无并发读写；后续 newOpenGLContextCreated 看到非空就不会重扫。
+    // 目的：把磁盘扫描从 GL 线程关键路径中移除，减少 attach 时的卡顿。
+    if (glView != nullptr)
+        glView->ScanPresetFiles();
 #if JUCE_MAC
     // macOS：控制栏通过顶层 NSWindow 悬浮绘制（addToDesktop），
     // Z-order 高于主窗口内嵌的 NSOpenGLView，确保 GL 帧上可见。
@@ -570,7 +621,7 @@ MilkdropModule::~MilkdropModule()
     }
 
 #if JUCE_MAC
-    // macOS：先撤下顶层控制栏窗口（native peer），再销毁 unique_ptr。
+    // macOS：先撚下顶层控制栏窗口（native peer），再销毁 unique_ptr。
     // 顺序保证：不会在 native peer 尚存活时被 unique_ptr 析构。
     if (overlayView_ != nullptr && overlayView_->isOnDesktop())
         overlayView_->removeFromDesktop();
@@ -912,6 +963,13 @@ void MilkdropModule::GLView::LoadCurrentPreset() {
   if (local_current_preset_ < 0 || local_current_preset_ >= local_preset_paths_.size())
     return;
 
+  // Debug 死循环修复：projectM 在 loadPreset 内部会做 HLSL→GLSL 转译、
+  // glCompileShader / glLinkProgram，这些调用在 macOS OpenGL over Metal
+  // 后端有较大概率累积 GL error 队列。若不清空，下一帧 renderOpenGL()
+  // 进入 JUCE 的 checkGLError() 就会命中 jassertfalse 或死循环（peer
+  // 未 valid 时的 continue 无法消费错误）。前后各清一次保双保险。
+  while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+
   auto& api = projectm_api::Api::instance();
   auto path = local_preset_paths_[local_current_preset_];
   if (api.hasLoadPresetData()) {
@@ -923,23 +981,44 @@ void MilkdropModule::GLView::LoadCurrentPreset() {
   } else {
     api.loadPresetFile(local_pm_handle_, path.toRawUTF8(), true);
   }
+
+  while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
 }
 
 void MilkdropModule::GLView::newOpenGLContextCreated() {
+  std::cerr << "[Milkdrop] newOpenGLContextCreated: BEGIN" << std::endl;
+  // === Debug 死循环修复 + 首帧乱码修复 ===
+  // 1) 清空可能存在的历史 GL 错误。macOS Core Profile / OpenGL over Metal
+  //    下，刚 attach 时 GL error 队列里常有残留项，而 JUCE Debug 构建的
+  //    checkGLError() 内部（juce_opengl.cpp:214）在 peer 未 valid 时会
+  //    无限 continue 而不消费错误，造成卡死。先 clear 一下释放错误。
+  // 2) 立即黑帧。后面 projectm_create() / initGlew() 中程会阻塞 GL 线程
+  //    几百毫秒，期间 AppKit 仍会以 NSOpenGLView 的 back buffer 合成到
+  //    窗口。若不先 clear，用户看到的是未初始化的 GPU 显存 =“乱码”。
+  while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+  juce::OpenGLHelpers::clear(juce::Colours::black);
+  while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+
   auto& api = projectm_api::Api::instance();
+  std::cerr << "[Milkdrop] Api::instance() got, isAvailable=" << api.isAvailable()
+            << " loadError='" << api.loadError() << "'" << std::endl;
   api.resetGlewInitialization();
   if (!api.isAvailable()) {
     local_error_ = api.loadError();
+    std::cerr << "[Milkdrop] ABORT: api not available -> " << local_error_ << std::endl;
     return;
   }
   if (!api.initGlew()) {
     local_error_ = api.loadError();
+    std::cerr << "[Milkdrop] ABORT: initGlew failed -> " << local_error_ << std::endl;
     return;
   }
 
   local_pm_handle_ = api.create();
+  std::cerr << "[Milkdrop] projectm_create -> handle=" << local_pm_handle_ << std::endl;
   if (local_pm_handle_ == nullptr) {
     local_error_ = "projectm_create() returned NULL.";
+    std::cerr << "[Milkdrop] ABORT: projectm_create returned NULL" << std::endl;
     return;
   }
 
@@ -950,20 +1029,33 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   api.setHardCutEnabled(local_pm_handle_, false);
 
   auto tex_dir = FindMilkdropAssetsDirForModule("milkdrop_textures");
+  std::cerr << "[Milkdrop] tex_dir exists=" << tex_dir.exists()
+            << " path='" << tex_dir.getFullPathName().toStdString() << "'" << std::endl;
   if (tex_dir.exists()) {
     std::vector<std::string> paths{tex_dir.getFullPathName().toStdString()};
     api.setTextureSearchPaths(local_pm_handle_, paths);
   }
 
-  ScanPresetFiles();
+  // 卡顿感缓解：若构造函数已在主线程预扫过预设列表，则跳过；
+  // 否则退回到在 GL 线程扫盘（兼容异常路径）。
+  if (local_preset_paths_.isEmpty())
+    ScanPresetFiles();
+  std::cerr << "[Milkdrop] preset count=" << local_preset_paths_.size() << std::endl;
   int pending = owner_.restored_preset_index_;
   owner_.restored_preset_index_ = -1;
   local_current_preset_ = (pending >= 0 && pending < local_preset_paths_.size()) ? pending : 0;
+
+  // 预设 shader 编译前后清错误，避免 projectM 内部 hlslparser→GLSL 编译
+  // 过程产生的无害 warning 污染 error 队列、拖到下一帧 checkGLError 里卡死。
+  while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
   LoadCurrentPreset();
+  while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+
   last_preset_switch_ms_ = static_cast<int64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());
   local_render_ready_ = true;
+  std::cerr << "[Milkdrop] newOpenGLContextCreated: END (render_ready=true)" << std::endl;
 }
 
 void MilkdropModule::GLView::openGLContextClosing() {
@@ -1045,7 +1137,14 @@ void MilkdropModule::GLView::ConsumePresetRequests() {
   }
 
   if (switched) {
+    // 卡顿感缓解：将 shader 编译期间的“旧帧定格”换成黑帧，
+    // 让用户感知为“切换中”而非“卡住”。
+    // 同时前后清错误避免 Debug checkGLError 死循环。
+    while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+    juce::OpenGLHelpers::clear(juce::Colours::black);
+    while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
     LoadCurrentPreset();
+    while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
     last_preset_switch_ms_ = static_cast<int64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -1443,7 +1542,11 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
         layoutContent(getContentBounds());
 #endif
 #if JUCE_MAC
-    // macOS：同步顶层 overlayView_ 的可见性与位置（聚焦时显示，失焦时隐藏）。
+    // macOS: Overlay 可见性同步（非聚焦时隐藏内部控制栏窗口）。
+    // 注意：Milkdrop 模块在 macOS 非脱离模式下始终置顶（由
+    // ModuleWorkspace::onBroughtToFront 统一执行 toFront），因为 NSOpenGLView
+    // 作为 AppKit 原生子视图无法被 CoreGraphics 绘制的其他模块遮盖，
+    // 为保持“边框/抬头/视频”视觉一致，整个模块都预为最上层。
     UpdateOverlayViewPlacement();
 #endif
     repaint();
@@ -1663,8 +1766,8 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize);
 
     if (prevBtn.contains(pos))   return OverlayButton::kPrev;
-    // macOS：分辨率切换按钮已阉割，不响应 kRenderScale 点击
-#if ! JUCE_MAC
+    // 分辨率切换按钮已全平台阉割，不响应 kRenderScale 点击
+#if 0
     if (resBtn.contains(pos))    return OverlayButton::kRenderScale;
 #endif
     if (autoBtn.contains(pos))   return OverlayButton::kAuto;
@@ -1706,6 +1809,8 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kAutoBtnW, kBtnSize);
         return autoBtn;
     }
+    // 分辨率切换按钮已全平台阉割
+#if 0
     case OverlayButton::kRenderScale:
     {
         auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
@@ -1718,6 +1823,7 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kResBtnW, kBtnSize);
         return resBtn;
     }
+#endif
     default:
         return {};
     }
@@ -1732,7 +1838,10 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     case OverlayButton::kRandom: randomPreset();            break;
     case OverlayButton::kPresetName: showPresetJumpDialog();   break;
     case OverlayButton::kAuto:       toggleAutoMode();          break;
+    // 分辨率切换按钮已全平台阉割
+#if 0
     case OverlayButton::kRenderScale: glView->RequestRenderScale(); break;
+#endif
     default: break;
     }
 }
@@ -1800,8 +1909,8 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     drawBtn(nextBtn,   ">",   OverlayButton::kNext);
     drawBtn(randomBtn, "?",   OverlayButton::kRandom);
 
-    // 渲染分辨率按钮 [1:n]：macOS 上已阉割，不绘制此按钮
-#if ! JUCE_MAC
+    // 渲染分辨率按钮 [1:n]：全平台阉割，不绘制此按钮
+#if 0
     {
       int s = 1;
       if (isFloating()) {

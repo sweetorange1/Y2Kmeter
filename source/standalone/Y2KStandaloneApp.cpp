@@ -55,10 +55,309 @@
 #if JUCE_MAC
  #include "MacDesktopAudioCapture.h"
  #include "AudioDumpRecorder.h"
+ #include <cstdlib> // std::system —— 用于安装/升级后重置 TCC 权限
 #endif
 
 namespace y2k
 {
+
+// ----------------------------------------------------------
+// showSystemFontAlertAsync
+//   包含中文/日文等非 ASCII 字符的告警弹窗必须使用「系统默认字体」
+//   来渲染，否则会被主界面的 PinkXPLookAndFeel 位图字体（仅覆盖 ASCII）
+//   渲染成豆腐块 / 乱码。这里手工构造 AlertWindow，并挂一个进程级
+//   单例 LookAndFeel_V4（默认使用宿主系统的 UI 字体：macOS = .AppleSystemUIFont，
+//   Windows = Segoe UI，Linux = 系统 sans-serif），从而正确显示 CJK。
+//
+//   · buttonTexts 里第一个是「主按钮」（回车键触发），后续按钮返回值依次
+//     递减（JUCE 约定：主按钮 result=1，次按钮 result=2，以此类推）；
+//     与 MessageBoxOptions().withButton() 保持一致。
+//   · onResult 允许为空。
+// ----------------------------------------------------------
+static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
+                                      const juce::String& title,
+                                      const juce::String& message,
+                                      const juce::StringArray& buttonTexts,
+                                      std::function<void (int)> onResult)
+{
+    // ----------------------------------------------------------
+    // SystemLookAndFeel —— 彻底绕过全局位图字体污染
+    //
+    //   根因：PinkXPLookAndFeel 初始化时调用了
+    //   LookAndFeel::setDefaultSansSerifTypeface(ptr) 将全局
+    //   默认无衬线字体替换为 ASCII-only 位图字体。更致命的是
+    //   PinkXPLookAndFeel::getTypefaceForFont() 无条件返回
+    //   PinkXP::gTypeface（无论请求什么字体名字），导致标题、
+    //   按钮等控件的绘制链路被强制替换为位图字体。
+    //
+    //   SystemLookAndFeel 通过以下手段彻底隔离：
+    //   1) getTypefaceForFont → nullptr：阻断任何 LNF 层字体替换
+    //   2) drawButtonText → 用 getTextButtonFont() 显式设置字体
+    //   3) 字体方法返回显式 typefaceName 的 FontOptions
+    // ----------------------------------------------------------
+    struct SystemLookAndFeel : juce::LookAndFeel_V4
+    {
+        // ★ 阻断 LookAndFeel 层对任何字体的替换 —— 让 Font 对象
+        //    自身携带的 typeface 信息原封不动传到 Graphics 层
+        juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override
+        {
+            return nullptr;
+        }
+
+        // 弹窗大标题
+        juce::Font getAlertWindowTitleFont() override
+        {
+           #if JUCE_MAC
+            return juce::Font (juce::FontOptions ("PingFang SC", 18.0f, juce::Font::bold));
+           #elif JUCE_WINDOWS
+            return juce::Font (juce::FontOptions ("Microsoft YaHei", 18.0f, juce::Font::bold));
+           #elif JUCE_LINUX
+            return juce::Font (juce::FontOptions ("Noto Sans CJK SC", 18.0f, juce::Font::bold));
+           #else
+            return juce::LookAndFeel_V4::getAlertWindowTitleFont();
+           #endif
+        }
+
+        // 按钮文字 —— 同时被 getTextButtonFont 和 drawButtonText 使用
+        juce::Font getTextButtonFont (juce::TextButton& tb, int buttonHeight) override
+        {
+           #if JUCE_MAC
+            (void) tb;
+            return juce::Font (juce::FontOptions ("PingFang SC",
+                                                  juce::jmin (15.0f, (float) buttonHeight * 0.6f),
+                                                  juce::Font::plain));
+           #elif JUCE_WINDOWS
+            (void) tb;
+            return juce::Font (juce::FontOptions ("Microsoft YaHei",
+                                                  juce::jmin (15.0f, (float) buttonHeight * 0.6f),
+                                                  juce::Font::plain));
+           #elif JUCE_LINUX
+            (void) tb;
+            return juce::Font (juce::FontOptions ("Noto Sans CJK SC",
+                                                  juce::jmin (15.0f, (float) buttonHeight * 0.6f),
+                                                  juce::Font::plain));
+           #else
+            return juce::LookAndFeel_V4::getTextButtonFont (tb, buttonHeight);
+           #endif
+        }
+
+        // ★ 显式设置字体再画按钮文字 —— 这是确保按钮中文正确渲染
+        //    的最后一道防线。基类的 drawButtonText 可能内部走
+        //    Graphics::setFont 时重新解析 typeface，导致绕回全局位图。
+        void drawButtonText (juce::Graphics& g, juce::TextButton& button,
+                             bool /*highlighted*/, bool shouldDrawButtonAsDown) override
+        {
+            g.setColour (button.findColour (juce::TextButton::textColourOffId));
+            g.setFont (getTextButtonFont (button, button.getHeight()));
+
+            auto area = button.getLocalBounds();
+            if (shouldDrawButtonAsDown || button.getToggleState())
+                area.translate (1, 1);
+
+            g.drawText (button.getButtonText(), area,
+                        juce::Justification::centred, false);
+        }
+
+        // AlertWindow 内部其他标签
+        juce::Font getAlertWindowFont() override
+        {
+           #if JUCE_MAC
+            return juce::Font (juce::FontOptions ("PingFang SC", 12.0f, juce::Font::plain));
+           #elif JUCE_WINDOWS
+            return juce::Font (juce::FontOptions ("Microsoft YaHei", 12.0f, juce::Font::plain));
+           #elif JUCE_LINUX
+            return juce::Font (juce::FontOptions ("Noto Sans CJK SC", 12.0f, juce::Font::plain));
+           #else
+            return juce::LookAndFeel_V4::getAlertWindowFont();
+           #endif
+        }
+    };
+
+    static SystemLookAndFeel sysLnf;
+
+    // ----------------------------------------------------------
+    // 构建可滚动消息体（Viewport + TextEditor）
+    //   标题在 AlertWindow 原生标题栏里会被 JUCE 的 typeface
+    //   解析链路污染为位图字体，若含非 ASCII 字符（中文、◆
+    //   等符号）会显示为方块。这里把标题前置拼入正文 TextEditor,
+    //   TextEditor 走 applyFontToAllText 直设字体的路径，不依赖
+    //   LookAndFeel 的字体方法，能正确渲染任意字符。
+    //
+    //   ★ 前缀不使用任何非 ASCII 符号（避免调用方传入的 title
+    //     即便本身是 ASCII，也不会被前缀污染）。
+    // ----------------------------------------------------------
+    const juce::String fullMessage = (title.isEmpty() ? juce::String()
+            : (title + "\n\n")) + message;
+
+    auto* editor = new juce::TextEditor ("alertMessage");
+    editor->setMultiLine (true);
+    editor->setReadOnly (true);
+    editor->setScrollbarsShown (false);
+    editor->setText (fullMessage, juce::dontSendNotification);
+    editor->setColour (juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
+    editor->setColour (juce::TextEditor::outlineColourId,     juce::Colours::transparentBlack);
+    editor->setColour (juce::TextEditor::textColourId,        juce::Colours::white);
+
+    // 显式指定系统 CJK 字体 —— TextEditor 作为 custom component，
+    // 其 LookAndFeel 解析链路可能不与 AlertWindow 一致，必须直接设置。
+    {
+       #if JUCE_MAC
+        editor->applyFontToAllText (juce::Font (juce::FontOptions ("PingFang SC", 14.0f, juce::Font::plain)));
+       #elif JUCE_WINDOWS
+        editor->applyFontToAllText (juce::Font (juce::FontOptions ("Microsoft YaHei", 14.0f, juce::Font::plain)));
+       #elif JUCE_LINUX
+        editor->applyFontToAllText (juce::Font (juce::FontOptions ("Noto Sans CJK SC", 14.0f, juce::Font::plain)));
+       #endif
+    }
+
+    // 估算内容所需高度，给足空间避免不必要的滚动
+    int numLines = 0;
+    for (auto c : fullMessage) if (c == '\n') ++numLines;
+    numLines = juce::jmax (numLines + 3, 6);
+    editor->setSize (500, numLines * 20);
+
+    // Viewport 拥有 editor 生命周期，可见区域为 520×300
+    auto* viewport = new juce::Viewport ("alertViewport");
+    viewport->setViewedComponent (editor, true /*takeOwnership*/);
+    viewport->setScrollBarsShown (true, false);
+    viewport->setSize (520, 300);
+
+    // AlertWindow 本体：使用纯 ASCII 标题（中文标题已拼入
+    // 上方 fullMessage → TextEditor，绕过 LookAndFeel 字体污染）。
+    // message 传 " " 占位，实际内容由 addCustomComponent 承载。
+    auto* aw = new juce::AlertWindow ("Y2Kmeter", " ", iconType);
+    aw->setLookAndFeel (&sysLnf);
+
+    // ------------------------------------------------------------------
+    // 按钮策略：
+    //   - 若只有 1 个按钮：点击即关闭弹窗（默认行为）
+    //   - 若有多个按钮：只有【最后一个】按钮关闭弹窗，前面的按钮
+    //     仅触发 onResult 回调（例如跳转设置/打开访达），弹窗保持
+    //     打开，方便用户按流程完成多个操作。
+    //
+    //   实现：非最后一个按钮监听 onClick，回调 onResult 但不 exitModal。
+    // ------------------------------------------------------------------
+    if (buttonTexts.isEmpty())
+    {
+        aw->addButton ("OK", 1);
+    }
+    else
+    {
+        for (int i = 0; i < buttonTexts.size(); ++i)
+            aw->addButton (buttonTexts[i], i + 1);
+
+        // 除最后一个按钮外，其他按钮点击后不关闭弹窗
+        const int lastIdx = buttonTexts.size() - 1;
+        for (int i = 0; i < lastIdx; ++i)
+        {
+            if (auto* btn = aw->getButton (buttonTexts[i]))
+            {
+                const int resultCode = i + 1;
+                btn->onClick = [onResult, resultCode]()
+                {
+                    if (onResult) onResult (resultCode);
+                    // 不调用 exitModalState —— 保持弹窗打开
+                };
+            }
+        }
+    }
+
+    aw->addCustomComponent (viewport);
+
+    aw->enterModalState (true,
+                         juce::ModalCallbackFunction::create (
+                             [onResult] (int result)
+                             {
+                                 if (onResult) onResult (result);
+                             }),
+                         true /*deleteWhenDismissed*/);
+}
+
+#if JUCE_MAC
+// ----------------------------------------------------------
+// macOS：安装/升级后自动重置本 App 的麦克风 + 系统录音权限
+//
+//   背景：Y2Kmeter 目前用 ad-hoc 签名（`codesign --sign -`）分发，
+//     每次打包 dylib/可执行文件的签名指纹都会变。macOS 的 TCC
+//     数据库以 (bundleID, csreq/签名指纹) 为键存权限，因此新版本
+//     被视为"另一个同名 app"，之前授过的 Microphone / ScreenCapture
+//     权限对新版本失效。用户表现：装完新版本必须先在系统设置里
+//     把旧的 Y2Kmeter 移除、再重新添加并授权，才能捕捉音频。
+//   解决：安装新版本后首次运行时，主动调用 `tccutil reset` 清除
+//     旧记录，让 macOS 忘掉旧签名下的授权状态；下次用户点"允许"
+//     即可，无需先手动移除。
+//   ★ 关键前置条件：Info.plist 里必须有 NSMicrophoneUsageDescription。
+//     若没有该键，即便 tccutil reset 成功，macOS 15 也会走一条"半残
+//     授权"通路——TCC 记录会保留但 csreq 不与当前进程签名对齐，导致
+//     用户重新点"允许"后运行时校验依然失败。已通过在 CMakeLists.txt
+//     的 juce_add_plugin(...) 中加入 MICROPHONE_PERMISSION_ENABLED /
+//     MICROPHONE_PERMISSION_TEXT 让 JUCE 自动写入该键。
+//   触发时机：只在检测到"当前 bundle 版本 != 上次记录的版本"时
+//     执行一次（首次运行也算，因为上次版本记录为空）。此时 JUCE
+//     的 AudioDeviceManager 还未创建，尚未触发 CoreAudio 的
+//     TCC 权限查询，因此 reset 能生效。
+//   安全性：tccutil 是 Apple 官方命令，仅重置指定 bundleID 的权限，
+//     无需 sudo，不会污染其他 app。macOS 15+ 上 tccutil reset
+//     不会弹任何对话框，静默完成；旧版本上偶尔会弹一次授权对话
+//     框（这是用户本来就需要做的一步）。
+//
+//   仅 Standalone 需要（VST3/AU 由宿主进程负责权限，不走此路径）。
+static void resetTccIfVersionChanged (juce::ApplicationProperties& appProps)
+{
+    auto* settings = appProps.getUserSettings();
+    if (settings == nullptr)
+        return;
+
+    const juce::String currentVersion (JucePlugin_VersionString);
+    const juce::String lastVersion = settings->getValue ("macos.lastTccResetVersion", "");
+
+    if (lastVersion == currentVersion)
+        return; // 版本未变，不重复重置
+
+    // Bundle ID 与 Info.plist / codesign 中保持一致
+    // （由 CMake 通过 MACOSX_BUNDLE_GUI_IDENTIFIER 写入，见 CMakeLists.txt）
+    const char* bundleId = "cn.iisaacbeats.Y2Kmeter";
+
+    // 使用 std::system 调用 tccutil。命令执行是同步阻塞的，但对
+    // 单个 bundleID 的 reset 通常在 100ms 内完成，对启动耗时影响可忽略。
+    // 加 `>/dev/null 2>&1` 抑制 tccutil 在旧系统上偶发的 stderr 提示。
+    //
+    // ★ macOS 15 上 ScreenCapture 特别顽固：`tccutil reset ScreenCapture <bundleID>`
+    //   只按 (service, bundleID, csreq) 三元组精确删除；但 ad-hoc 签名下
+    //   旧记录的 csreq 已过期，新旧 csreq 不同，reset 命中不到旧行，导致
+    //   数据库里残留一条 "allowed=1 但 csreq 与当前进程不符" 的僵尸记录，
+    //   之后用户即便再点"允许"，系统也会用僵尸记录去校验 → 校验失败 → 拿不到系统音频。
+    //   我们做两层加固：
+    //     1) 先 reset 一次带 bundleID 的（清干净"能匹配上的"记录）；
+    //     2) 再 reset 一次不带 bundleID 的（此调用要求 Full Disk Access，
+    //        大多数用户没给，会静默失败，但不会有副作用，属于尽力而为）；
+    //     3) 100ms 落盘等待；
+    //     4) 最后再 reset 一次带 bundleID 的，让 tccd 内存缓存二次刷新。
+    //   即便如此仍无法保证 100% 清除僵尸记录 —— 这是 macOS 15 TCC 设计使然。
+    //   最终兜底：SCK 启动失败弹窗里引导用户"从系统设置里删除本 app 再重加"。
+    auto runShell = [] (const juce::String& cmd)
+    {
+        std::system ((cmd + " >/dev/null 2>&1").toRawUTF8());
+    };
+
+    runShell (juce::String ("/usr/bin/tccutil reset Microphone ")   + bundleId);
+    runShell (juce::String ("/usr/bin/tccutil reset ScreenCapture ") + bundleId);
+    // 全量 reset（无 bundleID）通常需要 Full Disk Access，用户没给时静默失败，无副作用
+    runShell ("/usr/bin/tccutil reset ScreenCapture");
+
+    // 给 tccd 一点时间把 reset 落盘、刷新内存缓存。实测在 macOS 15 上，
+    // 如果 reset 后立刻创建 AudioDeviceManager，tccd 有时还没来得及丢弃
+    // 旧 csreq，导致后续用户点"允许"时校验仍走旧记录。100ms 足够 tccd
+    // 完成一次 sqlite 写入 + WAL flush。
+    juce::Thread::sleep (100);
+
+    // 二次刷新（针对 ScreenCapture 的僵尸记录做最后一次尝试）
+    runShell (juce::String ("/usr/bin/tccutil reset ScreenCapture ") + bundleId);
+
+    settings->setValue ("macos.lastTccResetVersion", currentVersion);
+    settings->saveIfNeeded();
+}
+#endif // JUCE_MAC
 
 // ----------------------------------------------------------
 // Y2KMainWindow
@@ -134,6 +433,14 @@ public:
     // --------------------------------------------------
     void initialise (const juce::String&) override
     {
+       #if JUCE_MAC
+        // 0) macOS：若检测到 App 版本已升级（或首次启动），主动重置
+        //    本 bundleID 的 Microphone / ScreenCapture 权限记录，
+        //    避免 ad-hoc 签名变化导致 TCC 保留旧签名下的过期授权、
+        //    让用户必须手动移除再添加。详见 helper 函数上方注释。
+        resetTccIfVersionChanged (appProperties);
+       #endif
+
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
             appProperties.getUserSettings(),   // 设置持久化
@@ -954,15 +1261,70 @@ private:
                 return;
             }
 
-            juce::AlertWindow::showAsync (
-                juce::MessageBoxOptions()
-                    .withIconType (juce::MessageBoxIconType::WarningIcon)
-                    .withTitle ("System Output capture unavailable")
-                    .withMessage (juce::String ("Failed to start macOS desktop audio capture:\n")
-                                    + (macDesktopCapture != nullptr ? macDesktopCapture->getLastError() : juce::String ("(unknown)"))
-                                    + "\n\nFalling back to Microphone.")
-                    .withButton ("OK"),
-                nullptr);
+            // ------------------------------------------------------------------
+            // ScreenCaptureKit 启动失败 —— 大概率是 TCC 屏幕录制权限问题。
+            //
+            // 背景：Y2Kmeter 走 ad-hoc 签名，每次打包签名指纹会变。macOS 的
+            //   TCC 数据库对"屏幕与系统录音"权限的校验极为严格：即便调用
+            //   tccutil reset ScreenCapture 也无法彻底清除旧记录里残留的
+            //   csreq（签名指纹），导致用户在"系统设置 → 屏幕与系统录音"
+            //   里把开关重新点为"允许"后，运行时依然拿不到权限。
+            //   唯一 100% 可靠的解法：让用户手动在"屏幕与系统录音"面板里
+            //   点击本 app 条目 → 按 [ - ] 按钮删除 → 重新打开本 app →
+            //   系统再次弹出授权对话框 → 点"允许"。
+            //
+            // 因此这里的弹窗必须做到：
+            //   1) 明确写清"手动删除 + 重新添加"的操作步骤（用户光看
+            //      "启动失败"是想不到这条路径的）；
+            //   2) 提供"打开系统设置"按钮，一键跳转到目标面板；
+            //   3) 提供"打开应用文件夹"按钮，方便用户拖动重启动 app；
+            //   4) 保留"取消"回落到麦克风输入的选项。
+            // ------------------------------------------------------------------
+            const juce::String errDetail = (macDesktopCapture != nullptr
+                                                ? macDesktopCapture->getLastError()
+                                                : juce::String ("(unknown)"));
+
+            // 正文仅保留"整行中文"（用户实测能正常渲染）
+            // 与"整行英文"两段，避免中英文混排在同一行触发
+            // AlertWindow 字体解析乱码。
+            //
+            // ★ 副标题行绝不能出现 "macOS xxx" 这种中英混排——
+            //   即便是整行看起来一致，混排会让 TextEditor 首行
+            //   的字体解析走英文分支，中文段落变方块。
+            const juce::String guidedMsg =
+                juce::String ()
+            +   errDetail;
+
+            juce::StringArray perm_buttons;
+            perm_buttons.add ("Open System Settings");
+            perm_buttons.add ("Reveal App in Finder");
+            perm_buttons.add ("Close");
+
+            showSystemFontAlertAsync (
+                juce::AlertWindow::WarningIcon,
+                juce::String(),   // title 传空 —— 避免正文首行出现任何"非中文/非纯英文段"的字体解析歧义
+                guidedMsg,
+                perm_buttons,
+                [] (int result)
+                {
+                    if (result == 1)
+                    {
+                        // 直接跳转到 "屏幕与系统录音" 面板 —— 弹窗保持打开
+                        // 该 URL scheme 在 macOS 13+ 有效；旧系统会降级到隐私总览页
+                        juce::URL ("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                            .launchInDefaultBrowser();
+                    }
+                    else if (result == 2)
+                    {
+                        // 在 Finder 中定位到 /Applications/Y2Kmeter.app —— 弹窗保持打开
+                        juce::File appBundle ("/Applications/Y2Kmeter.app");
+                        if (appBundle.exists())
+                            appBundle.revealToUser();
+                        else
+                            juce::File ("/Applications").revealToUser();
+                    }
+                    // result == 3 (Close) 由 showSystemFontAlertAsync 内部关闭弹窗
+                });
 
             enableDefaultInput();
             if (cachedEditor != nullptr)

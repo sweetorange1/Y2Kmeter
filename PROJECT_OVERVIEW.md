@@ -2679,4 +2679,100 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 
 ---
 
+## 9. v2.5.6：Milkdrop 预设重命名 + 三端共享 + Milkdrop/Tamagotchi 稳定性
+
+本节记录 v2.5.6 与前一版本对比的**跨平台通用改动**（macOS 独属改动见
+`MACOS_ADAPTATION_DIFFS.md`）。
+
+### 9.1 Milkdrop 预设批量重命名
+
+- `assets/milkdrop_presets/` 下约 9600 个 `.milk` 文件统一重命名，去除
+  会在部分文件系统触发歧义的特殊字符，规整编号排序。
+- 旧名字预设 9612 个删除、新名字预设 9607 个新增（净减 5 个重名冗余）。
+- 内容与运行时行为不变，仅文件名变化。
+
+### 9.2 Milkdrop 预设三端共享 + 首次运行 seed
+
+- **背景**：Standalone / VST3 / AU 三端 bundle 各自内置 200MB 预设 →
+  DMG / installer 冗余 ~400MB。
+- **策略**（跨平台通用，Windows 走 `%APPDATA%\Y2Kmeter\`，macOS 走
+  `~/Library/Application Support/Y2Kmeter/`）：
+  1. 仅 Standalone bundle / 主程序旁边内置完整预设作为 "seed 源"
+  2. 首次启动 Milkdrop 模块时，若 AppData 目录缺失/空/无 `.milk`，
+     则从 bundle 内置目录一次性 `copyDirectoryTo(appDataDir)` 到 AppData
+  3. Standalone / VST3 / AU 三端后续都从共享 AppData 读取预设
+  4. 用户手动增删预设立即对三端生效
+- **副作用**：只装 VST3/AU 不装 Standalone 的用户，预设不会自动 seed，
+  需手动放置到 AppData 目录（DMG README / Installer 提示已注明）
+
+### 9.3 资源目录判空规则：从"存在"改为"有效"
+
+- 影响文件：`PluginEditor.cpp::FindMilkdropAssetsDir`、
+  `source/ui/modules/MilkdropModule.cpp::FindMilkdropAssetsDirForModule`
+- **旧规则**：`exists() && isDirectory()` 就采纳该目录
+- **新规则**：新增 `isValidAssetsDir()` lambda
+  - `milkdrop_presets`: 至少存在 1 个 `.milk` 文件
+  - `milkdrop_textures`: 至少存在 1 个子文件
+- 原因：旧版本残留的空 AppData 目录会屏蔽 bundle 内合法资源，导致
+  Milkdrop 模块打开后无预设可选 / 黑屏
+- 所有 4 个候选路径（AppData → macOS bundle → 插件 bundle → CWD 遍历）
+  都改用 `isValidAssetsDir`
+
+### 9.4 Milkdrop 模块 disk IO 前移到主线程
+
+- 影响文件：`source/ui/modules/MilkdropModule.h/.cpp`
+- `ScanPresetFiles()` 从 `private` 提升为 `public`
+- `MilkdropModule` 构造函数在主线程直接调用 `glView->ScanPresetFiles()`
+  预扫 9000+ `.milk` 文件（磁盘 IO，无 GL 依赖）
+- `newOpenGLContextCreated()` 内检查 `local_preset_paths_` 已非空则跳过扫盘
+- 效果：模块添加瞬间的卡顿感缓解，GL 线程关键路径更短
+
+### 9.5 Milkdrop 模块排他性：允许同时存在一个（含脱离态）
+
+- 影响文件：`source/ui/ModuleWorkspace.cpp::showAddMenu`
+- **旧逻辑**：只遍历 `modules` 数组判断是否已有 Milkdrop 模块
+- **新逻辑**：同时遍历 `floatingModuleStates_` 缓存（脱离态模块从
+  `modules` 数组移出但记录在此缓存）
+- 原因：脱离一个 Milkdrop 后能添加第二个 → libprojectM / GL context
+  冲突崩溃
+
+### 9.6 Tamagotchi 模块空资源兜底
+
+- 影响文件：`source/ui/modules/TamagotchiModule.cpp`
+- `randomAnimFrom (std::initializer_list<int>) const`：`availableAnimIds`
+  为空时返回默认 anim id `1`，避免访问空数组崩溃
+- `beginPatrolCycle()`：`availableAnimIds` 为空时提前 return，跳过巡逻
+  状态机初始化
+- 原因：极端情况下资源目录不完整时，避免程序崩溃退化为"无动画但不崩"
+
+### 9.7 弹窗 UI 微调（跨平台通用）
+
+- 影响文件：`source/ui/modules/TamagotchiModule.cpp`
+  - `TamagotchiConfirmOverlay::paint`：确认弹窗文字色改为 `Colours::black`
+    并把 "say bye to ur pet? :(" 表情改为 ":)"（原始文案有误导性）
+  - `paint()` 中的"弹出/停靠按钮"绘制逻辑挪出（改由 ModulePanel 通用
+    路径处理，去除重复绘制）
+  - `bubbleText.append` 颜色由 `PinkXP::ink` 改为 `Colours::black`
+
+### 9.8 macOS Milkdrop 独属改动的入口标记
+
+以下改动仅在 `#if JUCE_MAC` 分支生效，详见 MACOS_ADAPTATION_DIFFS.md：
+- 非脱离态 Milkdrop 模块整体强制置顶（NSOpenGLView 合成层级永远高于 CG）
+- newOpenGLContextCreated 首帧黑屏 + GL error 队列清空
+- LoadCurrentPreset 前后 GL error 清空（避免 checkGLError 死循环）
+- Standalone 首次运行 seed presets 到 AppData
+- CMake `y2km_deploy_projectm_into_bundle` 的 `SKIP_PRESETS` 参数
+
+### 9.9 关键教训（v2.5.6 追加，跨平台通用）
+
+| 类别 | 教训 |
+|------|------|
+| **资源"存在"vs"有效"** | 目录存在不代表内容合法。旧版本残留的空目录会屏蔽新版本内置资源。资源查找应基于**内容有效性**（子文件数量、扩展名匹配）而非**存在性**判空。跨平台通用规则，Windows 上升级软件后 `%APPDATA%\Y2Kmeter\` 残留空目录也一样翻车。 |
+| **共享大资源 · Seed 一次到 AppData** | 三端（Standalone / VST3 / AU）都携带 200MB 大资源既冗余又难维护。让主程序首次运行时 `copyDirectoryTo` 一次到 AppData，其余端读共享 AppData，是行业标准做法。副作用：只装插件不装主程序时资源不会自动 seed，需在文档 / installer 里提示。 |
+| **磁盘 IO 与 GL 线程关键路径解耦** | GL context 创建成本已经很高，若在 `newOpenGLContextCreated` 内再触发 9000+ 文件遍历会明显阻塞用户可见的"打开模块"操作。凡是无 GL 依赖的准备工作（扫盘、读小配置文件）都应上移到主线程构造函数中提前做完。 |
+| **模块排他性 · 脱离态缓存也要计入** | JUCE 里模块脱离后从 `modules` 数组移除并入 floatingCache。任何"是否已存在某类模块"的判断都必须同时看两个来源，否则用户脱离一个后就能再添一个 → 单例资源（GL context / dylib handle）打架。 |
+| **空资源兜底就地退化** | 资源缺失属于"用户可能长期忽略"的错误状态。热路径中所有依赖资源数组的随机访问必须先判空并返回合理默认值，而不是崩溃。用户宁愿看到"一动不动的宠物"也不愿"打开就崩"。 |
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

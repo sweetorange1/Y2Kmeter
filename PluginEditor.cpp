@@ -184,7 +184,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.5.5");
+const int versionW = versionFont.getStringWidth ("v2.5.6");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -225,7 +225,7 @@ const int versionW = versionFont.getStringWidth ("v2.5.5");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.5.5";
+const juce::String versionText = "v2.5.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -2998,7 +2998,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.5.5";
+const juce::String versionText = "v2.5.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3006,7 +3006,7 @@ const juce::String versionText = "v2.5.5";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.5.5");
+        const int versionW = versionFont.getStringWidth ("v2.5.6");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4273,17 +4273,47 @@ namespace {
 
 juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
     const juce::String& subdir) {
+  // 判空规则（与 MilkdropModule.cpp 内的 isValidAssetsDir 保持一致）：
+  //   · milkdrop_presets: 至少存在 1 个 .milk 文件
+  //   · milkdrop_textures: 至少存在 1 个子文件
+  // 保证旧版本残留的空 AppData 目录不会屏蔽 bundle 内合法资源。
+  auto isValidAssetsDir = [&](const juce::File& d) -> bool {
+    if (!d.exists() || !d.isDirectory()) return false;
+    if (subdir == "milkdrop_presets") {
+      return d.findChildFiles(juce::File::findFiles, false, "*.milk").size() > 0;
+    }
+    return d.getNumberOfChildFiles(juce::File::findFiles) > 0;
+  };
+
   // v2.3.1: 预设/纹理集中存放在 %APPDATA%\Y2Kmeter\ 下，
   //   Standalone 和 VST3 共享同一份，不再各自携带独立副本。
   //   AppData 路径在所有搜索策略中拥有最高优先级。
+  //   v2.4+: AppData 必须"有效"（有 .milk / 子文件）才被采纳，
+  //   否则继续 fallback 到 bundle，避免旧版本残留空目录屏蔽资源。
   juce::File appDataDir = juce::File::getSpecialLocation(
       juce::File::userApplicationDataDirectory)
       .getChildFile("Y2Kmeter")
       .getChildFile(subdir);
-  if (appDataDir.exists() && appDataDir.isDirectory())
+  if (isValidAssetsDir(appDataDir))
     return appDataDir;
 
  #if defined (__APPLE__)
+  // macOS Seed 机制（v2.4+）：Standalone bundle 内的 milkdrop_presets
+  // 首次被查找命中时同步复制到 AppData，让 VST3/AU 后续可以从共享 AppData
+  // 目录读取（VST3/AU bundle 已不再内置 presets）。
+  auto seedToAppDataIfNeeded = [&](const juce::File& srcDir) -> juce::File {
+    if (!isValidAssetsDir(srcDir))
+      return srcDir;
+    if (subdir != "milkdrop_presets")
+      return srcDir;
+    auto parent = appDataDir.getParentDirectory();
+    if (!parent.exists())
+      parent.createDirectory();
+    if (srcDir.copyDirectoryTo(appDataDir) && isValidAssetsDir(appDataDir))
+      return appDataDir;
+    return srcDir;
+  };
+
   // macOS bundle 内置路径（优先级高于向上遍历）：
   //   可执行文件位于 Y2Kmeter.app/Contents/MacOS/Y2Kmeter，
   //   资源打包在    Y2Kmeter.app/Contents/Resources/assets/<subdir>
@@ -4299,12 +4329,14 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
         .getChildFile("Resources")
         .getChildFile("assets")
         .getChildFile(subdir);
-    if (bundleCandidate.exists() && bundleCandidate.isDirectory())
-      return bundleCandidate;
+    if (isValidAssetsDir(bundleCandidate))
+      return seedToAppDataIfNeeded(bundleCandidate);
   }
   // VST3 / AU bundle 内置路径：
   //   currentApplicationFile 在插件场景下指向 .vst3/.component bundle 根，
   //   资源打包在 <bundle>/Contents/Resources/assets/<subdir>
+  //   注意：v2.4+ VST3/AU bundle 已剥离 milkdrop_presets（走共享 AppData），
+  //   只保留 milkdrop_textures 副本。
   {
     auto appFile = juce::File::getSpecialLocation(
         juce::File::currentApplicationFile);
@@ -4315,8 +4347,8 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
           .getChildFile("Resources")
           .getChildFile("assets")
           .getChildFile(subdir);
-      if (pluginCandidate.exists() && pluginCandidate.isDirectory())
-        return pluginCandidate;
+      if (isValidAssetsDir(pluginCandidate))
+        return seedToAppDataIfNeeded(pluginCandidate);
     }
   }
  #endif
@@ -4332,7 +4364,7 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
     cur = cur.getParentDirectory();
   }
   for (auto& f : candidates) {
-    if (f.exists() && f.isDirectory()) return f;
+    if (isValidAssetsDir(f)) return f;
   }
   return {};
 }

@@ -60,6 +60,7 @@ Y2KmeterAudioProcessor::Y2KmeterAudioProcessor()
             opts.applicationName = "Y2Kmeter";
             opts.filenameSuffix  = ".telemetry";
             opts.folderName      = "";
+            opts.osxLibrarySubFolder = "Application Support";
             opts.storageFormat   = juce::PropertiesFile::storeAsXML;
             sTelemetryProps.setStorageParameters(opts);
         }

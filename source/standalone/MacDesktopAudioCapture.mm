@@ -1126,11 +1126,30 @@ struct MacDesktopAudioCapture::Impl
                 bundleId = juce::String::fromUTF8 (bid.UTF8String);
         }
 
-        return "macOS denied Screen Recording / System Audio capture permission (TCC).\n\n"
-               "Please open: System Settings -> Privacy & Security -> Screen & System Audio Recording,\n"
-               "enable permission for this app, then fully quit and relaunch.\n\n"
-               "App: " + appName + "\n"
-               "Bundle ID: " + bundleId;
+        // 说明：新装/升级后的 ad-hoc 签名 app 常出现 "TCC 记录存在但 csreq
+        //   与新签名不匹配"的半残状态。此时用户仅切换"允许"开关是无效的，
+        //   必须先把 app 从"屏幕与系统音频录制"列表移除（-号），退出 app，
+        //   再重新打开 app 让它触发一次授权请求。以下文本把这一步骤明确
+        //   写清楚，避免用户误以为只需切开关。
+        return juce::String::fromUTF8 (u8"⚠️ 无法采集系统输出音频：\n")
+             + juce::String::fromUTF8 (u8"macOS 拒绝了本 App 的\"屏幕与系统音频录制\"权限 (TCC)。\n\n")
+             + juce::String::fromUTF8 (u8"请按以下步骤操作（这是 macOS 对 ad-hoc 签名 App 的限制）：\n")
+             + juce::String::fromUTF8 (u8"  1) 打开 系统设置 → 隐私与安全性 → 屏幕与系统音频录制\n")
+             + juce::String::fromUTF8 (u8"  2) 在列表里找到 ") + appName + juce::String::fromUTF8 (u8"，点右下角的 \"-\" 把它移除\n")
+             + juce::String::fromUTF8 (u8"  3) 完全退出 ") + appName + juce::String::fromUTF8 (u8"（Cmd+Q）\n")
+             + juce::String::fromUTF8 (u8"  4) 重新打开 ") + appName + juce::String::fromUTF8 (u8"，再次点击\"抓取系统输出\"，弹出授权时点\"允许\"\n\n")
+             + juce::String::fromUTF8 (u8"⚠️ 请勿只切换开关——升级后旧的授权记录已失效，\n")
+             + juce::String::fromUTF8 (u8"    必须先移除、再重新添加，权限才会真正生效。\n\n")
+             + "-------- English --------\n"
+             + "macOS denied Screen Recording / System Audio capture permission (TCC).\n\n"
+             + "Steps to fix (required for ad-hoc signed apps):\n"
+             + "  1) Open System Settings -> Privacy & Security -> Screen & System Audio Recording\n"
+             + "  2) Select \"" + appName + "\" in the list, click the \"-\" button to REMOVE it\n"
+             + "  3) Fully quit \"" + appName + "\" (Cmd+Q)\n"
+             + "  4) Relaunch \"" + appName + "\", trigger System Output again, and click Allow\n\n"
+             + "Do NOT just toggle the switch: the stale TCC record must be deleted first.\n\n"
+             + "App: " + appName + "\n"
+             + "Bundle ID: " + bundleId;
     }
 
     static bool hasScreenCapturePermission()

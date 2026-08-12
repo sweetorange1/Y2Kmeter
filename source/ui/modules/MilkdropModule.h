@@ -179,10 +179,15 @@ private:
         // 用于在 detach/attach 重建期间显示上一帧画面，消除切换模式时的黑屏闪烁。
         juce::Image GetLastFrameSnapshot() const;
 
+        // 预扫描 milkdrop_presets 目录（纯 CPU 磁盘 IO，无 GL 依赖）。
+        // 允许 MilkdropModule 构造函数在主线程提前调用，
+        // 将 9000+ .milk 文件的遍历从 GL 线程关键路径中移出，
+        // 减少 attach 时的卡顿感。
+        void ScanPresetFiles();
+
     private:
         void UpdateOpenGLAttachment();
         void DetachOpenGL();
-        void ScanPresetFiles();
         void LoadCurrentPreset();
         void ConsumePresetRequests();
         void ConsumePcm();

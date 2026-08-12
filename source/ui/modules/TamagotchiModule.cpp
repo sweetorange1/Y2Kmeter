@@ -15,6 +15,43 @@ bool isPanelLayoutLocked (const juce::Component& panel) noexcept
     return false;
 }
 
+#if defined(__APPLE__)
+// macOS .app / .vst3 / .component bundle 资源路径辅助函数
+//   可执行文件路径：<bundle>/Contents/MacOS/<name>
+//   资源路径：      <bundle>/Contents/Resources/assets/
+//   IDE 直跑时 CWD=项目根目录，assets/ 直接可访问；
+//   但 DMG 安装到 /Applications 后从启动台或 Finder 启动时 CWD=/，
+//   必须额外搜索 bundle 内部 Contents/Resources/assets/ 路径。
+//
+// 注意：本函数返回的是 Contents/Resources/（即"assets/"的父目录），
+//   因为下方 findTamagotchi*Root() 里 tryFromBase 会在 base 上再拼一次
+//   "assets"，若这里返回 ".../Resources/assets"，就会变成
+//   ".../Resources/assets/assets/Tamagotchi/..."，多一层 assets 导致找不到
+//   （这是 v2.5.x 出现"assets/Tamagotchi not found"的根因）。
+//   currentApplicationFile 在 .app 里指向 bundle 根目录，其内
+//   Contents/Resources/assets/ 才是真实资源目录。
+static juce::File findBundleResourcesBaseDir()
+{
+    auto appFile = juce::File::getSpecialLocation(juce::File::currentApplicationFile);
+    // 情况 A：Standalone 从启动台/Finder 启动，currentApplicationFile
+    //         指向 Y2Kmeter.app 本身。
+    auto contentsResources = appFile.getChildFile("Contents").getChildFile("Resources");
+    if (contentsResources.isDirectory())
+        return contentsResources;
+
+    // 情况 B：从 IDE 直跑或其它嵌入场景，currentApplicationFile 可能
+    //         指向可执行文件本身：<bundle>/Contents/MacOS/Y2Kmeter。
+    //         向上两级得到 Contents/，再进 Resources/。
+    auto viaExe = appFile.getParentDirectory()   // MacOS/
+                         .getParentDirectory()   // Contents/
+                         .getChildFile("Resources");
+    if (viaExe.isDirectory())
+        return viaExe;
+
+    return {};
+}
+#endif
+
 juce::File findTamagotchiAssetsRoot()
 
 {
@@ -39,6 +76,11 @@ juce::File findTamagotchiAssetsRoot()
     if (auto f = tryFromBase (juce::File::getSpecialLocation (juce::File::currentApplicationFile)
                                   .getParentDirectory()); f.isDirectory())
         return f;
+
+#if defined(__APPLE__)
+    if (auto f = tryFromBase (findBundleResourcesBaseDir()); f.isDirectory())
+        return f;
+#endif
 
     return {};
 }
@@ -68,6 +110,11 @@ juce::File findTamagotchiMirrorAssetsRoot()
                                   .getParentDirectory()); f.isDirectory())
         return f;
 
+#if defined(__APPLE__)
+    if (auto f = tryFromBase (findBundleResourcesBaseDir()); f.isDirectory())
+        return f;
+#endif
+
     return {};
 }
 
@@ -95,6 +142,11 @@ juce::File findTamagotchiRolePngDir()
                                   .getParentDirectory()); f.isDirectory())
         return f;
 
+#if defined(__APPLE__)
+    if (auto f = tryFromBase (findBundleResourcesBaseDir()); f.isDirectory())
+        return f;
+#endif
+
     return {};
 }
 
@@ -121,6 +173,11 @@ juce::File findTamagotchiEggAssetsDir()
     if (auto f = tryFromBase (juce::File::getSpecialLocation (juce::File::currentApplicationFile)
                                   .getParentDirectory()); f.isDirectory())
         return f;
+
+#if defined(__APPLE__)
+    if (auto f = tryFromBase (findBundleResourcesBaseDir()); f.isDirectory())
+        return f;
+#endif
 
     return {};
 }
@@ -337,18 +394,6 @@ void TamagotchiModule::setFocusVisual (bool shouldFocus)
 void TamagotchiModule::paint (juce::Graphics& g)
 
 {
-    // 弹出/停靠按钮（=），绘制于标题栏右上角
-    if (isPopOutEnabled() || isFloating())
-    {
-        auto popBtn = getPopOutButtonBounds();
-        PinkXP::drawRaised(g, popBtn, PinkXP::btnFace);
-        g.setColour(PinkXP::ink);
-        g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-        auto popBtnText = popBtn;
-        popBtnText.translate(-1, -1);
-        g.drawText(isFloating() ? "=" : "-", popBtnText, juce::Justification::centred, false);
-    }
-
     auto bounds = getLocalBounds();
 
     auto hud = getHudBounds();
@@ -411,7 +456,7 @@ void TamagotchiModule::paint (juce::Graphics& g)
             juce::AttributedString bubbleText;
             bubbleText.setJustification (juce::Justification::centred);
             bubbleText.setWordWrap (juce::AttributedString::WordWrap::byWord);
-            bubbleText.append (currentSpeechText, bubbleFont, PinkXP::ink);
+            bubbleText.append (currentSpeechText, bubbleFont, juce::Colours::black);
 
             juce::TextLayout textLayout;
             textLayout.createLayout (bubbleText, (float) textW);
@@ -1023,7 +1068,11 @@ int TamagotchiModule::randomAnimFrom (std::initializer_list<int> ids) const
     }
 
     if (candidates.isEmpty())
+    {
+        if (availableAnimIds.isEmpty())
+            return 1;  // 防御：没有任何可用动画资源时返回 1
         return availableAnimIds.getReference (juce::Random::getSystemRandom().nextInt (availableAnimIds.size()));
+    }
 
     return candidates.getReference (juce::Random::getSystemRandom().nextInt (candidates.size()));
 }
@@ -1745,6 +1794,9 @@ void TamagotchiModule::flushVisualRepaintQueue (bool forceNow)
 void TamagotchiModule::beginPatrolCycle()
 
 {
+    if (availableAnimIds.isEmpty())
+        return;  // 防御：没有任何可用动画资源时放弃巡逻
+
     currentPatrolAction = PatrolAction::lookLeftSlow;
     patrolActionTicksRemaining = 0;
     patrolCooldownTicksRemaining = patrolCycleTicks;
@@ -2288,9 +2340,9 @@ void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
     // 正文区域
     auto body = inner.reduced (2, 2);
     auto textArea = body.removeFromTop (body.getHeight() - 22);
-    g.setColour (PinkXP::ink);
+    g.setColour (juce::Colours::black);
     g.setFont (PinkXP::getFont (9.0f));
-    g.drawFittedText ("say bye to ur pet? :(\ncan't undo this~", textArea,
+    g.drawFittedText ("say bye to ur pet? :)\ncan't undo this~", textArea,
                       juce::Justification::centred, 2);
 
     // 取消按钮
@@ -2299,7 +2351,7 @@ void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
         PinkXP::drawRaised (g, cancelBounds, PinkXP::pink200);
     else
         PinkXP::drawRaised (g, cancelBounds, PinkXP::btnFace);
-    g.setColour (PinkXP::ink);
+    g.setColour (juce::Colours::black);
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
     g.drawText ("Cancel", cancelBounds, juce::Justification::centred, false);
 
@@ -2309,7 +2361,7 @@ void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
         PinkXP::drawRaised (g, confirmBounds, PinkXP::pink200);
     else
         PinkXP::drawRaised (g, confirmBounds, PinkXP::btnFace);
-    g.setColour (PinkXP::pink700);
+    g.setColour (juce::Colours::black);
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
     g.drawText ("OK", confirmBounds, juce::Justification::centred, false);
 }

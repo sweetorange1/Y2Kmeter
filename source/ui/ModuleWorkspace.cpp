@@ -889,7 +889,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     //     因此这里能拦住"点击子模块"这条事件路径（父 ModuleWorkspace 的 mouseDown
     //     本来只响应 canvas 空白区，点到子模块时根本收不到 mouseDown）
     //   · 仅在 focusedPerlerIdx 有效时执行 repaint，避免无聚焦时的无谓刷新
-    panel.onBroughtToFront = [this](ModulePanel&)
+    panel.onBroughtToFront = [this](ModulePanel& p)
     {
         clearTamagotchiFocusVisuals (modules);
         clearMilkdropFocus (modules);
@@ -919,6 +919,24 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
             if (m->getModuleType() == ModuleType::tamagotchi)
                 m->toFront (false);
         }
+
+        // ---- macOS 专属：Milkdrop 模块整体强制置顶（仅非脱离态）----
+        //   原因：macOS 上 GLView 通过 attachTo 创建的原生 NSOpenGLView 是
+        //   顶层 NSView 的一个子视图，其合成层级永远高于同一窗口内的
+        //   CoreGraphics 绘制（其他模块）。用户无法通过 JUCE Component::toFront()
+        //   等 z-order 机制让其他模块盖住 Milkdrop 的视频区。
+        //   为保持"边框/抬头/视频"三者视觉一致，非脱离态下 Milkdrop 模块整体
+        //   强制置顶（含 CoreGraphics 绘制的边框和抬头）。
+        //   脱离态：每个模块有独立 NSWindow，窗口级 z-order 正常工作，无需处理。
+        //   Windows：Editor GL 上下文渲染，无独立原生视图，无此问题。
+        //   参考：Tamagotchi 始终置顶采用相同思路。
+#if JUCE_MAC
+        for (auto* m : modules)
+        {
+            if (m->getModuleType() == ModuleType::milkdrop && ! m->isFloating())
+                m->toFront (false);
+        }
+#endif
 
         // hideBtn 始终保持在最上层：模块 mouseDown 会调 toFront(true) 把自己
         // 移到 child 列表末尾（z-order 最顶），此时 hideBtn 会被压在下面。
@@ -954,6 +972,18 @@ ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool
 
     modules.add(panel.release());
     raw->toFront(false);
+
+    // macOS 专属：非脱离态 Milkdrop 模块整体强制置顶（含边框/抬头）。
+    //   因为 GLView 的原生 NSOpenGLView 合成层级永远高于 CoreGraphics 绘制，
+    //   无法被其他模块盖住；为视觉一致，模块整体（含 CG 绘制部分）也置顶。
+#if JUCE_MAC
+    for (auto* m : modules)
+    {
+        if (m->getModuleType() == ModuleType::milkdrop && ! m->isFloating())
+            m->toFront (false);
+    }
+#endif
+
     notifyLayoutChanged();
 
     // 通知外部订阅者（如新手引导检测 Tamagotchi 模块已添加）
@@ -1073,6 +1103,17 @@ void ModuleWorkspace::dockModule(ModulePanel& panel, juce::Rectangle<int> savedB
 
     // ★ Bug3修复：从脱离态记录中移除
     floatingModuleStates_.erase(panel.getModuleId());
+
+    // macOS 专属：dock 完成后重新将所有非脱离 Milkdrop 模块整体置顶，
+    //   避免刚 dock 回来的其他模块（其 toFront 已把自己冒到最顶）盖住
+    //   Milkdrop 的边框/抬头（视频区无法被盖住是物理事实，这里只是保持一致）。
+#if JUCE_MAC
+    for (auto* m : modules)
+    {
+        if (m->getModuleType() == ModuleType::milkdrop && ! m->isFloating())
+            m->toFront (false);
+    }
+#endif
 
     repaint();
     notifyLayoutChanged();
@@ -1234,6 +1275,13 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
             return false;
         for (auto* m : modules)
             if (m != nullptr && m->getModuleType() == ModuleType::milkdrop)
+                return true;
+        // ★ 修复：脱离（浮动）的 Milkdrop 模块在 popOutModule 时
+        // 从 modules 数组移出并记录到 floatingModuleStates_。
+        // 若不检查脱离态缓存，用户脱离一个 Milkdrop 后就能添加
+        // 第二个，导致 libprojectM / OpenGL 上下文冲突。
+        for (const auto& [id, state] : floatingModuleStates_)
+            if (state.type == ModuleType::milkdrop)
                 return true;
         return false;
     };
