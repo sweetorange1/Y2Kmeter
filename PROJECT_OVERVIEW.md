@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.5.4`）
+- **产品名**：`Y2Kmeter` （版本：`2.5.7`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -2772,6 +2772,94 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 | **磁盘 IO 与 GL 线程关键路径解耦** | GL context 创建成本已经很高，若在 `newOpenGLContextCreated` 内再触发 9000+ 文件遍历会明显阻塞用户可见的"打开模块"操作。凡是无 GL 依赖的准备工作（扫盘、读小配置文件）都应上移到主线程构造函数中提前做完。 |
 | **模块排他性 · 脱离态缓存也要计入** | JUCE 里模块脱离后从 `modules` 数组移除并入 floatingCache。任何"是否已存在某类模块"的判断都必须同时看两个来源，否则用户脱离一个后就能再添一个 → 单例资源（GL context / dylib handle）打架。 |
 | **空资源兜底就地退化** | 资源缺失属于"用户可能长期忽略"的错误状态。热路径中所有依赖资源数组的随机访问必须先判空并返回合理默认值，而不是崩溃。用户宁愿看到"一动不动的宠物"也不愿"打开就崩"。 |
+
+---
+
+### v2.5.7：Windows Seed 机制重构 + Milkdrop 非脱离模式渲染修复 + Black Pink 主题
+
+本章记录 v2.5.7 版本围绕 Windows Milkdrop 模块的三项改进：
+预设 seed 机制从"合并复制"升级为"文件数差异检测 + 全量替换"；
+修复 macOS 适配引入的 Windows 非脱离模式渲染失败；
+新增黑粉配色主题及爱心像素桌面纹理。
+
+#### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | `FindMilkdropAssetsDir` 重构为统一 seed 逻辑（找 seed 源 → 比较文件数 → 全量替换） |
+| [`source/ui/modules/MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | `FindMilkdropAssetsDirForModule` 同步重构；`paint()` 脱离态用 `face` 底色防透底、非脱离态用 `transparentBlack` 让 GL 帧透出 |
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | 预设/纹理 ZIP 与解压不再绑定 `Components: standalone`，任何组件安装都部署到 AppData |
+| [`source/ui/PinkXPStyle.h`](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | `ThemeId` 枚举新增 `blackPink`；`DesktopPattern` 枚举新增 `hearts` |
+| [`source/ui/PinkXPStyle.cpp`](/I:/Y2KMeter/source/ui/PinkXPStyle.cpp) | `buildThemes()` 新增 Black Pink 配色；`drawDesktop()` 新增 `DesktopPattern::hearts` 像素爱心纹理 |
+
+#### 改动 1：Seed 机制从合并复制升级为全量替换
+
+**旧问题**：
+- `copyDirectoryTo` 只在目标不存在时创建目录；目标已存在时**合并**内容，不会删除目标中多余的文件
+- 用户从 Mac 删除了 6 个预设（9927→9921），Windows 安装器升级后 AppData 中残留旧文件，`copyDirectoryTo` 把新旧合并 → 仍显示 9927
+- 安装器预设 ZIP 绑定 `Components: standalone`，用户只装 VST3 时 AppData 无预设 → VST3 启动读不到预设
+
+**新逻辑**（三步统一，macOS/Windows 共享同一代码路径）：
+
+```
+Step 1: findSeedSource() → 统一搜索最优 Seed 源
+         ├─ macOS: Standalone bundle → VST3/AU bundle
+         └─ 通用: exe 目录向上 8 层遍历 assets/
+              ↓
+Step 2: 比较 Seed 源与 AppData 的 .milk 文件数
+         ├─ 文件数一致 → 跳过（快速路径，无 IO）
+         └─ 文件数不一致 → deleteRecursively() + copyDirectoryTo()
+              （全量替换，绝不 merge）
+              ↓
+Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
+```
+
+**安装器侧**：预设/纹理 ZIP 的 `[Files]` 部署和 `ssPostInstall` 解压均移除 `Components: standalone` 限制，始终执行。`[InstallDelete]` 中 AppData 旧预设目录清理同样不绑定组件。
+
+#### 改动 2：Milkdrop 非脱离模式渲染修复
+
+**根因**：v2.5.3 的 macOS 适配将 `paint()` 中 `drawRaised` 的 face 参数从 `transparentBlack` 改为 `PinkXP::face`。`drawRaised` 第一行就是 `g.fillRect(r)` 填充整块矩形，不透明粉色会挡住 Editor GL 渲染到底层 FBO 0 的 projectM 帧。macOS 不受影响因为 Editor GL 未启用（GLView 自己渲染且 `setComponentPaintingEnabled(true)` 让 GL 层高于 paint）。
+
+**修复**：根据模式选择底色：
+
+```cpp
+#if JUCE_MAC
+  PinkXP::drawRaised(g, bounds, PinkXP::face);           // Editor GL 未启用
+#else
+  if (isFloating())
+    PinkXP::drawRaised(g, bounds, PinkXP::face);           // GLView GL 高于 paint
+  else
+    PinkXP::drawRaised(g, bounds, juce::Colours::transparentBlack); // GL 在 FBO 0 下层
+#endif
+```
+
+**同时修复的关联 Bug**：脱离模式下抬头区域透底（聚焦切换时模块底色透明可透视下方内容）、脱离模式顶部常驻 1px 透底线。根因相同——脱离态用了 transparentBlack，`setOpaque(true)` 让 JUCE 跳过清背景 → 整个模块区域透视。
+
+#### 改动 3：Black Pink（黑粉 Y2K）主题 + 爱心纹理
+
+**配色设计**：
+
+| 角色 | 色值 | 说明 |
+|------|------|------|
+| `desktop` | `#0E0E0E` | 暗黑底 |
+| `content` | `#121212` | 深灰黑画布 |
+| `face` / `btnFace` | `#1A1A1A` / `#1E1E1E` | 暗灰控件面 |
+| `sel` | `#F0508A` | 标题栏亮粉 |
+| `selInk` | `#050D02` | 深色文字（复刻 Jungle 黑字风格） |
+| `ink` | `#FFE6F0` | 浅粉白正文字 |
+| `pink50→700` | 暗粉→浅粉 8 阶 | 图表线条逐级高亮 |
+| 图标 | ♥ | 黑桃心 |
+
+**爱心纹理**：新增 `DesktopPattern::hearts`，7×7 像素爱心以 18px 步长棋盘错位均匀平铺。爱心用 `desktop2`（`#040404`）在 `desktop`（`#0E0E0E`）底色上形成微弱但可见的反差。
+
+**持久化兼容**：`blackPink` 在枚举中追加到 `custom` 之后，保证已有用户的存档主题 ID 不偏移。
+
+#### 踩坑记录
+
+- **`copyDirectoryTo` 是合并而非替换**：JUCE 文件 API 的语义是"把源内容合并到目标"，不会删除目标已有的多余文件。要全量替换必须先用 `deleteRecursively()` 清空目标。
+- **GL 层与 paint 层的叠放关系决定底色选择**：`setComponentPaintingEnabled(true)` 让 GL 渲染高于 CPU paint，`false` 则 GL 在底层。Milkdrop 脱离态 GLView 自己附着 GL context 且 paintingEnabled=true，非脱离态 Editor GL 渲染到 FBO 0 在组件树之下——同一种底色在这两种模式下效果截然相反。
+- **安装器组件绑定与运行时 seed 的互补关系**：仅靠运行时 seed 不能解决"用户只装 VST3 不装 Standalone"的场景（VST3 旁无 seed 源）；仅靠安装器部署不能解决"开发期 IDE 直接运行"的场景。两者必须同时存在、互为兜底。
+- **枚举值追加顺序影响持久化**：`ThemeId` 按枚举整数值存入配置文件。新增主题必须追加到末尾（包括 `custom` 之后），否则已保存的自定义主题 `custom=11` 会漂移到其他主题上。
 
 ---
 

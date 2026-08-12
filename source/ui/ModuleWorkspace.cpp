@@ -1325,7 +1325,8 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
     }
 
     auto options = juce::PopupMenu::Options()
-        .withMinimumWidth (menuMinWidth);
+        .withMinimumWidth (menuMinWidth)
+        .withTargetComponent (getTopLevelComponent());  // 确保 PopupMenu 窗口有正确的 owner，在全屏主窗口上方可见
 
     // Popup 左右边框（LookAndFeel 会把它加在菜单宽度两侧）
     const int popupBorder = lfRef.getPopupMenuBorderSizeWithOptions (options);

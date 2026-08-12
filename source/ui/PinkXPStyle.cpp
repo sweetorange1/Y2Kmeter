@@ -275,6 +275,43 @@ namespace PinkXP
                 }
                 break;
             }
+
+            case DesktopPattern::hearts:
+            {
+                // 像素爱心：7x7 小桃心均匀平铺
+                //    shape (每个 X 为一个 1px 填充点)：
+                //      . X . . . X .
+                //      X X X X X X X
+                //      X X X X X X X
+                //      . X X X X X .
+                //      . . X X X . .
+                //      . . . X . . .
+                constexpr int kStep = 18;
+                auto drawHeart = [&](int cx, int cy) {
+                  // Row 0（top）
+                  g.fillRect(cx - 2, cy - 3, 1, 1);
+                  g.fillRect(cx + 2, cy - 3, 1, 1);
+                  // Row 1
+                  for (int i = -3; i <= 3; ++i) g.fillRect(cx + i, cy - 2, 1, 1);
+                  // Row 2
+                  for (int i = -3; i <= 3; ++i) g.fillRect(cx + i, cy - 1, 1, 1);
+                  // Row 3
+                  for (int i = -2; i <= 2; ++i) g.fillRect(cx + i, cy,     1, 1);
+                  // Row 4
+                  for (int i = -1; i <= 1; ++i) g.fillRect(cx + i, cy + 1, 1, 1);
+                  // Row 5（bottom tip）
+                  g.fillRect(cx, cy + 2, 1, 1);
+                };
+                g.setColour(desktop2);
+                const int offset = kStep / 2;
+                for (int y = r.getY() + 6; y < r.getBottom(); y += kStep) {
+                  const int xPhase = ((y / kStep) % 2) * offset;
+                  for (int x = r.getX() + 6 + xPhase; x < r.getRight(); x += kStep) {
+                    drawHeart(x, y);
+                  }
+                }
+                break;
+            }
         }
     }
 
@@ -845,6 +882,37 @@ namespace PinkXP
                 juce::Colour(0xff7d7d7d),                           // swatch（色票：中灰）
                 DesktopPattern::checker,
                 "\xe2\x97\x8b" // ○（空心圆）
+            },
+            // ---- 🖤💗 Black Pink（黑粉 Y2K）----
+            //   · K-pop / 千禧年复古：纯黑主基调 + 亮粉强调色
+            //   · desktop/content/face 全部使用暗黑色系，pink50→300 为暗粉→中粉过渡，
+            //     pink400→700 为鲜艳粉→浅粉，供图表线条逐级高亮。
+            //   · sel（标题栏）用签名亮粉 #ec4d85，搭配白色标题文字，黑底高对比。
+            //   · ink 用浅粉白 #ffe6f0，在深色画布上清晰可读且保持粉色气质。
+            //   · btnFace 用暗灰 #1e1e1e，保证按钮/控件在黑底上可见但不刺眼。
+            //   · desktopPattern 用 checker 经典棋盘格，保持千禧年 XP 感。
+            {
+                ThemeId::blackPink,
+                "Black Pink",
+                "K-pop / Y2K / Dark + Neon pink",
+                juce::Colour(0xff220a14), juce::Colour(0xff3a1428), // pink50/100  近黑深粉（提亮）
+                juce::Colour(0xff5a203a), juce::Colour(0xff8a3058), // pink200/300 暗粉→玫瑰粉（提亮）
+                juce::Colour(0xfff0508a), juce::Colour(0xffff78aa), // pink400/500 亮粉（Y2K 签名色，更亮）
+                juce::Colour(0xffff96c0), juce::Colour(0xffffbddd), // pink600/700 浅粉→极浅粉（提亮）
+                juce::Colour(0xff2e2e2e),                           // hl（暗灰高光，克制）
+                juce::Colour(0xff1a1a1a),                           // face（深黑灰按钮面）
+                juce::Colour(0xff0a0a0a),                           // shdw（近黑阴影）
+                juce::Colour(0xff000000),                           // dark（纯黑边框）
+                juce::Colour(0xffffe6f0),                           // ink（浅粉白文字，暗底高对比）
+                juce::Colour(0xfff0508a),                           // sel（标题栏：亮粉，与 pink400 同步提亮）
+                juce::Colour(0xff050d02),                           // selInk（深色文字 on 亮粉标题栏，复刻 Jungle 黑字风格）
+                juce::Colour(0xff0e0e0e),                           // desktop（暗黑底，较之前调亮以显示纹理）
+                juce::Colour(0xff4d1b2f),                           // desktop2（更深的爱心颜色，与底色形成微弱反差）
+                juce::Colour(0xff121212),                           // content（深灰黑画布）
+                juce::Colour(0xff1e1e1e),                           // btnFace（暗灰按钮面）
+                juce::Colour(0xffec4d85),                           // swatch（色票：亮粉）
+                DesktopPattern::hearts,
+                "\xe2\x99\xa5" // ♥（黑桃心，千禧年符号）
             },
         };
         return themes;

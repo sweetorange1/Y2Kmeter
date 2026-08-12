@@ -155,7 +155,8 @@ namespace PinkXP
         crimsonNoir,  // 🩸 红黑暗夜（深酒红 + 漆黑）
         voidGrey,     // ⬛ 纯黑灰（OLED 友好的暗色极简）
         paperGrey,    // ⬜ 纯白灰（纸面极简，亮色）
-        custom        // 🎨 用户自定义（通过预览方块调色板生成）
+        custom,       // 🎨 用户自定义（通过预览方块调色板生成）
+        blackPink     // 🖤💗 黑粉（黑色主基调 + 粉色强调，千禧年 Y2K 风格）
     };
 
     // 桌面纹理样式
@@ -166,7 +167,8 @@ namespace PinkXP
         scanGrid,    // 网格扫描线
         bigDots,     // 大圆点
         bubbles,     // 横条泡泡
-        diagStripes  // 斜条纹
+        diagStripes, // 斜条纹
+        hearts       // 像素爱心（均匀排列的小桃心）
     };
 
     // 单一主题定义

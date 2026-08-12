@@ -2528,9 +2528,12 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
                                  .getDisplayForPoint(top->getScreenBounds().getCentre());
-        // 全屏预设使用 totalArea（完整显示器尺寸含任务栏），
-        // 在旋转/翻转显示器上 totalArea 会正确反映逻辑坐标，避免交互错位
-        const auto area = (display != nullptr) ? display->totalArea
+        // 全屏预设使用 userArea（任务栏之外的可用区），而非 totalArea。
+        //   · totalArea 包含任务栏区域，窗口覆盖整个显示器后 Windows 的
+        //     PopupMenu（添加模块/布局预设/音频源下拉）将不可见——因为
+        //     PopupMenu 窗口是普通 z-order 窗口，被铺满全屏的主窗口遮挡。
+        //   · userArea 为任务栏留出空间，确保 PopupMenu 有可见区域。
+        const auto area = (display != nullptr) ? display->userArea
                                               : juce::Rectangle<int>(1280, 720);
         const int screenW = area.getWidth();
         const int screenH = area.getHeight();

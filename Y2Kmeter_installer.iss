@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "2.5.6"
+#define MyAppVersion   "2.5.7"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -73,9 +73,11 @@ Type: filesandordirs; Name: "{app}\assets\milkdrop_presets"; Components: standal
 Type: filesandordirs; Name: "{app}\assets\milkdrop_textures"; Components: standalone
 Type: files; Name: "{app}\assets\milkdrop_presets.zip"; Components: standalone
 ; AppData 共享目录：删除旧版散装文件（若存在，v2.3.1 及之前为直接安装），升级时统一改为 ZIP 解压
-Type: filesandordirs; Name: "{userappdata}\Y2Kmeter\milkdrop_textures"; Components: standalone
-Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_textures.zip"; Components: standalone
-Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_presets.zip"; Components: standalone
+;   不绑定组件，确保 Standalone 或 VST3 单独/同时升级时都能清理旧预设
+Type: filesandordirs; Name: "{userappdata}\Y2Kmeter\milkdrop_textures"
+Type: filesandordirs; Name: "{userappdata}\Y2Kmeter\milkdrop_presets"
+Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_textures.zip"
+Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_presets.zip"
 ; VST3：删除旧 bundle 目录（若存在），用户选择的目录由 [Code] 段 GetVst3Dir 决定
 Type: filesandordirs; Name: "{code:GetVst3Dir}\{#MyPluginBundle}"; Components: vst3
 ; VST3：删除系统默认 VST3 路径下的旧版 Milkdrop 预设/纹理（迁移至 AppData 集中存储后不再随 VST3 bundle 分发）
@@ -110,23 +112,23 @@ Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone
     Flags: ignoreversion; \
     Components: standalone
 
-; Standalone Milkdrop 预设（打包为单一 ZIP 以加速安装，9927 个 .milk 文件合并为 1 个）
+; Milkdrop 预设（打包为单一 ZIP 以加速安装）
 ;   · ZIP 预置于 assets/milkdrop_presets.zip，更新预设后需重新手动打包
 ;   · v2.3.1: 预设集中存放于 %APPDATA%\Y2Kmeter\，Standalone 和 VST3 共享同一份
+;   · v2.5.6: 不再绑定 standalone 组件，VST3 单独安装时也部署预设到 AppData
 ;   · 安装后由 [Code] CurStepChanged(ssPostInstall) 自动解压
 Source: "assets\milkdrop_presets.zip"; \
     DestDir: "{userappdata}\Y2Kmeter"; \
-    Flags: ignoreversion; \
-    Components: standalone
+    Flags: ignoreversion
 
-; Standalone Milkdrop 纹理（打包为 ZIP 以加速安装，66 个 jpg 文件合并为 1 个）
+; Milkdrop 纹理（打包为 ZIP 以加速安装）
 ;   · ZIP 预置于 assets/milkdrop_textures.zip，更新纹理后需重新手动打包
 ;   · v2.3.1: 纹理集中存放于 %APPDATA%\Y2Kmeter\，Standalone 和 VST3 共享同一份
+;   · v2.5.6: 不再绑定 standalone 组件，VST3 单独安装时也部署纹理到 AppData
 ;   · 安装后由 [Code] CurStepChanged(ssPostInstall) 自动解压
 Source: "assets\milkdrop_textures.zip"; \
     DestDir: "{userappdata}\Y2Kmeter"; \
-    Flags: ignoreversion; \
-    Components: standalone
+    Flags: ignoreversion
 
 ; VST3（整个 .vst3 bundle 目录递归复制）
 ;   v2.3.1: 排除 milkdrop_presets/ 和 milkdrop_textures/，预设和纹理已集中存放于
@@ -431,19 +433,24 @@ begin
       'TelemetryEnabled',
       TelemetryValue);
 
+    // ---------- Milkdrop 预设与纹理：始终解压到 AppData，不绑定组件 ----------
+    //   v2.5.6: Standalone 和 VST3 共享 AppData 中的预设/纹理，
+    //   无论用户选择安装哪些组件，均需要部署到 AppData。
+
+    // 1) Milkdrop 预设
+    ZipPath  := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_presets.zip';
+    DestPath := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_presets';
+    ExtractZip(ZipPath, DestPath);
+
+    // 2) Milkdrop 纹理
+    ZipPath  := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_textures.zip';
+    DestPath := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_textures';
+    ExtractZip(ZipPath, DestPath);
+
+    // ---------- Standalone 专属资源 ----------
     if IsComponentSelected('standalone') then
     begin
-      // 1) Milkdrop 预设（9927 个 .milk 文件）
-      ZipPath  := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_presets.zip';
-      DestPath := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_presets';
-      ExtractZip(ZipPath, DestPath);
-
-      // 2) Milkdrop 纹理（66 个 jpg 文件）
-      ZipPath  := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_textures.zip';
-      DestPath := ExpandConstant('{userappdata}') + '\Y2Kmeter\milkdrop_textures';
-      ExtractZip(ZipPath, DestPath);
-
-      // 3) Tamagotchi 动画资源（2652 个 PNG 文件）
+      // Tamagotchi 动画资源
       ZipPath  := ExpandConstant('{app}') + '\assets\tamagotchi_assets.zip';
       DestPath := ExpandConstant('{app}') + '\assets';
       ExtractZip(ZipPath, DestPath);

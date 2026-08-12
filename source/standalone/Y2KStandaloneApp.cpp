@@ -370,10 +370,10 @@ public:
     Y2KMainWindow (const juce::String& name, juce::Colour bg)
         : juce::DocumentWindow (name,
                                 bg,
-                                juce::DocumentWindow::minimiseButton,
-                                false /*addToDesktop: 不立即显示，由 initialise()
-                                       末尾通过 MessageManager::callAsync 延迟加入桌面，
-                                       确保 Editor 首帧渲染完成后用户才看到窗口*/)
+                                0,  // 无原生标题栏按钮（去掉 minimiseButton 以防止 WS_SYSMENU
+                                    // 在 Windows 上产生系统菜单区域，该区域会响应双击为最大化，
+                                    // 最大化后主窗口铺满屏幕导致 PopupMenu 不可见）
+                                false /*addToDesktop*/)
     {
         setUsingNativeTitleBar (false);
         setTitleBarHeight (0);
