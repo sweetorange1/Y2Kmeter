@@ -2,6 +2,130 @@
 
 本文档用于说明本次“相对稳定的 macOS 适配版本”与此前版本的关键差异，便于后续回溯、合并与发布。
 
+---
+
+## 适配范围（当前打包版本 v2.5.6）
+
+> 以下信息基于对 `Y2Kmeter.app/Contents/MacOS/Y2Kmeter` 的 `file` / `otool -l` 检查得出，反映的是 **当前 DMG 分发包的真实兼容性边界**，而非源码理论支持范围。
+
+### 0. 版本演进摘要（重要）
+
+| 状态 | 版本 | 主二进制架构 | 最低系统 | 说明 |
+|:---:|:---:|:---:|:---:|---|
+| ~~旧~~ | ≤ v2.5.6 | 仅 x86_64（单架构） | macOS **15.0** | 未显式设置部署目标 → 被动继承本机 SDK；Apple Silicon 用户被迫走 Rosetta 2 |
+| ✅ 新 | ≥ v2.5.7 | **x86_64 + arm64（Universal）** | macOS **12.3** | 在 `CMakeLists.txt` 顶部显式设置 `CMAKE_OSX_ARCHITECTURES` 与 `CMAKE_OSX_DEPLOYMENT_TARGET`，产出 Universal Binary 并把最低系统下探到 ScreenCaptureKit 的底线 |
+
+以下小节描述的是 **新策略（v2.5.7+）** 下的兼容性边界。
+
+### 1. CPU 架构支持
+
+| 架构 | 主可执行文件 | 内嵌 projectM 动态库 | 用户端表现 |
+|------|:---:|:---:|------|
+| **Intel（x86_64）** | ✅ 原生 | ✅ | 原生运行 |
+| **Apple Silicon（arm64，M1/M2/M3/M4）** | ✅ **原生** | ✅ | **原生运行，不再需要 Rosetta 2** |
+
+- 主二进制现在是 **Universal Binary**（x86_64 + arm64 两个切片）
+- 第三方 `libprojectM-4*.dylib` 本身已经是 Universal（x86_64 + arm64），加载时会自动匹配架构
+- 验证命令：
+  ```bash
+  file Y2Kmeter.app/Contents/MacOS/Y2Kmeter
+  # 期望输出：Mach-O universal binary with 2 architectures: [x86_64] [arm64]
+  ```
+
+### 2. 最低系统版本要求
+
+- **CMake 显式设置**：`CMAKE_OSX_DEPLOYMENT_TARGET = 12.3`
+- **LC_BUILD_VERSION 预期内嵌值**：`platform=macOS(1), minos=12.3`
+- 即最低支持 **macOS 12.3 Monterey**
+- 低于 12.3 的系统（macOS 12.0~12.2 / 11 Big Sur / 10.15 Catalina 等）**无法启动**，会在 dyld 加载阶段被系统拒绝
+- 取 12.3 的原因：
+  - ScreenCaptureKit（本项目桌面音频捕获依赖）自 macOS 12.3 引入
+  - 更低版本 ScreenCaptureKit API 不存在，链接期就无法通过
+
+### 2.1 各 macOS 版本的功能可用矩阵
+
+| macOS 版本 | 主程序启动 | 麦克风采集 | Milkdrop 可视化 | **桌面（系统）音频采集** |
+|:---:|:---:|:---:|:---:|:---:|
+| 15 Sequoia | ✅ | ✅ | ✅ | ✅ |
+| 14 Sonoma | ✅ | ✅ | ✅ | ✅ |
+| 13 Ventura | ✅ | ✅ | ✅ | ✅ |
+| 12.3 ~ 12.7 Monterey | ✅ | ✅ | ✅ | ❌ 明确提示"需要 macOS 13.0+" |
+| ≤ 12.2 或更早 | ❌ 系统拒绝启动 | — | — | — |
+
+- 桌面音频采集在 12.3~12.7 不可用的原因：`SCStreamOutputTypeAudio` 系于 macOS 13.0 才对外开放；代码里已有 `@available(macOS 13.0, *)` runtime gate，会返回明确的提示信息 `"Desktop audio capture requires macOS 13.0 or newer."`，而不是崩溃
+
+### 3. 代码签名与公证状态
+
+- **签名类型**：ad-hoc 临时签名（`codesign -s -`），无 Apple Developer ID
+- **公证状态**：未公证（未申请 Apple Developer 账号）
+- **用户端表现**：首次打开会被 Gatekeeper 拦截，提示"无法打开，来自身份不明的开发者"
+- **绕过方式**：右键 → 打开 → 确认；或系统设置 → 隐私与安全性 → "仍要打开"
+- **hardened runtime**：**未启用**（`--options runtime` 被主动去除），原因见 v2.5.6 章节 "Milkdrop 纯黑屏"教训——启用后会拦截 ad-hoc 签名的 dylib 加载
+
+### 4. 关键系统能力依赖
+
+| 依赖 | 系统 API 最低版本 | 用途 |
+|------|:---:|------|
+| **CoreAudio** | 全版本 | 麦克风采集、Audio Unit 宿主 |
+| **ScreenCaptureKit（框架加载）** | macOS 12.3+ | 桌面音频链路必需 |
+| **`SCStreamOutputTypeAudio`** | macOS 13.0+ | 桌面音频真正取样点，runtime 检测 |
+| **CoreMIDI** | 全版本 | MIDI 输入（当前未用但已链接） |
+| **OpenGL 4.1 Core Profile** | macOS 10.9+（Apple 已 deprecated 但仍可用） | Milkdrop 可视化渲染 |
+| **Metal**（间接） | macOS 10.11+ | JUCE UI 合成层 |
+
+### 5. 权限声明（Info.plist）
+
+打包的 `Y2Kmeter.app/Contents/Info.plist` 中含以下 usage description：
+
+- `NSMicrophoneUsageDescription`：麦克风采集提示
+- `NSScreenCaptureUsageDescription` / TCC 屏幕录制：系统音频捕获提示
+- 首次触发对应功能时，系统会弹出授权请求；用户拒绝或撤销后需通过 `系统设置 → 隐私与安全性` 手动恢复（详见 v2.5.6 章节"授权授权引导弹窗"）
+
+### 6. 分发格式
+
+- **格式**：DMG 磁盘镜像（`build_macos_installer.sh` 产出）
+- **内容**：`Y2Kmeter.app`（Standalone） + `Y2Kmeter.vst3` + `Y2Kmeter.component`（AU），DMG 内三条拖拽引导
+- Universal 化后 DMG 体积会比 v2.5.6 大约 **+40%~50%**（多了 arm64 切片），属正常
+
+### 7. 兼容性摘要（一句话版）
+
+> **支持 macOS 12.3 Monterey 及以上 / Intel & Apple Silicon 均原生 / 12.3~12.7 用户无桌面音频功能 / ad-hoc 签名需用户绕过 Gatekeeper**
+
+### 8. 打包 Universal Binary 的完整流程
+
+1. **清理旧构建产物**（架构从单架构切到 Universal 后必须清）：
+   ```bash
+   rm -rf cmake-build-release
+   ```
+2. **重新 configure（CMake 会读到顶部新加的 arch/deployment 配置）**：
+   ```bash
+   cmake -S . -B cmake-build-release -DCMAKE_BUILD_TYPE=Release
+   ```
+   configure 阶段应该能看到日志：
+   ```
+   [macOS] Deployment target: 12.3
+   [macOS] Architectures    : x86_64;arm64
+   ```
+3. **构建三个 target**（CLion IDE 里跑 Release 也行）：
+   ```bash
+   cmake --build cmake-build-release --target Y2Kmeter_Standalone Y2Kmeter_VST3 Y2Kmeter_AU -j
+   ```
+4. **验证 Universal**：
+   ```bash
+   file cmake-build-release/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.app/Contents/MacOS/Y2Kmeter
+   # 期望：Mach-O universal binary with 2 architectures: [x86_64] [arm64]
+
+   otool -l cmake-build-release/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.app/Contents/MacOS/Y2Kmeter | grep -A1 LC_BUILD_VERSION | head -6
+   # 期望：minos 12.3
+   ```
+5. **打 DMG**：
+   ```bash
+   ./build_macos_installer.sh
+   # 产出：dist/Y2Kmeter-2.5.x-macOS.dmg
+   ```
+
+---
+
 ## 版本定位
 
 - 目标：提升在 macOS（含 Standalone 场景）下的功能可用性与显示稳定性。

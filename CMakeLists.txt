@@ -37,6 +37,37 @@ else()
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 endif()
 
+# ==========================================================
+# macOS 分发策略：最低系统版本 + Universal Binary（Intel + Apple Silicon）
+#   · 必须放在 project() 之前，否则 JUCE 与所有子 target 会各自继承 SDK 默认值，
+#     产出的 LC_BUILD_VERSION.minos 会被动跟随本机 SDK（例如 15.0），
+#     导致低于 15.0 的 mac 用户无法启动。
+#
+#   · CMAKE_OSX_DEPLOYMENT_TARGET = 12.3
+#     取值理由：桌面（系统）音频采集依赖 ScreenCaptureKit，SCStream / SCShareableContent
+#     两个符号自 macOS 12.3 引入。低于 12.3 会 dlopen 失败或链接期就报错。
+#     虽然 MacDesktopAudioCapture.mm 内部实际用到的 SCStreamOutputTypeAudio 需要
+#     macOS 13.0，但代码已经用 @available(macOS 13.0, *) 做了 runtime gate，
+#     12.3 ~ 12.7 的用户主程序可正常启动，只是桌面音频功能会明确提示需要 13.0+。
+#
+#   · CMAKE_OSX_ARCHITECTURES = "x86_64;arm64"
+#     产出 Universal Binary，Intel Mac 与 Apple Silicon（M1/M2/M3/M4）均原生运行，
+#     不再需要 Rosetta 2 转译。附带的 libprojectM-4*.dylib 本身已经是 Universal，
+#     切成 Universal 之后加载时会自动选中匹配架构切片。
+# ==========================================================
+if (APPLE)
+  if (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING
+        "macOS minimum deployment target (12.3 = ScreenCaptureKit floor)" FORCE)
+  endif()
+  if (NOT DEFINED CMAKE_OSX_ARCHITECTURES OR CMAKE_OSX_ARCHITECTURES STREQUAL "")
+    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING
+        "Build Universal Binary for both Intel and Apple Silicon" FORCE)
+  endif()
+  message(STATUS "[macOS] Deployment target: ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+  message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
+endif()
+
 project(Y2Kmeter VERSION 2.5.6 LANGUAGES C CXX)
 
 # ==========================================================
