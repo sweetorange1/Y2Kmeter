@@ -672,10 +672,21 @@ void MilkdropModule::paint(juce::Graphics& g) {
   // 内容区保持透明以保留 GPU 渲染的 projectM 帧。
   const auto bounds = getLocalBounds();
 
-  // 1. 像素凸起窗口边框（仅边框，不填充内容区 — 保留 projectM 帧）
-  // 注意：必须传入不透明底色（face），否则边框区域透明，可透见下方内容。
-  // 内容区由 paintContent 负责，GLView 覆盖在其上，不受此处填充影响。
+  // 1. 像素凸起窗口边框（边框必须不透明，内容区必须透明以透出 projectM 帧）
+  //   · macOS：Editor GL 未启用，GLView 自己的 GL surface 高于 paint，用不透明 face。
+  //   · Windows 脱离态：GLView 自己的 native GL surface 高于 paint，同理用不透明 face。
+  //   · Windows 非脱离态：Editor GL 渲染到 FBO 0（CachedImage）位于组件树之下，
+  //     drawRaised 首行的 fillRect 会覆盖整个模块矩形；用不透明 face 会遮住
+  //     projectM 帧，表现为"模块底色色块"。必须用 transparentBlack 让内容区
+  //     透明透出帧（边框 hl/dark/shdw 仍为不透明正常显示）。
+#if JUCE_MAC
   PinkXP::drawRaised(g, bounds, PinkXP::face);
+#else
+  if (isFloating())
+    PinkXP::drawRaised(g, bounds, PinkXP::face);
+  else
+    PinkXP::drawRaised(g, bounds, juce::Colours::transparentBlack);
+#endif
 
   // 2. 玫瑰粉标题栏
   auto tb = getTitleBarBounds();
