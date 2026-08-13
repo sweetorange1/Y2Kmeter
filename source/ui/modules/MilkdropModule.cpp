@@ -972,11 +972,19 @@ void MilkdropModule::GLView::LoadCurrentPreset() {
 
   auto& api = projectm_api::Api::instance();
   auto path = local_preset_paths_[local_current_preset_];
+  juce::Logger::writeToLog (juce::String ("[Milkdrop] LoadCurrentPreset idx=")
+                            + juce::String (local_current_preset_)
+                            + " hasLoadPresetData=" + juce::String (api.hasLoadPresetData() ? 1 : 0)
+                            + " path='" + path + "'");
   if (api.hasLoadPresetData()) {
     juce::File file(path);
     if (file.existsAsFile()) {
       auto data = file.loadFileAsString().toStdString();
+      juce::Logger::writeToLog (juce::String ("[Milkdrop] LoadCurrentPreset file OK, data bytes=")
+                                + juce::String (static_cast<int> (data.size())));
       api.loadPresetData(local_pm_handle_, FixMilkdropShaderTypes(data), true);
+    } else {
+      juce::Logger::writeToLog ("[Milkdrop] LoadCurrentPreset file MISSING!");
     }
   } else {
     api.loadPresetFile(local_pm_handle_, path.toRawUTF8(), true);
@@ -986,7 +994,7 @@ void MilkdropModule::GLView::LoadCurrentPreset() {
 }
 
 void MilkdropModule::GLView::newOpenGLContextCreated() {
-  std::cerr << "[Milkdrop] newOpenGLContextCreated: BEGIN" << std::endl;
+  juce::Logger::writeToLog ("[Milkdrop] newOpenGLContextCreated: BEGIN");
   // === Debug 死循环修复 + 首帧乱码修复 ===
   // 1) 清空可能存在的历史 GL 错误。macOS Core Profile / OpenGL over Metal
   //    下，刚 attach 时 GL error 队列里常有残留项，而 JUCE Debug 构建的
@@ -1000,25 +1008,27 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
 
   auto& api = projectm_api::Api::instance();
-  std::cerr << "[Milkdrop] Api::instance() got, isAvailable=" << api.isAvailable()
-            << " loadError='" << api.loadError() << "'" << std::endl;
+  juce::Logger::writeToLog (juce::String ("[Milkdrop] Api::instance() got, isAvailable=")
+                            + juce::String (api.isAvailable() ? 1 : 0)
+                            + " loadError='" + juce::String (api.loadError()) + "'");
   api.resetGlewInitialization();
   if (!api.isAvailable()) {
     local_error_ = api.loadError();
-    std::cerr << "[Milkdrop] ABORT: api not available -> " << local_error_ << std::endl;
+    juce::Logger::writeToLog ("[Milkdrop] ABORT: api not available -> " + local_error_);
     return;
   }
   if (!api.initGlew()) {
     local_error_ = api.loadError();
-    std::cerr << "[Milkdrop] ABORT: initGlew failed -> " << local_error_ << std::endl;
+    juce::Logger::writeToLog ("[Milkdrop] ABORT: initGlew failed -> " + local_error_);
     return;
   }
 
   local_pm_handle_ = api.create();
-  std::cerr << "[Milkdrop] projectm_create -> handle=" << local_pm_handle_ << std::endl;
+  juce::Logger::writeToLog (juce::String ("[Milkdrop] projectm_create -> handle=")
+                            + juce::String (local_pm_handle_ != nullptr ? "ok" : "null"));
   if (local_pm_handle_ == nullptr) {
     local_error_ = "projectm_create() returned NULL.";
-    std::cerr << "[Milkdrop] ABORT: projectm_create returned NULL" << std::endl;
+    juce::Logger::writeToLog ("[Milkdrop] ABORT: projectm_create returned NULL");
     return;
   }
 
@@ -1029,8 +1039,9 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   api.setHardCutEnabled(local_pm_handle_, false);
 
   auto tex_dir = FindMilkdropAssetsDirForModule("milkdrop_textures");
-  std::cerr << "[Milkdrop] tex_dir exists=" << tex_dir.exists()
-            << " path='" << tex_dir.getFullPathName().toStdString() << "'" << std::endl;
+  juce::Logger::writeToLog (juce::String ("[Milkdrop] tex_dir exists=")
+                            + juce::String (tex_dir.exists() ? 1 : 0)
+                            + " path='" + tex_dir.getFullPathName() + "'");
   if (tex_dir.exists()) {
     std::vector<std::string> paths{tex_dir.getFullPathName().toStdString()};
     api.setTextureSearchPaths(local_pm_handle_, paths);
@@ -1040,10 +1051,15 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   // 否则退回到在 GL 线程扫盘（兼容异常路径）。
   if (local_preset_paths_.isEmpty())
     ScanPresetFiles();
-  std::cerr << "[Milkdrop] preset count=" << local_preset_paths_.size() << std::endl;
+  juce::Logger::writeToLog ("[Milkdrop] preset count="
+                            + juce::String (local_preset_paths_.size()));
   int pending = owner_.restored_preset_index_;
   owner_.restored_preset_index_ = -1;
   local_current_preset_ = (pending >= 0 && pending < local_preset_paths_.size()) ? pending : 0;
+  juce::Logger::writeToLog (juce::String ("[Milkdrop] restore preset: pending=")
+                            + juce::String (pending)
+                            + " current=" + juce::String (local_current_preset_)
+                            + " total=" + juce::String (local_preset_paths_.size()));
 
   // 预设 shader 编译前后清错误，避免 projectM 内部 hlslparser→GLSL 编译
   // 过程产生的无害 warning 污染 error 队列、拖到下一帧 checkGLError 里卡死。
@@ -1055,7 +1071,7 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());
   local_render_ready_ = true;
-  std::cerr << "[Milkdrop] newOpenGLContextCreated: END (render_ready=true)" << std::endl;
+  juce::Logger::writeToLog ("[Milkdrop] newOpenGLContextCreated: END (render_ready=true)");
 }
 
 void MilkdropModule::GLView::openGLContextClosing() {

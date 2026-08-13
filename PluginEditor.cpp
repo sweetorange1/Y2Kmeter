@@ -52,6 +52,19 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::closeButtonPressed()
         onDock_(module_, savedBounds_);
 }
 
+bool Y2KmeterAudioProcessorEditor::FloatingModuleWindow::keyPressed(
+    const juce::KeyPress& key) {
+  // 浮动 Milkdrop 有独立的 GLView 本地渲染器（Editor renderer 已被挂起），
+  // 键盘事件必须直接路由到本窗口的模块，调用其公开 API 以操作本地渲染器。
+  // 不能转发给 Editor::keyPressed，否则会误操作 workspace 中其它嵌入态 Milkdrop。
+  if (auto* milk = dynamic_cast<MilkdropModule*>(&module_)) {
+    if (key == juce::KeyPress::leftKey)  { milk->prevPreset();   return true; }
+    if (key == juce::KeyPress::rightKey) { milk->nextPreset();   return true; }
+    if (key == juce::KeyPress::spaceKey) { milk->randomPreset(); return true; }
+  }
+  return false;
+}
+
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::resized()
 {
     DocumentWindow::resized();
@@ -4001,20 +4014,24 @@ void Y2KmeterAudioProcessorEditor::mouseUp(const juce::MouseEvent& e)
 }
 
 // ==========================================================
-// 双击标题栏空白区 → 切换顶层窗口全屏 / 还原
+// 双击标题栏空白区 → 切换顶层窗口"伪最大化" / 还原（v2.5.8 修复）
 //   · 参考 Windows 系统标题栏双击最大化的用户习惯；
-//   · 命中矩形：抬头 titleBarHeight 高度内、避开右侧三个按钮和左侧标题文字热区；
+//   · 命中矩形：抬头 titleBarHeight 高度内、避开右侧四个按钮和左侧标题文字热区；
 //   · 仅 Standalone 有效，插件宿主模式下窗口由 DAW 管理，直接忽略；
 //   · chrome 隐藏态下不响应（隐藏时"标题栏"实际不存在，浮层区域也不合适当"抬头"）；
-//   · 全屏与还原都通过顶层 Component::setFullScreen(bool)；JUCE ComponentPeer
-//     内部会记住 restore-bounds，切回时自动还原到原来的位置和大小。
+//   · 【重要】不再使用 juce::ResizableWindow::setFullScreen —— JUCE 在 Windows 上
+//     的实现是 ShowWindow(SW_SHOWMAXIMIZED)；对无原生标题栏窗口（Y2KMainWindow
+//     使用 setUsingNativeTitleBar(false)）该 API 会把窗口撑到 monitor 物理边界
+//     （覆盖任务栏），并且此时主窗口是 alwaysOnTop=true 与 PopupMenu / ComboBox
+//     弹窗平级 topmost，主窗口铺满屏后 Popup 被 Z 序压住 → "右键添加模块"菜单、
+//     底部 Toolbar 里 FPS/Source 下拉都看不见。
+//   · 新方案：改走 toggleFakeFullScreen() 手动 setBounds 到当前显示器的 userArea
+//     （已扣除任务栏），Popup 依然可以在主窗口内正常弹出且可视。
 //
 // 踩坑记录：
 //   · JUCE 双击流程是 mouseDown → mouseUp → mouseDoubleClick，中间的 mouseDown
-//     会启动 windowDragger.startDraggingComponent()。这里进入全屏后要主动把
-//     draggingWindow 复位并调用 setFullScreen 前先 clear，否则接下来任何 mouseDrag
-//     都会尝试拖动全屏窗口（在 Windows 上 dragComponent 对全屏窗口是 no-op，
-//     但视觉上会给用户"卡了一下"的错觉）。
+//     会启动 windowDragger.startDraggingComponent()。这里进入全屏前要主动把
+//     draggingWindow 复位，否则接下来任何 mouseDrag 都会尝试拖动窗口。
 // ==========================================================
 void Y2KmeterAudioProcessorEditor::mouseDoubleClick (const juce::MouseEvent& e)
 {
@@ -4039,24 +4056,141 @@ void Y2KmeterAudioProcessorEditor::mouseDoubleClick (const juce::MouseEvent& e)
 
     if (! juce::JUCEApplicationBase::isStandaloneApp()) return;
 
-    auto* top = getTopLevelComponent();
-    if (top == nullptr) return;
-
     // 前置的 mouseDown 已启动了 windowDragger —— 复位，避免全屏后残留拖动状态
     draggingWindow = false;
 
-    // 全屏 API 定义在 juce::ResizableWindow 上（DocumentWindow → ResizableWindow），
-    // 不在 juce::Component / juce::TopLevelWindow 上。Standalone 的顶层
-    // Y2KMainWindow : DocumentWindow，能命中；否则退回到 ComponentPeer 层。
-    if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
-    {
-        const bool nowFullScreen = rw->isFullScreen();
-        rw->setFullScreen (! nowFullScreen);
+    toggleFakeFullScreen();
+}
+
+bool Y2KmeterAudioProcessorEditor::keyPressed(const juce::KeyPress& key) {
+  // Milkdrop 键盘快捷键（v2.5.7）：← → 切预设，空格随机预设。
+  // 只处理嵌入态 Milkdrop（脱离态由 FloatingModuleWindow::keyPressed 自行路由）。
+  // 必须调用 MilkdropModule 的公开 API（prevPreset/nextPreset/randomPreset），
+  // 它们内部会根据 isFloating() 正确路由到本地 GLView 或 Editor renderer；
+  // 直接调 Editor 的 RequestMilkdropPreset* 在脱离态下会被挂起的 renderer 忽略。
+
+  MilkdropModule* milk = nullptr;
+  if (workspace != nullptr) {
+    for (int i = 0; i < workspace->getNumModules(); ++i) {
+      if (auto* m = workspace->getModule(i)) {
+        if (m->getModuleType() == ModuleType::milkdrop) {
+          milk = dynamic_cast<MilkdropModule*>(m);
+          break;
+        }
+      }
     }
-    else if (auto* peer = top->getPeer())
+  }
+
+  if (milk == nullptr)
+    return false;
+
+  if (key == juce::KeyPress::leftKey)  { milk->prevPreset();   return true; }
+  if (key == juce::KeyPress::rightKey) { milk->nextPreset();   return true; }
+  if (key == juce::KeyPress::spaceKey) { milk->randomPreset(); return true; }
+
+  return false;
+}
+
+// ==========================================================
+// 伪最大化 / 还原（v2.5.8）
+//   替代 juce::ResizableWindow::setFullScreen，规避以下 Windows 下的两个副作用：
+//     A) 无原生标题栏窗口（Y2KMainWindow 使用 setUsingNativeTitleBar(false)）
+//        的 SW_SHOWMAXIMIZED 会撑到 monitor 物理边界（覆盖任务栏）；
+//     B) 全屏后主窗口 alwaysOnTop=true 铺满屏，与 PopupMenu / ComboBox 弹窗平级
+//        topmost，弹窗 Z 序被压住不可见。
+//
+// 方案：手动 setBounds 到当前显示器 userArea（Windows 已扣除任务栏），并暂时
+// 放宽 constrainer 的 resize limits；退出时把 bounds 与 limits 都还原。
+//
+// 与 layoutLocked 兼容：
+//   · 若在锁定态进入，applyLayoutLocked 之前已把 constrainer min=max=当前尺寸
+//     锁死，会阻止 setBounds 到 userArea。这里保存进入前的 limits，覆盖为
+//     (0, 0, MAX, MAX)，setBounds 完再返回。退出时优先按锁定态重新 apply。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::toggleFakeFullScreen()
+{
+    auto* top = getTopLevelComponent();
+    if (top == nullptr || top == this) return;
+
+    auto* rw = dynamic_cast<juce::ResizableWindow*> (top);
+    if (rw == nullptr) return;
+
+    if (! pseudoFullScreen)
     {
-        // Fallback：直接走 peer 层。restore-bounds 由 peer 内部维护。
-        peer->setFullScreen (! peer->isFullScreen());
+        // -------- 进入伪全屏 --------
+        // 1) 保存当前 bounds
+        preFullScreenBounds = top->getBounds();
+
+        // 2) 保存并放宽 constrainer 的 resize limits（避免被夹回）
+        if (auto* cbc = rw->getConstrainer())
+        {
+            preFullScreenMinW = cbc->getMinimumWidth();
+            preFullScreenMinH = cbc->getMinimumHeight();
+            preFullScreenMaxW = cbc->getMaximumWidth();
+            preFullScreenMaxH = cbc->getMaximumHeight();
+            preFullScreenLimitsValid = true;
+        }
+        // 临时把 limits 放到 1..very-large，保证 setBounds 到 userArea 能生效。
+        // 用 1（而不是 0）避免命中 ComponentBoundsConstrainer 内部
+        // jassert(minW>0 && minH>0)。
+        rw->setResizeLimits (1, 1, 32768, 32768);
+
+        // 3) 计算目标 bounds：当前显示器的 userArea（已扣除任务栏）
+        auto& displays = juce::Desktop::getInstance().getDisplays();
+        auto  disp     = displays.getDisplayForRect (top->getScreenBounds());
+        juce::Rectangle<int> target;
+        if (disp != nullptr && ! disp->userArea.isEmpty())
+            target = disp->userArea;
+        else if (auto primary = displays.getPrimaryDisplay())
+            target = primary->userArea;
+        else
+            target = top->getScreenBounds(); // 兜底，理论上到不了
+
+        // 4) 应用
+        top->setBounds (target);
+
+        pseudoFullScreen = true;
+    }
+    else
+    {
+        // -------- 退出伪全屏，恢复原 bounds 与 limits --------
+        // 1) 先把 limits 放宽，防止 setBounds 被夹住
+        rw->setResizeLimits (1, 1, 32768, 32768);
+
+        if (! preFullScreenBounds.isEmpty())
+            top->setBounds (preFullScreenBounds);
+
+        pseudoFullScreen = false;
+
+        // 2) 恢复 resize limits：
+        //    · 若当前处于 layoutLocked → 让 applyLayoutLocked(true) 按新尺寸重新锁死；
+        //    · 否则还原到进入前的 limits。
+        if (layoutLocked)
+        {
+            // 让 applyLayoutLocked 在退出后按恢复的 bounds 重新 setResizeLimits(w,h,w,h)。
+            // 先清掉 savedLockLimitsValid 使其重新采样一份"进入锁定前"的 limits，
+            // 用我们本次保存的 preFullScreen* 作为真值，避免用被覆盖过的错误值。
+            if (preFullScreenLimitsValid)
+            {
+                savedLockMinW = preFullScreenMinW;
+                savedLockMinH = preFullScreenMinH;
+                savedLockMaxW = preFullScreenMaxW;
+                savedLockMaxH = preFullScreenMaxH;
+                savedLockLimitsValid = true;
+            }
+            layoutLocked = false;              // applyLayoutLocked(true) 会重新写 min=max=当前尺寸
+            applyLayoutLocked (true, /*initial*/ false);
+        }
+        else if (preFullScreenLimitsValid)
+        {
+            const int minW = juce::jmax (1, preFullScreenMinW);
+            const int minH = juce::jmax (1, preFullScreenMinH);
+            const int maxW = juce::jmax (minW, preFullScreenMaxW);
+            const int maxH = juce::jmax (minH, preFullScreenMaxH);
+            rw->setResizeLimits (minW, minH, maxW, maxH);
+        }
+
+        preFullScreenLimitsValid = false;
     }
 }
 

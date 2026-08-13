@@ -79,6 +79,11 @@ public:
     //   · 仅在 Standalone 且非 chrome 隐藏态下生效；插件宿主模式忽略。
     void mouseDoubleClick (const juce::MouseEvent&) override;
 
+    // 键盘快捷键（v2.5.7）：加载 Milkdrop 模块时，← → 切预设，空格随机预设。
+    //   仅在软件有焦点且当前存在 Milkdrop 模块（嵌入态或脱离态）时生效，
+    //   否则返回 false 让事件继续传播，避免干扰其他键盘交互。
+    bool keyPressed(const juce::KeyPress& key) override;
+
     // 兼容旧接口：返回自定义字体
     static juce::Font getCustomFont(float height, int styleFlags = juce::Font::plain);
 
@@ -175,6 +180,19 @@ private:
     void handlePinClicked();       // 切换 alwaysOnTop
     void handleMinimiseClicked();  // 最小化顶层窗口
     void handleLockClicked();      // 切换布局锁定（v1.8.3）
+
+    // 伪全屏切换（v2.5.8：修复 setFullScreen 覆盖任务栏 + PopupMenu 不可见）
+    //   · 背景：Y2KMainWindow 是无原生标题栏 DocumentWindow；JUCE 在 Windows 上
+    //     setFullScreen(true) = ShowWindow(SW_SHOWMAXIMIZED)；对无 WS_CAPTION 的
+    //     窗口而言，此调用会把窗口撑到 monitor 物理边界（覆盖任务栏），并且此时
+    //     顶层是 alwaysOnTop=true，PopupMenu / ComboBox 弹窗与主窗口平级 topmost，
+    //     会被主窗口 Z 序压住导致"看不见弹出内容"。
+    //   · 修复：手动把顶层窗口 setBounds 到 Displays::getDisplayForRect().userArea
+    //     （即当前显示器的"工作区"，Windows 已自动扣除任务栏），并暂时把 resize
+    //     limits 放宽。退出时把 bounds 与 resize limits 都还原。
+    //   · 与 layoutLocked 兼容：进入伪全屏前若已锁定，则临时放开 resize limits；
+    //     退出后重新 apply。
+    void toggleFakeFullScreen();
 
     // 将 layoutLocked 同步到 workspace / 顶层窗口的 setResizable / Processor 持久化。
     //   · shouldRepaintButton 为 true 时刷新 lock 按钮局部（仅在用户交互时需要）；
@@ -278,6 +296,17 @@ private:
     // 用此标记等 parentHierarchyChanged 触发后补做一次真正的 apply。
     bool pendingLockApplyOnAttach = false;
     bool initialAlwaysOnTopApplied = false; // 首次 visibilityChanged 时把默认置顶应用到顶层窗口的一次性 flag
+
+    // 伪全屏状态（v2.5.8）
+    //   · pseudoFullScreen: 当前是否处于"伪最大化"（用户 double-click 标题栏触发）
+    //   · preFullScreenBounds: 进入前顶层窗口 bounds，用于退出时还原
+    //   · preFullScreenLockMin/Max*: 进入前 constrainer 的 resize limits，用于退出时还原
+    //     （与 layoutLocked 的 savedLock*字段独立，避免互相污染）
+    bool                 pseudoFullScreen = false;
+    juce::Rectangle<int> preFullScreenBounds;
+    int                  preFullScreenMinW = 0, preFullScreenMinH = 0;
+    int                  preFullScreenMaxW = 0, preFullScreenMaxH = 0;
+    bool                 preFullScreenLimitsValid = false;
 
     // Windows 下强制关闭 Direct2D 渲染器的一次性 flag。
     //   背景：JUCE 8 默认在 Windows 上启用 Direct2D。VST3 DLL 被宿主
@@ -448,6 +477,10 @@ private:
         juce::Rectangle<int> getSavedBounds() const noexcept { return savedBounds_; }
         void setLayoutLocked(bool locked);
         juce::ValueTree saveModuleSpecificState() const;
+
+        // 键盘事件：浮动 Milkdrop 窗口需要将 ← → 空格转发给 Editor，
+        // 否则浮动窗口吞掉键盘焦点后 Editor 收不到按键事件。
+        bool keyPressed(const juce::KeyPress& key) override;
 
         // 取消 resize/move 触发的 pending async update（关闭窗口前调用）
         void cancelAsyncUpdates() { cancelPendingUpdate(); }

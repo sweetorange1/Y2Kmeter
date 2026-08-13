@@ -441,6 +441,21 @@ public:
         resetTccIfVersionChanged (appProperties);
        #endif
 
+        // 0.5) 挂载运行时日志文件：Windows GUI 程序无控制台，stderr 不可见，
+        //      把所有 juce::Logger::writeToLog 输出落盘到 exe 目录下的固定 txt，
+        //      便于定位 Milkdrop 等模块的运行时问题。每次启动覆盖旧日志。
+        {
+            const auto logFile = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                                     .getParentDirectory()
+                                     .getChildFile ("Y2Kmeter_debug.log");
+            logFile.deleteFile();  // 覆盖旧日志，避免无限增长
+            runtimeFileLogger = std::make_unique<juce::FileLogger> (logFile,
+                                                                     "Y2Kmeter debug log",
+                                                                     0);
+            juce::Logger::setCurrentLogger (runtimeFileLogger.get());
+            juce::Logger::writeToLog ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
+        }
+
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
             appProperties.getUserSettings(),   // 设置持久化
@@ -752,6 +767,10 @@ public:
         pluginHolder = nullptr;
 
         appProperties.saveIfNeeded();
+
+        // 5) 卸载运行时日志 logger（在写完所有日志后再清理）
+        juce::Logger::setCurrentLogger (nullptr);
+        runtimeFileLogger.reset();
     }
 
     void systemRequestedQuit() override
@@ -840,6 +859,56 @@ private:
             }
         }
         if (! onScreen) return false;
+
+        // ---------------------------------------------------------------
+        // v2.5.8：兼容老存档 —— 若之前是"伪最大化覆盖任务栏"的窗口尺寸
+        //   （无边框窗口 setFullScreen 走 SW_SHOWMAXIMIZED 会撑到 monitor
+        //   物理边界，任务栏被盖），启动时直接恢复会重现原来的 bug：
+        //   任务栏被盖 + PopupMenu / ComboBox 不可见。
+        //
+        //   这里在 setBounds 之前做一次"防御性收缩"：找到 target 主要
+        //   落在哪个显示器，如果 target 的任一边超出该显示器的 userArea
+        //   （工作区，Windows 已扣除任务栏），就把 target 夹到 userArea
+        //   内。这样：
+        //     · 正常窗口（早已在 userArea 内）不会被改动；
+        //     · 老存档里的"全屏覆盖任务栏"窗口自动缩回工作区；
+        //     · 不会触发 juce::ResizableWindow::setFullScreen / Windows
+        //       SW_SHOWMAXIMIZED，纯 setBounds，行为可控。
+        // ---------------------------------------------------------------
+        {
+            // 选一个"主要归属"的显示器：与 target 交集最大的那个
+            const juce::Displays::Display* best = nullptr;
+            int bestArea = -1;
+            for (const auto& d : disp.displays)
+            {
+                const auto inter = d.userArea.getIntersection (target);
+                const int  a     = inter.getWidth() * inter.getHeight();
+                if (a > bestArea) { bestArea = a; best = &d; }
+            }
+
+            if (best != nullptr)
+            {
+                const auto ua = best->userArea;
+
+                // 触发"收缩"的条件：target 至少有一条边超出了 userArea
+                //   （典型情况：target == monitor 物理矩形，会覆盖任务栏；
+                //    也覆盖了 target 完全包住 userArea 的情形。）
+                const bool overflows = target.getX()      < ua.getX()
+                                    || target.getY()      < ua.getY()
+                                    || target.getRight()  > ua.getRight()
+                                    || target.getBottom() > ua.getBottom();
+
+                if (overflows)
+                {
+                    // 夹到 userArea 内：优先保尺寸不超出，其次尽量保持左上角
+                    const int w2 = juce::jmin (target.getWidth(),  ua.getWidth());
+                    const int h2 = juce::jmin (target.getHeight(), ua.getHeight());
+                    int x2 = juce::jlimit (ua.getX(), ua.getRight()  - w2, target.getX());
+                    int y2 = juce::jlimit (ua.getY(), ua.getBottom() - h2, target.getY());
+                    target = { x2, y2, w2, h2 };
+                }
+            }
+        }
 
         mainWindow->setBounds (target);
         return true;
@@ -1815,6 +1884,11 @@ private:
     // 独立持有 editor —— 与 DocumentWindow 解耦生命周期，
     // 以便在 delete 之前显式调用 processor->editorBeingDeleted()。
     std::unique_ptr<juce::AudioProcessorEditor>     pluginEditor;
+
+    // 运行时日志：Windows GUI 程序没有控制台，std::cerr / stderr 都不可见，
+    //   因此把 juce::Logger 输出落盘到 exe 目录下的 Y2Kmeter_debug.log，
+    //   便于排查 Milkdrop 等模块的运行时问题（见 initialise / shutdown）。
+    std::unique_ptr<juce::FileLogger>               runtimeFileLogger;
 
     // 裸指针缓存 —— 指向 pluginEditor.get() 动态转型后的具体类型
     //   · 用于 ChangeListener 回调里刷新下拉框；不拥有生命周期

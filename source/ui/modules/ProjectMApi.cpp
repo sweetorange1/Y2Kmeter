@@ -179,9 +179,10 @@ Api::Api()
     loadLibrary();
     if (moduleHandle != nullptr)
         resolveSymbols();
-    std::cerr << "[ProjectMApi] Api::Api() done: moduleHandle=" << moduleHandle
-              << " available=" << available
-              << " errorMessage='" << errorMessage << "'" << std::endl;
+    juce::Logger::writeToLog (juce::String ("[ProjectMApi] Api::Api() done: moduleHandle=")
+                              + juce::String (moduleHandle != nullptr ? "ok" : "null")
+                              + " available=" + juce::String (available ? 1 : 0)
+                              + " errorMessage='" + juce::String (errorMessage) + "'");
 }
 
 Api::~Api()
@@ -334,9 +335,9 @@ void Api::loadLibrary()
     }
    #elif defined (__APPLE__)
     auto dylib = locateProjectMDylib();
-    std::cerr << "[ProjectMApi] loadLibrary: locate dylib -> '"
-              << dylib.getFullPathName().toStdString()
-              << "' exists=" << dylib.existsAsFile() << std::endl;
+    juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary: locate dylib -> '")
+                              + dylib.getFullPathName()
+                              + "' exists=" + juce::String (dylib.existsAsFile() ? 1 : 0));
 
     if (! dylib.existsAsFile())
     {
@@ -345,7 +346,8 @@ void Api::loadLibrary()
                        "or next to the executable, "
                        "or in third_party/projectm/bin/. "
                        "Please rebuild with latest CMake install rules.";
-        std::cerr << "[ProjectMApi] loadLibrary FAIL: " << errorMessage << std::endl;
+        juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary FAIL: ")
+                                  + juce::String (errorMessage));
         return;
     }
 
@@ -357,11 +359,13 @@ void Api::loadLibrary()
         const char* err = ::dlerror();
         errorMessage = std::string ("dlopen(libprojectM-4.dylib) failed: ")
                      + (err != nullptr ? err : "unknown error");
-        std::cerr << "[ProjectMApi] loadLibrary FAIL: " << errorMessage << std::endl;
+        juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary FAIL: ")
+                                  + juce::String (errorMessage));
     }
     else
     {
-        std::cerr << "[ProjectMApi] loadLibrary OK: dlopen handle=" << moduleHandle << std::endl;
+        juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary OK: dlopen handle=")
+                                  + juce::String (moduleHandle != nullptr ? "ok" : "null"));
     }
    #else
     errorMessage = "libprojectM dynamic loading is not implemented on this platform.";
