@@ -2246,7 +2246,6 @@ VTune 报告 `RtlAllocateHeap` 0.063s 位居热点前列 → `juce::Path` 在 `f
 |---|---|
 | [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `[InstallDelete]` 新增旧版散装文件清理；`[Files]` Tamagotchi & 纹理改为 ZIP Source；`[Code]` 抽取 `ExtractZip()` 通用函数，`tar.exe` 优先 → PowerShell 回退 |
 | [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | `y2km_copy_projectm_runtime` 新增 `SKIP_TEXTURES` 选项；Standalone post-build 跳过纹理拷贝（走安装包 ZIP） |
-| [`build_macos_installer.sh`](/I:/Y2KMeter/build_macos_installer.sh) | README.txt 新增"资源说明"章节，解释 macOS 自包含 Bundle 与 Windows ZIP 方案的差异 |
 | `assets/milkdrop_textures.zip` | **新建**：预制作的纹理压缩包（~3.2 MB） |
 | `assets/tamagotchi_assets.zip` | **新建**：预制作的 Tamagotchi 动画压缩包（~1.5 MB，内部含 `Tamagotchi/` 前缀） |
 
@@ -2775,11 +2774,10 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 
 ---
 
-### v2.5.7：Windows Seed 机制重构 + Milkdrop 非脱离模式渲染修复 + Black Pink 主题
+### v2.5.7：Windows Seed 机制重构 + Black Pink 主题
 
-本章记录 v2.5.7 版本围绕 Windows Milkdrop 模块的三项改进：
+本章记录 v2.5.7 版本围绕 Windows Milkdrop 模块的改进：
 预设 seed 机制从"合并复制"升级为"文件数差异检测 + 全量替换"；
-修复 macOS 适配引入的 Windows 非脱离模式渲染失败；
 新增黑粉配色主题及爱心像素桌面纹理。
 
 #### 涉及文件
@@ -2787,7 +2785,6 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 | 文件 | 主要变更 |
 |---|---|
 | [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | `FindMilkdropAssetsDir` 重构为统一 seed 逻辑（找 seed 源 → 比较文件数 → 全量替换） |
-| [`source/ui/modules/MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | `FindMilkdropAssetsDirForModule` 同步重构；`paint()` 脱离态用 `face` 底色防透底、非脱离态用 `transparentBlack` 让 GL 帧透出 |
 | [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | 预设/纹理 ZIP 与解压不再绑定 `Components: standalone`，任何组件安装都部署到 AppData |
 | [`source/ui/PinkXPStyle.h`](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | `ThemeId` 枚举新增 `blackPink`；`DesktopPattern` 枚举新增 `hearts` |
 | [`source/ui/PinkXPStyle.cpp`](/I:/Y2KMeter/source/ui/PinkXPStyle.cpp) | `buildThemes()` 新增 Black Pink 配色；`drawDesktop()` 新增 `DesktopPattern::hearts` 像素爱心纹理 |
@@ -2816,25 +2813,6 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 
 **安装器侧**：预设/纹理 ZIP 的 `[Files]` 部署和 `ssPostInstall` 解压均移除 `Components: standalone` 限制，始终执行。`[InstallDelete]` 中 AppData 旧预设目录清理同样不绑定组件。
 
-#### 改动 2：Milkdrop 非脱离模式渲染修复
-
-**根因**：v2.5.3 的 macOS 适配将 `paint()` 中 `drawRaised` 的 face 参数从 `transparentBlack` 改为 `PinkXP::face`。`drawRaised` 第一行就是 `g.fillRect(r)` 填充整块矩形，不透明粉色会挡住 Editor GL 渲染到底层 FBO 0 的 projectM 帧。macOS 不受影响因为 Editor GL 未启用（GLView 自己渲染且 `setComponentPaintingEnabled(true)` 让 GL 层高于 paint）。
-
-**修复**：根据模式选择底色：
-
-```cpp
-#if JUCE_MAC
-  PinkXP::drawRaised(g, bounds, PinkXP::face);           // Editor GL 未启用
-#else
-  if (isFloating())
-    PinkXP::drawRaised(g, bounds, PinkXP::face);           // GLView GL 高于 paint
-  else
-    PinkXP::drawRaised(g, bounds, juce::Colours::transparentBlack); // GL 在 FBO 0 下层
-#endif
-```
-
-**同时修复的关联 Bug**：脱离模式下抬头区域透底（聚焦切换时模块底色透明可透视下方内容）、脱离模式顶部常驻 1px 透底线。根因相同——脱离态用了 transparentBlack，`setOpaque(true)` 让 JUCE 跳过清背景 → 整个模块区域透视。
-
 #### 改动 3：Black Pink（黑粉 Y2K）主题 + 爱心纹理
 
 **配色设计**：
@@ -2857,7 +2835,6 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 #### 踩坑记录
 
 - **`copyDirectoryTo` 是合并而非替换**：JUCE 文件 API 的语义是"把源内容合并到目标"，不会删除目标已有的多余文件。要全量替换必须先用 `deleteRecursively()` 清空目标。
-- **GL 层与 paint 层的叠放关系决定底色选择**：`setComponentPaintingEnabled(true)` 让 GL 渲染高于 CPU paint，`false` 则 GL 在底层。Milkdrop 脱离态 GLView 自己附着 GL context 且 paintingEnabled=true，非脱离态 Editor GL 渲染到 FBO 0 在组件树之下——同一种底色在这两种模式下效果截然相反。
 - **安装器组件绑定与运行时 seed 的互补关系**：仅靠运行时 seed 不能解决"用户只装 VST3 不装 Standalone"的场景（VST3 旁无 seed 源）；仅靠安装器部署不能解决"开发期 IDE 直接运行"的场景。两者必须同时存在、互为兜底。
 - **枚举值追加顺序影响持久化**：`ThemeId` 按枚举整数值存入配置文件。新增主题必须追加到末尾（包括 `custom` 之后），否则已保存的自定义主题 `custom=11` 会漂移到其他主题上。
 
