@@ -559,6 +559,11 @@ private:
     std::atomic<bool>      milkdrop_requested_preset_random_{ false };
     std::atomic<int>       milkdrop_requested_preset_jump_{ -1 };
     std::atomic<int64_t>   milkdrop_last_preset_switch_ms_{ 0 };
+    // 脱离态（floating）期间置 true，阻止 Editor::newOpenGLContextCreated 异步
+    // 创建 Editor projectM handle。Windows 下 libprojectM/GLEW 依赖进程全局指针表，
+    // 若 Editor handle 与 GLView 的本地 handle 同时存在会互相干扰（表现为预设
+    // shader 编译失败回退 Idle）。挂起期间跳过创建，dock 回来时再恢复。
+    std::atomic<bool>      milkdrop_renderer_suspended_{ false };
     void LoadMilkdropPresetInternal();
     static juce::File FindMilkdropAssetsDir(const juce::String& subdir);
     // PCM 缓冲（UI 线程写，GL 线程读）

@@ -143,6 +143,7 @@ private:
         void parentHierarchyChanged() override;
         void visibilityChanged() override;
         void resized() override;
+        void paint(juce::Graphics& g) override;
 
         // OpenGLRenderer：仅浮动态 attach 后会被调用
         void newOpenGLContextCreated() override;
@@ -179,10 +180,9 @@ private:
         // 用于在 detach/attach 重建期间显示上一帧画面，消除切换模式时的黑屏闪烁。
         juce::Image GetLastFrameSnapshot() const;
 
-        // 预扫描 milkdrop_presets 目录（纯 CPU 磁盘 IO，无 GL 依赖）。
-        // 允许 MilkdropModule 构造函数在主线程提前调用，
-        // 将 9000+ .milk 文件的遍历从 GL 线程关键路径中移出，
-        // 减少 attach 时的卡顿感。
+        // 扫描 milkdrop_presets 目录（纯 CPU 磁盘 IO，无 GL 依赖）。
+        // 在 GL 线程 newOpenGLContextCreated 中调用，保证读取
+        // restored_preset_index_ 前预设列表是最新且完整的。
         void ScanPresetFiles();
 
     private:

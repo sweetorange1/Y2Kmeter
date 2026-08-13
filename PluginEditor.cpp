@@ -197,7 +197,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.5.6");
+const int versionW = versionFont.getStringWidth ("v2.6.0");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -238,7 +238,7 @@ const int versionW = versionFont.getStringWidth ("v2.5.6");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.5.6";
+const juce::String versionText = "v2.6.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -3014,7 +3014,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.5.6";
+const juce::String versionText = "v2.6.0";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3022,7 +3022,7 @@ const juce::String versionText = "v2.5.6";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.5.6");
+        const int versionW = versionFont.getStringWidth ("v2.6.0");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4507,6 +4507,11 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
 }
 
 void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
+  // 脱离态期间 Editor renderer 被挂起，跳过创建，避免与 GLView 的本地
+  // projectM handle 共存（Windows libprojectM/GLEW 全局指针表冲突）。
+  if (milkdrop_renderer_suspended_)
+    return;
+
   auto& api = projectm_api::Api::instance();
   if (!api.isAvailable()) {
     milkdrop_error_ = api.loadError();
@@ -4936,6 +4941,11 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
 }
 
 void Y2KmeterAudioProcessorEditor::SuspendMilkdropEditorRendererForFloating() {
+  // 先置挂起标志：即便 Editor GL 上下文尚未 attach、Editor handle 尚未创建，
+  // 也要阻止后续异步触发的 newOpenGLContextCreated 再创建 Editor handle，
+  // 避免与 GLView 的本地 projectM handle 共存导致 GLEW 全局状态互相干扰。
+  milkdrop_renderer_suspended_ = true;
+
   if (!openGLContext.isAttached()) return;
 
   openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
@@ -4944,6 +4954,9 @@ void Y2KmeterAudioProcessorEditor::SuspendMilkdropEditorRendererForFloating() {
 }
 
 void Y2KmeterAudioProcessorEditor::ResumeMilkdropEditorRendererAfterFloating() {
+  // 解除挂起：dock 回嵌入态后允许恢复 Editor renderer（可能重新创建 handle）。
+  milkdrop_renderer_suspended_ = false;
+
   if (editorBeingDestructed || !openGLContext.isAttached()) return;
 
   openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {

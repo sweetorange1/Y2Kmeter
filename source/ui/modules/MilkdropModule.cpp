@@ -588,13 +588,6 @@ MilkdropModule::MilkdropModule (AnalyserHub* hub_,
 
     glView = std::make_unique<GLView> (*this);
     addAndMakeVisible (glView.get());
-
-    // 卡顿感缓解：在主线程预扫预设目录（磁盘 IO，9000+ .milk 文件）。
-    // 此时 GL 上下文尚未 attach，GL 线程未启动，local_preset_paths_
-    // 无并发读写；后续 newOpenGLContextCreated 看到非空就不会重扫。
-    // 目的：把磁盘扫描从 GL 线程关键路径中移除，减少 attach 时的卡顿。
-    if (glView != nullptr)
-        glView->ScanPresetFiles();
 #if JUCE_MAC
     // macOS：控制栏通过顶层 NSWindow 悬浮绘制（addToDesktop），
     // Z-order 高于主窗口内嵌的 NSOpenGLView，确保 GL 帧上可见。
@@ -799,28 +792,12 @@ void MilkdropModule::layoutContent (juce::Rectangle<int> content)
 {
     if (glView != nullptr)
     {
-        auto viewBounds = content;
-        // 控制栏（overlay control bar）以纯绘制叠加层方式覆盖在 GL 帧上方，
-        // 不占用布局空间，不改变 GLView 尺寸，避免触发 projectM setWindowSize 重建。
-        // Windows 浮动态同理：控制栏叠加在 native surface 上，不挤压 GLView。
-        // 唯一需要预留空间的场景：Windows 浮动态（isFloating && focused），
-        // 因为浮动窗口的 native surface 与 JUCE paint 层是独立的，
-        // 控制栏绘制在 JUCE 层，不会自动覆盖 GL surface，需要挤压 GLView 让出空间。
-        // macOS：开启了 setComponentPaintingEnabled(true)，无论嵌入/浮动，
-        //   GLView 的 GL surface 会作为背景纹理上屏，CPU paint 层覆盖在其上，
-        //   paintContent 绘制的控制栏会正确叠加，无需预留空间。
-#if ! JUCE_MAC
-        const bool needs_reserved = isFloating() && focused_;
-        if (needs_reserved)
-        {
-            int reserved = 26;
-            if (isAutoMode_)
-                reserved += static_cast<int>(kAutoRowHeight);
-            reserved = juce::jmin(reserved, content.getHeight());
-            viewBounds = content.withTrimmedTop(reserved);
-        }
-#endif
-        glView->setBounds(viewBounds);
+        // 控制栏（overlay control bar）始终以纯绘制叠加方式覆盖在 GL 帧上方，
+        // 不占用布局空间、不改变 GLView 尺寸，避免触发 projectM setWindowSize 重建。
+        // 脱离态（floating）下，Windows 由 GLView::paint() 将控制栏绘制在
+        // projectM GL 帧之上；macOS 由顶层 overlayView_（NSWindow）另行绘制，
+        // 因此二者都无需再为控制栏预留空间，布局与非脱离态保持一致。
+        glView->setBounds(content);
 #if JUCE_MAC
         UpdateOverlayViewPlacement();
 #endif
@@ -874,10 +851,14 @@ void MilkdropModule::jumpToPresetIndex(int index)
 // ==========================================================
 MilkdropModule::GLView::GLView(MilkdropModule& owner)
     : owner_(owner) {
+#if JUCE_MAC
   // projectM 4 的 GLSL shader 需要 OpenGL Core Profile 3.2+。
   // 不设置此项时 macOS 默认给 Legacy Profile（NSOpenGLProfileVersionLegacy），
   // projectM 内部 shader 编译失败，渲染输出全黑。
+  // 仅 macOS 强制：Windows 端强制 Core Profile 会导致部分预设 shader 编译失败，
+  // projectM 回退到 Idle 动画（e4bc0b78 用默认 GL 版本无此问题）。
   open_gl_context_.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
+#endif
   open_gl_context_.setRenderer(this);
   // macOS 关键：必须开启 setComponentPaintingEnabled(true)，才能让
   // CPU paint 层（含 overlay 控制栏、模态对话框）叠加在 GL 帧之上可见。
@@ -905,6 +886,33 @@ void MilkdropModule::GLView::visibilityChanged() {
 void MilkdropModule::GLView::resized() {
   if (attached_)
     open_gl_context_.triggerRepaint();
+}
+
+void MilkdropModule::GLView::paint(juce::Graphics& g) {
+#if ! JUCE_MAC
+  // Windows 脱离态：控制栏必须绘制在 GLView 自己的 paint 层上。
+  // 由于 GLView 开启了 setComponentPaintingEnabled(true)，该 paint 会被
+  // 合成到 projectM GL 帧之上；若仍绘制在 owner 的 paintContent 中，
+  // 则会被 GLView 的原生 GL surface 遮挡（这也是此前需要挤压 GLView 的原因）。
+  // 这里通过平移 Graphics 到 owner 坐标系，复用 paintOverlayControlBar /
+  // paintAutoControlRow，保证 cachedNameArea_ / cachedAutoTimeLabel_ 的
+  // 命中测试坐标仍与 owner 坐标一致。
+  if (!owner_.isFloating() || !owner_.focused_)
+    return;
+
+  auto content = owner_.getContentBounds();
+  const auto offset = getPosition();
+  g.saveState();
+  g.addTransform(juce::AffineTransform::translation(
+      -static_cast<float>(offset.getX()),
+      -static_cast<float>(offset.getY())));
+  owner_.paintOverlayControlBar(g, content);
+  if (owner_.isAutoModeActive())
+    owner_.paintAutoControlRow(g, content.withHeight(26));
+  g.restoreState();
+#else
+  juce::ignoreUnused(g);
+#endif
 }
 
 void MilkdropModule::GLView::UpdateOpenGLAttachment() {
@@ -1058,10 +1066,9 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
     api.setTextureSearchPaths(local_pm_handle_, paths);
   }
 
-  // 卡顿感缓解：若构造函数已在主线程预扫过预设列表，则跳过；
-  // 否则退回到在 GL 线程扫盘（兼容异常路径）。
-  if (local_preset_paths_.isEmpty())
-    ScanPresetFiles();
+  // 每次 GL 上下文重建都重新扫描预设，保证读取 restored_preset_index_ 前
+  // local_preset_paths_ 是最新且完整的（与 e4bc0b78 行为一致）。
+  ScanPresetFiles();
   juce::Logger::writeToLog ("[Milkdrop] preset count="
                             + juce::String (local_preset_paths_.size()));
   int pending = owner_.restored_preset_index_;
@@ -1506,6 +1513,9 @@ void MilkdropModule::GLView::timerCallback() {
   owner_.checkOverlayAutoHide();
   owner_.checkAutoMode();
   owner_.repaint();
+  // 脱离态下控制栏由 GLView::paint 覆盖绘制，必须显式触发 GLView 重绘，
+  // 否则自动隐藏 / hover / auto 展开等状态变化不会刷新到画面。
+  repaint();
 #if JUCE_MAC
   // macOS：顶层控制栏悬浮窗需要跟随模块屏幕位置、可见性、hover/press 高亮实时刷新。
   // 与主 UI 重绘 30Hz 同步，既能跟踪窗口拖动/resize，又保证 hover 反馈及时。
@@ -1563,11 +1573,6 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
     }
 
     // 控制栏以 overlay 方式绘制，不改变 GLView 尺寸，无需重新 layout。
-    // 仅 Windows 浮动态需要触发 layoutContent（为控制栏预留空间）。
-#if ! JUCE_MAC
-    if (isFloating())
-        layoutContent(getContentBounds());
-#endif
 #if JUCE_MAC
     // macOS: Overlay 可见性同步（非聚焦时隐藏内部控制栏窗口）。
     // 注意：Milkdrop 模块在 macOS 非脱离模式下始终置顶（由
@@ -1577,6 +1582,10 @@ void MilkdropModule::setFocusVisual(bool shouldFocus)
     UpdateOverlayViewPlacement();
 #endif
     repaint();
+    // 脱离态控制栏由 GLView::paint 覆盖绘制，聚焦/失焦需同步触发 GLView 重绘，
+    // 否则自动隐藏后控制栏不会从画面消失。
+    if (glView != nullptr)
+        glView->repaint();
 }
 
 void MilkdropModule::checkOverlayAutoHide()
@@ -1619,6 +1628,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                                / static_cast<float>(sliderBounds.getWidth());
             updateAutoIntervalFromSlider(proportion);
             repaint(autoRow);
+            glView->repaint();
             return;  // 不调用基类，避免 ModulePanel::mouseDown 启动标题栏/边缘拖拽
         }
         // ---- auto 行时间标签点击检测（弹出间隔输入对话框） ----
@@ -1653,6 +1663,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             pressedOverlayBtn_ = btn;
             touchOverlayIdleTimer();
             repaint(overlay);
+            glView->repaint();
         }
     }
 }
@@ -1664,6 +1675,7 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     {
         isDraggingSlider_ = false;
         repaint();
+        glView->repaint();
         return;
     }
 
@@ -1678,6 +1690,7 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
 
         pressedOverlayBtn_ = OverlayButton::kNone;
         repaint(overlay);
+        glView->repaint();
         return;
     }
 
@@ -1698,6 +1711,7 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
                            / static_cast<float>(sliderBounds.getWidth());
         updateAutoIntervalFromSlider(proportion);
         repaint(autoRow);
+        glView->repaint();
         return;
     }
 
@@ -1710,6 +1724,7 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
         {
             hoveredOverlayBtn_ = hit;
             repaint(overlay);
+            glView->repaint();
         }
 
         if (hit != OverlayButton::kNone)
@@ -1753,6 +1768,7 @@ void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
                            / static_cast<float>(sliderBounds.getWidth());
         updateAutoIntervalFromSlider(proportion);
         repaint(autoRow);
+        glView->repaint();
         return;
     }
 
@@ -1765,6 +1781,7 @@ void MilkdropModule::mouseExit(const juce::MouseEvent& e)
     {
         hoveredOverlayBtn_ = OverlayButton::kNone;
         repaint();
+        glView->repaint();
     }
     ModulePanel::mouseExit(e);
 }
@@ -2511,6 +2528,7 @@ void MilkdropModule::toggleAutoMode()
   // 重新布局并重绘
   layoutContent(getContentBounds());
   repaint();
+  glView->repaint();
 }
 
 void MilkdropModule::checkAutoMode()
@@ -2536,6 +2554,7 @@ void MilkdropModule::applyAutoInterval(float seconds)
   // 用户确认间隔时始终重置计时器，从此刻起算经过完整间隔后执行第一次切换
   lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
   repaint();
+  glView->repaint();
 }
 
 void MilkdropModule::updateAutoIntervalFromSlider(float proportion)
