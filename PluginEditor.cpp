@@ -2530,10 +2530,13 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         //     │                                            │
         //     └────────────────────────────────────────────┘
         //
-        //   注意：顶层窗口不需要全屏变动（DocumentWindow 的 setFullScreen 会创建
-        //   独立的全屏 HWND 并改变消息循环，与我们的 auto-hide 边界行为冲突）。
-        //   这里改为让窗口铺满当前显示器 userArea（任务栏之外的可用区），
-        //   视觉效果等同全屏但技术上仍是普通顶层窗口。
+        //   注意：Windows 下顶层窗口不应走 setFullScreen（会创建独立的全屏 HWND
+        //   并改变消息循环，与我们的 auto-hide 边界行为冲突），而是铺满 userArea
+        //   （任务栏之外的可用区），视觉等同全屏但技术上仍是普通顶层窗口，
+        //   避免 PopupMenu 被 Z 序遮挡。
+        //   macOS 下则调用 rw->setFullScreen(true) 进入系统原生全屏（独立 Space、
+        //   自动隐藏菜单栏与 Dock），与双击标题栏行为一致；模块布局仍按
+        //   totalArea（完整显示器尺寸）计算。
 
         auto* top = getTopLevelComponent();
         if (top == nullptr) top = this;
@@ -2541,13 +2544,22 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
                                  .getDisplayForPoint(top->getScreenBounds().getCentre());
-        // 全屏预设使用 userArea（任务栏之外的可用区），而非 totalArea。
-        //   · totalArea 包含任务栏区域，窗口覆盖整个显示器后 Windows 的
+        // 全屏预设的窗口区域按平台区分：
+        //   · Windows：使用 userArea（任务栏之外的可用区），而非 totalArea。
+        //     totalArea 包含任务栏区域，窗口覆盖整个显示器后 Windows 的
         //     PopupMenu（添加模块/布局预设/音频源下拉）将不可见——因为
         //     PopupMenu 窗口是普通 z-order 窗口，被铺满全屏的主窗口遮挡。
-        //   · userArea 为任务栏留出空间，确保 PopupMenu 有可见区域。
+        //     userArea 为任务栏留出空间，确保 PopupMenu 有可见区域。
+        //   · macOS：使用 totalArea（完整显示器尺寸）计算模块布局，并在末尾
+        //     调用 rw->setFullScreen(true) 进入系统原生全屏（覆盖菜单栏/Dock），
+        //     因此这里的 totalArea 仅用于布局，真正隐藏菜单栏/Dock 由原生全屏完成。
+#if JUCE_MAC
+        const auto area = (display != nullptr) ? display->totalArea
+                                              : juce::Rectangle<int>(1280, 720);
+#else
         const auto area = (display != nullptr) ? display->userArea
                                               : juce::Rectangle<int>(1280, 720);
+#endif
         const int screenW = area.getWidth();
         const int screenH = area.getHeight();
 
@@ -2655,6 +2667,18 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
             milkdrop->setBounds(x0, milkY, usableW, milkH);
             workspace->addModule(std::move(milkdrop), /*autoPosition*/ false);
         }
+
+        // -------- 第 5 步（macOS）：进入系统原生全屏 ----------
+        // 与双击标题栏行为一致：调用 setFullScreen(true) 进入独立 Space，
+        // 自动隐藏顶部菜单栏与 Dock。窗口尺寸已在上方按 totalArea 铺满、
+        // 模块布局已就绪；此处的原生全屏切换由系统接管，不影响已完成布局。
+        // 仅在 Standalone 下触发（插件模式窗口由宿主管理，不接管全屏）。
+        // Windows 不进入此分支，保持 userArea 伪最大化。
+#if JUCE_MAC
+        if (juce::JUCEApplicationBase::isStandaloneApp())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*>(top))
+                rw->setFullScreen(true);
+#endif
     }
 
     // 重新添加 Tamagotchi 模块到 canvas 右下角（切换预设时保留宠物不被清除）
@@ -4025,8 +4049,9 @@ void Y2KmeterAudioProcessorEditor::mouseUp(const juce::MouseEvent& e)
 //     （覆盖任务栏），并且此时主窗口是 alwaysOnTop=true 与 PopupMenu / ComboBox
 //     弹窗平级 topmost，主窗口铺满屏后 Popup 被 Z 序压住 → "右键添加模块"菜单、
 //     底部 Toolbar 里 FPS/Source 下拉都看不见。
-//   · 新方案：改走 toggleFakeFullScreen() 手动 setBounds 到当前显示器的 userArea
-//     （已扣除任务栏），Popup 依然可以在主窗口内正常弹出且可视。
+//   · 新方案：改走 toggleFakeFullScreen() —— Windows 手动 setBounds 到当前显示器的
+//     userArea（已扣除任务栏），Popup 依然可以在主窗口内正常弹出且可视；
+//     macOS 走原生 setFullScreen（覆盖菜单栏/Dock，完全全屏）。
 //
 // 踩坑记录：
 //   · JUCE 双击流程是 mouseDown → mouseUp → mouseDoubleClick，中间的 mouseDown
@@ -4099,8 +4124,10 @@ bool Y2KmeterAudioProcessorEditor::keyPressed(const juce::KeyPress& key) {
 //     B) 全屏后主窗口 alwaysOnTop=true 铺满屏，与 PopupMenu / ComboBox 弹窗平级
 //        topmost，弹窗 Z 序被压住不可见。
 //
-// 方案：手动 setBounds 到当前显示器 userArea（Windows 已扣除任务栏），并暂时
-// 放宽 constrainer 的 resize limits；退出时把 bounds 与 limits 都还原。
+// 方案（Windows）：手动 setBounds 到当前显示器 userArea（Windows 已扣除任务栏），
+// 并暂时放宽 constrainer 的 resize limits；退出时把 bounds 与 limits 都还原。
+// macOS：走原生 setFullScreen（toggleFullScreen → 独立 Space 覆盖菜单栏/Dock），
+// 不受 Windows 伪最大化副作用影响，也不应使用 userArea 伪最大化。
 //
 // 与 layoutLocked 兼容：
 //   · 若在锁定态进入，applyLayoutLocked 之前已把 constrainer min=max=当前尺寸
@@ -4114,6 +4141,14 @@ void Y2KmeterAudioProcessorEditor::toggleFakeFullScreen()
 
     auto* rw = dynamic_cast<juce::ResizableWindow*> (top);
     if (rw == nullptr) return;
+
+#if JUCE_MAC
+    // macOS 单独适配：恢复原生全屏（NSWindow toggleFullScreen → 进入独立 Space，
+    // 覆盖菜单栏与 Dock），避免 v2.5.8 的伪最大化（setBounds 到 userArea）在
+    // macOS 上留下系统菜单栏/Dock 空间。Windows 端仍走下方伪最大化路径。
+    rw->setFullScreen (! rw->isFullScreen());
+    return;
+#endif
 
     if (! pseudoFullScreen)
     {

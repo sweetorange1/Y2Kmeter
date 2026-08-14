@@ -194,7 +194,7 @@
 - **持久化协作**：Editor 构造时读 `Processor.getSavedLayoutXml` 恢复布局；`workspace->onLayoutChanged` → 写回 Processor。
 - **Windows Direct2D 处理**：首次 `visibilityChanged` 时通过 `renderingEngineConfigured` flag 强制切换到软光栅/GDI，规避 AMD `atidxx64.dll` 卸载死锁（详见头文件相关注释）。
 - **Chrome 隐藏态**：Hide 按钮收缩窗口；实现"幂等化" —— Hide 前完整快照 bounds 与 resizeLimits，Show 时直接 setBounds 回快照，避免累积漂移。
-- **双击标题栏切换全屏**（v1.8.2 新增）：`mouseDoubleClick` 中命中 `getTitleBarBounds()` 且避开三个按钮与标题文字热区后，对顶层窗口 `dynamic_cast<juce::ResizableWindow*>` 调用 `setFullScreen(!isFullScreen())`；仅 Standalone 非 chrome 隐藏态下生效，插件宿主模式不劈持。切换前先把 `draggingWindow=false` 复位，避免上一帧 `mouseDown` 启动的 `windowDragger` 残留拖拽态。
+- **双击标题栏切换全屏**（v1.8.2 新增，v2.6.0 后按平台拆分）：`mouseDoubleClick` 中命中 `getTitleBarBounds()` 且避开按钮与标题文字热区后，走 `toggleFakeFullScreen()` —— **macOS** 调用 `rw->setFullScreen(!isFullScreen())` 进入系统原生全屏（独立 Space、隐藏菜单栏/Dock）；**Windows** 保留 v2.5.8 的伪最大化（setBounds 到 userArea，避免覆盖任务栏及 PopupMenu Z 序遮挡）。仅 Standalone 非 chrome 隐藏态下生效，插件宿主模式不接管。切换前先把 `draggingWindow=false` 复位，避免上一帧 `mouseDown` 启动的 `windowDragger` 残留拖拽态。
 - **布局锁定按钮 L**（v1.8.3 新增）：位于顶栏「最小化 _」按钮左侧，从右到左依次为 `× / * / _ / L`。点击切换 `layoutLocked`，同步 `ModuleWorkspace::setLayoutLocked` 与 Processor `setLayoutLocked`（XML 属性 `layoutLocked="1"` 序列化）。锁定时：
   - 顶层窗口通过 `setResizeLimits(cur, cur, cur, cur)` 冻结尺寸（**不用 `setResizable(false, ...)`，那会重建 native 窗口导致闪现**），Editor 双击标题栏切全屏仍可用（因为 fullscreen 不走 resize limits）。
   - Editor::mouseDown 在锁定态跳过 `windowDragger.startDraggingComponent`，即无法拖动窗口。
@@ -206,7 +206,7 @@
 - **模块工厂**：`setModuleFactory(f)`，Editor 侧会按 `ModuleType` 构造具体 `ModulePanel` 派生类（见 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `createModule`）。
 - **底部 Toolbar 组件**（自左至右）：`ThemeSwatchBar` → 布局预设下拉 + Save/Load → Grid → FPS → GAIN → Source → Hide。
 - **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / tiled=4 / mv=5`。
-  - **MV (Preset 5)**：窗口铺满当前显示器 userArea（视觉等同全屏），上方 180px 横向模块条（同 Preset 2 的 7 个默认模块），下方 Milkdrop 模块占满剩余 canvas 区域。代码位于 `applyLayoutPreset` case 5。
+  - **MV (Preset 5)**：**Windows** 铺满当前显示器 userArea（视觉等同全屏）；**macOS** 铺满 totalArea 后调用 `rw->setFullScreen(true)` 进入系统原生全屏（隐藏菜单栏/Dock）。上方 180px 横向模块条（同 Preset 2 的 7 个默认模块），下方 Milkdrop 模块占满剩余 canvas 区域。代码位于 `applyLayoutPreset` case 5。
 - **拼豆像素画（PerlerImage）**：拖入图片 → 按 `cellSize`（默认 4，范围 1..15）降采样 + 每格取原图平均色 → 生成像素画 → 作为 canvas 底图；每张贴画对应一个 `PerlerImageLayer` 子 Component 与模块**同 z-order 层级**。
 - **P4 debounce**：`LayoutChangeCoalescer`（16ms 单发计时器），大量小改动只派发 1 次 `onLayoutChanged`。
 - **hit-test 挖洞**：`setHitTestHoles`，chrome 隐藏态下让浮层按钮的鼠标事件冒泡回 Editor。
@@ -1890,7 +1890,7 @@ if (motionMode != MotionMode::carried
   - top→setBounds(userArea) 铺满屏幕
   - 上方复用 preset 2 的加权宽度分配逻辑
   - 下方 Milkdrop = createModule(Milkdrop) + setBounds(x0, milkY, usableW, milkH)
-- 技术说明：未使用 `setFullScreen()`（会创建独立 HWND 改变消息循环，与 auto-hide 冲突），改用普通窗口 setBounds 到 userArea
+- 技术说明（v2.6.0 后按平台拆分）：**Windows** 未使用 `setFullScreen()`（会创建独立 HWND 改变消息循环，与 auto-hide 冲突），改用普通窗口 setBounds 到 userArea；**macOS** 改用 totalArea 布局后调用 `rw->setFullScreen(true)` 进入系统原生全屏，实现与双击标题栏一致的完全全屏效果。
 
 ---
 
@@ -2837,6 +2837,23 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 - **`copyDirectoryTo` 是合并而非替换**：JUCE 文件 API 的语义是"把源内容合并到目标"，不会删除目标已有的多余文件。要全量替换必须先用 `deleteRecursively()` 清空目标。
 - **安装器组件绑定与运行时 seed 的互补关系**：仅靠运行时 seed 不能解决"用户只装 VST3 不装 Standalone"的场景（VST3 旁无 seed 源）；仅靠安装器部署不能解决"开发期 IDE 直接运行"的场景。两者必须同时存在、互为兜底。
 - **枚举值追加顺序影响持久化**：`ThemeId` 按枚举整数值存入配置文件。新增主题必须追加到末尾（包括 `custom` 之后），否则已保存的自定义主题 `custom=11` 会漂移到其他主题上。
+
+---
+
+### 6.42 v2.6.0 后续修复：双击标题栏 / MV 预设全屏按平台拆分（macOS 原生全屏 + Windows 伪最大化）
+
+**背景**：v2.5.8 为修复 Windows 无边框窗口 `setFullScreen` 覆盖任务栏 + PopupMenu 不可见的问题，把"双击标题栏全屏"和"MV 预设全屏"统一改成"伪最大化"——`setBounds(display->userArea)`。但 `userArea` 在 macOS 上同样会扣除顶部菜单栏与 Dock，导致 macOS 端全屏后仍留出系统栏空间，出现两个回归：
+1. 双击标题栏无法完全全屏；
+2. MV 预设只铺满 userArea，未进入系统原生全屏（菜单栏/Dock 仍显示）。
+
+**修复**（[PluginEditor.cpp](/Users/jy/CLionProjects/Y2Kmeter/PluginEditor.cpp)，仅 macOS 分支，Windows 保持不变）：
+- `toggleFakeFullScreen()`：顶部新增 `#if JUCE_MAC` 分支，macOS 直接 `rw->setFullScreen(!rw->isFullScreen())` 走系统原生全屏（`NSWindow toggleFullScreen` → 独立 Space，自动隐藏菜单栏/Dock）；Windows 继续走下方 userArea 伪最大化逻辑。
+- `applyLayoutPreset()` case 5（MV）：macOS 布局区域改用 `display->totalArea`（完整显示器尺寸，与原生全屏后的窗口尺寸一致），并在布局完成后追加 `rw->setFullScreen(true)` 进入系统原生全屏；Windows 仍用 `userArea`，不调用原生全屏。
+
+**跨平台隔离**：两处均用 `#if JUCE_MAC` 包裹，macOS 原生全屏 / Windows 伪最大化完全隔离；macOS 的 `setFullScreen(true)` 幂等（JUCE 内部判断 `shouldBeFullScreen == isFullScreen()` 时不重复 toggle），且 MV 预设的 macOS 原生全屏仅在 `isStandaloneApp()` 时触发（插件模式窗口由宿主管理）。
+
+**教训**：
+- `Displays::Display::userArea` 在 Windows 是"扣除任务栏的工作区"，在 macOS 是"扣除菜单栏/Dock 的安全区"；凡"伪全屏/铺满"逻辑按平台用 `userArea`/`totalArea` 时，macOS 若需"真正全屏"必须显式走原生 `setFullScreen`，仅 setBounds 到 totalArea 无法隐藏菜单栏/Dock（macOS 菜单栏/Dock 以更高窗口层级显示）。
 
 ---
 

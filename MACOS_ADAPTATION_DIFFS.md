@@ -710,3 +710,35 @@ struct SystemLookAndFeel : juce::LookAndFeel_V4 {
 | **AppData 空目录 vs bundle 内合法资源** | "存在即采纳"的资源查找策略在遇到旧版本残留空目录时会屏蔽 bundle 内的合法资源。资源查找应该基于**内容有效性**（至少 N 个子文件 / 特定后缀）而非**存在性**判空。 |
 | **DMG 瘦身 · 三端 bundle 共享大资源** | Milkdrop 预设约 200 MB × 3 (Standalone/VST3/AU) = 600 MB 冗余。改为"Standalone 内置作 seed 源，首次运行时 copy 到 AppData，插件读共享 AppData"后 DMG 直接减 400+ MB。副作用：只装插件不装 Standalone 的用户需手动放预设，README 需说明。 |
 | **macOS Application Support 规范** | `~/Library/` 根目录不应直接放 app 私有数据，应走 `~/Library/Application Support/<AppName>/`。JUCE `PropertiesFile::Options` 里通过 `osxLibrarySubFolder = "Application Support"` 一行搞定。 |
+
+---
+
+## 全屏行为跨平台适配（v2.6.0 后续修复，不升级版本号）
+
+### 背景与根因
+
+v2.5.8 为修复 Windows 无边框窗口（`setUsingNativeTitleBar(false)`）调用 `setFullScreen` 走 `SW_SHOWMAXIMIZED` 时覆盖任务栏、且 `alwaysOnTop` 主窗口压住 PopupMenu 的问题，把"双击标题栏全屏"与"MV 布局预设全屏"统一改为**伪最大化**：`setBounds(display->userArea)`。
+
+`Displays::Display::userArea` 在 Windows 上等于"扣除任务栏的工作区"，但在 macOS 上等于"扣除顶部菜单栏与 Dock 的安全区"。该改动未做平台隔离，导致 macOS 端出现两个回归：
+1. 双击标题栏只能铺满 userArea，留出系统菜单栏/Dock 空间，无法完全全屏；
+2. MV 预设（`applyLayoutPreset` case 5）同样只铺满 userArea，未调用系统原生全屏接口，菜单栏/Dock 仍显示。
+
+### 修复内容（仅 [PluginEditor.cpp](/Users/jy/CLionProjects/Y2Kmeter/PluginEditor.cpp)，macOS 分支）
+
+| 位置 | macOS 行为 | Windows 行为 |
+|------|-----------|-------------|
+| `toggleFakeFullScreen()` | 顶部 `#if JUCE_MAC` 分支直接 `rw->setFullScreen(!rw->isFullScreen())`，进入系统原生全屏（`NSWindow toggleFullScreen` → 独立 Space，隐藏菜单栏/Dock），与双击标题栏历史行为一致 | 保持 v2.5.8 伪最大化：`setBounds(userArea)` + 放宽/恢复 resizeLimits |
+| `applyLayoutPreset()` case 5（MV） | 布局区域用 `display->totalArea`（完整显示器尺寸），布局完成后 `rw->setFullScreen(true)` 进入系统原生全屏 | 继续 `display->userArea` 伪最大化，不调用原生全屏 |
+
+### 关键实现细节
+
+- macOS MV 预设顺序：先按 `totalArea` 铺满并完成模块布局（上方 7 模块条 + 下方 Milkdrop），再 `setFullScreen(true)` 进入原生全屏；原生全屏后的窗口尺寸即 totalArea，二者不冲突。
+- `setFullScreen(true)` 幂等：若窗口已处于全屏，JUCE 内部判断 `shouldBeFullScreen == isFullScreen()` 后不重复 toggle。
+- macOS 原生全屏仅在 `juce::JUCEApplicationBase::isStandaloneApp()` 为真时触发，插件模式（AU/VST3）窗口由宿主管理，不接管全屏。
+- 两处均用 `#if JUCE_MAC` 包裹，Windows 路径完全不进入，保证跨平台隔离。
+
+### 教训
+
+| 类别 | 教训 |
+|------|------|
+| **`Displays::Display::userArea` 平台语义差异** | `userArea` 在 Windows = 扣除任务栏的工作区，在 macOS = 扣除菜单栏/Dock 的安全区。任何"伪全屏/铺满"逻辑若跨平台共用 `userArea`，macOS 上会留出系统栏空间。macOS 需要"真正全屏"时必须显式走原生 `ResizableWindow::setFullScreen`（`NSWindow toggleFullScreen`），仅 setBounds 到 `totalArea` 无法隐藏菜单栏/Dock（它们以更高窗口层级显示）。 |
