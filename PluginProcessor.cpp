@@ -446,6 +446,14 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     // 新手引导完成状态：始终写入，区分"未完成"与"旧存档中缺失"
     root.setProperty ("tutorialCompleted", tutorialCompleted, nullptr);
 
+    // Milkdrop 整体染色 + 效果（全局状态）
+    root.setProperty ("milkdropTintR",  (double) savedMilkdropVisualState_.tint_r,  nullptr);
+    root.setProperty ("milkdropTintG",  (double) savedMilkdropVisualState_.tint_g,  nullptr);
+    root.setProperty ("milkdropTintB",  (double) savedMilkdropVisualState_.tint_b,  nullptr);
+    root.setProperty ("milkdropBrightness", (double) savedMilkdropVisualState_.brightness, nullptr);
+    root.setProperty ("milkdropInvert",  savedMilkdropVisualState_.invert,  nullptr);
+    root.setProperty ("milkdropShadows", savedMilkdropVisualState_.shadows, nullptr);
+
     if (savedLayoutXml.isNotEmpty())
     {
         if (auto layoutXml = juce::parseXML(savedLayoutXml))
@@ -491,6 +499,20 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
         tutorialCompleted = (bool) root.getProperty ("tutorialCompleted");
     else
         tutorialCompleted = true;   // old settings file → user already has experience
+
+    // Milkdrop 整体染色 + 效果（旧存档缺失时保持默认值）
+    if (root.hasProperty ("milkdropTintR"))
+        savedMilkdropVisualState_.tint_r = (float) (double) root.getProperty ("milkdropTintR", 1.0);
+    if (root.hasProperty ("milkdropTintG"))
+        savedMilkdropVisualState_.tint_g = (float) (double) root.getProperty ("milkdropTintG", 1.0);
+    if (root.hasProperty ("milkdropTintB"))
+        savedMilkdropVisualState_.tint_b = (float) (double) root.getProperty ("milkdropTintB", 1.0);
+    if (root.hasProperty ("milkdropBrightness"))
+        savedMilkdropVisualState_.brightness = (float) (double) root.getProperty ("milkdropBrightness", 1.0);
+    if (root.hasProperty ("milkdropInvert"))
+        savedMilkdropVisualState_.invert = (bool) root.getProperty ("milkdropInvert", false);
+    if (root.hasProperty ("milkdropShadows"))
+        savedMilkdropVisualState_.shadows = (bool) root.getProperty ("milkdropShadows", false);
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())

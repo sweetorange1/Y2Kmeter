@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.6.0`）
+- **产品名**：`Y2Kmeter` （版本：`2.6.1`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -145,7 +145,8 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；**v2.6.1：color 面板 RGB+Bright 四行滑块（bright 非线性映射，中点=1.0）+ effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复 + 诊断日志**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + `invert` + `shadows` + `isNeutral()`；由 Editor 全局共享并持久化到 Processor host state） | — |
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2837,6 +2838,54 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 - **`copyDirectoryTo` 是合并而非替换**：JUCE 文件 API 的语义是"把源内容合并到目标"，不会删除目标已有的多余文件。要全量替换必须先用 `deleteRecursively()` 清空目标。
 - **安装器组件绑定与运行时 seed 的互补关系**：仅靠运行时 seed 不能解决"用户只装 VST3 不装 Standalone"的场景（VST3 旁无 seed 源）；仅靠安装器部署不能解决"开发期 IDE 直接运行"的场景。两者必须同时存在、互为兜底。
 - **枚举值追加顺序影响持久化**：`ThemeId` 按枚举整数值存入配置文件。新增主题必须追加到末尾（包括 `custom` 之后），否则已保存的自定义主题 `custom=11` 会漂移到其他主题上。
+
+## v2.6.1：Milkdrop 后处理效果系统（color/effects 面板）+ 脱离模式渲染修复
+
+本章记录 v2.6.1 版本相对 v2.6.0 的改动：将 bright 从 effects 移到 color 面板、effects 简化为纯开关、修复脱离模式非默认值导致视频不渲染的 bug，并增强 bright / shadows 效果观感。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/modules/MilkdropVisualState.h`](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | **新增**：`MilkdropVisualState` 结构体（`tint_r/g/b` + `brightness` + `invert` + `shadows` + `isNeutral()`），统一后处理视觉状态 |
+| [`PluginProcessor.h/.cpp`](/I:/Y2KMeter/PluginProcessor.h) | 新增 `savedMilkdropVisualState_` 成员与 set/get 接口；`getStateInformation` / `setStateInformation` 序列化/反序列化（旧存档缺失时用默认值向后兼容） |
+| [`PluginEditor.h/.cpp`](/I:/Y2KMeter/PluginEditor.h) | 新增 `SetMilkdropVisualState()` / `GetMilkdropVisualState()`（UI 写 / GL 读，内部加锁）；`SuspendMilkdropEditorRendererForFloating()` 的 GLEW `reload()` 时机修正 |
+| [`source/ui/modules/MilkdropModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | color/effects 面板重构；bright 非线性映射；GLView offscreen 渲染路径修复；tint shader 公式；诊断日志 |
+
+### 改动 1：统一视觉状态 + 持久化
+
+- 新增 `MilkdropVisualState` 轻量结构体，集中承载 RGB 加性偏移、bright 增益、invert/shadows 开关，后续可扩展更多效果字段而不改接口签名。
+- `PluginProcessor` 以 `savedMilkdropVisualState_` 持久化到 host state（顶层 XML 属性），软件关闭重开可复原。
+- `PluginEditor` 以 `milkdrop_visual_state_` 全局共享，所有 Milkdrop 模块同一状态；UI 线程 `Set` 写、GL 线程 `Get` 读，写时同步回 Processor。
+
+### 改动 2：color / effects 面板交互
+
+- **color 面板**：从 3 行（R/G/B）扩为 4 行（`R / G / B / Bri`），bright 从 effects 面板移回 color 面板；Reset 同时重置四行。
+- **effects 面板**：简化为 `invert` / `shadows` 两个纯开关按钮（按下=开启、弹起=关闭），去掉左侧效果名标签，Reset 仅重置两个开关。
+- **自动隐藏抑制**：`checkOverlayAutoHide()` 在 color/effects/auto 面板展开时直接跳过自动隐藏；鼠标拖动滑块时刷新 idle 计时器，避免调整参数时控制台中途消失。
+
+### 改动 3：bright 效果增强
+
+- shader 从软 gamma `pow(c, 1/brightness)` 改为**纯线性增益** `c.rgb *= uBrightness`（对齐 MilkDrop3 的 `ret *= brightness`），上限从 2 提到 **8**（对齐 MilkDrop3 的 1~8 范围），`1.0` 为中性点。
+- bright 滑块改为**非线性映射**：分段二次曲线（ease-in / ease-out），使 `brightness=1.0` 恰好位于滑块正中间（比例 0.5），左端 0.0、右端 8.0，靠近两端时变化率放缓，便于精细调节暗部与强发光区域。
+
+### 改动 4：shadows 效果优化
+
+- 从全局平方 `c.rgb *= c.rgb` 改为**暗部针对性压暗并保留高光**：用亮度掩码 `smoothstep` 只对暗部做平方，高光基本不受影响，观感更接近 MilkDrop3 反馈环内的暗部增强。
+
+### 改动 5：脱离模式 FBO 渲染修复
+
+- GLView offscreen 渲染路径**对齐 Editor 嵌入态**：在 `openglRenderFrameFbo` 前先 `glBindFramebuffer(scale_fbo_)` + `glViewport` + `glScissor` + `glClear`，否则 projectM 画面不写入 `scale_fbo_`（纹理保持全黑）。
+- fallback 路径修正：`openglRenderFrame` 内部强制 `glBindFramebuffer(0)`，改为**先渲染到 framebuffer 0，再跨 FBO `glBlitFramebuffer` 到 `scale_fbo_`**（与 Editor 降级路径一致）。
+- GLEW `reload()` 时机修正：`Suspend` 无条件重载（不再受 `isAttached()` 早退影响）；`Detach` 仅在恢复 Editor renderer 分支里、`Resume` 之前重载，避免退出路径卡死。
+- 新增节流诊断日志（前缀 `[MilkdropGLView]`），落盘到 exe 同目录 `Y2Kmeter_debug.log`。
+
+### 踩坑记录
+
+1. **脱离模式非默认值不渲染的根因是 FBO 状态缺失，而非 GLEW**：前几轮误判为 GLEW `reload()` 时机问题，实际根因是 GLView offscreen 路径没有像 Editor 那样在 `openglRenderFrameFbo` 前 bind FBO + clear，导致 `scale_fbo_` 保持全黑，后处理对黑纹理做加性偏移/反相 → 纯色 / 纯黑 / 纯白。对齐 Editor 渲染路径后解决。
+2. **`openglRenderFrame` 内部强制 bind FBO0**：fallback 路径不能预先绑定 `scale_fbo_` 并期望它渲染到该 FBO，必须先渲染到 FBO0 再跨 FBO blit。
+3. **bright 软 knee 公式分母错误导致双向变暗**：`c/(1+c*(b-1))` 中的 `c` 已是乘过增益后的值，`b>1` 时分母被放大、画面反被压暗。恢复纯线性增益 + 最终 clamp。
+4. **bright 线性映射默认值位于最左端**：改为分段二次曲线（ease-in/ease-out）后，默认值 1.0 位于中点，符合操作直觉，两端变化率放缓更利于精细调节。
 
 ---
 

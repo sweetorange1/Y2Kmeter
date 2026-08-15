@@ -11,6 +11,7 @@
 class ModuleWorkspace;
 class ModulePanel;
 enum class ModuleType;
+class MilkdropTintPass;  // 整体染色后处理着色器，完整定义在 MilkdropModule.h
 
 // ==========================================================
 // Y2KmeterAudioProcessorEditor —— 多模块框架版
@@ -59,6 +60,12 @@ public:
     // 持有的 projectM handle，避免 Windows/GLEW 下跨上下文多 handle 崩溃。
     void SuspendMilkdropEditorRendererForFloating();
     void ResumeMilkdropEditorRendererAfterFloating();
+
+    // 整体视觉状态（master output colors 染色 + bright/invert/shadows 等效果），
+    // 全局共享（所有 Milkdrop 模块同一状态）。UI 线程调用 SetMilkdropVisualState 写，
+    // GL 线程调用 GetMilkdropVisualState 读（内部加锁）；写时同步回 Processor 以便持久化。
+    void SetMilkdropVisualState(const MilkdropVisualState& state);
+    MilkdropVisualState GetMilkdropVisualState() const;
 
     Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcessor&);
     ~Y2KmeterAudioProcessorEditor() override;
@@ -543,6 +550,18 @@ private:
     int    milkdrop_render_scale_ = 1;  // 1=全分辨率, 2=半分辨率, 4=1/4分辨率
     int    milkdrop_last_fbo_w_   = 0;
     int    milkdrop_last_fbo_h_   = 0;
+
+    // 整体染色后处理（master output colors）：projectM 渲染到 milkdrop_render_fbo_ 后，
+    // 若染色增益非 (1,1,1)，先经着色器采样到 milkdrop_post_fbo_，再 blit 到各模块。
+    std::unique_ptr<MilkdropTintPass> milkdrop_tint_pass_;
+    GLuint milkdrop_post_fbo_ = 0;   ///< 染色后处理输出 FBO
+    GLuint milkdrop_post_tex_ = 0;   ///< 染色后处理输出纹理
+    int    milkdrop_post_w_   = 0;   ///< 当前 post FBO 宽度
+    int    milkdrop_post_h_   = 0;   ///< 当前 post FBO 高度
+
+    // 全局视觉状态（UI 线程写，GL 线程读，mutex 保护）
+    mutable std::mutex milkdrop_visual_mutex_;
+    MilkdropVisualState milkdrop_visual_state_;
 
     // 浮动窗口共享帧：renderOpenGL 抓取离线 FBO 内容 → 浮动 Milkdrop 读取
     juce::Image       milkdrop_shared_frame_;

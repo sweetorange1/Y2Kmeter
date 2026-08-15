@@ -197,7 +197,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.6.0");
+const int versionW = versionFont.getStringWidth ("v2.6.1");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -238,7 +238,7 @@ const int versionW = versionFont.getStringWidth ("v2.6.0");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.6.0";
+const juce::String versionText = "v2.6.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -789,6 +789,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
       DBG("!! Logo image is null after load: size="
           << BinaryData::logo_pngSize << " bytes");
     }
+
+    // 从 Processor 读回上次保存的 Milkdrop 整体视觉状态（染色 + 效果），
+    // 实现关闭→重开复原。
+    milkdrop_visual_state_ = processor.getSavedMilkdropVisualState();
 
     initLookAndFeel();
 
@@ -3038,7 +3042,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.6.0";
+const juce::String versionText = "v2.6.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3046,7 +3050,7 @@ const juce::String versionText = "v2.6.0";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.6.0");
+        const int versionW = versionFont.getStringWidth ("v2.6.1");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4620,6 +4624,12 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
   juce::gl::glGenFramebuffers(1, &milkdrop_render_fbo_);
   juce::gl::glGenTextures(1, &milkdrop_render_tex_);
 
+  // 创建整体染色后处理着色器（master output colors）。
+  // 编译失败不致命，仅关闭染色能力；post FBO 纹理在 renderOpenGL 里按需分配。
+  milkdrop_tint_pass_.reset(new MilkdropTintPass(openGLContext));
+  if (!milkdrop_tint_pass_->init())
+    milkdrop_tint_pass_.reset();
+
   milkdrop_render_ready_ = true;
 
 }
@@ -4826,10 +4836,54 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   }
 
   // ================================================================
+  // 整体染色后处理（master output colors）：projectM → render FBO → post FBO → 各模块
+  // ================================================================
+  const auto visual_state = GetMilkdropVisualState();
+  const bool tint_active = !visual_state.isNeutral();
+
+  GLuint blit_source_fbo = milkdrop_render_fbo_;
+  if (tint_active) {
+    // 分配 / 重分配 post FBO（与 render FBO 同尺寸）
+    if (milkdrop_post_fbo_ == 0) {
+      juce::gl::glGenFramebuffers(1, &milkdrop_post_fbo_);
+      juce::gl::glGenTextures(1, &milkdrop_post_tex_);
+    }
+    if (milkdrop_post_w_ != fbo_w || milkdrop_post_h_ != fbo_h) {
+      juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_post_tex_);
+      juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
+                             fbo_w, fbo_h, 0,
+                             juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE, nullptr);
+      juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                                juce::gl::GL_TEXTURE_MIN_FILTER,
+                                juce::gl::GL_LINEAR);
+      juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                                juce::gl::GL_TEXTURE_MAG_FILTER,
+                                juce::gl::GL_LINEAR);
+      juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
+      juce::gl::glFramebufferTexture2D(juce::gl::GL_FRAMEBUFFER,
+                                       juce::gl::GL_COLOR_ATTACHMENT0,
+                                       juce::gl::GL_TEXTURE_2D,
+                                       milkdrop_post_tex_, 0);
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+      milkdrop_post_w_ = fbo_w;
+      milkdrop_post_h_ = fbo_h;
+    }
+
+    // 后处理：采样 render FBO 纹理 → post FBO
+    if (milkdrop_tint_pass_ != nullptr && milkdrop_tint_pass_->isReady()) {
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
+      juce::gl::glViewport(0, 0, fbo_w, fbo_h);
+      milkdrop_tint_pass_->apply(milkdrop_render_tex_, visual_state);
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+      blit_source_fbo = milkdrop_post_fbo_;
+    }
+  }
+
+  // ================================================================
   // 跨 FBO blit：offscreen FBO → FBO 0，搬运到各模块正确位置
   // ================================================================
-  juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER,
-                               milkdrop_render_fbo_);
+  juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, blit_source_fbo);
   juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER, 0);
 
   std::function<void(juce::Component*)> blitToModules =
@@ -4959,6 +5013,19 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
     gEditorProjectMInstances.store(0);
     api.resetGlewInitialization();
   }
+  // 销毁整体染色后处理着色器与 post FBO
+  if (milkdrop_tint_pass_ != nullptr) {
+    milkdrop_tint_pass_->shutdown();
+    milkdrop_tint_pass_.reset();
+  }
+  if (milkdrop_post_fbo_ != 0) {
+    juce::gl::glDeleteFramebuffers(1, &milkdrop_post_fbo_);
+    milkdrop_post_fbo_ = 0;
+  }
+  if (milkdrop_post_tex_ != 0) {
+    juce::gl::glDeleteTextures(1, &milkdrop_post_tex_);
+    milkdrop_post_tex_ = 0;
+  }
   if (milkdrop_render_fbo_ != 0) {
     juce::gl::glDeleteFramebuffers(1, &milkdrop_render_fbo_);
     milkdrop_render_fbo_ = 0;
@@ -4981,11 +5048,22 @@ void Y2KmeterAudioProcessorEditor::SuspendMilkdropEditorRendererForFloating() {
   // 避免与 GLView 的本地 projectM handle 共存导致 GLEW 全局状态互相干扰。
   milkdrop_renderer_suspended_ = true;
 
-  if (!openGLContext.isAttached()) return;
+  if (openGLContext.isAttached()) {
+    openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
+      openGLContextClosing();
+    }, true);
+  }
 
-  openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
-    openGLContextClosing();
-  }, true);
+  // Windows/GLEW：Editor handle 已销毁（若存在）。无论 Editor GL 是否 attached
+  // 都必须彻底重载 projectM/GLEW DLL，让进程全局的 GL 函数指针表归零。否则
+  // GLView 本地上下文再 create 时，projectM 内部仍残留 Editor HGLRC 的旧指针：
+  //   · framebuffer 0 直接渲染碰巧兼容，所以"默认参数"正常；
+  //   · 渲染到自定义 FBO（scale_fbo_）时 glBindFramebuffer 指向旧上下文，
+  //     静默失败 → scale_fbo_ 全黑 → 后处理对黑纹理做偏移/反相，表现为纯色/纯黑/纯白。
+  // 这正是"脱离模式下修改任意参数后画面异常"的根因。
+#if defined(_WIN32)
+  projectm_api::Api::instance().reload();
+#endif
 }
 
 void Y2KmeterAudioProcessorEditor::ResumeMilkdropEditorRendererAfterFloating() {
@@ -5075,5 +5153,19 @@ void Y2KmeterAudioProcessorEditor::RequestMilkdropRenderScale() {
   int s = milkdrop_render_scale_;
   s = (s == 1) ? 2 : (s == 2) ? 4 : 1;
   milkdrop_render_scale_ = s;
+}
+
+void Y2KmeterAudioProcessorEditor::SetMilkdropVisualState(const MilkdropVisualState& state) {
+  {
+    std::lock_guard<std::mutex> lock(milkdrop_visual_mutex_);
+    milkdrop_visual_state_ = state;
+  }
+  // 同步写回 Processor，作为 host state 顶层属性持久化（关闭→重开复原）。
+  processor.setSavedMilkdropVisualState(state);
+}
+
+MilkdropVisualState Y2KmeterAudioProcessorEditor::GetMilkdropVisualState() const {
+  std::lock_guard<std::mutex> lock(milkdrop_visual_mutex_);
+  return milkdrop_visual_state_;
 }
 

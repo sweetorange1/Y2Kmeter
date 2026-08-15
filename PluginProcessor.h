@@ -3,6 +3,8 @@
 #include <JuceHeader.h>
 #include <atomic>
 
+#include "source/ui/modules/MilkdropVisualState.h"
+
 // 前向声明（AnalyserHub 的完整头下沉到 .cpp，规避 MSVC 多文件同进程编译时
 // include guard 跨 TU 串扰问题）
 class AnalyserHub;
@@ -121,6 +123,21 @@ public:
     //   Editor 构造时注册，析构时清空。
     std::function<void()> flushPendingUiStateBeforeSave;
 
+    // ---- Milkdrop 整体染色 + 效果持久化（全局状态，所有 Milkdrop 模块共享）----
+    //   · tint_r/g/b 为加性偏移系数（master output colors），默认 1.0 = 中性；
+    //   · brightness 为软 gamma 亮度系数，默认 1.0；
+    //   · invert / shadows 为效果开关；
+    //   · Editor 每次 SetMilkdropVisualState 时同步写回，序列化到 host state
+    //     顶层属性；Editor 构造时读回，实现关闭→重开软件后复原。
+    void setSavedMilkdropVisualState (const MilkdropVisualState& state) noexcept
+    {
+        savedMilkdropVisualState_ = state;
+    }
+    const MilkdropVisualState& getSavedMilkdropVisualState() const noexcept
+    {
+        return savedMilkdropVisualState_;
+    }
+
     // ---- 兼容旧接口（供 EqModule 使用，内部转发到 AnalyserHub）----
     double getCurrentSampleRate() const noexcept;
     void getOscilloscopeSnapshot(juce::Array<float>& dest);   // 返回 L 声道
@@ -151,6 +168,9 @@ private:
     // 插件 Editor 最近一次窗口尺寸（0 = 未保存）
     int savedEditorWidth  = 0;
     int savedEditorHeight = 0;
+
+    // Milkdrop 整体染色 + 效果（全局状态，持久化到 host state）
+    MilkdropVisualState savedMilkdropVisualState_;
 
     // processBlock 时间占比测量器（JUCE 内置，读写原子，实时线程友好）
     juce::AudioProcessLoadMeasurer loadMeasurer;

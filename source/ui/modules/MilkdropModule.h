@@ -9,6 +9,7 @@
 #include "projectM-4/types.h"
 #include "source/ui/ModuleWorkspace.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/ui/modules/MilkdropVisualState.h"
 
 class Y2KmeterAudioProcessorEditor;  // 前向声明，用于 Milkdrop 脱离后仍能桥接项目M状态
 
@@ -70,6 +71,60 @@ class Y2KmeterAudioProcessorEditor;  // 前向声明，用于 Milkdrop 脱离后
 //   每个 GLView 有独立的 OpenGLContext（自己的 GL 线程 + surface），
 //   projectM handle 与 context 一一绑定；多个 Milkdrop 模块并存时
 //   相互不干扰。projectM::Api 是单例但只做函数指针查找，无实例状态。
+// ==========================================================
+// MilkdropTintPass —— projectM 输出帧的整体视觉后处理着色器
+//
+// 负责在 projectM 渲染完成后、blit 到各模块之前，对 offscreen FBO 采样并应用
+// 完整视觉状态（MilkdropVisualState）：
+//   · tint_r/g/b  加性偏移染色（master output colors）：uTint=(1,1,1) 为中性点，
+//                 调高让整体（含黑色）偏向该色，调低偏向补色。
+//   · brightness  bright 增益：c *= brightness（对齐 MilkDrop3 的 ret *= brightness），
+//                 范围 0~8；1.0 中性，>1 提亮（暗部大幅抬升、高光溢出），
+//                 <1 压暗。后处理阶段为纯线性增益 + 最终 clamp。
+//   · invert      反相 / 负片（对应 MilkDrop3 的 ret = 1 - ret）。
+//   · shadows     暗部针对性压暗并保留高光（亮度掩码 + 平方，而非全局平方）。
+// libprojectM 4 没有对应运行时效果调节 API，故此处用全屏后处理 pass 模拟。
+//
+// 使用约束：
+//   · init() / shutdown() / apply() 都必须在持有活动 OpenGL 上下文的 GL 线程
+//     调用（分别对应 newOpenGLContextCreated / openGLContextClosing / renderOpenGL）。
+//   · macOS Core Profile 用 GLSL 150 + VAO；Windows Compatibility 用 GLSL 120，
+//     避免 Windows 端强制 Core Profile 导致 projectM 预设 shader 编译失败的历史问题。
+// ==========================================================
+class MilkdropTintPass
+{
+public:
+    explicit MilkdropTintPass (juce::OpenGLContext& context);
+
+    // GL 线程调用：编译着色器并建立全屏三角形顶点缓冲。
+    bool init();
+    // GL 线程调用：释放全部 GL 资源。
+    void shutdown();
+
+    // GL 线程调用：采样 srcTex，应用完整视觉状态（RGB 染色 + bright/invert/shadows
+    // 效果），把全屏三角形绘制到当前绑定的 framebuffer。
+    void apply (GLuint srcTex, const MilkdropVisualState& state);
+
+    bool isReady() const noexcept { return ready_; }
+    juce::String getLastError() const { return lastError_; }
+
+private:
+    juce::OpenGLContext& context_;
+    std::unique_ptr<juce::OpenGLShaderProgram> program_;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLint  texLoc_ = -1;
+    GLint  tintLoc_ = -1;
+    GLint  brightnessLoc_ = -1;
+    GLint  invertLoc_ = -1;
+    GLint  shadowsLoc_ = -1;
+    bool   coreProfile_ = false;
+    bool   ready_ = false;
+    juce::String lastError_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilkdropTintPass)
+};
+
 // ==========================================================
 class MilkdropModule : public ModulePanel,
                        public AnalyserHub::FrameListener
@@ -222,6 +277,10 @@ private:
         int    scale_fbo_w_   = 0;   ///< 当前 FBO 宽度（像素）
         int    scale_fbo_h_   = 0;   ///< 当前 FBO 高度（像素）
 
+        // 整体染色后处理着色器（浮动态 / macOS 本地 GL 上下文渲染路径使用）。
+        // 在 newOpenGLContextCreated 创建并初始化，openGLContextClosing 释放。
+        std::unique_ptr<MilkdropTintPass> tint_pass_;
+
         /// 确保离屏 FBO 尺寸与 render_w×render_h 匹配，必要时重建。
         /// 必须在 GL 线程调用。
         void EnsureScaleFbo(int render_w, int render_h);
@@ -329,7 +388,7 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
 
@@ -353,6 +412,29 @@ private:
     void updateAutoIntervalFromSlider(float proportion);
     void applyAutoInterval(float seconds);
 
+    // ---- 整体染色控制（color 按钮 + RGB/Bright 控制器）----
+    void toggleColorPanel();                                            ///< 展开/收起染色控制器
+    void paintColorPanel(juce::Graphics& g, juce::Rectangle<int> topBar);
+    juce::Rectangle<int> getColorPanelBounds(juce::Rectangle<int> topBar) const;
+    juce::Rectangle<int> getTintSliderBounds(juce::Rectangle<int> panel, int row) const;
+    juce::Rectangle<int> getTintResetBounds(juce::Rectangle<int> panel) const;
+    void syncVisualFromEditor();                                        ///< 从 Editor 全局视觉状态读回本地缓存
+    void applyVisualToEditor();                                         ///< 写回 Editor 全局视觉状态
+    void updateTintFromSlider(int row, float proportion);               ///< 0=R,1=G,2=B,3=Bright
+
+    // Bright 滑块非线性映射：使中性点 brightness=1.0 位于滑块正中间（比例 0.5），
+    // 左端 0.0、右端 8.0，靠近两端时变化率放缓，便于精细调节暗部与强发光区域。
+    static float SliderProportionToBrightness(float proportion);        ///< 滑块比例(0~1) → bright 增益(0~8)
+    static float BrightnessToSliderProportion(float brightness);        ///< bright 增益(0~8) → 滑块比例(0~1)
+
+    // ---- 效果控制（effects 按钮 + invert/shadows 开关）----
+    void toggleEffectsPanel();                                          ///< 展开/收起效果控制器
+    void paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> topBar);
+    juce::Rectangle<int> getEffectsPanelBounds(juce::Rectangle<int> topBar) const;
+    juce::Rectangle<int> getEffectsToggleBounds(juce::Rectangle<int> panel, int row) const;
+    juce::Rectangle<int> getEffectsResetBounds(juce::Rectangle<int> panel) const;
+    void toggleEffectSwitch(int row);                                   ///< 0=invert,1=shadows 切换开关
+
     // Auto-hide 逻辑（由 GLView::timerCallback 在 UI 线程驱动，30Hz 轮询）：
     //   · 检测 !hasKeyboardFocus → 窗口失焦即隐藏
     //   · 检测 idle > 4s → 长时间不操作 overlay 自动隐藏
@@ -373,6 +455,24 @@ private:
     static constexpr int   kResBtnW  = 32;  // [1:n] 渲染缩放按钮
     static constexpr float kMinAutoInterval = 1.0f;
     static constexpr float kMaxAutoInterval = 60.0f;
+
+    // ---- 整体视觉状态（master output colors + effects）----
+    MilkdropVisualState visualState_;          ///< 本地缓存：完整视觉状态
+    bool isColorPanelOpen_ { false };          ///< 染色控制器是否展开
+    bool isEffectsPanelOpen_ { false };        ///< 效果控制器是否展开
+    int  draggingTintRow_ { -1 };              ///< 正在拖动的滑块行（0=R,1=G,2=B,3=Bright；-1=无）
+    juce::Rectangle<int> cachedColorPanelRect_;  ///< 缓存染色面板区域，供 hit-test
+    juce::Rectangle<int> cachedTintResetRect_;   ///< 缓存染色 Reset 按钮区域，供 hit-test
+    juce::Rectangle<int> cachedEffectsPanelRect_; ///< 缓存效果面板区域，供 hit-test
+    juce::Rectangle<int> cachedEffectsResetRect_; ///< 缓存效果 Reset 按钮区域，供 hit-test
+    static constexpr float kColorPanelHeight = 104.0f; ///< 染色控制器面板高度（标题 + 4 行）
+    static constexpr float kEffectsPanelHeight = 66.0f; ///< 效果控制器面板高度（标题 + 2 开关）
+    static constexpr int   kColorBtnW = 32;             ///< color 按钮宽度（与 auto 一致）
+    static constexpr int   kEffectsBtnW = 42;           ///< effects 按钮宽度
+    static constexpr float kTintMin = 0.0f;             ///< RGB 加性偏移下限（0%）
+    static constexpr float kTintMax = 2.0f;             ///< RGB 加性偏移上限（200%）
+    static constexpr float kBrightMin = 0.0f;           ///< bright 增益下限
+    static constexpr float kBrightMax = 8.0f;           ///< bright 增益上限（对齐 MilkDrop3 的 1~8）
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilkdropModule)
 };

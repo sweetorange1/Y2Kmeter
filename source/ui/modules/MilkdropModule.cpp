@@ -564,6 +564,214 @@ namespace
 }
 
 // ==========================================================
+// MilkdropTintPass —— projectM 输出帧的整体染色后处理着色器
+// ==========================================================
+MilkdropTintPass::MilkdropTintPass (juce::OpenGLContext& context)
+    : context_ (context)
+{
+}
+
+bool MilkdropTintPass::init()
+{
+    if (ready_)
+        return true;
+
+    coreProfile_ = context_.isCoreProfile();
+    program_.reset (new juce::OpenGLShaderProgram (context_));
+
+    juce::String vertexSource;
+    juce::String fragmentSource;
+
+    if (coreProfile_)
+    {
+        vertexSource =
+            "#version 150\n"
+            "in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "  vUV = aPos * 0.5 + 0.5;\n"
+            "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        fragmentSource =
+            "#version 150\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "uniform sampler2D uTex;\n"
+            "uniform vec3 uTint;\n"
+            "uniform float uBrightness;\n"
+            "uniform float uInvert;\n"
+            "uniform float uShadows;\n"
+            "void main() {\n"
+            "  vec4 c = texture(uTex, vUV);\n"
+            "  // 加性偏移：uTint=(1,1,1) 为中性点，调高让整体（含黑色）偏向该色，\n"
+            "  // 调低偏向补色。偏移量 = uTint-1.0，范围 -1~+1（对应滑块 0%~200%）。\n"
+            "  c.rgb += (uTint - vec3(1.0));\n"
+            "  c.rgb = max(c.rgb, vec3(0.0));\n"
+            "  // bright：纯线性增益（对齐 MilkDrop3 的 ret *= brightness）。\n"
+            "  // 1.0=中性；>1 提亮（暗部大幅抬升、高光溢出），<1 压暗。\n"
+            "  // 曾引入软 knee 公式 c/(1+c*(b-1))，但分母中的 c 已是乘过增益后的值，\n"
+            "  // 导致 b>1 时分母被放大、画面反被压暗；这里恢复线性增益 + 最终 clamp。\n"
+            "  c.rgb *= uBrightness;\n"
+            "  // invert：反相 / 负片（对应 MilkDrop3 的 ret = 1 - ret）。\n"
+            "  if (uInvert > 0.5) c.rgb = vec3(1.0) - c.rgb;\n"
+            "  // shadows：暗部针对性压暗并保留高光（而非全局平方）。\n"
+            "  // 用亮度掩码只对暗部做平方，还原 MilkDrop3 反馈环内平方的暗部强对比。\n"
+            "  float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
+            "  float shadowMask = 1.0 - smoothstep(0.0, 0.5, lum);\n"
+            "  c.rgb = mix(c.rgb, c.rgb * c.rgb, uShadows * shadowMask);\n"
+            "  c.rgb = clamp(c.rgb, 0.0, 1.0);\n"
+            "  fragColor = c;\n"
+            "}\n";
+    }
+    else
+    {
+        vertexSource =
+            "#version 120\n"
+            "attribute vec2 aPos;\n"
+            "varying vec2 vUV;\n"
+            "void main() {\n"
+            "  vUV = aPos * 0.5 + 0.5;\n"
+            "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        fragmentSource =
+            "#version 120\n"
+            "varying vec2 vUV;\n"
+            "uniform sampler2D uTex;\n"
+            "uniform vec3 uTint;\n"
+            "uniform float uBrightness;\n"
+            "uniform float uInvert;\n"
+            "uniform float uShadows;\n"
+            "void main() {\n"
+            "  vec4 c = texture2D(uTex, vUV);\n"
+            "  // 加性偏移：uTint=(1,1,1) 为中性点，调高让整体（含黑色）偏向该色，\n"
+            "  // 调低偏向补色。偏移量 = uTint-1.0，范围 -1~+1（对应滑块 0%~200%）。\n"
+            "  c.rgb += (uTint - vec3(1.0));\n"
+            "  c.rgb = max(c.rgb, vec3(0.0));\n"
+            "  // bright：纯线性增益（对齐 MilkDrop3 的 ret *= brightness）。\n"
+            "  // 1.0=中性；>1 提亮（暗部大幅抬升、高光溢出），<1 压暗。\n"
+            "  // 曾引入软 knee 公式 c/(1+c*(b-1))，但分母中的 c 已是乘过增益后的值，\n"
+            "  // 导致 b>1 时分母被放大、画面反被压暗；这里恢复线性增益 + 最终 clamp。\n"
+            "  c.rgb *= uBrightness;\n"
+            "  // invert：反相 / 负片（对应 MilkDrop3 的 ret = 1 - ret）。\n"
+            "  if (uInvert > 0.5) c.rgb = vec3(1.0) - c.rgb;\n"
+            "  // shadows：暗部针对性压暗并保留高光（而非全局平方）。\n"
+            "  // 用亮度掩码只对暗部做平方，还原 MilkDrop3 反馈环内平方的暗部强对比。\n"
+            "  float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
+            "  float shadowMask = 1.0 - smoothstep(0.0, 0.5, lum);\n"
+            "  c.rgb = mix(c.rgb, c.rgb * c.rgb, uShadows * shadowMask);\n"
+            "  c.rgb = clamp(c.rgb, 0.0, 1.0);\n"
+            "  gl_FragColor = c;\n"
+            "}\n";
+    }
+
+    if (!program_->addVertexShader (vertexSource)
+        || !program_->addFragmentShader (fragmentSource)
+        || !program_->link())
+    {
+        lastError_ = program_->getLastError();
+        program_.reset();
+        return false;
+    }
+
+    texLoc_        = program_->getUniformIDFromName ("uTex");
+    tintLoc_       = program_->getUniformIDFromName ("uTint");
+    brightnessLoc_ = program_->getUniformIDFromName ("uBrightness");
+    invertLoc_     = program_->getUniformIDFromName ("uInvert");
+    shadowsLoc_    = program_->getUniformIDFromName ("uShadows");
+
+    // 全屏三角形（单个大三角形覆盖整个视口，顶点为 NDC 坐标）
+    static const float kQuadVertices[6] = {
+        -1.0f, -1.0f,
+         3.0f, -1.0f,
+        -1.0f,  3.0f
+    };
+
+    juce::gl::glGenBuffers (1, &vbo_);
+    juce::gl::glBindBuffer (juce::gl::GL_ARRAY_BUFFER, vbo_);
+    juce::gl::glBufferData (juce::gl::GL_ARRAY_BUFFER,
+                            static_cast<GLsizeiptr> (sizeof (kQuadVertices)),
+                            kQuadVertices, juce::gl::GL_STATIC_DRAW);
+
+    if (coreProfile_)
+    {
+        juce::gl::glGenVertexArrays (1, &vao_);
+        juce::gl::glBindVertexArray (vao_);
+        juce::gl::glBindBuffer (juce::gl::GL_ARRAY_BUFFER, vbo_);
+        juce::gl::glEnableVertexAttribArray (0);
+        juce::gl::glVertexAttribPointer (0, 2, juce::gl::GL_FLOAT,
+                                         juce::gl::GL_FALSE, 0, nullptr);
+        juce::gl::glBindVertexArray (0);
+    }
+    juce::gl::glBindBuffer (juce::gl::GL_ARRAY_BUFFER, 0);
+
+    ready_ = true;
+    return true;
+}
+
+void MilkdropTintPass::shutdown()
+{
+    if (vao_ != 0)
+    {
+        juce::gl::glDeleteVertexArrays (1, &vao_);
+        vao_ = 0;
+    }
+    if (vbo_ != 0)
+    {
+        juce::gl::glDeleteBuffers (1, &vbo_);
+        vbo_ = 0;
+    }
+    if (program_ != nullptr)
+    {
+        program_->release();
+        program_.reset();
+    }
+    ready_ = false;
+}
+
+void MilkdropTintPass::apply (GLuint srcTex, const MilkdropVisualState& state)
+{
+    if (!ready_ || program_ == nullptr)
+        return;
+
+    program_->use();
+
+    juce::gl::glActiveTexture (juce::gl::GL_TEXTURE0);
+    juce::gl::glBindTexture (juce::gl::GL_TEXTURE_2D, srcTex);
+    juce::gl::glUniform1i (texLoc_, 0);
+    juce::gl::glUniform3f (tintLoc_, state.tint_r, state.tint_g, state.tint_b);
+    juce::gl::glUniform1f (brightnessLoc_, state.brightness);
+    juce::gl::glUniform1f (invertLoc_, state.invert ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (shadowsLoc_, state.shadows ? 1.0f : 0.0f);
+
+    if (coreProfile_)
+    {
+        juce::gl::glBindVertexArray (vao_);
+    }
+    else
+    {
+        juce::gl::glBindBuffer (juce::gl::GL_ARRAY_BUFFER, vbo_);
+        juce::gl::glEnableVertexAttribArray (0);
+        juce::gl::glVertexAttribPointer (0, 2, juce::gl::GL_FLOAT,
+                                         juce::gl::GL_FALSE, 0, nullptr);
+    }
+
+    juce::gl::glDrawArrays (juce::gl::GL_TRIANGLES, 0, 3);
+
+    if (coreProfile_)
+    {
+        juce::gl::glBindVertexArray (0);
+    }
+    else
+    {
+        juce::gl::glDisableVertexAttribArray (0);
+        juce::gl::glBindBuffer (juce::gl::GL_ARRAY_BUFFER, 0);
+    }
+
+    juce::gl::glBindTexture (juce::gl::GL_TEXTURE_2D, 0);
+    juce::gl::glUseProgram (0);
+}
+
+// ==========================================================
 // MilkdropModule
 // ==========================================================
 MilkdropModule::MilkdropModule (AnalyserHub* hub_,
@@ -785,6 +993,10 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     paintOverlayControlBar(g, topBar);
     if (isAutoMode_)
       paintAutoControlRow(g, topBar);
+    if (isColorPanelOpen_)
+      paintColorPanel(g, topBar);
+    if (isEffectsPanelOpen_)
+      paintEffectsPanel(g, topBar);
   }
 }
 
@@ -909,6 +1121,10 @@ void MilkdropModule::GLView::paint(juce::Graphics& g) {
   owner_.paintOverlayControlBar(g, content);
   if (owner_.isAutoModeActive())
     owner_.paintAutoControlRow(g, content.withHeight(26));
+  if (owner_.isColorPanelOpen_)
+    owner_.paintColorPanel(g, content.withHeight(26));
+  if (owner_.isEffectsPanelOpen_)
+    owner_.paintEffectsPanel(g, content.withHeight(26));
   g.restoreState();
 #else
   juce::ignoreUnused(g);
@@ -956,7 +1172,15 @@ void MilkdropModule::GLView::DetachOpenGL() {
 
   open_gl_context_.detach();
   attached_ = false;
+
   if (owner_.editor_ != nullptr && should_resume_editor_renderer) {
+    // Windows/GLEW：local handle 已销毁。恢复 Editor renderer 前彻底重载
+    // projectM/GLEW DLL，让全局 GL 函数指针表归零。否则 Editor GL 上下文再
+    // create 时，GLEW 仍残留本地 HGLRC 的旧指针，导致 dock 回嵌入态后
+    // projectM 渲染卡死/黑帧。仅在此分支执行，避免程序退出时 FreeLibrary 卡死。
+#if defined(_WIN32)
+    projectm_api::Api::instance().reload();
+#endif
     const int preset_index = owner_.restored_preset_index_;
     if (preset_index >= 0)
       owner_.editor_->RequestMilkdropPresetJump(preset_index);
@@ -1018,17 +1242,25 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
 
   auto& api = projectm_api::Api::instance();
+  juce::Logger::writeToLog("[MilkdropGLView] newOpenGLContextCreated: isAvailable="
+      + juce::String(api.isAvailable() ? 1 : 0)
+      + " hasFboAPI=" + juce::String(api.hasOpenglRenderFrameFbo() ? 1 : 0)
+      + " loadErr=" + api.loadError());
   api.resetGlewInitialization();
   if (!api.isAvailable()) {
     local_error_ = api.loadError();
+    juce::Logger::writeToLog("[MilkdropGLView] projectM unavailable: " + local_error_);
     return;
   }
   if (!api.initGlew()) {
     local_error_ = api.loadError();
+    juce::Logger::writeToLog("[MilkdropGLView] glewInit failed: " + local_error_);
     return;
   }
 
   local_pm_handle_ = api.create();
+  juce::Logger::writeToLog("[MilkdropGLView] projectm_create -> "
+      + juce::String(local_pm_handle_ != nullptr ? "OK" : "NULL"));
   if (local_pm_handle_ == nullptr) {
     local_error_ = "projectm_create() returned NULL.";
     return;
@@ -1062,6 +1294,15 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   last_preset_switch_ms_ = static_cast<int64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());
+
+  // 初始化整体染色后处理着色器（浮动态 / macOS 本地 GL 上下文渲染路径使用）。
+  // 编译失败不致命，只关闭染色能力，Milkdrop 渲染本身不受影响。
+  tint_pass_.reset (new MilkdropTintPass (open_gl_context_));
+  if (!tint_pass_->init())
+    tint_pass_.reset();
+  juce::Logger::writeToLog("[MilkdropGLView] tint pass init -> "
+      + juce::String(tint_pass_ != nullptr ? "OK" : "FAIL"));
+
   local_render_ready_ = true;
 }
 
@@ -1070,6 +1311,12 @@ void MilkdropModule::GLView::openGLContextClosing() {
   // 在销毁 handle 之前先抓取最后一帧快照，
   // 供 detach/attach 重建期间 paintContent 显示，消除切换模式时的黑屏闪烁。
   CaptureLastFrame();
+  // 释放整体染色后处理着色器（必须在 GL 上下文关闭前，此时 GL context 仍有效）
+  if (tint_pass_ != nullptr)
+  {
+    tint_pass_->shutdown();
+    tint_pass_.reset();
+  }
   // 销毁离屏 FBO（必须在 GL 上下文关闭前，此时 GL context 仍有效）
   DestroyScaleFbo();
   if (local_pm_handle_ != nullptr) {
@@ -1196,6 +1443,22 @@ void MilkdropModule::GLView::EnsureScaleFbo(int render_w, int render_h) {
                                    juce::gl::GL_COLOR_ATTACHMENT0,
                                    juce::gl::GL_TEXTURE_2D,
                                    scale_texture_, 0);
+
+  // FBO 完整性校验：projectM 渲染到自定义 FBO 依赖该状态。若在脱离模式上下文
+  // 切换后 FBO 意外不完整，projectM 会静默输出黑帧，导致后处理对黑纹理做偏移。
+  const GLenum status = juce::gl::glCheckFramebufferStatus (juce::gl::GL_FRAMEBUFFER);
+  if (status != juce::gl::GL_FRAMEBUFFER_COMPLETE)
+    local_error_ = "scale FBO incomplete: 0x"
+                 + juce::String::toHexString (static_cast<int> (status));
+  else
+    local_error_.clear();
+
+  juce::Logger::writeToLog("[MilkdropGLView] EnsureScaleFbo "
+      + juce::String(render_w) + "x" + juce::String(render_h)
+      + " fbo=" + juce::String(static_cast<int>(scale_fbo_))
+      + " tex=" + juce::String(static_cast<int>(scale_texture_))
+      + " status=0x" + juce::String::toHexString(static_cast<int>(status)));
+
   juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
 
   scale_fbo_w_ = render_w;
@@ -1229,57 +1492,134 @@ void MilkdropModule::GLView::renderOpenGL() {
   int surface_w = juce::jmax(1, static_cast<int>(getWidth()  * dpi_scale));
   int surface_h = juce::jmax(1, static_cast<int>(getHeight() * dpi_scale));
 
-  // local_render_scale_：1 = 原始分辨率，2 = 半分辨率，4 = 四分之一分辨率。
-  // 值越大渲染分辨率越低，性能越好，画质越差。
-  if (local_render_scale_ <= 1) {
-    // ---- 1:1 模式：直接渲染到默认 framebuffer，无需离屏 FBO ----
-    DestroyScaleFbo();  // 释放不再需要的 FBO
-    api.setWindowSize(local_pm_handle_,
-                      static_cast<std::size_t>(surface_w),
-                      static_cast<std::size_t>(surface_h));
-    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-    juce::gl::glViewport(0, 0, surface_w, surface_h);
-    api.openglRenderFrame(local_pm_handle_);
-  } else {
-    // ---- 降分辨率模式：渲染到离屏 FBO，再 blit 到全屏 ----
-    int render_w = juce::jmax(1, surface_w / local_render_scale_);
-    int render_h = juce::jmax(1, surface_h / local_render_scale_);
+  // 读取全局视觉状态（master output colors + bright/invert/shadows 效果）。
+  // isNeutral() 为 true 时保持原零拷贝/直接渲染路径，零额外开销。
+  MilkdropVisualState visual_state;
+  if (owner_.editor_ != nullptr)
+    visual_state = owner_.editor_->GetMilkdropVisualState();
+  const bool tint_active = !visual_state.isNeutral();
 
-    // 优先使用 projectM 4.2+ 的 openglRenderFrameFbo（直接渲染到指定 FBO）
+  // local_render_scale_：1 = 原始分辨率，2 = 半分辨率，4 = 四分之一分辨率。
+  int render_w = juce::jmax(1, surface_w / local_render_scale_);
+  int render_h = juce::jmax(1, surface_h / local_render_scale_);
+
+  // 需要离屏渲染的情况：染色后处理，或降分辨率（local_render_scale_ > 1）。
+  const bool need_offscreen = tint_active || (local_render_scale_ > 1);
+
+  // 诊断日志节流：前 30 帧每帧输出，之后每 300 帧输出一次，避免刷屏。
+  static int glDbgFrame = 0;
+  ++glDbgFrame;
+  const bool logFrame = (glDbgFrame <= 30) || (glDbgFrame % 300 == 0);
+  if (logFrame) {
+    juce::Logger::writeToLog("[MilkdropGLView] renderOpenGL frame=" + juce::String(glDbgFrame)
+        + " tint=" + juce::String(tint_active ? 1 : 0)
+        + " offscreen=" + juce::String(need_offscreen ? 1 : 0)
+        + " hasFbo=" + juce::String(api.hasOpenglRenderFrameFbo() ? 1 : 0)
+        + " scale=" + juce::String(local_render_scale_)
+        + " surf=" + juce::String(surface_w) + "x" + juce::String(surface_h)
+        + " render=" + juce::String(render_w) + "x" + juce::String(render_h));
+  }
+
+  if (need_offscreen) {
+    // ---- 先渲染到离屏 FBO ----
+    EnsureScaleFbo (render_w, render_h);
+
+    // 优先使用 projectM 4.2+ 的 openglRenderFrameFbo（直接渲染到指定 FBO）。
+    // 关键：必须像 Editor 嵌入态那样，在调用前先绑定 FBO、设置 viewport/scissor
+    // 并 clear。否则 projectM 不会把画面写入 scale_fbo_（纹理保持全黑），
+    // 后续后处理会对黑纹理做加性偏移/反相 → 纯色 / 纯黑 / 纯白。
     if (api.hasOpenglRenderFrameFbo()) {
-      EnsureScaleFbo(render_w, render_h);
-      api.setWindowSize(local_pm_handle_,
-                        static_cast<std::size_t>(render_w),
-                        static_cast<std::size_t>(render_h));
-      api.openglRenderFrameFbo(local_pm_handle_, scale_fbo_);
+      if (logFrame)
+        juce::Logger::writeToLog("[MilkdropGLView] branch: openglRenderFrameFbo -> scale_fbo_");
+      juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, scale_fbo_);
+      juce::gl::glViewport (0, 0, render_w, render_h);
+      juce::gl::glScissor (0, 0, render_w, render_h);
+      juce::gl::glEnable (juce::gl::GL_SCISSOR_TEST);
+      juce::gl::glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
+      juce::gl::glClear (juce::gl::GL_COLOR_BUFFER_BIT);
+      api.setWindowSize (local_pm_handle_,
+                         static_cast<std::size_t>(render_w),
+                         static_cast<std::size_t>(render_h));
+      api.openglRenderFrameFbo (local_pm_handle_, scale_fbo_);
+      juce::gl::glDisable (juce::gl::GL_SCISSOR_TEST);
     } else {
-      // 回退：用 openglRenderFrame + 临时重定向 framebuffer
-      EnsureScaleFbo(render_w, render_h);
-      api.setWindowSize(local_pm_handle_,
-                        static_cast<std::size_t>(render_w),
-                        static_cast<std::size_t>(render_h));
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, scale_fbo_);
-      juce::gl::glViewport(0, 0, render_w, render_h);
-      api.openglRenderFrame(local_pm_handle_);
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+      // 回退：projectM 的 openglRenderFrame 内部会强制 glBindFramebuffer(0)，
+      // 不能预先绑定 scale_fbo_ 并期望它渲染到该 FBO——否则画面会写到
+      // framebuffer 0，scale_fbo_ 保持黑。这里与 Editor 降级路径保持一致：
+      // 先渲染到 framebuffer 0，再跨 FBO blit 到 scale_fbo_。
+      if (logFrame)
+        juce::Logger::writeToLog("[MilkdropGLView] branch: openglRenderFrame -> FBO0, blit -> scale_fbo_");
+      juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+      juce::gl::glViewport (0, 0, render_w, render_h);
+      juce::gl::glScissor (0, 0, render_w, render_h);
+      juce::gl::glEnable (juce::gl::GL_SCISSOR_TEST);
+      juce::gl::glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
+      juce::gl::glClear (juce::gl::GL_COLOR_BUFFER_BIT);
+      api.setWindowSize (local_pm_handle_,
+                         static_cast<std::size_t>(render_w),
+                         static_cast<std::size_t>(render_h));
+      api.openglRenderFrame (local_pm_handle_);
+      juce::gl::glDisable (juce::gl::GL_SCISSOR_TEST);
+
+      juce::gl::glBindFramebuffer (juce::gl::GL_READ_FRAMEBUFFER, 0);
+      juce::gl::glBindFramebuffer (juce::gl::GL_DRAW_FRAMEBUFFER, scale_fbo_);
+      juce::gl::glBlitFramebuffer (0, 0, render_w, render_h,
+                                   0, 0, render_w, render_h,
+                                   juce::gl::GL_COLOR_BUFFER_BIT,
+                                   juce::gl::GL_LINEAR);
+      juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
     }
 
-    // 将离屏 FBO 内容 blit（拉伸）到默认 framebuffer（全屏）
-    // 注意：macOS OpenGL Core Profile 对 glBlitFramebuffer 有严格限制：
-    //   当源/目标尺寸不同（拉伸 blit）时，macOS 驱动对部分 FBO 格式
-    //   使用 GL_LINEAR 会触发 GL_INVALID_OPERATION，导致 GL 上下文进入
-    //   错误状态，后续所有渲染调用均被忽略，表现为画面卡死。
-    //   改用 GL_NEAREST 在 macOS 上始终安全，画质差异在降分辨率场景下不明显。
-    // 清除 projectM 内部渲染可能留下的残留 GL 错误，避免影响 blit 状态检测
-    while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
-    juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, scale_fbo_);
-    juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER, 0);
-    juce::gl::glBlitFramebuffer(
-        0, 0, render_w, render_h,          // 源：离屏 FBO 全区域
-        0, 0, surface_w, surface_h,        // 目标：默认 framebuffer 全区域
-        juce::gl::GL_COLOR_BUFFER_BIT,
-        juce::gl::GL_NEAREST);             // macOS 拉伸 blit 必须用 NEAREST，LINEAR 会触发 GL_INVALID_OPERATION
-    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+    // projectM 渲染完成后的 GL error 检查（定位 scale_fbo_ 是否成功接收画面）
+    {
+      const GLenum pm_err = juce::gl::glGetError();
+      if (pm_err != juce::gl::GL_NO_ERROR && logFrame)
+        juce::Logger::writeToLog("[MilkdropGLView] projectM GL error=0x"
+            + juce::String::toHexString(static_cast<int>(pm_err)));
+    }
+
+    if (tint_active) {
+      // ---- 染色后处理：采样离屏纹理，应用 RGB 增益，绘制全屏三角形 ----
+      // 全屏三角形覆盖整个视口，纹理采样自然完成 1:1 或降采样放大，
+      // 因此无需额外的 glBlitFramebuffer（也规避 macOS 拉伸 blit 的兼容性问题）。
+      if (logFrame)
+        juce::Logger::writeToLog("[MilkdropGLView] branch: tint apply (tex="
+            + juce::String(static_cast<int>(scale_texture_)) + ")");
+      if (tint_pass_ == nullptr)
+        tint_pass_.reset (new MilkdropTintPass (open_gl_context_));
+      if (!tint_pass_->isReady())
+        tint_pass_->init();
+
+      juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+      juce::gl::glViewport (0, 0, surface_w, surface_h);
+      tint_pass_->apply (scale_texture_, visual_state);
+
+      const GLenum tint_err = juce::gl::glGetError();
+      if (tint_err != juce::gl::GL_NO_ERROR && logFrame)
+        juce::Logger::writeToLog("[MilkdropGLView] tint GL error=0x"
+            + juce::String::toHexString(static_cast<int>(tint_err)));
+    } else {
+      // ---- 降分辨率无染色：blit 拉伸到默认 framebuffer ----
+      // 注意：macOS OpenGL Core Profile 对拉伸 blit 有严格限制（须 GL_NEAREST）。
+      while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+      juce::gl::glBindFramebuffer (juce::gl::GL_READ_FRAMEBUFFER, scale_fbo_);
+      juce::gl::glBindFramebuffer (juce::gl::GL_DRAW_FRAMEBUFFER, 0);
+      juce::gl::glBlitFramebuffer (
+          0, 0, render_w, render_h,
+          0, 0, surface_w, surface_h,
+          juce::gl::GL_COLOR_BUFFER_BIT,
+          juce::gl::GL_NEAREST);
+      juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+    }
+  } else {
+    // ---- 1:1 无染色：直接渲染到默认 framebuffer，无需离屏 FBO ----
+    DestroyScaleFbo();
+    api.setWindowSize (local_pm_handle_,
+                       static_cast<std::size_t>(surface_w),
+                       static_cast<std::size_t>(surface_h));
+    juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+    juce::gl::glViewport (0, 0, surface_w, surface_h);
+    api.openglRenderFrame (local_pm_handle_);
   }
 }
 
@@ -1566,6 +1906,11 @@ void MilkdropModule::checkOverlayAutoHide()
   if (!focused_)
     return;
 
+  // color / effects / auto 面板展开期间不自动隐藏，避免用户调整参数时
+  // 控制台中途消失。
+  if (isColorPanelOpen_ || isEffectsPanelOpen_ || isAutoMode_)
+    return;
+
   // overlay 无交互超过 4 秒 → 自动隐藏
   if (juce::Time::getMillisecondCounter() - lastInteractionTime_ >= 4000)
   {
@@ -1615,6 +1960,87 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         }
     }
 
+    // ---- color panel 交互检测（Reset + RGB 滑块拖动） ----
+    if (isColorPanelOpen_ && glView != nullptr)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getColorPanelBounds(topBar);
+
+        // Reset 按钮点击（重置 RGB + Bright 四行）
+        if (getTintResetBounds(panel).contains(e.getPosition()))
+        {
+            if (!focused_)
+                setFocusVisual(true);
+            touchOverlayIdleTimer();
+            visualState_.tint_r = 1.0f;
+            visualState_.tint_g = 1.0f;
+            visualState_.tint_b = 1.0f;
+            visualState_.brightness = 1.0f;
+            applyVisualToEditor();
+            repaint(panel);
+            glView->repaint();
+            return;
+        }
+
+        // RGB + Bright 滑块拖动
+        for (int row = 0; row < 4; ++row)
+        {
+            auto sb = getTintSliderBounds(panel, row);
+            if (sb.expanded(6).contains(e.getPosition()))
+            {
+                draggingTintRow_ = row;
+                if (!focused_)
+                    setFocusVisual(true);
+                touchOverlayIdleTimer();
+                float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                                   / static_cast<float>(sb.getWidth());
+                updateTintFromSlider(row, proportion);
+                repaint(panel);
+                glView->repaint();
+                return;
+            }
+        }
+    }
+
+    // ---- effects panel 交互检测（Reset + invert/shadows 开关） ----
+    if (isEffectsPanelOpen_ && glView != nullptr)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getEffectsPanelBounds(topBar);
+
+        // Reset 按钮点击（重置 invert/shadows）
+        if (getEffectsResetBounds(panel).contains(e.getPosition()))
+        {
+            if (!focused_)
+                setFocusVisual(true);
+            touchOverlayIdleTimer();
+            visualState_.invert = false;
+            visualState_.shadows = false;
+            applyVisualToEditor();
+            repaint(panel);
+            glView->repaint();
+            return;
+        }
+
+        // invert / shadows 开关点击
+        for (int row = 0; row < 2; ++row)
+        {
+            auto toggle = getEffectsToggleBounds(panel, row);
+            if (toggle.expanded(4).contains(e.getPosition()))
+            {
+                if (!focused_)
+                    setFocusVisual(true);
+                touchOverlayIdleTimer();
+                toggleEffectSwitch(row);
+                repaint(panel);
+                glView->repaint();
+                return;
+            }
+        }
+    }
+
     // 基类处理：toFront + onBroughtToFront + 关闭按钮 + 缩放边缘 + 标题栏拖动
     // 所有涉及 private 成员的逻辑（closeButtonPressed / dragMode / detectEdge 等）
     // 均由基类完成，我们只在上层附加 overlay 按钮处理。
@@ -1652,6 +2078,15 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
         return;
     }
 
+    // color/bright slider 拖动结束
+    if (draggingTintRow_ >= 0)
+    {
+        draggingTintRow_ = -1;
+        repaint();
+        glView->repaint();
+        return;
+    }
+
     // 优先处理 overlay 按钮释放
     if (pressedOverlayBtn_ != OverlayButton::kNone)
     {
@@ -1684,6 +2119,22 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
                            / static_cast<float>(sliderBounds.getWidth());
         updateAutoIntervalFromSlider(proportion);
         repaint(autoRow);
+        glView->repaint();
+        return;
+    }
+
+    // color/bright slider 拖动中
+    if (draggingTintRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getColorPanelBounds(topBar);
+        auto sb = getTintSliderBounds(panel, draggingTintRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateTintFromSlider(draggingTintRow_, proportion);
+        repaint(panel);
         glView->repaint();
         return;
     }
@@ -1745,6 +2196,22 @@ void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
         return;
     }
 
+    // color/bright slider 拖动中
+    if (draggingTintRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getColorPanelBounds(topBar);
+        auto sb = getTintSliderBounds(panel, draggingTintRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateTintFromSlider(draggingTintRow_, proportion);
+        repaint(panel);
+        glView->repaint();
+        return;
+    }
+
     ModulePanel::mouseDrag(e);
 }
 
@@ -1776,20 +2243,19 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     constexpr int kBtnSize = 22;
     constexpr int kPadding = 4;
 
-    auto prevBtn   = juce::Rectangle<int>(overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize);
-    auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW, overlay.getY() + 2, kResBtnW, kBtnSize);
+    auto prevBtn    = juce::Rectangle<int>(overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize);
+    auto randomBtn  = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
+    auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
+    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize);
+    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, overlay.getY() + 2, kColorBtnW, kBtnSize);
+    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, overlay.getY() + 2, kEffectsBtnW, kBtnSize);
 
-    if (prevBtn.contains(pos))   return OverlayButton::kPrev;
-    // 分辨率切换按钮已全平台阉割，不响应 kRenderScale 点击
-#if 0
-    if (resBtn.contains(pos))    return OverlayButton::kRenderScale;
-#endif
-    if (autoBtn.contains(pos))   return OverlayButton::kAuto;
-    if (nextBtn.contains(pos))   return OverlayButton::kNext;
-    if (randomBtn.contains(pos)) return OverlayButton::kRandom;
+    if (prevBtn.contains(pos))     return OverlayButton::kPrev;
+    if (effectsBtn.contains(pos))  return OverlayButton::kEffects;
+    if (colorBtn.contains(pos))    return OverlayButton::kColor;
+    if (autoBtn.contains(pos))     return OverlayButton::kAuto;
+    if (nextBtn.contains(pos))     return OverlayButton::kNext;
+    if (randomBtn.contains(pos))   return OverlayButton::kRandom;
 
     // name area：覆盖 < 和 [1:1] 之间的空余区域
     if (cachedNameArea_.contains(pos))
@@ -1826,6 +2292,28 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kAutoBtnW, kBtnSize);
         return autoBtn;
     }
+    case OverlayButton::kColor:
+    {
+        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
+                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
+        return { autoBtn.getX() - kPadding - kColorBtnW, overlay.getY() + 2, kColorBtnW, kBtnSize };
+    }
+    case OverlayButton::kEffects:
+    {
+        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
+                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
+        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW,
+                                              overlay.getY() + 2, kColorBtnW, kBtnSize);
+        return { colorBtn.getX() - kPadding - kEffectsBtnW, overlay.getY() + 2, kEffectsBtnW, kBtnSize };
+    }
     // 分辨率切换按钮已全平台阉割
 #if 0
     case OverlayButton::kRenderScale:
@@ -1855,6 +2343,8 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     case OverlayButton::kRandom: randomPreset();            break;
     case OverlayButton::kPresetName: showPresetJumpDialog();   break;
     case OverlayButton::kAuto:       toggleAutoMode();          break;
+    case OverlayButton::kColor:      toggleColorPanel();        break;
+    case OverlayButton::kEffects:    toggleEffectsPanel();      break;
     // 分辨率切换按钮已全平台阉割
 #if 0
     case OverlayButton::kRenderScale: glView->RequestRenderScale(); break;
@@ -1884,20 +2374,16 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     g.setColour(PinkXP::pink300.withAlpha(0.7f));
     g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
 
-    // 按钮位置: [<] nameArea [1:n] [auto] [>] [?]
-    auto prevBtn   = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto randomBtn = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, bar.getY() + 2, kAutoBtnW, kBtnSize);
-    auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW, bar.getY() + 2, kResBtnW, kBtnSize);
-    // macOS：resBtn 不显示，nameArea 延伸到 autoBtn 左侧
-#if JUCE_MAC
-    auto nameArea  = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
-                                          autoBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
-#else
-    auto nameArea  = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
-                                          resBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
-#endif
+    // 按钮位置: [<] nameArea [effects] [color] [auto] [>] [?]
+    auto prevBtn    = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
+    auto randomBtn  = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
+    auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
+    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, bar.getY() + 2, kAutoBtnW, kBtnSize);
+    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, bar.getY() + 2, kColorBtnW, kBtnSize);
+    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, bar.getY() + 2, kEffectsBtnW, kBtnSize);
+    // effects/color 按钮在所有平台都显示，nameArea 延伸到 effectsBtn 左侧
+    auto nameArea   = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
+                                          effectsBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
 
     // 按钮绘制 lambda
     auto drawBtn = [&](juce::Rectangle<int> r, const juce::String& text, OverlayButton btn)
@@ -1940,6 +2426,52 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
       drawBtn(resBtn, label, OverlayButton::kRenderScale);
     }
 #endif
+
+    // color 按钮：染色控制器展开时用高亮 toggle 样式
+    {
+        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kColor);
+        bool pressed = (pressedOverlayBtn_ == OverlayButton::kColor);
+        bool active  = isColorPanelOpen_;
+
+        if (pressed || active)
+            PinkXP::drawPressed(g, colorBtn, PinkXP::pink100);
+        else if (hovered)
+            PinkXP::drawRaised(g, colorBtn, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+            g.fillRect(colorBtn);
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
+            g.drawRect(colorBtn, 1);
+        }
+
+        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
+        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+        g.drawText("color", colorBtn, juce::Justification::centred, false);
+    }
+
+    // effects 按钮：效果控制器展开时用高亮 toggle 样式
+    {
+        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kEffects);
+        bool pressed = (pressedOverlayBtn_ == OverlayButton::kEffects);
+        bool active  = isEffectsPanelOpen_;
+
+        if (pressed || active)
+            PinkXP::drawPressed(g, effectsBtn, PinkXP::pink100);
+        else if (hovered)
+            PinkXP::drawRaised(g, effectsBtn, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+            g.fillRect(effectsBtn);
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
+            g.drawRect(effectsBtn, 1);
+        }
+
+        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
+        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+        g.drawText("effects", effectsBtn, juce::Justification::centred, false);
+    }
 
     // auto 按钮：轮播模式激活时用高亮 toggle 样式
     {
@@ -2496,6 +3028,9 @@ void MilkdropModule::toggleAutoMode()
   isAutoMode_ = !isAutoMode_;
   if (isAutoMode_)
   {
+    // 与整体染色控制器互斥，避免两块控制器重叠遮挡。
+    if (isColorPanelOpen_)
+      isColorPanelOpen_ = false;
     lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
   }
   // 重新布局并重绘
@@ -2644,4 +3179,373 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
   g.setColour(PinkXP::pink300.withAlpha(timeHovered ? 1.0f : 0.9f));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
   g.drawText(timeLabel, timeLabelRect, juce::Justification::centredLeft, false);
+}
+
+// ==========================================================
+// 整体染色控制器（master output colors）
+// ==========================================================
+void MilkdropModule::toggleColorPanel()
+{
+  isColorPanelOpen_ = !isColorPanelOpen_;
+  if (isColorPanelOpen_)
+  {
+    // 与自动轮播 / 效果面板互斥，避免控制器重叠遮挡。
+    if (isAutoMode_)
+      isAutoMode_ = false;
+    if (isEffectsPanelOpen_)
+      isEffectsPanelOpen_ = false;
+    // 打开时从 Editor 读回当前全局视觉状态，保证 UI 显示与渲染一致。
+    syncVisualFromEditor();
+  }
+
+  layoutContent(getContentBounds());
+  repaint();
+  glView->repaint();
+}
+
+void MilkdropModule::toggleEffectsPanel()
+{
+  isEffectsPanelOpen_ = !isEffectsPanelOpen_;
+  if (isEffectsPanelOpen_)
+  {
+    // 与自动轮播 / 染色面板互斥，避免控制器重叠遮挡。
+    if (isAutoMode_)
+      isAutoMode_ = false;
+    if (isColorPanelOpen_)
+      isColorPanelOpen_ = false;
+    syncVisualFromEditor();
+  }
+
+  layoutContent(getContentBounds());
+  repaint();
+  glView->repaint();
+}
+
+void MilkdropModule::syncVisualFromEditor()
+{
+  if (editor_ != nullptr)
+    visualState_ = editor_->GetMilkdropVisualState();
+}
+
+void MilkdropModule::applyVisualToEditor()
+{
+  if (editor_ != nullptr)
+    editor_->SetMilkdropVisualState(visualState_);
+}
+
+// ==========================================================
+// Bright 滑块非线性映射
+//
+// 需求：brightness=1.0（中性点）位于滑块正中间（proportion=0.5），
+// 左端 brightness=0.0，右端 brightness=8.0，且靠近两端时变化率放缓，
+// 便于精细调节暗部（<1.0）与强发光（>1.0）区域。
+//
+// 采用分段二次曲线（ease-in / ease-out）：
+//   · 左半段 [0, 0.5] → [0, 1]：brightness = t^2，t = 2p。
+//     在 brightness→0 处导数趋近 0，暗部调节更细腻。
+//   · 右半段 [0.5, 1] → [1, 8]：brightness = 1 + 7*(1 - (1-t)^2)，t = 2p-1。
+//     在 brightness→8 处导数趋近 0，强发光调节更细腻。
+// ==========================================================
+float MilkdropModule::SliderProportionToBrightness(float proportion)
+{
+  proportion = juce::jlimit(0.0f, 1.0f, proportion);
+
+  if (proportion <= 0.5f)
+  {
+    const float t = proportion * 2.0f;  // 0~1
+    return t * t;                        // 0~1，中点 t=1 → 1.0
+  }
+
+  const float t = (proportion - 0.5f) * 2.0f;  // 0~1
+  const float one_minus_t = 1.0f - t;
+  // brightness = 1 + (kBrightMax-1) * (1 - (1-t)^2)
+  return 1.0f + (kBrightMax - 1.0f) * (1.0f - one_minus_t * one_minus_t);
+}
+
+float MilkdropModule::BrightnessToSliderProportion(float brightness)
+{
+  brightness = juce::jlimit(kBrightMin, kBrightMax, brightness);
+
+  if (brightness <= 1.0f)
+  {
+    // brightness = t^2 → t = sqrt(brightness)，比例 = t / 2
+    return std::sqrt(brightness) * 0.5f;  // 0~0.5
+  }
+
+  // brightness = 1 + (kBrightMax-1)*(1 - (1-t)^2)
+  // (1-t)^2 = 1 - (brightness-1)/(kBrightMax-1)
+  // t = 1 - sqrt(1 - (brightness-1)/(kBrightMax-1))
+  const float ratio = (brightness - 1.0f) / (kBrightMax - 1.0f);
+  const float t = 1.0f - std::sqrt(1.0f - ratio);
+  return 0.5f + t * 0.5f;
+}
+
+void MilkdropModule::updateTintFromSlider(int row, float proportion)
+{
+  proportion = juce::jlimit(0.0f, 1.0f, proportion);
+
+  float value = 0.0f;
+  if (row == 3)
+  {
+    // Bright 行：非线性映射，中点 proportion=0.5 对应 brightness=1.0。
+    value = SliderProportionToBrightness(proportion);
+  }
+  else
+  {
+    // RGB 行：线性加性偏移范围 0~2。
+    value = kTintMin + proportion * (kTintMax - kTintMin);
+    value = juce::jlimit(kTintMin, kTintMax, value);
+  }
+  value = std::round(value * 100.0f) / 100.0f;  // 1% 精度
+
+  switch (row)
+  {
+    case 0: visualState_.tint_r = value; break;
+    case 1: visualState_.tint_g = value; break;
+    case 2: visualState_.tint_b = value; break;
+    case 3: visualState_.brightness = value; break;
+    default: break;
+  }
+  applyVisualToEditor();
+}
+
+void MilkdropModule::toggleEffectSwitch(int row)
+{
+  if (row == 0)
+    visualState_.invert = !visualState_.invert;
+  else if (row == 1)
+    visualState_.shadows = !visualState_.shadows;
+  applyVisualToEditor();
+}
+
+juce::Rectangle<int> MilkdropModule::getColorPanelBounds(juce::Rectangle<int> topBar) const
+{
+  return juce::Rectangle<int>(topBar.getX(), topBar.getBottom(),
+                              topBar.getWidth(),
+                              static_cast<int>(kColorPanelHeight));
+}
+
+juce::Rectangle<int> MilkdropModule::getTintSliderBounds(juce::Rectangle<int> panel, int row) const
+{
+  constexpr int kPad     = 6;
+  constexpr int kLabelW  = 22;
+  constexpr int kValueW  = 48;
+  constexpr int kHeaderH = 22;
+  constexpr int kRowH    = 20;
+  constexpr int kSliderH = 8;
+
+  int sliderX = panel.getX() + kPad + kLabelW + 4;
+  int sliderW = panel.getWidth() - kPad - kLabelW - 4 - kValueW - kPad;
+  int y = panel.getY() + kHeaderH + row * kRowH + (kRowH - kSliderH) / 2;
+
+  return juce::Rectangle<int>(sliderX, y, juce::jmax(20, sliderW), kSliderH);
+}
+
+juce::Rectangle<int> MilkdropModule::getTintResetBounds(juce::Rectangle<int> panel) const
+{
+  constexpr int kPad = 6;
+  return juce::Rectangle<int>(panel.getRight() - kPad - 44, panel.getY() + 2, 44, 18);
+}
+
+void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> topBar)
+{
+  auto panel = getColorPanelBounds(topBar);
+  cachedColorPanelRect_ = panel;
+
+  // 半透明暗底
+  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
+  g.fillRect(panel);
+
+  // 底部分割线
+  g.setColour(PinkXP::pink300.withAlpha(0.5f));
+  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+
+  // 标题 "COLOR"
+  g.setColour(PinkXP::pink300.withAlpha(0.95f));
+  g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+  g.drawText("COLOR", panel.getX() + 6, panel.getY(),
+             60, 22, juce::Justification::centredLeft, false);
+
+  // Reset 按钮
+  auto resetRect = getTintResetBounds(panel);
+  cachedTintResetRect_ = resetRect;
+  bool resetHovered = resetRect.contains(getMouseXYRelative());
+  if (resetHovered)
+  {
+    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
+    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
+  }
+  else
+  {
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+    g.fillRect(resetRect);
+    g.setColour(PinkXP::pink300.withAlpha(0.55f));
+    g.drawRect(resetRect, 1);
+    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
+  }
+  g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+
+  // RGB + Bright 四行滑块
+  static const char* kLabels[4] = { "R", "G", "B", "Bri" };
+  static const juce::Colour kRowColours[4] = {
+      juce::Colour(0xFF, 0x6B, 0x6B),  // R
+      juce::Colour(0x6B, 0xFF, 0x6B),  // G
+      juce::Colour(0x6B, 0x9B, 0xFF),  // B
+      juce::Colour(0xE8, 0xE8, 0xE8),  // Bright（中性白）
+  };
+
+  for (int row = 0; row < 4; ++row)
+  {
+    float value = (row == 0) ? visualState_.tint_r
+                : (row == 1) ? visualState_.tint_g
+                : (row == 2) ? visualState_.tint_b
+                             : visualState_.brightness;
+
+    float proportion = 0.0f;
+    if (row == 3)
+    {
+      // Bright 行：非线性映射（中点 brightness=1.0 对应 proportion=0.5）。
+      proportion = BrightnessToSliderProportion(value);
+    }
+    else
+    {
+      proportion = (value - kTintMin) / (kTintMax - kTintMin);
+      proportion = juce::jlimit(0.0f, 1.0f, proportion);
+    }
+
+    auto sliderBounds = getTintSliderBounds(panel, row);
+    int labelY = panel.getY() + 22 + row * 20;
+    auto labelRect = juce::Rectangle<int>(panel.getX() + 6, labelY, 22, 20);
+
+    g.setColour(kRowColours[row]);
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText(kLabels[row], labelRect, juce::Justification::centredLeft, false);
+
+    // 轨道底色
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
+    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
+
+    // 已填充部分
+    int fillW = static_cast<int>(sliderBounds.getWidth() * proportion);
+    if (fillW > 0)
+    {
+      g.setColour(kRowColours[row].withAlpha(0.8f));
+      g.fillRoundedRectangle(
+          juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(),
+                               fillW, sliderBounds.getHeight()).toFloat(), 2.0f);
+    }
+
+    // 滑块手柄
+    int knobX = sliderBounds.getX() + fillW - 4;
+    int knobSize = 12;
+    auto knobBounds = juce::Rectangle<int>(
+        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
+        knobSize, knobSize);
+    g.setColour(draggingTintRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
+    g.fillRect(knobBounds);
+    g.setColour(PinkXP::pink600);
+    g.drawRect(knobBounds, 1);
+
+    // 右侧数值（百分比）
+    auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 48, 20);
+    // Bright 行：比例 0~1 映射为 0%~200%（中点 100%）。
+    // RGB 行：value 0~2 直接 *100 即 0%~200%。
+    int percent = (row == 3)
+        ? juce::roundToInt(proportion * 200.0f)
+        : juce::roundToInt(value * 100.0f);
+    g.setColour(kRowColours[row].withAlpha(0.95f));
+    g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
+    g.drawText(juce::String(percent) + "%", valueRect, juce::Justification::centredLeft, false);
+  }
+}
+
+juce::Rectangle<int> MilkdropModule::getEffectsPanelBounds(juce::Rectangle<int> topBar) const
+{
+  return juce::Rectangle<int>(topBar.getX(), topBar.getBottom(),
+                              topBar.getWidth(),
+                              static_cast<int>(kEffectsPanelHeight));
+}
+
+juce::Rectangle<int> MilkdropModule::getEffectsToggleBounds(juce::Rectangle<int> panel, int row) const
+{
+  constexpr int kPad     = 6;
+  constexpr int kHeaderH = 22;
+  constexpr int kRowH    = 20;
+  constexpr int kToggleH = 16;
+
+  int x = panel.getX() + kPad;
+  int w = panel.getWidth() - kPad * 2;
+  int y = panel.getY() + kHeaderH + row * kRowH + (kRowH - kToggleH) / 2;
+  return juce::Rectangle<int>(x, y, juce::jmax(20, w), kToggleH);
+}
+
+juce::Rectangle<int> MilkdropModule::getEffectsResetBounds(juce::Rectangle<int> panel) const
+{
+  constexpr int kPad = 6;
+  return juce::Rectangle<int>(panel.getRight() - kPad - 44, panel.getY() + 2, 44, 18);
+}
+
+void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> topBar)
+{
+  auto panel = getEffectsPanelBounds(topBar);
+  cachedEffectsPanelRect_ = panel;
+
+  // 半透明暗底
+  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
+  g.fillRect(panel);
+
+  // 底部分割线
+  g.setColour(PinkXP::pink300.withAlpha(0.5f));
+  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+
+  // 标题 "EFFECTS"
+  g.setColour(PinkXP::pink300.withAlpha(0.95f));
+  g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+  g.drawText("EFFECTS", panel.getX() + 6, panel.getY(),
+             60, 22, juce::Justification::centredLeft, false);
+
+  // Reset 按钮
+  auto resetRect = getEffectsResetBounds(panel);
+  cachedEffectsResetRect_ = resetRect;
+  bool resetHovered = resetRect.contains(getMouseXYRelative());
+  if (resetHovered)
+  {
+    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
+    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
+  }
+  else
+  {
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+    g.fillRect(resetRect);
+    g.setColour(PinkXP::pink300.withAlpha(0.55f));
+    g.drawRect(resetRect, 1);
+    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
+  }
+  g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+
+  // invert / shadows 开关按钮：按钮自身即开关，按下=开启，弹起=关闭。
+  static const char* kToggleLabels[2] = { "invert", "shadows" };
+  for (int row = 0; row < 2; ++row)
+  {
+    bool enabled = (row == 0) ? visualState_.invert : visualState_.shadows;
+    auto toggle = getEffectsToggleBounds(panel, row);
+
+    if (enabled)
+    {
+      PinkXP::drawPressed(g, toggle, PinkXP::pink100);
+      g.setColour(PinkXP::pink300);
+    }
+    else
+    {
+      g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+      g.fillRect(toggle);
+      g.setColour(PinkXP::pink300.withAlpha(0.55f));
+      g.drawRect(toggle, 1);
+      g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
+    }
+    g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+    g.drawText(kToggleLabels[row], toggle, juce::Justification::centred, false);
+  }
 }
