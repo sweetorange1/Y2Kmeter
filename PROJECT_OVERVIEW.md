@@ -145,9 +145,9 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类 + 时间反馈 FBO）+ 19 个后处理效果 + effects 面板动态网格布局**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
-| [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 19 个开关效果字段 + `isNeutral()`；由 Editor 全局共享并持久化到 Processor host state） | — |
-| [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表 + `MilkdropFeedbackFbo` 时间反馈 ping-pong FBO；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；由 Editor 全局共享并持久化到 Processor host state） | — |
+| [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2905,9 +2905,9 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 **教训**：
 - `Displays::Display::userArea` 在 Windows 是"扣除任务栏的工作区"，在 macOS 是"扣除菜单栏/Dock 的安全区"；凡"伪全屏/铺满"逻辑按平台用 `userArea`/`totalArea` 时，macOS 若需"真正全屏"必须显式走原生 `setFullScreen`，仅 setBounds 到 totalArea 无法隐藏菜单栏/Dock（macOS 菜单栏/Dock 以更高窗口层级显示）。
 
-## v2.6.5：Milkdrop 效果系统架构重构 + 19 个后处理效果
+## v2.6.5：Milkdrop 效果系统架构重构 + 38 个后处理效果
 
-本章记录 v2.6.5 版本相对 v2.6.1 的改动：将散落的 Milkdrop 后处理效果抽象为**注册表驱动的可扩展效果系统**，引入 **efftop/effbottom 二分类**对齐 MilkDrop3 的 Effect Injection 语义，用**加性叠加的 effbottom 实现**贴近 MilkDrop3 的 Shadows（画面不变暗、只叠加黑白镜像纹理），并一次性落地 19 个开关效果与动态网格布局的 effects 面板。
+本章记录 v2.6.5 版本相对 v2.6.1 的改动：将散落的 Milkdrop 后处理效果抽象为**注册表驱动的可扩展效果系统**，引入 **efftop/effbottom 二分类**对齐 MilkDrop3 的 Effect Injection 语义，用**加性叠加的 effbottom 实现**贴近 MilkDrop3 的 Shadows（画面不变暗、只叠加黑白镜像纹理），并累计落地 38 个开关效果（含第三批 19 个实验性效果）与动态网格布局的 effects 面板。
 
 ### 涉及文件
 
@@ -2978,6 +2978,36 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 ### 改动 7：vignette 强化
 
 - 从简单径向暗角 `smoothstep(0.3, 0.9, d) * 0.8` 改为**强暗角 + 桶形畸变**：暗角起止收窄到 `(0.2, 0.72)`、边缘衰减平方（`vig*vig`）、强度提升到 0.95，并叠加 `vp * vr2 * 0.4` 桶形畸变让边缘向外膨胀。
+
+### 改动 8：第三批 19 个实验性效果
+
+在前两批基础上，新增 19 种更"疯狂"的实验性/迷幻效果（强几何畸变、高频噪波、色彩爆炸、镜像嵌套、像素破碎等），累计效果达 38 个。同样遵循注册表驱动 + efftop/effbottom 二分类，无需改面板布局。
+
+| 效果 | 类型 | 核心逻辑 | 视觉效果 |
+|---|---|---|---|
+| `tunnel` | efftop | 极坐标下 `depth=1/(0.3+r*2)` 映射 uv | 无限纵深隧道 |
+| `ripple` | efftop | `uv += p*sin(r*30)*0.06` 径向正弦扰动 | 同心水波涟漪 |
+| `melt` | efftop | `uv.y += (1-uv.y)*sin(uv.x*20)*0.25` | 画面向下融化 |
+| `fisheye` | efftop | `uv = p*(1+0.8*r²)+0.5` 强桶形畸变 | 超广角鱼眼 |
+| `noise_warp` | efftop | `uv += (sin,cos)` 组合伪噪声偏移 | 高频噪波蠕动 |
+| `mirror_maze` | efftop | `uv = abs(fract(uv*3)*2-1)` 递归折叠 | 无限镜像嵌套 |
+| `fragment` | efftop | 12×12 网格切块 + hash 随机错位 | 像素碎片打乱 |
+| `spiral` | efftop | `atan(p.y,p.x)+r*8` 复合旋转 | 强烈螺旋卷曲 |
+| `twist` | efftop | 沿 y 轴旋转 `p.y*6` | 垂直扭转 |
+| `color_shift` | effbottom | RGB 通道 ±0.03 分离采样 ×1.6 | 色彩爆炸撕裂 |
+| `neon` | effbottom | 亮部提取 + 邻域模糊平方叠加 | 霓虹光晕 |
+| `thermal` | effbottom | 亮度映射蓝→红→黄热力色谱 | 热成像 |
+| `acid` | effbottom | `abs(c-0.5)*2` + 绿增蓝减 | 酸性迷幻撞色 |
+| `vhs` | effbottom | 横向条纹 + RGB 错位 + 高频噪点 | VHS 录像带故障 |
+| `crt` | effbottom | 正弦扫描线 + 隔行暗化 | CRT 扫描线 |
+| `duotone` | effbottom | 亮度映射双色（深紫→橙黄） | 双色调艺术 |
+| `bloom` | effbottom | 亮部阈值 + 邻域模糊 ×3 叠加 | 强泛光爆发 |
+| `binary` | effbottom | `step(0.5, l)` 硬阈值二值化 | 极端黑白剪影 |
+| `prismatic` | effbottom | 径向 `dir*0.02` 红蓝分离 + 增益 | 棱镜色散 |
+
+- **efftop 执行链**（采样前）：`split → zoom → multi → kaleidoscope → swirl → pinch → pixelate → tunnel → ripple → melt → fisheye → noise_warp → mirror_maze → fragment → spiral → twist`。
+- **effbottom 执行链**（采样后）：`shadows → invert → solarize → rainbow → blow → burn → glitch → posterize → sepia → grayscale → edge → vignette → color_shift → neon → thermal → acid → vhs → crt → duotone → bloom → binary → prismatic`。
+- 全部插在现有链末尾，不破坏既有顺序，整体保持单 pass 后处理管线。
 
 ### 踩坑记录
 

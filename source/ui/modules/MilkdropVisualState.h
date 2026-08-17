@@ -40,6 +40,27 @@
 //   · edge         —— 边缘检测，邻域差分（effbottom）。
 //   · vignette     —— 暗角，径向暗化（effbottom）。
 //
+// 第三批扩展效果（本次新增，实验性/迷幻风格，同样 efftop/effbottom 二分类）：
+//   · tunnel       —— 隧道纵深，极坐标映射（efftop）。
+//   · ripple       —— 同心水波涟漪，径向正弦扰动（efftop）。
+//   · melt         —— 融化下垂，uv.y 正弦下垂（efftop）。
+//   · fisheye      —— 超广角鱼眼，强桶形畸变（efftop）。
+//   · noise_warp   —— 高频噪波扰动，uv 伪随机偏移（efftop）。
+//   · mirror_maze  —— 无限镜像嵌套，递归折叠（efftop）。
+//   · fragment     —— 像素破碎，小块打乱（efftop）。
+//   · spiral       —— 螺旋扭曲，角度+半径复合旋转（efftop）。
+//   · twist        —— 垂直扭转，沿 y 旋转（efftop）。
+//   · color_shift  —— 色彩爆炸，RGB 通道大幅分离+增强（effbottom）。
+//   · neon         —— 霓虹光晕，亮部提取+光晕扩散（effbottom）。
+//   · thermal      —— 热成像，亮度映射热力色谱（effbottom）。
+//   · acid         —— 酸性色调，高对比绿品红偏移（effbottom）。
+//   · vhs          —— VHS 故障，横向条纹+色差+噪点（effbottom）。
+//   · crt          —— CRT 扫描线，扫描线+磷光（effbottom）。
+//   · duotone      —— 双色调，亮度映射双色（effbottom）。
+//   · bloom        —— 泛光爆发，亮部模糊扩散叠加（effbottom）。
+//   · binary       —— 极端二值化，硬阈值黑白（effbottom）。
+//   · prismatic    —— 棱镜色散，径向色差（effbottom）。
+//
 // 开关型效果通过 MilkdropEffect.h 中的注册表统一驱动 UI 与 shader uniform 传递；
 // 本结构体仅作为纯数据载体，新增效果时在此追加字段 + isNeutral 判定 +
 // PluginProcessor 持久化字段三处同步。
@@ -70,6 +91,26 @@ struct MilkdropVisualState
     bool  grayscale    = false;  // 灰度：亮度加权（effbottom）
     bool  edge         = false;  // 边缘检测/浮雕：邻域差分（effbottom）
     bool  vignette     = false;  // 暗角：径向暗化（effbottom）
+    // 以下为第三批扩展效果（实验性/迷幻风格，efftop=采样前 uv 变换，effbottom=采样后 ret 变换）
+    bool  tunnel       = false;  // 隧道纵深：极坐标映射（efftop）
+    bool  ripple       = false;  // 同心水波涟漪：径向正弦扰动（efftop）
+    bool  melt         = false;  // 融化下垂：uv.y 正弦下垂（efftop）
+    bool  fisheye      = false;  // 超广角鱼眼：强桶形畸变（efftop）
+    bool  noise_warp   = false;  // 高频噪波扰动：uv 伪随机偏移（efftop）
+    bool  mirror_maze  = false;  // 无限镜像嵌套：递归折叠（efftop）
+    bool  fragment     = false;  // 像素破碎：小块打乱（efftop）
+    bool  spiral       = false;  // 螺旋扭曲：角度+半径复合旋转（efftop）
+    bool  twist        = false;  // 垂直扭转：沿 y 旋转（efftop）
+    bool  color_shift  = false;  // 色彩爆炸：RGB 通道大幅分离+增强（effbottom）
+    bool  neon         = false;  // 霓虹光晕：亮部提取+光晕扩散（effbottom）
+    bool  thermal      = false;  // 热成像：亮度映射热力色谱（effbottom）
+    bool  acid         = false;  // 酸性色调：高对比绿品红偏移（effbottom）
+    bool  vhs          = false;  // VHS 故障：横向条纹+色差+噪点（effbottom）
+    bool  crt          = false;  // CRT 扫描线：扫描线+磷光（effbottom）
+    bool  duotone      = false;  // 双色调：亮度映射双色（effbottom）
+    bool  bloom        = false;  // 泛光爆发：亮部模糊扩散叠加（effbottom）
+    bool  binary       = false;  // 极端二值化：硬阈值黑白（effbottom）
+    bool  prismatic    = false;  // 棱镜色散：径向色差（effbottom）
 
     // 无任何染色 / 效果时返回 true，用于跳过零开销的 offscreen 后处理路径。
     bool isNeutral() const noexcept
@@ -96,6 +137,25 @@ struct MilkdropVisualState
             && ! sepia
             && ! grayscale
             && ! edge
-            && ! vignette;
+            && ! vignette
+            && ! tunnel
+            && ! ripple
+            && ! melt
+            && ! fisheye
+            && ! noise_warp
+            && ! mirror_maze
+            && ! fragment
+            && ! spiral
+            && ! twist
+            && ! color_shift
+            && ! neon
+            && ! thermal
+            && ! acid
+            && ! vhs
+            && ! crt
+            && ! duotone
+            && ! bloom
+            && ! binary
+            && ! prismatic;
     }
 };

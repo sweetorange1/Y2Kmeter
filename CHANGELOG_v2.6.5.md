@@ -1,6 +1,6 @@
 # Y2Kmeter v2.6.5 开发总结
 
-> 本文档记录 v2.6.5 版本相对 v2.6.1 的开发内容：Milkdrop 效果系统架构重构、Shadows 加性叠加（对齐 MilkDrop3）、19 个后处理效果、effects 面板动态网格布局。
+> 本文档记录 v2.6.5 版本相对 v2.6.1 的开发内容：Milkdrop 效果系统架构重构、Shadows 加性叠加（对齐 MilkDrop3）、38 个后处理效果（含第三批 19 个实验性效果）、effects 面板动态网格布局。
 
 ---
 
@@ -11,7 +11,7 @@ v2.6.1 完成 color/effects 面板与脱离模式渲染修复后，本轮聚焦 
 - 将散落的效果状态与后处理 pass 抽象为注册表驱动的可扩展效果系统；
 - 用加性叠加的 effbottom 实现贴近 MilkDrop3 的 Shadows（原实现画面只是变暗，观感差距大）；
 - 引入 efftop/effbottom 二分类对齐 MilkDrop3 Effect Injection 语义；
-- 落地 19 个开关效果 + effects 面板动态网格布局；
+- 累计落地 38 个开关效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局；
 - 修复脱离→切回后 effect 渲染偏移 bug。
 
 ## 2. 核心改动
@@ -74,6 +74,35 @@ v2.6.1 完成 color/effects 面板与脱离模式渲染修复后，本轮聚焦 
 ### 2.7 vignette 强化
 
 - 从简单径向暗角改为强暗角（起止 0.2~0.72、平方衰减、强度 0.95）+ 桶形畸变扭曲。
+
+### 2.8 第三批 19 个实验性效果
+
+在前两批基础上新增 19 种更"疯狂"的实验性/迷幻效果，累计达 38 个。遵循注册表驱动 + efftop/effbottom 二分类，无需改面板布局。
+
+| 效果 | 类型 | 核心逻辑 | 视觉效果 |
+|---|---|---|---|
+| tunnel | efftop | 极坐标 `depth=1/(0.3+r*2)` 映射 uv | 无限纵深隧道 |
+| ripple | efftop | `uv += p*sin(r*30)*0.06` 径向正弦扰动 | 同心水波涟漪 |
+| melt | efftop | `uv.y += (1-uv.y)*sin(uv.x*20)*0.25` | 画面向下融化 |
+| fisheye | efftop | `uv = p*(1+0.8*r²)+0.5` 强桶形畸变 | 超广角鱼眼 |
+| noise_warp | efftop | `uv += (sin,cos)` 组合伪噪声偏移 | 高频噪波蠕动 |
+| mirror_maze | efftop | `uv = abs(fract(uv*3)*2-1)` 递归折叠 | 无限镜像嵌套 |
+| fragment | efftop | 12×12 网格切块 + hash 随机错位 | 像素碎片打乱 |
+| spiral | efftop | `atan(p.y,p.x)+r*8` 复合旋转 | 强烈螺旋卷曲 |
+| twist | efftop | 沿 y 轴旋转 `p.y*6` | 垂直扭转 |
+| color_shift | effbottom | RGB 通道 ±0.03 分离采样 ×1.6 | 色彩爆炸撕裂 |
+| neon | effbottom | 亮部提取 + 邻域模糊平方叠加 | 霓虹光晕 |
+| thermal | effbottom | 亮度映射蓝→红→黄热力色谱 | 热成像 |
+| acid | effbottom | `abs(c-0.5)*2` + 绿增蓝减 | 酸性迷幻撞色 |
+| vhs | effbottom | 横向条纹 + RGB 错位 + 高频噪点 | VHS 录像带故障 |
+| crt | effbottom | 正弦扫描线 + 隔行暗化 | CRT 扫描线 |
+| duotone | effbottom | 亮度映射双色（深紫→橙黄） | 双色调艺术 |
+| bloom | effbottom | 亮部阈值 + 邻域模糊 ×3 叠加 | 强泛光爆发 |
+| binary | effbottom | `step(0.5, l)` 硬阈值二值化 | 极端黑白剪影 |
+| prismatic | effbottom | 径向 `dir*0.02` 红蓝分离 + 增益 | 棱镜色散 |
+
+- efftop 执行链（采样前）：`split → zoom → multi → kaleidoscope → swirl → pinch → pixelate → tunnel → ripple → melt → fisheye → noise_warp → mirror_maze → fragment → spiral → twist`。
+- effbottom 执行链（采样后）：`shadows → invert → solarize → rainbow → blow → burn → glitch → posterize → sepia → grayscale → edge → vignette → color_shift → neon → thermal → acid → vhs → crt → duotone → bloom → binary → prismatic`。
 
 ## 3. 踩坑记录
 

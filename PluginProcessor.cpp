@@ -470,6 +470,25 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty ("milkdropGrayscale",    savedMilkdropVisualState_.grayscale,    nullptr);
     root.setProperty ("milkdropEdge",         savedMilkdropVisualState_.edge,         nullptr);
     root.setProperty ("milkdropVignette",     savedMilkdropVisualState_.vignette,     nullptr);
+    root.setProperty ("milkdropTunnel",       savedMilkdropVisualState_.tunnel,       nullptr);
+    root.setProperty ("milkdropRipple",       savedMilkdropVisualState_.ripple,       nullptr);
+    root.setProperty ("milkdropMelt",         savedMilkdropVisualState_.melt,         nullptr);
+    root.setProperty ("milkdropFisheye",      savedMilkdropVisualState_.fisheye,      nullptr);
+    root.setProperty ("milkdropNoiseWarp",    savedMilkdropVisualState_.noise_warp,   nullptr);
+    root.setProperty ("milkdropMirrorMaze",   savedMilkdropVisualState_.mirror_maze,  nullptr);
+    root.setProperty ("milkdropFragment",     savedMilkdropVisualState_.fragment,     nullptr);
+    root.setProperty ("milkdropSpiral",       savedMilkdropVisualState_.spiral,       nullptr);
+    root.setProperty ("milkdropTwist",        savedMilkdropVisualState_.twist,        nullptr);
+    root.setProperty ("milkdropColorShift",   savedMilkdropVisualState_.color_shift,  nullptr);
+    root.setProperty ("milkdropNeon",         savedMilkdropVisualState_.neon,         nullptr);
+    root.setProperty ("milkdropThermal",      savedMilkdropVisualState_.thermal,      nullptr);
+    root.setProperty ("milkdropAcid",         savedMilkdropVisualState_.acid,         nullptr);
+    root.setProperty ("milkdropVhs",          savedMilkdropVisualState_.vhs,          nullptr);
+    root.setProperty ("milkdropCrt",          savedMilkdropVisualState_.crt,          nullptr);
+    root.setProperty ("milkdropDuotone",      savedMilkdropVisualState_.duotone,      nullptr);
+    root.setProperty ("milkdropBloom",        savedMilkdropVisualState_.bloom,        nullptr);
+    root.setProperty ("milkdropBinary",       savedMilkdropVisualState_.binary,       nullptr);
+    root.setProperty ("milkdropPrismatic",    savedMilkdropVisualState_.prismatic,    nullptr);
 
     if (savedLayoutXml.isNotEmpty())
     {
@@ -564,6 +583,44 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
         savedMilkdropVisualState_.edge = (bool) root.getProperty ("milkdropEdge", false);
     if (root.hasProperty ("milkdropVignette"))
         savedMilkdropVisualState_.vignette = (bool) root.getProperty ("milkdropVignette", false);
+    if (root.hasProperty ("milkdropTunnel"))
+        savedMilkdropVisualState_.tunnel = (bool) root.getProperty ("milkdropTunnel", false);
+    if (root.hasProperty ("milkdropRipple"))
+        savedMilkdropVisualState_.ripple = (bool) root.getProperty ("milkdropRipple", false);
+    if (root.hasProperty ("milkdropMelt"))
+        savedMilkdropVisualState_.melt = (bool) root.getProperty ("milkdropMelt", false);
+    if (root.hasProperty ("milkdropFisheye"))
+        savedMilkdropVisualState_.fisheye = (bool) root.getProperty ("milkdropFisheye", false);
+    if (root.hasProperty ("milkdropNoiseWarp"))
+        savedMilkdropVisualState_.noise_warp = (bool) root.getProperty ("milkdropNoiseWarp", false);
+    if (root.hasProperty ("milkdropMirrorMaze"))
+        savedMilkdropVisualState_.mirror_maze = (bool) root.getProperty ("milkdropMirrorMaze", false);
+    if (root.hasProperty ("milkdropFragment"))
+        savedMilkdropVisualState_.fragment = (bool) root.getProperty ("milkdropFragment", false);
+    if (root.hasProperty ("milkdropSpiral"))
+        savedMilkdropVisualState_.spiral = (bool) root.getProperty ("milkdropSpiral", false);
+    if (root.hasProperty ("milkdropTwist"))
+        savedMilkdropVisualState_.twist = (bool) root.getProperty ("milkdropTwist", false);
+    if (root.hasProperty ("milkdropColorShift"))
+        savedMilkdropVisualState_.color_shift = (bool) root.getProperty ("milkdropColorShift", false);
+    if (root.hasProperty ("milkdropNeon"))
+        savedMilkdropVisualState_.neon = (bool) root.getProperty ("milkdropNeon", false);
+    if (root.hasProperty ("milkdropThermal"))
+        savedMilkdropVisualState_.thermal = (bool) root.getProperty ("milkdropThermal", false);
+    if (root.hasProperty ("milkdropAcid"))
+        savedMilkdropVisualState_.acid = (bool) root.getProperty ("milkdropAcid", false);
+    if (root.hasProperty ("milkdropVhs"))
+        savedMilkdropVisualState_.vhs = (bool) root.getProperty ("milkdropVhs", false);
+    if (root.hasProperty ("milkdropCrt"))
+        savedMilkdropVisualState_.crt = (bool) root.getProperty ("milkdropCrt", false);
+    if (root.hasProperty ("milkdropDuotone"))
+        savedMilkdropVisualState_.duotone = (bool) root.getProperty ("milkdropDuotone", false);
+    if (root.hasProperty ("milkdropBloom"))
+        savedMilkdropVisualState_.bloom = (bool) root.getProperty ("milkdropBloom", false);
+    if (root.hasProperty ("milkdropBinary"))
+        savedMilkdropVisualState_.binary = (bool) root.getProperty ("milkdropBinary", false);
+    if (root.hasProperty ("milkdropPrismatic"))
+        savedMilkdropVisualState_.prismatic = (bool) root.getProperty ("milkdropPrismatic", false);
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())

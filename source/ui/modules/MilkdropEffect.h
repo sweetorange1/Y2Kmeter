@@ -42,6 +42,25 @@ enum class MilkdropEffectId
     kGrayscale,     // 灰度：亮度加权（effbottom）
     kEdge,          // 边缘检测：邻域差分（effbottom）
     kVignette,      // 暗角：径向暗化（effbottom）
+    kTunnel,        // 隧道纵深：极坐标映射（efftop）
+    kRipple,        // 同心水波涟漪：径向正弦扰动（efftop）
+    kMelt,          // 融化下垂：uv.y 正弦下垂（efftop）
+    kFisheye,       // 超广角鱼眼：强桶形畸变（efftop）
+    kNoiseWarp,     // 高频噪波扰动：uv 伪随机偏移（efftop）
+    kMirrorMaze,    // 无限镜像嵌套：递归折叠（efftop）
+    kFragment,      // 像素破碎：小块打乱（efftop）
+    kSpiral,        // 螺旋扭曲：角度+半径复合旋转（efftop）
+    kTwist,         // 垂直扭转：沿 y 旋转（efftop）
+    kColorShift,    // 色彩爆炸：RGB 通道大幅分离+增强（effbottom）
+    kNeon,          // 霓虹光晕：亮部提取+光晕扩散（effbottom）
+    kThermal,       // 热成像：亮度映射热力色谱（effbottom）
+    kAcid,          // 酸性色调：高对比绿品红偏移（effbottom）
+    kVhs,           // VHS 故障：横向条纹+色差+噪点（effbottom）
+    kCrt,           // CRT 扫描线：扫描线+磷光（effbottom）
+    kDuotone,       // 双色调：亮度映射双色（effbottom）
+    kBloom,         // 泛光爆发：亮部模糊扩散叠加（effbottom）
+    kBinary,        // 极端二值化：硬阈值黑白（effbottom）
+    kPrismatic,     // 棱镜色散：径向色差（effbottom）
 };
 
 // 单个开关型效果的元数据，供 effects 面板动态生成 UI。
@@ -133,6 +152,82 @@ inline const std::vector<MilkdropEffectDef>& GetMilkdropEffectDefs()
         { MilkdropEffectId::kVignette, "vignette", true,
           [] (const MilkdropVisualState& s) { return s.vignette; },
           [] (MilkdropVisualState& s, bool v) { s.vignette = v; } },
+
+        { MilkdropEffectId::kTunnel, "tunnel", true,
+          [] (const MilkdropVisualState& s) { return s.tunnel; },
+          [] (MilkdropVisualState& s, bool v) { s.tunnel = v; } },
+
+        { MilkdropEffectId::kRipple, "ripple", true,
+          [] (const MilkdropVisualState& s) { return s.ripple; },
+          [] (MilkdropVisualState& s, bool v) { s.ripple = v; } },
+
+        { MilkdropEffectId::kMelt, "melt", true,
+          [] (const MilkdropVisualState& s) { return s.melt; },
+          [] (MilkdropVisualState& s, bool v) { s.melt = v; } },
+
+        { MilkdropEffectId::kFisheye, "fisheye", true,
+          [] (const MilkdropVisualState& s) { return s.fisheye; },
+          [] (MilkdropVisualState& s, bool v) { s.fisheye = v; } },
+
+        { MilkdropEffectId::kNoiseWarp, "noise_warp", true,
+          [] (const MilkdropVisualState& s) { return s.noise_warp; },
+          [] (MilkdropVisualState& s, bool v) { s.noise_warp = v; } },
+
+        { MilkdropEffectId::kMirrorMaze, "mirror_maze", true,
+          [] (const MilkdropVisualState& s) { return s.mirror_maze; },
+          [] (MilkdropVisualState& s, bool v) { s.mirror_maze = v; } },
+
+        { MilkdropEffectId::kFragment, "fragment", true,
+          [] (const MilkdropVisualState& s) { return s.fragment; },
+          [] (MilkdropVisualState& s, bool v) { s.fragment = v; } },
+
+        { MilkdropEffectId::kSpiral, "spiral", true,
+          [] (const MilkdropVisualState& s) { return s.spiral; },
+          [] (MilkdropVisualState& s, bool v) { s.spiral = v; } },
+
+        { MilkdropEffectId::kTwist, "twist", true,
+          [] (const MilkdropVisualState& s) { return s.twist; },
+          [] (MilkdropVisualState& s, bool v) { s.twist = v; } },
+
+        { MilkdropEffectId::kColorShift, "color_shift", true,
+          [] (const MilkdropVisualState& s) { return s.color_shift; },
+          [] (MilkdropVisualState& s, bool v) { s.color_shift = v; } },
+
+        { MilkdropEffectId::kNeon, "neon", true,
+          [] (const MilkdropVisualState& s) { return s.neon; },
+          [] (MilkdropVisualState& s, bool v) { s.neon = v; } },
+
+        { MilkdropEffectId::kThermal, "thermal", true,
+          [] (const MilkdropVisualState& s) { return s.thermal; },
+          [] (MilkdropVisualState& s, bool v) { s.thermal = v; } },
+
+        { MilkdropEffectId::kAcid, "acid", true,
+          [] (const MilkdropVisualState& s) { return s.acid; },
+          [] (MilkdropVisualState& s, bool v) { s.acid = v; } },
+
+        { MilkdropEffectId::kVhs, "vhs", true,
+          [] (const MilkdropVisualState& s) { return s.vhs; },
+          [] (MilkdropVisualState& s, bool v) { s.vhs = v; } },
+
+        { MilkdropEffectId::kCrt, "crt", true,
+          [] (const MilkdropVisualState& s) { return s.crt; },
+          [] (MilkdropVisualState& s, bool v) { s.crt = v; } },
+
+        { MilkdropEffectId::kDuotone, "duotone", true,
+          [] (const MilkdropVisualState& s) { return s.duotone; },
+          [] (MilkdropVisualState& s, bool v) { s.duotone = v; } },
+
+        { MilkdropEffectId::kBloom, "bloom", true,
+          [] (const MilkdropVisualState& s) { return s.bloom; },
+          [] (MilkdropVisualState& s, bool v) { s.bloom = v; } },
+
+        { MilkdropEffectId::kBinary, "binary", true,
+          [] (const MilkdropVisualState& s) { return s.binary; },
+          [] (MilkdropVisualState& s, bool v) { s.binary = v; } },
+
+        { MilkdropEffectId::kPrismatic, "prismatic", true,
+          [] (const MilkdropVisualState& s) { return s.prismatic; },
+          [] (MilkdropVisualState& s, bool v) { s.prismatic = v; } },
     };
     return defs;
 }
