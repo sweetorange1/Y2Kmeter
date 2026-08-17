@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.6.1`）
+- **产品名**：`Y2Kmeter` （版本：`2.6.5`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -145,8 +145,9 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；**v2.6.1：color 面板 RGB+Bright 四行滑块（bright 非线性映射，中点=1.0）+ effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复 + 诊断日志**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
-| [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + `invert` + `shadows` + `isNeutral()`；由 Editor 全局共享并持久化到 Processor host state） | — |
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类 + 时间反馈 FBO）+ 19 个后处理效果 + effects 面板动态网格布局**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 19 个开关效果字段 + `isNeutral()`；由 Editor 全局共享并持久化到 Processor host state） | — |
+| [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表 + `MilkdropFeedbackFbo` 时间反馈 ping-pong FBO；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -2903,6 +2904,86 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 
 **教训**：
 - `Displays::Display::userArea` 在 Windows 是"扣除任务栏的工作区"，在 macOS 是"扣除菜单栏/Dock 的安全区"；凡"伪全屏/铺满"逻辑按平台用 `userArea`/`totalArea` 时，macOS 若需"真正全屏"必须显式走原生 `setFullScreen`，仅 setBounds 到 totalArea 无法隐藏菜单栏/Dock（macOS 菜单栏/Dock 以更高窗口层级显示）。
+
+## v2.6.5：Milkdrop 效果系统架构重构 + 19 个后处理效果
+
+本章记录 v2.6.5 版本相对 v2.6.1 的改动：将散落的 Milkdrop 后处理效果抽象为**注册表驱动的可扩展效果系统**，引入 **efftop/effbottom 二分类**对齐 MilkDrop3 的 Effect Injection 语义，用**加性叠加的 effbottom 实现**贴近 MilkDrop3 的 Shadows（画面不变暗、只叠加黑白镜像纹理），并一次性落地 19 个开关效果与动态网格布局的 effects 面板。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/modules/MilkdropEffect.h`](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | **新增**（header-only）：`MilkdropEffectId` 枚举、`MilkdropEffectDef` 元数据（id/name/implemented/get/set lambda）、`GetMilkdropEffectDefs()` 注册表、`CountImplementedMilkdropEffects()`/`GetImplementedMilkdropEffect()` 辅助函数 |
+| [`source/ui/modules/MilkdropVisualState.h`](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | 从 4 字段扩展为 19 个开关效果字段 + `isNeutral()` 全量判定 |
+| [`source/ui/modules/MilkdropModule.h`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropTintPass` 扩展 19 个 uniform 成员；effects 面板常量改为网格布局相关（最小按钮宽/间距/行高） |
+| [`source/ui/modules/MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | shader 重构（统一 pass 多效果分支，GLSL 150/120 两版）、uniform 查找与 apply、effects 面板动态网格布局 |
+| [`PluginEditor.h/.cpp`](/I:/Y2KMeter/PluginEditor.h) | `openGLContextClosing()` 补重置 `milkdrop_post_w_/h_`（修复脱离→切回 post FBO 残缺） |
+| [`PluginProcessor.cpp`](/I:/Y2KMeter/PluginProcessor.cpp) | 持久化序列化/反序列化扩展 19 个效果字段 |
+
+### 改动 1：效果系统架构重构（注册表驱动）
+
+- 将原先散落在 `MilkdropModule` 中的效果状态与后处理 pass 逻辑，抽象为统一效果系统：
+  - **状态层**：`MilkdropVisualState` 纯数据承载（19 个开关 bool + 4 个参数化字段 + `isNeutral()`）。
+  - **注册表层**：`MilkdropEffect.h` 中的 `MilkdropEffectDef`（含 `get`/`set` lambda），使每个效果的开关、UI 显示名、shader uniform 传递可独立声明与管理。
+  - **渲染层**：`MilkdropTintPass` 统一 pass 内多效果分支，按注册顺序串行执行。
+- **effects 面板 UI 完全由注册表驱动**：`paintEffectsPanel` 与 hit-test 遍历 `GetMilkdropEffectDefs()` 中 `implemented == true` 的项动态生成按钮；新增效果只需在 `MilkdropVisualState` 追加字段 + 注册表追加一行 + shader 追加分支 + 持久化追加字段，**无需改面板布局代码**。
+- **单 pass 多效果**：所有开关效果在同一个 `MilkdropTintPass` 全屏 pass 内按注册顺序串行执行，无需多 pass 或额外 FBO，保持后处理零额外开销。
+
+### 改动 2：Shadows 加性叠加（对齐 MilkDrop3）
+
+- 旧实现为"单帧暗部压暗"（亮度掩码 + 平方），画面只是变暗，与 MilkDrop3 的 Shadows 观感差距大。
+- 新实现贴近 MilkDrop3：**对当前帧的上下翻转位置采样灰度，pow 后加性叠加**（`ret += pow(gray(flip(uv)), 2)`），画面不变暗，只叠加黑白镜像纹理。
+- 执行顺序对齐 MilkDrop3 composite shader：`tint → bright → shadows → invert → solarize → ... → clamp`。
+
+### 改动 3：efftop / effbottom 二分类
+
+- **efftop**（采样前重映射 uv）：`split`、`zoom`、`multi`、`kaleidoscope`、`swirl`、`pinch`、`pixelate`。
+- **effbottom**（采样后修改 ret）：`invert`、`shadows`、`solarize`、`rainbow`、`blow`、`burn`、`glitch`、`posterize`、`sepia`、`grayscale`、`edge`、`vignette`。
+
+### 改动 4：19 个效果清单
+
+| 效果 | 类型 | 逻辑 |
+|---|---|---|
+| `invert` | effbottom | `ret = 1 - ret` |
+| `shadows` | effbottom | `ret += pow(gray(flip(uv)), 2)`（加性叠加，不压暗） |
+| `solarize` | effbottom | `ret = ret*(1-ret)*4` |
+| `split` | efftop | `uv = (abs(uv.x-0.5), uv.y)` |
+| `zoom` | efftop | `uv = 0.25 + 0.5*uv` |
+| `multi` | efftop | uv 多重折叠 |
+| `rainbow` | effbottom | 程序化彩虹染色 |
+| `blow` | effbottom | `ret += blur(uv)` 加性模糊 |
+| `burn` | effbottom | color burn 近似 |
+| `kaleidoscope` | efftop | 极坐标角度折叠（π/3 扇区） |
+| `swirl` | efftop | 绕中心旋转，越远旋转越多 |
+| `pinch` | efftop | 径向缩放（鱼眼/挤压） |
+| `pixelate` | efftop | uv 量化成 24×24 网格 |
+| `glitch` | effbottom | RGB 通道微偏移采样（色差） |
+| `posterize` | effbottom | ret 量化成 8 级 |
+| `sepia` | effbottom | sepia 颜色矩阵 |
+| `grayscale` | effbottom | 亮度加权灰度 |
+| `edge` | effbottom | 邻域差分边缘检测 |
+| `vignette` | effbottom | 强暗角 + 桶形畸变扭曲 |
+
+### 改动 5：effects 面板动态网格布局
+
+- 按钮不再一行一个，而是根据模块宽度动态决定每行列数：`getEffectsColumns()` 按可用宽度与最小按钮宽（56px）+ 间距推算列数，`getEffectsToggleBounds()` 把 row 映射到 `(col, r)` 网格坐标。
+- 面板高度由实际行数动态决定。
+- 修复按钮被挤窄的 bug：先扣除列间间距再均分宽度，整除余数补给最后一列，保证最右侧按钮不被挤小。
+
+### 改动 6：脱离→切回 effect 渲染偏移修复
+
+- **根因**：`openGLContextClosing()` 销毁 post FBO 时重置了 `milkdrop_last_fbo_w_/h_`，却漏掉 `milkdrop_post_w_/h_`，导致脱离→切回后 post FBO 尺寸判断为假、跳过纹理分配与附件绑定，得到残缺 framebuffer。任何 effect 开启（`tint_active`）走 post FBO 路径即渲染偏移到左下角。
+- **修复**：销毁 post FBO 后补充 `milkdrop_post_w_ = 0; milkdrop_post_h_ = 0;`。
+
+### 改动 7：vignette 强化
+
+- 从简单径向暗角 `smoothstep(0.3, 0.9, d) * 0.8` 改为**强暗角 + 桶形畸变**：暗角起止收窄到 `(0.2, 0.72)`、边缘衰减平方（`vig*vig`）、强度提升到 0.95，并叠加 `vp * vr2 * 0.4` 桶形畸变让边缘向外膨胀。
+
+### 踩坑记录
+
+1. **Shadows 观感差距的根因是语义错误而非强度**：MilkDrop3 的 Shadows 是"对上下翻转位置的灰度做 pow 后**加性叠加**"，产生黑白镜像纹理；旧实现是"对当前帧暗部做平方**乘法压暗**"，语义完全不同，导致画面只是变暗。
+2. **脱离→切回 post FBO 残缺**：`glGen*` 重建了 FBO 对象，但尺寸缓存未清零导致跳过附件绑定。凡是"销毁 GL 资源 + 重建"的路径，必须同步清零尺寸/状态缓存，否则残留值会让重建逻辑误判。
+3. **effects 网格布局 gap 未先扣除**：`cell_w = avail_w / cols` 未扣间距，却用 `col * (cell_w + gap)` 累加偏移，导致每列都向右多偏 `col*gap`，最后一列被挤窄。应先扣总间距再均分，余数补给最后一列。
 
 ---
 

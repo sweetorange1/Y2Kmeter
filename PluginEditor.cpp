@@ -197,7 +197,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.6.1");
+const int versionW = versionFont.getStringWidth ("v2.6.5");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -238,7 +238,7 @@ const int versionW = versionFont.getStringWidth ("v2.6.1");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.6.1";
+const juce::String versionText = "v2.6.5";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -3042,7 +3042,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.6.1";
+const juce::String versionText = "v2.6.5";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3050,7 +3050,7 @@ const juce::String versionText = "v2.6.1";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.6.1");
+        const int versionW = versionFont.getStringWidth ("v2.6.5");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4870,7 +4870,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       milkdrop_post_h_ = fbo_h;
     }
 
-    // 后处理：采样 render FBO 纹理 → post FBO
+    // 后处理：采样 render FBO 纹理 → post FBO，统一 pass 应用完整视觉状态。
     if (milkdrop_tint_pass_ != nullptr && milkdrop_tint_pass_->isReady()) {
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
       juce::gl::glViewport(0, 0, fbo_w, fbo_h);
@@ -5026,6 +5026,8 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
     juce::gl::glDeleteTextures(1, &milkdrop_post_tex_);
     milkdrop_post_tex_ = 0;
   }
+  milkdrop_post_w_ = 0;
+  milkdrop_post_h_ = 0;
   if (milkdrop_render_fbo_ != 0) {
     juce::gl::glDeleteFramebuffers(1, &milkdrop_render_fbo_);
     milkdrop_render_fbo_ = 0;

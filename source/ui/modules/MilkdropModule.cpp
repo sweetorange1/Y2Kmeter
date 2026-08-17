@@ -601,24 +601,132 @@ bool MilkdropTintPass::init()
             "uniform float uBrightness;\n"
             "uniform float uInvert;\n"
             "uniform float uShadows;\n"
+            "uniform float uShadowsStrength;\n"
+            "uniform float uSolarize;\n"
+            "uniform float uSplit;\n"
+            "uniform float uZoom;\n"
+            "uniform float uMulti;\n"
+            "uniform float uRainbow;\n"
+            "uniform float uBlow;\n"
+            "uniform float uBurn;\n"
+            "uniform float uKaleidoscope;\n"
+            "uniform float uSwirl;\n"
+            "uniform float uPinch;\n"
+            "uniform float uPixelate;\n"
+            "uniform float uGlitch;\n"
+            "uniform float uPosterize;\n"
+            "uniform float uSepia;\n"
+            "uniform float uGrayscale;\n"
+            "uniform float uEdge;\n"
+            "uniform float uVignette;\n"
             "void main() {\n"
-            "  vec4 c = texture(uTex, vUV);\n"
-            "  // 加性偏移：uTint=(1,1,1) 为中性点，调高让整体（含黑色）偏向该色，\n"
-            "  // 调低偏向补色。偏移量 = uTint-1.0，范围 -1~+1（对应滑块 0%~200%）。\n"
+            "  vec2 uv = vUV;\n"
+            "  // efftop：采样前 uv 重映射（split → zoom → multi → kaleidoscope → swirl → pinch → pixelate）。\n"
+            "  if (uSplit > 0.5) uv = vec2(abs(uv.x - 0.5), uv.y);\n"
+            "  if (uZoom > 0.5) uv = 0.25 + 0.5 * uv;\n"
+            "  if (uMulti > 0.5) uv = 1.0 - abs(fract((uv - 0.5) * 0.75) * 2.0 - 1.0);\n"
+            "  if (uKaleidoscope > 0.5) {\n"
+            "    vec2 p = uv - 0.5;\n"
+            "    float r = length(p);\n"
+            "    float a = atan(p.y, p.x);\n"
+            "    float seg = 3.14159265 / 3.0;\n"
+            "    a = abs(mod(a, seg * 2.0) - seg);\n"
+            "    uv = vec2(cos(a), sin(a)) * r + 0.5;\n"
+            "  }\n"
+            "  if (uSwirl > 0.5) {\n"
+            "    vec2 p = uv - 0.5;\n"
+            "    float r = length(p);\n"
+            "    float a = atan(p.y, p.x) + (1.0 - r) * 3.0;\n"
+            "    uv = vec2(cos(a), sin(a)) * r + 0.5;\n"
+            "  }\n"
+            "  if (uPinch > 0.5) {\n"
+            "    vec2 p = uv - 0.5;\n"
+            "    float r = length(p);\n"
+            "    uv = p * (0.3 + 0.7 * r) / max(r, 0.0001) + 0.5;\n"
+            "  }\n"
+            "  if (uPixelate > 0.5) uv = floor(uv * 24.0) / 24.0 + vec2(1.0 / 48.0);\n"
+            "  vec4 c = texture(uTex, uv);\n"
+            "  // 加性偏移：uTint=(1,1,1) 为中性点，调高让整体（含黑色）偏向该色。\n"
             "  c.rgb += (uTint - vec3(1.0));\n"
             "  c.rgb = max(c.rgb, vec3(0.0));\n"
             "  // bright：纯线性增益（对齐 MilkDrop3 的 ret *= brightness）。\n"
-            "  // 1.0=中性；>1 提亮（暗部大幅抬升、高光溢出），<1 压暗。\n"
-            "  // 曾引入软 knee 公式 c/(1+c*(b-1))，但分母中的 c 已是乘过增益后的值，\n"
-            "  // 导致 b>1 时分母被放大、画面反被压暗；这里恢复线性增益 + 最终 clamp。\n"
             "  c.rgb *= uBrightness;\n"
-            "  // invert：反相 / 负片（对应 MilkDrop3 的 ret = 1 - ret）。\n"
+            "  // shadows：上下翻转 + 灰度 + pow + 加性叠加（对齐 MilkDrop3 shadow 注入效果）。\n"
+            "  // 注意：是 += 加法而非乘法，画面不变暗，只叠加黑白镜像纹理。\n"
+            "  if (uShadows > 0.5) {\n"
+            "    float gray = texture(uTex, vec2(vUV.x, 1.0 - vUV.y)).g;\n"
+            "    float shadow = pow(gray, 2.0);\n"
+            "    c.rgb += shadow * uShadowsStrength;\n"
+            "  }\n"
+            "  // invert：反相 / 负片（ret = 1 - ret）。\n"
             "  if (uInvert > 0.5) c.rgb = vec3(1.0) - c.rgb;\n"
-            "  // shadows：暗部针对性压暗并保留高光（而非全局平方）。\n"
-            "  // 用亮度掩码只对暗部做平方，还原 MilkDrop3 反馈环内平方的暗部强对比。\n"
-            "  float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
-            "  float shadowMask = 1.0 - smoothstep(0.0, 0.5, lum);\n"
-            "  c.rgb = mix(c.rgb, c.rgb * c.rgb, uShadows * shadowMask);\n"
+            "  // solarize：曝光反转（ret = ret*(1-ret)*4）。\n"
+            "  if (uSolarize > 0.5) c.rgb = c.rgb * (vec3(1.0) - c.rgb) * 4.0;\n"
+            "  // rainbow：程序化彩虹染色（原版依赖噪声纹理，此处降级为水平彩虹渐变）。\n"
+            "  if (uRainbow > 0.5) {\n"
+            "    vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (vUV.x + vec3(0.0, 0.3333, 0.6667)));\n"
+            "    c.rgb = mix(c.rgb, rainbow, 0.6);\n"
+            "  }\n"
+            "  // blow：加性模糊叠加（近似 MilkDrop3 的 ret += GetBlur1(uv)）。\n"
+            "  if (uBlow > 0.5) {\n"
+            "    vec3 blur = texture(uTex, vUV).rgb;\n"
+            "    blur += texture(uTex, vUV + vec2(0.02, 0.0)).rgb;\n"
+            "    blur += texture(uTex, vUV - vec2(0.02, 0.0)).rgb;\n"
+            "    blur += texture(uTex, vUV + vec2(0.0, 0.02)).rgb;\n"
+            "    blur += texture(uTex, vUV - vec2(0.0, 0.02)).rgb;\n"
+            "    blur /= 5.0;\n"
+            "    c.rgb += blur * 0.4;\n"
+            "  }\n"
+            "  // burn：灼烧混合（color burn 近似）。\n"
+            "  if (uBurn > 0.5) {\n"
+            "    vec3 d = texture(uTex, vUV).rgb;\n"
+            "    vec3 burned = vec3(1.0) - (vec3(1.0) - c.rgb) / max(d + 0.001, vec3(0.001));\n"
+            "    c.rgb = mix(c.rgb, burned, 0.7);\n"
+            "  }\n"
+            "  // glitch：故障色差，RGB 通道沿 x 微偏移重新采样。\n"
+            "  if (uGlitch > 0.5) {\n"
+            "    vec2 off = vec2(0.015, 0.0);\n"
+            "    c.r = texture(uTex, vUV + off).r;\n"
+            "    c.b = texture(uTex, vUV - off).b;\n"
+            "  }\n"
+            "  // posterize：色调分离，ret 量化成 8 级。\n"
+            "  if (uPosterize > 0.5) c.rgb = floor(c.rgb * 8.0) / 8.0;\n"
+            "  // sepia：复古棕褐颜色矩阵。\n"
+            "  if (uSepia > 0.5) {\n"
+            "    vec3 s;\n"
+            "    s.r = dot(c.rgb, vec3(0.393, 0.769, 0.189));\n"
+            "    s.g = dot(c.rgb, vec3(0.349, 0.686, 0.168));\n"
+            "    s.b = dot(c.rgb, vec3(0.272, 0.534, 0.131));\n"
+            "    c.rgb = mix(c.rgb, s, 0.85);\n"
+            "  }\n"
+            "  // grayscale：灰度化（亮度加权）。\n"
+            "  if (uGrayscale > 0.5) {\n"
+            "    float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
+            "    c.rgb = vec3(l);\n"
+            "  }\n"
+            "  // edge：邻域差分边缘检测（亮线 / 浮雕感）。\n"
+            "  if (uEdge > 0.5) {\n"
+            "    float o = 0.005;\n"
+            "    float tl = dot(texture(uTex, vUV + vec2(-o, -o)).rgb, vec3(0.333));\n"
+            "    float tr = dot(texture(uTex, vUV + vec2(o, -o)).rgb, vec3(0.333));\n"
+            "    float bl = dot(texture(uTex, vUV + vec2(-o, o)).rgb, vec3(0.333));\n"
+            "    float br = dot(texture(uTex, vUV + vec2(o, o)).rgb, vec3(0.333));\n"
+            "    float gx = tr + br - tl - bl;\n"
+            "    float gy = bl + br - tl - tr;\n"
+            "    float e = clamp(sqrt(gx * gx + gy * gy), 0.0, 1.0);\n"
+            "    c.rgb = mix(c.rgb, vec3(1.0 - e), 0.8);\n"
+            "  }\n"
+            "  // vignette：强暗角 + 桶形畸变扭曲。\n"
+            "  if (uVignette > 0.5) {\n"
+            "    vec2 vp = vUV - 0.5;\n"
+            "    float vr2 = dot(vp, vp);\n"
+            "    vec2 warped_uv = vUV + vp * vr2 * 0.4;\n"
+            "    vec3 warped = texture(uTex, warped_uv).rgb;\n"
+            "    c.rgb = mix(c.rgb, warped, 0.5);\n"
+            "    float vd = length(vp);\n"
+            "    float vig = smoothstep(0.2, 0.72, vd);\n"
+            "    c.rgb *= 1.0 - vig * vig * 0.95;\n"
+            "  }\n"
             "  c.rgb = clamp(c.rgb, 0.0, 1.0);\n"
             "  fragColor = c;\n"
             "}\n";
@@ -641,24 +749,132 @@ bool MilkdropTintPass::init()
             "uniform float uBrightness;\n"
             "uniform float uInvert;\n"
             "uniform float uShadows;\n"
+            "uniform float uShadowsStrength;\n"
+            "uniform float uSolarize;\n"
+            "uniform float uSplit;\n"
+            "uniform float uZoom;\n"
+            "uniform float uMulti;\n"
+            "uniform float uRainbow;\n"
+            "uniform float uBlow;\n"
+            "uniform float uBurn;\n"
+            "uniform float uKaleidoscope;\n"
+            "uniform float uSwirl;\n"
+            "uniform float uPinch;\n"
+            "uniform float uPixelate;\n"
+            "uniform float uGlitch;\n"
+            "uniform float uPosterize;\n"
+            "uniform float uSepia;\n"
+            "uniform float uGrayscale;\n"
+            "uniform float uEdge;\n"
+            "uniform float uVignette;\n"
             "void main() {\n"
-            "  vec4 c = texture2D(uTex, vUV);\n"
-            "  // 加性偏移：uTint=(1,1,1) 为中性点，调高让整体（含黑色）偏向该色，\n"
-            "  // 调低偏向补色。偏移量 = uTint-1.0，范围 -1~+1（对应滑块 0%~200%）。\n"
+            "  vec2 uv = vUV;\n"
+            "  // efftop：采样前 uv 重映射（split → zoom → multi → kaleidoscope → swirl → pinch → pixelate）。\n"
+            "  if (uSplit > 0.5) uv = vec2(abs(uv.x - 0.5), uv.y);\n"
+            "  if (uZoom > 0.5) uv = 0.25 + 0.5 * uv;\n"
+            "  if (uMulti > 0.5) uv = 1.0 - abs(fract((uv - 0.5) * 0.75) * 2.0 - 1.0);\n"
+            "  if (uKaleidoscope > 0.5) {\n"
+            "    vec2 p = uv - 0.5;\n"
+            "    float r = length(p);\n"
+            "    float a = atan(p.y, p.x);\n"
+            "    float seg = 3.14159265 / 3.0;\n"
+            "    a = abs(mod(a, seg * 2.0) - seg);\n"
+            "    uv = vec2(cos(a), sin(a)) * r + 0.5;\n"
+            "  }\n"
+            "  if (uSwirl > 0.5) {\n"
+            "    vec2 p = uv - 0.5;\n"
+            "    float r = length(p);\n"
+            "    float a = atan(p.y, p.x) + (1.0 - r) * 3.0;\n"
+            "    uv = vec2(cos(a), sin(a)) * r + 0.5;\n"
+            "  }\n"
+            "  if (uPinch > 0.5) {\n"
+            "    vec2 p = uv - 0.5;\n"
+            "    float r = length(p);\n"
+            "    uv = p * (0.3 + 0.7 * r) / max(r, 0.0001) + 0.5;\n"
+            "  }\n"
+            "  if (uPixelate > 0.5) uv = floor(uv * 24.0) / 24.0 + vec2(1.0 / 48.0);\n"
+            "  vec4 c = texture2D(uTex, uv);\n"
+            "  // 加性偏移：uTint=(1,1,1) 为中性点，调高让整体（含黑色）偏向该色。\n"
             "  c.rgb += (uTint - vec3(1.0));\n"
             "  c.rgb = max(c.rgb, vec3(0.0));\n"
             "  // bright：纯线性增益（对齐 MilkDrop3 的 ret *= brightness）。\n"
-            "  // 1.0=中性；>1 提亮（暗部大幅抬升、高光溢出），<1 压暗。\n"
-            "  // 曾引入软 knee 公式 c/(1+c*(b-1))，但分母中的 c 已是乘过增益后的值，\n"
-            "  // 导致 b>1 时分母被放大、画面反被压暗；这里恢复线性增益 + 最终 clamp。\n"
             "  c.rgb *= uBrightness;\n"
-            "  // invert：反相 / 负片（对应 MilkDrop3 的 ret = 1 - ret）。\n"
+            "  // shadows：上下翻转 + 灰度 + pow + 加性叠加（对齐 MilkDrop3 shadow 注入效果）。\n"
+            "  // 注意：是 += 加法而非乘法，画面不变暗，只叠加黑白镜像纹理。\n"
+            "  if (uShadows > 0.5) {\n"
+            "    float gray = texture2D(uTex, vec2(vUV.x, 1.0 - vUV.y)).g;\n"
+            "    float shadow = pow(gray, 2.0);\n"
+            "    c.rgb += shadow * uShadowsStrength;\n"
+            "  }\n"
+            "  // invert：反相 / 负片（ret = 1 - ret）。\n"
             "  if (uInvert > 0.5) c.rgb = vec3(1.0) - c.rgb;\n"
-            "  // shadows：暗部针对性压暗并保留高光（而非全局平方）。\n"
-            "  // 用亮度掩码只对暗部做平方，还原 MilkDrop3 反馈环内平方的暗部强对比。\n"
-            "  float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
-            "  float shadowMask = 1.0 - smoothstep(0.0, 0.5, lum);\n"
-            "  c.rgb = mix(c.rgb, c.rgb * c.rgb, uShadows * shadowMask);\n"
+            "  // solarize：曝光反转（ret = ret*(1-ret)*4）。\n"
+            "  if (uSolarize > 0.5) c.rgb = c.rgb * (vec3(1.0) - c.rgb) * 4.0;\n"
+            "  // rainbow：程序化彩虹染色（原版依赖噪声纹理，此处降级为水平彩虹渐变）。\n"
+            "  if (uRainbow > 0.5) {\n"
+            "    vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (vUV.x + vec3(0.0, 0.3333, 0.6667)));\n"
+            "    c.rgb = mix(c.rgb, rainbow, 0.6);\n"
+            "  }\n"
+            "  // blow：加性模糊叠加（近似 MilkDrop3 的 ret += GetBlur1(uv)）。\n"
+            "  if (uBlow > 0.5) {\n"
+            "    vec3 blur = texture2D(uTex, vUV).rgb;\n"
+            "    blur += texture2D(uTex, vUV + vec2(0.02, 0.0)).rgb;\n"
+            "    blur += texture2D(uTex, vUV - vec2(0.02, 0.0)).rgb;\n"
+            "    blur += texture2D(uTex, vUV + vec2(0.0, 0.02)).rgb;\n"
+            "    blur += texture2D(uTex, vUV - vec2(0.0, 0.02)).rgb;\n"
+            "    blur /= 5.0;\n"
+            "    c.rgb += blur * 0.4;\n"
+            "  }\n"
+            "  // burn：灼烧混合（color burn 近似）。\n"
+            "  if (uBurn > 0.5) {\n"
+            "    vec3 d = texture2D(uTex, vUV).rgb;\n"
+            "    vec3 burned = vec3(1.0) - (vec3(1.0) - c.rgb) / max(d + 0.001, vec3(0.001));\n"
+            "    c.rgb = mix(c.rgb, burned, 0.7);\n"
+            "  }\n"
+            "  // glitch：故障色差，RGB 通道沿 x 微偏移重新采样。\n"
+            "  if (uGlitch > 0.5) {\n"
+            "    vec2 off = vec2(0.015, 0.0);\n"
+            "    c.r = texture2D(uTex, vUV + off).r;\n"
+            "    c.b = texture2D(uTex, vUV - off).b;\n"
+            "  }\n"
+            "  // posterize：色调分离，ret 量化成 8 级。\n"
+            "  if (uPosterize > 0.5) c.rgb = floor(c.rgb * 8.0) / 8.0;\n"
+            "  // sepia：复古棕褐颜色矩阵。\n"
+            "  if (uSepia > 0.5) {\n"
+            "    vec3 s;\n"
+            "    s.r = dot(c.rgb, vec3(0.393, 0.769, 0.189));\n"
+            "    s.g = dot(c.rgb, vec3(0.349, 0.686, 0.168));\n"
+            "    s.b = dot(c.rgb, vec3(0.272, 0.534, 0.131));\n"
+            "    c.rgb = mix(c.rgb, s, 0.85);\n"
+            "  }\n"
+            "  // grayscale：灰度化（亮度加权）。\n"
+            "  if (uGrayscale > 0.5) {\n"
+            "    float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
+            "    c.rgb = vec3(l);\n"
+            "  }\n"
+            "  // edge：邻域差分边缘检测（亮线 / 浮雕感）。\n"
+            "  if (uEdge > 0.5) {\n"
+            "    float o = 0.005;\n"
+            "    float tl = dot(texture2D(uTex, vUV + vec2(-o, -o)).rgb, vec3(0.333));\n"
+            "    float tr = dot(texture2D(uTex, vUV + vec2(o, -o)).rgb, vec3(0.333));\n"
+            "    float bl = dot(texture2D(uTex, vUV + vec2(-o, o)).rgb, vec3(0.333));\n"
+            "    float br = dot(texture2D(uTex, vUV + vec2(o, o)).rgb, vec3(0.333));\n"
+            "    float gx = tr + br - tl - bl;\n"
+            "    float gy = bl + br - tl - tr;\n"
+            "    float e = clamp(sqrt(gx * gx + gy * gy), 0.0, 1.0);\n"
+            "    c.rgb = mix(c.rgb, vec3(1.0 - e), 0.8);\n"
+            "  }\n"
+            "  // vignette：强暗角 + 桶形畸变扭曲。\n"
+            "  if (uVignette > 0.5) {\n"
+            "    vec2 vp = vUV - 0.5;\n"
+            "    float vr2 = dot(vp, vp);\n"
+            "    vec2 warped_uv = vUV + vp * vr2 * 0.4;\n"
+            "    vec3 warped = texture2D(uTex, warped_uv).rgb;\n"
+            "    c.rgb = mix(c.rgb, warped, 0.5);\n"
+            "    float vd = length(vp);\n"
+            "    float vig = smoothstep(0.2, 0.72, vd);\n"
+            "    c.rgb *= 1.0 - vig * vig * 0.95;\n"
+            "  }\n"
             "  c.rgb = clamp(c.rgb, 0.0, 1.0);\n"
             "  gl_FragColor = c;\n"
             "}\n";
@@ -673,11 +889,29 @@ bool MilkdropTintPass::init()
         return false;
     }
 
-    texLoc_        = program_->getUniformIDFromName ("uTex");
-    tintLoc_       = program_->getUniformIDFromName ("uTint");
-    brightnessLoc_ = program_->getUniformIDFromName ("uBrightness");
-    invertLoc_     = program_->getUniformIDFromName ("uInvert");
-    shadowsLoc_    = program_->getUniformIDFromName ("uShadows");
+    texLoc_             = program_->getUniformIDFromName ("uTex");
+    tintLoc_            = program_->getUniformIDFromName ("uTint");
+    brightnessLoc_      = program_->getUniformIDFromName ("uBrightness");
+    invertLoc_          = program_->getUniformIDFromName ("uInvert");
+    shadowsLoc_         = program_->getUniformIDFromName ("uShadows");
+    shadowsStrengthLoc_ = program_->getUniformIDFromName ("uShadowsStrength");
+    solarizeLoc_        = program_->getUniformIDFromName ("uSolarize");
+    splitLoc_           = program_->getUniformIDFromName ("uSplit");
+    zoomLoc_            = program_->getUniformIDFromName ("uZoom");
+    multiLoc_           = program_->getUniformIDFromName ("uMulti");
+    rainbowLoc_         = program_->getUniformIDFromName ("uRainbow");
+    blowLoc_            = program_->getUniformIDFromName ("uBlow");
+    burnLoc_            = program_->getUniformIDFromName ("uBurn");
+    kaleidoscopeLoc_    = program_->getUniformIDFromName ("uKaleidoscope");
+    swirlLoc_           = program_->getUniformIDFromName ("uSwirl");
+    pinchLoc_           = program_->getUniformIDFromName ("uPinch");
+    pixelateLoc_        = program_->getUniformIDFromName ("uPixelate");
+    glitchLoc_          = program_->getUniformIDFromName ("uGlitch");
+    posterizeLoc_       = program_->getUniformIDFromName ("uPosterize");
+    sepiaLoc_           = program_->getUniformIDFromName ("uSepia");
+    grayscaleLoc_       = program_->getUniformIDFromName ("uGrayscale");
+    edgeLoc_            = program_->getUniformIDFromName ("uEdge");
+    vignetteLoc_        = program_->getUniformIDFromName ("uVignette");
 
     // 全屏三角形（单个大三角形覆盖整个视口，顶点为 NDC 坐标）
     static const float kQuadVertices[6] = {
@@ -735,13 +969,33 @@ void MilkdropTintPass::apply (GLuint srcTex, const MilkdropVisualState& state)
 
     program_->use();
 
+    // 纹理单元 0：当前帧 projectM 输出
     juce::gl::glActiveTexture (juce::gl::GL_TEXTURE0);
     juce::gl::glBindTexture (juce::gl::GL_TEXTURE_2D, srcTex);
     juce::gl::glUniform1i (texLoc_, 0);
+
     juce::gl::glUniform3f (tintLoc_, state.tint_r, state.tint_g, state.tint_b);
     juce::gl::glUniform1f (brightnessLoc_, state.brightness);
     juce::gl::glUniform1f (invertLoc_, state.invert ? 1.0f : 0.0f);
     juce::gl::glUniform1f (shadowsLoc_, state.shadows ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (shadowsStrengthLoc_, 0.8f);  // shadows 加性叠加强度
+    juce::gl::glUniform1f (solarizeLoc_, state.solarize ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (splitLoc_, state.split ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (zoomLoc_, state.zoom ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (multiLoc_, state.multi ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (rainbowLoc_, state.rainbow ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (blowLoc_, state.blow ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (burnLoc_, state.burn ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (kaleidoscopeLoc_, state.kaleidoscope ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (swirlLoc_, state.swirl ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (pinchLoc_, state.pinch ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (pixelateLoc_, state.pixelate ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (glitchLoc_, state.glitch ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (posterizeLoc_, state.posterize ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (sepiaLoc_, state.sepia ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (grayscaleLoc_, state.grayscale ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (edgeLoc_, state.edge ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (vignetteLoc_, state.vignette ? 1.0f : 0.0f);
 
     if (coreProfile_)
     {
@@ -767,6 +1021,7 @@ void MilkdropTintPass::apply (GLuint srcTex, const MilkdropVisualState& state)
         juce::gl::glBindBuffer (juce::gl::GL_ARRAY_BUFFER, 0);
     }
 
+    juce::gl::glActiveTexture (juce::gl::GL_TEXTURE0);
     juce::gl::glBindTexture (juce::gl::GL_TEXTURE_2D, 0);
     juce::gl::glUseProgram (0);
 }
@@ -1580,8 +1835,6 @@ void MilkdropModule::GLView::renderOpenGL() {
 
     if (tint_active) {
       // ---- 染色后处理：采样离屏纹理，应用 RGB 增益，绘制全屏三角形 ----
-      // 全屏三角形覆盖整个视口，纹理采样自然完成 1:1 或降采样放大，
-      // 因此无需额外的 glBlitFramebuffer（也规避 macOS 拉伸 blit 的兼容性问题）。
       if (logFrame)
         juce::Logger::writeToLog("[MilkdropGLView] branch: tint apply (tex="
             + juce::String(static_cast<int>(scale_texture_)) + ")");
@@ -1590,6 +1843,8 @@ void MilkdropModule::GLView::renderOpenGL() {
       if (!tint_pass_->isReady())
         tint_pass_->init();
 
+      // 统一 pass：采样 scale_fbo_ 纹理，应用完整视觉状态，渲染到 framebuffer 0。
+      // shadows 等效果均在单帧内完成，无需上一帧累积（与 MilkDrop3 注入语义一致）。
       juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
       juce::gl::glViewport (0, 0, surface_w, surface_h);
       tint_pass_->apply (scale_texture_, visual_state);
@@ -2010,22 +2265,24 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         auto topBar = content.withHeight(26);
         auto panel = getEffectsPanelBounds(topBar);
 
-        // Reset 按钮点击（重置 invert/shadows）
+        // Reset 按钮点击（重置所有已实现效果）
         if (getEffectsResetBounds(panel).contains(e.getPosition()))
         {
             if (!focused_)
                 setFocusVisual(true);
             touchOverlayIdleTimer();
-            visualState_.invert = false;
-            visualState_.shadows = false;
+            for (const auto& def : GetMilkdropEffectDefs())
+                if (def.implemented)
+                    def.set(visualState_, false);
             applyVisualToEditor();
             repaint(panel);
             glView->repaint();
             return;
         }
 
-        // invert / shadows 开关点击
-        for (int row = 0; row < 2; ++row)
+        // 开关点击（遍历已实现效果）
+        const int effect_count = CountImplementedMilkdropEffects();
+        for (int row = 0; row < effect_count; ++row)
         {
             auto toggle = getEffectsToggleBounds(panel, row);
             if (toggle.expanded(4).contains(e.getPosition()))
@@ -3311,10 +3568,10 @@ void MilkdropModule::updateTintFromSlider(int row, float proportion)
 
 void MilkdropModule::toggleEffectSwitch(int row)
 {
-  if (row == 0)
-    visualState_.invert = !visualState_.invert;
-  else if (row == 1)
-    visualState_.shadows = !visualState_.shadows;
+  const MilkdropEffectDef* def = GetImplementedMilkdropEffect(row);
+  if (def == nullptr)
+    return;
+  def->set(visualState_, !def->get(visualState_));
   applyVisualToEditor();
 }
 
@@ -3460,24 +3717,71 @@ void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> top
   }
 }
 
+int MilkdropModule::getEffectsColumns(juce::Rectangle<int> panel) const
+{
+  const int effect_count = CountImplementedMilkdropEffects();
+  if (effect_count <= 0)
+    return 1;
+
+  constexpr int kPad = 6;
+  const int avail_w = panel.getWidth() - kPad * 2;
+  if (avail_w <= 0)
+    return 1;
+
+  // 每行至少 1 个，最多 effect_count 个；按最小按钮宽度 + 间距推算能容纳的列数。
+  const int max_cols = juce::jmin(effect_count,
+      juce::jmax(1, static_cast<int>((avail_w + kEffectsToggleGap)
+                                     / (kEffectsToggleMinW + kEffectsToggleGap))));
+  return max_cols;
+}
+
+int MilkdropModule::getEffectsRowCount(juce::Rectangle<int> panel) const
+{
+  const int effect_count = CountImplementedMilkdropEffects();
+  if (effect_count <= 0)
+    return 0;
+  const int cols = getEffectsColumns(panel);
+  return (effect_count + cols - 1) / cols;
+}
+
 juce::Rectangle<int> MilkdropModule::getEffectsPanelBounds(juce::Rectangle<int> topBar) const
 {
+  const int rows = getEffectsRowCount(
+      juce::Rectangle<int>(topBar.getX(), topBar.getBottom(),
+                           topBar.getWidth(), 10));
+  const float height = kEffectsHeaderH
+                     + static_cast<float>(rows) * kEffectsRowH
+                     + kEffectsPadBottom;
   return juce::Rectangle<int>(topBar.getX(), topBar.getBottom(),
                               topBar.getWidth(),
-                              static_cast<int>(kEffectsPanelHeight));
+                              static_cast<int>(height));
 }
 
 juce::Rectangle<int> MilkdropModule::getEffectsToggleBounds(juce::Rectangle<int> panel, int row) const
 {
   constexpr int kPad     = 6;
-  constexpr int kHeaderH = 22;
-  constexpr int kRowH    = 20;
-  constexpr int kToggleH = 16;
+  const int kHeaderH     = static_cast<int>(kEffectsHeaderH);
+  const int kRowH        = static_cast<int>(kEffectsRowH);
+  const int kToggleH     = 16;
+  const int kGap         = static_cast<int>(kEffectsToggleGap);
 
-  int x = panel.getX() + kPad;
-  int w = panel.getWidth() - kPad * 2;
-  int y = panel.getY() + kHeaderH + row * kRowH + (kRowH - kToggleH) / 2;
-  return juce::Rectangle<int>(x, y, juce::jmax(20, w), kToggleH);
+  const int cols = getEffectsColumns(panel);
+  const int col  = row % cols;
+  const int r    = row / cols;
+
+  // 可用宽度先扣除列间间距，再均分到每列。此前 cell_w = avail_w / cols
+  // 未扣间距，却用 col * (cell_w + kGap) 累加列偏移，导致每列都向右多偏
+  // col*kGap，最后一列被挤窄（模块拉宽、列数增多时尤其明显）。整除余数
+  // 补给最后一列，保证最右侧按钮不会被挤小。
+  const int avail_w   = panel.getWidth() - kPad * 2;
+  const int total_gap = (cols - 1) * kGap;
+  const int cell_w    = (avail_w - total_gap) / cols;
+  const int remainder = (avail_w - total_gap) % cols;
+  const int x = panel.getX() + kPad + col * (cell_w + kGap);
+  const int w = (col == cols - 1) ? (cell_w + remainder) : cell_w;
+  const int y = panel.getY() + kHeaderH + r * kRowH + (kRowH - kToggleH) / 2;
+
+  return juce::Rectangle<int>(x, y, juce::jmax(20, w), juce::jmax(16, kToggleH));
 }
 
 juce::Rectangle<int> MilkdropModule::getEffectsResetBounds(juce::Rectangle<int> panel) const
@@ -3525,11 +3829,14 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
   g.drawText("Reset", resetRect, juce::Justification::centred, false);
 
-  // invert / shadows 开关按钮：按钮自身即开关，按下=开启，弹起=关闭。
-  static const char* kToggleLabels[2] = { "invert", "shadows" };
-  for (int row = 0; row < 2; ++row)
+  // 开关按钮：基于效果注册表动态生成，按钮自身即开关（按下=开启，弹起=关闭）。
+  int row = 0;
+  for (const auto& def : GetMilkdropEffectDefs())
   {
-    bool enabled = (row == 0) ? visualState_.invert : visualState_.shadows;
+    if (!def.implemented)
+      continue;
+
+    const bool enabled = def.get(visualState_);
     auto toggle = getEffectsToggleBounds(panel, row);
 
     if (enabled)
@@ -3546,6 +3853,7 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
       g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
     }
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText(kToggleLabels[row], toggle, juce::Justification::centred, false);
+    g.drawText(def.display_name, toggle, juce::Justification::centred, false);
+    ++row;
   }
 }

@@ -10,6 +10,7 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/modules/MilkdropVisualState.h"
+#include "source/ui/modules/MilkdropEffect.h"
 
 class Y2KmeterAudioProcessorEditor;  // 前向声明，用于 Milkdrop 脱离后仍能桥接项目M状态
 
@@ -75,15 +76,12 @@ class Y2KmeterAudioProcessorEditor;  // 前向声明，用于 Milkdrop 脱离后
 // MilkdropTintPass —— projectM 输出帧的整体视觉后处理着色器
 //
 // 负责在 projectM 渲染完成后、blit 到各模块之前，对 offscreen FBO 采样并应用
-// 完整视觉状态（MilkdropVisualState）：
-//   · tint_r/g/b  加性偏移染色（master output colors）：uTint=(1,1,1) 为中性点，
-//                 调高让整体（含黑色）偏向该色，调低偏向补色。
-//   · brightness  bright 增益：c *= brightness（对齐 MilkDrop3 的 ret *= brightness），
-//                 范围 0~8；1.0 中性，>1 提亮（暗部大幅抬升、高光溢出），
-//                 <1 压暗。后处理阶段为纯线性增益 + 最终 clamp。
-//   · invert      反相 / 负片（对应 MilkDrop3 的 ret = 1 - ret）。
-//   · shadows     暗部针对性压暗并保留高光（亮度掩码 + 平方，而非全局平方）。
-// libprojectM 4 没有对应运行时效果调节 API，故此处用全屏后处理 pass 模拟。
+// 完整视觉状态（MilkdropVisualState）。shader 为统一 pass 内多效果分支，
+// 与 MilkDrop3 Effect Injection（ADDMILKEFFECT）的执行顺序对齐：
+//   efftop（采样前 uv 重映射：split → zoom → multi）
+//   → tint（RGB 加性偏移）→ bright（增益）
+//   → effbottom（采样后 ret 变换：shadows → invert → solarize → rainbow → blow → burn）
+//   → clamp。
 //
 // 使用约束：
 //   · init() / shutdown() / apply() 都必须在持有活动 OpenGL 上下文的 GL 线程
@@ -101,8 +99,9 @@ public:
     // GL 线程调用：释放全部 GL 资源。
     void shutdown();
 
-    // GL 线程调用：采样 srcTex，应用完整视觉状态（RGB 染色 + bright/invert/shadows
-    // 效果），把全屏三角形绘制到当前绑定的 framebuffer。
+    // GL 线程调用：采样 srcTex（当前帧 projectM 输出），应用完整视觉状态
+    // （RGB 染色 + bright + invert/shadows/solarize/split/zoom/multi/rainbow/blow/burn），
+    // 把全屏三角形绘制到当前绑定的 framebuffer。
     void apply (GLuint srcTex, const MilkdropVisualState& state);
 
     bool isReady() const noexcept { return ready_; }
@@ -113,11 +112,29 @@ private:
     std::unique_ptr<juce::OpenGLShaderProgram> program_;
     GLuint vao_ = 0;
     GLuint vbo_ = 0;
-    GLint  texLoc_ = -1;
-    GLint  tintLoc_ = -1;
-    GLint  brightnessLoc_ = -1;
-    GLint  invertLoc_ = -1;
-    GLint  shadowsLoc_ = -1;
+    GLint  texLoc_               = -1;
+    GLint  tintLoc_              = -1;
+    GLint  brightnessLoc_        = -1;
+    GLint  invertLoc_            = -1;
+    GLint  shadowsLoc_           = -1;
+    GLint  shadowsStrengthLoc_   = -1;
+    GLint  solarizeLoc_          = -1;
+    GLint  splitLoc_             = -1;
+    GLint  zoomLoc_              = -1;
+    GLint  multiLoc_             = -1;
+    GLint  rainbowLoc_           = -1;
+    GLint  blowLoc_              = -1;
+    GLint  burnLoc_              = -1;
+    GLint  kaleidoscopeLoc_      = -1;
+    GLint  swirlLoc_             = -1;
+    GLint  pinchLoc_             = -1;
+    GLint  pixelateLoc_          = -1;
+    GLint  glitchLoc_            = -1;
+    GLint  posterizeLoc_         = -1;
+    GLint  sepiaLoc_             = -1;
+    GLint  grayscaleLoc_         = -1;
+    GLint  edgeLoc_              = -1;
+    GLint  vignetteLoc_          = -1;
     bool   coreProfile_ = false;
     bool   ready_ = false;
     juce::String lastError_;
@@ -433,7 +450,9 @@ private:
     juce::Rectangle<int> getEffectsPanelBounds(juce::Rectangle<int> topBar) const;
     juce::Rectangle<int> getEffectsToggleBounds(juce::Rectangle<int> panel, int row) const;
     juce::Rectangle<int> getEffectsResetBounds(juce::Rectangle<int> panel) const;
-    void toggleEffectSwitch(int row);                                   ///< 0=invert,1=shadows 切换开关
+    void toggleEffectSwitch(int row);                                   ///< 按 row 切换对应效果开关
+    int getEffectsColumns(juce::Rectangle<int> panel) const;            ///< 根据面板宽度计算每行按钮数
+    int getEffectsRowCount(juce::Rectangle<int> panel) const;           ///< 根据列数计算总行数
 
     // Auto-hide 逻辑（由 GLView::timerCallback 在 UI 线程驱动，30Hz 轮询）：
     //   · 检测 !hasKeyboardFocus → 窗口失焦即隐藏
@@ -466,7 +485,11 @@ private:
     juce::Rectangle<int> cachedEffectsPanelRect_; ///< 缓存效果面板区域，供 hit-test
     juce::Rectangle<int> cachedEffectsResetRect_; ///< 缓存效果 Reset 按钮区域，供 hit-test
     static constexpr float kColorPanelHeight = 104.0f; ///< 染色控制器面板高度（标题 + 4 行）
-    static constexpr float kEffectsPanelHeight = 66.0f; ///< 效果控制器面板高度（标题 + 2 开关）
+    static constexpr float kEffectsHeaderH = 22.0f;    ///< effects 面板标题高度
+    static constexpr float kEffectsRowH = 22.0f;       ///< effects 面板每行开关高度
+    static constexpr float kEffectsPadBottom = 6.0f;   ///< effects 面板底部 padding
+    static constexpr float kEffectsToggleMinW = 56.0f; ///< 每个效果按钮最小宽度（不足则换行）
+    static constexpr float kEffectsToggleGap = 4.0f;   ///< 效果按钮水平/垂直间距
     static constexpr int   kColorBtnW = 32;             ///< color 按钮宽度（与 auto 一致）
     static constexpr int   kEffectsBtnW = 42;           ///< effects 按钮宽度
     static constexpr float kTintMin = 0.0f;             ///< RGB 加性偏移下限（0%）
