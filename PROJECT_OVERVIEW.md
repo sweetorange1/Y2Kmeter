@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.6.7`）
+- **产品名**：`Y2Kmeter` （版本：`2.6.8`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -45,7 +45,30 @@
 | 安装器 | Inno Setup（[Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss)） |
 | 字体 | `Silkscreen-Regular.ttf`（像素英文字体，通过 `juce_add_binary_data` 打包） |
 | 项目性能特性 | 支持 **LTO/IPO** + **PGO**（`Y2K_ENABLE_LTO`、`Y2K_PGO_MODE`）|
-| 特殊宏 | `Y2K_ENABLE_PERF_COUNTERS=0`（发布版关闭性能计数）、`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1`（用自定义 Standalone 外壳） |
+| 特殊宏 | `Y2K_ENABLE_PERF_COUNTERS=0`（发布版关闭性能计数）、`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1`（用自定义 Standalone 外壳）、`Y2K_ENABLE_LOGGING`（仅 RelWithDebInfo 定义，见 §1.4） |
+
+---
+
+### 1.4 日志输出方案（开发约定）
+
+**现状**：正式发布包（Release / Debug / MinSizeRel）**不产生任何日志文件**，也不执行日志字符串拼接；只有 **RelWithDebInfo** 构建才会启用日志并落盘。
+
+**实现机制**（编译器开关 + 宏）：
+
+1. `CMakeLists.txt` 中通过生成器表达式定义编译宏：
+   ```cmake
+   $<$<CONFIG:RelWithDebInfo>:Y2K_ENABLE_LOGGING=1>
+   ```
+2. [`source/Y2KLogging.h`](/I:/Y2KMeter/source/Y2KLogging.h) 定义 `Y2K_LOG(msg)` 宏：
+   - 定义 `Y2K_ENABLE_LOGGING` 时 → 展开为 `juce::Logger::writeToLog(msg)`；
+   - 未定义时 → 展开为 `((void)0)`，参数里的字符串拼接 / `juce::String` 构造在**预处理阶段即被丢弃**，零运行时开销。
+3. Standalone 应用在 [`Y2KStandaloneApp.cpp`](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) 的 `initialise()` 中仅当 `Y2K_ENABLE_LOGGING` 定义时才挂载 `juce::FileLogger`（输出到 exe 同目录 `Y2Kmeter_debug.log`），`shutdown()` 对称卸载；相关代码全部用 `#ifdef Y2K_ENABLE_LOGGING` 包裹。
+
+**后续开发如何加日志**：
+
+- 直接调用 `Y2K_LOG("前缀 + " + juce::String(value));`，**不要**再直接写 `juce::Logger::writeToLog(...)`（否则脱离宏控制，Release 包也会产生字符串拼接）。
+- `Y2K_LOG` 参数必须是纯字符串/拼接表达式，**禁止含副作用**（如会修改状态的函数调用），否则关闭日志的构建中副作用会被一并删除。
+- 已使用 `Y2K_LOG` 的调用点：`UpdateChecker.cpp`、`Y2KStandaloneApp.cpp`、`MilkdropModule.cpp`、`ProjectMApi.cpp`、`UpdateDialog.cpp`。
 
 ---
 
@@ -2842,6 +2865,33 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 - **安装器组件绑定与运行时 seed 的互补关系**：仅靠运行时 seed 不能解决"用户只装 VST3 不装 Standalone"的场景（VST3 旁无 seed 源）；仅靠安装器部署不能解决"开发期 IDE 直接运行"的场景。两者必须同时存在、互为兜底。
 - **枚举值追加顺序影响持久化**：`ThemeId` 按枚举整数值存入配置文件。新增主题必须追加到末尾（包括 `custom` 之后），否则已保存的自定义主题 `custom=11` 会漂移到其他主题上。
 
+## v2.6.0：Milkdrop 脱离态存档恢复 + 预设控制台交互修复
+
+本章记录 v2.6.0 针对 Milkdrop 脱离（floating）场景两个遗留缺陷的根因分析与修复。
+
+### 问题 1：脱离 Milkdrop 后重新打开软件仍卡在 Idle 动画
+
+- **现象**：脱离 Milkdrop 后退出软件，重新打开并读取存档，模块持续卡在初始 Idle 动画，手动切换一次预设后才恢复正常。
+- **根因 A（Windows 强制 Core Profile）**：`GLView` 构造函数无条件调用 `setOpenGLVersionRequired(openGL3_2)`，该调用本为 macOS 引入（macOS 默认 Legacy Profile 会导致 projectM shader 编译失败），却未做平台区分，导致 Windows 部分预设 shader 编译失败、projectM 回退 Idle。
+- **根因 B（Editor 与 GLView 的 projectM handle 时序竞争）**：存档恢复时 Editor 的异步 `attachTo` 创建 handle，与 `loadInitialModules()` 同步恢复 floating 模块可能交错，Editor handle 与 GLView handle 共存导致 Windows libprojectM/GLEW 全局指针表互相干扰。
+- **修复**：
+  1. `setOpenGLVersionRequired(openGL3_2)` 仅 `#if JUCE_MAC` 强制，Windows 恢复默认 GL 版本。
+  2. 新增 `std::atomic<bool> milkdrop_renderer_suspended_` 挂起标志：`SuspendMilkdropEditorRendererForFloating()` 开头置 `true`（即便 Editor 上下文尚未 attach 也先置位）、`Resume...` 置 `false`；`PluginEditor::newOpenGLContextCreated()` 开头检查该标志，挂起期间直接 `return`，阻止 Editor handle 被异步创建。
+
+### 问题 2：脱离后预设控制台行为异常（不自动隐藏 / 无按下动画 / auto 不展开）
+
+- **根因**：前一轮为修「控制栏不挤压视频区」把控制栏绘制移到 `GLView::paint`（依赖 `setComponentPaintingEnabled(true)` 合成到 projectM 帧），但交互代码的 `repaint()` 调用的是 `MilkdropModule::repaint`，**不会触发子组件 `GLView::paintComponent` 重绘**。
+- **修复**：在所有会改变控制栏视觉状态的交互路径补充 `glView->repaint()`：`GLView::timerCallback()`（30Hz 自动隐藏轮询）、`setFocusVisual()`、`mouseDown/Up/Move/Drag/Exit`、`toggleAutoMode()`、`applyAutoInterval()`。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| `source/ui/modules/MilkdropModule.cpp` | `setOpenGLVersionRequired` 按平台包裹；交互路径补 `glView->repaint()` |
+| `source/ui/modules/MilkdropModule.h` | `GLView` 新增 `paint(juce::Graphics&)` 声明 |
+| `PluginEditor.cpp` | `newOpenGLContextCreated()` 增加挂起标志检查；`Suspend/Resume` 置挂起标志 |
+| `PluginEditor.h` | 新增 `std::atomic<bool> milkdrop_renderer_suspended_{false}` |
+
 ## v2.6.1：Milkdrop 后处理效果系统（color/effects 面板）+ 脱离模式渲染修复
 
 本章记录 v2.6.1 版本相对 v2.6.0 的改动：将 bright 从 effects 移到 color 面板、effects 简化为纯开关、修复脱离模式非默认值导致视频不渲染的 bug，并增强 bright / shadows 效果观感。
@@ -3111,6 +3161,58 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 3. sx/sy 线性映射 `1 + s*2` 在负值区产生镜像，改指数映射 `exp(-s*1.5)`。
 4. zoom 负值下限无意义（`max(z, 0.01)` 提前 clamp），限为 -0.3。
 5. 整数 0 与 1 效果相同（阈值 `>= 2.0` 导致 `1` 不生效），改 `>= 1.0` 并去掉 0。
+
+---
+
+## v2.6.8：深色主题弹窗文本修复 + 日志开关宏方案 + 代码质量整改
+
+本章记录 v2.6.8 版本相对 v2.6.7 的改动：修复深色主题下删除弹窗文本看不清的问题；用编译开关 + 宏统一收敛日志输出；并对既有代码做一轮线程安全与类型安全整改。
+
+### 改动 1：深色主题弹窗正文文本看不清修复
+
+- **问题**：使用 `jungle` / `crimson noir` / `void grey` / `black pink` 等深色主题预设时，删除拓麻歌子（Tamagotchi）模块的二次确认弹窗正文文本仍用深色，与深色底色对比度不足、看不清。
+- **修复**：该弹窗正文文本改用浅色（或弹窗底色改用浅色），保证深色主题下可读。
+
+### 改动 2：日志输出统一走编译开关 + 宏
+
+- **背景**：此前散落大量 `juce::Logger::writeToLog(...)` 调用，且 Standalone 启动时无条件挂载 `FileLogger` 把日志写到 exe 目录 `Y2Kmeter_debug.log`；正式打包需屏蔽该文件输出，并消除日志字符串拼接的无意义算力开销。
+- **方案**（详见 §1.4）：
+  - 新增 [`source/Y2KLogging.h`](/I:/Y2KMeter/source/Y2KLogging.h)：定义 `Y2K_LOG(msg)` 宏；开启时展开为 `writeToLog`，关闭时展开为 `((void)0)`。
+  - `CMakeLists.txt` 新增 `$<$<CONFIG:RelWithDebInfo>:Y2K_ENABLE_LOGGING=1>`，仅 RelWithDebInfo 构建启用日志。
+  - `Y2KStandaloneApp.cpp` 的 `FileLogger` 挂载/卸载/成员变量全部用 `#ifdef Y2K_ENABLE_LOGGING` 包裹。
+  - 将 `UpdateChecker.cpp`、`Y2KStandaloneApp.cpp`、`MilkdropModule.cpp`、`ProjectMApi.cpp`、`UpdateDialog.cpp` 共 37 处 `writeToLog` 统一替换为 `Y2K_LOG`。
+- **效果**：Release / Debug / MinSizeRel 构建不产生日志文件、不执行日志字符串拼接；仅 RelWithDebInfo 构建落盘 `Y2Kmeter_debug.log`。
+
+### 改动 3：代码质量整改（线程安全 + 类型安全）
+
+- **移除 `callAfterDelay` 多余 `this` 捕获**（`PluginProcessor.cpp`）：lambda 内部未使用 `this`，`[this]` → `[]`，消除 DAW 扫描期实例销毁后的悬空风险。
+- **后台网络线程优雅收尾**：
+  - `TelemetryClient`：由「每次请求 detach 一个线程」改为「常驻单 worker 线程 + 任务队列（`queueMutex_` / `queueCv_` / `tasks_`）」，析构置 `stopWorker_` 并 `join`。
+  - `UpdateChecker`：引入 `BackgroundThreadRegistry` 持有进行中的 `std::thread` 句柄，static 析构阶段统一 `join`，避免游离线程被 OS 强杀。
+- **`cachedSampleRate` 原子化**（`AnalyserHub.h`）：`double` → `std::atomic<double>`，读写用 `memory_order_relaxed`，消除跨线程数据竞争。
+- **C 风格类型转换 → `static_cast`**：`AnalyserHub.cpp` 等约 50 处 `(size_t)/(int)/(float)` 及 `(bool)` 冗余转换统一替换为 `static_cast`。
+- **移除裸 `new juce::DynamicObject()`**（`TelemetryClient.cpp`）：改用 `juce::DynamicObject::Ptr` 管理。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/Y2KLogging.h`](/I:/Y2KMeter/source/Y2KLogging.h) | **新增**：`Y2K_LOG` 日志开关宏 |
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 新增 `Y2K_ENABLE_LOGGING` 生成器表达式 |
+| [`source/standalone/Y2KStandaloneApp.cpp`](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | `FileLogger` 挂载/卸载/成员用 `#ifdef Y2K_ENABLE_LOGGING` 包裹；日志调用改 `Y2K_LOG` |
+| [`source/network/TelemetryClient.h/.cpp`](/I:/Y2KMeter/source/network/TelemetryClient.h) | worker 线程 + 任务队列；`DynamicObject::Ptr`；日志改 `Y2K_LOG` |
+| [`source/network/UpdateChecker.cpp`](/I:/Y2KMeter/source/network/UpdateChecker.cpp) | 线程登记器统一 join；日志改 `Y2K_LOG` |
+| [`source/analysis/AnalyserHub.h/.cpp`](/I:/Y2KMeter/source/analysis/AnalyserHub.h) | `cachedSampleRate` 原子化；C 风格转换改 `static_cast` |
+| [`PluginProcessor.cpp`](/I:/Y2KMeter/PluginProcessor.cpp) | `callAfterDelay` lambda 捕获 `[this]` → `[]` |
+| [`source/ui/modules/MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | 日志改 `Y2K_LOG` |
+| [`source/ui/modules/ProjectMApi.cpp`](/I:/Y2KMeter/source/ui/modules/ProjectMApi.cpp) | 日志改 `Y2K_LOG` |
+| [`source/ui/UpdateDialog.cpp`](/I:/Y2KMeter/source/ui/UpdateDialog.cpp) | 日志改 `Y2K_LOG` |
+
+### 踩坑记录
+
+1. **屏蔽日志文件 ≠ 屏蔽日志生成逻辑**：仅移除 `FileLogger` 挂载后，`writeToLog` 的参数（字符串拼接）仍会在运行时执行。必须改用 `Y2K_LOG` 宏（关闭时展开为空表达式），才能在预处理阶段彻底丢弃拼接开销。
+2. **日志宏参数禁止含副作用**：`Y2K_LOG(msg)` 关闭时 `msg` 不会求值，若参数里含会修改状态的函数调用，副作用会被一并删除；约定参数只能是纯字符串/拼接表达式。
+3. **`std::atomic<double>` 在 x64 下是 lock-free**：`cachedSampleRate` 用 `relaxed` 读写，与普通 `double` 读写开销基本一致，且该值运行期不变，无实际竞争。
 
 ---
 

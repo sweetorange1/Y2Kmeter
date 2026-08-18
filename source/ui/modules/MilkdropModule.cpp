@@ -14,6 +14,7 @@
 #include "MilkdropModule_mac.h"
 #endif
 #include "source/ui/PinkXPStyle.h"
+#include "source/Y2KLogging.h"
 #include "PluginEditor.h"
 
 #include "projectM-4/projectM.h"
@@ -1924,24 +1925,24 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
 
   auto& api = projectm_api::Api::instance();
-  juce::Logger::writeToLog("[MilkdropGLView] newOpenGLContextCreated: isAvailable="
+  Y2K_LOG("[MilkdropGLView] newOpenGLContextCreated: isAvailable="
       + juce::String(api.isAvailable() ? 1 : 0)
       + " hasFboAPI=" + juce::String(api.hasOpenglRenderFrameFbo() ? 1 : 0)
       + " loadErr=" + api.loadError());
   api.resetGlewInitialization();
   if (!api.isAvailable()) {
     local_error_ = api.loadError();
-    juce::Logger::writeToLog("[MilkdropGLView] projectM unavailable: " + local_error_);
+    Y2K_LOG("[MilkdropGLView] projectM unavailable: " + local_error_);
     return;
   }
   if (!api.initGlew()) {
     local_error_ = api.loadError();
-    juce::Logger::writeToLog("[MilkdropGLView] glewInit failed: " + local_error_);
+    Y2K_LOG("[MilkdropGLView] glewInit failed: " + local_error_);
     return;
   }
 
   local_pm_handle_ = api.create();
-  juce::Logger::writeToLog("[MilkdropGLView] projectm_create -> "
+  Y2K_LOG("[MilkdropGLView] projectm_create -> "
       + juce::String(local_pm_handle_ != nullptr ? "OK" : "NULL"));
   if (local_pm_handle_ == nullptr) {
     local_error_ = "projectm_create() returned NULL.";
@@ -1982,7 +1983,7 @@ void MilkdropModule::GLView::newOpenGLContextCreated() {
   tint_pass_.reset (new MilkdropTintPass (open_gl_context_));
   if (!tint_pass_->init())
     tint_pass_.reset();
-  juce::Logger::writeToLog("[MilkdropGLView] tint pass init -> "
+  Y2K_LOG("[MilkdropGLView] tint pass init -> "
       + juce::String(tint_pass_ != nullptr ? "OK" : "FAIL"));
 
   local_render_ready_ = true;
@@ -2135,7 +2136,7 @@ void MilkdropModule::GLView::EnsureScaleFbo(int render_w, int render_h) {
   else
     local_error_.clear();
 
-  juce::Logger::writeToLog("[MilkdropGLView] EnsureScaleFbo "
+  Y2K_LOG("[MilkdropGLView] EnsureScaleFbo "
       + juce::String(render_w) + "x" + juce::String(render_h)
       + " fbo=" + juce::String(static_cast<int>(scale_fbo_))
       + " tex=" + juce::String(static_cast<int>(scale_texture_))
@@ -2193,7 +2194,7 @@ void MilkdropModule::GLView::renderOpenGL() {
   ++glDbgFrame;
   const bool logFrame = (glDbgFrame <= 30) || (glDbgFrame % 300 == 0);
   if (logFrame) {
-    juce::Logger::writeToLog("[MilkdropGLView] renderOpenGL frame=" + juce::String(glDbgFrame)
+    Y2K_LOG("[MilkdropGLView] renderOpenGL frame=" + juce::String(glDbgFrame)
         + " tint=" + juce::String(tint_active ? 1 : 0)
         + " offscreen=" + juce::String(need_offscreen ? 1 : 0)
         + " hasFbo=" + juce::String(api.hasOpenglRenderFrameFbo() ? 1 : 0)
@@ -2212,7 +2213,7 @@ void MilkdropModule::GLView::renderOpenGL() {
     // 后续后处理会对黑纹理做加性偏移/反相 → 纯色 / 纯黑 / 纯白。
     if (api.hasOpenglRenderFrameFbo()) {
       if (logFrame)
-        juce::Logger::writeToLog("[MilkdropGLView] branch: openglRenderFrameFbo -> scale_fbo_");
+        Y2K_LOG("[MilkdropGLView] branch: openglRenderFrameFbo -> scale_fbo_");
       juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, scale_fbo_);
       juce::gl::glViewport (0, 0, render_w, render_h);
       juce::gl::glScissor (0, 0, render_w, render_h);
@@ -2230,7 +2231,7 @@ void MilkdropModule::GLView::renderOpenGL() {
       // framebuffer 0，scale_fbo_ 保持黑。这里与 Editor 降级路径保持一致：
       // 先渲染到 framebuffer 0，再跨 FBO blit 到 scale_fbo_。
       if (logFrame)
-        juce::Logger::writeToLog("[MilkdropGLView] branch: openglRenderFrame -> FBO0, blit -> scale_fbo_");
+        Y2K_LOG("[MilkdropGLView] branch: openglRenderFrame -> FBO0, blit -> scale_fbo_");
       juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
       juce::gl::glViewport (0, 0, render_w, render_h);
       juce::gl::glScissor (0, 0, render_w, render_h);
@@ -2256,14 +2257,14 @@ void MilkdropModule::GLView::renderOpenGL() {
     {
       const GLenum pm_err = juce::gl::glGetError();
       if (pm_err != juce::gl::GL_NO_ERROR && logFrame)
-        juce::Logger::writeToLog("[MilkdropGLView] projectM GL error=0x"
+        Y2K_LOG("[MilkdropGLView] projectM GL error=0x"
             + juce::String::toHexString(static_cast<int>(pm_err)));
     }
 
     if (tint_active) {
       // ---- 染色后处理：采样离屏纹理，应用 RGB 增益，绘制全屏三角形 ----
       if (logFrame)
-        juce::Logger::writeToLog("[MilkdropGLView] branch: tint apply (tex="
+        Y2K_LOG("[MilkdropGLView] branch: tint apply (tex="
             + juce::String(static_cast<int>(scale_texture_)) + ")");
       if (tint_pass_ == nullptr)
         tint_pass_.reset (new MilkdropTintPass (open_gl_context_));
@@ -2278,7 +2279,7 @@ void MilkdropModule::GLView::renderOpenGL() {
 
       const GLenum tint_err = juce::gl::glGetError();
       if (tint_err != juce::gl::GL_NO_ERROR && logFrame)
-        juce::Logger::writeToLog("[MilkdropGLView] tint GL error=0x"
+        Y2K_LOG("[MilkdropGLView] tint GL error=0x"
             + juce::String::toHexString(static_cast<int>(tint_err)));
     } else {
       // ---- 降分辨率无染色：blit 拉伸到默认 framebuffer ----

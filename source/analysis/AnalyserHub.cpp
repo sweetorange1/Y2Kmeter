@@ -33,9 +33,9 @@ public:
 
         // 1) 组装活跃 mask
         juce::uint32 mask = 0;
-        for (int i = 0; i < (int) Kind::NumKinds; ++i)
-            if (owner.refCounts[(size_t) i].load (std::memory_order_relaxed) > 0)
-                mask |= (juce::uint32) (1u << i);
+        for (int i = 0; i < static_cast<int> (Kind::NumKinds); ++i)
+            if (owner.refCounts[static_cast<size_t> (i)].load (std::memory_order_relaxed) > 0)
+                mask |= static_cast<juce::uint32> (1u << i);
 
         if (mask == 0)
             return; // 所有路都无人订阅 —— 不生成帧
@@ -74,15 +74,15 @@ public:
             const int bufSize    = oscilloscopeBufferSize;
             const int firstChunk = bufSize - owner.oscWritePos;
             std::memcpy (frame->oscL.data(),              owner.oscBufL.data() + owner.oscWritePos,
-                         (size_t) firstChunk * sizeof (float));
+                         static_cast<size_t> (firstChunk) * sizeof (float));
             std::memcpy (frame->oscR.data(),              owner.oscBufR.data() + owner.oscWritePos,
-                         (size_t) firstChunk * sizeof (float));
+                         static_cast<size_t> (firstChunk) * sizeof (float));
             if (owner.oscWritePos > 0)
             {
                 std::memcpy (frame->oscL.data() + firstChunk, owner.oscBufL.data(),
-                             (size_t) owner.oscWritePos * sizeof (float));
+                             static_cast<size_t> (owner.oscWritePos) * sizeof (float));
                 std::memcpy (frame->oscR.data() + firstChunk, owner.oscBufR.data(),
-                             (size_t) owner.oscWritePos * sizeof (float));
+                             static_cast<size_t> (owner.oscWritePos) * sizeof (float));
             }
         }
 
@@ -180,8 +180,8 @@ public:
 
         std::vector<FrameListener*> activeListeners;
         // 用 reserved 水位避免反复扩容；push后不会 shrink 回去。
-        activeListeners.reserve ((size_t) juce::jmax (owner.frameListenersReserved,
-                                                       (int) localCopy.size()));
+        activeListeners.reserve (static_cast<size_t> (juce::jmax (owner.frameListenersReserved,
+                                                                   static_cast<int> (localCopy.size()))));
         for (auto* lst : localCopy)
         {
             if (lst == nullptr)
@@ -206,12 +206,12 @@ public:
         }
 
 #if Y2K_ENABLE_PERF_COUNTERS
-        y2k::perf::PerformanceCounterSystem::instance().recordFrameListenerCount((int) activeListeners.size());
+        y2k::perf::PerformanceCounterSystem::instance().recordFrameListenerCount(static_cast<int> (activeListeners.size()));
         y2k::perf::PerformanceCounterSystem::instance().recordEvent(
             y2k::perf::FunctionId::uiFrameListenerFanout,
             y2k::perf::Partition::uiRendering,
             y2k::perf::ThreadRole::ui,
-            (juce::int64) activeListeners.size());
+            static_cast<juce::int64> (activeListeners.size()));
 #endif
         for (auto* lst : activeListeners)
         {
@@ -257,7 +257,7 @@ AnalyserHub::~AnalyserHub()
 
 void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
 {
-    cachedSampleRate = sampleRate;
+    cachedSampleRate.store (sampleRate, std::memory_order_relaxed);
 
     // 示波器缓冲清零
     {
@@ -319,11 +319,11 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
     //   · memory_order_relaxed 已足够：这里只要求原子读写不撕裂，不需要跨线程同步其他数据。
     //   · 若某个 Kind 被短暂 retain 之后又 release，本帧可能仍旧跑或跑半路就停，
     //     都不会造成数据一致性问题，因为每一路都是"能算就算"，不依赖上一帧活跃状态。
-    const bool wantOsc      = refCounts[(size_t) Kind::Oscilloscope].load (std::memory_order_relaxed) > 0;
-    const bool wantSpec     = refCounts[(size_t) Kind::Spectrum    ].load (std::memory_order_relaxed) > 0;
-    const bool wantLoud     = refCounts[(size_t) Kind::Loudness    ].load (std::memory_order_relaxed) > 0;
-    const bool wantPhase    = refCounts[(size_t) Kind::Phase       ].load (std::memory_order_relaxed) > 0;
-    const bool wantDynamics = refCounts[(size_t) Kind::Dynamics    ].load (std::memory_order_relaxed) > 0;
+    const bool wantOsc      = refCounts[static_cast<size_t> (Kind::Oscilloscope)].load (std::memory_order_relaxed) > 0;
+    const bool wantSpec     = refCounts[static_cast<size_t> (Kind::Spectrum    )].load (std::memory_order_relaxed) > 0;
+    const bool wantLoud     = refCounts[static_cast<size_t> (Kind::Loudness    )].load (std::memory_order_relaxed) > 0;
+    const bool wantPhase    = refCounts[static_cast<size_t> (Kind::Phase       )].load (std::memory_order_relaxed) > 0;
+    const bool wantDynamics = refCounts[static_cast<size_t> (Kind::Dynamics    )].load (std::memory_order_relaxed) > 0;
 
     if (wantOsc)      pushSamplesToOscilloscope(left, right, numSamples);
     if (wantSpec)     pushSamplesToSpectrum    (left, right, numSamples);
@@ -360,7 +360,7 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
 
 #if Y2K_ENABLE_PERF_COUNTERS
     const auto t1 = juce::Time::getHighResolutionTicks();
-    const auto us = (juce::int64) (juce::Time::highResolutionTicksToSeconds(t1 - t0) * 1.0e6);
+    const auto us = static_cast<juce::int64> (juce::Time::highResolutionTicksToSeconds(t1 - t0) * 1.0e6);
     perfPushCount.fetch_add(1, std::memory_order_relaxed);
     perfPushTotalUs.fetch_add(us, std::memory_order_relaxed);
     // CAS-like max 更新
@@ -378,15 +378,15 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
 // ==========================================================
 void AnalyserHub::retain(Kind kind) noexcept
 {
-    const auto idx = (size_t) kind;
-    jassert (idx < (size_t) Kind::NumKinds);
+    const auto idx = static_cast<size_t> (kind);
+    jassert (idx < static_cast<size_t> (Kind::NumKinds));
     refCounts[idx].fetch_add (1, std::memory_order_relaxed);
 }
 
 void AnalyserHub::release(Kind kind) noexcept
 {
-    const auto idx = (size_t) kind;
-    jassert (idx < (size_t) Kind::NumKinds);
+    const auto idx = static_cast<size_t> (kind);
+    jassert (idx < static_cast<size_t> (Kind::NumKinds));
     const auto prev = refCounts[idx].fetch_sub (1, std::memory_order_relaxed);
     jassert (prev >= 1); // 每次 release 前都必须有对应的 retain
     (void) prev;
@@ -394,8 +394,8 @@ void AnalyserHub::release(Kind kind) noexcept
 
 bool AnalyserHub::isActive(Kind kind) const noexcept
 {
-    const auto idx = (size_t) kind;
-    jassert (idx < (size_t) Kind::NumKinds);
+    const auto idx = static_cast<size_t> (kind);
+    jassert (idx < static_cast<size_t> (Kind::NumKinds));
     return refCounts[idx].load (std::memory_order_relaxed) > 0;
 }
 
@@ -431,8 +431,8 @@ void AnalyserHub::pushSamplesToOscilloscope(const float* left, const float* righ
         const int spaceTillEnd = oscilloscopeBufferSize - oscWritePos;
         const int chunk        = juce::jmin (samplesRemaining, spaceTillEnd);
 
-        std::memcpy (oscBufL.data() + oscWritePos, left  + srcPos, (size_t) chunk * sizeof (float));
-        std::memcpy (oscBufR.data() + oscWritePos, right + srcPos, (size_t) chunk * sizeof (float));
+        std::memcpy (oscBufL.data() + oscWritePos, left  + srcPos, static_cast<size_t> (chunk) * sizeof (float));
+        std::memcpy (oscBufR.data() + oscWritePos, right + srcPos, static_cast<size_t> (chunk) * sizeof (float));
 
         oscWritePos = (oscWritePos + chunk) % oscilloscopeBufferSize;
         srcPos            += chunk;
@@ -453,15 +453,15 @@ void AnalyserHub::getOscilloscopeSnapshot(juce::Array<float>& destL,
     //   最多两段 memcpy 就能拷完；destL/R 内部 raw 数组由 juce::Array 连续分配。
     const int firstChunk = oscilloscopeBufferSize - oscWritePos;
     std::memcpy (destL.getRawDataPointer(),               oscBufL.data() + oscWritePos,
-                 (size_t) firstChunk * sizeof (float));
+                 static_cast<size_t> (firstChunk) * sizeof (float));
     std::memcpy (destR.getRawDataPointer(),               oscBufR.data() + oscWritePos,
-                 (size_t) firstChunk * sizeof (float));
+                 static_cast<size_t> (firstChunk) * sizeof (float));
     if (oscWritePos > 0)
     {
         std::memcpy (destL.getRawDataPointer() + firstChunk, oscBufL.data(),
-                     (size_t) oscWritePos * sizeof (float));
+                     static_cast<size_t> (oscWritePos) * sizeof (float));
         std::memcpy (destR.getRawDataPointer() + firstChunk, oscBufR.data(),
-                     (size_t) oscWritePos * sizeof (float));
+                     static_cast<size_t> (oscWritePos) * sizeof (float));
     }
 }
 
@@ -511,7 +511,7 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
         const float s   = juce::jlimit(-1.0f, 1.0f, mid);
 
         // ---------- 主路（2048）：非重叠，攒满就跑 ----------
-        fftFifo[(size_t) fftFifoIndex] = s;
+        fftFifo[static_cast<size_t> (fftFifoIndex)] = s;
         ++fftFifoIndex;
 
         if (fftFifoIndex >= fftSize)
@@ -528,27 +528,27 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
             //    将幅度归一化到 [0,1]（用 FFT 大小归一 + 汉宁窗补偿）
             //    简化做法：除以 fftSize/2 作为粗略归一化，后续 UI 自己转 dB
             {
-                const float invMax = 2.0f / (float) fftSize;
+                const float invMax = 2.0f / static_cast<float> (fftSize);
                 for (int iBin = 0; iBin < maxBin; ++iBin)
-                    magDataWork[(size_t) iBin] = fftData[(size_t) iBin] * invMax;
+                    magDataWork[static_cast<size_t> (iBin)] = fftData[static_cast<size_t> (iBin)] * invMax;
             }
 
             // 2) 像素 EQ 用的粗粒度平滑频谱（保留原有逻辑）
             for (int iBin = 0; iBin < spectrumBins; ++iBin)
             {
-                const float norm  = (float) iBin / (float) juce::jmax(1, spectrumBins - 1);
+                const float norm  = static_cast<float> (iBin) / static_cast<float> (juce::jmax(1, spectrumBins - 1));
                 const float skew  = std::pow(norm, 2.3f);
                 const int   fBin  = juce::jlimit(0, maxBin - 1,
-                                        (int) std::round(skew * (float)(maxBin - 1)));
+                                        static_cast<int> (std::round(skew * static_cast<float> (maxBin - 1))));
 
-                const float mag    = fftData[(size_t) fBin];
+                const float mag    = fftData[static_cast<size_t> (fBin)];
                 const float db     = juce::Decibels::gainToDecibels(juce::jmax(1.0e-6f, mag));
                 const float mapped = juce::jlimit(0.0f, 1.0f,
                                         juce::jmap(db, -50.0f, 50.0f, 0.0f, 1.0f));
 
-                const float prev  = specDataWork[(size_t) iBin];
+                const float prev  = specDataWork[static_cast<size_t> (iBin)];
                 const float alpha = (mapped > prev) ? 0.6f : 0.15f;
-                specDataWork[(size_t) iBin] = prev + alpha * (mapped - prev);
+                specDataWork[static_cast<size_t> (iBin)] = prev + alpha * (mapped - prev);
             }
 
             fftFifoIndex = 0;
@@ -559,7 +559,7 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
         //   存入当前写位置，再把"写位置"前进。当写位置每次跨过 hopLo 的整数倍时，
         //   就把"从 writePos 往回看的 fftSizeLo 个样本"打包跑一次 FFT。
         //   数据从最老到最新的排列为：fftFifoLo[writePos..end] + fftFifoLo[0..writePos-1]
-        fftFifoLo[(size_t) fftFifoIndexLo] = s;
+        fftFifoLo[static_cast<size_t> (fftFifoIndexLo)] = s;
         fftFifoIndexLo = (fftFifoIndexLo + 1) % fftSizeLo;
 
         // 每 hopLo 个样本触发一次
@@ -571,10 +571,10 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
         // 将环形 FIFO 展平到 fftDataLo（时序：oldest → newest）
         const int firstChunk = fftSizeLo - fftFifoIndexLo;
         std::memcpy (fftDataLo.data(),              fftFifoLo.data() + fftFifoIndexLo,
-                     (size_t) firstChunk * sizeof (float));
+                     static_cast<size_t> (firstChunk) * sizeof (float));
         if (fftFifoIndexLo > 0)
             std::memcpy (fftDataLo.data() + firstChunk, fftFifoLo.data(),
-                         (size_t) fftFifoIndexLo * sizeof (float));
+                         static_cast<size_t> (fftFifoIndexLo) * sizeof (float));
         // fftDataLo 后半段（fftSizeLo .. fftSizeLo*2）用作 FFT 内部缓冲，填 0
         std::fill (fftDataLo.begin() + fftSizeLo, fftDataLo.end(), 0.0f);
 
@@ -584,9 +584,9 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
         // 归一化（与主路保持一致的公式：2 / fftSize）
         {
             const int   maxBinLo = fftSizeLo / 2;
-            const float invMaxLo = 2.0f / (float) fftSizeLo;
+            const float invMaxLo = 2.0f / static_cast<float> (fftSizeLo);
             for (int iBin = 0; iBin < maxBinLo; ++iBin)
-                magDataLoWork[(size_t) iBin] = fftDataLo[(size_t) iBin] * invMaxLo;
+                magDataLoWork[static_cast<size_t> (iBin)] = fftDataLo[static_cast<size_t> (iBin)] * invMaxLo;
         }
 
         publishLo = true;
@@ -620,7 +620,7 @@ void AnalyserHub::getSpectrumSnapshot(juce::Array<float>& dest)
     {
         const juce::SpinLock::ScopedLockType sl (specLock);
         std::memcpy (dest.getRawDataPointer(), specData.data(),
-                     sizeof (float) * (size_t) spectrumBins);
+                     sizeof (float) * static_cast<size_t> (spectrumBins));
     }
 }
 
@@ -634,12 +634,12 @@ void AnalyserHub::getSpectrumMagnitudes(juce::Array<float>& dest)
     {
         const juce::SpinLock::ScopedLockType sl (specLock);
         std::memcpy (dest.getRawDataPointer(), magData.data(),
-                     sizeof (float) * (size_t) spectrumMagSize);
+                     sizeof (float) * static_cast<size_t> (spectrumMagSize));
     }
 
 #if Y2K_ENABLE_PERF_COUNTERS
     const auto t1 = juce::Time::getHighResolutionTicks();
-    const auto us = (juce::int64) (juce::Time::highResolutionTicksToSeconds(t1 - t0) * 1.0e6);
+    const auto us = static_cast<juce::int64> (juce::Time::highResolutionTicksToSeconds(t1 - t0) * 1.0e6);
     perfSnapCount.fetch_add(1,  std::memory_order_relaxed);
     perfSnapTotalUs.fetch_add(us, std::memory_order_relaxed);
 #endif
@@ -655,7 +655,7 @@ void AnalyserHub::getSpectrumMagnitudesLo(juce::Array<float>& dest)
     {
         const juce::SpinLock::ScopedLockType sl (specLock);
         std::memcpy (dest.getRawDataPointer(), magDataLo.data(),
-                     sizeof (float) * (size_t) spectrumMagSizeLo);
+                     sizeof (float) * static_cast<size_t> (spectrumMagSizeLo));
     }
 }
 
@@ -680,11 +680,12 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
     numPoints = juce::jmax (2, numPoints);
     dest.resize (numPoints);
 
-    const double sr      = (cachedSampleRate > 0.0) ? cachedSampleRate : 48000.0;
+    const double cachedSr = cachedSampleRate.load (std::memory_order_relaxed);
+    const double sr       = (cachedSr > 0.0) ? cachedSr : 48000.0;
     const double nyquist = sr * 0.5;
 
-    const double fLo2 = juce::jmax (1.0, (double) fMin);
-    const double fHi2 = juce::jmin (nyquist, (double) fMax);
+    const double fLo2 = juce::jmax (1.0, static_cast<double> (fMin));
+    const double fHi2 = juce::jmin (nyquist, static_cast<double> (fMax));
     if (fHi2 <= fLo2)
     {
         auto* outData = dest.getRawDataPointer();
@@ -711,11 +712,11 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
     const double logMax = std::log10 (fHi2);
 
     // 主路 / 低频路的 "Hz → bin" 因子
-    const double hzToBinHi = (double) (spectrumMagSize   - 1) / nyquist;
-    const double hzToBinLo = (double) (spectrumMagSizeLo - 1) / nyquist;
+    const double hzToBinHi = static_cast<double> (spectrumMagSize   - 1) / nyquist;
+    const double hzToBinLo = static_cast<double> (spectrumMagSizeLo - 1) / nyquist;
 
     // 过渡带（对数中心 = spectrumXoverHz，±0.5 八度 → ratio = sqrt(2)）
-    const double xover     = (double) spectrumXoverHz;
+    const double xover     = static_cast<double> (spectrumXoverHz);
     const double xoverLo   = xover / std::sqrt (2.0);   // ~354 Hz
     const double xoverHi   = xover * std::sqrt (2.0);   // ~707 Hz
     // 低频路 FFT 低通之外禁用（取 2× xover 作为硬上限兜底）
@@ -739,27 +740,27 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
     for (int i = 0; i < numPoints; ++i)
     {
         // 以点 i 为中心的频率带宽 [f0, f1]（几何平均法）
-        const double t   = (double) i / (double) (numPoints - 1);
+        const double t   = static_cast<double> (i) / static_cast<double> (numPoints - 1);
         const double f   = std::pow (10.0, logMin + t * (logMax - logMin));
 
-        const double tPrev = (double) (i - 1) / (double) (numPoints - 1);
-        const double tNext = (double) (i + 1) / (double) (numPoints - 1);
+        const double tPrev = static_cast<double> (i - 1) / static_cast<double> (numPoints - 1);
+        const double tNext = static_cast<double> (i + 1) / static_cast<double> (numPoints - 1);
         const double fPrev = (i == 0)               ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
         const double fNext = (i == numPoints - 1)   ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
         const double f0    = std::sqrt (fPrev * f);
         const double f1    = std::sqrt (f * fNext);
 
         // ---- 主路取值 ----
-        const int binHiLo  = (int) std::floor (f0 * hzToBinHi);
-        const int binHiUp  = (int) std::ceil  (f1 * hzToBinHi);
+        const int binHiLo  = static_cast<int> (std::floor (f0 * hzToBinHi));
+        const int binHiUp  = static_cast<int> (std::ceil  (f1 * hzToBinHi));
         const float magHi  = peakInRange (magHiSnapshot.data(), spectrumMagSize, binHiLo, binHiUp);
 
         // ---- 低频路取值（只在有效频段内查询）----
         float magLo = 0.0f;
         if (f < loHardMax)
         {
-            const int binLoLo = (int) std::floor (f0 * hzToBinLo);
-            const int binLoUp = (int) std::ceil  (f1 * hzToBinLo);
+            const int binLoLo = static_cast<int> (std::floor (f0 * hzToBinLo));
+            const int binLoUp = static_cast<int> (std::ceil  (f1 * hzToBinLo));
             magLo = peakInRange (magLoSnapshot.data(), spectrumMagSizeLo, binLoLo, binLoUp);
         }
 
@@ -773,7 +774,7 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
             const double u = (std::log (f) - std::log (xoverLo))
                            / (std::log (xoverHi) - std::log (xoverLo));
             // 等功率（cos²/sin²）交叉：w²(Hi) + (1-w)²(Lo) 之和在能量域平滑
-            w = (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * u));
+            w = static_cast<float> (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * u));
         }
 
         // 能量域线性混合后再开方（避免两峰重合时幅度偏高）
@@ -829,9 +830,9 @@ AnalyserHub::PerfCounters AnalyserHub::getPerfCounters() const noexcept
 
     out.pushCount = pc;
     out.snapCount = sc;
-    out.avgPushUs = (pc > 0) ? (double) pt / (double) pc : 0.0;
-    out.avgSnapUs = (sc > 0) ? (double) st / (double) sc : 0.0;
-    out.maxPushUs = (double) pm;
+    out.avgPushUs = (pc > 0) ? static_cast<double> (pt) / static_cast<double> (pc) : 0.0;
+    out.avgSnapUs = (sc > 0) ? static_cast<double> (st) / static_cast<double> (sc) : 0.0;
+    out.maxPushUs = static_cast<double> (pm);
     return out;
 }
 
@@ -855,7 +856,7 @@ void AnalyserHub::addFrameListener (FrameListener* listener)
     for (auto* l : frameListeners)
         if (l == listener) return;
     frameListeners.push_back (listener);
-    frameListenersReserved = juce::jmax (frameListenersReserved, (int) frameListeners.size());
+    frameListenersReserved = juce::jmax (frameListenersReserved, static_cast<int> (frameListeners.size()));
 }
 
 void AnalyserHub::removeFrameListener (FrameListener* listener)
@@ -868,8 +869,8 @@ void AnalyserHub::removeFrameListener (FrameListener* listener)
         {
             frameListeners.erase (it);
             // 容量下降到一半以下再缩水位，避免抖动；reserve 仍归 vector 管。
-            if ((int) frameListeners.size() < frameListenersReserved / 2)
-                frameListenersReserved = (int) frameListeners.size();
+            if (static_cast<int> (frameListeners.size()) < frameListenersReserved / 2)
+                frameListenersReserved = static_cast<int> (frameListeners.size());
             return;
         }
     }

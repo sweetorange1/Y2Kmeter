@@ -44,6 +44,24 @@ TelemetryClient& TelemetryClient::GetInstance() {
 }
 
 // --------------------------------------------------
+// 构造 / 析构
+//
+// 构造时启动一个常驻 worker 线程；所有遥测 POST 都经任务队列交给它串行
+// 执行，取代原先每次请求 detach 一个线程的做法。析构时置 stopWorker_ 并
+// join，保证进程退出时后台线程不会游离、被 OS 强制终止。
+// --------------------------------------------------
+TelemetryClient::TelemetryClient() {
+  workerThread_ = std::thread([this]() { WorkerLoop(); });
+}
+
+TelemetryClient::~TelemetryClient() {
+  stopWorker_.store(true, std::memory_order_release);
+  queueCv_.notify_all();
+  if (workerThread_.joinable())
+    workerThread_.join();
+}
+
+// --------------------------------------------------
 // 从注册表读取安装时授予的遥测授权状态
 //
 // 注册表路径（仅 Windows）：
@@ -116,7 +134,7 @@ juce::var TelemetryClient::CollectSystemInfo(
     bool isPlugin) {
   using juce::SystemStats;
 
-  auto* obj = new juce::DynamicObject();
+  juce::DynamicObject::Ptr obj = new juce::DynamicObject();
 
   // 匿名 client_id
   obj->setProperty("client_id", GetOrCreateClientId(settings));
@@ -204,16 +222,14 @@ juce::var TelemetryClient::CollectSystemInfo(
   obj->setProperty("timezone_offset_min",
     juce::Time::getCurrentTime().getUTCOffsetSeconds() / 60);
 
-  return juce::var(obj);
+  return juce::var(obj.get());
 }
 
 // --------------------------------------------------
 // 异步 POST JSON
 //
-// 使用 std::thread + detach 执行后台网络 I/O，替代不存在的
-// juce::ThreadPool::getDefaultJobPool()（JUCE 8 无此 API）。
-//
-// POST 数据通过 URL::withPOSTData() 挂载，配合
+// 只在主调线程做 JSON 序列化并投递任务到队列；真正的网络 I/O 由常驻
+// worker 线程串行执行。POST 数据通过 URL::withPOSTData() 挂载，配合
 // InputStreamOptions(ParameterHandling::inPostData) 发出。
 // --------------------------------------------------
 void TelemetryClient::PostJsonAsync(const juce::URL& url,
@@ -221,26 +237,50 @@ void TelemetryClient::PostJsonAsync(const juce::URL& url,
   // 在主调线程先把 JSON 序列化为字符串（避免跨线程引用临时对象）
   const auto body = juce::JSON::toString(json, false);
 
-  std::thread([url, body]() {
-    // 将 POST 数据挂到 URL 上
-    const auto postUrl = url.withPOSTData(body);
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    tasks_.emplace_back([url, body]() {
+      // 将 POST 数据挂到 URL 上
+      const auto postUrl = url.withPOSTData(body);
 
-    // 创建带 POST 数据的 stream options
-    auto opts = juce::URL::InputStreamOptions(
-                  juce::URL::ParameterHandling::inPostData)
-                  .withConnectionTimeoutMs(5000)
-                  .withExtraHeaders(
-                      "Content-Type: application/json\r\n"
-                      "Accept: application/json\r\n")
-                  .withHttpRequestCmd("POST");
+      // 创建带 POST 数据的 stream options
+      auto opts = juce::URL::InputStreamOptions(
+                    juce::URL::ParameterHandling::inPostData)
+                    .withConnectionTimeoutMs(5000)
+                    .withExtraHeaders(
+                        "Content-Type: application/json\r\n"
+                        "Accept: application/json\r\n")
+                    .withHttpRequestCmd("POST");
 
-    // 尝试发送，任何错误直接吞掉
-    if (auto stream = postUrl.createInputStream(opts)) {
-      // 读取响应体以触发完整 HTTP 事务（即使我们不需要响应内容）
-      stream->readEntireStreamAsString();
+      // 尝试发送，任何错误直接吞掉
+      if (auto stream = postUrl.createInputStream(opts)) {
+        // 读取响应体以触发完整 HTTP 事务（即使我们不需要响应内容）
+        stream->readEntireStreamAsString();
+      }
+      // 静默忽略所有错误（网络不通、DNS 失败、超时等）
+    });
+  }
+  queueCv_.notify_one();
+}
+
+// --------------------------------------------------
+// 后台 worker 主循环
+// --------------------------------------------------
+void TelemetryClient::WorkerLoop() {
+  while (true) {
+    std::function<void()> task;
+    {
+      std::unique_lock<std::mutex> lock(queueMutex_);
+      queueCv_.wait(lock, [this]() {
+        return stopWorker_.load(std::memory_order_acquire) || !tasks_.empty();
+      });
+      if (stopWorker_.load(std::memory_order_acquire) && tasks_.empty())
+        return;
+      task = std::move(tasks_.front());
+      tasks_.pop_front();
     }
-    // 静默忽略所有错误（网络不通、DNS 失败、超时等）
-  }).detach();
+    task();
+  }
 }
 
 // --------------------------------------------------

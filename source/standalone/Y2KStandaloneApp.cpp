@@ -38,6 +38,7 @@
 #include "../../PluginProcessor.h"
 #include "../analysis/AnalyserHub.h"
 #include "../perf/PerformanceCounterSystem.h"
+#include "../Y2KLogging.h"
 
 // 主题持久化：从 settings 读取/写回 PinkXP 全局主题 id
 #include "../ui/PinkXPStyle.h"
@@ -441,9 +442,11 @@ public:
         resetTccIfVersionChanged (appProperties);
        #endif
 
+       #ifdef Y2K_ENABLE_LOGGING
         // 0.5) 挂载运行时日志文件：Windows GUI 程序无控制台，stderr 不可见，
-        //      把所有 juce::Logger::writeToLog 输出落盘到 exe 目录下的固定 txt，
-        //      便于定位 Milkdrop 等模块的运行时问题。每次启动覆盖旧日志。
+        //      把所有 Y2K_LOG 输出落盘到 exe 目录下的固定 txt，
+        //      便于在 RelWithDebInfo 构建中定位 Milkdrop 等模块的运行时问题。
+        //      每次启动覆盖旧日志。仅在 Y2K_ENABLE_LOGGING 下编译。
         {
             const auto logFile = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
                                      .getParentDirectory()
@@ -453,8 +456,9 @@ public:
                                                                      "Y2Kmeter debug log",
                                                                      0);
             juce::Logger::setCurrentLogger (runtimeFileLogger.get());
-            juce::Logger::writeToLog ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
+            Y2K_LOG ("[Y2KStandaloneApp] runtime log file=" + logFile.getFullPathName());
         }
+       #endif
 
         // 1) 创建音频 + 插件宿主
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
@@ -705,16 +709,16 @@ public:
 #else
                 const juce::String platform = "unknown";
 #endif
-                juce::Logger::writeToLog("[UpdateCheck] SENDING version=" + juce::String(JucePlugin_VersionString) + " platform=" + platform);
+                Y2K_LOG("[UpdateCheck] SENDING version=" + juce::String(JucePlugin_VersionString) + " platform=" + platform);
                 y2k::network::CheckForUpdatesAsync(
                     juce::String(JucePlugin_VersionString),
                     platform,
                     &settings,
                     [&settings](const y2k::network::UpdateInfo& info) {
-                        juce::Logger::writeToLog("[UpdateCheck] callback: has_update=" + juce::String((bool)info.has_update ? "1" : "0")
+                        Y2K_LOG("[UpdateCheck] callback: has_update=" + juce::String(info.has_update ? "1" : "0")
                             + " latest=" + info.latest_version);
                         if (info.has_update) {
-                            juce::Logger::writeToLog("[UpdateCheck] calling ShowUpdateDialog");
+                            Y2K_LOG("[UpdateCheck] calling ShowUpdateDialog");
                             y2k::network::ShowUpdateDialog(
                                 info, &settings);
                         }
@@ -768,9 +772,11 @@ public:
 
         appProperties.saveIfNeeded();
 
+       #ifdef Y2K_ENABLE_LOGGING
         // 5) 卸载运行时日志 logger（在写完所有日志后再清理）
         juce::Logger::setCurrentLogger (nullptr);
         runtimeFileLogger.reset();
+       #endif
     }
 
     void systemRequestedQuit() override
@@ -1885,10 +1891,13 @@ private:
     // 以便在 delete 之前显式调用 processor->editorBeingDeleted()。
     std::unique_ptr<juce::AudioProcessorEditor>     pluginEditor;
 
+   #ifdef Y2K_ENABLE_LOGGING
     // 运行时日志：Windows GUI 程序没有控制台，std::cerr / stderr 都不可见，
     //   因此把 juce::Logger 输出落盘到 exe 目录下的 Y2Kmeter_debug.log，
     //   便于排查 Milkdrop 等模块的运行时问题（见 initialise / shutdown）。
+    //   仅在 Y2K_ENABLE_LOGGING（RelWithDebInfo）下编译。
     std::unique_ptr<juce::FileLogger>               runtimeFileLogger;
+   #endif
 
     // 裸指针缓存 —— 指向 pluginEditor.get() 动态转型后的具体类型
     //   · 用于 ChangeListener 回调里刷新下拉框；不拥有生命周期

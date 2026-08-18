@@ -15,11 +15,15 @@
 #include "Version.h"
 #include "TelemetryClient.h"
 #include "source/ui/UpdateDialog.h"
+#include "source/Y2KLogging.h"
 
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 
+#include <functional>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 namespace y2k {
 namespace network {
@@ -37,6 +41,37 @@ UpdateInfo ParseUpdateResponse(const juce::var& json) {
     info.force_update   = obj->getProperty("force_update");
   }
   return info;
+}
+
+// --------------------------------------------------
+// 后台线程登记器
+//
+// 更新检查是命名空间级自由函数，没有对象可挂线程句柄。这里用一个函数内
+// static 的登记器持有所有进行中的后台线程，进程退出（static 析构阶段）时
+// 统一 join，取代原先 std::thread(...).detach() 导致线程游离、被 OS 强制
+// 终止的问题。join 最多等待网络超时（5 秒）。
+// --------------------------------------------------
+struct BackgroundThreadRegistry {
+  ~BackgroundThreadRegistry() {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto& t : threads)
+      if (t.joinable())
+        t.join();
+  }
+
+  std::mutex mutex;
+  std::vector<std::thread> threads;
+};
+
+BackgroundThreadRegistry& GetBackgroundThreadRegistry() {
+  static BackgroundThreadRegistry registry;
+  return registry;
+}
+
+void LaunchBackgroundThread(std::function<void()> fn) {
+  auto& registry = GetBackgroundThreadRegistry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  registry.threads.emplace_back(std::move(fn));
 }
 
 }  // namespace
@@ -63,7 +98,7 @@ void ShowUpdateDialog(const UpdateInfo& info,
   // VST3 插件模式下 Editor 可能尚未打开，若找不到父组件则回退到系统原生对话框。
   auto* dlg = y2k::ui::UpdateDialog::ShowInComponent(
           /*parentComponent=*/nullptr, info, settings);
-  juce::Logger::writeToLog("[UpdateCheck] ShowInComponent returned: " + juce::String(dlg ? "DIALOG" : "NULL"));
+  Y2K_LOG("[UpdateCheck] ShowInComponent returned: " + juce::String(dlg ? "DIALOG" : "NULL"));
   if (dlg != nullptr) {
     return;
   }
@@ -90,19 +125,19 @@ void ShowUpdateDialog(const UpdateInfo& info,
       .withButton("Download")
       .withButton("Remind Me Later"),
     [info](int result) {
-      juce::Logger::writeToLog("[UpdateCheck] NativeMessageBox result=" + juce::String(result));
+      Y2K_LOG("[UpdateCheck] NativeMessageBox result=" + juce::String(result));
       // JUCE NativeMessageBox::showAsync 使用 plainIndex 模式（0-based）：
       //   0 = 第一个按钮 (Download)，也可能表示关闭对话框
       //   1 = 第二个按钮 (Remind Me Later)
       if (result == 0) {
-        juce::Logger::writeToLog("[UpdateCheck] Download button pressed (or dialog closed), opening URL");
+        Y2K_LOG("[UpdateCheck] Download button pressed (or dialog closed), opening URL");
         if (info.download_url.isNotEmpty()) {
           juce::URL(info.download_url).launchInDefaultBrowser();
         } else {
           juce::URL("https://iisaacbeats.cn").launchInDefaultBrowser();
         }
       } else {
-        juce::Logger::writeToLog("[UpdateCheck] Remind Me Later / dismissed, no action");
+        Y2K_LOG("[UpdateCheck] Remind Me Later / dismissed, no action");
       }
     });
 }
@@ -136,10 +171,10 @@ void CheckForUpdatesAsync(
          << "&platform=" << juce::URL::addEscapeChars(platform, false);
   const auto url = juce::URL(urlStr);
 
-  juce::Logger::writeToLog("[UpdateCheck] URL: " + urlStr);
+  Y2K_LOG("[UpdateCheck] URL: " + urlStr);
 
-  // 后台线程执行 HTTP GET
-  std::thread([url, callback, current_version]() {
+  // 后台线程执行 HTTP GET（句柄由登记器持有，进程退出时统一 join）
+  LaunchBackgroundThread([url, callback, current_version]() {
     UpdateInfo info;
 
     auto opts = juce::URL::InputStreamOptions(
@@ -150,38 +185,38 @@ void CheckForUpdatesAsync(
 
     if (auto stream = url.createInputStream(opts)) {
       const auto body = stream->readEntireStreamAsString();
-      juce::Logger::writeToLog("[UpdateCheck] Response body: " + body);
+      Y2K_LOG("[UpdateCheck] Response body: " + body);
 
       if (body.isNotEmpty()) {
         const auto json = juce::JSON::parse(body);
         info = ParseUpdateResponse(json);
-        juce::Logger::writeToLog("[UpdateCheck] Parsed: has_update=" + juce::String((bool)info.has_update ? "1" : "0")
+        Y2K_LOG("[UpdateCheck] Parsed: has_update=" + juce::String(info.has_update ? "1" : "0")
             + " latest_version=" + info.latest_version);
       }
     } else {
-      juce::Logger::writeToLog("[UpdateCheck] HTTP request FAILED (stream is null)");
+      Y2K_LOG("[UpdateCheck] HTTP request FAILED (stream is null)");
     }
 
     if (info.has_update && info.latest_version.isNotEmpty()) {
       const int cmp = CompareVersionStrings(
           current_version,
           info.latest_version);
-      juce::Logger::writeToLog("[UpdateCheck] Compare: current=" + current_version
+      Y2K_LOG("[UpdateCheck] Compare: current=" + current_version
           + " latest=" + info.latest_version + " cmp=" + juce::String(cmp));
       if (cmp >= 0) {
         info.has_update = false;
-        juce::Logger::writeToLog("[UpdateCheck] has_update set to FALSE (current >= latest)");
+        Y2K_LOG("[UpdateCheck] has_update set to FALSE (current >= latest)");
       }
     }
 
-    juce::Logger::writeToLog("[UpdateCheck] Final: has_update=" + juce::String((bool)info.has_update ? "1" : "0")
+    Y2K_LOG("[UpdateCheck] Final: has_update=" + juce::String(info.has_update ? "1" : "0")
         + " firing callback=" + juce::String(callback ? "YES" : "NO"));
 
     if (callback) {
       juce::MessageManager::callAsync(
         [callback, info]() { callback(info); });
     }
-  }).detach();
+  });
 }
 
 }  // namespace network

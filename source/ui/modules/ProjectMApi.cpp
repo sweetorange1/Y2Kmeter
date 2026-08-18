@@ -8,6 +8,8 @@
 */
 #include "ProjectMApi.h"
 
+#include "source/Y2KLogging.h"
+
 #include <juce_core/juce_core.h>
 #include <iostream>
 
@@ -179,7 +181,7 @@ Api::Api()
     loadLibrary();
     if (moduleHandle != nullptr)
         resolveSymbols();
-    juce::Logger::writeToLog (juce::String ("[ProjectMApi] Api::Api() done: moduleHandle=")
+    Y2K_LOG (juce::String ("[ProjectMApi] Api::Api() done: moduleHandle=")
                               + juce::String (moduleHandle != nullptr ? "ok" : "null")
                               + " available=" + juce::String (available ? 1 : 0)
                               + " errorMessage='" + juce::String (errorMessage) + "'");
@@ -335,7 +337,7 @@ void Api::loadLibrary()
     }
    #elif defined (__APPLE__)
     auto dylib = locateProjectMDylib();
-    juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary: locate dylib -> '")
+    Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary: locate dylib -> '")
                               + dylib.getFullPathName()
                               + "' exists=" + juce::String (dylib.existsAsFile() ? 1 : 0));
 
@@ -346,7 +348,7 @@ void Api::loadLibrary()
                        "or next to the executable, "
                        "or in third_party/projectm/bin/. "
                        "Please rebuild with latest CMake install rules.";
-        juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary FAIL: ")
+        Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary FAIL: ")
                                   + juce::String (errorMessage));
         return;
     }
@@ -359,12 +361,12 @@ void Api::loadLibrary()
         const char* err = ::dlerror();
         errorMessage = std::string ("dlopen(libprojectM-4.dylib) failed: ")
                      + (err != nullptr ? err : "unknown error");
-        juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary FAIL: ")
+        Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary FAIL: ")
                                   + juce::String (errorMessage));
     }
     else
     {
-        juce::Logger::writeToLog (juce::String ("[ProjectMApi] loadLibrary OK: dlopen handle=")
+        Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary OK: dlopen handle=")
                                   + juce::String (moduleHandle != nullptr ? "ok" : "null"));
     }
    #else

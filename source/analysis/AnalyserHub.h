@@ -493,7 +493,7 @@ public:
     void         resetPerfCounters() noexcept;
 
     // ---- 参数查询 ----
-    double getSampleRate() const noexcept { return cachedSampleRate; }
+    double getSampleRate() const noexcept { return cachedSampleRate.load (std::memory_order_relaxed); }
 
 private:
     // ---- 内部常量 ----
@@ -550,7 +550,9 @@ private:
     DynamicRangeMeter dynamicsMeter;
 
     // ---- 采样率缓存 ----
-    double cachedSampleRate = 44100.0;
+    //   prepare() 在音频线程准备阶段写入，getSampleRate()/频谱混合在 UI 线程读取，
+    //   用 std::atomic<double> 消除跨线程数据竞争（无锁，读写均 relaxed 即可）。
+    std::atomic<double> cachedSampleRate { 44100.0 };
 
     // ---- Phase E 性能计数（音频线程写，UI 线程读；用 atomic 保证无锁）----
     std::atomic<juce::int64> perfPushCount  { 0 };

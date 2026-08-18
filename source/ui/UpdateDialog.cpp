@@ -13,6 +13,7 @@
 #include "UpdateDialog.h"
 #include "PinkXPStyle.h"
 #include "source/network/UpdateChecker.h"
+#include "source/Y2KLogging.h"
 
 namespace y2k {
 namespace ui {
@@ -281,10 +282,10 @@ int UpdateDialog::HitTestButton(juce::Point<int> pos) const {
 }
 
 void UpdateDialog::ExecuteButton(int idx) {
-  juce::Logger::writeToLog("[UpdateDialog] ExecuteButton idx=" + juce::String(idx));
+  Y2K_LOG("[UpdateDialog] ExecuteButton idx=" + juce::String(idx));
   switch (static_cast<ButtonId>(idx)) {
     case ButtonId::kDownload: {
-      juce::Logger::writeToLog("[UpdateDialog] Download button -> opening URL");
+      Y2K_LOG("[UpdateDialog] Download button -> opening URL");
       if (info_.download_url.isNotEmpty()) {
         juce::URL(info_.download_url).launchInDefaultBrowser();
       } else {
@@ -293,7 +294,7 @@ void UpdateDialog::ExecuteButton(int idx) {
       break;
     }
     case ButtonId::kRemind: {
-      juce::Logger::writeToLog("[UpdateDialog] Remind Me Later button -> close only");
+      Y2K_LOG("[UpdateDialog] Remind Me Later button -> close only");
       break;
     }
   }
@@ -330,10 +331,10 @@ UpdateDialog* UpdateDialog::ShowInComponent(
   // 但弹窗定位不再依赖父窗口位置，而是居中于显示器屏幕。
   if (parentComponent == nullptr) {
     const int numWindows = juce::TopLevelWindow::getNumTopLevelWindows();
-    juce::Logger::writeToLog("[UpdateDialog] Searching for parent among " + juce::String(numWindows) + " top-level windows");
+    Y2K_LOG("[UpdateDialog] Searching for parent among " + juce::String(numWindows) + " top-level windows");
     for (int i = 0; i < numWindows; ++i) {
       auto* tw = juce::TopLevelWindow::getTopLevelWindow(i);
-      juce::Logger::writeToLog("[UpdateDialog]   window[" + juce::String(i) + "]: " + juce::String(tw ? "non-null" : "null")
+      Y2K_LOG("[UpdateDialog]   window[" + juce::String(i) + "]: " + juce::String(tw ? "non-null" : "null")
           + " showing=" + juce::String(tw && tw->isShowing() ? "YES" : "NO"));
       if (tw != nullptr && tw->isShowing()) {
         parentComponent = tw;
@@ -343,7 +344,7 @@ UpdateDialog* UpdateDialog::ShowInComponent(
   }
 
   if (parentComponent == nullptr) {
-    juce::Logger::writeToLog("[UpdateDialog] No parent window found, returning nullptr");
+    Y2K_LOG("[UpdateDialog] No parent window found, returning nullptr");
     return nullptr;
   }
 

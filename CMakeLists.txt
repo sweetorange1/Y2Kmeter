@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 2.6.7 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.6.8 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -354,7 +354,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.6.7
+VERSION 2.6.8
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -458,6 +458,11 @@ target_compile_definitions(Y2Kmeter
     # 外网发布版默认关闭性能计数系统（导出 + 运行时统计计算）
     # 目的是尽可能减少冗余统计开销，把算力留给真实音频/绘制路径。
     Y2K_ENABLE_PERF_COUNTERS=0
+    # 日志开关：仅在 RelWithDebInfo 配置下定义 Y2K_ENABLE_LOGGING。
+    #   · 对应 source/Y2KLogging.h 里的 Y2K_LOG 宏；Release / Debug /
+    #     MinSizeRel 下宏展开为空，彻底消除日志字符串拼接与 FileLogger 开销。
+    #   · RelWithDebInfo 用于排查 Release 场景问题，需要保留诊断日志。
+    $<$<CONFIG:RelWithDebInfo>:Y2K_ENABLE_LOGGING=1>
     # 关闭 JUCE 默认的 StandaloneFilterApp / StandaloneFilterWindow，
     # 转而使用我们自定义的 source/standalone/Y2KStandaloneApp.cpp（无边框 Y2K 外壳）
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1

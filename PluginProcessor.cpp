@@ -65,7 +65,7 @@ Y2KmeterAudioProcessor::Y2KmeterAudioProcessor()
             sTelemetryProps.setStorageParameters(opts);
         }
 
-        juce::Timer::callAfterDelay(5000, [this]() {
+        juce::Timer::callAfterDelay(5000, []() {
             auto* telemetrySettings =
                 sTelemetryProps.getUserSettings();
 

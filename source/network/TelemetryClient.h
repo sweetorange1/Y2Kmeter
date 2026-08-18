@@ -23,6 +23,11 @@
 
 #include <JuceHeader.h>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
 
 namespace y2k {
 namespace network {
@@ -60,8 +65,8 @@ public:
   void SendStartupPing(juce::PropertiesFile* settings, bool isPlugin);
 
 private:
-  TelemetryClient() = default;
-  ~TelemetryClient() = default;
+  TelemetryClient();
+  ~TelemetryClient();
 
   // 内部设置开关（仅供 LoadFromRegistry 等初始化逻辑调用）
   void SetEnabled(bool enabled) noexcept;
@@ -73,12 +78,26 @@ private:
   static juce::var CollectSystemInfo(juce::PropertiesFile* settings,
                                      bool isPlugin);
 
-  // 异步执行 HTTP POST，失败静默
-  static void PostJsonAsync(const juce::URL& url, const juce::var& json);
+  // 异步执行 HTTP POST，失败静默。
+  //   · 只做 JSON 序列化 + 入队，实际网络 I/O 交给 workerThread_ 串行执行，
+  //     避免每次请求都 detach 一个不可控的后台线程。
+  void PostJsonAsync(const juce::URL& url, const juce::var& json);
+
+  // 后台 worker 主循环：从任务队列取任务执行，直到 stopWorker_ 置位。
+  void WorkerLoop();
 
   // 隐私授权标志。默认 false（未授权），仅当 LoadFromRegistry()
   // 读到注册表值为 1 时才设为 true。
   std::atomic<bool> enabled_{false};
+
+  // 单一后台 worker 线程 + 任务队列（取代 std::thread(...).detach()）。
+  //   · 单例构造时启动，析构时置 stopWorker_ 并 join，保证退出时优雅收尾；
+  //   · 队列由 queueMutex_ 保护，queueCv_ 负责唤醒 worker。
+  std::thread             workerThread_;
+  std::mutex              queueMutex_;
+  std::condition_variable queueCv_;
+  std::deque<std::function<void()>> tasks_;
+  std::atomic<bool>       stopWorker_{false};
 };
 
 }  // namespace network

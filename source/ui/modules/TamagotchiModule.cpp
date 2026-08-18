@@ -2340,7 +2340,7 @@ void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
     // 正文区域
     auto body = inner.reduced (2, 2);
     auto textArea = body.removeFromTop (body.getHeight() - 22);
-    g.setColour (juce::Colours::black);
+    g.setColour (PinkXP::ink);
     g.setFont (PinkXP::getFont (9.0f));
     g.drawFittedText ("say bye to ur pet? :)\ncan't undo this~", textArea,
                       juce::Justification::centred, 2);
@@ -2351,7 +2351,7 @@ void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
         PinkXP::drawRaised (g, cancelBounds, PinkXP::pink200);
     else
         PinkXP::drawRaised (g, cancelBounds, PinkXP::btnFace);
-    g.setColour (juce::Colours::black);
+    g.setColour (PinkXP::ink);
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
     g.drawText ("Cancel", cancelBounds, juce::Justification::centred, false);
 
@@ -2361,7 +2361,7 @@ void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
         PinkXP::drawRaised (g, confirmBounds, PinkXP::pink200);
     else
         PinkXP::drawRaised (g, confirmBounds, PinkXP::btnFace);
-    g.setColour (juce::Colours::black);
+    g.setColour (PinkXP::ink);
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
     g.drawText ("OK", confirmBounds, juce::Justification::centred, false);
 }
