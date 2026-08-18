@@ -1548,6 +1548,8 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
       paintColorPanel(g, topBar);
     if (isEffectsPanelOpen_)
       paintEffectsPanel(g, topBar);
+    if (isWavePanelOpen_)
+      paintWavePanel(g, topBar);
   }
 }
 
@@ -1676,6 +1678,8 @@ void MilkdropModule::GLView::paint(juce::Graphics& g) {
     owner_.paintColorPanel(g, content.withHeight(26));
   if (owner_.isEffectsPanelOpen_)
     owner_.paintEffectsPanel(g, content.withHeight(26));
+  if (owner_.isWavePanelOpen_)
+    owner_.paintWavePanel(g, content.withHeight(26));
   g.restoreState();
 #else
   juce::ignoreUnused(g);
@@ -1770,6 +1774,11 @@ void MilkdropModule::GLView::LoadCurrentPreset() {
     juce::File file(path);
     if (file.existsAsFile()) {
       auto data = file.loadFileAsString().toStdString();
+      // 注入 wave 样式覆盖（启用时才生效），再走 macOS shader 修复预处理。
+      MilkdropWaveState wave;
+      if (owner_.editor_ != nullptr)
+        wave = owner_.editor_->GetMilkdropWaveState();
+      data = ApplyWaveParamsToPresetText(data, wave);
       api.loadPresetData(local_pm_handle_, FixMilkdropShaderTypes(data), true);
     }
   } else {
@@ -2594,6 +2603,88 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         }
     }
 
+    // ---- wave panel 交互检测（Reset + mode stepper + 开关 + slider 拖动） ----
+    if (isWavePanelOpen_ && glView != nullptr)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getWavePanelBounds(topBar);
+
+        // Reset 按钮点击（恢复默认，关闭覆盖）
+        if (getWaveResetBounds(panel).contains(e.getPosition()))
+        {
+            if (!focused_)
+                setFocusVisual(true);
+            touchOverlayIdleTimer();
+            waveState_.reset();
+            applyWaveToEditor();
+            reloadCurrentPresetForWave();
+            repaint(panel);
+            glView->repaint();
+            return;
+        }
+
+        // mode stepper：左半区 -1，右半区 +1（循环 0~15）
+        auto stepper = getWaveModeStepperBounds(panel);
+        if (stepper.contains(e.getPosition()))
+        {
+            if (!focused_)
+                setFocusVisual(true);
+            touchOverlayIdleTimer();
+            const int delta = (e.getPosition().x < stepper.getCentreX()) ? -1 : +1;
+            waveModeStepperPressed_ = (delta < 0) ? 0 : 1;
+            waveState_.mode = (waveState_.mode + delta + 16) % 16;
+            waveState_.enabled = true;
+            applyWaveToEditor();
+            reloadCurrentPresetForWave();
+            repaint(panel);
+            glView->repaint();
+            return;
+        }
+
+        // 开关点击（usedots / thick / additive / brighten）
+        for (int idx = 0; idx < 4; ++idx)
+        {
+            auto sw = getWaveSwitchBounds(panel, idx);
+            if (sw.expanded(4).contains(e.getPosition()))
+            {
+                if (!focused_)
+                    setFocusVisual(true);
+                touchOverlayIdleTimer();
+                bool* target = (idx == 0) ? &waveState_.usedots
+                             : (idx == 1) ? &waveState_.thick
+                             : (idx == 2) ? &waveState_.additive
+                                          : &waveState_.brighten;
+                *target = !*target;
+                waveState_.enabled = true;
+                applyWaveToEditor();
+                reloadCurrentPresetForWave();
+                repaint(panel);
+                glView->repaint();
+                return;
+            }
+        }
+
+        // slider 拖动（X / Y / R / G / B / A / Mystery）
+        for (int row = 0; row < 7; ++row)
+        {
+            auto sb = getWaveSliderBounds(panel, row);
+            if (sb.expanded(6).contains(e.getPosition()))
+            {
+                draggingWaveRow_ = row;
+                if (!focused_)
+                    setFocusVisual(true);
+                touchOverlayIdleTimer();
+                float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                                   / static_cast<float>(sb.getWidth());
+                updateWaveFromSlider(row, proportion);
+                repaint(panel);
+                glView->repaint();
+                return;
+            }
+        }
+    }
+
     // 基类处理：toFront + onBroughtToFront + 关闭按钮 + 缩放边缘 + 标题栏拖动
     // 所有涉及 private 成员的逻辑（closeButtonPressed / dragMode / detectEdge 等）
     // 均由基类完成，我们只在上层附加 overlay 按钮处理。
@@ -2635,6 +2726,25 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     if (draggingTintRow_ >= 0)
     {
         draggingTintRow_ = -1;
+        repaint();
+        glView->repaint();
+        return;
+    }
+
+    // wave slider 拖动结束：应用当前覆盖并重载预设（重载在松手时一次性触发）
+    if (draggingWaveRow_ >= 0)
+    {
+        draggingWaveRow_ = -1;
+        reloadCurrentPresetForWave();
+        repaint();
+        glView->repaint();
+        return;
+    }
+
+    // mode stepper 按下结束
+    if (waveModeStepperPressed_ >= 0)
+    {
+        waveModeStepperPressed_ = -1;
         repaint();
         glView->repaint();
         return;
@@ -2690,6 +2800,49 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
         repaint(panel);
         glView->repaint();
         return;
+    }
+
+    // wave slider 拖动中（只更新本地状态，不重载，松手时统一重载）
+    if (draggingWaveRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getWavePanelBounds(topBar);
+        auto sb = getWaveSliderBounds(panel, draggingWaveRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateWaveFromSlider(draggingWaveRow_, proportion);
+        repaint(panel);
+        glView->repaint();
+        return;
+    }
+
+    // mode stepper 悬停检测（wave 面板打开且聚焦时）
+    if (focused_ && isWavePanelOpen_ && glView != nullptr)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getWavePanelBounds(topBar);
+        auto stepper = getWaveModeStepperBounds(panel);
+        constexpr int kArrowW = 22;
+        auto leftArrow  = juce::Rectangle<int>(stepper.getX(), stepper.getY(),
+                                               kArrowW, stepper.getHeight());
+        auto rightArrow = juce::Rectangle<int>(stepper.getRight() - kArrowW,
+                                               stepper.getY(), kArrowW, stepper.getHeight());
+
+        int hover = -1;
+        if (leftArrow.contains(e.getPosition()))
+            hover = 0;
+        else if (rightArrow.contains(e.getPosition()))
+            hover = 1;
+
+        if (hover != waveModeStepperHover_)
+        {
+            waveModeStepperHover_ = hover;
+            repaint(panel);
+            glView->repaint();
+        }
     }
 
     if (focused_ && glView != nullptr)
@@ -2765,6 +2918,22 @@ void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
         return;
     }
 
+    // wave slider 拖动中
+    if (draggingWaveRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getWavePanelBounds(topBar);
+        auto sb = getWaveSliderBounds(panel, draggingWaveRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateWaveFromSlider(draggingWaveRow_, proportion);
+        repaint(panel);
+        glView->repaint();
+        return;
+    }
+
     ModulePanel::mouseDrag(e);
 }
 
@@ -2802,8 +2971,10 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize);
     auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, overlay.getY() + 2, kColorBtnW, kBtnSize);
     auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, overlay.getY() + 2, kEffectsBtnW, kBtnSize);
+    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW, overlay.getY() + 2, kWaveBtnW, kBtnSize);
 
     if (prevBtn.contains(pos))     return OverlayButton::kPrev;
+    if (waveBtn.contains(pos))     return OverlayButton::kWave;
     if (effectsBtn.contains(pos))  return OverlayButton::kEffects;
     if (colorBtn.contains(pos))    return OverlayButton::kColor;
     if (autoBtn.contains(pos))     return OverlayButton::kAuto;
@@ -2867,6 +3038,20 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kColorBtnW, kBtnSize);
         return { colorBtn.getX() - kPadding - kEffectsBtnW, overlay.getY() + 2, kEffectsBtnW, kBtnSize };
     }
+    case OverlayButton::kWave:
+    {
+        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
+                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
+        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW,
+                                              overlay.getY() + 2, kColorBtnW, kBtnSize);
+        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW,
+                                               overlay.getY() + 2, kEffectsBtnW, kBtnSize);
+        return { effectsBtn.getX() - kPadding - kWaveBtnW, overlay.getY() + 2, kWaveBtnW, kBtnSize };
+    }
     // 分辨率切换按钮已全平台阉割
 #if 0
     case OverlayButton::kRenderScale:
@@ -2898,6 +3083,7 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     case OverlayButton::kAuto:       toggleAutoMode();          break;
     case OverlayButton::kColor:      toggleColorPanel();        break;
     case OverlayButton::kEffects:    toggleEffectsPanel();      break;
+    case OverlayButton::kWave:       toggleWavePanel();         break;
     // 分辨率切换按钮已全平台阉割
 #if 0
     case OverlayButton::kRenderScale: glView->RequestRenderScale(); break;
@@ -2927,16 +3113,17 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     g.setColour(PinkXP::pink300.withAlpha(0.7f));
     g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
 
-    // 按钮位置: [<] nameArea [effects] [color] [auto] [>] [?]
+    // 按钮位置: [<] nameArea [wave] [effects] [color] [auto] [>] [?]
     auto prevBtn    = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn  = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, bar.getY() + 2, kAutoBtnW, kBtnSize);
     auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, bar.getY() + 2, kColorBtnW, kBtnSize);
     auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, bar.getY() + 2, kEffectsBtnW, kBtnSize);
-    // effects/color 按钮在所有平台都显示，nameArea 延伸到 effectsBtn 左侧
+    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW, bar.getY() + 2, kWaveBtnW, kBtnSize);
+    // effects/color/wave 按钮在所有平台都显示，nameArea 延伸到 waveBtn 左侧
     auto nameArea   = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
-                                          effectsBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
+                                          waveBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
 
     // 按钮绘制 lambda
     auto drawBtn = [&](juce::Rectangle<int> r, const juce::String& text, OverlayButton btn)
@@ -3024,6 +3211,29 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
         g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
         g.drawText("effects", effectsBtn, juce::Justification::centred, false);
+    }
+
+    // wave 按钮：波形样式控制器展开时用高亮 toggle 样式
+    {
+        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kWave);
+        bool pressed = (pressedOverlayBtn_ == OverlayButton::kWave);
+        bool active  = isWavePanelOpen_;
+
+        if (pressed || active)
+            PinkXP::drawPressed(g, waveBtn, PinkXP::pink100);
+        else if (hovered)
+            PinkXP::drawRaised(g, waveBtn, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+            g.fillRect(waveBtn);
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
+            g.drawRect(waveBtn, 1);
+        }
+
+        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
+        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+        g.drawText("wave", waveBtn, juce::Justification::centred, false);
     }
 
     // auto 按钮：轮播模式激活时用高亮 toggle 样式
@@ -3742,11 +3952,13 @@ void MilkdropModule::toggleColorPanel()
   isColorPanelOpen_ = !isColorPanelOpen_;
   if (isColorPanelOpen_)
   {
-    // 与自动轮播 / 效果面板互斥，避免控制器重叠遮挡。
+    // 与自动轮播 / 效果 / 波形面板互斥，避免控制器重叠遮挡。
     if (isAutoMode_)
       isAutoMode_ = false;
     if (isEffectsPanelOpen_)
       isEffectsPanelOpen_ = false;
+    if (isWavePanelOpen_)
+      isWavePanelOpen_ = false;
     // 打开时从 Editor 读回当前全局视觉状态，保证 UI 显示与渲染一致。
     syncVisualFromEditor();
   }
@@ -3761,17 +3973,52 @@ void MilkdropModule::toggleEffectsPanel()
   isEffectsPanelOpen_ = !isEffectsPanelOpen_;
   if (isEffectsPanelOpen_)
   {
-    // 与自动轮播 / 染色面板互斥，避免控制器重叠遮挡。
+    // 与自动轮播 / 染色 / 波形面板互斥，避免控制器重叠遮挡。
     if (isAutoMode_)
       isAutoMode_ = false;
     if (isColorPanelOpen_)
       isColorPanelOpen_ = false;
+    if (isWavePanelOpen_)
+      isWavePanelOpen_ = false;
     syncVisualFromEditor();
   }
 
   layoutContent(getContentBounds());
   repaint();
   glView->repaint();
+}
+
+void MilkdropModule::toggleWavePanel()
+{
+  isWavePanelOpen_ = !isWavePanelOpen_;
+  if (isWavePanelOpen_)
+  {
+    // 与自动轮播 / 染色 / 效果面板互斥，避免控制器重叠遮挡。
+    if (isAutoMode_)
+      isAutoMode_ = false;
+    if (isColorPanelOpen_)
+      isColorPanelOpen_ = false;
+    if (isEffectsPanelOpen_)
+      isEffectsPanelOpen_ = false;
+    // 打开时从 Editor 读回当前全局 wave 状态，保证 UI 显示与渲染一致。
+    syncWaveFromEditor();
+  }
+
+  layoutContent(getContentBounds());
+  repaint();
+  glView->repaint();
+}
+
+void MilkdropModule::syncWaveFromEditor()
+{
+  if (editor_ != nullptr)
+    waveState_ = editor_->GetMilkdropWaveState();
+}
+
+void MilkdropModule::applyWaveToEditor()
+{
+  if (editor_ != nullptr)
+    editor_->SetMilkdropWaveState(waveState_);
 }
 
 void MilkdropModule::syncVisualFromEditor()
@@ -4151,5 +4398,280 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
     g.drawText(def.display_name, toggle, juce::Justification::centred, false);
     ++row;
+  }
+}
+
+// ==========================================================
+// 波形样式控制器（simple waveform style）
+// ==========================================================
+juce::Rectangle<int> MilkdropModule::getWavePanelBounds(juce::Rectangle<int> topBar) const
+{
+  const float height = kWaveHeaderH + kWaveModeRowH + 7.0f * kWaveSliderRowH
+                     + kWaveSwitchRowH + kWavePadBottom;
+  return juce::Rectangle<int>(topBar.getX(), topBar.getBottom(),
+                              topBar.getWidth(), static_cast<int>(height));
+}
+
+juce::Rectangle<int> MilkdropModule::getWaveModeStepperBounds(juce::Rectangle<int> panel) const
+{
+  constexpr int kPad = 6;
+  const int y = panel.getY() + static_cast<int>(kWaveHeaderH);
+  const int h = static_cast<int>(kWaveModeRowH);
+  return juce::Rectangle<int>(panel.getX() + kPad, y, panel.getWidth() - kPad * 2, h);
+}
+
+juce::Rectangle<int> MilkdropModule::getWaveSliderBounds(juce::Rectangle<int> panel, int row) const
+{
+  constexpr int kPad    = 6;
+  constexpr int kLabelW = 26;
+  constexpr int kValueW = 44;
+  constexpr int kSliderH = 8;
+
+  const int sliderX = panel.getX() + kPad + kLabelW + 4;
+  const int sliderW = panel.getWidth() - kPad - kLabelW - 4 - kValueW - kPad;
+  const int y = panel.getY() + static_cast<int>(kWaveHeaderH + kWaveModeRowH)
+              + row * static_cast<int>(kWaveSliderRowH)
+              + (static_cast<int>(kWaveSliderRowH) - kSliderH) / 2;
+
+  return juce::Rectangle<int>(sliderX, y, juce::jmax(20, sliderW), kSliderH);
+}
+
+juce::Rectangle<int> MilkdropModule::getWaveSwitchBounds(juce::Rectangle<int> panel, int index) const
+{
+  constexpr int kPad  = 6;
+  constexpr int kGap  = 4;
+  const int y = panel.getY() + static_cast<int>(kWaveHeaderH + kWaveModeRowH)
+              + 7 * static_cast<int>(kWaveSliderRowH) + 2;
+  const int h = static_cast<int>(kWaveSwitchRowH) - 6;
+  const int totalW = panel.getWidth() - kPad * 2 - kGap * 3;
+  const int cellW  = juce::jmax(20, totalW / 4);
+  const int x = panel.getX() + kPad + index * (cellW + kGap);
+  return juce::Rectangle<int>(x, y, cellW, h);
+}
+
+juce::Rectangle<int> MilkdropModule::getWaveResetBounds(juce::Rectangle<int> panel) const
+{
+  constexpr int kPad = 6;
+  return juce::Rectangle<int>(panel.getRight() - kPad - 44, panel.getY() + 2, 44, 18);
+}
+
+void MilkdropModule::updateWaveFromSlider(int row, float proportion)
+{
+  proportion = juce::jlimit(0.0f, 1.0f, proportion);
+  waveState_.enabled = true;
+  switch (row)
+  {
+    case 0: waveState_.x = proportion; break;
+    case 1: waveState_.y = proportion; break;
+    case 2: waveState_.r = proportion; break;
+    case 3: waveState_.g = proportion; break;
+    case 4: waveState_.b = proportion; break;
+    case 5: waveState_.a = proportion; break;
+    case 6: waveState_.mystery = proportion * 2.0f - 1.0f; break;
+    default: break;
+  }
+  applyWaveToEditor();
+}
+
+void MilkdropModule::reloadCurrentPresetForWave()
+{
+  if (glView == nullptr)
+    return;
+
+  // 嵌入态由 Editor 全局 projectM 渲染；浮动态由 GLView 本地 projectM 渲染。
+  // 通过"跳转到当前索引"复用现有预设切换链路，触发带 wave 注入的重新加载。
+  if (isFloating())
+  {
+    const int idx = glView->GetCurrentPresetIndex();
+    if (idx >= 0)
+      glView->RequestPresetJump(idx);
+  }
+  else if (editor_ != nullptr)
+  {
+    const int idx = editor_->GetMilkdropCurrentPresetIndex();
+    if (idx >= 0)
+      editor_->RequestMilkdropPresetJump(idx);
+  }
+}
+
+void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topBar)
+{
+  auto panel = getWavePanelBounds(topBar);
+  cachedWavePanelRect_ = panel;
+
+  // 半透明暗底
+  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
+  g.fillRect(panel);
+
+  // 底部分割线
+  g.setColour(PinkXP::pink300.withAlpha(0.5f));
+  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+
+  // 标题 "WAVE"
+  g.setColour(PinkXP::pink300.withAlpha(0.95f));
+  g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+  g.drawText("WAVE", panel.getX() + 6, panel.getY(),
+             60, 22, juce::Justification::centredLeft, false);
+
+  // Reset 按钮
+  auto resetRect = getWaveResetBounds(panel);
+  cachedWaveResetRect_ = resetRect;
+  bool resetHovered = resetRect.contains(getMouseXYRelative());
+  if (resetHovered)
+  {
+    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
+    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
+  }
+  else
+  {
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+    g.fillRect(resetRect);
+    g.setColour(PinkXP::pink300.withAlpha(0.55f));
+    g.drawRect(resetRect, 1);
+    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
+  }
+  g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+
+  // mode stepper：< 模式名 >
+  {
+    auto stepper = getWaveModeStepperBounds(panel);
+    const int arrowW = 22;
+    auto leftArrow  = juce::Rectangle<int>(stepper.getX(), stepper.getY(), arrowW, stepper.getHeight());
+    auto rightArrow = juce::Rectangle<int>(stepper.getRight() - arrowW, stepper.getY(), arrowW, stepper.getHeight());
+    auto nameRect   = juce::Rectangle<int>(stepper.getX() + arrowW, stepper.getY(),
+                                           stepper.getWidth() - arrowW * 2, stepper.getHeight());
+
+    // 绘制单个箭头（按下 > 悬停 > 常态）
+    auto drawArrow = [&](juce::Rectangle<int> r, const juce::String& label, int zone)
+    {
+        const bool pressed = (waveModeStepperPressed_ == zone);
+        const bool hovered = (waveModeStepperHover_ == zone);
+
+        if (pressed)
+            PinkXP::drawPressed(g, r, PinkXP::pink100);
+        else if (hovered)
+            PinkXP::drawRaised(g, r, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+            g.fillRect(r);
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
+            g.drawRect(r, 1);
+        }
+
+        g.setColour(pressed ? PinkXP::pink300 : juce::Colour(0xEE, 0xEE, 0xEE));
+        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+        g.drawText(label, r, juce::Justification::centred, false);
+    };
+
+    drawArrow(leftArrow,  "<", 0);
+    drawArrow(rightArrow, ">", 1);
+
+    // 模式名（当前是否启用覆盖用颜色区分）
+    const bool override_on = waveState_.enabled;
+    g.setColour(override_on ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText(juce::String(GetWaveModeName(waveState_.mode)),
+               nameRect, juce::Justification::centred, false);
+  }
+
+  // 7 个 slider：X / Y / R / G / B / A / Mystery
+  static const char* kLabels[7] = { "X", "Y", "R", "G", "B", "A", "Mys" };
+  static const juce::Colour kRowColours[7] = {
+      juce::Colour(0xFF, 0x6B, 0x6B),  // X
+      juce::Colour(0x6B, 0xFF, 0x6B),  // Y
+      juce::Colour(0xFF, 0x6B, 0x6B),  // R
+      juce::Colour(0x6B, 0xFF, 0x6B),  // G
+      juce::Colour(0x6B, 0x9B, 0xFF),  // B
+      juce::Colour(0xE8, 0xE8, 0xE8),  // A
+      juce::Colour(0xE0, 0xA0, 0xFF),  // Mystery
+  };
+
+  for (int row = 0; row < 7; ++row)
+  {
+    float value = 0.0f;
+    float proportion = 0.0f;
+    switch (row)
+    {
+      case 0: value = waveState_.x; proportion = value; break;
+      case 1: value = waveState_.y; proportion = value; break;
+      case 2: value = waveState_.r; proportion = value; break;
+      case 3: value = waveState_.g; proportion = value; break;
+      case 4: value = waveState_.b; proportion = value; break;
+      case 5: value = waveState_.a; proportion = value; break;
+      case 6: value = waveState_.mystery; proportion = (value + 1.0f) * 0.5f; break;
+      default: break;
+    }
+    proportion = juce::jlimit(0.0f, 1.0f, proportion);
+
+    auto sliderBounds = getWaveSliderBounds(panel, row);
+    int labelY = sliderBounds.getY() - 6;
+    auto labelRect = juce::Rectangle<int>(panel.getX() + 6, labelY, 26, 20);
+
+    g.setColour(kRowColours[row]);
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText(kLabels[row], labelRect, juce::Justification::centredLeft, false);
+
+    // 轨道底色
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
+    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
+
+    // 已填充部分
+    int fillW = static_cast<int>(sliderBounds.getWidth() * proportion);
+    if (fillW > 0)
+    {
+      g.setColour(kRowColours[row].withAlpha(0.8f));
+      g.fillRoundedRectangle(
+          juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(),
+                               fillW, sliderBounds.getHeight()).toFloat(), 2.0f);
+    }
+
+    // 滑块手柄
+    int knobX = sliderBounds.getX() + fillW - 4;
+    int knobSize = 12;
+    auto knobBounds = juce::Rectangle<int>(
+        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
+        knobSize, knobSize);
+    g.setColour(draggingWaveRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
+    g.fillRect(knobBounds);
+    g.setColour(PinkXP::pink600);
+    g.drawRect(knobBounds, 1);
+
+    // 右侧数值
+    auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);
+    int percent = (row == 6)
+        ? juce::roundToInt(value * 100.0f)          // Mystery: -100% ~ 100%
+        : juce::roundToInt(value * 100.0f);         // 其余: 0% ~ 100%
+    g.setColour(kRowColours[row].withAlpha(0.95f));
+    g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
+    g.drawText(juce::String(percent) + "%", valueRect, juce::Justification::centredLeft, false);
+  }
+
+  // 4 个开关：dots / thick / additive / brighten
+  static const char* kSwitchNames[4] = { "dots", "thick", "add", "bright" };
+  for (int idx = 0; idx < 4; ++idx)
+  {
+    const bool enabled = (idx == 0) ? waveState_.usedots
+                       : (idx == 1) ? waveState_.thick
+                       : (idx == 2) ? waveState_.additive
+                                    : waveState_.brighten;
+    auto sw = getWaveSwitchBounds(panel, idx);
+
+    if (enabled)
+    {
+      PinkXP::drawPressed(g, sw, PinkXP::pink100);
+      g.setColour(PinkXP::pink300);
+    }
+    else
+    {
+      g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+      g.fillRect(sw);
+      g.setColour(PinkXP::pink300.withAlpha(0.55f));
+      g.drawRect(sw, 1);
+      g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
+    }
+    g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+    g.drawText(kSwitchNames[idx], sw, juce::Justification::centred, false);
   }
 }

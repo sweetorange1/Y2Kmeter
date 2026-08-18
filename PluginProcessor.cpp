@@ -490,6 +490,21 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty ("milkdropBinary",       savedMilkdropVisualState_.binary,       nullptr);
     root.setProperty ("milkdropPrismatic",    savedMilkdropVisualState_.prismatic,    nullptr);
 
+    // Milkdrop 简单波形样式覆盖（全局状态）
+    root.setProperty ("milkdropWaveEnabled",  savedMilkdropWaveState_.enabled,  nullptr);
+    root.setProperty ("milkdropWaveMode",     savedMilkdropWaveState_.mode,     nullptr);
+    root.setProperty ("milkdropWaveX",        (double) savedMilkdropWaveState_.x, nullptr);
+    root.setProperty ("milkdropWaveY",        (double) savedMilkdropWaveState_.y, nullptr);
+    root.setProperty ("milkdropWaveR",        (double) savedMilkdropWaveState_.r, nullptr);
+    root.setProperty ("milkdropWaveG",        (double) savedMilkdropWaveState_.g, nullptr);
+    root.setProperty ("milkdropWaveB",        (double) savedMilkdropWaveState_.b, nullptr);
+    root.setProperty ("milkdropWaveA",        (double) savedMilkdropWaveState_.a, nullptr);
+    root.setProperty ("milkdropWaveMystery",  (double) savedMilkdropWaveState_.mystery, nullptr);
+    root.setProperty ("milkdropWaveUsedots",  savedMilkdropWaveState_.usedots,  nullptr);
+    root.setProperty ("milkdropWaveThick",    savedMilkdropWaveState_.thick,    nullptr);
+    root.setProperty ("milkdropWaveAdditive", savedMilkdropWaveState_.additive, nullptr);
+    root.setProperty ("milkdropWaveBrighten", savedMilkdropWaveState_.brighten, nullptr);
+
     if (savedLayoutXml.isNotEmpty())
     {
         if (auto layoutXml = juce::parseXML(savedLayoutXml))
@@ -621,6 +636,34 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
         savedMilkdropVisualState_.binary = (bool) root.getProperty ("milkdropBinary", false);
     if (root.hasProperty ("milkdropPrismatic"))
         savedMilkdropVisualState_.prismatic = (bool) root.getProperty ("milkdropPrismatic", false);
+
+    // Milkdrop 简单波形样式覆盖（旧存档缺失时保持默认）
+    if (root.hasProperty ("milkdropWaveEnabled"))
+        savedMilkdropWaveState_.enabled = (bool) root.getProperty ("milkdropWaveEnabled", false);
+    if (root.hasProperty ("milkdropWaveMode"))
+        savedMilkdropWaveState_.mode = (int) root.getProperty ("milkdropWaveMode", 6);
+    if (root.hasProperty ("milkdropWaveX"))
+        savedMilkdropWaveState_.x = (float) (double) root.getProperty ("milkdropWaveX", 0.5);
+    if (root.hasProperty ("milkdropWaveY"))
+        savedMilkdropWaveState_.y = (float) (double) root.getProperty ("milkdropWaveY", 0.5);
+    if (root.hasProperty ("milkdropWaveR"))
+        savedMilkdropWaveState_.r = (float) (double) root.getProperty ("milkdropWaveR", 1.0);
+    if (root.hasProperty ("milkdropWaveG"))
+        savedMilkdropWaveState_.g = (float) (double) root.getProperty ("milkdropWaveG", 1.0);
+    if (root.hasProperty ("milkdropWaveB"))
+        savedMilkdropWaveState_.b = (float) (double) root.getProperty ("milkdropWaveB", 1.0);
+    if (root.hasProperty ("milkdropWaveA"))
+        savedMilkdropWaveState_.a = (float) (double) root.getProperty ("milkdropWaveA", 1.0);
+    if (root.hasProperty ("milkdropWaveMystery"))
+        savedMilkdropWaveState_.mystery = (float) (double) root.getProperty ("milkdropWaveMystery", 0.0);
+    if (root.hasProperty ("milkdropWaveUsedots"))
+        savedMilkdropWaveState_.usedots = (bool) root.getProperty ("milkdropWaveUsedots", false);
+    if (root.hasProperty ("milkdropWaveThick"))
+        savedMilkdropWaveState_.thick = (bool) root.getProperty ("milkdropWaveThick", false);
+    if (root.hasProperty ("milkdropWaveAdditive"))
+        savedMilkdropWaveState_.additive = (bool) root.getProperty ("milkdropWaveAdditive", false);
+    if (root.hasProperty ("milkdropWaveBrighten"))
+        savedMilkdropWaveState_.brighten = (bool) root.getProperty ("milkdropWaveBrighten", false);
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())

@@ -67,6 +67,11 @@ public:
     void SetMilkdropVisualState(const MilkdropVisualState& state);
     MilkdropVisualState GetMilkdropVisualState() const;
 
+    // 简单波形样式覆盖（wave_mode/x/y/r/g/b/a/mystery/usedots/...），全局共享。
+    // UI 线程写、GL 线程读（内部加锁），写时同步回 Processor 以便持久化。
+    void SetMilkdropWaveState(const MilkdropWaveState& state);
+    MilkdropWaveState GetMilkdropWaveState() const;
+
     Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcessor&);
     ~Y2KmeterAudioProcessorEditor() override;
 
@@ -562,6 +567,10 @@ private:
     // 全局视觉状态（UI 线程写，GL 线程读，mutex 保护）
     mutable std::mutex milkdrop_visual_mutex_;
     MilkdropVisualState milkdrop_visual_state_;
+
+    // 简单波形样式覆盖（UI 线程写，GL 线程读，mutex 保护）
+    mutable std::mutex milkdrop_wave_mutex_;
+    MilkdropWaveState milkdrop_wave_state_;
 
     // 浮动窗口共享帧：renderOpenGL 抓取离线 FBO 内容 → 浮动 Milkdrop 读取
     juce::Image       milkdrop_shared_frame_;

@@ -4,6 +4,7 @@
 #include <atomic>
 
 #include "source/ui/modules/MilkdropVisualState.h"
+#include "source/ui/modules/MilkdropWaveState.h"
 
 // 前向声明（AnalyserHub 的完整头下沉到 .cpp，规避 MSVC 多文件同进程编译时
 // include guard 跨 TU 串扰问题）
@@ -138,6 +139,18 @@ public:
         return savedMilkdropVisualState_;
     }
 
+    // ---- Milkdrop 简单波形样式覆盖持久化（全局状态，所有 Milkdrop 模块共享）----
+    //   · 与 visual state 同构：Editor 每次 SetMilkdropWaveState 时同步写回，
+    //     序列化到 host state 顶层属性；Editor 构造时读回。
+    void setSavedMilkdropWaveState (const MilkdropWaveState& state) noexcept
+    {
+        savedMilkdropWaveState_ = state;
+    }
+    const MilkdropWaveState& getSavedMilkdropWaveState() const noexcept
+    {
+        return savedMilkdropWaveState_;
+    }
+
     // ---- 兼容旧接口（供 EqModule 使用，内部转发到 AnalyserHub）----
     double getCurrentSampleRate() const noexcept;
     void getOscilloscopeSnapshot(juce::Array<float>& dest);   // 返回 L 声道
@@ -171,6 +184,9 @@ private:
 
     // Milkdrop 整体染色 + 效果（全局状态，持久化到 host state）
     MilkdropVisualState savedMilkdropVisualState_;
+
+    // Milkdrop 简单波形样式覆盖（全局状态，持久化到 host state）
+    MilkdropWaveState savedMilkdropWaveState_;
 
     // processBlock 时间占比测量器（JUCE 内置，读写原子，实时线程友好）
     juce::AudioProcessLoadMeasurer loadMeasurer;

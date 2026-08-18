@@ -197,7 +197,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.6.5");
+const int versionW = versionFont.getStringWidth ("v2.6.6");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -238,7 +238,7 @@ const int versionW = versionFont.getStringWidth ("v2.6.5");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.6.5";
+const juce::String versionText = "v2.6.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -793,6 +793,8 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // 从 Processor 读回上次保存的 Milkdrop 整体视觉状态（染色 + 效果），
     // 实现关闭→重开复原。
     milkdrop_visual_state_ = processor.getSavedMilkdropVisualState();
+    // 简单波形样式覆盖（wave_mode/x/y/r/g/b/a/...）
+    milkdrop_wave_state_ = processor.getSavedMilkdropWaveState();
 
     initLookAndFeel();
 
@@ -3042,7 +3044,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.6.5";
+const juce::String versionText = "v2.6.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3050,7 +3052,7 @@ const juce::String versionText = "v2.6.5";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.6.5");
+        const int versionW = versionFont.getStringWidth ("v2.6.6");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -5091,6 +5093,8 @@ void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {
     juce::File f(path);
     if (f.existsAsFile()) {
       auto data = f.loadFileAsString().toStdString();
+      // 注入 wave 样式覆盖（wave_mode/x/y/r/g/b/a/...），启用时才生效。
+      data = ApplyWaveParamsToPresetText(data, GetMilkdropWaveState());
       api.loadPresetData(milkdrop_pm_handle_, data, true);
     }
   } else {
@@ -5169,5 +5173,18 @@ void Y2KmeterAudioProcessorEditor::SetMilkdropVisualState(const MilkdropVisualSt
 MilkdropVisualState Y2KmeterAudioProcessorEditor::GetMilkdropVisualState() const {
   std::lock_guard<std::mutex> lock(milkdrop_visual_mutex_);
   return milkdrop_visual_state_;
+}
+
+void Y2KmeterAudioProcessorEditor::SetMilkdropWaveState(const MilkdropWaveState& state) {
+  {
+    std::lock_guard<std::mutex> lock(milkdrop_wave_mutex_);
+    milkdrop_wave_state_ = state;
+  }
+  processor.setSavedMilkdropWaveState(state);
+}
+
+MilkdropWaveState Y2KmeterAudioProcessorEditor::GetMilkdropWaveState() const {
+  std::lock_guard<std::mutex> lock(milkdrop_wave_mutex_);
+  return milkdrop_wave_state_;
 }
 

@@ -11,6 +11,7 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/modules/MilkdropVisualState.h"
 #include "source/ui/modules/MilkdropEffect.h"
+#include "source/ui/modules/MilkdropWaveState.h"
 
 class Y2KmeterAudioProcessorEditor;  // 前向声明，用于 Milkdrop 脱离后仍能桥接项目M状态
 
@@ -424,7 +425,7 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects, kWave };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
 
@@ -473,6 +474,19 @@ private:
     int getEffectsColumns(juce::Rectangle<int> panel) const;            ///< 根据面板宽度计算每行按钮数
     int getEffectsRowCount(juce::Rectangle<int> panel) const;           ///< 根据列数计算总行数
 
+    // ---- 波形样式控制（wave 按钮 + 简单波形样式编辑）----
+    void toggleWavePanel();                                             ///< 展开/收起波形样式控制器
+    void paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topBar);
+    juce::Rectangle<int> getWavePanelBounds(juce::Rectangle<int> topBar) const;
+    juce::Rectangle<int> getWaveModeStepperBounds(juce::Rectangle<int> panel) const;
+    juce::Rectangle<int> getWaveSliderBounds(juce::Rectangle<int> panel, int row) const;
+    juce::Rectangle<int> getWaveSwitchBounds(juce::Rectangle<int> panel, int index) const;
+    juce::Rectangle<int> getWaveResetBounds(juce::Rectangle<int> panel) const;
+    void syncWaveFromEditor();                                          ///< 从 Editor 全局 wave 状态读回本地缓存
+    void applyWaveToEditor();                                           ///< 写回 Editor 全局 wave 状态
+    void updateWaveFromSlider(int row, float proportion);               ///< 0=X,1=Y,2=R,3=G,4=B,5=A,6=Mystery
+    void reloadCurrentPresetForWave();                                  ///< 用当前 wave 覆盖重载当前预设
+
     // Auto-hide 逻辑（由 GLView::timerCallback 在 UI 线程驱动，30Hz 轮询）：
     //   · 检测 !hasKeyboardFocus → 窗口失焦即隐藏
     //   · 检测 idle > 4s → 长时间不操作 overlay 自动隐藏
@@ -496,13 +510,20 @@ private:
 
     // ---- 整体视觉状态（master output colors + effects）----
     MilkdropVisualState visualState_;          ///< 本地缓存：完整视觉状态
+    MilkdropWaveState   waveState_;            ///< 本地缓存：简单波形样式覆盖
     bool isColorPanelOpen_ { false };          ///< 染色控制器是否展开
     bool isEffectsPanelOpen_ { false };        ///< 效果控制器是否展开
+    bool isWavePanelOpen_ { false };           ///< 波形样式控制器是否展开
     int  draggingTintRow_ { -1 };              ///< 正在拖动的滑块行（0=R,1=G,2=B,3=Bright；-1=无）
+    int  draggingWaveRow_ { -1 };              ///< 正在拖动的 wave 滑块行（0~6；-1=无）
+    int  waveModeStepperHover_ { -1 };         ///< mode stepper 悬停区（-1=无，0=左，1=右）
+    int  waveModeStepperPressed_ { -1 };       ///< mode stepper 按下区（-1=无，0=左，1=右）
     juce::Rectangle<int> cachedColorPanelRect_;  ///< 缓存染色面板区域，供 hit-test
     juce::Rectangle<int> cachedTintResetRect_;   ///< 缓存染色 Reset 按钮区域，供 hit-test
     juce::Rectangle<int> cachedEffectsPanelRect_; ///< 缓存效果面板区域，供 hit-test
     juce::Rectangle<int> cachedEffectsResetRect_; ///< 缓存效果 Reset 按钮区域，供 hit-test
+    juce::Rectangle<int> cachedWavePanelRect_;    ///< 缓存波形面板区域，供 hit-test
+    juce::Rectangle<int> cachedWaveResetRect_;    ///< 缓存波形 Reset 按钮区域，供 hit-test
     static constexpr float kColorPanelHeight = 104.0f; ///< 染色控制器面板高度（标题 + 4 行）
     static constexpr float kEffectsHeaderH = 22.0f;    ///< effects 面板标题高度
     static constexpr float kEffectsRowH = 22.0f;       ///< effects 面板每行开关高度
@@ -511,6 +532,12 @@ private:
     static constexpr float kEffectsToggleGap = 4.0f;   ///< 效果按钮水平/垂直间距
     static constexpr int   kColorBtnW = 32;             ///< color 按钮宽度（与 auto 一致）
     static constexpr int   kEffectsBtnW = 42;           ///< effects 按钮宽度
+    static constexpr int   kWaveBtnW = 40;              ///< wave 按钮宽度
+    static constexpr float kWaveHeaderH = 22.0f;        ///< wave 面板标题高度
+    static constexpr float kWaveModeRowH = 22.0f;       ///< wave 面板 mode stepper 行高度
+    static constexpr float kWaveSliderRowH = 20.0f;     ///< wave 面板每个 slider 行高度
+    static constexpr float kWaveSwitchRowH = 22.0f;     ///< wave 面板开关行高度
+    static constexpr float kWavePadBottom = 6.0f;       ///< wave 面板底部 padding
     static constexpr float kTintMin = 0.0f;             ///< RGB 加性偏移下限（0%）
     static constexpr float kTintMax = 2.0f;             ///< RGB 加性偏移上限（200%）
     static constexpr float kBrightMin = 0.0f;           ///< bright 增益下限

@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.6.5`）
+- **产品名**：`Y2Kmeter` （版本：`2.6.6`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -145,9 +145,10 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；由 Editor 全局共享并持久化到 Processor host state） | — |
 | [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
+| [MilkdropWaveState.h](/I:/Y2KMeter/source/ui/modules/MilkdropWaveState.h) | `MilkdropWaveState`（v2.6.6 新增，header-only：Milkdrop 简单波形样式覆盖状态结构体 + 16 种 `wave_mode` 名称表 + `GetWaveModeName()` + `ReplaceWaveKeyValue()`/`ApplyWaveParamsToPresetText()` 预设文本注入函数；全局共享并持久化到 Processor host state） | — |
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -3014,6 +3015,62 @@ Step 3: 返回最优可用路径（AppData > Seed 源 > 空）
 1. **Shadows 观感差距的根因是语义错误而非强度**：MilkDrop3 的 Shadows 是"对上下翻转位置的灰度做 pow 后**加性叠加**"，产生黑白镜像纹理；旧实现是"对当前帧暗部做平方**乘法压暗**"，语义完全不同，导致画面只是变暗。
 2. **脱离→切回 post FBO 残缺**：`glGen*` 重建了 FBO 对象，但尺寸缓存未清零导致跳过附件绑定。凡是"销毁 GL 资源 + 重建"的路径，必须同步清零尺寸/状态缓存，否则残留值会让重建逻辑误判。
 3. **effects 网格布局 gap 未先扣除**：`cell_w = avail_w / cols` 未扣间距，却用 `col * (cell_w + gap)` 累加偏移，导致每列都向右多偏 `col*gap`，最后一列被挤窄。应先扣总间距再均分，余数补给最后一列。
+
+---
+
+*本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
+
+## v2.6.6：Milkdrop 简单波形样式编辑面板（wave panel）
+
+本章记录 v2.6.6 版本相对 v2.6.5 的改动：为 Milkdrop 模块新增**简单波形（simple waveform）样式编辑面板**，与 color / effects 面板同层级（控制栏 `wave` 按钮展开），通过**预设文本注入**实现 `wave_mode` 及其样式参数的运行时调整，全部状态全局共享并持久化。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/modules/MilkdropWaveState.h`](/I:/Y2KMeter/source/ui/modules/MilkdropWaveState.h) | **新增**（header-only）：`MilkdropWaveState` 结构体、16 种 `wave_mode` 名称表 `GetWaveModeName()`、`ReplaceWaveKeyValue()` / `ApplyWaveParamsToPresetText()` 预设文本注入函数 |
+| [`PluginProcessor.h/.cpp`](/I:/Y2KMeter/PluginProcessor.h) | 新增 `savedMilkdropWaveState_` 成员 + getter/setter + 13 个 host state 字段序列化/反序列化 |
+| [`PluginEditor.h/.cpp`](/I:/Y2KMeter/PluginEditor.h) | 新增 `milkdrop_wave_state_` 成员 + `Set/GetMilkdropWaveState()` + 构造回读 + `LoadMilkdropPresetInternal()` 注入 |
+| [`MilkdropModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | 新增 `kWave` overlay 按钮 + wave 面板方法/成员/常量 + `paintWavePanel()` + 交互/重载逻辑 + GLView 加载注入 |
+| [`0000_test_single_wave.milk`](/I:/Y2KMeter/0000_test_single_wave.milk) | **新增**：仅含单个 simple waveform 的测试预设（无自定义波形/形状干扰） |
+
+### 改动 1：wave 样式编辑面板 UI
+
+- 控制栏新增 `wave` 按钮（位于 `effects` 左侧），点击展开/收起，与 auto / color / effects 面板互斥。
+- 面板包含：
+  - **mode stepper**：`< 模式名 >` 左右切换 16 种波形（Circle / Radial Blob / Blob 2 / Blob 3 / Derivative / Blob 5 / Line / Double Line / Wave 8~15），带按下/悬停动画。
+  - **7 个滑块**：X / Y / R / G / B / A / Mystery。
+  - **4 个开关**：dots / thick / add / bright。
+  - **Reset**：恢复默认并关闭覆盖。
+
+### 改动 2：预设文本注入机制
+
+libprojectM 4 的 C API 没有运行时修改 `wave_mode` 等参数的接口，因此采用**加载时注入**方案：在 `projectm_load_preset_data` 之前，把被启用的覆盖值写入 `.milk` 文本（替换已有键值、缺失则追加），再交给 projectM 编译。全程不写磁盘、不破坏用户预设文件，`enabled=false` 时原样透传（零开销）。
+
+### 改动 3：字段名映射（关键坑）
+
+simple waveform 的静态样式由 `.milk` 预设块 `[preset00]` 字段决定，**与 per_frame 运行时变量名是两套命名**：
+
+| 面板语义参数 | 预设块真实字段 |
+|---|---|
+| mode | `nWaveMode` |
+| X / Y | `wave_x` / `wave_y` |
+| R / G / B | `wave_r` / `wave_g` / `wave_b` |
+| A（不透明度） | `fWaveAlpha` |
+| Mystery（形态参数） | `fWaveParam` |
+| dots | `bWaveDots` |
+| thick | `bWaveThick` |
+| add（加性） | `bAdditiveWaves` |
+| bright（提亮） | `bMaximizeWaveColor` |
+
+### 改动 4：持久化
+
+wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMilkdropWaveState()`，序列化到 host state 顶层属性（`milkdropWaveEnabled/Mode/X/Y/R/G/B/A/Mystery/Usedots/Thick/Additive/Brighten`），关闭重开软件后复原。
+
+### 踩坑记录
+
+1. **注入字段名用错导致一半参数失效**：最初注入用运行时变量名（`wave_mode`/`wave_a`/`wave_mystery`/`wave_usedots`/…），但 simple waveform 实际读取预设块字段（`nWaveMode`/`fWaveAlpha`/`fWaveParam`/`bWaveDots`/…）。巧合的是 `wave_x/y/r/g/b` 预设块同名，所以只有这几个生效——直接对应"只有 X/Y/R/G/B 有效"的现象。
+2. **mode stepper 左右按钮缺少交互反馈**：原始绘制只有静态填充，未记录 pressed/hover 状态；补充 `waveModeStepperPressed_` / `waveModeStepperHover_` 后在 `mouseDown/Up/Move` 与 `paintWavePanel` 贯通三态绘制。
 
 ---
 
