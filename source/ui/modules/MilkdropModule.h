@@ -155,6 +155,16 @@ private:
     GLint  bloomLoc_             = -1;
     GLint  binaryLoc_            = -1;
     GLint  prismaticLoc_         = -1;
+    GLint  tweakZoomLoc_         = -1;
+    GLint  tweakRotLoc_          = -1;
+    GLint  tweakWarpLoc_         = -1;
+    GLint  tweakDxLoc_           = -1;
+    GLint  tweakDyLoc_           = -1;
+    GLint  tweakSxLoc_           = -1;
+    GLint  tweakSyLoc_           = -1;
+    GLint  tweakKaleidoLoc_      = -1;
+    GLint  tweakFoldXLoc_        = -1;
+    GLint  tweakFoldYLoc_        = -1;
     bool   coreProfile_ = false;
     bool   ready_ = false;
     juce::String lastError_;
@@ -425,7 +435,7 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects, kWave };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects, kWave, kTweak };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
 
@@ -487,6 +497,16 @@ private:
     void updateWaveFromSlider(int row, float proportion);               ///< 0=X,1=Y,2=R,3=G,4=B,5=A,6=Mystery
     void reloadCurrentPresetForWave();                                  ///< 用当前 wave 覆盖重载当前预设
 
+    // ---- 全局变换偏移控制（tweak 按钮 + 双向偏移滑块，后处理 uv 实时生效）----
+    void toggleTweakPanel();                                            ///< 展开/收起全局变换偏移控制器
+    void paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> topBar);
+    juce::Rectangle<int> getTweakPanelBounds(juce::Rectangle<int> topBar) const;
+    juce::Rectangle<int> getTweakSliderBounds(juce::Rectangle<int> panel, int row) const;
+    juce::Rectangle<int> getTweakIntSliderBounds(juce::Rectangle<int> panel, int row) const;
+    juce::Rectangle<int> getTweakResetBounds(juce::Rectangle<int> panel) const;
+    void updateTweakFromSlider(int row, float proportion);              ///< 0~6 对应 zoom/rot/warp/dx/dy/sx/sy
+    void updateTweakIntFromSlider(int row, float proportion);           ///< 0~2 对应 kaleido/fold_x/fold_y
+
     // Auto-hide 逻辑（由 GLView::timerCallback 在 UI 线程驱动，30Hz 轮询）：
     //   · 检测 !hasKeyboardFocus → 窗口失焦即隐藏
     //   · 检测 idle > 4s → 长时间不操作 overlay 自动隐藏
@@ -508,14 +528,17 @@ private:
     static constexpr float kMinAutoInterval = 1.0f;
     static constexpr float kMaxAutoInterval = 60.0f;
 
-    // ---- 整体视觉状态（master output colors + effects）----
-    MilkdropVisualState visualState_;          ///< 本地缓存：完整视觉状态
+    // ---- 整体视觉状态（master output colors + effects + tweak uv 畸变）----
+    MilkdropVisualState visualState_;          ///< 本地缓存：完整视觉状态（含 offset）
     MilkdropWaveState   waveState_;            ///< 本地缓存：简单波形样式覆盖
     bool isColorPanelOpen_ { false };          ///< 染色控制器是否展开
     bool isEffectsPanelOpen_ { false };        ///< 效果控制器是否展开
     bool isWavePanelOpen_ { false };           ///< 波形样式控制器是否展开
+    bool isTweakPanelOpen_ { false };          ///< 全局变换偏移控制器是否展开
     int  draggingTintRow_ { -1 };              ///< 正在拖动的滑块行（0=R,1=G,2=B,3=Bright；-1=无）
     int  draggingWaveRow_ { -1 };              ///< 正在拖动的 wave 滑块行（0~6；-1=无）
+    int  draggingTweakRow_ { -1 };             ///< 正在拖动的 tweak 浮点滑块行（0~6；-1=无）
+    int  draggingTweakIntRow_ { -1 };          ///< 正在拖动的 tweak 整数滑块行（0~2；-1=无）
     int  waveModeStepperHover_ { -1 };         ///< mode stepper 悬停区（-1=无，0=左，1=右）
     int  waveModeStepperPressed_ { -1 };       ///< mode stepper 按下区（-1=无，0=左，1=右）
     juce::Rectangle<int> cachedColorPanelRect_;  ///< 缓存染色面板区域，供 hit-test
@@ -524,6 +547,8 @@ private:
     juce::Rectangle<int> cachedEffectsResetRect_; ///< 缓存效果 Reset 按钮区域，供 hit-test
     juce::Rectangle<int> cachedWavePanelRect_;    ///< 缓存波形面板区域，供 hit-test
     juce::Rectangle<int> cachedWaveResetRect_;    ///< 缓存波形 Reset 按钮区域，供 hit-test
+    juce::Rectangle<int> cachedTweakPanelRect_;   ///< 缓存偏移面板区域，供 hit-test
+    juce::Rectangle<int> cachedTweakResetRect_;   ///< 缓存偏移 Reset 按钮区域，供 hit-test
     static constexpr float kColorPanelHeight = 104.0f; ///< 染色控制器面板高度（标题 + 4 行）
     static constexpr float kEffectsHeaderH = 22.0f;    ///< effects 面板标题高度
     static constexpr float kEffectsRowH = 22.0f;       ///< effects 面板每行开关高度
@@ -533,11 +558,16 @@ private:
     static constexpr int   kColorBtnW = 32;             ///< color 按钮宽度（与 auto 一致）
     static constexpr int   kEffectsBtnW = 42;           ///< effects 按钮宽度
     static constexpr int   kWaveBtnW = 40;              ///< wave 按钮宽度
+    static constexpr int   kTweakBtnW = 46;             ///< tweak 按钮宽度
     static constexpr float kWaveHeaderH = 22.0f;        ///< wave 面板标题高度
     static constexpr float kWaveModeRowH = 22.0f;       ///< wave 面板 mode stepper 行高度
     static constexpr float kWaveSliderRowH = 20.0f;     ///< wave 面板每个 slider 行高度
     static constexpr float kWaveSwitchRowH = 22.0f;     ///< wave 面板开关行高度
     static constexpr float kWavePadBottom = 6.0f;       ///< wave 面板底部 padding
+    static constexpr float kTweakHeaderH = 22.0f;       ///< tweak 面板标题高度
+    static constexpr float kTweakSliderRowH = 20.0f;    ///< tweak 面板每个 slider 行高度
+    static constexpr float kTweakIntRowH = 22.0f;       ///< tweak 面板每个整数滑块行高度
+    static constexpr float kTweakPadBottom = 6.0f;      ///< tweak 面板底部 padding
     static constexpr float kTintMin = 0.0f;             ///< RGB 加性偏移下限（0%）
     static constexpr float kTintMax = 2.0f;             ///< RGB 加性偏移上限（200%）
     static constexpr float kBrightMin = 0.0f;           ///< bright 增益下限

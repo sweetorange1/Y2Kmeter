@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "source/ui/modules/MilkdropVisualOffsetState.h"
+
 // ==========================================================
 // MilkdropVisualState —— Milkdrop 模块整体后处理的全局视觉状态
 //
@@ -112,7 +114,11 @@ struct MilkdropVisualState
     bool  binary       = false;  // 极端二值化：硬阈值黑白（effbottom）
     bool  prismatic    = false;  // 棱镜色散：径向色差（effbottom）
 
-    // 无任何染色 / 效果时返回 true，用于跳过零开销的 offscreen 后处理路径。
+    // 后处理 uv 几何畸变（tweak 面板，连续强度，0 = 中性）。
+    // 作为后处理层 uv 重映射参数，实时生效，不修改预设。
+    MilkdropVisualOffsetState offset;
+
+    // 无任何染色 / 效果 / uv 畸变时返回 true，用于跳过零开销的 offscreen 后处理路径。
     bool isNeutral() const noexcept
     {
         return std::fabs (tint_r - 1.0f)     <= 1e-4f
@@ -156,6 +162,7 @@ struct MilkdropVisualState
             && ! duotone
             && ! bloom
             && ! binary
-            && ! prismatic;
+            && ! prismatic
+            && offset.isNeutral();
     }
 };

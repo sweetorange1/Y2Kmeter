@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.6.6`）
+- **产品名**：`Y2Kmeter` （版本：`2.6.7`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -145,10 +145,11 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
-| [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；由 Editor 全局共享并持久化到 Processor host state） | — |
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
 | [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
 | [MilkdropWaveState.h](/I:/Y2KMeter/source/ui/modules/MilkdropWaveState.h) | `MilkdropWaveState`（v2.6.6 新增，header-only：Milkdrop 简单波形样式覆盖状态结构体 + 16 种 `wave_mode` 名称表 + `GetWaveModeName()` + `ReplaceWaveKeyValue()`/`ApplyWaveParamsToPresetText()` 预设文本注入函数；全局共享并持久化到 Processor host state） | — |
+| [MilkdropVisualOffsetState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualOffsetState.h) | `MilkdropVisualOffsetState`（v2.6.7 新增，header-only：tweak 后处理 uv 几何畸变数据载体，7 个浮点 `value[]` + 3 个整数 `ivalue[]` + `isNeutral()`/`reset()` + `GetVisualOffsetParams()`/`GetVisualOffsetIntParams()` 元数据；作为 `MilkdropVisualState::offset` 成员随视觉状态每帧传递到 `MilkdropTintPass`） | — |
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
@@ -3071,6 +3072,45 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 
 1. **注入字段名用错导致一半参数失效**：最初注入用运行时变量名（`wave_mode`/`wave_a`/`wave_mystery`/`wave_usedots`/…），但 simple waveform 实际读取预设块字段（`nWaveMode`/`fWaveAlpha`/`fWaveParam`/`bWaveDots`/…）。巧合的是 `wave_x/y/r/g/b` 预设块同名，所以只有这几个生效——直接对应"只有 X/Y/R/G/B 有效"的现象。
 2. **mode stepper 左右按钮缺少交互反馈**：原始绘制只有静态填充，未记录 pressed/hover 状态；补充 `waveModeStepperPressed_` / `waveModeStepperHover_` 后在 `mouseDown/Up/Move` 与 `paintWavePanel` 贯通三态绘制。
+
+---
+
+## v2.6.7：Milkdrop tweak 面板重构为后处理 uv 几何畸变 + 万花镜对称
+
+本章记录 v2.6.7 版本相对 v2.6.6 的改动：将 tweak 面板从「预设注入 per_frame 变量」重构为「后处理层 uv 几何畸变」，实现实时生效、不修改预设、对所有预设生效；同时新增 3 个整数万花镜对称控制器（kaleido / fold_x / fold_y）。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/modules/MilkdropVisualOffsetState.h`](/I:/Y2KMeter/source/ui/modules/MilkdropVisualOffsetState.h) | **重构**：`MilkdropVisualOffsetState` 改为 7 浮点 `value[]` + 3 整数 `ivalue[]`，新增 `GetVisualOffsetIntParams()`；删除 `ApplyVisualOffsetsToPresetText()` / `FindMaxPerFrameIndex()` |
+| [`source/ui/modules/MilkdropVisualState.h`](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | 新增 `offset` 成员（`MilkdropVisualOffsetState`）并纳入 `isNeutral()` |
+| [`PluginProcessor.h/.cpp`](/I:/Y2KMeter/PluginProcessor.h) | 删除独立 `savedMilkdropVisualOffsetState_`，offset 字段改读写 `savedMilkdropVisualState_.offset` |
+| [`PluginEditor.h/.cpp`](/I:/Y2KMeter/PluginEditor.h) | 删除独立 `milkdrop_offset_state_` / `Set/GetMilkdropVisualOffsetState()` 及注入调用 |
+| [`MilkdropModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | tint pass 新增 7+3 个 tweak uniform；shader 两处新增 uv 变换与万花镜对称；tweak 面板改为浮点滑块 + 整数滑块 |
+
+### 改动 1：后处理 uv 几何畸变（替代预设注入）
+
+- 9 个 tweak 参数改由 `MilkdropTintPass` 后处理着色器消费，在采样 projectM 输出纹理前对 `uv` 做几何变换。
+- 实时生效（无需重载预设）、不修改预设、对所有预设生效。
+
+### 改动 2：参数语义重构
+
+- 连续浮点（7 个）：zoom / rot / warp / dx / dy / sx / sy；删除 cx / cy（与 dx/dy 语义重复）。
+- 整数万花镜（3 个，1~16）：kaleido（径向角度瓣数）、fold_x（水平对称折叠）、fold_y（垂直对称折叠）。
+
+### 改动 3：shader 算法
+
+- zoom 下限 -0.3；sx/sy 改指数映射 `exp(-s*1.5)`（负值拉伸、正值压缩、永不镜像）。
+- kaleido 阈值 `>= 1.0` 使 `1` 成为首个有效档位。
+
+### 踩坑记录
+
+1. tweak 注入对「不引用变量的预设」无效（warp shader uniform 只传值不消费，用不用取决于预设 shader）。
+2. cx/cy 与 dx/dy 语义重复（`p += vec2(dx + cx, dy + cy)`），最终删除。
+3. sx/sy 线性映射 `1 + s*2` 在负值区产生镜像，改指数映射 `exp(-s*1.5)`。
+4. zoom 负值下限无意义（`max(z, 0.01)` 提前 clamp），限为 -0.3。
+5. 整数 0 与 1 效果相同（阈值 `>= 2.0` 导致 `1` 不生效），改 `>= 1.0` 并去掉 0。
 
 ---
 

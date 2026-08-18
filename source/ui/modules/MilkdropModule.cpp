@@ -638,8 +638,57 @@ bool MilkdropTintPass::init()
             "uniform float uBloom;\n"
             "uniform float uBinary;\n"
             "uniform float uPrismatic;\n"
+            "uniform float uTweakZoom;\n"
+            "uniform float uTweakRot;\n"
+            "uniform float uTweakWarp;\n"
+            "uniform float uTweakDx;\n"
+            "uniform float uTweakDy;\n"
+            "uniform float uTweakSx;\n"
+            "uniform float uTweakSy;\n"
+            "uniform float uTweakKaleido;\n"
+            "uniform float uTweakFoldX;\n"
+            "uniform float uTweakFoldY;\n"
             "void main() {\n"
             "  vec2 uv = vUV;\n"
+            "  // tweak：后处理 uv 几何畸变（连续强度，0 = 中性，实时生效，不修改预设）。\n"
+            "  {\n"
+            "    vec2 c = vec2(0.5, 0.5);\n"
+            "    vec2 p = uv - c;\n"
+            "    float z = 1.0 + uTweakZoom * 4.0;\n"
+            "    p /= max(z, 0.01);\n"
+            "    float ang = uTweakRot * 6.28318;\n"
+            "    float s = sin(ang);\n"
+            "    float co = cos(ang);\n"
+            "    p = vec2(p.x * co - p.y * s, p.x * s + p.y * co);\n"
+            "    p.x *= exp(-uTweakSx * 1.5);\n"
+            "    p.y *= exp(-uTweakSy * 1.5);\n"
+            "    p += vec2(uTweakDx, uTweakDy);\n"
+            "    uv = p + c;\n"
+            "    if (abs(uTweakWarp) > 0.001) {\n"
+            "      vec2 w = uv - c;\n"
+            "      float r = length(w);\n"
+            "      float a = atan(w.y, w.x) + uTweakWarp * r * 12.0;\n"
+            "      uv = vec2(cos(a), sin(a)) * r + c;\n"
+            "    }\n"
+            "    // 万花镜整数对称控制器：kaleido（角度）+ fold_x/fold_y（笛卡尔网格）。\n"
+            "    if (uTweakKaleido >= 1.0) {\n"
+            "      float segs = floor(uTweakKaleido + 0.5);\n"
+            "      vec2 kp = uv - 0.5;\n"
+            "      float kr = length(kp);\n"
+            "      float ka = atan(kp.y, kp.x);\n"
+            "      float wedge = 3.14159265 / segs;\n"
+            "      ka = abs(mod(ka, wedge * 2.0) - wedge);\n"
+            "      uv = vec2(cos(ka), sin(ka)) * kr + 0.5;\n"
+            "    }\n"
+            "    if (uTweakFoldX >= 1.0) {\n"
+            "      float n = floor(uTweakFoldX + 0.5);\n"
+            "      uv.x = abs(fract(uv.x * n) * 2.0 - 1.0);\n"
+            "    }\n"
+            "    if (uTweakFoldY >= 1.0) {\n"
+            "      float n = floor(uTweakFoldY + 0.5);\n"
+            "      uv.y = abs(fract(uv.y * n) * 2.0 - 1.0);\n"
+            "    }\n"
+            "  }\n"
             "  // efftop：采样前 uv 重映射（split → zoom → multi → kaleidoscope → swirl → pinch → pixelate → 第三批）。\n"
             "  if (uSplit > 0.5) uv = vec2(abs(uv.x - 0.5), uv.y);\n"
             "  if (uZoom > 0.5) uv = 0.25 + 0.5 * uv;\n"
@@ -915,8 +964,57 @@ bool MilkdropTintPass::init()
             "uniform float uBloom;\n"
             "uniform float uBinary;\n"
             "uniform float uPrismatic;\n"
+            "uniform float uTweakZoom;\n"
+            "uniform float uTweakRot;\n"
+            "uniform float uTweakWarp;\n"
+            "uniform float uTweakDx;\n"
+            "uniform float uTweakDy;\n"
+            "uniform float uTweakSx;\n"
+            "uniform float uTweakSy;\n"
+            "uniform float uTweakKaleido;\n"
+            "uniform float uTweakFoldX;\n"
+            "uniform float uTweakFoldY;\n"
             "void main() {\n"
             "  vec2 uv = vUV;\n"
+            "  // tweak：后处理 uv 几何畸变（连续强度，0 = 中性，实时生效，不修改预设）。\n"
+            "  {\n"
+            "    vec2 c = vec2(0.5, 0.5);\n"
+            "    vec2 p = uv - c;\n"
+            "    float z = 1.0 + uTweakZoom * 4.0;\n"
+            "    p /= max(z, 0.01);\n"
+            "    float ang = uTweakRot * 6.28318;\n"
+            "    float s = sin(ang);\n"
+            "    float co = cos(ang);\n"
+            "    p = vec2(p.x * co - p.y * s, p.x * s + p.y * co);\n"
+            "    p.x *= exp(-uTweakSx * 1.5);\n"
+            "    p.y *= exp(-uTweakSy * 1.5);\n"
+            "    p += vec2(uTweakDx, uTweakDy);\n"
+            "    uv = p + c;\n"
+            "    if (abs(uTweakWarp) > 0.001) {\n"
+            "      vec2 w = uv - c;\n"
+            "      float r = length(w);\n"
+            "      float a = atan(w.y, w.x) + uTweakWarp * r * 12.0;\n"
+            "      uv = vec2(cos(a), sin(a)) * r + c;\n"
+            "    }\n"
+            "    // 万花镜整数对称控制器：kaleido（角度）+ fold_x/fold_y（笛卡尔网格）。\n"
+            "    if (uTweakKaleido >= 1.0) {\n"
+            "      float segs = floor(uTweakKaleido + 0.5);\n"
+            "      vec2 kp = uv - 0.5;\n"
+            "      float kr = length(kp);\n"
+            "      float ka = atan(kp.y, kp.x);\n"
+            "      float wedge = 3.14159265 / segs;\n"
+            "      ka = abs(mod(ka, wedge * 2.0) - wedge);\n"
+            "      uv = vec2(cos(ka), sin(ka)) * kr + 0.5;\n"
+            "    }\n"
+            "    if (uTweakFoldX >= 1.0) {\n"
+            "      float n = floor(uTweakFoldX + 0.5);\n"
+            "      uv.x = abs(fract(uv.x * n) * 2.0 - 1.0);\n"
+            "    }\n"
+            "    if (uTweakFoldY >= 1.0) {\n"
+            "      float n = floor(uTweakFoldY + 0.5);\n"
+            "      uv.y = abs(fract(uv.y * n) * 2.0 - 1.0);\n"
+            "    }\n"
+            "  }\n"
             "  // efftop：采样前 uv 重映射（split → zoom → multi → kaleidoscope → swirl → pinch → pixelate → 第三批）。\n"
             "  if (uSplit > 0.5) uv = vec2(abs(uv.x - 0.5), uv.y);\n"
             "  if (uZoom > 0.5) uv = 0.25 + 0.5 * uv;\n"
@@ -1189,6 +1287,16 @@ bool MilkdropTintPass::init()
     bloomLoc_           = program_->getUniformIDFromName ("uBloom");
     binaryLoc_          = program_->getUniformIDFromName ("uBinary");
     prismaticLoc_       = program_->getUniformIDFromName ("uPrismatic");
+    tweakZoomLoc_       = program_->getUniformIDFromName ("uTweakZoom");
+    tweakRotLoc_        = program_->getUniformIDFromName ("uTweakRot");
+    tweakWarpLoc_       = program_->getUniformIDFromName ("uTweakWarp");
+    tweakDxLoc_         = program_->getUniformIDFromName ("uTweakDx");
+    tweakDyLoc_         = program_->getUniformIDFromName ("uTweakDy");
+    tweakSxLoc_         = program_->getUniformIDFromName ("uTweakSx");
+    tweakSyLoc_         = program_->getUniformIDFromName ("uTweakSy");
+    tweakKaleidoLoc_    = program_->getUniformIDFromName ("uTweakKaleido");
+    tweakFoldXLoc_      = program_->getUniformIDFromName ("uTweakFoldX");
+    tweakFoldYLoc_      = program_->getUniformIDFromName ("uTweakFoldY");
 
     // 全屏三角形（单个大三角形覆盖整个视口，顶点为 NDC 坐标）
     static const float kQuadVertices[6] = {
@@ -1292,6 +1400,16 @@ void MilkdropTintPass::apply (GLuint srcTex, const MilkdropVisualState& state)
     juce::gl::glUniform1f (bloomLoc_, state.bloom ? 1.0f : 0.0f);
     juce::gl::glUniform1f (binaryLoc_, state.binary ? 1.0f : 0.0f);
     juce::gl::glUniform1f (prismaticLoc_, state.prismatic ? 1.0f : 0.0f);
+    juce::gl::glUniform1f (tweakZoomLoc_, state.offset.value[0]);
+    juce::gl::glUniform1f (tweakRotLoc_,  state.offset.value[1]);
+    juce::gl::glUniform1f (tweakWarpLoc_, state.offset.value[2]);
+    juce::gl::glUniform1f (tweakDxLoc_,   state.offset.value[3]);
+    juce::gl::glUniform1f (tweakDyLoc_,   state.offset.value[4]);
+    juce::gl::glUniform1f (tweakSxLoc_,   state.offset.value[5]);
+    juce::gl::glUniform1f (tweakSyLoc_,   state.offset.value[6]);
+    juce::gl::glUniform1f (tweakKaleidoLoc_, static_cast<float>(state.offset.ivalue[0]));
+    juce::gl::glUniform1f (tweakFoldXLoc_,   static_cast<float>(state.offset.ivalue[1]));
+    juce::gl::glUniform1f (tweakFoldYLoc_,   static_cast<float>(state.offset.ivalue[2]));
 
     if (coreProfile_)
     {
@@ -1550,6 +1668,8 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
       paintEffectsPanel(g, topBar);
     if (isWavePanelOpen_)
       paintWavePanel(g, topBar);
+    if (isTweakPanelOpen_)
+      paintTweakPanel(g, topBar);
   }
 }
 
@@ -1680,6 +1800,8 @@ void MilkdropModule::GLView::paint(juce::Graphics& g) {
     owner_.paintEffectsPanel(g, content.withHeight(26));
   if (owner_.isWavePanelOpen_)
     owner_.paintWavePanel(g, content.withHeight(26));
+  if (owner_.isTweakPanelOpen_)
+    owner_.paintTweakPanel(g, content.withHeight(26));
   g.restoreState();
 #else
   juce::ignoreUnused(g);
@@ -2685,6 +2807,65 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         }
     }
 
+    // ---- tweak panel 交互检测（Reset + 双向偏移滑块拖动） ----
+    if (isTweakPanelOpen_ && glView != nullptr)
+    {
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getTweakPanelBounds(topBar);
+
+        // Reset 按钮点击（恢复默认，所有偏移归零，实时生效）
+        if (getTweakResetBounds(panel).contains(e.getPosition()))
+        {
+            if (!focused_)
+                setFocusVisual(true);
+            touchOverlayIdleTimer();
+            visualState_.offset.reset();
+            applyVisualToEditor();
+            repaint(panel);
+            glView->repaint();
+            return;
+        }
+
+        // 整数滑块拖动（kaleido / fold_x / fold_y，1~16）
+        for (int row = 0; row < MilkdropVisualOffsetState::kIntParamCount; ++row)
+        {
+            auto sb = getTweakIntSliderBounds(panel, row);
+            if (sb.expanded(6).contains(e.getPosition()))
+            {
+                draggingTweakIntRow_ = row;
+                if (!focused_)
+                    setFocusVisual(true);
+                touchOverlayIdleTimer();
+                float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                                   / static_cast<float>(sb.getWidth());
+                updateTweakIntFromSlider(row, proportion);
+                repaint(panel);
+                glView->repaint();
+                return;
+            }
+        }
+
+        // 双向偏移滑块拖动（zoom/rot/warp/dx/dy/sx/sy）
+        for (int row = 0; row < MilkdropVisualOffsetState::kParamCount; ++row)
+        {
+            auto sb = getTweakSliderBounds(panel, row);
+            if (sb.expanded(6).contains(e.getPosition()))
+            {
+                draggingTweakRow_ = row;
+                if (!focused_)
+                    setFocusVisual(true);
+                touchOverlayIdleTimer();
+                float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                                   / static_cast<float>(sb.getWidth());
+                updateTweakFromSlider(row, proportion);
+                repaint(panel);
+                glView->repaint();
+                return;
+            }
+        }
+    }
+
     // 基类处理：toFront + onBroughtToFront + 关闭按钮 + 缩放边缘 + 标题栏拖动
     // 所有涉及 private 成员的逻辑（closeButtonPressed / dragMode / detectEdge 等）
     // 均由基类完成，我们只在上层附加 overlay 按钮处理。
@@ -2736,6 +2917,24 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     {
         draggingWaveRow_ = -1;
         reloadCurrentPresetForWave();
+        repaint();
+        glView->repaint();
+        return;
+    }
+
+    // tweak 整数滑块拖动结束：实时生效，仅复位拖动状态
+    if (draggingTweakIntRow_ >= 0)
+    {
+        draggingTweakIntRow_ = -1;
+        repaint();
+        glView->repaint();
+        return;
+    }
+
+    // tweak slider 拖动结束：实时生效，仅复位拖动状态
+    if (draggingTweakRow_ >= 0)
+    {
+        draggingTweakRow_ = -1;
         repaint();
         glView->repaint();
         return;
@@ -2813,6 +3012,38 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
         float proportion = static_cast<float>(e.getPosition().x - sb.getX())
                            / static_cast<float>(sb.getWidth());
         updateWaveFromSlider(draggingWaveRow_, proportion);
+        repaint(panel);
+        glView->repaint();
+        return;
+    }
+
+    // tweak slider 拖动中（只更新本地状态，不重载，松手时统一重载）
+    if (draggingTweakRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getTweakPanelBounds(topBar);
+        auto sb = getTweakSliderBounds(panel, draggingTweakRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateTweakFromSlider(draggingTweakRow_, proportion);
+        repaint(panel);
+        glView->repaint();
+        return;
+    }
+
+    // tweak 整数滑块拖动中
+    if (draggingTweakIntRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getTweakPanelBounds(topBar);
+        auto sb = getTweakIntSliderBounds(panel, draggingTweakIntRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateTweakIntFromSlider(draggingTweakIntRow_, proportion);
         repaint(panel);
         glView->repaint();
         return;
@@ -2934,6 +3165,38 @@ void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
         return;
     }
 
+    // tweak slider 拖动中
+    if (draggingTweakRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getTweakPanelBounds(topBar);
+        auto sb = getTweakSliderBounds(panel, draggingTweakRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateTweakFromSlider(draggingTweakRow_, proportion);
+        repaint(panel);
+        glView->repaint();
+        return;
+    }
+
+    // tweak 整数滑块拖动中
+    if (draggingTweakIntRow_ >= 0)
+    {
+        touchOverlayIdleTimer();
+        auto content = getContentBounds();
+        auto topBar = content.withHeight(26);
+        auto panel = getTweakPanelBounds(topBar);
+        auto sb = getTweakIntSliderBounds(panel, draggingTweakIntRow_);
+        float proportion = static_cast<float>(e.getPosition().x - sb.getX())
+                           / static_cast<float>(sb.getWidth());
+        updateTweakIntFromSlider(draggingTweakIntRow_, proportion);
+        repaint(panel);
+        glView->repaint();
+        return;
+    }
+
     ModulePanel::mouseDrag(e);
 }
 
@@ -2972,8 +3235,10 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, overlay.getY() + 2, kColorBtnW, kBtnSize);
     auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, overlay.getY() + 2, kEffectsBtnW, kBtnSize);
     auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW, overlay.getY() + 2, kWaveBtnW, kBtnSize);
+    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - kTweakBtnW, overlay.getY() + 2, kTweakBtnW, kBtnSize);
 
     if (prevBtn.contains(pos))     return OverlayButton::kPrev;
+    if (tweakBtn.contains(pos))    return OverlayButton::kTweak;
     if (waveBtn.contains(pos))     return OverlayButton::kWave;
     if (effectsBtn.contains(pos))  return OverlayButton::kEffects;
     if (colorBtn.contains(pos))    return OverlayButton::kColor;
@@ -3052,6 +3317,22 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                                overlay.getY() + 2, kEffectsBtnW, kBtnSize);
         return { effectsBtn.getX() - kPadding - kWaveBtnW, overlay.getY() + 2, kWaveBtnW, kBtnSize };
     }
+    case OverlayButton::kTweak:
+    {
+        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
+                                              overlay.getY() + 2, kBtnSize, kBtnSize);
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
+                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
+        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW,
+                                              overlay.getY() + 2, kColorBtnW, kBtnSize);
+        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW,
+                                               overlay.getY() + 2, kEffectsBtnW, kBtnSize);
+        auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW,
+                                               overlay.getY() + 2, kWaveBtnW, kBtnSize);
+        return { waveBtn.getX() - kPadding - kTweakBtnW, overlay.getY() + 2, kTweakBtnW, kBtnSize };
+    }
     // 分辨率切换按钮已全平台阉割
 #if 0
     case OverlayButton::kRenderScale:
@@ -3084,6 +3365,7 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     case OverlayButton::kColor:      toggleColorPanel();        break;
     case OverlayButton::kEffects:    toggleEffectsPanel();      break;
     case OverlayButton::kWave:       toggleWavePanel();         break;
+    case OverlayButton::kTweak:      toggleTweakPanel();        break;
     // 分辨率切换按钮已全平台阉割
 #if 0
     case OverlayButton::kRenderScale: glView->RequestRenderScale(); break;
@@ -3113,7 +3395,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     g.setColour(PinkXP::pink300.withAlpha(0.7f));
     g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
 
-    // 按钮位置: [<] nameArea [wave] [effects] [color] [auto] [>] [?]
+    // 按钮位置: [<] nameArea [tweak] [wave] [effects] [color] [auto] [>] [?]
     auto prevBtn    = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn  = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
@@ -3121,9 +3403,10 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, bar.getY() + 2, kColorBtnW, kBtnSize);
     auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, bar.getY() + 2, kEffectsBtnW, kBtnSize);
     auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW, bar.getY() + 2, kWaveBtnW, kBtnSize);
-    // effects/color/wave 按钮在所有平台都显示，nameArea 延伸到 waveBtn 左侧
+    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - kTweakBtnW, bar.getY() + 2, kTweakBtnW, kBtnSize);
+    // tweak/wave/effects/color 按钮在所有平台都显示，nameArea 延伸到 tweakBtn 左侧
     auto nameArea   = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
-                                          waveBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
+                                          tweakBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
 
     // 按钮绘制 lambda
     auto drawBtn = [&](juce::Rectangle<int> r, const juce::String& text, OverlayButton btn)
@@ -3234,6 +3517,29 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
         g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
         g.drawText("wave", waveBtn, juce::Justification::centred, false);
+    }
+
+    // tweak 按钮：全局变换偏移控制器展开时用高亮 toggle 样式
+    {
+        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kTweak);
+        bool pressed = (pressedOverlayBtn_ == OverlayButton::kTweak);
+        bool active  = isTweakPanelOpen_;
+
+        if (pressed || active)
+            PinkXP::drawPressed(g, tweakBtn, PinkXP::pink100);
+        else if (hovered)
+            PinkXP::drawRaised(g, tweakBtn, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+            g.fillRect(tweakBtn);
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
+            g.drawRect(tweakBtn, 1);
+        }
+
+        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
+        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+        g.drawText("tweak", tweakBtn, juce::Justification::centred, false);
     }
 
     // auto 按钮：轮播模式激活时用高亮 toggle 样式
@@ -3706,6 +4012,14 @@ void MilkdropModule::OverlayView::paint(juce::Graphics& g)
     owner_.paintOverlayControlBar(g, moduleTopBar);
     if (owner_.isAutoMode_)
         owner_.paintAutoControlRow(g, moduleTopBar);
+    if (owner_.isColorPanelOpen_)
+        owner_.paintColorPanel(g, moduleTopBar);
+    if (owner_.isEffectsPanelOpen_)
+        owner_.paintEffectsPanel(g, moduleTopBar);
+    if (owner_.isWavePanelOpen_)
+        owner_.paintWavePanel(g, moduleTopBar);
+    if (owner_.isTweakPanelOpen_)
+        owner_.paintTweakPanel(g, moduleTopBar);
 }
 
 void MilkdropModule::UpdateOverlayViewPlacement()
@@ -3952,13 +4266,15 @@ void MilkdropModule::toggleColorPanel()
   isColorPanelOpen_ = !isColorPanelOpen_;
   if (isColorPanelOpen_)
   {
-    // 与自动轮播 / 效果 / 波形面板互斥，避免控制器重叠遮挡。
+    // 与自动轮播 / 效果 / 波形 / 偏移面板互斥，避免控制器重叠遮挡。
     if (isAutoMode_)
       isAutoMode_ = false;
     if (isEffectsPanelOpen_)
       isEffectsPanelOpen_ = false;
     if (isWavePanelOpen_)
       isWavePanelOpen_ = false;
+    if (isTweakPanelOpen_)
+      isTweakPanelOpen_ = false;
     // 打开时从 Editor 读回当前全局视觉状态，保证 UI 显示与渲染一致。
     syncVisualFromEditor();
   }
@@ -3973,13 +4289,15 @@ void MilkdropModule::toggleEffectsPanel()
   isEffectsPanelOpen_ = !isEffectsPanelOpen_;
   if (isEffectsPanelOpen_)
   {
-    // 与自动轮播 / 染色 / 波形面板互斥，避免控制器重叠遮挡。
+    // 与自动轮播 / 染色 / 波形 / 偏移面板互斥，避免控制器重叠遮挡。
     if (isAutoMode_)
       isAutoMode_ = false;
     if (isColorPanelOpen_)
       isColorPanelOpen_ = false;
     if (isWavePanelOpen_)
       isWavePanelOpen_ = false;
+    if (isTweakPanelOpen_)
+      isTweakPanelOpen_ = false;
     syncVisualFromEditor();
   }
 
@@ -3993,15 +4311,40 @@ void MilkdropModule::toggleWavePanel()
   isWavePanelOpen_ = !isWavePanelOpen_;
   if (isWavePanelOpen_)
   {
-    // 与自动轮播 / 染色 / 效果面板互斥，避免控制器重叠遮挡。
+    // 与自动轮播 / 染色 / 效果 / 偏移面板互斥，避免控制器重叠遮挡。
     if (isAutoMode_)
       isAutoMode_ = false;
     if (isColorPanelOpen_)
       isColorPanelOpen_ = false;
     if (isEffectsPanelOpen_)
       isEffectsPanelOpen_ = false;
+    if (isTweakPanelOpen_)
+      isTweakPanelOpen_ = false;
     // 打开时从 Editor 读回当前全局 wave 状态，保证 UI 显示与渲染一致。
     syncWaveFromEditor();
+  }
+
+  layoutContent(getContentBounds());
+  repaint();
+  glView->repaint();
+}
+
+void MilkdropModule::toggleTweakPanel()
+{
+  isTweakPanelOpen_ = !isTweakPanelOpen_;
+  if (isTweakPanelOpen_)
+  {
+    // 与自动轮播 / 染色 / 效果 / 波形面板互斥，避免控制器重叠遮挡。
+    if (isAutoMode_)
+      isAutoMode_ = false;
+    if (isColorPanelOpen_)
+      isColorPanelOpen_ = false;
+    if (isEffectsPanelOpen_)
+      isEffectsPanelOpen_ = false;
+    if (isWavePanelOpen_)
+      isWavePanelOpen_ = false;
+    // 打开时从 Editor 读回当前全局视觉状态（含 tweak offset），保证 UI 与渲染一致。
+    syncVisualFromEditor();
   }
 
   layoutContent(getContentBounds());
@@ -4673,5 +5016,238 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
     }
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
     g.drawText(kSwitchNames[idx], sw, juce::Justification::centred, false);
+  }
+}
+
+// ==========================================================
+// 全局变换偏移控制器（tweak panel）
+// ==========================================================
+juce::Rectangle<int> MilkdropModule::getTweakPanelBounds(juce::Rectangle<int> topBar) const
+{
+  const float height = kTweakHeaderH
+                     + MilkdropVisualOffsetState::kParamCount * kTweakSliderRowH
+                     + MilkdropVisualOffsetState::kIntParamCount * kTweakIntRowH
+                     + kTweakPadBottom;
+  return juce::Rectangle<int>(topBar.getX(), topBar.getBottom(),
+                              topBar.getWidth(), static_cast<int>(height));
+}
+
+juce::Rectangle<int> MilkdropModule::getTweakSliderBounds(juce::Rectangle<int> panel, int row) const
+{
+  constexpr int kPad    = 6;
+  constexpr int kLabelW = 30;
+  constexpr int kValueW = 44;
+  constexpr int kSliderH = 8;
+
+  const int sliderX = panel.getX() + kPad + kLabelW + 4;
+  const int sliderW = panel.getWidth() - kPad - kLabelW - 4 - kValueW - kPad;
+  const int y = panel.getY() + static_cast<int>(kTweakHeaderH)
+              + row * static_cast<int>(kTweakSliderRowH)
+              + (static_cast<int>(kTweakSliderRowH) - kSliderH) / 2;
+
+  return juce::Rectangle<int>(sliderX, y, juce::jmax(20, sliderW), kSliderH);
+}
+
+juce::Rectangle<int> MilkdropModule::getTweakIntSliderBounds(juce::Rectangle<int> panel, int row) const
+{
+  constexpr int kPad    = 6;
+  constexpr int kLabelW = 30;
+  constexpr int kValueW = 44;
+  constexpr int kSliderH = 8;
+
+  const int sliderX = panel.getX() + kPad + kLabelW + 4;
+  const int sliderW = panel.getWidth() - kPad - kLabelW - 4 - kValueW - kPad;
+  const int y = panel.getY() + static_cast<int>(kTweakHeaderH)
+              + MilkdropVisualOffsetState::kParamCount * static_cast<int>(kTweakSliderRowH)
+              + row * static_cast<int>(kTweakIntRowH)
+              + (static_cast<int>(kTweakIntRowH) - kSliderH) / 2;
+
+  return juce::Rectangle<int>(sliderX, y, juce::jmax(20, sliderW), kSliderH);
+}
+
+juce::Rectangle<int> MilkdropModule::getTweakResetBounds(juce::Rectangle<int> panel) const
+{
+  constexpr int kPad = 6;
+  return juce::Rectangle<int>(panel.getRight() - kPad - 44, panel.getY() + 2, 44, 18);
+}
+
+void MilkdropModule::updateTweakFromSlider(int row, float proportion)
+{
+  proportion = juce::jlimit(0.0f, 1.0f, proportion);
+  if (row < 0 || row >= MilkdropVisualOffsetState::kParamCount)
+    return;
+
+  // 线性映射：proportion 0→min_value，1→max_value（中性点 0 的位置由 min/max 决定）。
+  const auto* params = GetVisualOffsetParams();
+  const float min_v = params[row].min_value;
+  const float max_v = params[row].max_value;
+  visualState_.offset.value[row] = min_v + proportion * (max_v - min_v);
+  applyVisualToEditor();
+}
+
+void MilkdropModule::updateTweakIntFromSlider(int row, float proportion)
+{
+  proportion = juce::jlimit(0.0f, 1.0f, proportion);
+  if (row < 0 || row >= MilkdropVisualOffsetState::kIntParamCount)
+    return;
+
+  // 线性映射并四舍五入取整：proportion 0→min_value，1→max_value。
+  const auto* params = GetVisualOffsetIntParams();
+  const int min_v = params[row].min_value;
+  const int max_v = params[row].max_value;
+  const float vf = min_v + proportion * (max_v - min_v);
+  visualState_.offset.ivalue[row] = juce::roundToInt(vf);
+  applyVisualToEditor();
+}
+
+void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> topBar)
+{
+  auto panel = getTweakPanelBounds(topBar);
+  cachedTweakPanelRect_ = panel;
+
+  // 半透明暗底
+  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
+  g.fillRect(panel);
+
+  // 底部分割线
+  g.setColour(PinkXP::pink300.withAlpha(0.5f));
+  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+
+  // 标题 "TWEAK"
+  g.setColour(PinkXP::pink300.withAlpha(0.95f));
+  g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+  g.drawText("TWEAK", panel.getX() + 6, panel.getY(),
+             60, 22, juce::Justification::centredLeft, false);
+
+  // Reset 按钮
+  auto resetRect = getTweakResetBounds(panel);
+  cachedTweakResetRect_ = resetRect;
+  bool resetHovered = resetRect.contains(getMouseXYRelative());
+  if (resetHovered)
+  {
+    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
+    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
+  }
+  else
+  {
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+    g.fillRect(resetRect);
+    g.setColour(PinkXP::pink300.withAlpha(0.55f));
+    g.drawRect(resetRect, 1);
+    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
+  }
+  g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+
+  const auto* params = GetVisualOffsetParams();
+  for (int row = 0; row < MilkdropVisualOffsetState::kParamCount; ++row)
+  {
+    const float value = visualState_.offset.value[row];
+    const float min_v = params[row].min_value;
+    const float max_v = params[row].max_value;
+
+    // 当前值与中性点(0)在滑块轨道上的比例位置（0~1）。
+    // 中性点位置由 min/max 决定：zoom 的 min=-0.3、max=1.0，故中性点偏左而非居中。
+    float proportion = (value - min_v) / (max_v - min_v);
+    proportion = juce::jlimit(0.0f, 1.0f, proportion);
+    float neutral = (0.0f - min_v) / (max_v - min_v);
+    neutral = juce::jlimit(0.0f, 1.0f, neutral);
+
+    auto sliderBounds = getTweakSliderBounds(panel, row);
+    int labelY = sliderBounds.getY() - 6;
+    auto labelRect = juce::Rectangle<int>(panel.getX() + 6, labelY, 30, 20);
+
+    g.setColour(PinkXP::pink300.withAlpha(0.95f));
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText(params[row].display_name, labelRect, juce::Justification::centredLeft, false);
+
+    // 轨道底色
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
+    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
+
+    // 中性点与当前手柄的像素位置
+    const int neutralX = sliderBounds.getX() + juce::roundToInt(sliderBounds.getWidth() * neutral);
+    const int valueX   = sliderBounds.getX() + juce::roundToInt(sliderBounds.getWidth() * proportion);
+
+    // 已填充部分：从中性点到当前手柄。
+    const int fillX = juce::jmin(neutralX, valueX);
+    const int fillWidth = juce::jmax(1, juce::jmax(neutralX, valueX) - juce::jmin(neutralX, valueX));
+    g.setColour(PinkXP::pink200.withAlpha(0.8f));
+    g.fillRoundedRectangle(
+        juce::Rectangle<int>(fillX, sliderBounds.getY(), fillWidth, sliderBounds.getHeight()).toFloat(),
+        2.0f);
+
+    // 中性点刻度线
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.5f));
+    g.fillRect(neutralX - 1, sliderBounds.getY() - 2, 2, sliderBounds.getHeight() + 4);
+
+    // 滑块手柄
+    int knobX = valueX - 4;
+    int knobSize = 12;
+    auto knobBounds = juce::Rectangle<int>(
+        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
+        knobSize, knobSize);
+    g.setColour(draggingTweakRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
+    g.fillRect(knobBounds);
+    g.setColour(PinkXP::pink600);
+    g.drawRect(knobBounds, 1);
+
+    // 右侧数值（显示偏移量，带正负号）
+    auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);
+    g.setColour(PinkXP::pink300.withAlpha(0.95f));
+    g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
+    g.drawText(juce::String(value, 2), valueRect, juce::Justification::centredLeft, false);
+  }
+
+  // 3 个整数滑块（kaleido / fold_x / fold_y，1~16）
+  const auto* intParams = GetVisualOffsetIntParams();
+  for (int row = 0; row < MilkdropVisualOffsetState::kIntParamCount; ++row)
+  {
+    const int value = visualState_.offset.ivalue[row];
+    const int min_v = intParams[row].min_value;
+    const int max_v = intParams[row].max_value;
+
+    auto sliderBounds = getTweakIntSliderBounds(panel, row);
+    const int labelY = sliderBounds.getY() - 6;
+    auto labelRect = juce::Rectangle<int>(panel.getX() + 6, labelY, 30, 20);
+
+    // 名称 label
+    g.setColour(PinkXP::pink300.withAlpha(0.95f));
+    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+    g.drawText(intParams[row].display_name, labelRect, juce::Justification::centredLeft, false);
+
+    // 轨道底色
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
+    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
+
+    // 当前值在轨道上的比例（value 0 与 1 均落在最左，因为滑块范围从 1 开始）。
+    float proportion = static_cast<float>(value - min_v) / static_cast<float>(max_v - min_v);
+    proportion = juce::jlimit(0.0f, 1.0f, proportion);
+
+    const int valueX = sliderBounds.getX() + juce::roundToInt(sliderBounds.getWidth() * proportion);
+
+    // 已填充部分：从最左到当前手柄。
+    const int fillWidth = juce::jmax(1, valueX - sliderBounds.getX());
+    g.setColour(PinkXP::pink200.withAlpha(0.8f));
+    g.fillRoundedRectangle(
+        juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(), fillWidth, sliderBounds.getHeight()).toFloat(),
+        2.0f);
+
+    // 滑块手柄
+    const int knobX = valueX - 4;
+    const int knobSize = 12;
+    auto knobBounds = juce::Rectangle<int>(
+        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
+        knobSize, knobSize);
+    g.setColour(draggingTweakIntRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
+    g.fillRect(knobBounds);
+    g.setColour(PinkXP::pink600);
+    g.drawRect(knobBounds, 1);
+
+    // 右侧数值（整数值）
+    auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);
+    g.setColour(PinkXP::pink300.withAlpha(0.95f));
+    g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
+    g.drawText(juce::String(value), valueRect, juce::Justification::centredLeft, false);
   }
 }

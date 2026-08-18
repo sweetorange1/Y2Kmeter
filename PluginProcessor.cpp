@@ -505,6 +505,18 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty ("milkdropWaveAdditive", savedMilkdropWaveState_.additive, nullptr);
     root.setProperty ("milkdropWaveBrighten", savedMilkdropWaveState_.brighten, nullptr);
 
+    // Milkdrop 后处理 uv 几何畸变偏移（全局状态，随 visual state 持久化）
+    root.setProperty ("milkdropOffsetZoom", (double) savedMilkdropVisualState_.offset.value[0], nullptr);
+    root.setProperty ("milkdropOffsetRot",  (double) savedMilkdropVisualState_.offset.value[1], nullptr);
+    root.setProperty ("milkdropOffsetWarp", (double) savedMilkdropVisualState_.offset.value[2], nullptr);
+    root.setProperty ("milkdropOffsetDx",   (double) savedMilkdropVisualState_.offset.value[3], nullptr);
+    root.setProperty ("milkdropOffsetDy",   (double) savedMilkdropVisualState_.offset.value[4], nullptr);
+    root.setProperty ("milkdropOffsetSx",   (double) savedMilkdropVisualState_.offset.value[5], nullptr);
+    root.setProperty ("milkdropOffsetSy",   (double) savedMilkdropVisualState_.offset.value[6], nullptr);
+    root.setProperty ("milkdropOffsetKaleido", savedMilkdropVisualState_.offset.ivalue[0], nullptr);
+    root.setProperty ("milkdropOffsetFoldX",   savedMilkdropVisualState_.offset.ivalue[1], nullptr);
+    root.setProperty ("milkdropOffsetFoldY",   savedMilkdropVisualState_.offset.ivalue[2], nullptr);
+
     if (savedLayoutXml.isNotEmpty())
     {
         if (auto layoutXml = juce::parseXML(savedLayoutXml))
@@ -664,6 +676,28 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
         savedMilkdropWaveState_.additive = (bool) root.getProperty ("milkdropWaveAdditive", false);
     if (root.hasProperty ("milkdropWaveBrighten"))
         savedMilkdropWaveState_.brighten = (bool) root.getProperty ("milkdropWaveBrighten", false);
+
+    // Milkdrop 后处理 uv 几何畸变偏移（旧存档缺失时保持默认 0）
+    if (root.hasProperty ("milkdropOffsetZoom"))
+        savedMilkdropVisualState_.offset.value[0] = (float) (double) root.getProperty ("milkdropOffsetZoom", 0.0);
+    if (root.hasProperty ("milkdropOffsetRot"))
+        savedMilkdropVisualState_.offset.value[1] = (float) (double) root.getProperty ("milkdropOffsetRot", 0.0);
+    if (root.hasProperty ("milkdropOffsetWarp"))
+        savedMilkdropVisualState_.offset.value[2] = (float) (double) root.getProperty ("milkdropOffsetWarp", 0.0);
+    if (root.hasProperty ("milkdropOffsetDx"))
+        savedMilkdropVisualState_.offset.value[3] = (float) (double) root.getProperty ("milkdropOffsetDx", 0.0);
+    if (root.hasProperty ("milkdropOffsetDy"))
+        savedMilkdropVisualState_.offset.value[4] = (float) (double) root.getProperty ("milkdropOffsetDy", 0.0);
+    if (root.hasProperty ("milkdropOffsetSx"))
+        savedMilkdropVisualState_.offset.value[5] = (float) (double) root.getProperty ("milkdropOffsetSx", 0.0);
+    if (root.hasProperty ("milkdropOffsetSy"))
+        savedMilkdropVisualState_.offset.value[6] = (float) (double) root.getProperty ("milkdropOffsetSy", 0.0);
+    if (root.hasProperty ("milkdropOffsetKaleido"))
+        savedMilkdropVisualState_.offset.ivalue[0] = (int) root.getProperty ("milkdropOffsetKaleido", 0);
+    if (root.hasProperty ("milkdropOffsetFoldX"))
+        savedMilkdropVisualState_.offset.ivalue[1] = (int) root.getProperty ("milkdropOffsetFoldX", 0);
+    if (root.hasProperty ("milkdropOffsetFoldY"))
+        savedMilkdropVisualState_.offset.ivalue[2] = (int) root.getProperty ("milkdropOffsetFoldY", 0);
 
     const auto layoutTree = root.getChildWithName("PBEQ_Layout");
     if (layoutTree.isValid())
