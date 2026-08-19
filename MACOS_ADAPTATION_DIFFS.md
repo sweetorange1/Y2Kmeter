@@ -742,3 +742,80 @@ v2.5.8 为修复 Windows 无边框窗口（`setUsingNativeTitleBar(false)`）调
 | 类别 | 教训 |
 |------|------|
 | **`Displays::Display::userArea` 平台语义差异** | `userArea` 在 Windows = 扣除任务栏的工作区，在 macOS = 扣除菜单栏/Dock 的安全区。任何"伪全屏/铺满"逻辑若跨平台共用 `userArea`，macOS 上会留出系统栏空间。macOS 需要"真正全屏"时必须显式走原生 `ResizableWindow::setFullScreen`（`NSWindow toggleFullScreen`），仅 setBounds 到 `totalArea` 无法隐藏菜单栏/Dock（它们以更高窗口层级显示）。 |
+
+---
+
+## v2.7.0 补充修复（不升级版本号）
+
+本轮在 macOS 端完成两项修复：① 编译期 JUCE `Point` 宏污染导致的 `juce::Point<int>` 编译错误；② Milkdrop 二级控制面板（tweak/wave/effects/color）在 macOS 上不可见的问题。
+
+### 问题一：JUCE `Point` 宏污染导致 `juce::Point<int>` 编译报错
+
+#### 背景与根因
+
+macOS 构建在 [Y2KStandaloneApp.cpp](/Users/jy/CLionProjects/Y2Kmeter/source/standalone/Y2KStandaloneApp.cpp) 编译时报错：
+
+```
+In file included from .../Y2KStandaloneApp.cpp:44:
+.../PinkXPStyle.h:149:25: error: no member named 'juce' in namespace 'juce'; did you mean simply 'juce'?
+  149 |  juce::Point<int> pos, const juce::String& readout);
+```
+
+根因是 JUCE 的 `juce_audio_plugin_client/detail/juce_IncludeModuleHeaders.h` 在 macOS（`JUCE_MAC`）下定义：
+
+```cpp
+#define Component juce::Component
+#if JUCE_MAC
+ #define Point juce::Point
+#endif
+```
+
+其中 `Point` 宏在整个头文件包含链里没有被 `#undef`（`Component` 已在 `juce_BasicNativeHeaders.h` 中被清理，`Point` 却漏网）。当 [Y2KStandaloneApp.cpp](/Users/jy/CLionProjects/Y2Kmeter/source/standalone/Y2KStandaloneApp.cpp) 包含完 JUCE standalone 头文件后再包含项目自己的 `PinkXPStyle.h` 时，第 149 行的 `juce::Point<int>` 被二次宏展开为 `juce::juce::Point<int>`，从而报错。
+
+v2.7.0 才暴露是因为 `PinkXPStyle.h` 中 `drawHoverRuler` 的 `juce::Point<int>` 是新增写法（带 `juce::` 前缀）；旧代码写裸 `Point<int>` 会被宏"正确"替换成 `juce::Point<int>` 从而通过编译。
+
+#### 修复内容
+
+在 [Y2KStandaloneApp.cpp](/Users/jy/CLionProjects/Y2Kmeter/source/standalone/Y2KStandaloneApp.cpp) 中，于包含完 `juce_StandaloneFilterWindow.h` 之后、包含项目自身头文件之前，添加：
+
+```cpp
+#undef Point
+```
+
+并附注释说明根因。`Component` 宏无需处理，JUCE 内部已 undef。
+
+### 问题二：Milkdrop 二级面板（tweak/wave/effects/color）在 macOS 上不可见
+
+#### 背景与根因
+
+聚焦 Milkdrop 模块后，预设控制栏中新增的 `tweak / wave / effects / color` 按钮点击后应展开二级面板调整参数，但 macOS 上完全看不到；已有的 `auto` 按钮却能正常展开。
+
+原因：macOS 端由于 native `NSOpenGLView` 会遮挡 JUCE 的 CPU 绘制层，控制栏和展开面板是通过一个独立的顶层 `NSWindow`（`overlayView_`）绘制的。而 `UpdateOverlayViewPlacement()` 计算该窗口高度时，只考虑了控制栏本身（26px）与 auto 模式那一行（`kAutoRowHeight`），没有把 color/effects/wave/tweak 面板高度计入。因此这些面板展开时内容绘制在 `overlayView_` 的 bounds 之外，被系统裁剪，视觉上看不见（逻辑状态其实已切换）。
+
+#### 修复内容
+
+在 [MilkdropModule.cpp](/Users/jy/CLionProjects/Y2Kmeter/source/ui/modules/MilkdropModule.cpp) 的 `UpdateOverlayViewPlacement()`（`#if JUCE_MAC` 分支内）中，补充对四个面板高度的累加：
+
+```cpp
+auto moduleTopBar = contentLocal.withHeight(26);
+if (isColorPanelOpen_)
+    barH += getColorPanelBounds(moduleTopBar).getHeight();
+if (isEffectsPanelOpen_)
+    barH += getEffectsPanelBounds(moduleTopBar).getHeight();
+if (isWavePanelOpen_)
+    barH += getWavePanelBounds(moduleTopBar).getHeight();
+if (isTweakPanelOpen_)
+    barH += getTweakPanelBounds(moduleTopBar).getHeight();
+```
+
+#### 关键实现细节
+
+- 四个面板彼此互斥（toggle 时互相关闭），同一时刻至多展开一个，因此按实际展开状态累加即可，与 `OverlayView::paint` 的绘制逻辑一致。
+- 该改动位于 `#if JUCE_MAC` 宏块内，Windows 编译时被完全排除，不影响 Windows 端原有绘制路径（`GLView::paint` 的 `#if !JUCE_MAC` 分支）。
+
+### 教训
+
+| 类别 | 教训 |
+|------|------|
+| **JUCE `Point` 宏污染** | macOS 下 `juce_IncludeModuleHeaders.h` 定义的 `#define Point juce::Point` 不会被自动 undef，会与项目代码中带 `juce::` 前缀的 `juce::Point<T>` 二次展开成 `juce::juce::Point<T>`。凡在包含 JUCE plugin_client 头文件后、再包含项目自身头文件的 `.cpp`，若自身头文件用到 `juce::Point`，务必在中间 `#undef Point`。 |
+| **NSOpenGLView 顶层 overlay 窗口高度** | macOS 上因 native GL 遮挡而用独立 NSWindow 绘制控制栏时，窗口高度必须与绘制内容高度一致，否则超出 bounds 的内容会被裁剪。新增可展开面板时，除更新 paint 逻辑外，还要同步更新该 overlay 窗口的高度计算，否则面板"逻辑打开但视觉不可见"。 |

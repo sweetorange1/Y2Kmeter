@@ -33,6 +33,13 @@
 
 #include <juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h>
 
+// JUCE 的 juce_IncludeModuleHeaders.h 在 macOS（JUCE_MAC）下会定义
+//   #define Point juce::Point
+// 且该宏在头文件包含链中未被 undef（Component 已被 juce_BasicNativeHeaders.h 清理，
+// Point 却漏网），会把后续自己头文件里的 juce::Point<int> 二次展开成
+// juce::juce::Point<int>。因此在包含项目自己的头文件之前还原该宏。
+#undef Point
+
 // 我们需要直接访问 Y2KmeterAudioProcessorEditor（填音频源下拉 + 订阅回调）
 #include "../../PluginEditor.h"
 #include "../../PluginProcessor.h"

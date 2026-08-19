@@ -4054,6 +4054,22 @@ void MilkdropModule::UpdateOverlayViewPlacement()
     int barH = 26;
     if (isAutoMode_)
         barH += static_cast<int>(kAutoRowHeight);
+
+    // 展开的二级面板（color/effects/wave/tweak）绘制在控制栏正下方，
+    // 必须把对应面板高度一并计入 overlay NSWindow 的高度，否则面板内容
+    // 会绘制在 overlayView 的 bounds 之外被裁剪（macOS 专属问题）。
+    // 这些面板彼此互斥（toggle 时互相关闭），同一时刻至多展开一个；
+    // 这里按实际展开状态累加，保持与 OverlayView::paint 的绘制逻辑一致。
+    auto moduleTopBar = contentLocal.withHeight(26);
+    if (isColorPanelOpen_)
+        barH += getColorPanelBounds(moduleTopBar).getHeight();
+    if (isEffectsPanelOpen_)
+        barH += getEffectsPanelBounds(moduleTopBar).getHeight();
+    if (isWavePanelOpen_)
+        barH += getWavePanelBounds(moduleTopBar).getHeight();
+    if (isTweakPanelOpen_)
+        barH += getTweakPanelBounds(moduleTopBar).getHeight();
+
     barH = juce::jmin(barH, contentLocal.getHeight());
 
     auto barLocal = contentLocal.withHeight(barH);
