@@ -357,6 +357,62 @@ void SpectrogramModule::paintContent (juce::Graphics& g, juce::Rectangle<int> co
     g.drawImageTransformed (imageBuf, xform, false);
 
     drawAxisLabels (g, plot);
+
+    // 鼠标悬停标尺（实时绘制，与滚动瀑布数据解耦）
+    if (hoverActive)
+        drawHoverRuler(g, canvas);
+}
+
+void SpectrogramModule::mouseMove(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseMove(e);
+
+    const auto canvas = getCanvasBounds(getContentBounds());
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void SpectrogramModule::mouseExit(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseExit(e);
+    if (hoverActive)
+    {
+        hoverActive = false;
+        repaint();
+    }
+}
+
+void SpectrogramModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    if (!hoverActive || !canvas.contains(hoverPos))
+        return;
+
+    const double sampleRate = hub.getSampleRate();
+    const double nyquist    = (sampleRate > 0.0) ? sampleRate * 0.5 : 24000.0;
+    const double fMin       = (double) minFreqHz;
+    const double fMax       = juce::jmin((double) maxFreqHz, nyquist);
+
+    // Y → 频率（对数；顶=高频，底=低频）
+    const float t = 1.0f - (float)(hoverPos.y - canvas.getY())
+                  / juce::jmax(1, canvas.getHeight());
+    const double logA   = std::log10(fMin);
+    const double logB   = std::log10(fMax);
+    const float  freqHz = (float) std::pow(10.0,
+        logA + juce::jlimit(0.0, 1.0, (double) t) * (logB - logA));
+
+    // X → 相对时间（过去为负，越右越新）
+    const float secondsAgo = (float)(canvas.getRight() - hoverPos.x)
+                           / juce::jmax(1.0f, pixelsPerSecond);
+
+    const juce::String readout = PinkXP::formatFreqHz(freqHz)
+                               + "  " + juce::String(-secondsAgo, 1) + " s";
+    PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);
 }
 
 // ----------------------------------------------------------

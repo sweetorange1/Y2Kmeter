@@ -31,6 +31,10 @@ public:
     // Phase F：Hub 分发器回调
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // 鼠标悬停标尺：Crest 历史带内十字线 + 时间/crest 读数
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
@@ -112,6 +116,11 @@ private:
     //   Hub 可能以 60~100Hz 回调 onFrame，但 Dynamics 显示的峰值/DR 数字
     //   肉眼 ~30Hz 已足够。用最小刷新间隔（高 DPI 适度放大）避免每次都刷。
     double lastRepaintMs = 0.0;
+
+    // ---- 鼠标悬停标尺 ----
+    void drawHoverRuler(juce::Graphics& g);
+    juce::Point<int> hoverPos;
+    bool             hoverActive = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DynamicsModule)
 };

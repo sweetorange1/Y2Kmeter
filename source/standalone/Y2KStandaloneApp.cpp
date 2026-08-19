@@ -495,15 +495,15 @@ public:
 
         // 1.15) 恢复上次选择的 UI 主题（PinkXP ThemeId）
         //       · 必须在 createEditor() 之前应用：否则 Editor 构造里所有子组件会先
-        //         用默认 winXP 配色构建一遍，再被主题订阅回调刷新——中间会有一
+        //         用默认 blackPink 配色构建一遍，再被主题订阅回调刷新——中间会有一
         //         帧明显的"先粉后变色"，且部分缓存（LookAndFeel ColourScheme 等）
         //         以构造时的配色固化后需要额外 sendLookAndFeelChange 才能彻底刷新。
-        //       · settings 里存整数（强转 ThemeId），缺键/越界兜底为 winXP。
+        //       · settings 里存整数（强转 ThemeId），缺键/越界兜底为 blackPink。
         //       · ThemeId 枚举的数值顺序不会被动（新主题追加到末尾），因此存值稳定。
         //       · 自定义主题（custom）需要额外读取双色并调用 applyCustomTheme。
         {
             const int savedThemeRaw = getUserSettings()
-                .getIntValue ("ui.themeId", (int) PinkXP::ThemeId::winXP);
+                .getIntValue ("ui.themeId", (int) PinkXP::ThemeId::blackPink);
 
             if (savedThemeRaw == (int) PinkXP::ThemeId::custom)
             {
@@ -522,7 +522,7 @@ public:
             else
             {
                 const auto& themes = PinkXP::getAllThemes();
-                PinkXP::ThemeId targetId = PinkXP::ThemeId::winXP;
+                PinkXP::ThemeId targetId = PinkXP::ThemeId::blackPink;
                 for (const auto& t : themes)
                 {
                     if ((int) t.id == savedThemeRaw) { targetId = t.id; break; }

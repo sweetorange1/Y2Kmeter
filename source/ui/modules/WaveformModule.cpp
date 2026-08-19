@@ -404,6 +404,63 @@ void WaveformModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
         g.drawText ("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
                     42, 12, juce::Justification::centredRight, false);
     }
+
+    // 鼠标悬停标尺（时间 + 响度读数）
+    if (hoverActive)
+        drawHoverRuler(g, canvas);
+}
+
+void WaveformModule::mouseMove(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseMove(e);
+
+    const auto canvas = getCanvasBounds(getContentBounds());
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void WaveformModule::mouseExit(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseExit(e);
+    if (hoverActive)
+    {
+        hoverActive = false;
+        repaint();
+    }
+}
+
+void WaveformModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    if (!hoverActive || !canvas.contains(hoverPos))
+        return;
+
+    const auto inner = canvas.reduced(4);
+    if (inner.isEmpty())
+        return;
+
+    const float gainMul = std::pow(10.0f, gainDb / 20.0f);
+    const float halfH   = (float) inner.getHeight() * 0.48f * gainMul;
+    const float cy      = (float) inner.getCentreY();
+
+    // X → 相对时间（秒，负=过去，最右=当前）
+    const float t = (float)(hoverPos.x - inner.getRight())
+                  / juce::jmax(1, inner.getWidth());
+    const float timeSec = t * displaySeconds;
+
+    // Y → 幅度（±1 满幅）→ dBFS
+    const float amp = (cy - (float) hoverPos.y) / juce::jmax(1.0f, halfH);
+    const float mag = juce::jlimit(0.0f, 1.0f, std::abs(amp));
+    const float db  = juce::Decibels::gainToDecibels(juce::jmax(1.0e-4f, mag));
+
+    const juce::String readout = juce::String(timeSec, 1) + " s  "
+                               + juce::String(db, 1) + " dBFS";
+    PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);
 }
 
 void WaveformModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const

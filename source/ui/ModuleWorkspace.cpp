@@ -141,6 +141,7 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::vuMeter:           return "vu_meter";
         case ModuleType::spectrogram:       return "spectrogram";
         case ModuleType::spectrogram3d:    return "spectrogram3d";
+        case ModuleType::stereoField:       return "stereo_field";
         case ModuleType::tamagotchi:        return "tamagotchi";
         case ModuleType::milkdrop:         return "milkdrop";
     }
@@ -174,6 +175,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "vu_meter",           ModuleType::vuMeter },
         { "spectrogram",        ModuleType::spectrogram },
         { "spectrogram3d",     ModuleType::spectrogram3d },
+        { "stereo_field",      ModuleType::stereoField },
         { "tamagotchi",         ModuleType::tamagotchi },
         { "milkdrop",          ModuleType::milkdrop },
     };
@@ -4631,8 +4633,9 @@ juce::Rectangle<int> ModuleWorkspace::getDecoratedBounds (juce::Rectangle<int> i
 juce::Rectangle<int> ModuleWorkspace::getPerlerBeadsCheckboxBounds (juce::Rectangle<int> imgBounds) const
 {
     // 整行命中区：位于图片正下方，行高 perlerBeadsRowH，
-    //   宽度 = 方框 + 4px 间距 + "PerlerBeads" 文字宽度（近似 90px），整体左对齐图片左边
-    const int rowW = perlerBeadsBoxSize + 4 + 90;
+    //   宽度 = 方框 + 4px 间距 + "PerlerBeads" 文字宽度（11pt bold 约需 105px，
+    //   原 90px 偏小会裁掉末尾 "ds"），整体左对齐图片左边
+    const int rowW = perlerBeadsBoxSize + 4 + 105;
     const int rowH = perlerBeadsRowH;
     const int x    = imgBounds.getX();
     const int y    = imgBounds.getBottom() + perlerBeadsRowGap;

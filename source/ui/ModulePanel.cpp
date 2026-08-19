@@ -27,7 +27,7 @@ juce::String getModuleDisplayName(ModuleType t)
 {
     switch (t)
     {
-        case ModuleType::eq:                return "EQ";
+        case ModuleType::eq:                return "Spectrum Perlerbeads";
         case ModuleType::loudness:          return "Loudness";
         case ModuleType::oscilloscope:      return "Oscilloscope";
         case ModuleType::spectrum:          return "Spectrum";
@@ -46,6 +46,7 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::vuMeter:           return "VU Meter";
         case ModuleType::spectrogram:       return "Spectrogram";
         case ModuleType::spectrogram3d:    return "Spectrogram 3D";
+        case ModuleType::stereoField:       return "Stereo Field";
         case ModuleType::tamagotchi:        return "Tamagotchi";
         case ModuleType::milkdrop:         return "Milkdrop";
 

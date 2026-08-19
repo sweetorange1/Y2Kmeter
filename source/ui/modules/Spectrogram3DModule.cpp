@@ -38,16 +38,34 @@ Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
     speedLabel.setFont   (PinkXP::getFont (11.0f, juce::Font::bold));
     speedLabel.setText   ("SPEED", juce::dontSendNotification);
 
+    // ---------- 山峰着色按钮（默认按下：跟随主题着色）----------
+    themeColourBtn.setClickingTogglesState (true);
+    themeColourBtn.setToggleState (true, juce::dontSendNotification);
+    themeColourBtn.setTooltip ("山峰着色跟随当前主题（关闭则使用固定蓝→红热力图）");
+    themeColourBtn.onClick = [this]()
+    {
+        useThemeColours = themeColourBtn.getToggleState();
+        depthPalettesDirty = true;
+        imageCacheDirty    = true;
+        repaint();
+    };
+
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
         speedLabel.setColour  (juce::Label::textColourId,          PinkXP::ink);
         speedSlider.setColour (juce::Slider::textBoxTextColourId,  PinkXP::ink);
         speedLabel.repaint();
         speedSlider.repaint();
+        themeColourBtn.repaint();
+        // 主题切换 → 山峰主题色与背景 fade 目标变化 → 重建色板 + 重绘
+        depthPalettesDirty = true;
+        imageCacheDirty    = true;
+        repaint();
     });
 
     addAndMakeVisible (speedSlider);
     addAndMakeVisible (speedLabel);
+    addAndMakeVisible (themeColourBtn);
 
     // 预分配历史缓冲 + 幅度→色板 LUT
     buildMagLut();
@@ -83,7 +101,9 @@ void Spectrogram3DModule::layoutContent (juce::Rectangle<int> contentBounds)
 
     auto labelArea = rightPanel.removeFromTop (14);
     speedLabel.setBounds  (labelArea);
+    auto btnArea = rightPanel.removeFromBottom (18);
     speedSlider.setBounds (rightPanel);
+    themeColourBtn.setBounds (btnArea);
 }
 
 void Spectrogram3DModule::resized()
@@ -210,18 +230,24 @@ float Spectrogram3DModule::freqToScreenX (int binIndex, int totalBins) const
 }
 
 // ----------------------------------------------------------
-// 强度 t∈[0,1] → 热力图颜色（低→蓝，高→红）
+// 强度 t∈[0,1] → 山峰颜色（按 useThemeColours 选择热力图或主题色阶）
+// ----------------------------------------------------------
+juce::Colour Spectrogram3DModule::valueToColour (float t) const noexcept
+{
+    t = juce::jlimit (0.0f, 1.0f, t);
+    return useThemeColours ? themeValueToColour (t) : heatValueToColour (t);
+}
+
+// ----------------------------------------------------------
+// 蓝→红固定热力图（低=深蓝，高=红），不依赖主题
 //
 //   t=0.00 → 深蓝（无信号）
 //   t=0.25 → 青色
 //   t=0.50 → 绿色
 //   t=0.75 → 黄色
 //   t=1.00 → 红色（满幅爆点）
-//
-//   色彩不依赖主题（蓝→红为固定热力图配色），
-//   但 depthFade 会在 paint 侧叠加——旧切片整体向深色 fade。
 // ----------------------------------------------------------
-juce::Colour Spectrogram3DModule::valueToColour (float t, float depthFade) noexcept
+juce::Colour Spectrogram3DModule::heatValueToColour (float t) noexcept
 {
     t = juce::jlimit (0.0f, 1.0f, t);
 
@@ -250,10 +276,58 @@ juce::Colour Spectrogram3DModule::valueToColour (float t, float depthFade) noexc
             break;
         }
     }
+    return c;
+}
 
-    // 深度 fade：旧切片向深色融合（用深蓝黑作为 fade 目标）
-    const float fade = juce::jlimit (0.0f, 1.0f, depthFade);
-    return c.interpolatedWith (juce::Colour (8, 8, 24), fade * 0.65f);
+// ----------------------------------------------------------
+// 主题色阶（低=深色主题色，高=亮色主题色），跟随当前颜色预设
+//
+//   自定义主题：
+//     t=0.00 → primary 深色（左侧强调色的暗部）
+//     t=1.00 → secondary   （右侧基色，满幅峰值）
+//   预设主题：
+//     t=0.00 → pink700（最深）
+//     t=0.30 → pink500
+//     t=0.60 → pink300
+//     t=0.85 → pink50 （最亮）
+//     t=1.00 → sel    （满幅爆点高亮）
+// ----------------------------------------------------------
+juce::Colour Spectrogram3DModule::themeValueToColour (float t) noexcept
+{
+    t = juce::jlimit (0.0f, 1.0f, t);
+
+    // 自定义主题：高能量（满幅）使用右侧选择的基色（secondary），
+    //   低能量（无信号）直接使用左侧强调色（accent / primary），
+    //   形成 accent → secondary 的渐变（不做变深，避免低能量处发脏）。
+    if (PinkXP::isCustomThemeActive())
+    {
+        const juce::Colour low  = PinkXP::getCustomPrimary();
+        const juce::Colour high = PinkXP::getCustomSecondary();
+        return low.interpolatedWith (high, t);
+    }
+
+    struct Stop { float t; juce::Colour c; };
+    const Stop stops[] = {
+        { 0.00f, PinkXP::pink700 },
+        { 0.30f, PinkXP::pink500 },
+        { 0.60f, PinkXP::pink300 },
+        { 0.85f, PinkXP::pink50  },
+        { 1.00f, PinkXP::sel     },
+    };
+    constexpr int N = (int) (sizeof (stops) / sizeof (stops[0]));
+
+    juce::Colour c = stops[N - 1].c;
+    for (int i = 0; i < N - 1; ++i)
+    {
+        if (t <= stops[i + 1].t)
+        {
+            const float span = juce::jmax (1.0e-6f, stops[i + 1].t - stops[i].t);
+            const float u    = juce::jlimit (0.0f, 1.0f, (t - stops[i].t) / span);
+            c = stops[i].c.interpolatedWith (stops[i + 1].c, u);
+            break;
+        }
+    }
+    return c;
 }
 
 // ----------------------------------------------------------
@@ -350,6 +424,58 @@ void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> 
 
     // 轴标签浮绘在 3D 视图上方（不进入 Image，保证文字清晰度）
     drawAxisLabels (g, plot);
+
+    // 鼠标悬停标尺（实时绘制在缓存之上）
+    if (hoverActive)
+        drawHoverRuler(g, canvas);
+}
+
+void Spectrogram3DModule::mouseMove(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseMove(e);
+
+    const auto canvas = getCanvasBounds(getContentBounds());
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void Spectrogram3DModule::mouseExit(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseExit(e);
+    if (hoverActive)
+    {
+        hoverActive = false;
+        repaint();
+    }
+}
+
+void Spectrogram3DModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    if (!hoverActive || !canvas.contains(hoverPos))
+        return;
+
+    const double sampleRate = hub.getSampleRate();
+    const double nyquist    = (sampleRate > 0.0) ? sampleRate * 0.5 : 24000.0;
+    const double fMin       = (double) minFreqHz;
+    const double fMax       = juce::jmin((double) maxFreqHz, nyquist);
+
+    // X → 频率（对数；频率轴宽度 = projBinWidth × (numBins-1)）
+    const float freqAxisW = projBinWidth * (float)(numBins - 1);
+    const float t = (float)(hoverPos.x - canvas.getX() - projOriginX)
+                  / juce::jmax(1.0f, freqAxisW);
+    const double logA   = std::log10(fMin);
+    const double logB   = std::log10(fMax);
+    const float  freqHz = (float) std::pow(10.0,
+        logA + juce::jlimit(0.0, 1.0, (double) t) * (logB - logA));
+
+    const juce::String readout = PinkXP::formatFreqHz(freqHz);
+    PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);
 }
 
 // ----------------------------------------------------------
@@ -384,11 +510,12 @@ void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
     if (nRows == depthPalettesRows && ! depthPalettesDirty)
         return;
 
-    const juce::Colour fadeTarget (8, 8, 24);
-    // 先算基准色板（depthFade=0）
+    // 深度 fade 目标：主题模式向画布底色融合，热力图模式向深蓝黑融合
+    const juce::Colour fadeTarget = useThemeColours ? PinkXP::content : juce::Colour (8, 8, 24);
+    // 先算基准色板（无深度 fade）
     std::array<juce::Colour, 256> basePalette;
     for (int i = 0; i < 256; ++i)
-        basePalette[(size_t) i] = valueToColour ((float) i * (1.0f / 255.0f), 0.0f);
+        basePalette[(size_t) i] = valueToColour ((float) i * (1.0f / 255.0f));
 
     for (int d = 0; d < nRows; ++d)
     {

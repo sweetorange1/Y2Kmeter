@@ -35,6 +35,10 @@ public:
     // AnalyserHub::FrameListener
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // 鼠标悬停标尺：仪表区域内十字线 + 频率读数
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
     void paintContent  (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
@@ -52,8 +56,14 @@ private:
     // 根据当前 canvas 尺寸计算 isometric 投影参数（自适配缩放）
     void recomputeProjection (int canvasW, int canvasH);
 
-    // 强度 t∈[0,1] + 深度 d∈[0,1]（0=最新,1=最旧）→ 蓝→红热力图颜色
-    static juce::Colour valueToColour (float t, float depthFade) noexcept;
+    // 强度 t∈[0,1] → 山峰颜色（按 useThemeColours 选择热力图或主题色阶）
+    juce::Colour valueToColour (float t) const noexcept;
+
+    // 蓝→红固定热力图（低=深蓝，高=红），不依赖主题
+    static juce::Colour heatValueToColour (float t) noexcept;
+
+    // 主题色阶（低=深色主题色，高=亮色主题色），跟随当前颜色预设
+    static juce::Colour themeValueToColour (float t) noexcept;
 
     // 频率 → 屏幕 X（等距线性映射）
     float freqToScreenX (int binIndex, int totalBins) const;
@@ -94,8 +104,10 @@ private:
     float  columnAccumulator = 0.0f;
 
     // ---- 右侧控制条 ----
-    juce::Slider speedSlider;
-    juce::Label  speedLabel;
+    juce::Slider     speedSlider;
+    juce::Label      speedLabel;
+    juce::TextButton themeColourBtn { "TINT" };
+    bool             useThemeColours = true;  // 默认按下：山峰跟随主题着色
     static constexpr int sliderPanelW = 42;
 
     int themeSubToken = -1;
@@ -147,6 +159,11 @@ private:
     std::vector<std::array<juce::Colour, kPaletteLevels>> depthPalettes;
     int  depthPalettesRows  = 0;    // 当前 depthPalettes 对应的有效行数
     bool depthPalettesDirty = true;
+
+    // ---- 鼠标悬停标尺 ----
+    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);
+    juce::Point<int> hoverPos;
+    bool             hoverActive = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Spectrogram3DModule)
 };

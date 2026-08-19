@@ -167,6 +167,7 @@
 | [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成） | `Spectrum` |
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
+| [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
@@ -251,6 +252,8 @@
 - **主题订阅**：`subscribeThemeChanged(cb) → token`，用于组件切主题时刷新缓存的颜色。
 - **桌面纹理共享缓存**：`getSharedDesktopTexture(w,h)` 跨实例复用（多插件实例共用同一张 Image），主题切换时 `invalidateDesktopTextureCache()`。
 - **两种字体接口**：`getFont(h)` 有 1.5x 放大（正文）；`getAxisFont(h)` 保持原大小（坐标轴刻度专用）。
+- **悬停标尺公共辅助（v2.7.0 新增）**：`formatFreqHz(hz)` 格式化频率读数（`<1kHz → "xxx Hz"`，`≥1kHz → "x.x kHz"`）；`drawHoverRuler(g, canvas, pos, readout)` 在仪表区绘制十字线 + 鼠标右上方读数框（自动越界回退），供频谱类/时序类模块复用。
+- **默认主题（v2.7.0 变更）**：全局默认主题由 `winXP` 改为 `blackPink`（首次无存档启动时的缺省配色）。
 
 ---
 
@@ -3213,6 +3216,92 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 1. **屏蔽日志文件 ≠ 屏蔽日志生成逻辑**：仅移除 `FileLogger` 挂载后，`writeToLog` 的参数（字符串拼接）仍会在运行时执行。必须改用 `Y2K_LOG` 宏（关闭时展开为空表达式），才能在预处理阶段彻底丢弃拼接开销。
 2. **日志宏参数禁止含副作用**：`Y2K_LOG(msg)` 关闭时 `msg` 不会求值，若参数里含会修改状态的函数调用，副作用会被一并删除；约定参数只能是纯字符串/拼接表达式。
 3. **`std::atomic<double>` 在 x64 下是 lock-free**：`cachedSampleRate` 用 `relaxed` 读写，与普通 `double` 读写开销基本一致，且该值运行期不变，无实际竞争。
+
+---
+
+## v2.7.0：Stereo Field 声像雷达 + 6 模块鼠标悬停标尺 + Spectrum Perlerbeads 重构 + 默认主题 Black Pink
+
+本章记录 v2.7.0 版本相对 v2.6.8 的改动：新增 **Stereo Field** 半圆雷达声像指示模块；为 **Spectrum / Spectrogram / Spectrogram 3D / Spectrum Perlerbeads / Waveform / Dynamics Crest History** 六个模块统一加入鼠标悬停标尺；将早期 **EQ 模块重构为 Spectrum Perlerbeads**（三按钮 → 双滑块频率范围）；并把全局默认主题改为 **Black Pink**，Horizontal Bar 布局预设中的 Oscilloscope 替换为 Stereo Field。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/modules/StereoFieldModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | **新增**：半圆雷达声像指示模块（见下） |
+| [`source/ui/PinkXPStyle.h/.cpp`](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 新增 `formatFreqHz()` / `drawHoverRuler()` 悬停标尺公共辅助；`drawLinearSlider` 支持 `TwoValue` 双滑块；全局默认主题 `winXP` → `blackPink` |
+| [`source/ui/modules/EqModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/EqModule.h) | 改名 `Spectrum Perlerbeads`；LOW/MID/HIGH 三按钮 → 双滑块频率范围；SIZE 滑条范围 1–20 默认 4；右键弹模块选择器；鼠标悬停标尺 |
+| [`source/ui/modules/SpectrumModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/SpectrumModule.h) | 鼠标悬停标尺（频率 + dBFS） |
+| [`source/ui/modules/SpectrogramModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | 鼠标悬停标尺（频率 + 相对时间） |
+| [`source/ui/modules/Spectrogram3DModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | 鼠标悬停标尺（频率） |
+| [`source/ui/modules/WaveformModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | 鼠标悬停标尺（相对时间 + 响度 dBFS） |
+| [`source/ui/modules/DynamicsModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | Crest History 区域鼠标悬停标尺（时间 + crest dB） |
+| [`source/ui/modules/FineSplitModules.h/.cpp`](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 独立 `DynamicsCrestModule` 增加鼠标悬停标尺 |
+| [`source/ui/ModuleWorkspace.h/.cpp`](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | 新增 `ModuleType::stereoField` 枚举 + 字符串映射 + 可用列表；PerlerBeads 复选框文字宽度修复（90→105） |
+| [`source/ui/ModulePanel.cpp`](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | `getModuleDisplayName`：`eq → "Spectrum Perlerbeads"`；新增 `stereoField → "Stereo Field"` |
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | 工厂/可用列表注册 `stereoField`；模块选择器顺序调整；Horizontal Bar 预设 Oscilloscope→Stereo Field；窗口拖拽松手顶部边界保护 |
+| [`source/standalone/Y2KStandaloneApp.cpp`](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | Standalone 主题恢复缺省兜底 `winXP` → `blackPink` |
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 新增 StereoFieldModule 源文件；版本号 2.6.8 → 2.7.0 |
+
+### 改动 1：Stereo Field 半圆雷达声像指示模块（全新）
+
+- **数据源**：复用 `AnalyserHub::Kind::Oscilloscope`（2048 样本立体声），后端音频线程零新增计算。
+- **几何**：圆心在底部、圆弧朝上的半圆极坐标图；左右各固定预留 10px 侧边留白，直径端点贴近仪表区边界。
+- **映射算法**：
+  - `balance = (|R| - |L|) / (|L|+|R|)` → 方向角 `ang = balance × (±90°)`（纯左 → 左水平线 9 点方向，纯右 → 右水平线 3 点方向，居中 → 顶部 12 点方向）。
+  - `peak = max(|L|, |R|)` → 径向距离 `rho = peak × R`（主导声道幅度驱动，散点最大包络正好落在半圆上）。
+- **固定比例尺**：样本能量 [0,1] 线性映射到半径 R，不做随信号强度的实时自动缩放；能量刻度环（-12 / -6 / -2.5 / 0 dB）固定在外轮廓内。
+- **渐隐残影**：新样本点累积到离屏 `trailImage`，每帧 `multiplyAlpha(0.92)` 衰减旧点。
+- **性能优化**：点数量上限固定 512（不随画布宽度线性增长）；离屏分辨率动态降采样（对角线 >700px 反比缩放，下限 25%）。
+
+### 改动 2：六模块统一鼠标悬停标尺
+
+- **公共能力**：`PinkXP::drawHoverRuler(g, canvas, pos, readout)` 以鼠标位置画十字线（半透明墨色竖线 + 横线），并在鼠标右上方画读数框（自动越界回退到左/下侧）；`PinkXP::formatFreqHz(hz)` 统一频率读数格式。
+- **统一模式**：各模块重写 `mouseMove`（调用基类保持边缘光标/按钮 hover，记录 `hoverPos`/`hoverActive` 并 `repaint`）+ `mouseExit`（清除）+ `paintContent` 末尾（或 `PixelEqGraph::paint` 末尾）实时绘制。
+- **读数只与鼠标位置有关，与音频信号无关**：
+  | 模块 | 读数内容 |
+  |---|---|
+  | Spectrum | 频率 + dBFS（Y 由 -80~0 dBFS 反解） |
+  | Spectrogram | 频率 + 相对时间（X 用 `pixelsPerSecond` 换算秒） |
+  | Spectrogram 3D | 频率（对数频率轴反解） |
+  | Spectrum Perlerbeads (Eq) | 频率 + dB（Y 由 -50~+50 dB 反解） |
+  | Waveform | 相对时间 + dBFS（Y 由幅度反解，含增益） |
+  | Dynamics Crest History（含独立 `DynamicsCrestModule`） | 相对时间 + crest dB（Y 由 0~30 dB 反解） |
+- **带离屏缓存的模块**（Spectrum / Spectrogram 3D）标尺绘制在屏幕层（缓存 blit 之后），不写入缓存，鼠标移动实时刷新且开销极低。
+
+### 改动 3：EqModule → Spectrum Perlerbeads 重构
+
+- **改名**：`getModuleDisplayName(ModuleType::eq)` 由 `"EQ"` 改为 `"Spectrum Perlerbeads"`；布局持久化字符串标识 `"eq"` 保持不变（旧存档仍可识别）。
+- **三按钮 → 双滑块**：删除 `BandSelector`（LOW/MID/HIGH），`PixelEqGraph` 的 `Band` 枚举/`setActiveBand` 替换为 `setFreqRange(minHz, maxHz)`；新增 `juce::Slider freqRangeSlider`（`TwoValueHorizontal`，20–20000Hz，默认 20/20000）+ `freqRangeLabel`（常驻显示 Hz 数值，8px 小字）。
+- **图像联动**：频段映射从三段改为按 Hz 连续映射，用 `pow(norm, 1/2.3)` 与 `AnalyserHub` 的 `skew = norm^2.3` 互逆，保证滑块值精确对应频谱频率轴。
+- **SIZE 滑条**：范围 4–24 → **1–20**，默认值 10 → **4**；`PixelEqGraph::cellSize` 默认同步 4。
+- **刻度尺留白**：`scaleMarginLeft` 36 → 30，保证 +40/+20/0/-20/-40 文本不被遮挡。
+- **旧存档兼容**：`restoreModuleSpecificState` 新旧分流——新存档恢复 `minFreq/maxFreq`，旧存档（只有 `cellSize`）重置为默认 20/20000。
+- **右键弹模块选择器**：`PixelEqGraph` 拦截鼠标，`mouseDown` 转发给父模块，`EqModule::mouseDown` 显式处理右键 → `onRightClick`（左键交还基类）。
+
+### 改动 4：默认主题 Black Pink + Horizontal Bar 预设替换
+
+- **默认主题**：全局 `gCurrentThemeId` 初始值、Standalone `ui.themeId` 缺省值与越界兜底值，均由 `winXP` 改为 `blackPink`（已有存档用户仍恢复其之前主题）。
+- **Horizontal Bar(T/B)**：`horizOrder` 中第 4 项 `ModuleType::oscilloscope` → `ModuleType::stereoField`，删除为 Oscilloscope 设置 Lissajous 模式的代码，位置/大小不变（沿用 0.7 宽度比例）。
+
+### 改动 5：窗口拖拽顶部边界保护（松手判断）
+
+- **背景**：早期版本在 `mouseDrag` 中实时钳制窗口顶部，导致拖过屏幕上方时窗口持续闪现，且多屏场景下无法把窗口拖到上方屏幕。
+- **方案**：移除 `mouseDrag` 实时钳制，改为 `mouseUp` 松手时判断——若窗口顶部越过当前显示器 `userArea` 顶部，则弹回 `userArea.getY()`；多屏场景下松手时窗口已在目标屏，`getDisplayForRect` 判定切换到目标屏，不会误弹回。
+
+### 改动 6：其他修复
+
+- **模块选择器顺序**：`ModuleType::eq`（Spectrum Perlerbeads）从第一位移到 `ModuleType::spectrum` 之后（真正生效处在 `PluginEditor::setAvailableModuleTypes`）。
+- **PerlerBeads 复选框文字宽度**：`getPerlerBeadsCheckboxBounds` 文字宽度估算 90 → 105，修复 `"PerlerBeads"` 末尾 `ds` 被 `drawText` 裁剪成 `PerlerBea` 的问题。
+- **双滑块显示修复**：`PinkXPLookAndFeel::drawLinearSlider` 此前把 `minSliderPos`/`maxSliderPos` 写成匿名参数忽略，导致 `TwoValueHorizontal` 只画一个滑块、右侧滑块消失、拖动无动画；重写后正确填充 min↔max 选中区并绘制两个 thumb。
+
+### 踩坑记录
+
+1. **枚举插入中间会重编号后续值**：`ModuleType::stereoField` 插入在 `spectrogram3d` 与 `tamagotchi` 之间，使 `tamagotchi`/`milkdrop` 枚举数值 +1。布局持久化走字符串映射（`moduleTypeToString`/`stringToModuleType`）不受影响，但**必须全量构建**（避免 Release 增量构建下的枚举重编号 0x80000003 崩溃，见 §6.16）。
+2. **TwoValue 滑块的 `drawLinearSlider` 只被调用一次**：JUCE 对 `TwoValueHorizontal` 只在 `sliderPos`/`minSliderPos`/`maxSliderPos` 三个参数里传递两个 thumb 位置，若 LookAndFeel 忽略后两个参数就只剩单滑块，且选中区填充错误。
+3. **Stereo Field 散点收缩成三角形**：半径曾用 `(|L|+|R|)/2`（平均能量），纯左/纯右满幅时半径只有 R/2，散点最大包络收缩成倒三角形；改用 `max(|L|,|R|)` 后三种满幅极端情况都落回半圆边界。
+4. **Stereo Field 大窗口卡顿**：点数量曾随画布宽度线性增长（`cw*2`）+ 离屏图 1:1 全分辨率，拖大后每帧数千次 `fillRect` + 全图 `multiplyAlpha` 遍历；改为固定 512 点 + 700px 阈值降采样（下限 25%）后显著缓解。
+5. **子组件拦截鼠标导致右键/悬停失效**：`EqModule::PixelEqGraph` 覆盖内容区，必须显式 `mouseDown` 转发 + 重写 `mouseMove/mouseExit`，右键才能触发模块选择器、悬停标尺才能工作。
+6. **过时注释易残留**：侧边留白由"动态缩放"改为"固定 10px"、`freqRangeLabel` 由"拖动显示"改为"常驻显示"时，头文件注释未同步；审查时需对照实际实现修正注释。
 
 ---
 

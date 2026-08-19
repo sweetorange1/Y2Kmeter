@@ -92,6 +92,50 @@ namespace PinkXP
         return makeFontRaw(height, styleFlags);
     }
 
+    juce::String formatFreqHz(float hz)
+    {
+        if (hz >= 1000.0f)
+            return juce::String(hz / 1000.0f, 1) + " kHz";
+        return juce::String((int) std::lround(hz)) + " Hz";
+    }
+
+    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas,
+                        juce::Point<int> pos, const juce::String& readout)
+    {
+        if (readout.isEmpty())
+            return;
+
+        const int x = pos.x;
+        const int y = pos.y;
+
+        // 十字线（竖线 + 横线），半透明墨色，覆盖整个仪表区域
+        g.setColour(ink.withAlpha(0.55f));
+        g.drawVerticalLine(x, (float) canvas.getY(), (float) canvas.getBottom());
+        g.drawHorizontalLine(y, (float) canvas.getX(), (float) canvas.getRight());
+
+        // 读数框：绘制在鼠标右上方，尺寸按文本估算
+        const int fontH = 9;
+        const int padX  = 5;
+        const int boxH  = 16;
+        const int textW = juce::jmax(40, (int) std::ceil(getAxisFont((float) fontH).getStringWidth(readout)) + padX * 2);
+
+        int bx = x + 12;
+        int by = y - boxH - 8;
+        // 避免读数框超出仪表区域：右侧/顶部越界时回退到鼠标左/下侧
+        if (bx + textW > canvas.getRight())
+            bx = x - textW - 12;
+        if (by < canvas.getY())
+            by = y + 8;
+        bx = juce::jlimit(canvas.getX(), canvas.getRight() - textW, bx);
+        by = juce::jlimit(canvas.getY(), canvas.getBottom() - boxH, by);
+
+        g.setColour(ink.withAlpha(0.85f));
+        g.fillRect(bx, by, textW, boxH);
+        g.setColour(hl);
+        g.setFont(getAxisFont((float) fontH, juce::Font::plain));
+        g.drawText(readout, bx, by, textW, boxH, juce::Justification::centred, false);
+    }
+
     void drawRaised(juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill)
     {
         g.setColour(fill);
@@ -924,7 +968,7 @@ namespace PinkXP
     }
 
     // 当前主题状态
-    static ThemeId gCurrentThemeId = ThemeId::winXP;
+    static ThemeId gCurrentThemeId = ThemeId::blackPink;
 
     // 主题变更回调表
     struct ThemeSub { int token; ThemeChangedCallback cb; };
@@ -1187,10 +1231,13 @@ juce::Font PinkXPLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHei
 }
 
 void PinkXPLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w, int h,
-                                         float sliderPos, float, float,
+                                         float sliderPos, float minSliderPos, float maxSliderPos,
                                          const juce::Slider::SliderStyle style, juce::Slider& slider)
 {
-    const bool isVertical = (style == juce::Slider::LinearVertical);
+    juce::ignoreUnused(slider);
+
+    const bool isVertical = (style == juce::Slider::LinearVertical
+                             || style == juce::Slider::TwoValueVertical);
 
     juce::Rectangle<int> track;
     if (isVertical)
@@ -1205,6 +1252,48 @@ void PinkXPLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w,
     }
     PinkXP::drawSunken(g, track, juce::Colours::white);
 
+    const int thumbW = isVertical ? juce::jmin(w - 4, 18) : 12;
+    const int thumbH = isVertical ? 12 : juce::jmin(h - 4, 18);
+
+    const bool isTwoValue = (style == juce::Slider::TwoValueHorizontal
+                             || style == juce::Slider::TwoValueVertical);
+
+    if (isTwoValue)
+    {
+        // 双滑块：填充 min↔max 之间的选中区，并绘制两个 thumb。
+        //   JUCE 对 TwoValue 只调用一次本函数，两个 thumb 位置分别由
+        //   minSliderPos / maxSliderPos 传入（sliderPos 仅是当前被拖动的 thumb）。
+        if (isVertical)
+        {
+            // 垂直方向：value 越大 thumb 越靠上，故 max 在上、min 在下
+            const int top    = juce::jlimit(track.getY() + 2, track.getBottom() - 2, (int) maxSliderPos);
+            const int bottom = juce::jlimit(track.getY() + 2, track.getBottom() - 2, (int) minSliderPos);
+            g.setColour(PinkXP::sel);
+            g.fillRect(track.getX() + 2, top, track.getWidth() - 4, juce::jmax(0, bottom - top));
+        }
+        else
+        {
+            const int left  = juce::jlimit(track.getX() + 2, track.getRight() - 2, (int) minSliderPos);
+            const int right = juce::jlimit(track.getX() + 2, track.getRight() - 2, (int) maxSliderPos);
+            g.setColour(PinkXP::sel);
+            g.fillRect(left, track.getY() + 2, juce::jmax(0, right - left), track.getHeight() - 4);
+        }
+
+        auto drawThumb = [&](float pos)
+        {
+            juce::Rectangle<int> thumb;
+            if (isVertical)
+                thumb = juce::Rectangle<int>(x + (w - thumbW) / 2, (int) pos - thumbH / 2, thumbW, thumbH);
+            else
+                thumb = juce::Rectangle<int>((int) pos - thumbW / 2, y + (h - thumbH) / 2, thumbW, thumbH);
+            PinkXP::drawRaised(g, thumb, PinkXP::btnFace);
+        };
+        drawThumb(minSliderPos);
+        drawThumb(maxSliderPos);
+        return;
+    }
+
+    // ---- 单值滑块（保持原逻辑）----
     if (isVertical)
     {
         int fillTop = juce::jlimit(track.getY() + 2, track.getBottom() - 2, (int) sliderPos);
@@ -1218,8 +1307,6 @@ void PinkXPLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w,
         g.fillRect(track.getX() + 2, track.getY() + 2, fillRight - (track.getX() + 2), track.getHeight() - 4);
     }
 
-    const int thumbW = isVertical ? juce::jmin(w - 4, 18) : 12;
-    const int thumbH = isVertical ? 12 : juce::jmin(h - 4, 18);
     juce::Rectangle<int> thumb;
     if (isVertical)
         thumb = juce::Rectangle<int>(x + (w - thumbW) / 2, (int) sliderPos - thumbH / 2, thumbW, thumbH);
@@ -1227,8 +1314,6 @@ void PinkXPLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w,
         thumb = juce::Rectangle<int>((int) sliderPos - thumbW / 2, y + (h - thumbH) / 2, thumbW, thumbH);
 
     PinkXP::drawRaised(g, thumb, PinkXP::btnFace);
-
-    juce::ignoreUnused(slider);
 }
 
 juce::Font PinkXPLookAndFeel::getLabelFont(juce::Label&)

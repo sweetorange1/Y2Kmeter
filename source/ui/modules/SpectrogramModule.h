@@ -34,6 +34,10 @@ public:
     // AnalyserHub::FrameListener
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // 鼠标悬停标尺：仪表区域内十字线 + 频率/时间读数
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
     // 默认每格像素尺寸（正方形），决定"默认状态下"方格是多大像素
     void  setCellPx (int px);
     int   getCellPx() const noexcept { return cellPx; }
@@ -148,6 +152,11 @@ private:
 
     // 根据当前主题刷新 spectrogramBaseColour_ / spectrogramAccentColour_
     void refreshSpectrogramColours();
+
+    // ---- 鼠标悬停标尺 ----
+    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);
+    juce::Point<int> hoverPos;
+    bool             hoverActive = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrogramModule)
 };

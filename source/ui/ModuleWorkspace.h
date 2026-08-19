@@ -43,6 +43,9 @@ enum class ModuleType
     // 3D 频谱瀑布图（45° 俯视三维曲面效果，复用 Spectrum 路 FFT 幅度）
     spectrogram3d,
 
+    // 声相指示（半圆雷达，复用 Oscilloscope 立体声样本，幅度驱动声像位置）
+    stereoField,
+
     // Tamagotchi 小宠物模块（独立模块，不走拖图逻辑）
     tamagotchi,
 
@@ -873,11 +876,12 @@ private:
 
     ModuleFactory factory;
     juce::Array<ModuleType> availableTypes {
-        ModuleType::eq, ModuleType::loudness, ModuleType::lufsRealtime, ModuleType::truePeak,
+        ModuleType::loudness, ModuleType::lufsRealtime, ModuleType::truePeak,
         ModuleType::vuMeter,
         ModuleType::oscilloscope, ModuleType::oscilloscopeWave,
         ModuleType::waveform,
-        ModuleType::spectrum, ModuleType::spectrogram, ModuleType::spectrogram3d,
+        ModuleType::spectrum, ModuleType::eq, ModuleType::spectrogram, ModuleType::spectrogram3d,
+        ModuleType::stereoField,
         ModuleType::tamagotchi,
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 

@@ -32,6 +32,10 @@ public:
     // Phase F：Hub 分发器回调
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // 鼠标悬停标尺：仪表区域内十字线 + 频率/响度读数
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
     void setPeakHoldEnabled(bool b);
     bool isPeakHoldEnabled() const noexcept { return peakHoldEnabled; }
 
@@ -101,8 +105,8 @@ private:
     static constexpr float maxFreqHz = 20000.0f;
     static constexpr float minDb     = -80.0f;
     static constexpr float maxDb     = 0.0f;
-    static constexpr float peakHoldDuration = 2000.0f; // 2s
-    static constexpr float peakFallRate     = 0.5f;     // dB/frame 下降率
+    static constexpr float peakHoldDuration   = 3500.0f; // 3.5s 滞留
+    static constexpr float peakFallRatePerSec = 12.0f;   // dB/s 连续下降速率
 
     bool peakHoldEnabled = true;
     bool slopeEnabled    = true;
@@ -124,6 +128,11 @@ private:
     juce::TextButton btnPeak  { "Peak"  };
     juce::TextButton btnSlope { "Slope" };
     static constexpr int toolbarH = 26;
+
+    // ---- 鼠标悬停标尺 ----
+    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);
+    juce::Point<int> hoverPos;
+    bool             hoverActive = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectrumModule)
 };

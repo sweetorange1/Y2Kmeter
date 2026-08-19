@@ -143,6 +143,10 @@ public:
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // 鼠标悬停标尺：Crest 历史带内十字线 + 时间/crest 读数
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
     void layoutContent(juce::Rectangle<int> contentBounds) override;
@@ -174,6 +178,11 @@ private:
     // 主题订阅 token：切换主题时重新下发 spanLabel 的 textColourId，
     //   避免 Label 缓存的旧 ink 颜色在主题切换后与标题栏不一致。
     int themeSubToken = -1;
+
+    // ---- 鼠标悬停标尺 ----
+    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> plot);
+    juce::Point<int> hoverPos;
+    bool             hoverActive = false;
 };
 
 // ==========================================================

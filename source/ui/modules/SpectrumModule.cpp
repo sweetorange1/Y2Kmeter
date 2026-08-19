@@ -170,8 +170,13 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     rebuildDisplay();
 
     // 峰值保持 / 下降更新
+    //   · 滞留超过 peakHoldDuration 后按时间连续下降（帧率无关），避免固定步长的离散跳变；
+    //   · 不做列间平滑：每列独立下降，完整保留频谱的峰谷特征，仅让下降幅度连续化，
+    //     从而消除"逐点跳变"观感，又不抹平细节。
     if (peakHoldEnabled && ! peakDb.empty())
     {
+        const float fallDelta = peakFallRatePerSec * (deltaMs / 1000.0f);
+
         for (size_t i = 0; i < peakDb.size(); ++i)
         {
             if (smoothedDb[i] > peakDb[i])
@@ -183,7 +188,7 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
             {
                 peakHoldMs[i] += deltaMs;
                 if (peakHoldMs[i] > peakHoldDuration)
-                    peakDb[i] -= peakFallRate;
+                    peakDb[i] -= fallDelta;
             }
             peakDb[i] = juce::jmax(minDb, peakDb[i]);
         }
@@ -225,10 +230,10 @@ void SpectrumModule::rebuildDisplay()
 
     if ((int) smoothedDb.size() != N)
     {
-        smoothedDb .assign(N, minDb);
-        peakDb     .assign(N, minDb);
-        peakHoldMs .assign(N, 0.0f);
-        blurredDb  .assign(N, minDb);
+        smoothedDb  .assign(N, minDb);
+        peakDb      .assign(N, minDb);
+        peakHoldMs  .assign(N, 0.0f);
+        blurredDb   .assign(N, minDb);
     }
 
     ensureDisplayCache (N);
@@ -322,6 +327,53 @@ void SpectrumModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     }
 
     g.drawImageAt(cached_curve_image_, contentBounds.getX(), contentBounds.getY());
+
+    // 鼠标悬停标尺（实时绘制在离屏缓存之上，不写入缓存）
+    if (hoverActive)
+    {
+        const auto canvas = getCanvasBounds(contentBounds);
+        drawHoverRuler(g, canvas);
+    }
+}
+
+void SpectrumModule::mouseMove(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseMove(e);
+
+    const auto canvas = getCanvasBounds(getContentBounds());
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void SpectrumModule::mouseExit(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseExit(e);
+    if (hoverActive)
+    {
+        hoverActive = false;
+        repaint();
+    }
+}
+
+void SpectrumModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    if (!hoverActive || !canvas.contains(hoverPos))
+        return;
+
+    const float freqHz = xToFreq((float) hoverPos.x, canvas);
+    const float t = (float)(canvas.getBottom() - hoverPos.y)
+                  / juce::jmax(1.0f, (float) canvas.getHeight());
+    const float db = minDb + juce::jlimit(0.0f, 1.0f, t) * (maxDb - minDb);
+
+    const juce::String readout = PinkXP::formatFreqHz(freqHz)
+                               + "  " + juce::String(db, 1) + " dBFS";
+    PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);
 }
 
 // ----------------------------------------------------------

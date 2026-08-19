@@ -27,6 +27,37 @@ void EqModule::PixelEqGraph::visibilityChanged()
     // Phase F：Hub 分发器统一由 Editor 管理，不再起 Timer
 }
 
+void EqModule::PixelEqGraph::mouseDown(const juce::MouseEvent& e)
+{
+    // 频谱显示区覆盖整个内容区，会拦截鼠标事件导致 ModulePanel::mouseDown
+    // 收不到右键。这里把事件转发给父模块 EqModule，由它统一处理右键弹菜单。
+    if (auto* parent = getParentComponent())
+        parent->mouseDown(e.getEventRelativeTo(parent));
+}
+
+void EqModule::PixelEqGraph::mouseMove(const juce::MouseEvent& e)
+{
+    // 仪表区域与 paint 里的 inner 一致：bounds.reduced(6) 再扣除左侧刻度留白
+    const auto inner = getLocalBounds().reduced(6).withTrimmedLeft(30);
+    const auto pos   = e.getPosition();
+    const bool inside = inner.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void EqModule::PixelEqGraph::mouseExit(const juce::MouseEvent&)
+{
+    if (hoverActive)
+    {
+        hoverActive = false;
+        repaint();
+    }
+}
+
 void EqModule::PixelEqGraph::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
     if (! frame.has (AnalyserHub::Kind::Spectrum)) return;
@@ -83,16 +114,26 @@ void EqModule::PixelEqGraph::onFrame (const AnalyserHub::FrameSnapshot& frame)
     repaint();
 }
 
-void EqModule::PixelEqGraph::setActiveBand(Band newBand)
+void EqModule::PixelEqGraph::setFreqRange(float minHz, float maxHz)
 {
-    if (activeBand == newBand) return;
-    activeBand = newBand;
+    // 保证 min < max（至少 1Hz 间隔），避免显示范围退化为空
+    if (minHz > maxHz)
+        std::swap(minHz, maxHz);
+    if (maxHz - minHz < 1.0f)
+        maxHz = minHz + 1.0f;
+
+    if (juce::approximatelyEqual(minFreqHz, minHz)
+        && juce::approximatelyEqual(maxFreqHz, maxHz))
+        return;
+
+    minFreqHz = minHz;
+    maxFreqHz = maxHz;
     repaint();
 }
 
 void EqModule::PixelEqGraph::setCellSize(int newSize)
 {
-    newSize = juce::jlimit(4, 24, newSize);
+    newSize = juce::jlimit(1, 20, newSize);
     if (cellSize == newSize) return;
     cellSize = newSize;
     repaint();
@@ -109,7 +150,7 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
     const auto innerFull = bounds.reduced(padding);
     if (innerFull.getWidth() <= 0 || innerFull.getHeight() <= 0) return;
 
-    const int scaleMarginLeft = 36;
+    const int scaleMarginLeft = 30;
     const auto inner = innerFull.withTrimmedLeft(scaleMarginLeft);
     if (inner.getWidth() <= 0 || inner.getHeight() <= 0) return;
 
@@ -125,35 +166,19 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
     const int offsetX = inner.getX() + (inner.getWidth()  - totalGridW) / 2;
     const int offsetY = inner.getY() + (inner.getHeight() - totalGridH) / 2;
 
-    const auto getBandRange = [this]()
-    {
-        switch (activeBand)
-        {
-            case Band::low:  return std::pair<float,float>{ 0.0f,          1.0f / 3.0f };
-            case Band::mid:  return std::pair<float,float>{ 1.0f / 3.0f,   2.0f / 3.0f };
-            case Band::high: return std::pair<float,float>{ 2.0f / 3.0f,   1.0f };
-            default:         return std::pair<float,float>{ 0.0f,          1.0f };
-        }
-    };
+    const double sr = processor.getCurrentSampleRate();
+    const double nyquist = sr * 0.5;
+    if (nyquist <= 0.0) return;
 
-    auto bandRange = getBandRange();
-    float bandStart = bandRange.first;
-    float bandEnd   = bandRange.second;
-
-    {
-        const double sr = processor.getCurrentSampleRate();
-        const double nyquist = sr * 0.5;
-        const float normLow  = (float) std::pow(20.0    / nyquist, 1.0 / 2.3);
-        const float normHigh = (float) std::pow(20000.0 / nyquist, 1.0 / 2.3);
-        bandStart = juce::jmax(bandStart, normLow);
-        bandEnd   = juce::jmin(bandEnd,   normHigh);
-    }
+    // 将显示频率（Hz）映射到归一化频谱位置 norm = (freq/nyquist)^(1/2.3)
+    //   （与 AnalyserHub 生成 spectrumData 时使用的 skew=norm^2.3 互逆）
+    const float bandStart = (float) std::pow(
+        juce::jlimit(0.0, nyquist, (double) minFreqHz) / nyquist, 1.0 / 2.3);
+    const float bandEnd = (float) std::pow(
+        juce::jlimit(0.0, nyquist, (double) maxFreqHz) / nyquist, 1.0 / 2.3);
     if (bandEnd <= bandStart) return;
 
-    juce::Colour litColour = PinkXP::pink400;
-    if (activeBand == Band::low)  litColour = PinkXP::pink200;
-    if (activeBand == Band::mid)  litColour = PinkXP::pink400;
-    if (activeBand == Band::high) litColour = PinkXP::pink600;
+    const juce::Colour litColour = PinkXP::pink400;
 
     const juce::Colour dimColour = PinkXP::pink50;
     const int specCount = smoothedSpectrum.size();
@@ -335,80 +360,31 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
             }
         }
     }
-}
 
-// ==========================================================
-// EqModule::BandSelector
-// ==========================================================
-EqModule::BandSelector::BandSelector()
-{
-    setMouseCursor(juce::MouseCursor::PointingHandCursor);
-}
-
-void EqModule::BandSelector::setSelectedIndex(int newIndex, bool notify)
-{
-    newIndex = juce::jlimit(0, 2, newIndex);
-    if (selectedIndex == newIndex) return;
-    selectedIndex = newIndex;
-    repaint();
-    if (notify && onSelectionChanged) onSelectionChanged(selectedIndex);
-}
-
-int EqModule::BandSelector::getIndexForX(float x) const
-{
-    const float segW = (float) getWidth() / 3.0f;
-    int idx = (int)(x / segW);
-    return juce::jlimit(0, 2, idx);
-}
-
-void EqModule::BandSelector::paint(juce::Graphics& g)
-{
-    const int w = getWidth();
-    const int h = getHeight();
-    const int segW = w / 3;
-
-    for (int i = 0; i < 3; ++i)
+    // 鼠标悬停标尺（频率 + dB 读数，只与鼠标位置有关）
+    if (hoverActive)
     {
-        const int x = i * segW;
-        const int segWidth = (i == 2) ? (w - x) : segW;
-        juce::Rectangle<int> btnRect(x, 0, segWidth, h);
-        const bool isSelected = (i == selectedIndex);
+        const int gx = hoverPos.x;
+        const int gy = hoverPos.y;
+        if (gx >= offsetX && gx <= offsetX + totalGridW
+            && gy >= offsetY && gy <= offsetY + totalGridH)
+        {
+            // X → 频率：colNorm∈[0,1] → specPos → specPos^2.3 × nyquist
+            const float colNorm = juce::jlimit(0.0f, 1.0f,
+                (float)(gx - offsetX) / (float) juce::jmax(1, totalGridW));
+            const float specPos = bandStart + colNorm * (bandEnd - bandStart);
+            const float freqHz  = (float) std::pow((double) specPos, 2.3) * (float) nyquist;
 
-        if (isSelected)
-        {
-            PinkXP::drawPressed(g, btnRect, PinkXP::btnFace);
-            g.setColour(PinkXP::pink100);
-            for (int py = btnRect.getY() + 3; py < btnRect.getBottom() - 2; py += 4)
-                for (int px = btnRect.getX() + 3 + ((py / 4) % 2) * 2; px < btnRect.getRight() - 2; px += 4)
-                    g.fillRect(px, py, 2, 2);
-            g.setColour(PinkXP::ink);
-            g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
+            // Y → dB：-50 ~ +50
+            const float level = juce::jlimit(0.0f, 1.0f,
+                (float)(offsetY + totalGridH - gy) / (float) juce::jmax(1, totalGridH));
+            const float db = -50.0f + level * 100.0f;
+
+            const juce::String readout = PinkXP::formatFreqHz(freqHz)
+                                       + "  " + juce::String(db, 1) + " dB";
+            PinkXP::drawHoverRuler(g, inner, hoverPos, readout);
         }
-        else
-        {
-            PinkXP::drawRaised(g, btnRect, PinkXP::btnFace);
-            g.setColour(PinkXP::ink);
-            g.setFont(PinkXP::getFont(12.0f, juce::Font::plain));
-        }
-        g.drawText(labels[i], btnRect, juce::Justification::centred, false);
     }
-}
-
-void EqModule::BandSelector::mouseDown(const juce::MouseEvent& e)
-{
-    isDragging = true;
-    setSelectedIndex(getIndexForX(e.position.x));
-}
-
-void EqModule::BandSelector::mouseDrag(const juce::MouseEvent& e)
-{
-    if (!isDragging) return;
-    setSelectedIndex(getIndexForX(juce::jlimit(0.0f, (float) getWidth(), e.position.x)));
-}
-
-void EqModule::BandSelector::mouseUp(const juce::MouseEvent&)
-{
-    isDragging = false;
 }
 
 // ==========================================================
@@ -425,17 +401,29 @@ EqModule::EqModule(Y2KmeterAudioProcessor& p)
     setMinSize(64, 64);
     setDefaultSize(384, 256); // eq 6×4 大格
 
-    bandSelector.onSelectionChanged = [this](int idx)
+    // 双滑块：一个滑轨 + 两个滑块，分别控制显示频谱的最低/最高频率。
+    //   默认左滑块在最低频率（20Hz）、右滑块在最高频率（20kHz），即全频段显示。
+    freqRangeSlider.setSliderStyle(juce::Slider::TwoValueHorizontal);
+    freqRangeSlider.setRange(20.0, 20000.0, 1.0);
+    freqRangeSlider.setMinValue(20.0, juce::dontSendNotification);
+    freqRangeSlider.setMaxValue(20000.0, juce::dontSendNotification);
+    freqRangeSlider.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
+    freqRangeSlider.onValueChange = [this]()
     {
-        PixelEqGraph::Band b = PixelEqGraph::Band::mid;
-        if (idx == 0) b = PixelEqGraph::Band::low;
-        if (idx == 2) b = PixelEqGraph::Band::high;
-        eqGraph.setActiveBand(b);
+        eqGraph.setFreqRange((float) freqRangeSlider.getMinValue(),
+                             (float) freqRangeSlider.getMaxValue());
+        updateFreqLabel();
     };
 
+    // Hz 数值常驻显示（不再仅在拖动时出现），字体调小以压缩顶部占位
+    freqRangeLabel.setJustificationType(juce::Justification::centred);
+    freqRangeLabel.setColour(juce::Label::textColourId, PinkXP::ink);
+    freqRangeLabel.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
+    freqRangeLabel.setText("", juce::dontSendNotification);
+
     cellSizeSlider.setSliderStyle(juce::Slider::LinearVertical);
-    cellSizeSlider.setRange(4.0, 24.0, 1.0);
-    cellSizeSlider.setValue(10.0, juce::dontSendNotification);
+    cellSizeSlider.setRange(1.0, 20.0, 1.0);
+    cellSizeSlider.setValue(4.0, juce::dontSendNotification);
     // TextBox 只读：第 2 个参数 isReadOnly=true 让数字仅用于展示，
     //   不再接受点击编辑（需求：拿掉"点数字改值"的交互入口）
     cellSizeSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, true, 40, 16);
@@ -461,18 +449,21 @@ EqModule::EqModule(Y2KmeterAudioProcessor& p)
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
         cellSizeLabel.setColour (juce::Label::textColourId, PinkXP::ink);
+        freqRangeLabel.setColour (juce::Label::textColourId, PinkXP::ink);
         cellSizeSlider.setColour (juce::Slider::textBoxTextColourId, PinkXP::ink);
         cellSizeLabel.repaint();
+        freqRangeLabel.repaint();
         cellSizeSlider.repaint();
     });
 
-    addAndMakeVisible(bandSelector);
+    addAndMakeVisible(freqRangeSlider);
+    addAndMakeVisible(freqRangeLabel);
     addAndMakeVisible(eqGraph);
     addAndMakeVisible(cellSizeSlider);
     addAndMakeVisible(cellSizeLabel);
 
-    bandSelector.setSelectedIndex(1, false);
-    eqGraph.setActiveBand(PixelEqGraph::Band::mid);
+    eqGraph.setFreqRange(20.0f, 20000.0f);
+    updateFreqLabel();
 }
 
 EqModule::~EqModule()
@@ -492,6 +483,8 @@ juce::ValueTree EqModule::saveModuleSpecificState() const
 {
     juce::ValueTree s("state");
     s.setProperty("cellSize", eqGraph.getCellSize(), nullptr);
+    s.setProperty("minFreq", eqGraph.getMinFreqHz(), nullptr);
+    s.setProperty("maxFreq", eqGraph.getMaxFreqHz(), nullptr);
     return s;
 }
 
@@ -499,6 +492,45 @@ void EqModule::restoreModuleSpecificState(const juce::ValueTree& state)
 {
     if (state.hasProperty("cellSize"))
         eqGraph.setCellSize((int) state.getProperty("cellSize"));
+
+    // 兼容旧存档：旧版本只有 cellSize，没有 minFreq/maxFreq。
+    //   此时滑块重置为默认值（最低 20Hz / 最高 20kHz）。
+    if (state.hasProperty("minFreq") && state.hasProperty("maxFreq"))
+    {
+        const float minHz = (float) state.getProperty("minFreq");
+        const float maxHz = (float) state.getProperty("maxFreq");
+        freqRangeSlider.setMinValue(minHz, juce::dontSendNotification);
+        freqRangeSlider.setMaxValue(maxHz, juce::dontSendNotification);
+        eqGraph.setFreqRange(minHz, maxHz);
+    }
+    else
+    {
+        freqRangeSlider.setMinValue(20.0, juce::dontSendNotification);
+        freqRangeSlider.setMaxValue(20000.0, juce::dontSendNotification);
+        eqGraph.setFreqRange(20.0f, 20000.0f);
+    }
+}
+
+void EqModule::updateFreqLabel()
+{
+    const float minHz = (float) freqRangeSlider.getMinValue();
+    const float maxHz = (float) freqRangeSlider.getMaxValue();
+    freqRangeLabel.setText(juce::String((int) minHz) + " - " + juce::String((int) maxHz) + " Hz",
+                           juce::dontSendNotification);
+}
+
+void EqModule::mouseDown(const juce::MouseEvent& e)
+{
+    // 右键模块区域 → 弹出"添加模块"选择器。
+    //   由于 eqGraph 等子组件会拦截鼠标，需在此显式处理右键（与 Milkdrop、
+    //   Tamagotchi 的做法一致）；左键仍交还基类处理标题栏/边缘拖拽。
+    if (e.mods.isPopupMenu())
+    {
+        if (!isFloating() && onRightClick)
+            onRightClick(*this, e.getPosition());
+        return;
+    }
+    ModulePanel::mouseDown(e);
 }
 
 void EqModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
@@ -513,11 +545,13 @@ void EqModule::layoutContent(juce::Rectangle<int> contentBounds)
 {
     auto area = contentBounds.reduced(6);
 
-    // 顶部工具栏（band 选择器整行）
-    auto top = area.removeFromTop(26);
-    bandSelector.setBounds(top);
+    // 顶部：双滑块（缩小滑轨）+ 常驻 Hz 标签，总占位 ≈ 26px（与 waveform 工具栏一致）
+    auto top = area.removeFromTop(14);
+    freqRangeSlider.setBounds(top);
 
-    area.removeFromTop(6);
+    auto hzArea = area.removeFromTop(12);
+    // 文本整体向上偏移 3px，避免 8px 小字在 12px 区域内因居中而贴近下方图形区（下边缘相切）
+    freqRangeLabel.setBounds(hzArea.translated(0, -3));
 
     // 右侧 SIZE 滑条
     const int sliderWidth = 42;

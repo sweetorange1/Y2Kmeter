@@ -35,6 +35,10 @@ public:
     // Hub 分发器回调（每帧把新样本追加到内部环形历史缓冲）
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // 鼠标悬停标尺：仪表区域内十字线 + 时间/响度读数
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
     // 显示时长（秒）：缓冲容量按此 × 采样率分配
     void setDisplaySeconds (float seconds);
     float getDisplaySeconds() const noexcept { return displaySeconds; }
@@ -123,6 +127,11 @@ private:
     float        gainDb = 0.0f;  // 默认 0 dB（无放大）
 
     static constexpr int toolbarH = 26;
+
+    // ---- 鼠标悬停标尺 ----
+    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);
+    juce::Point<int> hoverPos;
+    bool             hoverActive = false;
 
     // 主题订阅 token：切换主题时重新下发 gainLabel 的 textColourId，
     //   避免 Label 缓存的旧 ink 颜色在主题切换后与标题栏不一致。

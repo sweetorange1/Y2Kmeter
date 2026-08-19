@@ -116,6 +116,60 @@ void DynamicsModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     drawMeterGroup(g, areaMeters);
     drawDrPanel   (g, areaDr);
     drawCrestBand (g, areaCrest);
+
+    // 鼠标悬停标尺（Crest 历史带）
+    if (hoverActive)
+        drawHoverRuler(g);
+}
+
+void DynamicsModule::mouseMove(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseMove(e);
+
+    const auto pos    = e.getPosition();
+    const bool inside = areaCrest.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void DynamicsModule::mouseExit(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseExit(e);
+    if (hoverActive)
+    {
+        hoverActive = false;
+        repaint();
+    }
+}
+
+void DynamicsModule::drawHoverRuler(juce::Graphics& g)
+{
+    if (!hoverActive)
+        return;
+
+    // Crest 历史带内部绘图区（与 drawCrestBand 一致）
+    const auto inner = areaCrest.reduced(4);
+    const auto plot  = inner.withTrimmedTop(14);
+    if (plot.isEmpty() || !plot.contains(hoverPos))
+        return;
+
+    // X → 相对时间（120 帧 × 30Hz ≈ 4s，最右=当前，负=过去）
+    const float t = (float)(hoverPos.x - plot.getX())
+                  / juce::jmax(1, plot.getWidth());
+    const float timeSec = (t - 1.0f) * 4.0f;
+
+    // Y → crest 值（0 ~ 30 dB）
+    const float norm = juce::jlimit(0.0f, 1.0f,
+        (float)(plot.getBottom() - hoverPos.y) / juce::jmax(1, plot.getHeight()));
+    const float crestDb = norm * 30.0f;
+
+    const juce::String readout = juce::String(timeSec, 1) + " s  "
+                               + juce::String(crestDb, 1) + " dB";
+    PinkXP::drawHoverRuler(g, plot, hoverPos, readout);
 }
 
 // ----------------------------------------------------------

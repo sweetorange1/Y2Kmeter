@@ -139,6 +139,15 @@ namespace PinkXP
     // 坐标轴刻度专用字体：不做放大，保持原始 height
     juce::Font getAxisFont(float height, int styleFlags = juce::Font::plain);
 
+    // 格式化频率读数：<1kHz 显示 "xxx Hz"，>=1kHz 显示 "x.x kHz"
+    juce::String formatFreqHz(float hz);
+
+    // 鼠标悬停标尺：在仪表区域 canvas 内以 pos 为中心绘制十字线，
+    // 并在鼠标右上方绘制读数框（readout 为读数文本）。用于频谱类/
+    // 时序类模块的悬停读数，读数只与鼠标位置有关，与音频信号无关。
+    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas,
+                        juce::Point<int> pos, const juce::String& readout);
+
     // ======================================================
     // 主题系统（运行时可切换）
     // ======================================================
