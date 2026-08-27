@@ -49,6 +49,9 @@ Makefile
 *.lib
 *.exe
 
+# 放行 libprojectM 的 Windows 运行时 DLL，需随仓库分发（见 third_party/projectm/README.md）
+!/third_party/projectm/bin/*.dll
+
 # Debug and release builds
 Debug/
 Release/
