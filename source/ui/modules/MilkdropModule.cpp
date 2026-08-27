@@ -562,6 +562,15 @@ namespace
       }
       return {};
     }
+
+    // 收藏库目录：固定位于用户数据目录 Y2Kmeter/milkdrop_presets_like，
+    // 与内置 milkdrop_presets 同级。GLView 浮动态 / macOS 本地渲染路径使用。
+    static juce::File FindMilkdropLikeDirForModule()
+    {
+      return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+          .getChildFile("Y2Kmeter")
+          .getChildFile("milkdrop_presets_like");
+    }
 }
 
 // ==========================================================
@@ -1661,6 +1670,7 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
   if (focused_ && glView != nullptr) {
     auto topBar = content.withHeight(26);
     paintOverlayControlBar(g, topBar);
+    paintLibraryButtons(g, content);
     if (isAutoMode_)
       paintAutoControlRow(g, topBar);
     if (isColorPanelOpen_)
@@ -1793,6 +1803,7 @@ void MilkdropModule::GLView::paint(juce::Graphics& g) {
       -static_cast<float>(offset.getX()),
       -static_cast<float>(offset.getY())));
   owner_.paintOverlayControlBar(g, content);
+  owner_.paintLibraryButtons(g, content);
   if (owner_.isAutoModeActive())
     owner_.paintAutoControlRow(g, content.withHeight(26));
   if (owner_.isColorPanelOpen_)
@@ -1868,7 +1879,12 @@ void MilkdropModule::GLView::DetachOpenGL() {
 
 void MilkdropModule::GLView::ScanPresetFiles() {
   local_preset_paths_.clear();
-  auto presets_dir = FindMilkdropAssetsDirForModule("milkdrop_presets");
+  // 根据全局收藏库状态选择预设目录（浮动态 / macOS 本地渲染路径）。
+  const bool use_like = (owner_.editor_ != nullptr)
+                        && owner_.editor_->IsMilkdropUseLikeLibrary();
+  auto presets_dir = use_like
+                         ? FindMilkdropLikeDirForModule()
+                         : FindMilkdropAssetsDirForModule("milkdrop_presets");
   if (!presets_dir.exists())
     return;
 
@@ -2055,6 +2071,61 @@ juce::Image MilkdropModule::GLView::GetLastFrameSnapshot() const {
 }
 
 void MilkdropModule::GLView::ConsumePresetRequests() {
+  // 消费收藏库切换请求：重扫本地预设列表并恢复到切换后库之前记录的预设。
+  if (requested_library_toggle_.exchange(false)) {
+    // 切换前 Editor 的 milkdrop_use_like_library_ 已被 ToggleMilkdropLibraryState 翻转，
+    // 按新值反推旧库，把当前索引（仍指向旧库）存入旧库的记忆。
+    const bool now_like = (owner_.editor_ != nullptr)
+                          && owner_.editor_->IsMilkdropUseLikeLibrary();
+    if (now_like)
+      local_builtin_preset_index_ = local_current_preset_;
+    else
+      local_like_preset_index_ = local_current_preset_;
+
+    ScanPresetFiles();
+
+    int target = now_like ? local_like_preset_index_
+                          : local_builtin_preset_index_;
+    if (target < 0 || target >= local_preset_paths_.size())
+      target = 0;
+    local_current_preset_ = local_preset_paths_.isEmpty() ? -1 : target;
+
+    if (local_current_preset_ >= 0) {
+      while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+      LoadCurrentPreset();
+      while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+      last_preset_switch_ms_ = static_cast<int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+  }
+
+  // 消费取消收藏触发的重扫请求：预设列表少一项，保持当前索引（后续预设顶上来），
+  // 越界则回绕到 0；若收藏库因此被删空，则回退到内置库。
+  if (requested_rescan_.exchange(false)) {
+    ScanPresetFiles();
+    if (local_preset_paths_.isEmpty()) {
+      if (owner_.editor_ != nullptr)
+        owner_.editor_->SetMilkdropUseLikeLibrary(false);
+      ScanPresetFiles();
+      int target = local_builtin_preset_index_;
+      if (target < 0 || target >= local_preset_paths_.size())
+        target = 0;
+      local_current_preset_ = local_preset_paths_.isEmpty() ? -1 : target;
+    } else if (local_current_preset_ >= local_preset_paths_.size()) {
+      local_current_preset_ = 0;
+    }
+
+    if (local_current_preset_ >= 0) {
+      while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+      LoadCurrentPreset();
+      while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+      last_preset_switch_ms_ = static_cast<int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+  }
+
   int jump = requested_preset_jump_.exchange(-1);
   int delta = requested_preset_delta_.exchange(0);
   bool random = requested_preset_random_.exchange(false);
@@ -2064,8 +2135,27 @@ void MilkdropModule::GLView::ConsumePresetRequests() {
     local_current_preset_ = jump;
     switched = true;
   } else if (random && !local_preset_paths_.isEmpty()) {
-    local_current_preset_ = juce::Random::getSystemRandom().nextInt(local_preset_paths_.size());
-    switched = true;
+    const int n = local_preset_paths_.size();
+    if (n <= 1) {
+      // 特殊处理：目录里只有一个预设，无法排除当前，重新加载当前预设
+      // （软切换刷新），给用户一次"有反馈"的随机点击。
+      if (local_current_preset_ < 0 || local_current_preset_ >= n)
+        local_current_preset_ = 0;
+      switched = true;
+    } else {
+      // 排除当前预设：从 n-1 个候选中均匀随机，选中 >= 当前索引则 +1 跳过。
+      const int cur = (local_current_preset_ >= 0 && local_current_preset_ < n)
+                          ? local_current_preset_ : -1;
+      if (cur < 0) {
+        local_current_preset_ = juce::Random::getSystemRandom().nextInt(n);
+      } else {
+        int next = juce::Random::getSystemRandom().nextInt(n - 1);
+        if (next >= cur)
+          ++next;
+        local_current_preset_ = next;
+      }
+      switched = true;
+    }
   } else if (delta != 0 && !local_preset_paths_.isEmpty()) {
     local_current_preset_ = (local_current_preset_ + delta) % local_preset_paths_.size();
     if (local_current_preset_ < 0)
@@ -2364,6 +2454,40 @@ void MilkdropModule::GLView::RequestPresetJump(int index) {
 #endif
 }
 
+void MilkdropModule::GLView::RequestLibraryToggle() {
+  // 浮动态 / macOS 本地渲染路径：切换预设库。
+  // 1) 仅翻转 Editor 全局收藏库状态并持久化（不触发 Editor GL 消费，避免残留）；
+  // 2) 置本地重扫标志，由 ConsumePresetRequests 在 GL 线程消费（重扫 + 加载第一预设）。
+#if JUCE_MAC
+  if (owner_.editor_ != nullptr)
+    owner_.editor_->ToggleMilkdropLibraryState();
+  requested_library_toggle_.store(true);
+#else
+  if (owner_.isFloating()) {
+    if (owner_.editor_ != nullptr)
+      owner_.editor_->ToggleMilkdropLibraryState();
+    requested_library_toggle_.store(true);
+  } else if (owner_.editor_ != nullptr) {
+    // 嵌入态由 Editor GL 线程消费切换请求，无需本地重扫。
+    owner_.editor_->RequestMilkdropToggleLibrary();
+  }
+#endif
+}
+
+void MilkdropModule::GLView::RequestUnlinkReload() {
+  // 取消收藏后（当前浏览收藏库时），预设列表少一项，需重扫并切换到下一个预设。
+  // 嵌入态由 Editor GL 线程重扫；浮动态 / macOS 由本地 GL 线程重扫。
+#if JUCE_MAC
+  requested_rescan_.store(true);
+#else
+  if (owner_.isFloating()) {
+    requested_rescan_.store(true);
+  } else if (owner_.editor_ != nullptr) {
+    owner_.editor_->RequestMilkdropUnlinkReload();
+  }
+#endif
+}
+
 void MilkdropModule::GLView::RequestRenderScale() {
   // macOS：分辨率切换功能在 macOS 上已阉割（glBlitFramebuffer 兼容性问题），
   //   强制保持 1:1，忽略所有切换请求。
@@ -2476,6 +2600,23 @@ juce::String MilkdropModule::GLView::GetCurrentPresetName() const {
   }
   if (owner_.editor_ != nullptr)
     return owner_.editor_->GetMilkdropCurrentPresetName();
+  return {};
+}
+
+juce::String MilkdropModule::GLView::GetCurrentPresetFilePath() const {
+  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
+#if JUCE_MAC
+  const bool use_local = true;
+#else
+  const bool use_local = owner_.isFloating();
+#endif
+  if (use_local) {
+    if (local_current_preset_ >= 0 && local_current_preset_ < local_preset_paths_.size())
+      return local_preset_paths_[local_current_preset_];
+    return {};
+  }
+  if (owner_.editor_ != nullptr)
+    return owner_.editor_->GetMilkdropCurrentPresetFilePath();
   return {};
 }
 
@@ -2877,17 +3018,20 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
     if (isPanelLayoutLocked(*this))
         return;
 
-    // 内容区 overlay 按钮点击
+    // 内容区 overlay 按钮点击（顶部控制栏 + 右下角收藏/切换按钮）
     if (focused_ && glView != nullptr)
     {
         auto content = getContentBounds();
         auto overlay = getOverlayBounds(content);
         auto btn = hitTestOverlayButton(e.getPosition(), overlay);
+        if (btn == OverlayButton::kNone)
+            btn = hitTestLibraryButton(e.getPosition(), content);
         if (btn != OverlayButton::kNone)
         {
             pressedOverlayBtn_ = btn;
             touchOverlayIdleTimer();
             repaint(overlay);
+            repaint(content);
             glView->repaint();
         }
     }
@@ -2950,17 +3094,25 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
         return;
     }
 
-    // 优先处理 overlay 按钮释放
+    // 优先处理 overlay 按钮释放（顶部控制栏 + 右下角收藏/切换按钮）
     if (pressedOverlayBtn_ != OverlayButton::kNone)
     {
         auto content = getContentBounds();
         auto overlay = getOverlayBounds(content);
         auto hit = hitTestOverlayButton(e.getPosition(), overlay);
+        if (hit == OverlayButton::kNone)
+            hit = hitTestLibraryButton(e.getPosition(), content);
         if (hit == pressedOverlayBtn_)
-            executeOverlayAction(hit);
+        {
+            if (hit == OverlayButton::kLike || hit == OverlayButton::kLibraryToggle)
+                executeLibraryAction(hit);
+            else
+                executeOverlayAction(hit);
+        }
 
         pressedOverlayBtn_ = OverlayButton::kNone;
         repaint(overlay);
+        repaint(content);
         glView->repaint();
         return;
     }
@@ -3082,10 +3234,13 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
         auto content = getContentBounds();
         auto overlay = getOverlayBounds(content);
         auto hit = hitTestOverlayButton(e.getPosition(), overlay);
+        if (hit == OverlayButton::kNone)
+            hit = hitTestLibraryButton(e.getPosition(), content);
         if (hit != hoveredOverlayBtn_)
         {
             hoveredOverlayBtn_ = hit;
             repaint(overlay);
+            repaint(content);
             glView->repaint();
         }
 
@@ -3609,6 +3764,191 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     g.drawText(presetDisplay.substring(idxPart.length()), nameRect, juce::Justification::centredLeft, true);
 }
 
+// ---- 右下角收藏 / 切换库按钮 ----
+
+bool MilkdropModule::isLibraryToggleVisible() const
+{
+    if (editor_ == nullptr)
+        return false;
+    return editor_->HasMilkdropLikedPresets();
+}
+
+juce::Rectangle<int> MilkdropModule::getLibraryButtonRect(
+    juce::Rectangle<int> content, OverlayButton btn) const
+{
+    constexpr int kSize = kLibraryBtnSize;
+    constexpr int kPad  = 4;
+    const int y = content.getBottom() - kPad - kSize;
+
+    // 切换按钮固定在最右；收藏按钮在其左（若切换按钮不可见则复用最右位置）。
+    auto toggleBtn = juce::Rectangle<int>(content.getRight() - kPad - kSize, y, kSize, kSize);
+    auto likeBtn   = juce::Rectangle<int>(toggleBtn.getX() - kPad - kSize, y, kSize, kSize);
+
+    switch (btn)
+    {
+    case OverlayButton::kLibraryToggle:
+        return toggleBtn;
+    case OverlayButton::kLike:
+        return isLibraryToggleVisible() ? likeBtn : toggleBtn;
+    default:
+        return {};
+    }
+}
+
+MilkdropModule::OverlayButton MilkdropModule::hitTestLibraryButton(
+    juce::Point<int> pos, juce::Rectangle<int> content) const
+{
+    if (getLibraryButtonRect(content, OverlayButton::kLike).contains(pos))
+        return OverlayButton::kLike;
+    if (isLibraryToggleVisible()
+        && getLibraryButtonRect(content, OverlayButton::kLibraryToggle).contains(pos))
+        return OverlayButton::kLibraryToggle;
+    return OverlayButton::kNone;
+}
+
+void MilkdropModule::executeLibraryAction(OverlayButton btn)
+{
+    if (glView == nullptr || editor_ == nullptr)
+        return;
+
+    if (btn == OverlayButton::kLike)
+    {
+        // 收藏 / 取消收藏 toggle。
+        const juce::String path = glView->GetCurrentPresetFilePath();
+        if (path.isEmpty())
+            return;
+        juce::File src(path);
+        if (!src.existsAsFile())
+            return;
+
+        juce::File likeDir = FindMilkdropLikeDirForModule();
+        juce::File dst = likeDir.getChildFile(src.getFileName());
+
+        if (dst.existsAsFile())
+        {
+            // 已收藏 → 取消收藏：删除收藏库内的对应预设文件。
+            dst.deleteFile();
+            // 若当前浏览的是收藏库，该预设已从列表中移除，需重扫并切换到下一个；
+            // 若仍在内置库，仅删除收藏副本，内置列表不变，无需重扫。
+            if (editor_->IsMilkdropUseLikeLibrary())
+                glView->RequestUnlinkReload();
+        }
+        else
+        {
+            // 未收藏 → 收藏：拷贝当前 .milk 到收藏库目录。
+            if (!likeDir.exists())
+                likeDir.createDirectory();
+            src.copyFileTo(dst);
+        }
+    }
+    else if (btn == OverlayButton::kLibraryToggle)
+    {
+        // 切换预设库（内置库 ↔ 收藏库）。
+        glView->RequestLibraryToggle();
+    }
+}
+
+void MilkdropModule::paintLibraryButtons(juce::Graphics& g, juce::Rectangle<int> content)
+{
+    constexpr int kSize = kLibraryBtnSize;
+    if (content.getHeight() < kSize + 8 || content.getWidth() < (kSize + 4) * 2 + 8)
+        return;
+
+    // 收藏按钮：当前预设已收藏时显示按下态（再次点击取消收藏）。
+    const bool liked = [&]() {
+        if (glView == nullptr) return false;
+        const juce::String path = glView->GetCurrentPresetFilePath();
+        if (path.isEmpty()) return false;
+        return FindMilkdropLikeDirForModule()
+            .getChildFile(juce::File(path).getFileName()).existsAsFile();
+    }();
+
+    // 切换按钮：当前浏览收藏库时显示按下态。
+    const bool inLikeLib = (editor_ != nullptr) && editor_->IsMilkdropUseLikeLibrary();
+
+    auto drawIconBtn = [&](juce::Rectangle<int> r, OverlayButton btn,
+                           bool active, const std::function<void(juce::Graphics&, juce::Rectangle<float>)>& icon)
+    {
+        bool hovered = (hoveredOverlayBtn_ == btn);
+        bool pressed = (pressedOverlayBtn_ == btn);
+
+        if (pressed)
+            PinkXP::drawPressed(g, r, PinkXP::pink100);
+        else if (active)
+        {
+            // 持续激活态（已收藏/已切换库）：半透明粉色底 + 半透明边框，
+            // 避免实心色块遮挡底层 Milkdrop 渲染的视频。
+            g.setColour(PinkXP::pink300.withAlpha(0.32f));
+            g.fillRect(r);
+            g.setColour(PinkXP::pink300.withAlpha(0.85f));
+            g.drawRect(r, 1);
+        }
+        else if (hovered)
+            PinkXP::drawRaised(g, r, PinkXP::pink200);
+        else
+        {
+            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
+            g.fillRect(r);
+            g.setColour(PinkXP::pink300.withAlpha(0.55f));
+            g.drawRect(r, 1);
+        }
+
+        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xEE, 0xEE, 0xEE));
+        icon(g, r.toFloat().reduced(5.0f));
+    };
+
+    // 收藏按钮（爱心）
+    {
+        auto likeBtn = getLibraryButtonRect(content, OverlayButton::kLike);
+        drawIconBtn(likeBtn, OverlayButton::kLike, liked, [](juce::Graphics& gg, juce::Rectangle<float> rf)
+        {
+            // 胖心形（拼接方案）：两个饱满的圆 + 一个宽矮的底部三角。
+            // 两个圆半径 0.30w、圆心距 0.40w，重叠 0.20w，顶部形成自然的 V 形凹陷；
+            // 三角底边几乎贴满宽度、尖角收于底部，顶点插入两圆交界处自然衔接。
+            const float x = rf.getX();
+            const float y = rf.getY();
+            const float w = rf.getWidth();
+            const float h = rf.getHeight();
+
+            juce::Path heart;
+            heart.addEllipse(x, y, w * 0.60f, h * 0.60f);           // 左圆
+            heart.addEllipse(x + w * 0.40f, y, w * 0.60f, h * 0.60f); // 右圆
+            heart.addTriangle(x + w * 0.01f, y + h * 0.40f,          // 底部三角
+                              x + w * 0.99f, y + h * 0.40f,
+                              x + w * 0.50f, y + h * 0.97f);
+            gg.fillPath(heart);
+        });
+    }
+
+    // 切换按钮（双向箭头）：仅收藏库非空时显示
+    if (isLibraryToggleVisible())
+    {
+        auto toggleBtn = getLibraryButtonRect(content, OverlayButton::kLibraryToggle);
+        drawIconBtn(toggleBtn, OverlayButton::kLibraryToggle, inLikeLib,
+                    [](juce::Graphics& gg, juce::Rectangle<float> rf)
+        {
+            const float cx = rf.getCentreX();
+            const float cy = rf.getCentreY();
+            const float w  = rf.getWidth();
+            const float h  = rf.getHeight();
+            // 双向切换：一条水平箭杆贯穿，两端各一个放大的实心箭头头（尖朝外）。
+            gg.fillRect(cx - w * 0.14f, cy - h * 0.07f, w * 0.28f, h * 0.14f);
+
+            juce::Path left;
+            left.addTriangle(cx - w * 0.40f, cy,
+                             cx - w * 0.14f, cy - h * 0.26f,
+                             cx - w * 0.14f, cy + h * 0.26f);
+            gg.fillPath(left);
+
+            juce::Path right;
+            right.addTriangle(cx + w * 0.40f, cy,
+                              cx + w * 0.14f, cy - h * 0.26f,
+                              cx + w * 0.14f, cy + h * 0.26f);
+            gg.fillPath(right);
+        });
+    }
+}
+
 // ---- 加载指示器绘制 ----
 
 void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content)
@@ -4011,6 +4351,7 @@ void MilkdropModule::OverlayView::paint(juce::Graphics& g)
         static_cast<float>(-moduleTopBar.getY())));
 
     owner_.paintOverlayControlBar(g, moduleTopBar);
+    owner_.paintLibraryButtons(g, owner_.getContentBounds());
     if (owner_.isAutoMode_)
         owner_.paintAutoControlRow(g, moduleTopBar);
     if (owner_.isColorPanelOpen_)
@@ -4072,7 +4413,11 @@ void MilkdropModule::UpdateOverlayViewPlacement()
 
     barH = juce::jmin(barH, contentLocal.getHeight());
 
-    auto barLocal = contentLocal.withHeight(barH);
+    // 右下角收藏 / 切换按钮位于内容区底部，不在顶部控制栏区域内。
+    // 为让其可见，overlayView 必须覆盖整个内容区（而非仅顶部 barH 高度），
+    // 否则按钮绘制会被 overlayView 的 bounds 裁剪。OverlayView::paint 内部
+    // 已按内容区坐标完整绘制顶部控制栏与右下角按钮，此处直接采用完整内容区。
+    auto barLocal = contentLocal;
     auto barScreen = localAreaToGlobal(barLocal);
     if (barScreen.isEmpty())
     {

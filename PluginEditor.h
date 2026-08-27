@@ -47,6 +47,27 @@ public:
     // 渲染缩放（循环 1→2→4→1，来自 MilkdropModule Overlay 的 [1:n] 按钮）
     void RequestMilkdropRenderScale();
     int  GetMilkdropRenderScale() const noexcept { return milkdrop_render_scale_; }
+
+    // ---- Milkdrop 收藏库（like library）桥接 ----
+    // 当前是否浏览收藏库（全局共享，仅一个 Milkdrop 模块）。
+    bool IsMilkdropUseLikeLibrary() const noexcept { return milkdrop_use_like_library_.load(); }
+    // UI 线程调用：请求切换预设库（内置库 ↔ 收藏库）。GL 线程在 renderOpenGL 中
+    // 消费该请求，重扫预设列表并加载切换后库的第一个预设。
+    void RequestMilkdropToggleLibrary();
+    // 仅翻转收藏库状态并持久化，不触发 Editor GL 线程消费。
+    // 供浮动态 / macOS（GLView 本地渲染路径）使用：GLView 用自己的请求标志重扫，
+    // 避免 Editor 的 toggle 标志在挂起期间残留、dock 回嵌入态时被误消费。
+    void ToggleMilkdropLibraryState();
+    // 直接设置收藏库状态并持久化（供删空收藏库后回退到内置库等场景使用）。
+    void SetMilkdropUseLikeLibrary(bool use_like);
+    // 取消收藏当前预设后请求重扫预设列表（嵌入态；renderOpenGL 消费）。
+    // 当前浏览收藏库时，删除当前预设后列表少一项，需重扫并切换到下一个预设；
+    // 若收藏库因此被删空，则自动回退到内置库。
+    void RequestMilkdropUnlinkReload();
+    // 收藏库是否至少含一个 .milk 预设（决定切换按钮是否显示）。
+    bool HasMilkdropLikedPresets() const;
+    // 当前预设的完整文件路径（嵌入态专用，UI 线程安全）。
+    juce::String GetMilkdropCurrentPresetFilePath() const;
     // 诊断
     bool IsMilkdropRenderReady() const noexcept { return milkdrop_render_ready_; }
     juce::String GetMilkdropError() const;
@@ -587,6 +608,17 @@ private:
     std::atomic<bool>      milkdrop_requested_preset_random_{ false };
     std::atomic<int>       milkdrop_requested_preset_jump_{ -1 };
     std::atomic<int64_t>   milkdrop_last_preset_switch_ms_{ 0 };
+    // 收藏库（like library）：当前是否浏览收藏库（全局共享，仅一个 Milkdrop 模块）。
+    // UI 线程写、GL 线程读（RescanMilkdropPresetPaths），用 atomic 消除数据竞争；
+    // 切换请求经独立原子标志异步消费。
+    std::atomic<bool>      milkdrop_use_like_library_{ false };
+    std::atomic<bool>      milkdrop_requested_library_toggle_{ false };
+    // 双向索引记忆：切换库时记录各自库的当前预设索引（-1 = 未记录，用 0 兜底）。
+    // 仅在 GL 线程消费切换请求时读写，无跨线程竞争。
+    int                    milkdrop_builtin_preset_index_ = -1;
+    int                    milkdrop_like_preset_index_ = -1;
+    // 取消收藏触发的重扫请求（renderOpenGL 消费）。
+    std::atomic<bool>      milkdrop_requested_rescan_{ false };
     // 脱离态（floating）期间置 true，阻止 Editor::newOpenGLContextCreated 异步
     // 创建 Editor projectM handle。Windows 下 libprojectM/GLEW 依赖进程全局指针表，
     // 若 Editor handle 与 GLView 的本地 handle 同时存在会互相干扰（表现为预设
@@ -594,6 +626,9 @@ private:
     std::atomic<bool>      milkdrop_renderer_suspended_{ false };
     void LoadMilkdropPresetInternal();
     static juce::File FindMilkdropAssetsDir(const juce::String& subdir);
+    // 重扫预设目录（根据 milkdrop_use_like_library_ 选择内置库或收藏库）。
+    // 必须在 GL 线程调用（或 projectM handle 尚未创建的初始化阶段）。
+    void RescanMilkdropPresetPaths();
     // PCM 缓冲（UI 线程写，GL 线程读）
     std::mutex             milkdrop_pcm_mutex_;
     std::vector<float>     milkdrop_pending_pcm_;

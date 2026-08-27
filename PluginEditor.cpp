@@ -198,7 +198,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.7.0");
+const int versionW = versionFont.getStringWidth ("v2.7.1");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -239,7 +239,7 @@ const int versionW = versionFont.getStringWidth ("v2.7.0");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.0";
+const juce::String versionText = "v2.7.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -796,6 +796,8 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     milkdrop_visual_state_ = processor.getSavedMilkdropVisualState();
     // 简单波形样式覆盖（wave_mode/x/y/r/g/b/a/...）
     milkdrop_wave_state_ = processor.getSavedMilkdropWaveState();
+    // 收藏库切换状态（浏览内置库还是收藏库）
+    milkdrop_use_like_library_.store(processor.getSavedMilkdropUseLikeLibrary());
 
     initLookAndFeel();
 
@@ -3046,7 +3048,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.0";
+const juce::String versionText = "v2.7.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3054,7 +3056,7 @@ const juce::String versionText = "v2.7.0";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.7.0");
+        const int versionW = versionFont.getStringWidth ("v2.7.1");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4574,6 +4576,16 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
   return {};
 }
 
+// 收藏库（like library）目录：固定位于用户数据目录 Y2Kmeter/milkdrop_presets_like，
+// 与内置 milkdrop_presets 同级。该目录只由"收藏"动作创建/写入，不参与 bundle
+// seed，也不会因版本更新覆盖内置预设而被清空。
+static juce::File FindMilkdropLikeDir()
+{
+  return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+      .getChildFile("Y2Kmeter")
+      .getChildFile("milkdrop_presets_like");
+}
+
 void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
   // 脱离态期间 Editor renderer 被挂起，跳过创建，避免与 GLView 的本地
   // projectM handle 共存（Windows libprojectM/GLEW 全局指针表冲突）。
@@ -4623,15 +4635,7 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
   // 扫描预设。newOpenGLContextCreated() 在脱离态 dock 回嵌入态时会再次执行，
   // 因此每次扫描前必须清空旧列表，避免总预设数被重复追加成 2N、3N。
-  milkdrop_preset_paths_.clear();
-  auto presetsDir = FindMilkdropAssetsDir("milkdrop_presets");
-  if (presetsDir.exists()) {
-    auto files = presetsDir.findChildFiles(juce::File::findFiles,
-                                           false, "*.milk");
-    for (auto& f : files)
-      milkdrop_preset_paths_.add(f.getFullPathName());
-    milkdrop_preset_paths_.sort(false);
-  }
+  RescanMilkdropPresetPaths();
 
   // 检查是否有待处理的预设跳转请求（Standalone 启动恢复等）。
   //   时序说明：GL 上下文可能异步创建，此时 4.5 恢复代码可能
@@ -4677,6 +4681,60 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
 
   auto& api = projectm_api::Api::instance();
 
+  // 消费收藏库切换请求：重扫预设列表并恢复到切换后库之前记录的预设。
+  if (milkdrop_requested_library_toggle_.exchange(false)) {
+    // 切换前 milkdrop_use_like_library_ 已被 RequestMilkdropToggleLibrary 翻转成新值，
+    // 因此按新值反推"旧库"，把当前索引（仍指向旧库）存入旧库的记忆。
+    const bool now_like = milkdrop_use_like_library_.load();
+    if (now_like)
+      milkdrop_builtin_preset_index_ = milkdrop_current_preset_;
+    else
+      milkdrop_like_preset_index_ = milkdrop_current_preset_;
+
+    RescanMilkdropPresetPaths();
+
+    // 恢复到目标库（当前库）之前记录的索引，未记录或越界则用 0。
+    int target = now_like ? milkdrop_like_preset_index_
+                          : milkdrop_builtin_preset_index_;
+    if (target < 0 || target >= milkdrop_preset_paths_.size())
+      target = 0;
+    milkdrop_current_preset_ = milkdrop_preset_paths_.isEmpty() ? -1 : target;
+
+    if (milkdrop_current_preset_ >= 0) {
+      LoadMilkdropPresetInternal();
+      milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+      milkdrop_last_preset_switch_ms_.store(
+          static_cast<int64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count()));
+    }
+  }
+
+  // 消费取消收藏触发的重扫请求：预设列表少一项，保持当前索引（后续预设顶上来），
+  // 越界则回绕到 0；若收藏库因此被删空，则回退到内置库。
+  if (milkdrop_requested_rescan_.exchange(false)) {
+    RescanMilkdropPresetPaths();
+    if (milkdrop_preset_paths_.isEmpty()) {
+      SetMilkdropUseLikeLibrary(false);
+      RescanMilkdropPresetPaths();
+      int target = milkdrop_builtin_preset_index_;
+      if (target < 0 || target >= milkdrop_preset_paths_.size())
+        target = 0;
+      milkdrop_current_preset_ = milkdrop_preset_paths_.isEmpty() ? -1 : target;
+    } else if (milkdrop_current_preset_ >= milkdrop_preset_paths_.size()) {
+      milkdrop_current_preset_ = 0;
+    }
+
+    if (milkdrop_current_preset_ >= 0) {
+      LoadMilkdropPresetInternal();
+      milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+      milkdrop_last_preset_switch_ms_.store(
+          static_cast<int64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count()));
+    }
+  }
+
   // 消费预设切换请求
   int jump_idx = milkdrop_requested_preset_jump_.exchange(-1);
   int delta    = milkdrop_requested_preset_delta_.exchange(0);
@@ -4687,10 +4745,27 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     milkdrop_current_preset_ = jump_idx;
     switched = true;
   } else if (random) {
-    if (!milkdrop_preset_paths_.isEmpty())
-      milkdrop_current_preset_ = juce::Random::getSystemRandom()
-          .nextInt(milkdrop_preset_paths_.size());
-    switched = true;
+    const int n = milkdrop_preset_paths_.size();
+    if (n <= 1) {
+      // 特殊处理：目录里只有一个预设，无法排除当前，重新加载当前预设
+      // （软切换刷新），给用户一次"有反馈"的随机点击。
+      if (milkdrop_current_preset_ < 0 || milkdrop_current_preset_ >= n)
+        milkdrop_current_preset_ = 0;
+      switched = true;
+    } else {
+      // 排除当前预设：从 n-1 个候选中均匀随机，选中 >= 当前索引则 +1 跳过。
+      const int cur = (milkdrop_current_preset_ >= 0 && milkdrop_current_preset_ < n)
+                          ? milkdrop_current_preset_ : -1;
+      if (cur < 0) {
+        milkdrop_current_preset_ = juce::Random::getSystemRandom().nextInt(n);
+      } else {
+        int next = juce::Random::getSystemRandom().nextInt(n - 1);
+        if (next >= cur)
+          ++next;
+        milkdrop_current_preset_ = next;
+      }
+      switched = true;
+    }
   } else if (delta != 0 && !milkdrop_preset_paths_.isEmpty()) {
     milkdrop_current_preset_ = (milkdrop_current_preset_ + delta)
         % milkdrop_preset_paths_.size();
@@ -5107,6 +5182,56 @@ void Y2KmeterAudioProcessorEditor::ResumeMilkdropEditorRendererAfterFloating() {
     if (!milkdrop_render_ready_ && milkdrop_pm_handle_ == nullptr)
       newOpenGLContextCreated();
   }, false);
+}
+
+void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {
+  milkdrop_preset_paths_.clear();
+  auto presetsDir = milkdrop_use_like_library_.load()
+                        ? FindMilkdropLikeDir()
+                        : FindMilkdropAssetsDir("milkdrop_presets");
+  if (presetsDir.exists()) {
+    auto files = presetsDir.findChildFiles(juce::File::findFiles,
+                                           false, "*.milk");
+    for (auto& f : files)
+      milkdrop_preset_paths_.add(f.getFullPathName());
+    milkdrop_preset_paths_.sort(false);
+  }
+}
+
+void Y2KmeterAudioProcessorEditor::SetMilkdropUseLikeLibrary(bool use_like) {
+  milkdrop_use_like_library_.store(use_like);
+  processor.setSavedMilkdropUseLikeLibrary(use_like);
+}
+
+void Y2KmeterAudioProcessorEditor::ToggleMilkdropLibraryState() {
+  // UI 线程：翻转收藏库标志并持久化。不触发 Editor GL 线程消费。
+  SetMilkdropUseLikeLibrary(!milkdrop_use_like_library_.load());
+}
+
+void Y2KmeterAudioProcessorEditor::RequestMilkdropToggleLibrary() {
+  // UI 线程：翻转收藏库状态，然后入队异步切换请求，由 renderOpenGL 在 GL 线程
+  // 消费（重扫 + 恢复到切换后库之前记录的预设）。
+  ToggleMilkdropLibraryState();
+  milkdrop_requested_library_toggle_.store(true);
+}
+
+void Y2KmeterAudioProcessorEditor::RequestMilkdropUnlinkReload() {
+  // UI 线程：取消收藏后入队重扫请求，由 renderOpenGL 在 GL 线程消费。
+  milkdrop_requested_rescan_.store(true);
+}
+
+bool Y2KmeterAudioProcessorEditor::HasMilkdropLikedPresets() const {
+  juce::File likeDir = FindMilkdropLikeDir();
+  if (!likeDir.isDirectory())
+    return false;
+  return likeDir.findChildFiles(juce::File::findFiles, false, "*.milk").size() > 0;
+}
+
+juce::String Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetFilePath() const {
+  const int idx = milkdrop_current_preset_ui_.load();
+  if (idx >= 0 && idx < milkdrop_preset_paths_.size())
+    return milkdrop_preset_paths_[idx];
+  return {};
 }
 
 void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {

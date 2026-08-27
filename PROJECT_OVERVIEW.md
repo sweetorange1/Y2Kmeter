@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.6.8`）
+- **产品名**：`Y2Kmeter` （版本：`2.7.1`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +30,7 @@
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
 - **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.5.2，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设；新增 Standalone 脱离/浮动窗口支持）
+- **Milkdrop 可视化模块**（v2.5.2，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设；新增 Standalone 脱离/浮动窗口支持；v2.7.1 新增预设收藏库 like + 切换 + 随机去重）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -169,7 +169,7 @@
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
 | [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
 | [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
 | [MilkdropWaveState.h](/I:/Y2KMeter/source/ui/modules/MilkdropWaveState.h) | `MilkdropWaveState`（v2.6.6 新增，header-only：Milkdrop 简单波形样式覆盖状态结构体 + 16 种 `wave_mode` 名称表 + `GetWaveModeName()` + `ReplaceWaveKeyValue()`/`ApplyWaveParamsToPresetText()` 预设文本注入函数；全局共享并持久化到 Processor host state） | — |
@@ -198,6 +198,7 @@
 - 状态持久化（`getStateInformation` / `setStateInformation`）：
   - 顶层 XML 根 `<PBEQ_State>`，含 `analysisInputGainDb`、`editorW/editorH` 属性；
   - 子节点 `<PBEQ_Layout>` 承载 `ModuleWorkspace` 布局（模块位置 / 拼豆图 / 主题 / FPS 等）。
+  - Milkdrop 相关属性直接挂顶层：`milkdropTintR/G/B`、`milkdropBrightness`、`milkdropInvert/Shadows/...` 等效果开关、`milkdropWaveXxx` 波形覆盖、`milkdropOffsetXxx`（tweak uv 畸变），以及 **v2.7.1 新增的 `milkdropUseLikeLibrary`**（收藏库切换状态，`std::atomic<bool>` 持久化）。
 - 分析开关：`setAnalysisActive(false)` 时 `processBlock` 完全跳过分析（UI 不可见时用）。
 - CPU 负载：`getCpuLoad()` 供每个模块右下角显示；Loopback 路径用 `registerLoopbackRenderTime` 通道注入。
 - 分析前置增益：`setAnalysisInputGainDb / getAnalysisInputGainLinear`（-10 ~ +36 dB），只作用于分析路径，不改变透传输出。
@@ -229,6 +230,7 @@
   - 关键接口：`isLayoutLocked() / handleLockClicked() / applyLayoutLocked(locked, initial)` + 构造期延迟 flag `pendingLockApplyOnAttach`（顶层窗口尺寸未就绪时先记账，`visibilityChanged` 时再应用，避免构造期 assert）。
 - 顶部三按钮几何：`getCloseButtonBounds / getPinButtonBounds / getMinimiseButtonBounds`；chrome 隐藏态特殊：`getFloatingCloseButtonBounds`。
 - **Tamagotchi 保活**：只有当工作区存在 Tamagotchi 模块时，Editor 才 `hub.retain(Kind::Loudness)` 保持信号驱动状态机。
+- **Milkdrop 收藏库桥接（v2.7.1 新增）**：`IsMilkdropUseLikeLibrary` / `RequestMilkdropToggleLibrary` / `ToggleMilkdropLibraryState` / `SetMilkdropUseLikeLibrary` / `RequestMilkdropUnlinkReload` / `HasMilkdropLikedPresets` / `GetMilkdropCurrentPresetFilePath`；`renderOpenGL` 消费库切换与取消收藏重扫请求，维护双向索引记忆 `milkdrop_builtin_preset_index_ / milkdrop_like_preset_index_`。
 
 ### 4.4 `ModuleWorkspace`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
 - **模块工厂**：`setModuleFactory(f)`，Editor 侧会按 `ModuleType` 构造具体 `ModulePanel` 派生类（见 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `createModule`）。
@@ -3302,6 +3304,42 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 4. **Stereo Field 大窗口卡顿**：点数量曾随画布宽度线性增长（`cw*2`）+ 离屏图 1:1 全分辨率，拖大后每帧数千次 `fillRect` + 全图 `multiplyAlpha` 遍历；改为固定 512 点 + 700px 阈值降采样（下限 25%）后显著缓解。
 5. **子组件拦截鼠标导致右键/悬停失效**：`EqModule::PixelEqGraph` 覆盖内容区，必须显式 `mouseDown` 转发 + 重写 `mouseMove/mouseExit`，右键才能触发模块选择器、悬停标尺才能工作。
 6. **过时注释易残留**：侧边留白由"动态缩放"改为"固定 10px"、`freqRangeLabel` 由"拖动显示"改为"常驻显示"时，头文件注释未同步；审查时需对照实际实现修正注释。
+
+---
+
+## v2.7.1：Milkdrop 预设收藏库（Like Library）+ 随机去重 + 图标优化
+
+本章记录 v2.7.1 版本相对 v2.7.0 的改动：为 Milkdrop 模块新增 **预设收藏（Like）功能** —— 聚焦时右下角显示「爱心收藏」与「双向箭头切换库」两个按钮；收藏的预设被拷贝到独立的 `milkdrop_presets_like` 目录，避免后续版本更新内置预设时丢失用户收藏；随机按钮改为**排除当前预设**的随机，杜绝"点击无变化"。
+
+### 功能概述
+
+- **收藏按钮（爱心）**：点击把当前 `.milk` 预设拷贝到用户数据目录下的 `Y2Kmeter/milkdrop_presets_like`（Windows `%APPDATA%\Y2Kmeter\`，macOS `~/Library/Application Support/Y2Kmeter/`）。已收藏时按钮呈半透明按下态，再次点击**取消收藏**（删除 like 目录内对应文件）。
+- **切换按钮（双向箭头）**：仅当 like 目录非空时显示。点击在「内置库 `milkdrop_presets` ↔ 收藏库 `milkdrop_presets_like`」间双向切换；切换时**记录并恢复各自库的预设索引**，回到原库仍停留在离开前的预设。
+- **随机去重**：随机按钮与 auto 轮播改为从「排除当前预设」的候选中均匀随机；目录仅剩 1 个预设时，点击随机改为重新加载当前预设（软切换刷新），给用户一次有反馈的点击。
+- **状态持久化**：当前浏览哪个库（`milkdropUseLikeLibrary`）写入 Processor host state，重启后恢复。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`PluginProcessor.h/.cpp`](/I:/Y2KMeter/PluginProcessor.h) | 新增 `savedMilkdropUseLikeLibrary_`（`std::atomic<bool>`）持久化字段 + `setSavedMilkdropUseLikeLibrary / getSavedMilkdropUseLikeLibrary`；`getStateInformation / setStateInformation` 序列化 `milkdropUseLikeLibrary` 属性 |
+| [`PluginEditor.h/.cpp`](/I:/Y2KMeter/PluginEditor.h) | 新增收藏库桥接 `IsMilkdropUseLikeLibrary / RequestMilkdropToggleLibrary / ToggleMilkdropLibraryState / SetMilkdropUseLikeLibrary / RequestMilkdropUnlinkReload / HasMilkdropLikedPresets / GetMilkdropCurrentPresetFilePath`；新增 `RescanMilkdropPresetPaths()`；`renderOpenGL` 消费库切换与取消收藏重扫；双向索引记忆 `milkdrop_builtin_preset_index_ / milkdrop_like_preset_index_` |
+| [`source/ui/modules/MilkdropModule.h/.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `OverlayButton` 枚举新增 `kLike / kLibraryToggle`；新增 `paintLibraryButtons / hitTestLibraryButton / getLibraryButtonRect / executeLibraryAction / isLibraryToggleVisible`；`GLView` 新增 `RequestLibraryToggle / RequestUnlinkReload` + 双向索引记忆 `local_builtin_preset_index_ / local_like_preset_index_` + `requested_rescan_`；`ScanPresetFiles` 按库状态选目录；`ConsumePresetRequests` 消费库切换与重扫；随机排除当前预设 |
+
+### 关键设计
+
+- **收藏库目录独立且不参与 seed**：`FindMilkdropLikeDir`（Editor）/ `FindMilkdropLikeDirForModule`（Module）直接定位用户数据目录下的 `milkdrop_presets_like`，与内置库同级但**不参与 bundle seed / AppData 同步**，版本更新覆盖内置预设时用户收藏副本不被清空。
+- **双渲染路径均打通**：嵌入态（Windows 非浮动）由 `Editor::renderOpenGL` 消费切换请求；浮动态 / macOS 由 `GLView::ConsumePresetRequests` 消费本地重扫标志。两路径分别维护 `milkdrop_builtin/like_preset_index_` 与 `local_builtin/like_preset_index_`。
+- **切换与重扫语义分离**：`RequestMilkdropToggleLibrary()`（嵌入态，带 Editor 消费标志）与 `ToggleMilkdropLibraryState()`（浮动态，仅翻转状态不触发 Editor 消费）分离，避免 dock 回嵌入态被残留 toggle 标志误消费；取消收藏走独立 `RequestMilkdropUnlinkReload() / RequestUnlinkReload()` → `milkdrop_requested_rescan_` 原子标志。
+- **删除后切换策略**：取消收藏时若当前在收藏库，重扫后**保持当前索引**（后续预设顶上来）；删空后自动回退内置库并恢复其记忆索引。
+
+### 踩坑记录
+
+1. **emoji 爱心不可行**：全局字体 `Silkscreen-Regular.ttf` 不含 ❤️（U+2764）字形，`PinkXP::getFont` 用 `FontOptions(gTypeface)` 强制锁定 Typeface，直接 `drawText` 渲染成豆腐块；且 ❤️ 是彩色 emoji，依赖系统彩色字体、JUCE `Graphics` 跨平台渲染不稳定、颜色不受 `setColour` 控制。最终改为矢量 `juce::Path`（两个大圆 + 宽矮三角拼接），纯几何、颜色可控、跨平台一致。
+2. **持续激活态不要用实心填充**：收藏/切换按钮"已激活"态最初复用 `PinkXP::drawPressed` 实心填充，遮挡底层 Milkdrop 视频；改为半透明粉色底 `pink300.withAlpha(0.32f)` + 半透明边框。
+3. **跨线程数据竞争**：`milkdrop_use_like_library_` 最初是普通 `bool`，取消收藏删空回退在 GL 线程写它，与 UI/host 线程读存在竞争；改为 `std::atomic<bool>`，Processor 侧字段一并原子化（`load/store`）。
+4. **双向索引反推旧库**：切换请求消费时 `milkdrop_use_like_library_` 已被 UI 线程翻转成新值，需按新值反推"旧库"，把当前索引存入旧库记忆，再恢复到目标库记录索引。
+5. **版本号字面量分散**：`PluginEditor.cpp` 中版本字面量既有 `getStringWidth("v2.7.0")` 又有 `versionText = "v2.7.0"` 两种写法（一处用变量、一处用字面量），升级版本号需逐一核对避免遗漏。
 
 ---
 

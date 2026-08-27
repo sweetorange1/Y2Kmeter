@@ -267,6 +267,8 @@ private:
         void RequestPresetRandom();
         void RequestPresetJump(int index);
         void RequestRenderScale();  // 循环 1→2→4→1
+        void RequestLibraryToggle();  // 切换预设库（浮动态 / macOS 本地路径重扫）
+        void RequestUnlinkReload();   // 取消收藏后（若在收藏库）请求重扫并切换到下一个
         int  GetLocalRenderScale() const noexcept { return local_render_scale_; }
 
         // 诊断
@@ -276,6 +278,7 @@ private:
         void SyncOwnerPresetIndexFromRenderer() const;
         int  GetTotalPresetCount() const;
         juce::String GetCurrentPresetName() const;
+        juce::String GetCurrentPresetFilePath() const;  // 当前预设完整路径（供收藏拷贝）
         int64_t GetLastPresetSwitchTimeMs() const;
 
         // 最后一帧快照（UI 线程读取，GL 线程写入，互斥锁保护）
@@ -306,6 +309,13 @@ private:
         std::atomic<int> requested_preset_delta_{0};
         std::atomic<int> requested_preset_jump_{-1};
         std::atomic<bool> requested_preset_random_{false};
+        std::atomic<bool> requested_library_toggle_{false};
+        // 双向索引记忆：切换库时记录各自库的当前预设索引（-1 = 未记录，用 0 兜底）。
+        // 仅在 GL 线程消费切换请求时读写，无跨线程竞争。
+        int local_builtin_preset_index_ = -1;
+        int local_like_preset_index_ = -1;
+        // 取消收藏触发的重扫请求（ConsumePresetRequests 消费）。
+        std::atomic<bool> requested_rescan_{false};
         std::mutex pcm_mutex_;
         std::vector<float> pending_pcm_;
         unsigned int pending_frames_ = 0;
@@ -435,7 +445,7 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects, kWave, kTweak };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects, kWave, kTweak, kLike, kLibraryToggle };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
 
@@ -448,6 +458,12 @@ private:
     juce::Rectangle<int> getOverlayButtonRect(juce::Rectangle<int> overlay, OverlayButton btn) const;
     void executeOverlayAction(OverlayButton btn);
     void paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<int> content);
+    // ---- 右下角收藏 / 切换库按钮 ----
+    void paintLibraryButtons(juce::Graphics& g, juce::Rectangle<int> content);
+    OverlayButton hitTestLibraryButton(juce::Point<int> pos, juce::Rectangle<int> content) const;
+    juce::Rectangle<int> getLibraryButtonRect(juce::Rectangle<int> content, OverlayButton btn) const;
+    bool isLibraryToggleVisible() const;   ///< 收藏库是否非空（决定切换按钮显隐）
+    void executeLibraryAction(OverlayButton btn);  ///< 收藏 / 切换库动作
     void PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<int> content);
     void showPresetJumpDialog();
 
@@ -559,6 +575,7 @@ private:
     static constexpr int   kEffectsBtnW = 42;           ///< effects 按钮宽度
     static constexpr int   kWaveBtnW = 40;              ///< wave 按钮宽度
     static constexpr int   kTweakBtnW = 46;             ///< tweak 按钮宽度
+    static constexpr int   kLibraryBtnSize = 22;        ///< 右下角收藏/切换按钮边长
     static constexpr float kWaveHeaderH = 22.0f;        ///< wave 面板标题高度
     static constexpr float kWaveModeRowH = 22.0f;       ///< wave 面板 mode stepper 行高度
     static constexpr float kWaveSliderRowH = 20.0f;     ///< wave 面板每个 slider 行高度

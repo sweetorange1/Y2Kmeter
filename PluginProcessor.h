@@ -151,6 +151,20 @@ public:
         return savedMilkdropWaveState_;
     }
 
+    // ---- Milkdrop 收藏库切换状态持久化（全局状态，仅一个 Milkdrop 模块）----
+    //   · true = 当前浏览的是收藏库 milkdrop_presets_like；
+    //   · false = 浏览内置库 milkdrop_presets（默认）。
+    //   · Editor 每次切换时同步写回，序列化到 host state 顶层属性；
+    //     Editor 构造时读回，实现关闭→重开软件后仍停留在上次浏览的库。
+    void setSavedMilkdropUseLikeLibrary (bool useLike) noexcept
+    {
+        savedMilkdropUseLikeLibrary_.store (useLike);
+    }
+    bool getSavedMilkdropUseLikeLibrary() const noexcept
+    {
+        return savedMilkdropUseLikeLibrary_.load();
+    }
+
     // ---- 兼容旧接口（供 EqModule 使用，内部转发到 AnalyserHub）----
     double getCurrentSampleRate() const noexcept;
     void getOscilloscopeSnapshot(juce::Array<float>& dest);   // 返回 L 声道
@@ -187,6 +201,10 @@ private:
 
     // Milkdrop 简单波形样式覆盖（全局状态，持久化到 host state）
     MilkdropWaveState savedMilkdropWaveState_;
+
+    // Milkdrop 收藏库切换状态（全局状态，持久化到 host state）。
+    // 用 atomic 消除 GL 线程（删空回退）与 UI/host 线程之间的读写竞争。
+    std::atomic<bool> savedMilkdropUseLikeLibrary_ { false };
 
     // processBlock 时间占比测量器（JUCE 内置，读写原子，实时线程友好）
     juce::AudioProcessLoadMeasurer loadMeasurer;

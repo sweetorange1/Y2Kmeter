@@ -505,6 +505,9 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty ("milkdropWaveAdditive", savedMilkdropWaveState_.additive, nullptr);
     root.setProperty ("milkdropWaveBrighten", savedMilkdropWaveState_.brighten, nullptr);
 
+    // Milkdrop 收藏库切换状态（全局状态）
+    root.setProperty ("milkdropUseLikeLibrary", savedMilkdropUseLikeLibrary_.load(), nullptr);
+
     // Milkdrop 后处理 uv 几何畸变偏移（全局状态，随 visual state 持久化）
     root.setProperty ("milkdropOffsetZoom", (double) savedMilkdropVisualState_.offset.value[0], nullptr);
     root.setProperty ("milkdropOffsetRot",  (double) savedMilkdropVisualState_.offset.value[1], nullptr);
@@ -676,6 +679,10 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
         savedMilkdropWaveState_.additive = (bool) root.getProperty ("milkdropWaveAdditive", false);
     if (root.hasProperty ("milkdropWaveBrighten"))
         savedMilkdropWaveState_.brighten = (bool) root.getProperty ("milkdropWaveBrighten", false);
+
+    // Milkdrop 收藏库切换状态（旧存档缺失时保持默认 false = 内置库）
+    if (root.hasProperty ("milkdropUseLikeLibrary"))
+        savedMilkdropUseLikeLibrary_.store ((bool) root.getProperty ("milkdropUseLikeLibrary", false));
 
     // Milkdrop 后处理 uv 几何畸变偏移（旧存档缺失时保持默认 0）
     if (root.hasProperty ("milkdropOffsetZoom"))
