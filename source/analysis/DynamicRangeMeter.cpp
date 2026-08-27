@@ -23,9 +23,10 @@ void DynamicRangeMeter::reset()
     shortPeakDb.clear();
     shortRmsDb.clear();
 
-    integratedSumSq   = 0.0;
-    integratedSamples = 0;
-    integratedPeakDb  = -144.0f;
+    allPeakDb.clear();
+    allRmsDb.clear();
+
+    silenceSamples = 0.0;
 
     lastPeakL = lastPeakR = -144.0f;
     lastRmsL  = lastRmsR  = -144.0f;
@@ -74,8 +75,9 @@ void DynamicRangeMeter::finishBlock()
     while ((int) shortPeakDb.size() > shortBlockCount) shortPeakDb.pop_front();
     while ((int) shortRmsDb .size() > shortBlockCount) shortRmsDb .pop_front();
 
-    // 全程统计
-    integratedPeakDb = juce::jmax(integratedPeakDb, peakDb);
+    // 写入全程序列（供 integratedDR 分位数计算）
+    allPeakDb.push_back(peakDb);
+    allRmsDb .push_back(rmsDb);
 
     // 计算快照
     Snapshot ns;
@@ -91,12 +93,10 @@ void DynamicRangeMeter::finishBlock()
     const float sRmsTop  = percentileTop20(shortRmsDb);
     ns.shortDR = juce::jlimit(0.0f, 60.0f, sPeakTop - sRmsTop);
 
-    // integratedDR：用全程 integrated peak 与 integrated rms 近似
-    const double avgSumSq = (integratedSamples > 0)
-                              ? integratedSumSq / (double) integratedSamples
-                              : 0.0;
-    const float integRms = toDb((float) std::sqrt(juce::jmax(0.0, avgSumSq)));
-    ns.integratedDR = juce::jlimit(0.0f, 60.0f, integratedPeakDb - integRms);
+    // integratedDR：与 shortDR 一致的分位数法，窗口为全程
+    const float iPeakTop = percentileTop20(allPeakDb);
+    const float iRmsTop  = percentileTop20(allRmsDb);
+    ns.integratedDR = juce::jlimit(0.0f, 60.0f, iPeakTop - iRmsTop);
 
     // 记录最后一次原始值
     lastPeakL = ns.peakL;
@@ -107,6 +107,28 @@ void DynamicRangeMeter::finishBlock()
     {
         const juce::SpinLock::ScopedLockType sl(snapLock);
         snap = ns;
+    }
+
+    // ---- Integrated DR 静音自动重置 ----
+    //   用本块（尚未清零）的合成 RMS 均方判断“无信号”：连续 silenceResetSeconds
+    //   秒低于 -60 dBFS 门限时清空 integrated 累积，下次有信号重新累积。
+    {
+        const double blockMeanSq =
+            (blockSumSqL + blockSumSqR) / (2.0 * static_cast<double>(blockCounter));
+        if (blockMeanSq < silenceMeanSqThreshold)
+        {
+            silenceSamples += static_cast<double>(blockCounter);
+            if (silenceSamples >= sampleRate * silenceResetSeconds)
+            {
+                allPeakDb.clear();
+                allRmsDb.clear();
+                silenceSamples = 0.0;
+            }
+        }
+        else
+        {
+            silenceSamples = 0.0;
+        }
     }
 
     // 块状态清空
@@ -131,10 +153,6 @@ void DynamicRangeMeter::pushStereo(const float* left, const float* right, int nu
         blockPeakR = juce::jmax(blockPeakR, absR);
         blockSumSqL += (double) L * (double) L;
         blockSumSqR += (double) R * (double) R;
-
-        // 全程积分
-        integratedSumSq += (double)(L * L + R * R) * 0.5;
-        ++integratedSamples;
 
         ++blockCounter;
         if (blockCounter >= blockSize)

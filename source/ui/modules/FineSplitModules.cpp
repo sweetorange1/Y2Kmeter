@@ -793,15 +793,15 @@ void DynamicsCrestModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int>
 // VuMeterModule —— 指针式模拟 VU 表
 //
 // 视觉差异化：
-//   · 采用**半圆扇形表盘 + 双指针**的经典模拟 VU 表造型，区别于项目里
+//   · 采用**半圆扇形表盘 + 单指针**的经典模拟 VU 表造型，区别于项目里
 //     其他基于方块柱 / 数字读数 / 示波器曲线的模块
-//   · 圆心位于表盘底部中点，扇形跨度约 140° (左下 -> 正上 -> 右下)
-//   · 左指针 (L) = pink400；右指针 (R) = pink700
-//   · 刻度：-20 / -10 / -7 / -5 / -3 / 0 / +3 VU
-//   · 右上角 LED 圆灯：dim / 绿 (有信号) / 红 (>= -3 dBFS 危险)
+//   · 圆心位于表盘底部中点，扇形跨度约 180° (水平左 -> 正上 -> 水平右)
+//   · 指针 = pink600（单指针，总电平）
+//   · 刻度：-36 .. +3 dBFS 均匀等距
+//   · 右上角 LED 圆灯：dim / 绿 (> -25 dBFS) / 红 (>= 0 dBFS 危险)
 //
-// 数据来源：AnalyserHub::Kind::Loudness → 复用已算好的 RMS L/R
-//         → 无任何新增的音频线程分析计算量
+// 数据来源：AnalyserHub::Kind::Oscilloscope → 从 2048 样本原始波形尾部
+//         取 ~20ms 窗口自算瞬时 RMS，后端音频线程零新增分析计算
 // ==========================================================
 VuMeterModule::VuMeterModule(AnalyserHub& h)
     : ModulePanel(ModuleType::vuMeter), hub(h)
@@ -1052,13 +1052,24 @@ void VuMeterModule::drawDial(juce::Graphics& g,
     g.setColour(juce::Colour(0xffd21f3a).withAlpha(0.9f));
     g.strokePath(arcRed, juce::PathStrokeType(3.0f));
 
-    // ---- 刻度与数字（dBFS，-25 .. +3 均匀等距） ----
+    // ---- 刻度与数字（dBFS，-36 .. +3 均匀等距） ----
     //   线性映射（vuToAngle 用 jmap），所以每个整数 dB 在表盘上间隔均等。
-    //   策略：-25 .. +3 共 28 dB
+    //   策略：-36 .. +3 共 39 dB
     //     · 每 1 dB 画一个微刻度（短刻度）
     //     · 每 5 dB + 关键整数位（-3/0/+3）画长刻度并带数字标签
     struct Tick { float db; const char* label; bool major; };
     static const Tick ticks[] = {
+        { -36.0f, "-36", true  },
+        { -35.0f, nullptr,false},
+        { -34.0f, nullptr,false},
+        { -33.0f, nullptr,false},
+        { -32.0f, nullptr,false},
+        { -31.0f, nullptr,false},
+        { -30.0f, "-30", true  },
+        { -29.0f, nullptr,false},
+        { -28.0f, nullptr,false},
+        { -27.0f, nullptr,false},
+        { -26.0f, nullptr,false},
         { -25.0f, "-25", true  },
         { -24.0f, nullptr,false},
         { -23.0f, nullptr,false},
@@ -1185,10 +1196,11 @@ void VuMeterModule::drawLed(juce::Graphics& g, juce::Rectangle<int> ledArea) con
 
     // 状态判定（使用 onFrame 里维护的实时 ledLevelDb — peak-follower，
     //   基于 currentMonoDbfs，和指针视觉同步）
-    //   · ledLevelDb < -60 dBFS → 视为无信号（暗灭，不发光）
-    //   · ledLevelDb >= warnDbfs → 危险（红灯 + 快速脉动），和表盘红色段一致
-    //   · 否则                    → 绿灯（慢速呼吸）
-    const bool hasSignal = ledLevelDb > minDisplayDb;
+    //   · ledLevelDb <= ledSignalDbfs → 视为无信号（暗灭，不发光）
+    //   · ledLevelDb >= warnDbfs     → 危险（红灯 + 快速脉动），和表盘红色段一致
+    //   · 否则                        → 绿灯（慢速呼吸）
+    //   注：绿灯点亮阈值 ledSignalDbfs(-25) 与表底 minDisplayDb(-36) 已解耦。
+    const bool hasSignal = ledLevelDb > ledSignalDbfs;
     const bool danger    = ledLevelDb >= warnDbfs;
 
     juce::Colour coreCol, glowCol;

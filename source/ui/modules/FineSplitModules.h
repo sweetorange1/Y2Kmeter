@@ -189,16 +189,17 @@ private:
 // VuMeterModule —— Pink XP 像素风"模拟 VU 表"指针仪表
 //
 //   · 与其它矩形柱状/数字模块视觉差异化：采用**半圆扇形表盘 + 指针**
-//   · 单指针（总电平：L/R 功率合成），复用 AnalyserHub 已计算的 RMS L/R
+//   · 单指针（总电平：L/R 功率合成），订阅 Oscilloscope 从原始波形算瞬时 RMS
 //     → 后端零新增计算
 //   · 右上角圆形 LED 信号灯：
-//        无信号 (合成 dBFS < -60) → 暗灭
-//        正常有信号               → 绿色 (慢速呼吸)
+//        无信号 (合成 dBFS <= ledSignalDbfs) → 暗灭
+//        正常有信号 (ledSignalDbfs < 合成 dBFS < warnDbfs) → 绿色 (慢速呼吸)
 //        危险  (合成 dBFS >= warnDbfs) → 红色 (快速脉动)
-//   · 指针 300ms 弹道（模拟机械迟滞），通过 smoothed 平滑实现
-//   · 刻度采用直接的 **dBFS**（-60 .. 0），与其他 Meter 统一；
-//     靠近 0 dBFS 的段红色警戒。
-//   · LED 判定阈值 = 刻度红色段起点 → 指针到红段 = LED 变红，完全同步。
+//   · 指针非对称弹道：上升 τ≈80ms（追瞬态）、下降 τ≈350ms（模拟机械回落）
+//   · 刻度采用直接的 **dBFS**（minDisplayDb .. maxDisplayDb），与其他 Meter 统一；
+//     靠近 warnDbfs 的段红色警戒。
+//   · LED 变红阈值 = warnDbfs（表盘红色段起点）；LED 绿灯点亮阈值 = ledSignalDbfs，
+//     与表底刻度（minDisplayDb）解耦。
 // ==========================================================
 class VuMeterModule : public ModulePanel,
                      public AnalyserHub::FrameListener,
@@ -295,9 +296,14 @@ private:
     static constexpr float tauRiseMs = 80.0f;
     static constexpr float tauFallMs = 350.0f;
 
-    // 刻度显示上下界（dBFS） —— 均匀等距从 -25 到 +3
-    static constexpr float minDisplayDb = -25.0f;
+    // 刻度显示上下界（dBFS） —— 均匀等距从 -36 到 +3
+    static constexpr float minDisplayDb = -36.0f;
     static constexpr float maxDisplayDb =  +3.0f;
+
+    // LED 绿灯点亮阈值（dBFS） —— 与表底刻度 minDisplayDb 解耦。
+    //   表底已扩展到 -36 以便捕捉更低瞬态，但 LED 仍在 -25 才点亮，
+    //   避免 -25~-36 之间的微弱底噪导致绿灯常亮。
+    static constexpr float ledSignalDbfs = -25.0f;
 
     // 红色警戒段的起点（dBFS） —— 也是 LED 变红的同一个阈值
     //   0 dBFS = 数字满刻度，到达即开始削波风险

@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.7.1`）
+- **产品名**：`Y2Kmeter` （版本：`2.7.2`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -3340,6 +3340,68 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 3. **跨线程数据竞争**：`milkdrop_use_like_library_` 最初是普通 `bool`，取消收藏删空回退在 GL 线程写它，与 UI/host 线程读存在竞争；改为 `std::atomic<bool>`，Processor 侧字段一并原子化（`load/store`）。
 4. **双向索引反推旧库**：切换请求消费时 `milkdrop_use_like_library_` 已被 UI 线程翻转成新值，需按新值反推"旧库"，把当前索引存入旧库记忆，再恢复到目标库记录索引。
 5. **版本号字面量分散**：`PluginEditor.cpp` 中版本字面量既有 `getStringWidth("v2.7.0")` 又有 `versionText = "v2.7.0"` 两种写法（一处用变量、一处用字面量），升级版本号需逐一核对避免遗漏。
+
+---
+
+## v2.7.2：响度/动态/VU 计量修正 —— 静音自动重置 + 标准相对门限 + DR 口径统一
+
+本章记录 v2.7.2 版本相对 v2.7.1 的改动，全部集中在**响度（Loudness）、实时响度（LUFS real-time）、动态（Dynamics）、VU 表**四条计量线上，聚焦「测量正确性」与「交互一致性」：
+
+1. **Integrated LUFS / Integrated DR 增加「无信号 5 秒自动重置」**；
+2. **Integrated LUFS 补上 ITU-R BS.1770-4 的「-10 LU 相对门限」（二阶段门限）**；
+3. **Integrated DR 的算法口径与 Short DR 统一（同为 top-20% 分位数法）**；
+4. **VU 表底刻度从 -25 dB 下探到 -36 dB**，并把 LED 点亮阈值与表底刻度**解耦**；
+5. 修正多处「注释与实际实现不符」的陈旧注释。
+
+### 功能概述
+
+#### 1. Integrated LUFS 静音 5 秒自动重置
+- 问题：`lufsI`（节目响度）全程积分从 `prepare/reset` 起只增不减，DAW 停止播放或 loopback 静音后，旧的节目响度仍污染后续新段落。
+- 修复：在 `LoudnessMeter::pushStereo()` 末尾基于 100ms 滑窗 RMS 的合成均方 `(rmsSumL + rmsSumR)/(2N)` 判断「无信号」；连续 5 秒低于 **-60 dBFS** 门限则清空 `integrated` 相关累积并立即 `updateSnapshot()`，下次有信号重新累积。
+
+#### 2. Integrated DR 静音 5 秒自动重置
+- 问题：`integratedDR` 同理由 `integratedPeakDb` 的 `jmax` 累积，静音后不回落。
+- 修复：在 `DynamicRangeMeter::finishBlock()`（每 100ms 块结束）用本块 `(blockSumSqL + blockSumSqR)/(2×blockCounter)` 判断静音，连续 5 秒低于 -60 dBFS 门限则清空 integrated 累积。
+
+#### 3. Integrated LUFS 相对门限（BS.1770-4 二阶段门限）
+- 问题：原实现只有 `absGateThreshold = 1e-7`（-70 LUFS 绝对门限）一道门限，注释却宣称「含相对门限」；缺失 -10 LU 相对门限会让轻响段落被计入积分，导致 `lufsI` 读数相对标准响度计**偏高约 0.5~2 LUFS**。
+- 修复：`integratedSumL/R` + `integratedCount` 改为 `std::deque<double> gatedBlocks` 保存通过绝对门限的 400ms 块能量；`updateSnapshot()` 中先对 `gatedBlocks` 求均值 × 0.1 得相对门限，再只对 `≥ 相对门限` 的块重新求均值作为最终 `lufsI`。
+
+#### 4. Integrated DR 口径与 Short DR 统一
+- 问题：`shortDR` 用「Peak top-20% 均值 − RMS top-20% 均值」（TT DR 分位数法），而 `integratedDR` 用「全程最大 Peak − 全程 RMS 均方根」，两者口径不一致；且 `integratedDR` 受单次爆音影响被永久顶高、不回落。
+- 修复：删除 `integratedSumSq / integratedSamples / integratedPeakDb` 近似，改为 `std::deque<float> allPeakDb / allRmsDb` 全程队列，`integratedDR = percentileTop20(allPeakDb) - percentileTop20(allRmsDb)`，复用同一个 `percentileTop20` 函数。
+
+#### 5. VU 表底 -25 → -36 dB，LED 阈值解耦
+- 问题：VU 指针表底 `minDisplayDb = -25.0f`，捕捉不到低电平瞬态；且 `drawLed()` 里 `hasSignal = ledLevelDb > minDisplayDb` 复用了表底变量，改表底会连带改变 LED 点亮阈值。
+- 修复：`minDisplayDb` 改为 `-36.0f`，刻度数组扩展为 `-36…+3`；新增独立常量 `ledSignalDbfs = -25.0f`，`hasSignal = ledLevelDb > ledSignalDbfs`，红色警戒段仍用 `warnDbfs = 0.0f`。
+
+#### 6. 注释修正（注释与实际不符）
+- `VuMeterModule` 类头/实现顶部：修正「双指针 → 单指针」「数据来源 Kind::Loudness → Kind::Oscilloscope」「无信号 < -60 → < -25」「指针 300ms → 上升 80ms / 下降 350ms 非对称」「刻度 -60..0 → -36..+3」「残留 -20/-10/…/+3 VU → -36..+3 dBFS」「红 >= -3 → >= 0 dBFS」等。
+- `LoudnessMeter` 类头注释：Short-term「3s」→「约 3.2s（8×400ms）」，并纠正「最多 7.5 块」过时表述。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/analysis/AnalyserHub.h`](/I:/Y2KMeter/source/analysis/AnalyserHub.h) | `LoudnessMeter`：新增 `gatedBlocks` deque + 静音重置成员 `silenceMeanSqThreshold/silenceResetSeconds/silenceSamples`；`DynamicRangeMeter`：新增 `allPeakDb/allRmsDb` deque + 静音重置成员，删除 `integratedSumSq/integratedSamples/integratedPeakDb` |
+| [`source/analysis/LoudnessMeter.cpp`](/I:/Y2KMeter/source/analysis/LoudnessMeter.cpp) | `pushStereo` 静音检测；`updateSnapshot` 二阶段相对门限；`reset` 清空 gatedBlocks 与 silenceSamples |
+| [`source/analysis/DynamicRangeMeter.cpp`](/I:/Y2KMeter/source/analysis/DynamicRangeMeter.cpp) | `finishBlock` 静音检测 + integratedDR 分位数法 |
+| [`source/ui/modules/FineSplitModules.h`](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | `minDisplayDb` -25→-36；新增 `ledSignalDbfs = -25.0f`；修正类头注释 |
+| [`source/ui/modules/FineSplitModules.cpp`](/I:/Y2KMeter/source/ui/modules/FineSplitModules.cpp) | `drawDial` 刻度数组扩展 -36…+3；`drawLed` 阈值改用 `ledSignalDbfs`；修正顶部注释 |
+
+### 关键设计
+
+- **静音检测门限统一取 -60 dBFS（线性均方 1e-6）**：与 RMS/LUFS 的底噪判定保持同一数量级，避免把低电平但真实存在的信号误判为静音；阈值与重置秒数均为 `static constexpr`，集中在类内一处修改。
+- **相对门限的「两遍」实现**：`gatedBlocks` 只存「通过绝对门限」的块，避免对静音段做无意义的相对门限计算；相对门限 = 存活块均值 × 0.1（-10 LU），第二遍过滤后再平均。
+- **静音重置与 relative gate 解耦**：静音重置触发的是 `gatedBlocks.clear()` / `allPeakDb.clear()` 的「清零」，相对门限只作用于「非空」的 gatedBlocks，两者互不干扰。
+
+### 踩坑记录
+
+1. **`integratedDR` 的 max 永续问题**：`juce::jmax(integratedPeakDb, peakDb)` 天然单调不减，静音或爆音后都不会回落，用户会看到 DR INTEG 被一次鼓点永久顶高；改为分位数法后与 shortDR 一致、可随数据回落。
+2. **LoudnessModule L/R 柱复用了 LUFS 的 `linearToLUFS`（含 -0.691）**：这两根柱标称 dBFS 但实际带 -0.691 校准常量，比真实 dBFS 恒低约 0.69 dB（本轮未改动，仅记录，避免后续叠加精确 dB 阈值时踩坑）。
+3. **True Peak 已计算但未显示**：`Snapshot.truePeakL/R`（4× 过采样 dBTP）在 `LoudnessMeter` 里算好了，但 `LoudnessModule` 的 L/R 柱用的是 `rmsL/R`，True Peak 字段目前闲置（本轮未改动，仅记录）。
+4. **LED 阈值与表底曾耦合**：`hasSignal = ledLevelDb > minDisplayDb` 复用了表底变量，改表底会连带改变 LED 点亮阈值；本轮拆出独立 `ledSignalDbfs`，后续调整两者互不影响。
+5. **版本号字面量分散**：除 `CMakeLists.txt`（`project(... VERSION)` 与 `juce_add_plugin(... VERSION)` 两处）、`Y2Kmeter_installer.iss`（`MyAppVersion`）外，`PluginEditor.cpp` 里版本字面量有 `getStringWidth("v2.7.x")` 与 `versionText = "v2.7.x"` 两种写法，且一处带 8 空格缩进、一处顶格，批量替换时需注意缩进差异逐行核对。
 
 ---
 

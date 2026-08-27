@@ -18,7 +18,7 @@
 // 实现：
 //   - K-weighting 两级 IIR 滤波（pre-filter + RLB-weighting）
 //   - 400ms 块均方（Momentary LUFS）
-//   - 3s 滑动窗口（Short-term LUFS）
+//   - 约 3.2s 滑动窗口（Short-term LUFS，8×400ms 块）
 //   - 全程积分（Integrated LUFS，含 -70 LUFS 绝对门限 + 相对门限）
 //   - 每通道 RMS（100ms 滑动窗口）
 //   - True Peak（4× 过采样插值）
@@ -35,7 +35,7 @@ public:
     struct Snapshot
     {
         float lufsM     = -144.0f;   // Momentary LUFS（400ms）
-        float lufsS     = -144.0f;   // Short-term LUFS（3s）
+        float lufsS     = -144.0f;   // Short-term LUFS（约 3.2s）
         float lufsI     = -144.0f;   // Integrated LUFS（全程）
         float rmsL      = -144.0f;   // 左声道 RMS dBFS（100ms）
         float rmsR      = -144.0f;   // 右声道 RMS dBFS（100ms）
@@ -130,17 +130,26 @@ private:
     double momentarySumL    = 0.0;
     double momentarySumR    = 0.0;
 
-    // 3s 短期（Short-term）：用 400ms 块的滑动队列（最多 7.5 块）
-    static constexpr int shortTermBlocks = 8; // 覆盖 ~3.2s
+    // 短期（Short-term）：用 400ms 块的滑动队列（8 块 ≈ 3.2s）
+    static constexpr int shortTermBlocks = 8;
     std::deque<double> shortTermBlocksL;
     std::deque<double> shortTermBlocksR;
 
-    // 积分（Integrated）：所有通过门限的 400ms 块
-    double integratedSumL   = 0.0;
-    double integratedSumR   = 0.0;
-    int    integratedCount  = 0;
-    // 第一轮门限（-70 LUFS 绝对门）
-    static constexpr double absGateThreshold = 1.0e-7; // -70 LUFS 线性均方
+    // 积分（Integrated）：BS.1770-4 两阶段门限
+    //   · 绝对门限：blockMean >= absGateThreshold（-70 LUFS）
+    //   · 相对门限：对通过绝对门限的所有块求平均，再 -10 LU（×0.1）
+    //   · 最终 Integrated = 对 blockMean >= 相对门限 的块求平均
+    std::deque<double> gatedBlocks; // 通过绝对门限的 400ms 块能量（左右合成均方）
+    // 绝对门限（-70 LUFS 线性均方）
+    static constexpr double absGateThreshold = 1.0e-7;
+
+    // ---- Integrated 静音自动重置 ----
+    //   连续 silenceResetSeconds 秒无音频信号（合成 RMS 均方 < silenceMeanSqThreshold）
+    //   时，自动清空 integrated 积分，下次出现信号时重新开始累积。
+    //   目的：DAW 停止播放 / loopback 静音后，旧的节目响度不应继续污染新段落。
+    static constexpr double silenceMeanSqThreshold = 1.0e-6; // -60 dBFS 线性均方
+    static constexpr double silenceResetSeconds    = 5.0;
+    double silenceSamples = 0.0; // 连续静音累计样本数
 
     // RMS（100ms 滑动窗口）
     int rmsWindowSize  = 0;
@@ -263,11 +272,17 @@ private:
     std::deque<float> shortPeakDb;   // 每块 peak（max(L,R)） dB
     std::deque<float> shortRmsDb;    // 每块 rms dB
 
-    // 全程累积（没有上限，使用 vector + 滑动代替逻辑：只保留 peak/rms 的 top有序列表太重，
-    // 简化做法：保留 integratedPeakSum / RmsSum 用于粗略全程 DR，以及最大 peak / 均值 rms）
-    double integratedSumSq     = 0.0;
-    long long integratedSamples = 0;
-    float integratedPeakDb     = -144.0f;
+    // 全程累积：保存每块的 peak/rms dB，供 integratedDR 用与 shortDR 一致的
+    // top-20% 分位数法（percentileTop20）计算。块数随静音重置清空，可控。
+    std::deque<float> allPeakDb;   // 全程每块 peak（max(L,R)）dB
+    std::deque<float> allRmsDb;    // 全程每块 rms dB
+
+    // ---- Integrated DR 静音自动重置 ----
+    //   连续 silenceResetSeconds 秒无音频信号（块合成 RMS 均方 < silenceMeanSqThreshold）
+    //   时清空 integrated 累积，下次有信号重新累积。
+    static constexpr double silenceMeanSqThreshold = 1.0e-6; // -60 dBFS 线性均方
+    static constexpr double silenceResetSeconds    = 5.0;
+    double silenceSamples = 0.0; // 连续静音累计样本数
 
     // 快照
     mutable juce::SpinLock snapLock;

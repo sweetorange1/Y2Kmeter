@@ -118,8 +118,9 @@ void LoudnessMeter::reset()
     shortTermBlocksL.clear();
     shortTermBlocksR.clear();
 
-    integratedSumL = integratedSumR = 0.0;
-    integratedCount = 0;
+    gatedBlocks.clear();
+
+    silenceSamples = 0.0;
 
     rmsHistL.clear();
     rmsHistR.clear();
@@ -200,13 +201,10 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
                 shortTermBlocksR.pop_front();
             }
 
-            // 积分（绝对门限 -70 LUFS）
+            // 积分（绝对门限 -70 LUFS）：保存通过绝对门限的块能量，
+            // 供 updateSnapshot 计算相对门限与最终 Integrated
             if (blockMean >= absGateThreshold)
-            {
-                integratedSumL += meanL;
-                integratedSumR += meanR;
-                ++integratedCount;
-            }
+                gatedBlocks.push_back(blockMean);
 
             momentarySumL = momentarySumR = 0.0;
             momentaryWriteCount = 0;
@@ -216,6 +214,32 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
             // True Peak 改为按块统计：发布快照后清零，下一块重新累计。
             tpL.peak = 0.0f;
             tpR.peak = 0.0f;
+        }
+    }
+
+    // ---- Integrated 静音自动重置 ----
+    //   基于 100ms 滑动 RMS 的合成均方判断“无信号”：连续 silenceResetSeconds
+    //   秒低于 -60 dBFS 门限时清空 integrated 积分，下次有信号重新累积。
+    {
+        const int rmsN = static_cast<int>(rmsHistL.size());
+        if (rmsN > 0)
+        {
+            const double meanSq = (rmsSumL + rmsSumR) / (2.0 * static_cast<double>(rmsN));
+            if (meanSq < silenceMeanSqThreshold)
+            {
+                silenceSamples += static_cast<double>(numSamples);
+                if (silenceSamples >= sampleRate * silenceResetSeconds
+                    && !gatedBlocks.empty())
+                {
+                    gatedBlocks.clear();
+                    silenceSamples = 0.0;
+                    updateSnapshot(); // 立即刷新快照，让 lufsI 归零
+                }
+            }
+            else
+            {
+                silenceSamples = 0.0;
+            }
         }
     }
 }
@@ -245,13 +269,26 @@ void LoudnessMeter::updateSnapshot()
         s.lufsS = linearToLUFS((sumL + sumR) * 0.5 / (double) n);
     }
 
-    // Integrated
-    if (integratedCount > 0)
+    // Integrated（BS.1770 两阶段门限）
+    if (!gatedBlocks.empty())
     {
-        const double iL = integratedSumL / (double) integratedCount;
-        const double iR = integratedSumR / (double) integratedCount;
-        s.lufsI = linearToLUFS((iL + iR) * 0.5);
-        s.integrated = true;
+        // 相对门限：通过绝对门限的块的平均能量再 -10 LU（×0.1）
+        double sum = 0.0;
+        for (double e : gatedBlocks) sum += e;
+        const double relativeGate = (sum / (double) gatedBlocks.size()) * 0.1;
+
+        // 只对 blockMean >= 相对门限 的块求平均
+        double gatedSum = 0.0;
+        int    gatedCount = 0;
+        for (double e : gatedBlocks)
+        {
+            if (e >= relativeGate) { gatedSum += e; ++gatedCount; }
+        }
+        if (gatedCount > 0)
+        {
+            s.lufsI = linearToLUFS(gatedSum / (double) gatedCount);
+            s.integrated = true;
+        }
     }
 
     // RMS
