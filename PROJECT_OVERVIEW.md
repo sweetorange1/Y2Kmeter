@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.7.2`）
+- **产品名**：`Y2Kmeter` （版本：`2.7.3`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -235,8 +235,13 @@
 ### 4.4 `ModuleWorkspace`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
 - **模块工厂**：`setModuleFactory(f)`，Editor 侧会按 `ModuleType` 构造具体 `ModulePanel` 派生类（见 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `createModule`）。
 - **底部 Toolbar 组件**（自左至右）：`ThemeSwatchBar` → 布局预设下拉 + Save/Load → Grid → FPS → GAIN → Source → Hide。
-- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / tiled=4 / mv=5`。
+- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / mv=5 / studioMonitor=6 / focusSidecar=7 / broadcastLoudness=9 / onlyMilkdrop=10`（编号 `4`、`8` 已废弃，保留空洞以兼容历史存档）。
+  - **Horizontal Bar T/B (2/3)**：横向铺满屏幕宽度，默认模块横向等分 canvas；Preset 2 贴屏幕顶部、Preset 3 贴屏幕底部。默认模块序列为 `Spectrogram3D / LUFS RT / VU / StereoField / Spectrum / OscWave / Waveform`（v2.7.3 起将 `Dynamics` 替换为 `LUFS RT` 并拉短，`VU`/`StereoField` 拉宽以适配低分辨率屏幕）。
   - **MV (Preset 5)**：**Windows** 铺满当前显示器 userArea（视觉等同全屏）；**macOS** 铺满 totalArea 后调用 `rw->setFullScreen(true)` 进入系统原生全屏（隐藏菜单栏/Dock）。上方 180px 横向模块条（同 Preset 2 的 7 个默认模块），下方 Milkdrop 模块占满剩余 canvas 区域。代码位于 `applyLayoutPreset` case 5。
+  - **Studio Monitor (6)**：双行监听——上排频谱行（`Spectrum / Spectrogram / Waveform`，拉宽 ≈1.5:1 保证频率信号可读）+ 下排仪表行（`VU / StereoField / LUFS RT / TruePeak`，半圆仪表保持 ≈2:1 避免空白）。
+  - **Focus + Sidecar (7)**：左 65% `Spectrogram` 主视觉（普通瀑布，帧率友好）+ 右 35% `VU / StereoField / LUFS RT` 竖排。
+  - **Broadcast Loudness (9)**：上排响度读数（`LUFS RT / TruePeak / Dynamics DR / Dynamics Crest`）+ 下排仪表（`VU / StereoField / Dynamics Meters`）。
+  - **Only Milkdrop (10)**：全屏（Windows userArea / macOS 原生全屏）+ 单个最大化 `Milkdrop` 模块。
 - **拼豆像素画（PerlerImage）**：拖入图片 → 按 `cellSize`（默认 4，范围 1..15）降采样 + 每格取原图平均色 → 生成像素画 → 作为 canvas 底图；每张贴画对应一个 `PerlerImageLayer` 子 Component 与模块**同 z-order 层级**。
 - **P4 debounce**：`LayoutChangeCoalescer`（16ms 单发计时器），大量小改动只派发 1 次 `onLayoutChanged`。
 - **hit-test 挖洞**：`setHitTestHoles`，chrome 隐藏态下让浮层按钮的鼠标事件冒泡回 Editor。
@@ -3402,6 +3407,70 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 3. **True Peak 已计算但未显示**：`Snapshot.truePeakL/R`（4× 过采样 dBTP）在 `LoudnessMeter` 里算好了，但 `LoudnessModule` 的 L/R 柱用的是 `rmsL/R`，True Peak 字段目前闲置（本轮未改动，仅记录）。
 4. **LED 阈值与表底曾耦合**：`hasSignal = ledLevelDb > minDisplayDb` 复用了表底变量，改表底会连带改变 LED 点亮阈值；本轮拆出独立 `ledSignalDbfs`，后续调整两者互不影响。
 5. **版本号字面量分散**：除 `CMakeLists.txt`（`project(... VERSION)` 与 `juce_add_plugin(... VERSION)` 两处）、`Y2Kmeter_installer.iss`（`MyAppVersion`）外，`PluginEditor.cpp` 里版本字面量有 `getStringWidth("v2.7.x")` 与 `versionText = "v2.7.x"` 两种写法，且一处带 8 空格缩进、一处顶格，批量替换时需注意缩进差异逐行核对。
+
+---
+
+## v2.7.3：布局预设体系重构 —— 仪表/频谱比例优化 + 预设增删 + 屏幕模拟调试
+
+本章记录 v2.7.3 版本相对 v2.7.2 的改动，全部集中在**布局预设（LayoutPreset）体系**，聚焦「模块显示比例合理性」「低分辨率屏幕适配」「预设体系收敛」与「调试手段」：
+
+1. **Horizontal Bar T/B 与 MV 预设的模块与宽度比例调整**（`Dynamics` → `LUFS RT`、`VU`/`StereoField` 拉宽）；
+2. **修复三处历史遗留问题**（废弃 `tiled=4` 死代码、注释「七个→十个默认模块」、下拉框拼写 `preasent` → `preset`）；
+3. **新增 4 个布局预设**（Studio Monitor / Focus+Sidecar / Broadcast Loudness / Only Milkdrop）；
+4. **抽公共辅助函数** `resizeToTargetCanvas` / `placeModuleRow`；
+5. **新增环境变量 `Y2KM_SIMULATE_SCREEN`** 用于模拟不同分辨率/比例屏幕测试布局。
+
+### 功能概述
+
+#### 1. Horizontal Bar T/B 与 MV 的模块与宽度比例调整
+- 问题：横向模块条里的 `Dynamics` 模块信息密度偏低；`VU Meter` / `Stereo Field` 这类**半圆仪表**在低分辨率屏幕上被压得过窄，仪表区域出现大量空白、可读性差。
+- 修复：横向模块条（`applyLayoutPreset` 的 case 2/3 与 case 5）将 `ModuleType::dynamics` 替换为 `ModuleType::lufsRealtime`，并把宽度比例从 `1.0` 降到 `0.7`（拉短约 30%）；`vuMeter` / `stereoField` 的宽度比例从 `0.7` 提升到 `1.0`（拉宽约 43%）。
+
+#### 2. 修复三处历史遗留问题
+- **删除废弃 `tiled=4` 死代码**：`LayoutPreset` 枚举曾声明 `tiled=4`，但下拉框未注册、`applyLayoutPreset` 也无 case 4，纯属死代码。本轮从枚举中移除，编号 4 保留空洞（注释说明以兼容历史存档）。
+- **注释与实现不符**：枚举注释「七个默认模块」实际 `seedDefaultModules` 的 `defaultOrder` 是 **10 个**（eq/loudness/vuMeter/oscilloscope/spectrum/phase/dynamics/waveform/spectrogram/spectrogram3d），已更正为「十个默认模块」。
+- **下拉框占位文本拼写**：`setTextWhenNothingSelected ("preasent")` 疑似 `preset` 笔误，已更正。
+
+#### 3. 新增 4 个布局预设（最终保留）
+| 编号 | 预设 | 布局形态 |
+|------|------|----------|
+| 6 | Studio Monitor | 上排频谱行（Spectrum/Spectrogram/Waveform，≈1.5:1）+ 下排仪表行（VU/StereoField/LUFS RT/TruePeak，≈2:1） |
+| 7 | Focus + Sidecar | 左 65% Spectrogram 主视觉 + 右 35% VU/StereoField/LUFS RT 竖排 |
+| 9 | Broadcast Loudness | 上排响度读数（LUFS RT/TruePeak/DR/Crest）+ 下排仪表（VU/StereoField/Dynamics Meters） |
+| 10 | Only Milkdrop | 全屏 + 单个最大化 Milkdrop |
+
+> 迭代过程中曾添加 `Mastering Chain (8)`、`Milkdrop Focus`、`Milkdrop Immersive`，经用户测试后删除；编号 8 保留空洞。
+
+#### 4. 抽公共辅助函数
+- `resizeToTargetCanvas(int targetW, int targetH)`：把顶层窗口居中缩放到目标尺寸，处理 resizeLimits 放开/锁定、standalone `setBounds`（含边框）与插件 `setSize` 的差异，并反推 `overheadH` 使 canvas 高度对齐到 8px 网格，返回对齐后的 canvas 区域。
+- `placeModuleRow(canvas, rowY, rowH, order, count, ratios)`：在 canvas 横向条内按加权宽度比例摆放一行模块，宽度对齐 8px 网格并占满整行，返回该行的实际底部 Y（供调用方在下方继续布局）。
+
+#### 5. 环境变量 `Y2KM_SIMULATE_SCREEN`
+- 用途：本地模拟不同分辨率/比例的屏幕，验证布局预设显示效果，无需真改系统分辨率或接额外显示器。
+- 格式：`宽x高`（如 `2560x1080` 模拟 21:9、`1280x1024` 模拟 5:4）；宽 ≥ 320 且高 ≥ 200 时生效，否则回退真实屏幕。
+- 实现：匿名命名空间函数 `resolveDisplayArea(realArea)` 读 `juce::SystemStats::getEnvironmentVariable`，统一接入 `applyLayoutPreset` 的 case 2/3、case 5、case 10 及 `resizeToTargetCanvas` 共 4 处屏幕尺寸读取点。
+
+### 涉及文件
+
+| 文件 | 主要变更 |
+|---|---|
+| [`PluginEditor.cpp`](/I:/Y2KMeter/PluginEditor.cpp) | `applyLayoutPreset` 重构：case 2/3/5 模块与比例调整、新增 case 6/7/9/10、删除 case 8/10/11；新增 `resizeToTargetCanvas`/`placeModuleRow`；新增 `resolveDisplayArea` + 4 处屏幕尺寸接入；版本号 `v2.7.2`→`v2.7.3` |
+| [`PluginEditor.h`](/I:/Y2KMeter/PluginEditor.h) | 声明 `resizeToTargetCanvas`/`placeModuleRow`；更新 `applyLayoutPreset` 注释 |
+| [`source/ui/ModuleWorkspace.h`](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | `LayoutPreset` 枚举：删除 `tiled`、新增 `studioMonitor/focusSidecar/broadcastLoudness/onlyMilkdrop`、注释修正 |
+| [`source/ui/ModuleWorkspace.cpp`](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | 下拉框：新增 4 项、删除 3 项、占位文本 `preasent`→`preset` |
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 `2.7.2`→`2.7.3`（project 与 juce_add_plugin 两处） |
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `MyAppVersion` `2.7.2`→`2.7.3` |
+
+### 关键设计
+
+- **模块显示比例分级**：不同模块有各自的理想宽高比——**频谱/瀑布类**（Spectrum/Spectrogram）越宽越清晰（≥1.5:1）；**半圆仪表类**（VU/StereoField）圆心在底部、半径受 `min(w/2, h)` 约束，理想 ≈2:1，过宽或过高会留大片空白；**3D 频谱**（Spectrogram3D）逐帧重算量大、拉大会掉帧，不宜做主视觉；**读数/曲线类**（LUFS/TruePeak/DR/Crest/Meters）宽高比灵活。布局预设必须按此分级取舍模块。
+- **预设切换的窗口尺寸策略**：铺满类预设（MV/Only Milkdrop/Bar T/B）直接用屏幕 `userArea`（macOS 用 `totalArea` + 原生全屏）；居中缩放类预设（Studio Monitor/Focus+Sidecar/Broadcast Loudness）走 `resizeToTargetCanvas` 反推 `overheadH` 对齐 8px 网格，避免模块落点偏离网格被 `snapToGrid` 拉开。
+
+### 踩坑记录
+
+1. **模块显示逻辑被低估**：最初预设把 Spectrum/Spectrogram3D 压成窄高条、把 VU 拉成超宽，用户实测发现频谱可读性差、3D 掉帧、半圆仪表大量空白。结论：布局预设不能只做几何均分，必须结合每个模块的渲染形态（宽高比敏感、帧率敏感）来取舍。
+2. **环境变量对进程是「启动时快照」**：`Y2KM_SIMULATE_SCREEN` 在系统属性里设置后，已运行中的 IDE/终端不会自动刷新环境，需重启 IDE 或新开终端才能读到；否则出现「变量已设置但无效果」的假象。
+3. **版本号字面量分散且缩进不一致**：延续 v2.7.2 的坑——`PluginEditor.cpp` 中版本字面量有 `getStringWidth("v2.7.x")` 与 `versionText = "v2.7.x"` 两种写法，其中 `versionW` 一处顶格、一处带 8 空格缩进，批量替换 `replace_all` 会因缩进差异失败，需按缩进分别精确替换。
 
 ---
 

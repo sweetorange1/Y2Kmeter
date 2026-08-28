@@ -181,13 +181,30 @@ private:
     void loadInitialModules();      // 加载默认模块（XP 风层叠瀑布）或恢复保存布局
 
     // 应用布局预设：
-    //   presetId = 1 (LayoutPreset::defaultGrid)    = 默认布局（七个默认模块 + 默认窗口 960×640 大小）
-    //   presetId = 2 (LayoutPreset::horizontalFull) = 横向铺满当前屏幕宽度（默认模块横向等分 canvas）
+    //   presetId = 1 (defaultGrid)        = 默认布局（十个默认模块 + 默认窗口 960×640）
+    //   presetId = 2 (horizontalFull)     = 横向铺满当前屏幕宽度（贴屏幕顶部）
+    //   presetId = 3 (horizontalBottom)   = 横向铺满当前屏幕宽度（贴屏幕底部）
+    //   presetId = 5 (mv)                 = 全屏 + 上方横向模块条 + 下方 Milkdrop
+    //   presetId = 6 (studioMonitor)      = 双行监听（仪表行 + 波形行）
+    //   presetId = 7 (focusSidecar)       = 主视觉 + 右侧仪表列
+    //   presetId = 9 (broadcastLoudness)  = 广播响度合规
+    //   presetId = 10 (onlyMilkdrop)      = 全屏 + 单个最大化 Milkdrop
     //   · 由 ModuleWorkspace::onLayoutPresetChanged 触发（参数用 int 承载枚举值，
     //     以避免在此头文件里 include 完整的 ModuleWorkspace.h）
     void applyLayoutPreset (int presetId);
 
-    // 按默认层叠瀑布布局加载七个默认模块（loadInitialModules 的"默认分支"提取）
+    // 把顶层窗口调整到目标尺寸（居中于当前屏幕 userArea），处理 resizeLimits
+    // 放开/锁定、standalone setBounds（含边框）与插件 setSize 的差异，并反推
+    // overhead 使 canvas 高度对齐到 8px 网格。返回对齐后的 canvas 区域。
+    juce::Rectangle<int> resizeToTargetCanvas (int targetW, int targetH);
+
+    // 在 canvas 从 rowY 起、高 rowH 的横向条内，按加权宽度比例（ratios 为
+    // nullptr 时均分）摆放 count 个模块，宽度对齐 8px 网格并占满 canvas 宽度。
+    // 返回该行模块的实际底部 Y（供调用方在其下方继续布局）。
+    int placeModuleRow (juce::Rectangle<int> canvas, int rowY, int rowH,
+                        const ModuleType* order, int count, const float* ratios);
+
+    // 按默认层叠瀑布布局加载十个默认模块（loadInitialModules 的"默认分支"提取）
     //   · 不检查 savedXml，只做填充；由调用方负责先清空 workspace
     void seedDefaultModules();
 

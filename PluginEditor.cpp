@@ -25,6 +25,34 @@
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
+// 屏幕尺寸模拟（仅开发调试用）
+//   环境变量 Y2KM_SIMULATE_SCREEN 格式 "宽x高"（如 "2560x1080" 模拟 21:9、
+//   "1280x1024" 模拟 5:4）。设置且解析成功时，所有基于 userArea/totalArea
+//   的布局计算改用该虚拟尺寸（原点固定 0,0）；未设置或非法时回退真实屏幕。
+//   用于在本地模拟不同分辨率/比例的屏幕，验证布局预设的显示效果。
+// ==========================================================
+namespace
+{
+juce::Rectangle<int> resolveDisplayArea (const juce::Rectangle<int>& realArea)
+{
+    const auto raw = juce::SystemStats::getEnvironmentVariable ("Y2KM_SIMULATE_SCREEN", {});
+    if (raw.isEmpty())
+        return realArea;
+
+    const int sep = raw.indexOfChar ('x');
+    if (sep <= 0)
+        return realArea;
+
+    const int w = raw.substring (0, sep).trim().getIntValue();
+    const int h = raw.substring (sep + 1).trim().getIntValue();
+    if (w < 320 || h < 200)
+        return realArea;
+
+    return juce::Rectangle<int> (0, 0, w, h);
+}
+}  // namespace
+
+// ==========================================================
 // FloatingModuleWindow —— 模块弹出独立窗口实现
 //   无系统标题栏，ModulePanel 自身的 PinkXP 标题栏作为窗口 chrome。
 //   关闭按钮触发 dock 回 workspace。
@@ -198,7 +226,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.7.2");
+const int versionW = versionFont.getStringWidth ("v2.7.3");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -239,7 +267,7 @@ const int versionW = versionFont.getStringWidth ("v2.7.2");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.2";
+const juce::String versionText = "v2.7.3";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -2342,8 +2370,8 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
                                  .getDisplayForPoint(top->getScreenBounds().getCentre());
-        const auto userArea = (display != nullptr) ? display->userArea
-                                                   : juce::Rectangle<int> (1280, 720);
+        const auto userArea = resolveDisplayArea ((display != nullptr) ? display->userArea
+                                                                       : juce::Rectangle<int> (1280, 720));
         const int screenW = userArea.getWidth();
 
         // ------------------------------------------------------------
@@ -2442,7 +2470,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         //   此时按横向等分的方式铺默认 7 个模块。
         static const ModuleType horizOrder[] = {
             ModuleType::spectrogram3d,
-            ModuleType::dynamics,
+            ModuleType::lufsRealtime,
             ModuleType::vuMeter,
             ModuleType::stereoField,
             ModuleType::spectrum,
@@ -2485,13 +2513,13 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
         const int totalCells    = usableW / kGrid;              // 小格数量（8px/格）
 
-        // v1.8.6：加权宽度分配（非均分），按以下比例从左到右：
-        //   SPECTROGRAM3D:1.0 | DYNAMICS:1.0 | VU:0.7 | STEREO FIELD:0.7
+        // 加权宽度分配（非均分），按以下比例从左到右：
+        //   SPECTROGRAM3D:1.0 | LUFS RT:0.7 | VU:1.0 | STEREO FIELD:1.0
         //   SPECTRUM:1.5 | OSC WAVE:1.0 | WAVEFORM:1.5
         static const float kWidthRatios[] = {
-            1.0f, 1.0f, 0.7f, 0.7f, 1.5f, 1.0f, 1.5f
+            1.0f, 0.7f, 1.0f, 1.0f, 1.5f, 1.0f, 1.5f
         };
-        static constexpr float kTotalRatio = 7.4f;
+        static constexpr float kTotalRatio = 7.7f;
 
         int cellsForModule[7] = {};
         int cellsAllocated = 0;
@@ -2561,12 +2589,13 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         //     调用 rw->setFullScreen(true) 进入系统原生全屏（覆盖菜单栏/Dock），
         //     因此这里的 totalArea 仅用于布局，真正隐藏菜单栏/Dock 由原生全屏完成。
 #if JUCE_MAC
-        const auto area = (display != nullptr) ? display->totalArea
-                                              : juce::Rectangle<int>(1280, 720);
+        const auto realArea = (display != nullptr) ? display->totalArea
+                                                  : juce::Rectangle<int>(1280, 720);
 #else
-        const auto area = (display != nullptr) ? display->userArea
-                                              : juce::Rectangle<int>(1280, 720);
+        const auto realArea = (display != nullptr) ? display->userArea
+                                                  : juce::Rectangle<int>(1280, 720);
 #endif
+        const auto area = resolveDisplayArea (realArea);
         const int screenW = area.getWidth();
         const int screenH = area.getHeight();
 
@@ -2612,7 +2641,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
         static const ModuleType horizOrder[] = {
             ModuleType::spectrogram3d,
-            ModuleType::dynamics,
+            ModuleType::lufsRealtime,
             ModuleType::vuMeter,
             ModuleType::oscilloscope,
             ModuleType::spectrum,
@@ -2622,7 +2651,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         constexpr int kHorizCount = 7;
 
         static const float kWidthRatios[] = {
-            1.0f, 1.0f, 0.7f, 0.7f, 1.5f, 1.0f, 1.5f
+            1.0f, 0.7f, 1.0f, 0.7f, 1.5f, 1.0f, 1.5f
         };
         static constexpr float kTotalRatio = 7.4f;
 
@@ -2687,6 +2716,148 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
                 rw->setFullScreen(true);
 #endif
     }
+    else if (presetId == 6)
+    {
+        // Preset 6 (Studio Monitor)：双行监听
+        //   上排（频谱行，宽而扁 ≈1.5:1）：Spectrum | Spectrogram | Waveform
+        //     · 横向频谱/瀑布拉宽，保证各频率信号强度可读
+        //   下排（仪表行 ≈2:1）：VU | StereoField | LUFS RT | TruePeak
+        //     · 半圆仪表保持 2:1 避免区域空白
+        const auto canvas = resizeToTargetCanvas (1440, 720);
+
+        static const ModuleType topOrder[] = {
+            ModuleType::spectrum, ModuleType::spectrogram, ModuleType::waveform
+        };
+        static const float topRatios[] = { 1.5f, 1.5f, 1.0f };
+        constexpr int kTopH = 360;
+        const int rowBottom = placeModuleRow (canvas, canvas.getY(), kTopH,
+                                              topOrder, 3, topRatios);
+
+        static const ModuleType bottomOrder[] = {
+            ModuleType::vuMeter, ModuleType::stereoField,
+            ModuleType::lufsRealtime, ModuleType::truePeak
+        };
+        static const float bottomRatios[] = { 1.0f, 1.0f, 0.8f, 0.8f };
+        placeModuleRow (canvas, rowBottom, canvas.getBottom() - rowBottom,
+                        bottomOrder, 4, bottomRatios);
+    }
+    else if (presetId == 7)
+    {
+        // Preset 7 (Focus + Sidecar)：主视觉 + 右侧仪表列
+        //   左侧 65%：Spectrogram（普通瀑布，帧率友好，避免 3D 拉大掉帧）
+        //   右侧 35%：VU | StereoField | LUFS RT 竖排（每格 ≈2:1 半圆比例）
+        const auto canvas = resizeToTargetCanvas (1280, 720);
+
+        constexpr int kGrid = 8;
+        const int x0 = canvas.getX();
+        const int y0 = canvas.getY();
+        const int xR = (canvas.getRight() / kGrid) * kGrid;
+        const int yB = (canvas.getBottom() / kGrid) * kGrid;
+
+        const int mainW = ((xR - x0) * 65) / 100;
+        const int sideW = (xR - x0) - mainW;
+
+        auto main = createModule (ModuleType::spectrogram);
+        if (main != nullptr)
+        {
+            main->setBounds (x0, y0, mainW, yB - y0);
+            workspace->addModule (std::move (main), false);
+        }
+
+        static const ModuleType sideOrder[] = {
+            ModuleType::vuMeter, ModuleType::stereoField, ModuleType::lufsRealtime
+        };
+        const int sideX = x0 + mainW;
+        const int sideSlotH = (yB - y0) / 3;
+        int curY = y0;
+        for (int i = 0; i < 3; ++i)
+        {
+            auto panel = createModule (sideOrder[i]);
+            if (panel != nullptr)
+            {
+                const int slotH = (i == 2) ? (yB - curY) : sideSlotH;
+                panel->setBounds (sideX, curY, sideW, slotH);
+                workspace->addModule (std::move (panel), false);
+            }
+            curY += sideSlotH;
+        }
+    }
+    else if (presetId == 9)
+    {
+        // Preset 9 (Broadcast Loudness)：广播响度合规
+        //   上排（响度读数主视觉）：LUFS RT | TruePeak | Dynamics DR | Dynamics Crest
+        //   下排（仪表辅助）：VU | StereoField | Dynamics Meters（半圆仪表 2:1）
+        const auto canvas = resizeToTargetCanvas (1280, 620);
+
+        static const ModuleType topOrder[] = {
+            ModuleType::lufsRealtime, ModuleType::truePeak,
+            ModuleType::dynamicsDr, ModuleType::dynamicsCrest
+        };
+        static const float topRatios[] = { 1.5f, 1.0f, 1.0f, 1.0f };
+        constexpr int kTopH = 300;
+        const int rowBottom = placeModuleRow (canvas, canvas.getY(), kTopH,
+                                              topOrder, 4, topRatios);
+
+        static const ModuleType bottomOrder[] = {
+            ModuleType::vuMeter, ModuleType::stereoField, ModuleType::dynamicsMeters
+        };
+        static const float bottomRatios[] = { 1.0f, 1.0f, 0.9f };
+        placeModuleRow (canvas, rowBottom, canvas.getBottom() - rowBottom,
+                        bottomOrder, 3, bottomRatios);
+    }
+    else if (presetId == 10)
+    {
+        // Preset 10 (Only Milkdrop)：全屏 + 单个最大化 Milkdrop
+        //   窗口铺满 userArea（macOS 原生全屏），canvas 内只放一个
+        //   占满整个 canvas 的 Milkdrop 模块。
+        auto* top = getTopLevelComponent();
+        if (top == nullptr) top = this;
+
+        const auto display = juce::Desktop::getInstance()
+                                 .getDisplays()
+                                 .getDisplayForPoint (top->getScreenBounds().getCentre());
+#if JUCE_MAC
+        const auto realArea = (display != nullptr) ? display->totalArea
+                                                  : juce::Rectangle<int> (1280, 720);
+#else
+        const auto realArea = (display != nullptr) ? display->userArea
+                                                  : juce::Rectangle<int> (1280, 720);
+#endif
+        const auto area = resolveDisplayArea (realArea);
+        const int screenW = area.getWidth();
+        const int screenH = area.getHeight();
+
+        if (auto* cbc0 = getConstrainer())
+        {
+            setResizeLimits (640, 420,
+                             juce::jmax (cbc0->getMaximumWidth(),  screenW),
+                             juce::jmax (cbc0->getMaximumHeight(), screenH));
+        }
+
+        if (top == this)
+            setSize (screenW, screenH);
+        else
+            top->setBounds (area.getX(), area.getY(), screenW, screenH);
+
+        if (auto* cbc = getConstrainer())
+            setResizeLimits (screenW, screenH, screenW, screenH);
+
+        const auto canvas = workspace->getCanvasArea();
+
+        auto milk = createModule (ModuleType::milkdrop);
+        if (milk != nullptr)
+        {
+            milk->setBounds (canvas.getX(), canvas.getY(),
+                             canvas.getWidth(), canvas.getHeight());
+            workspace->addModule (std::move (milk), false);
+        }
+
+#if JUCE_MAC
+        if (juce::JUCEApplicationBase::isStandaloneApp())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*>(top))
+                rw->setFullScreen(true);
+#endif
+    }
 
     // 重新添加 Tamagotchi 模块到 canvas 右下角（切换预设时保留宠物不被清除）
     for (const auto& state : tamagotchiStates)
@@ -2724,6 +2895,144 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
     // ------------------------------------------------------------------
     if (alwaysOnTopActive)
         setAlwaysOnTopActive (true);
+}
+
+// ----------------------------------------------------------
+// 布局预设辅助：把顶层窗口调整到目标尺寸并返回对齐后的 canvas
+//   · 居中于当前屏幕 userArea（standalone）或仅调整 Editor 尺寸（插件）
+//   · 放开 resizeLimits 后先试探 setSize/setBounds，反推 overheadH，
+//     再把目标高度对齐到 8px 网格并锁定 resizeLimits
+// ----------------------------------------------------------
+juce::Rectangle<int> Y2KmeterAudioProcessorEditor::resizeToTargetCanvas (int targetW, int targetH)
+{
+    auto* top = getTopLevelComponent();
+    if (top == nullptr) top = this;
+
+    const auto display = juce::Desktop::getInstance()
+                             .getDisplays()
+                             .getDisplayForPoint (top->getScreenBounds().getCentre());
+    const auto userArea = resolveDisplayArea ((display != nullptr) ? display->userArea
+                                                                   : juce::Rectangle<int> (1280, 720));
+
+    // 目标尺寸不超过屏幕可用区，并居中放置
+    const int w = juce::jmin (targetW, userArea.getWidth());
+    const int h = juce::jmin (targetH, userArea.getHeight());
+    const int targetX = userArea.getX() + (userArea.getWidth()  - w) / 2;
+    const int targetY = userArea.getY() + (userArea.getHeight() - h) / 2;
+
+    // 放开 resizeLimits，确保试探 setBounds 不会被 constrainer 夹回
+    if (auto* cbc0 = getConstrainer())
+    {
+        setResizeLimits (juce::jmin (cbc0->getMinimumWidth(),  w),
+                         juce::jmin (cbc0->getMinimumHeight(), h),
+                         juce::jmax (cbc0->getMaximumWidth(),  w),
+                         juce::jmax (cbc0->getMaximumHeight(), h));
+    }
+
+    // 第 1 步：试探布局（standalone 对顶层窗口 setBounds，含 4px 边框；
+    //          插件模式无法搬动顶层窗口，直接 setSize）
+    if (top == this)
+        setSize (w, h);
+    else
+        top->setBounds (targetX, targetY, w, h);
+
+    // 第 2 步：反推"顶层窗口高度里不属于 canvas 的部分"
+    const int probeContainerH = (top == this) ? getHeight() : top->getHeight();
+    const int probeCanvasH    = workspace->getCanvasArea().getHeight();
+    const int overheadH       = probeContainerH - probeCanvasH;
+
+    // 第 3 步：把目标高度对齐到 8px 网格
+    constexpr int kGrid = 8;
+    const int desiredCanvasH = juce::jmax (kGrid,
+                                           ((h - overheadH + kGrid / 2) / kGrid) * kGrid);
+    const int alignedH = desiredCanvasH + overheadH;
+
+    // 第 4 步：锁定 resizeLimits 到最终尺寸
+    if (auto* cbc = getConstrainer())
+    {
+        setResizeLimits (juce::jmin (cbc->getMinimumWidth(),  w),
+                         juce::jmin (cbc->getMinimumHeight(), alignedH),
+                         juce::jmax (cbc->getMaximumWidth(),  w),
+                         juce::jmax (cbc->getMaximumHeight(), alignedH));
+    }
+
+    // 第 5 步：应用最终尺寸
+    if (top == this)
+        setSize (w, alignedH);
+    else
+        top->setBounds (targetX, targetY, w, alignedH);
+
+    return workspace->getCanvasArea();
+}
+
+// ----------------------------------------------------------
+// 布局预设辅助：在 canvas 内横向摆放一行模块（加权宽度 + 网格对齐）
+//   · ratios 为 nullptr 时均分；否则按 ratios[i] / sum(ratios) 分配宽度
+//   · 所有模块左边界从 canvas 网格对齐点开始，密排占满整行
+//   · 返回该行的实际底部 Y
+// ----------------------------------------------------------
+int Y2KmeterAudioProcessorEditor::placeModuleRow (juce::Rectangle<int> canvas,
+                                                  int rowY, int rowH,
+                                                  const ModuleType* order, int count,
+                                                  const float* ratios)
+{
+    constexpr int kGrid = 8;
+    auto ceilToGrid  = [kGrid] (int v) { return ((v + kGrid - 1) / kGrid) * kGrid; };
+    auto floorToGrid = [kGrid] (int v) { return (v / kGrid) * kGrid; };
+
+    const int x0 = ceilToGrid  (canvas.getX());
+    const int y0 = ceilToGrid  (rowY);
+    const int xR = floorToGrid (canvas.getRight());
+    const int yB = floorToGrid (canvas.getBottom());
+
+    const int usableW = juce::jmax (kGrid * count, xR - x0);
+    const int rowHGrid = juce::jmax (kGrid, (rowH / kGrid) * kGrid);
+    const int usableH = juce::jmax (kGrid, juce::jmin (rowHGrid, yB - y0));
+
+    const int totalCells = usableW / kGrid;
+
+    // 计算每个模块分配的网格小格数（按加权比例）
+    float totalRatio = 0.0f;
+    for (int i = 0; i < count; ++i)
+        totalRatio += (ratios != nullptr) ? ratios[i] : 1.0f;
+
+    juce::Array<int> cellsForModule;
+    cellsForModule.resize (count);
+    int cellsAllocated = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        const float ratio = (ratios != nullptr) ? ratios[i] : 1.0f;
+        int cells = (int) std::round ((float) totalCells * ratio / totalRatio);
+        cells = juce::jmax (1, cells);
+        cellsForModule.set (i, cells);
+        cellsAllocated += cells;
+    }
+    // 最后一个模块消纳舍入误差
+    cellsForModule.set (count - 1,
+                        cellsForModule[count - 1] + (totalCells - cellsAllocated));
+
+    const int slotH = juce::jmax (80, usableH);
+
+    int curX = x0;
+    for (int i = 0; i < count; ++i)
+    {
+        auto panel = createModule (order[i]);
+        if (panel == nullptr)
+        {
+            curX += cellsForModule[i] * kGrid;
+            continue;
+        }
+
+        const int slotW = cellsForModule[i] * kGrid;
+        const int w = juce::jmax (panel->getMinWidth(),  slotW);
+        const int h = juce::jmax (panel->getMinHeight(), slotH);
+        panel->setBounds (curX, y0, w, h);
+        workspace->addModule (std::move (panel), /*autoPosition*/ false);
+
+        curX += slotW;
+    }
+
+    return y0 + slotH;
 }
 
 // ----------------------------------------------------------
@@ -3048,7 +3357,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.2";
+const juce::String versionText = "v2.7.3";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3056,7 +3365,7 @@ const juce::String versionText = "v2.7.2";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.7.2");
+        const int versionW = versionFont.getStringWidth ("v2.7.3");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间

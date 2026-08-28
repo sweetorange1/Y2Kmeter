@@ -544,23 +544,32 @@ public:
 
     // ======================================================
     // 布局预设下拉（toolbar 上 Grid 按钮左侧）
-    //   · Preset 1 = 默认布局（七个默认模块 + 默认窗口大小）
-    //   · Preset 2 = 上方横向铺满屏幕宽度（默认模块横向等分 canvas）
-    //   · Preset 3 = 下方横向铺满屏幕宽度（同 Preset 2 但窗口贴屏幕底部）
-    //   · Preset 4 = Tiled：按用户 settings 的 1346×1087@(89,134)
-    //                快照平铺布局（硬编码 XML）
-    //   · Preset 5 = MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
+    //   · Preset 1  = 默认布局（十个默认模块 + 默认窗口大小）
+    //   · Preset 2  = 上方横向铺满屏幕宽度（默认模块横向等分 canvas）
+    //   · Preset 3  = 下方横向铺满屏幕宽度（同 Preset 2 但窗口贴屏幕底部）
+    //   · Preset 4  = 已废弃（原 Tiled 预设从未实现，编号保留以兼容历史存档）
+    //   · Preset 5  = MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
+    //   · Preset 6  = Studio Monitor：双行监听（仪表行 + 波形行）
+    //   · Preset 7  = Focus + Sidecar：主视觉 + 右侧仪表列
+    //   · Preset 8  = 已废弃（原 Mastering Chain 已删除，编号保留以兼容历史存档）
+    //   · Preset 9  = Broadcast Loudness：广播响度合规
+    //   · Preset 10 = Only Milkdrop：全屏 + 单个最大化 Milkdrop
     //   · 选中某项时调用 onLayoutPresetChanged(index)，由 Editor
     //     负责真正的布局/窗口尺寸变更（ModuleWorkspace 本身不持有
     //     顶层窗口的引用，也不了解模块工厂细节，故把具体策略委托给 Editor）
     // ======================================================
     enum class LayoutPreset
     {
-        defaultGrid      = 1, // 默认布局（七个默认模块 + 默认窗口大小）
-        horizontalFull   = 2, // 横向铺满屏幕宽度（贴屏幕顶部）
-        horizontalBottom = 3, // 横向铺满屏幕宽度（贴屏幕底部）
-        tiled            = 4, // Tiled：按 settings 快照还原 1346×1087 平铺布局
-        mv               = 5  // MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
+        defaultGrid       = 1,  // 默认布局（十个默认模块 + 默认窗口大小）
+        horizontalFull    = 2,  // 横向铺满屏幕宽度（贴屏幕顶部）
+        horizontalBottom  = 3,  // 横向铺满屏幕宽度（贴屏幕底部）
+        // 4 = 已废弃（原 tiled，从未实现，保留编号空洞）
+        mv                = 5,  // MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
+        studioMonitor     = 6,  // Studio Monitor：双行监听
+        focusSidecar      = 7,  // Focus + Sidecar：主视觉 + 右侧仪表列
+        // 8 = 已废弃（原 masteringChain，已删除，保留编号空洞）
+        broadcastLoudness = 9,  // Broadcast Loudness：广播响度合规
+        onlyMilkdrop      = 10  // Only Milkdrop：全屏 + 单个最大化 Milkdrop
     };
     std::function<void(LayoutPreset)> onLayoutPresetChanged;
 

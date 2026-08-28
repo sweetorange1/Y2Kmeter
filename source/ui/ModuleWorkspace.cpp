@@ -460,12 +460,16 @@ ModuleWorkspace::ModuleWorkspace()
     //   · 样式与音频源下拉完全一致：显式挂 PinkXP LookAndFeel，ComboBox 箭头 + 条目
     //     颜色跟随主题；nothing-selected 文本作为占位，选中后触发 onLayoutPresetChanged
     layoutPresetBox.clear (juce::dontSendNotification);
-    layoutPresetBox.setTextWhenNothingSelected ("preasent");
+    layoutPresetBox.setTextWhenNothingSelected ("preset");
     layoutPresetBox.setTooltip ("Choose a layout preset");
     layoutPresetBox.addItem ("Default",             (int) LayoutPreset::defaultGrid);
     layoutPresetBox.addItem ("Horizontal Bar(T)",      (int) LayoutPreset::horizontalFull);
     layoutPresetBox.addItem ("Horizontal Bar(B)", (int) LayoutPreset::horizontalBottom);
     layoutPresetBox.addItem ("MV",                (int) LayoutPreset::mv);
+    layoutPresetBox.addItem ("Studio Monitor",    (int) LayoutPreset::studioMonitor);
+    layoutPresetBox.addItem ("Focus + Sidecar",   (int) LayoutPreset::focusSidecar);
+    layoutPresetBox.addItem ("Broadcast Loudness",(int) LayoutPreset::broadcastLoudness);
+    layoutPresetBox.addItem ("Only Milkdrop",     (int) LayoutPreset::onlyMilkdrop);
     layoutPresetBox.setLookAndFeel (&getPinkXPLookAndFeel());
     layoutPresetBox.onChange = [this]()
     {
