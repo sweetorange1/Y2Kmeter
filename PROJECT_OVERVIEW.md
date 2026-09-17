@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.7.3`）
+- **产品名**：`Y2Kmeter` （版本：`2.7.4`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -28,7 +28,7 @@
 - 持续滚动瀑布波形（Waveform Module）
 - 模拟指针 VU 表（VuMeterModule）
 - Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
-- **Tamagotchi 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
+- **VirtuPet 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
 - 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
 - **Milkdrop 可视化模块**（v2.5.2，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设；新增 Standalone 脱离/浮动窗口支持；v2.7.1 新增预设收藏库 like + 切换 + 随机去重）
 
@@ -102,7 +102,7 @@
 │    EqModule / LoudnessModule / OscilloscopeModule /             │
 │    OscilloscopeWaveModule / SpectrumModule / PhaseModule /      │
 │    DynamicsModule / WaveformModule / SpectrogramModule /        │
-│    VuMeterModule / TamagotchiModule /                           │
+│    VuMeterModule / VirtuPetModule /                           │
 │    FineSplitModules（LUFS / TruePeak / PhaseCorr / PhaseBal /   │
 │    DynamicsMeters / DynamicsDr / DynamicsCrest）                  │
 ├────────────────────────────────────────────────────────────────┤
@@ -129,7 +129,7 @@
 | [PluginProcessor.h/.cpp](/I:/Y2KMeter/PluginProcessor.h) | 顶层 `AudioProcessor`；持有 `AnalyserHub` 与状态持久化逻辑 |
 | [PluginEditor.h/.cpp](/I:/Y2KMeter/PluginEditor.h) | 顶层 `AudioProcessorEditor`；Pink XP 外壳 + 自画标题栏 + `ModuleWorkspace` 托管 |
 | [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) | Windows Inno Setup 安装器脚本 |
-| [assets/](/I:/Y2KMeter/assets) | Logo、图标、Tamagotchi 精灵图（角色 20 只 × 33 动作 + 蛋 8 款） |
+| [assets/](/I:/Y2KMeter/assets) | Logo、图标、VirtuPet 精灵图（角色 20 只 × 33 动作 + 蛋 8 款） |
 | [ttf/](/I:/Y2KMeter/ttf) | 打包用像素字体 |
 
 ### 3.2 `source/analysis`（音频分析）
@@ -168,7 +168,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
-| [TamagotchiModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | `TamagotchiModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
+| [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
 | [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
@@ -229,7 +229,7 @@
   - Editor::mouseDown 在锁定态跳过 `windowDragger.startDraggingComponent`，即无法拖动窗口。
   - 关键接口：`isLayoutLocked() / handleLockClicked() / applyLayoutLocked(locked, initial)` + 构造期延迟 flag `pendingLockApplyOnAttach`（顶层窗口尺寸未就绪时先记账，`visibilityChanged` 时再应用，避免构造期 assert）。
 - 顶部三按钮几何：`getCloseButtonBounds / getPinButtonBounds / getMinimiseButtonBounds`；chrome 隐藏态特殊：`getFloatingCloseButtonBounds`。
-- **Tamagotchi 保活**：只有当工作区存在 Tamagotchi 模块时，Editor 才 `hub.retain(Kind::Loudness)` 保持信号驱动状态机。
+- **VirtuPet 保活**：只有当工作区存在 VirtuPet 模块时，Editor 才 `hub.retain(Kind::Loudness)` 保持信号驱动状态机。
 - **Milkdrop 收藏库桥接（v2.7.1 新增）**：`IsMilkdropUseLikeLibrary` / `RequestMilkdropToggleLibrary` / `ToggleMilkdropLibraryState` / `SetMilkdropUseLikeLibrary` / `RequestMilkdropUnlinkReload` / `HasMilkdropLikedPresets` / `GetMilkdropCurrentPresetFilePath`；`renderOpenGL` 消费库切换与取消收藏重扫请求，维护双向索引记忆 `milkdrop_builtin_preset_index_ / milkdrop_like_preset_index_`。
 
 ### 4.4 `ModuleWorkspace`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
@@ -247,7 +247,7 @@
 - **hit-test 挖洞**：`setHitTestHoles`，chrome 隐藏态下让浮层按钮的鼠标事件冒泡回 Editor。
 - **Add-Menu Hover 预览**：右键/双击空白区弹菜单，hover 到某模块名时在鼠标位置绘制半透明预览快照，缓存已渲染的 `Image`。
 - **音频源下拉**（Standalone）：`setAudioSourceItems(items, selectedId)`，回调 `onAudioSourceChanged(sourceId, isLoopback)`。
-- **布局锁定态**（v1.8.3 新增）：`setLayoutLocked(bool) / isLayoutLocked()`。锁定时 `mouseDown / mouseDoubleClick / isInterestedInFileDrag` 三处早退 —— 拼豆贴画拖动/缩放/删除/滑块、右键或双击空白弹「添加模块」菜单、拖入图片文件添加贴画等**入口全部禁用**，但主题切换、Save/Load、FPS/GAIN/Source/Hide toolbar 保持可用。子模块层面：`ModulePanel` 与 `TamagotchiModule` 各自的 `mouseMove/mouseDown` 通过匿名 namespace 里的 `isPanelLayoutLocked` 辅助函数上溯查询顶层锁定态，锁定时跳过 resize/move 启动、关闭 × 按钮点击也失效（视觉上不高亮）。
+- **布局锁定态**（v1.8.3 新增）：`setLayoutLocked(bool) / isLayoutLocked()`。锁定时 `mouseDown / mouseDoubleClick / isInterestedInFileDrag` 三处早退 —— 拼豆贴画拖动/缩放/删除/滑块、右键或双击空白弹「添加模块」菜单、拖入图片文件添加贴画等**入口全部禁用**，但主题切换、Save/Load、FPS/GAIN/Source/Hide toolbar 保持可用。子模块层面：`ModulePanel` 与 `VirtuPetModule` 各自的 `mouseMove/mouseDown` 通过匿名 namespace 里的 `isPanelLayoutLocked` 辅助函数上溯查询顶层锁定态，锁定时跳过 resize/move 启动、关闭 × 按钮点击也失效（视觉上不高亮）。
 
 ### 4.5 `ModulePanel`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
 - 派生类通过 `paintContent` / `layoutContent` 定制绘制与布局；基类负责标题栏/关闭按钮/拖拽缩放/CPU 小字。
@@ -394,7 +394,7 @@ main
   - 启用 Objective-C++（`enable_language(OBJCXX)`），仅编译 `.mm` 文件时用。
   - 桌面音频走 `ScreenCaptureKit`（macOS 13+）；链接 `ScreenCaptureKit / AVFoundation / CoreMedia / Foundation`。
   - macOS 图标流水线：`assets/icon.ico` → sips 解码 PNG → `scripts/macos_iconize.m` 渲染圆角 squircle → iconutil 打包 `Icon.icns`。
-  - Tamagotchi 精灵图运行期从 bundle `Contents/Resources/assets/Tamagotchi/` 读取（构建时 `POST_BUILD` 由 CMake 复制到 `.vst3` 与 `.app`）。
+  - VirtuPet 精灵图运行期从 bundle `Contents/Resources/assets/VirtuPet/` 读取（构建时 `POST_BUILD` 由 CMake 复制到 `.vst3` 与 `.app`）。
   - 额外构建 AU 插件；`AudioDumpRecorder` 通过环境变量 `Y2KM_AUDIO_DUMP*` 开启调试转储。
 
 ### 6.5 GPU / OpenGL
@@ -432,12 +432,12 @@ main
 - CMake 里 `project(... VERSION 1.9.0)` 与 `juce_add_plugin(... VERSION 1.9.0)` **必须一致**，任何版本号变更都要同步这两处以及 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"v1.9.x"` 字面量（getStringWidth 一处 + `versionText` 两处）。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
-### 6.9 Tamagotchi 资源约定
-- 精灵图目录：[assets/Tamagotchi/](/I:/Y2KMeter/assets/Tamagotchi)
+### 6.9 VirtuPet 资源约定
+- 精灵图目录：[assets/VirtuPet/](/I:/Y2KMeter/assets/VirtuPet)
   - `role/` 原始角色大图（20 只）
   - `role_cut_by_xlsx_40x40/{RoleName}/` 每只角色 33 个动作切图（40×40 像素）
   - `egg/` + `egg_38x38/` 8 款蛋（4 帧孵化动画）
-- 运行时通过 `TamagotchiModule::findTamagotchiSubDir` 定位，优先 macOS bundle → 兜底源仓库路径。
+- 运行时通过 `VirtuPetModule::findVirtuPetSubDir` 定位，优先 macOS bundle → 兜底源仓库路径。
 
 ### 6.10 存在但已废弃/预留的符号
 - `SpectrumOverviewModule_REMOVED`：空壳，**不要引用**。
@@ -524,8 +524,8 @@ return juce::Font (juce::FontOptions (gTypeface).withHeight (height));
 - 修复：分三种场景走不同路径 —— (a) 首次启动 + 未锁定：什么都不做；(b) 首次启动 + 已锁定（从 XML 恢复）：**仅**打上 `pendingLockApplyOnAttach = true`，等 `visibilityChanged`（顶层已 attach 到 desktop 且尺寸就绪）时再执行 `applyLayoutLocked(true, initial=false)`；(c) 用户运行时点 L：同步执行完整流程。同时在 `applyLayoutLocked` 顶部加"顶层尺寸无效则跳过"的 defensive check，双保险。
 
 #### ③ 顶层锁定后子组件仍能拖动 / 缩放 / 删除
-- 现象：仅在 Editor 层拦 `mouseDown` 里 `windowDragger.startDraggingComponent`，不足以锁死子组件；`ModulePanel` 有自己的 hit-test 边角 resize、`ModuleWorkspace` 有拼豆图拖动、右键"添加模块"、双击空白添加、`isInterestedInFileDrag` 拖入图片，`TamagotchiModule` 有自己的 mouseMove/mouseDown。这些**都是独立的 mouseDown 处理器**，父级拦不住。
-- 修复：**分层"下沉冻结"** —— 在每个可拖曳/可点击的子组件的 `mouseMove / mouseDown / mouseDoubleClick / isInterestedInFileDrag` 顶部加早退。为了让子组件能查到"当前是否锁定"，在 `ModulePanel.cpp` / `TamagotchiModule.cpp` 的匿名 namespace 里各写了一个 `isPanelLayoutLocked(Component&)` 辅助函数，向上遍历 `getParentComponent()` 找到 `ModuleWorkspace*` 后读 `isLayoutLocked()`。子模块的 × 关闭按钮虽然仍会响应 mouseDown 事件，但在锁定态点击命中处会**直接不触发 delete 分支**（视觉上不高亮，行为上无效）；hover 提示仍然保留 `normal` 光标。
+- 现象：仅在 Editor 层拦 `mouseDown` 里 `windowDragger.startDraggingComponent`，不足以锁死子组件；`ModulePanel` 有自己的 hit-test 边角 resize、`ModuleWorkspace` 有拼豆图拖动、右键"添加模块"、双击空白添加、`isInterestedInFileDrag` 拖入图片，`VirtuPetModule` 有自己的 mouseMove/mouseDown。这些**都是独立的 mouseDown 处理器**，父级拦不住。
+- 修复：**分层"下沉冻结"** —— 在每个可拖曳/可点击的子组件的 `mouseMove / mouseDown / mouseDoubleClick / isInterestedInFileDrag` 顶部加早退。为了让子组件能查到"当前是否锁定"，在 `ModulePanel.cpp` / `VirtuPetModule.cpp` 的匿名 namespace 里各写了一个 `isPanelLayoutLocked(Component&)` 辅助函数，向上遍历 `getParentComponent()` 找到 `ModuleWorkspace*` 后读 `isLayoutLocked()`。子模块的 × 关闭按钮虽然仍会响应 mouseDown 事件，但在锁定态点击命中处会**直接不触发 delete 分支**（视觉上不高亮，行为上无效）；hover 提示仍然保留 `normal` 光标。
 
 **保留"仍可用"的操作**（一定要留，否则用户被锁死后连关闭都点不到）：
 - 顶栏 4 个按钮（`×` 关闭、`*` 置顶、`_` 最小化、`L` 解锁）都必须响应，且 L 本身不能被自己锁掉。
@@ -538,7 +538,7 @@ return juce::Font (juce::FontOptions (gTypeface).withHeight (height));
 【教训】
 - **Windows native 窗口的 style/frame 变更几乎必定会造成"闪一下"**：需要"锁定尺寸"这类需求优先考虑 `setResizeLimits(cur, cur, ...)` 或 `ComponentBoundsConstrainer`，避免 `setResizable / setUsingNativeTitleBar` 类 API。
 - **构造期只应记录意图，不应触碰几何/资源约束**：任何依赖 "顶层已 attach + 尺寸就绪" 的操作，都应该延迟到 `visibilityChanged / parentHierarchyChanged / handleAsyncUpdate` 里做；否则很难避免 Debug jassert 或崩溃。
-- **锁定/权限类特性天然是"分层"的**：不能奢望父组件的一次拦截能盖住所有子组件的独立事件路径；必须在每一层可交互组件的事件入口显式检查全局锁定状态。这次给 `ModulePanel` / `TamagotchiModule` / `ModuleWorkspace` 各自的 mouseMove / mouseDown / mouseDoubleClick / isInterestedInFileDrag 都补了早退，才彻底封死。
+- **锁定/权限类特性天然是"分层"的**：不能奢望父组件的一次拦截能盖住所有子组件的独立事件路径；必须在每一层可交互组件的事件入口显式检查全局锁定状态。这次给 `ModulePanel` / `VirtuPetModule` / `ModuleWorkspace` 各自的 mouseMove / mouseDown / mouseDoubleClick / isInterestedInFileDrag 都补了早退，才彻底封死。
 
 ### 6.15 ModuleType 枚举重构的检查清单（➔ v1.8.4 合并 OscL/OscR → OscilloscopeWave 时总结）
 **场景**：删除两个旧模块类型（`oscilloscopeLeft` / `oscilloscopeRight`），新增一个替代模块（`oscilloscopeWave`）。
@@ -630,7 +630,7 @@ if (nowMs - lastUpdateMs >= 1000ms) {
 
 ### 6.18 模块状态持久化：`saveModuleSpecificState` / `restoreModuleSpecificState` 虚方法模式（v1.8.5）
 
-**问题**：`saveLayoutTree` 对每个模块只保存 `type`、`id`、`x`、`y`、`w`、`h`（只有 `TamagotchiModule` 额外保存了 `roleName`/`hunger`/`health`）。重启后 `OscilloscopeModule` 的 `displayMode` 回到默认 `Waveform`、`OscilloscopeWaveModule` 的 `channelMode` 回到默认 `Both`、`SpectrumModule` 的 Peak/Slope 按钮回到默认开——所有模块内的用户点击控制全部丢失。
+**问题**：`saveLayoutTree` 对每个模块只保存 `type`、`id`、`x`、`y`、`w`、`h`（只有 `VirtuPetModule` 额外保存了 `roleName`/`hunger`/`health`）。重启后 `OscilloscopeModule` 的 `displayMode` 回到默认 `Waveform`、`OscilloscopeWaveModule` 的 `channelMode` 回到默认 `Both`、`SpectrumModule` 的 Peak/Slope 按钮回到默认开——所有模块内的用户点击控制全部丢失。
 
 **方案**：在 `ModulePanel` 基类添加两个虚方法：
 
@@ -650,13 +650,13 @@ virtual void restoreModuleSpecificState(const juce::ValueTree& state) { ignoreUn
 | `WaveformModule` | `displaySeconds` (double), `frozen` (bool), `gainDb` (double) | 浮点+布尔 |
 | `EqModule` | `cellSize` (int) | 整数 |
 
-`saveLayoutTree` 中在 Tamagotchi 分支后统一调用 `m->saveModuleSpecificState()`，若有数据则 `appendChild`。
-`loadLayoutFromTree` 中同样在 Tamagotchi 分支后调用 `raw->restoreModuleSpecificState(stateChild)`。
+`saveLayoutTree` 中在 VirtuPet 分支后统一调用 `m->saveModuleSpecificState()`，若有数据则 `appendChild`。
+`loadLayoutFromTree` 中同样在 VirtuPet 分支后调用 `raw->restoreModuleSpecificState(stateChild)`。
 
 **关键设计要点**：
 - **零侵入旧存档**：旧存档没有 `<state>` 子节点 → `getChildWithName("state")` 返回无效 → 不调用 `restore` → 模块保持构造函数默认值。向后完全兼容。
 - **新增模块自动支持**：新增一个模块类型时，只需覆写两个虚方法，无需修改 `saveLayoutTree`/`loadLayoutFromTree`。
-- **Tamagotchi 不走新机制**：因为它的状态结构更复杂（`restorePersistentState` 有额外业务逻辑），保持原有手写分支。
+- **VirtuPet 不走新机制**：因为它的状态结构更复杂（`restorePersistentState` 有额外业务逻辑），保持原有手写分支。
 - **`restore` 中调用 setter 而非直接赋值**：如 `setDisplayMode()` / `setPeakHoldEnabled()` 会触发按钮状态刷新和 `repaint()`。直接改成员变量不会。
 - **enum 序列化用 `(int)` 强转**：简单可靠，不依赖字符串解析，不引入新依赖。
 
@@ -1149,7 +1149,7 @@ Y2KMainWindow (juce::DocumentWindow, 无边框)
 │   │   │
 │   │   ├── [模块层] ModulePanel 派生类 × N
 │   │   │   ├── LoudnessModule / SpectrumModule / PhaseModule ...
-│   │   │   └── TamagotchiModule
+│   │   │   └── VirtuPetModule
 │   │   │
 │   │   ├── [贴画层] PerlerImageLayer × M（拼豆像素画，与模块同 z-order）
 │   │   │
@@ -1313,7 +1313,7 @@ I:/Y2KMeter/
 ├── README.md                   ─ 简要项目说明
 ├── assets/
 │   ├── icon.ico  logo.png  app_icon.rc
-│   └── Tamagotchi/             ─ 20 角色 × 33 动画 + 8 款蛋 精灵图
+│   └── VirtuPet/             ─ 20 角色 × 33 动画 + 8 款蛋 精灵图
 ├── ttf/  Silkscreen-Regular.ttf
 └── source/
     ├── analysis/
@@ -1334,7 +1334,7 @@ I:/Y2KMeter/
     │       ├── SpectrumModule / PhaseModule / DynamicsModule
     │       ├── WaveformModule / SpectrogramModule / Spectrogram3DModule（v1.8.6 新增 3D 瀑布图）
     │       ├── FineSplitModules（7 类细粒度模块 + VuMeter，v1.8.4 移除 OscilloscopeChannel）
-│       └── TamagotchiModule（.cpp 87KB，含状态机）
+│       └── VirtuPetModule（.cpp 87KB，含状态机）
     └── standalone/
         ├── Y2KStandaloneApp.cpp      ─ 自定义 JUCEApplication (69KB)
         ├── WasapiLoopbackCapture.h/.cpp   ─ Windows 系统输出采集
@@ -1344,32 +1344,32 @@ I:/Y2KMeter/
 
 ---
 
-### 6.24 v1.9.5 Tamagotchi 模块功能增强
+### 6.24 v1.9.5 VirtuPet 模块功能增强
 
-v1.9.5 聚焦于 Tamagotchi 模块的用户体验增强，包含三个子功能。
+v1.9.5 聚焦于 VirtuPet 模块的用户体验增强，包含三个子功能。
 
-#### ① Tamagotchi 始终置顶（z-order always-on-top）
+#### ① VirtuPet 始终置顶（z-order always-on-top）
 
-- **需求**：Tamagotchi 模块始终显示在所有普通模块之上，不因用户聚焦其他模块而沉到底层。
-- **根因**：`ModulePanel::mouseDown()` 对所有模块统一调用 `toFront(true)` 将自己移到 z-order 最顶层。用户点击其他模块时，被点击的模块置顶，Tamagotchi 被压在下面。
-- **方案**：在 `ModuleWorkspace::hookPanel()` 的 `onBroughtToFront` 回调中，`hideBtn.toFront(false)` 之前插入 Tamagotchi 置顶逻辑 —— 遍历 `modules` 数组，将所有 `ModuleType::tamagotchi` 类型的模块调用 `toFront(false)` 抬到最上层。
-- **最终 z-order（从顶到底）**：`hideBtn` → Tamagotchi 模块 → 当前聚焦的普通模块 → 其余模块。
+- **需求**：VirtuPet 模块始终显示在所有普通模块之上，不因用户聚焦其他模块而沉到底层。
+- **根因**：`ModulePanel::mouseDown()` 对所有模块统一调用 `toFront(true)` 将自己移到 z-order 最顶层。用户点击其他模块时，被点击的模块置顶，VirtuPet 被压在下面。
+- **方案**：在 `ModuleWorkspace::hookPanel()` 的 `onBroughtToFront` 回调中，`hideBtn.toFront(false)` 之前插入 VirtuPet 置顶逻辑 —— 遍历 `modules` 数组，将所有 `ModuleType::virtuPet` 类型的模块调用 `toFront(false)` 抬到最上层。
+- **最终 z-order（从顶到底）**：`hideBtn` → VirtuPet 模块 → 当前聚焦的普通模块 → 其余模块。
 - **关键代码**：[ModuleWorkspace.cpp](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) `hookPanel()` 中 `onBroughtToFront` 回调，`hideBtn.toFront(false)` 之前新增的 for 循环。
 
-#### ② 切换预设时保留 Tamagotchi 模块
+#### ② 切换预设时保留 VirtuPet 模块
 
-- **需求**：用户切换布局预设时，Tamagotchi 模块不被清除，而是保留状态并重新定位到 canvas 右下角。
+- **需求**：用户切换布局预设时，VirtuPet 模块不被清除，而是保留状态并重新定位到 canvas 右下角。
 - **方案**：在 `applyLayoutPreset()` 中做了两步改动：
-  1. **清除前保存**：在 `workspace->clearAllModules()` 之前，遍历所有模块找出 Tamagotchi，保存 `roleName` / `hunger` / `health` 到 `juce::Array<TamagotchiState>`。
-  2. **布局后重建**：在所有预设专属的模块播种完成后、`processor.setSavedLayoutXml()` 之前，遍历保存的状态重新 `make_unique<TamagotchiModule>()` → `restorePersistentState()` → 定位到 canvas 右下角（padding=8px）→ `workspace->addModule()`。
-  - 没有 Tamagotchi 时 `tamagotchiStates` 为空数组，零副作用。
+  1. **清除前保存**：在 `workspace->clearAllModules()` 之前，遍历所有模块找出 VirtuPet，保存 `roleName` / `hunger` / `health` 到 `juce::Array<VirtuPetState>`。
+  2. **布局后重建**：在所有预设专属的模块播种完成后、`processor.setSavedLayoutXml()` 之前，遍历保存的状态重新 `make_unique<VirtuPetModule>()` → `restorePersistentState()` → 定位到 canvas 右下角（padding=8px）→ `workspace->addModule()`。
+  - 没有 VirtuPet 时 `virtuPetStates` 为空数组，零副作用。
   - Preset 1（瀑布）、Preset 2/3（横向铺满）均适用。
 - **关键代码**：[PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) `applyLayoutPreset()` 函数开头新增的保存逻辑 + 函数末尾所有预设分支结束后新增的重建逻辑。
 
-#### ③ 删除二次确认弹窗（TamagotchiConfirmOverlay）
+#### ③ 删除二次确认弹窗（VirtuPetConfirmOverlay）
 
-- **需求**：点击 Tamagotchi 右上角 × 按钮时弹出确认对话框，防止误删除；弹窗样式参考模块的 `PinkXP::drawRaised` 凸起边框。
-- **架构设计**：弹窗不作为模块内部绘制（否则会受模块边界裁剪），而是作为 **workspace 层级的独立覆盖层组件** `TamagotchiConfirmOverlay`（继承 `juce::Component`），通过 `workspace->addAndMakeVisible()` 挂载到 workspace 上。
+- **需求**：点击 VirtuPet 右上角 × 按钮时弹出确认对话框，防止误删除；弹窗样式参考模块的 `PinkXP::drawRaised` 凸起边框。
+- **架构设计**：弹窗不作为模块内部绘制（否则会受模块边界裁剪），而是作为 **workspace 层级的独立覆盖层组件** `VirtuPetConfirmOverlay`（继承 `juce::Component`），通过 `workspace->addAndMakeVisible()` 挂载到 workspace 上。
   - **边界处理**：覆盖层的 `setBounds` 取"模块区域 ∪ 对话框区域"的并集，保证最小 160×90 的弹窗始终完整渲染。
   - **遮罩策略**：仅对模块区域施加半透明黑色遮罩（`black.withAlpha(0.55)`），不遮挡 workspace 其他内容。
 - **交互流程**：
@@ -1381,19 +1381,19 @@ v1.9.5 聚焦于 Tamagotchi 模块的用户体验增强，包含三个子功能�
     └─ 切到其他模块   → setFocusVisual(false) → dismissConfirmOverlay()
   ```
 - **对话框样式**：PinkXP 凸起边框 + 粉红标题栏 `"r u sure?"` + Y2K 风格文案 `"say bye to ur pet? :(\ncan't undo this~"` + `Cancel` / `OK` 双按钮（最大 55px 宽，dialog 保底 160×90）。
-- **重要：按钮点击在 `onBroughtToFront` 之前处理**：`TamagotchiModule::mouseDown()` 中已将 `confirmOverlay` 检查移到 `toFront()`/`onBroughtToFront()`/`setFocusVisual()` 之前（否则 `onBroughtToFront → clearTamagotchiFocusVisuals` 会把其他 Tamagotchi 的覆盖层也清掉，且若当前模块的 `setFocusVisual(false)` 被调用也会关闭弹窗）。
+- **重要：按钮点击在 `onBroughtToFront` 之前处理**：`VirtuPetModule::mouseDown()` 中已将 `confirmOverlay` 检查移到 `toFront()`/`onBroughtToFront()`/`setFocusVisual()` 之前（否则 `onBroughtToFront → clearVirtuPetFocusVisuals` 会把其他 VirtuPet 的覆盖层也清掉，且若当前模块的 `setFocusVisual(false)` 被调用也会关闭弹窗）。
 - **涉及文件**：
-  - [TamagotchiModule.h](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) — 新增 `TamagotchiConfirmOverlay` 类 + `confirmOverlay` 成员 + `showConfirmOverlay()`/`dismissConfirmOverlay()`
-  - [TamagotchiModule.cpp](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) — `TamagotchiConfirmOverlay` 完整实现（paint/mouseDown/mouseMove/dismiss/getButtonBounds/hitTestButton）+ `showConfirmOverlay()`/`dismissConfirmOverlay()`
+  - [VirtuPetModule.h](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) — 新增 `VirtuPetConfirmOverlay` 类 + `confirmOverlay` 成员 + `showConfirmOverlay()`/`dismissConfirmOverlay()`
+  - [VirtuPetModule.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.cpp) — `VirtuPetConfirmOverlay` 完整实现（paint/mouseDown/mouseMove/dismiss/getButtonBounds/hitTestButton）+ `showConfirmOverlay()`/`dismissConfirmOverlay()`
 
 #### 改动文件清单（v1.9.5）
 
 | 文件 | 改动 |
 |------|------|
-| `ModuleWorkspace.cpp` | `hookPanel()` 中 `onBroughtToFront` 回调新增 Tamagotchi 置顶循环 |
-| `PluginEditor.cpp` | `applyLayoutPreset()` 新增 Tamagotchi 状态保存+重建逻辑 |
-| `TamagotchiModule.h` | 新增 `TamagotchiConfirmOverlay` 类声明 + 成员/方法 |
-| `TamagotchiModule.cpp` | `TamagotchiConfirmOverlay` 完整实现 + mouseUp/mouseDown/setFocusVisual 适配 |
+| `ModuleWorkspace.cpp` | `hookPanel()` 中 `onBroughtToFront` 回调新增 VirtuPet 置顶循环 |
+| `PluginEditor.cpp` | `applyLayoutPreset()` 新增 VirtuPet 状态保存+重建逻辑 |
+| `VirtuPetModule.h` | 新增 `VirtuPetConfirmOverlay` 类声明 + 成员/方法 |
+| `VirtuPetModule.cpp` | `VirtuPetConfirmOverlay` 完整实现 + mouseUp/mouseDown/setFocusVisual 适配 |
 | `CMakeLists.txt` | 版本号 1.9.4 → 1.9.5 |
 | `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
 
@@ -1401,17 +1401,17 @@ v1.9.5 聚焦于 Tamagotchi 模块的用户体验增强，包含三个子功能�
 
 | 注意项 | 说明 |
 |--------|------|
-| **`onBroughtToFront` 回调中不可操作已删除的 Tamagotchi** | `clearTamagotchiFocusVisuals()` 和 Tamagotchi 置顶循环都遍历 `modules`。如果某个 Tamagotchi 刚被 `removeModule()` 但回调尚未返回，遍历可能悬垂。目前 `removeModule` 同步 delete，回调链在 mouseDown 内部完成，暂无问题，但未来如有异步删除需加防护。 |
-| **`TamagotchiConfirmOverlay` 生命周期管理** | 覆盖层通过 `confirmOverlay`（`unique_ptr`）管理。务必确保覆盖层在以下几种场景都能正确清理：(a) 用户点击 OK/Cancel；(b) 模块失去焦点（`setFocusVisual(false)`）；(c) 模块被外部删除（如 `clearAllModules`）。当前 `clearAllModules` 会同步 delete TamagotchiModule → 析构函数 → `confirmOverlay.reset()`，但如果未来模块删除改为异步，覆盖层需独立解绑。 |
-| **预设切换+位置计算依赖 canvas** | `applyLayoutPreset()` 中重建 Tamagotchi 时使用 `workspace->getCanvasArea()` 计算右下角位置。如果未来预设切换不再经过 `setSize()`/`setBounds()` 触发 `resized()`，canvas 可能是旧尺寸，宠物位置将错位。 |
-| **覆盖层渲染独立于模块 paint** | `TamagotchiConfirmOverlay` 作为 workspace 子组件独立渲染，不依赖 `TamagotchiModule::paint()`。这意味着覆盖层的 paint 不会经过 `repaintSelfAndParent()` 路径。如果未来需要在模块 paint 中访问 overlay 状态，需注意此解耦。 |
-| **多个 Tamagotchi 的情况** | 当前系统不支持同时添加多个 Tamagotchi 模块（工厂创建后 workspace 的右键菜单不允许多选同一类型），置顶循环和预设保存逻辑均已按"可能有多个"的模式编写，未来若放开多宠物支持无需额外改动。 |
+| **`onBroughtToFront` 回调中不可操作已删除的 VirtuPet** | `clearVirtuPetFocusVisuals()` 和 VirtuPet 置顶循环都遍历 `modules`。如果某个 VirtuPet 刚被 `removeModule()` 但回调尚未返回，遍历可能悬垂。目前 `removeModule` 同步 delete，回调链在 mouseDown 内部完成，暂无问题，但未来如有异步删除需加防护。 |
+| **`VirtuPetConfirmOverlay` 生命周期管理** | 覆盖层通过 `confirmOverlay`（`unique_ptr`）管理。务必确保覆盖层在以下几种场景都能正确清理：(a) 用户点击 OK/Cancel；(b) 模块失去焦点（`setFocusVisual(false)`）；(c) 模块被外部删除（如 `clearAllModules`）。当前 `clearAllModules` 会同步 delete VirtuPetModule → 析构函数 → `confirmOverlay.reset()`，但如果未来模块删除改为异步，覆盖层需独立解绑。 |
+| **预设切换+位置计算依赖 canvas** | `applyLayoutPreset()` 中重建 VirtuPet 时使用 `workspace->getCanvasArea()` 计算右下角位置。如果未来预设切换不再经过 `setSize()`/`setBounds()` 触发 `resized()`，canvas 可能是旧尺寸，宠物位置将错位。 |
+| **覆盖层渲染独立于模块 paint** | `VirtuPetConfirmOverlay` 作为 workspace 子组件独立渲染，不依赖 `VirtuPetModule::paint()`。这意味着覆盖层的 paint 不会经过 `repaintSelfAndParent()` 路径。如果未来需要在模块 paint 中访问 overlay 状态，需注意此解耦。 |
+| **多个 VirtuPet 的情况** | 当前系统不支持同时添加多个 VirtuPet 模块（工厂创建后 workspace 的右键菜单不允许多选同一类型），置顶循环和预设保存逻辑均已按"可能有多个"的模式编写，未来若放开多宠物支持无需额外改动。 |
 
 ---
 
 ### 6.25 v1.9.6 新手引导（Tutorial Overlay）
 
-v1.9.6 新增面向 Standalone 模式的新用户引导系统，引导用户添加拓麻歌子模块并孵化宠物蛋。
+v1.9.6 新增面向 Standalone 模式的新用户引导系统，引导用户添加电子宠物模块并孵化宠物蛋。
 
 #### 引导流程
 
@@ -1419,17 +1419,17 @@ v1.9.6 新增面向 Standalone 模式的新用户引导系统，引导用户添�
 首次启动（processor.tutorialCompleted == false）
   │
   ├─ STEP 1（step1_rightClick）
-  │   气泡 "WELCOME 2 Y2KMETER!" + "Right-click the canvas to add ur Tamagotchi pet! <3"
+  │   气泡 "WELCOME 2 Y2KMETER!" + "Right-click the canvas to add ur VirtuPet pet! <3"
   │   全屏 65% 黑色遮罩 + canvas 区域"聚光灯"粉色虚线边框 + Y2K 气泡对话框
   │
   ├─ 用户右键聚光灯区域
-  │   → TutorialOverlay 隐藏 → workspace->showAddMenu(screenPos, canvasPos, {Tamagotchi})
-  │   → 菜单中仅 Tamagotchi 可点击，其余类型置灰
-  │   → 状态变为 step1_menuOpened（timer 轮询检测到 Tamagotchi 添加）
+  │   → TutorialOverlay 隐藏 → workspace->showAddMenu(screenPos, canvasPos, {VirtuPet})
+  │   → 菜单中仅 VirtuPet 可点击，其余类型置灰
+  │   → 状态变为 step1_menuOpened（timer 轮询检测到 VirtuPet 添加）
   │
   ├─ STEP 2（step2_playAudio）
   │   气泡 "ALMOST THERE!" + "Play some audio to hatch the egg! :3"
-  │   聚光灯移至 Tamagotchi 模块位置
+  │   聚光灯移至 VirtuPet 模块位置
   │
   ├─ timer 每 100ms 轮询 isInEggPhase()
   │   → 孵化完成（非 egg/hatching 态）→ completeTutorial()
@@ -1446,15 +1446,15 @@ v1.9.6 新增面向 Standalone 模式的新用户引导系统，引导用户添�
 | **按需创建/销毁** | **这是解决模块拖拽/缩放失效 bug 的关键**。TutorialOverlay 不在构造时预创建，而是 `startTutorial()` 时 `make_unique` + `addChildComponent`，`dismissTutorialOverlay()` 时 `removeChildComponent` + `reset()`。引导不活动时 Editor 子组件列表中完全不存在此组件，从根本上杜绝 JUCE 子组件遍历 / OpenGL 渲染合成层对 workspace 模块事件路由的干扰。 |
 | **预设切换交互** | `onLayoutPresetChanged` 中：切换非 default → `skipTutorial()`（不标记完成，`tutorialWasSkipped=true`）；切回 default 时若被跳过 → `startTutorial()` 重新触发。 |
 | **气泡 × 关闭 + 二次确认** | 气泡右上角绘制半透明 × 按钮（hover 恢复不透明），点击弹出居中确认弹窗："SKIP TUTORIAL? / U will miss the fun :( this can't be undone~"，Cancel 关闭弹窗，Skip 触发 `skipTutorial()`。 |
-| **右键菜单仅 Tamagotchi 可选** | `showAddMenu` 新增 `enabledOnlyTypes` 参数，STEP1 调用时传入 `{ModuleType::tamagotchi}`；`AddMenuItemComponent` 支持 `itemEnabled` 构造参数：disabled 时灰色绘制 + 不响应 hover。 |
+| **右键菜单仅 VirtuPet 可选** | `showAddMenu` 新增 `enabledOnlyTypes` 参数，STEP1 调用时传入 `{ModuleType::virtuPet}`；`AddMenuItemComponent` 支持 `itemEnabled` 构造参数：disabled 时灰色绘制 + 不响应 hover。 |
 | **引导结束后清理** | `dismissTutorialOverlay()` 执行 `hide()` → `removeChildComponent` → `tutorialOverlay.reset()`，彻底从 child list 中移除。 |
 
 #### 涉及文件
 
 | 文件 | 改动 |
 |------|------|
-| `TamagotchiModule.h` | 新增 `isInEggPhase()` 公开查询方法（`egg/hatching` → `true`） |
-| `TamagotchiModule.cpp` | 实现 `isInEggPhase()` |
+| `VirtuPetModule.h` | 新增 `isInEggPhase()` 公开查询方法（`egg/hatching` → `true`） |
+| `VirtuPetModule.cpp` | 实现 `isInEggPhase()` |
 | `PluginProcessor.h` | 新增 `tutorialCompleted` 成员 + `isTutorialCompleted()` / `setTutorialCompleted()` |
 | `PluginProcessor.cpp` | `getStateInformation` / `setStateInformation` 中加入 `<PBEQ_State tutorialCompleted="1"/>` 序列化 |
 | `PluginEditor.h` | 新增 `TutorialStep` 枚举、`TutorialOverlay` 前向声明、`tutorialStep/tutorialWasSkipped` 成员、5 个教程管理方法声明 |
@@ -1487,8 +1487,8 @@ v1.9.6 新增面向 Standalone 模式的新用户引导系统，引导用户添�
 
 | 文件 | 改动 |
 |------|------|
-| `TamagotchiModule.h` | 新增 `isInEggPhase()` 查询方法 |
-| `TamagotchiModule.cpp` | 实现 `isInEggPhase()` |
+| `VirtuPetModule.h` | 新增 `isInEggPhase()` 查询方法 |
+| `VirtuPetModule.cpp` | 实现 `isInEggPhase()` |
 | `PluginProcessor.h` | 新增 `tutorialCompleted` 成员 + getter/setter |
 | `PluginProcessor.cpp` | `getStateInformation` / `setStateInformation` 序列化 `tutorialCompleted` |
 | `PluginEditor.h` | `TutorialOverlay` 前向声明 + 教程状态成员 + 5 个管理方法 |
@@ -1505,15 +1505,15 @@ v1.9.6 新增面向 Standalone 模式的新用户引导系统，引导用户添�
 
 v1.9.7 基于 v1.9.6 的新手引导进行了多项交互打磨和 bug 修复，提升引导流畅度和用户体验。
 
-#### ① STEP 2 遮罩镂空（Tamagotchi 模块保持明亮）
+#### ① STEP 2 遮罩镂空（VirtuPet 模块保持明亮）
 
-- **需求**：STEP 2 弹窗引导"播放音频孵化蛋"时，全屏 65% 黑色遮罩把 Tamagotchi 模块也盖住了，用户看不到宠物状态。
-- **方案**：`drawSpotlight()` 中用 `juce::Graphics::ScopedSaveState` + `g.excludeClipRegion(highlightArea)` 替代原来的 `g.fillRect(fullArea)`，使遮罩镂空聚光灯区域。Tamagotchi 模块透过镂空保持原色可见。
+- **需求**：STEP 2 弹窗引导"播放音频孵化蛋"时，全屏 65% 黑色遮罩把 VirtuPet 模块也盖住了，用户看不到宠物状态。
+- **方案**：`drawSpotlight()` 中用 `juce::Graphics::ScopedSaveState` + `g.excludeClipRegion(highlightArea)` 替代原来的 `g.fillRect(fullArea)`，使遮罩镂空聚光灯区域。VirtuPet 模块透过镂空保持原色可见。
 - **影响范围**：STEP 1 的 canvas 区域也同样受益（canvas 镂空保持可见）。
 
-#### ② STEP 2 气泡左右避让（不覆盖 Tamagotchi）
+#### ② STEP 2 气泡左右避让（不覆盖 VirtuPet）
 
-- **需求**：STEP 2 气泡仍然放在模块上方/下方，会遮挡 Tamagotchi。
+- **需求**：STEP 2 气泡仍然放在模块上方/下方，会遮挡 VirtuPet。
 - **方案**：`getBubbleBounds()` 在 STEP 2 时改为左右避让逻辑：
   - 模块中心 X > Editor 中心 X → 模块偏右 → 气泡放模块**左侧**（右缘贴左缘，间距 12px）
   - 模块中心 X ≤ Editor 中心 X → 模块偏左 → 气泡放模块**右侧**（左缘贴右缘，间距 12px）
@@ -1523,7 +1523,7 @@ v1.9.7 基于 v1.9.6 的新手引导进行了多项交互打磨和 bug 修复，
 
 #### ③ STEP 1 右键菜单期间遮罩+弹窗不消失
 
-- **需求**：用户右键展开添加模块菜单后，引导弹窗消失，此时用户可以点击其他区域打断引导流程。新的流程：菜单弹出后遮罩保持、弹窗保持（更换文案）、菜单外的区域不可点击，直到用户选中 Tamagotchi。
+- **需求**：用户右键展开添加模块菜单后，引导弹窗消失，此时用户可以点击其他区域打断引导流程。新的流程：菜单弹出后遮罩保持、弹窗保持（更换文案）、菜单外的区域不可点击，直到用户选中 VirtuPet。
 - **方案**（涉及 3 个文件）：
 
 | 文件 | 改动 |
@@ -1536,10 +1536,10 @@ v1.9.7 基于 v1.9.6 的新手引导进行了多项交互打磨和 bug 修复，
   ```
   STEP 1: 气泡 "WELCOME 2 Y2KMETER! / Right-click ..."
     ↓ 用户右键聚光灯区域
-  气泡变为 "NOW CHOOSE IT! / Click 'Tamagotchi' in the menu ..."
+  气泡变为 "NOW CHOOSE IT! / Click 'VirtuPet' in the menu ..."
   → showStep1MenuOpened()（遮罩保持 + 仅更换文案）
   → showAddMenu(callback: 菜单关闭 → 恢复 STEP 1 原文案)
-    ↓ 用户选中 Tamagotchi
+    ↓ 用户选中 VirtuPet
   → 模块添加 → onModuleAdded → advanceTutorialStep2()
     ↓ 用户关闭菜单（未选择）
   → onMenuClosed → showStep1(originalArea) → 恢复 STEP 1 文案
@@ -1579,7 +1579,7 @@ v1.9.7 基于 v1.9.6 的新手引导进行了多项交互打磨和 bug 修复，
 | **类型重定义 C2011** | v1.9.6 | `.h` 和 `.cpp` 各有一份 `TutorialOverlay` 完整类定义。 | `.h` 改为前向声明 `class TutorialOverlay;` |
 | **`drawDashedLine` 参数签名** | v1.9.6 | `juce::Graphics::drawDashedLine` 第一个参数是 `juce::Line<float>`，代码传了两个 `Point`。 | `juce::Line<float>(p1, p2)` 包装 |
 | **`showAddMenu` 私有访问** | v1.9.6 | 教程需要从 Editor 侧触发 `ModuleWorkspace::showAddMenu`，但它在 `private:` 区域。 | 移到 `public:` 区域 |
-| **STEP 2 遮罩盖住 Tamagotchi** | v1.9.7 | 全屏 `fillRect` 覆盖宠物模块。 | `excludeClipRegion` 镂空 |
+| **STEP 2 遮罩盖住 VirtuPet** | v1.9.7 | 全屏 `fillRect` 覆盖宠物模块。 | `excludeClipRegion` 镂空 |
 | **STEP 2 气泡覆盖宠物** | v1.9.7 | 上下定位仍会遮挡模块。 | 左右避让定位 |
 | **旧存档反复触发引导** | v1.9.7 | `getProperty` 默认值 `false` 导致旧存档被误判。 | `hasProperty` 检测，缺失→`true` |
 | **菜单弹出后 overlay 被销毁** | v1.9.7 | 数据流断裂，`advanceTutorialStep2` 被迫重建 overlay。 | 保持 overlay 存活，通过 `menuIsOpen` 切换文案 |
@@ -1600,7 +1600,7 @@ v1.9.7 基于 v1.9.6 的新手引导进行了多项交互打磨和 bug 修复，
 
 ### 6.27 v2.0.0 交互增强与细节打磨
 
-v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要围绕右键添加模块的交互优化、Tamagotchi 置顶逻辑完善、以及宠物聚焦信息展示。
+v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要围绕右键添加模块的交互优化、VirtuPet 置顶逻辑完善、以及宠物聚焦信息展示。
 
 #### ① 右键任意位置添加模块（不再限制空白区）
 
@@ -1615,10 +1615,10 @@ v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要
 
 - **回调签名设计**：`onRightClick(ModulePanel&, juce::Point<int> localPos)` —— 与 `onCloseClicked`/`onBroughtToFront` 风格一致，`localPos` 参数用于计算菜单弹出锚点。
 
-#### ② Tamagotchi 模块右键特殊处理
+#### ② VirtuPet 模块右键特殊处理
 
-- **Bug**：`TamagotchiModule::mouseDown` 完全重写了基类方法，之前加在 `ModulePanel::mouseDown` 中的右键转发逻辑不生效。
-- **修复**：在 `TamagotchiModule::mouseDown` 开头加入相同的右键转发代码。
+- **Bug**：`VirtuPetModule::mouseDown` 完全重写了基类方法，之前加在 `ModulePanel::mouseDown` 中的右键转发逻辑不生效。
+- **修复**：在 `VirtuPetModule::mouseDown` 开头加入相同的右键转发代码。
 
 #### ③ 修复菜单位置偏移
 
@@ -1626,16 +1626,16 @@ v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要
 - **根因**：`screenPos = localPointToGlobal(p.localPointToGlobal(localPos))` —— `p.localPointToGlobal()` 已经返回屏幕坐标，外层又做了一次 workspace→屏幕 转换，坐标被双重偏移。
 - **修复**：去掉外层 `localPointToGlobal`，直接用 `p.localPointToGlobal(localPos)`。
 
-#### ④ 修复拼豆图片聚焦覆盖 Tamagotchi
+#### ④ 修复拼豆图片聚焦覆盖 VirtuPet
 
-- **Bug**：拖入的图片聚焦（左键点击）后，`PerlerImageLayer::toFront(true)` 将图片推到所有子组件最上层，包括 Tamagotchi 模块。
-- **根因**：之前 `hookPanel` 的 `onBroughtToFront` 回调已处理「其他模块冒前时 Tamagotchi 置顶」，但图片聚焦走的是 `mouseDown → hitTestPerlerImageAt → focusedLayer->toFront(true)` 这条不同路径，缺少 Tamagotchi 重新置顶。
-- **修复**：在 `mouseDown` 图片聚焦分支中，`focusedLayer->toFront(true)` 之后立即遍历所有 Tamagotchi 模块并 `toFront(false)`。
+- **Bug**：拖入的图片聚焦（左键点击）后，`PerlerImageLayer::toFront(true)` 将图片推到所有子组件最上层，包括 VirtuPet 模块。
+- **根因**：之前 `hookPanel` 的 `onBroughtToFront` 回调已处理「其他模块冒前时 VirtuPet 置顶」，但图片聚焦走的是 `mouseDown → hitTestPerlerImageAt → focusedLayer->toFront(true)` 这条不同路径，缺少 VirtuPet 重新置顶。
+- **修复**：在 `mouseDown` 图片聚焦分支中，`focusedLayer->toFront(true)` 之后立即遍历所有 VirtuPet 模块并 `toFront(false)`。
 
 #### ⑤ 聚焦时显示宠物名字
 
-- **需求**：聚焦 Tamagotchi 模块时，在状态栏（饥饿/健康 HUD）下方显示宠物角色名，名字来源于资源文件的文件夹名。
-- **实现**：在 `TamagotchiModule::paint()` 的 `focused` 块中新增绘制：
+- **需求**：聚焦 VirtuPet 模块时，在状态栏（饥饿/健康 HUD）下方显示宠物角色名，名字来源于资源文件的文件夹名。
+- **实现**：在 `VirtuPetModule::paint()` 的 `focused` 块中新增绘制：
   - **位置**：`getHudBounds().withTrimmedTop(18)` 截取 14px 高的行
   - **样式**：`PinkXP::ink` 颜色 + 9px Bold 字体 + 居中
   - **来源**：`roleName` 字段（在 `loadRandomRoleAnimations()` 中从目录名自动提取）
@@ -1662,8 +1662,8 @@ v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要
 | 坑 | 原因 | 解决 |
 |----|------|------|
 | **`localPointToGlobal` 双重转换导致菜单位置偏移** | `p.localPointToGlobal(localPos)` 已返回屏幕坐标，外层又包了 `this->localPointToGlobal()` | 去掉外层转换 |
-| **Tamagotchi 右键无响应** | `TamagotchiModule` 重写了 `mouseDown`，未调用基类，新增的右键转发无法执行 | 在 `TamagotchiModule::mouseDown` 开头加上同样的右键转发 |
-| **拼豆图片聚焦覆盖 Tamagotchi** | 图片聚焦走 `mouseDown` 路径而非 `onBroughtToFront` 回调，缺少置顶逻辑 | 在图片聚焦分支后追加 Tamagotchi `toFront(false)` |
+| **VirtuPet 右键无响应** | `VirtuPetModule` 重写了 `mouseDown`，未调用基类，新增的右键转发无法执行 | 在 `VirtuPetModule::mouseDown` 开头加上同样的右键转发 |
+| **拼豆图片聚焦覆盖 VirtuPet** | 图片聚焦走 `mouseDown` 路径而非 `onBroughtToFront` 回调，缺少置顶逻辑 | 在图片聚焦分支后追加 VirtuPet `toFront(false)` |
 | **`replace_all` 短字符串失败** | `v1.9.7` 太短无法匹配 | 加上整行上下文（`versionText = "v..."`） |
 
 #### 改动文件清单（v2.0.0）
@@ -1672,9 +1672,9 @@ v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要
 |------|------|
 | `ModuleWorkspace.h` | `ModulePanel` 新增 `onRightClick` 回调声明 |
 | `ModulePanel.cpp` | `mouseDown` 右键转发 |
-| `ModuleWorkspace.cpp` | `hookPanel` 注册 `onRightClick`；图片聚焦后 Tamagotchi 置顶 |
-| `TamagotchiModule.cpp` | `mouseDown` 右键转发；`paint` 聚焦态绘制 `roleName`；名字颜色从 `pink300` → `ink` |
-| `TamagotchiModule.h` | 无改动（已继承 `onRightClick` 回调） |
+| `ModuleWorkspace.cpp` | `hookPanel` 注册 `onRightClick`；图片聚焦后 VirtuPet 置顶 |
+| `VirtuPetModule.cpp` | `mouseDown` 右键转发；`paint` 聚焦态绘制 `roleName`；名字颜色从 `pink300` → `ink` |
+| `VirtuPetModule.h` | 无改动（已继承 `onRightClick` 回调） |
 | `CMakeLists.txt` | 版本号 1.9.7 → 2.0.0 |
 | `Y2Kmeter_installer.iss` | 版本号 1.9.7 → 2.0.0 |
 | `PluginEditor.cpp` | 3 处硬编码版本号 1.9.7 → 2.0.0 |
@@ -1684,15 +1684,15 @@ v2.0.0 是一个里程碑版本，将版本号从 1.9.x 提升到 2.0.0，主要
 
 | 注意项 | 说明 |
 |--------|------|
-| **`onRightClick` 回调仅用于右键添加菜单** | 该回调专为 `showAddMenu` 设计。未来如有模块需要右键自定义菜单（如 Tamagotchi 设置），应在各自 `mouseDown` 中独立处理，不要复用此回调。 |
-| **Tamagotchi 置顶逻辑有两处** | ① `hookPanel` 的 `onBroughtToFront`（其他模块冒前时）、② `mouseDown` 图片聚焦分支（图片冒前时）。如果未来新增第三类可 `toFront` 的组件（如视频/3D 层），必须同步加入置顶逻辑。 |
+| **`onRightClick` 回调仅用于右键添加菜单** | 该回调专为 `showAddMenu` 设计。未来如有模块需要右键自定义菜单（如 VirtuPet 设置），应在各自 `mouseDown` 中独立处理，不要复用此回调。 |
+| **VirtuPet 置顶逻辑有两处** | ① `hookPanel` 的 `onBroughtToFront`（其他模块冒前时）、② `mouseDown` 图片聚焦分支（图片冒前时）。如果未来新增第三类可 `toFront` 的组件（如视频/3D 层），必须同步加入置顶逻辑。 |
 | **`roleName` 来源** | 由 `loadRandomRoleAnimations()` 通过 `selected.getFileNameWithoutExtension()` 提取。如果未来资源目录命名规范变化，需同步更新提取逻辑。 |
 
 ---
 
 ### 6.28 v2.0.1 Carried 拖拽状态机
 
-v2.0.1 引入了一个全新的瞬时状态机 `carried`，当用户鼠标按下并拖动 Tamagotchi 模块位置时触发。宠物在 workspace 坐标系中保持不动（类似 falling 的 startled 动画），外框随鼠标移动。当宠物触碰边框时被边框推动。松手后从当前位置触发 falling 物理跌落。
+v2.0.1 引入了一个全新的瞬时状态机 `carried`，当用户鼠标按下并拖动 VirtuPet 模块位置时触发。宠物在 workspace 坐标系中保持不动（类似 falling 的 startled 动画），外框随鼠标移动。当宠物触碰边框时被边框推动。松手后从当前位置触发 falling 物理跌落。
 
 #### ① 状态机定义
 
@@ -1725,7 +1725,7 @@ stateDiagram-v2
 
 | 组件 | 改动 | 说明 |
 |------|------|------|
-| `MotionMode` 枚举 | 新增 `carried` | `TamagotchiModule.h` |
+| `MotionMode` 枚举 | 新增 `carried` | `VirtuPetModule.h` |
 | 成员变量 | `carriedPetWsX/Y`、`carriedDragSuppressRepaint` | workspace 坐标锚点 + 拖拽期间重绘抑制标志 |
 | `mouseDown` | `toFront(true)` → `toFront(false)` | 仅改 z-order 不触发重绘 |
 | `mouseDrag` | 4px 阈值 → `switchMotionMode(carried)`；petPos 在 `setTopLeftPosition` **之前**用 `newTopLeft` 预计算 | 确保位置变更重绘时 petPos 已就绪 |
@@ -1780,8 +1780,8 @@ stateDiagram-v2
 
 | 文件 | 改动 |
 |------|------|
-| `TamagotchiModule.h` | `MotionMode` 新增 `carried`；新增 `carriedPetWsX/Y` + `carriedDragSuppressRepaint` 成员变量 |
-| `TamagotchiModule.cpp` | mouseDown/mouseDrag/mouseUp 重写；switchMotionMode/evaluateAutoMotionMode/getTargetVisualHzForMode/onAnimationFinished/stepWander/stepOneFrame/resized/flushVisualRepaintQueue/stateModeCombo 共 12 处修改 |
+| `VirtuPetModule.h` | `MotionMode` 新增 `carried`；新增 `carriedPetWsX/Y` + `carriedDragSuppressRepaint` 成员变量 |
+| `VirtuPetModule.cpp` | mouseDown/mouseDrag/mouseUp 重写；switchMotionMode/evaluateAutoMotionMode/getTargetVisualHzForMode/onAnimationFinished/stepWander/stepOneFrame/resized/flushVisualRepaintQueue/stateModeCombo 共 12 处修改 |
 | `CMakeLists.txt` | 版本号 2.0.0 → 2.0.1 |
 | `Y2Kmeter_installer.iss` | 版本号 2.0.0 → 2.0.1 |
 | `PROJECT_OVERVIEW.md` | 版本号 + 本节文档 |
@@ -1800,13 +1800,13 @@ stateDiagram-v2
 
 ### 6.29 v2.0.2 Carried 与孵蛋阶段兼容修复 / 孵化阈值降低
 
-v2.0.2 修复了两个与 Tamagotchi 状态机相关的问题。
+v2.0.2 修复了两个与 VirtuPet 状态机相关的问题。
 
 #### ① 蛋/孵化阶段拖拽跳过孵蛋流程
 
-**Bug 现象**：刚添加的 Tamagotchi 模块（宠物蛋状态）被拖动位置时，宠物直接跳过 `egg → hatching → patrol` 的正常孵化流程，进入 `carried → falling → landingFall → patrol`。
+**Bug 现象**：刚添加的 VirtuPet 模块（宠物蛋状态）被拖动位置时，宠物直接跳过 `egg → hatching → patrol` 的正常孵化流程，进入 `carried → falling → landingFall → patrol`。
 
-**根因**：[mouseDrag](I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) 中的 carried 触发条件没有排除 `egg`/`hatching` 状态，任何状态下的拖拽超过 4px 阈值都会切入 carried。
+**根因**：[mouseDrag](I:/Y2KMeter/source/ui/modules/VirtuPetModule.cpp) 中的 carried 触发条件没有排除 `egg`/`hatching` 状态，任何状态下的拖拽超过 4px 阈值都会切入 carried。
 
 **修复**：在 `mouseDrag` 的 carried 触发条件中增加 `motionMode != MotionMode::egg` 和 `motionMode != MotionMode::hatching` 排除：
 
@@ -1822,7 +1822,7 @@ if (motionMode != MotionMode::carried
 
 #### ② 孵化音频信号阈值降低
 
-**改动**：[evaluateAutoMotionMode](I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) 中 `egg → hatching` 的信号阈值从 `signalLevel01 > 0.02f` 改为 `signalLevel01 > 0.0f`。
+**改动**：[evaluateAutoMotionMode](I:/Y2KMeter/source/ui/modules/VirtuPetModule.cpp) 中 `egg → hatching` 的信号阈值从 `signalLevel01 > 0.02f` 改为 `signalLevel01 > 0.0f`。
 
 | 版本 | 阈值 | 含义 |
 |------|------|------|
@@ -1835,7 +1835,7 @@ if (motionMode != MotionMode::carried
 
 | 文件 | 改动 |
 |------|------|
-| `TamagotchiModule.cpp` | mouseDrag carried 触发条件增加 egg/hatching 排除；evaluateAutoMotionMode 孵化阈值 `0.02→0.0` |
+| `VirtuPetModule.cpp` | mouseDrag carried 触发条件增加 egg/hatching 排除；evaluateAutoMotionMode 孵化阈值 `0.02→0.0` |
 | `CMakeLists.txt` | 版本号 2.0.1 → 2.0.2（project + juce_add_plugin 两处） |
 | `Y2Kmeter_installer.iss` | 版本号 2.0.1 → 2.0.2 |
 | `PluginEditor.cpp` | 三处硬编码版本号 2.0.0 → 2.0.2（此前 v2.0.1 升级时漏改） |
@@ -2027,12 +2027,12 @@ if (motionMode != MotionMode::carried
 |------|---------|------|
 | [Y2KStandaloneApp.cpp](I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) `initialise()` | 移除 `FileLogger::createDateStampedLogger` 整个代码块 | 之前每次启动在 exe 目录生成 `Y2Kmeter-YYYY-MM-DD-HH-MM-SS.log`，正式版不需要 |
 | [MilkdropModule.cpp](I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | 移除 `static int paintCount` 计数器、移除 `#include <windows.h>`（`WIN32_LEAN_AND_MEAN`/`NOMINMAX` 宏） | paintCount 用于调试 GL 帧率，正式版不需要；Windows.h 在 cpp 中已被 JUCE 间接包含，多余的头文件增加编译时间 |
-| [TamagotchiModule.h](I:/Y2KMeter/source/ui/modules/TamagotchiModule.h) | 移除测试按钮声明：`getTestButtonBounds`、`hitTestButton`、`applyTestButton`、`refreshDebugAnimTriggerItems`、`applyForcedMotionMode`、`triggerDebugAnimationById`；移除 `stateModeCombo`/`animTriggerCombo` 两个 `ComboBox` 成员；移除 `forceMotionModeEnabled`/`forcedMotionMode`；移除 `hoveredTestButton`/`pressedTestButton`、`testButtonCount` 常量 | 这些是开发期间用于手动操控拓麻歌子状态机（强制切换 MotionMode、触发特定动画 ID、增减饥饿/血量）的调试 UI，正式用户不应看到 |
-| [TamagotchiModule.cpp](I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) | 同步删除上述声明对应的全部实现代码（~320 行）：`getTestButtonBounds`、`hitTestButton`、`applyTestButton`、`paint()` 中测试按钮绘制逻辑、`mouseMove/mouseDown/mouseMove/mouseUp` 中测试按钮交互、`refreshDebugAnimTriggerItems`、`applyForcedMotionMode`、`triggerDebugAnimationById`；`resized()` 中 ComboBox 布局 | HUD 高度从 64 缩减为只保留饥饿/血量条，`paint()` 中 Clean up 测试按钮绘制循环 |
+| [VirtuPetModule.h](I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | 移除测试按钮声明：`getTestButtonBounds`、`hitTestButton`、`applyTestButton`、`refreshDebugAnimTriggerItems`、`applyForcedMotionMode`、`triggerDebugAnimationById`；移除 `stateModeCombo`/`animTriggerCombo` 两个 `ComboBox` 成员；移除 `forceMotionModeEnabled`/`forcedMotionMode`；移除 `hoveredTestButton`/`pressedTestButton`、`testButtonCount` 常量 | 这些是开发期间用于手动操控电子宠物状态机（强制切换 MotionMode、触发特定动画 ID、增减饥饿/血量）的调试 UI，正式用户不应看到 |
+| [VirtuPetModule.cpp](I:/Y2KMeter/source/ui/modules/VirtuPetModule.cpp) | 同步删除上述声明对应的全部实现代码（~320 行）：`getTestButtonBounds`、`hitTestButton`、`applyTestButton`、`paint()` 中测试按钮绘制逻辑、`mouseMove/mouseDown/mouseMove/mouseUp` 中测试按钮交互、`refreshDebugAnimTriggerItems`、`applyForcedMotionMode`、`triggerDebugAnimationById`；`resized()` 中 ComboBox 布局 | HUD 高度从 64 缩减为只保留饥饿/血量条，`paint()` 中 Clean up 测试按钮绘制循环 |
 | [ModuleWorkspace.cpp](I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) `CustomThemePicker::show()` | 新增 2 行：每次 `show()` 时刷新 `ColourSelector::backgroundColourId` 为当前 `PinkXP::content` | **非清理，而是修复**：自定义取色器底色之前只在首次 `createChildComponents` 设置一次，之后用户 Apply 改主题后底色不会跟随更新；现在每次弹出都重新取 base 色 |
 
 **影响**：
-- 拓麻歌子模块的 HUD 区域显著简化（只剩饥饿/血量两条 pixel bar，原来还有 4 个调试按钮 + 2 个下拉框）
+- 电子宠物模块的 HUD 区域显著简化（只剩饥饿/血量两条 pixel bar，原来还有 4 个调试按钮 + 2 个下拉框）
 - 移除了 `evaluateAutoMotionMode`/`switchMotionMode` 中的 `forceMotionModeEnabled` 分支（之前如用户手动选了强制模式，自动评估会被跳过）——状态机现在完全由音频信号驱动，行为更可预测
 - `.log` 文件不再生成，减少用户困扰
 - 编译产物更干净，代码量减少约 370 行
@@ -2265,7 +2265,7 @@ VTune 报告 `RtlAllocateHeap` 0.063s 位居热点前列 → `juce::Path` 在 `f
 
 ### 8.3 v2.3.2 安装包资源分发优化
 
-**动机**：v2.3.1 及之前，Inno Setup 安装器对 Tamagotchi 动画（2652 个 PNG）和 Milkdrop 纹理（66 个 jpg）采用逐个文件复制安装，导致安装过程耗时极长且产生大量冗余 I/O。
+**动机**：v2.3.1 及之前，Inno Setup 安装器对 VirtuPet 动画（2652 个 PNG）和 Milkdrop 纹理（66 个 jpg）采用逐个文件复制安装，导致安装过程耗时极长且产生大量冗余 I/O。
 
 **核心改动**：统一 ZIP 压缩包解压流程
 - 将需要大量零散文件的三类资源改为"预制作 ZIP → 安装阶段复制 → ssPostInstall 解压"流程，与 Milkdrop 预设（9927 个 .milk）处理方式完全一致。
@@ -2275,18 +2275,18 @@ VTune 报告 `RtlAllocateHeap` 0.063s 位居热点前列 → `juce::Path` 在 `f
 |---|---|---|---|---|
 | `milkdrop_presets` | 9,927 `.milk` | ZIP（已有） | ZIP（不变） | `%APPDATA%\Y2Kmeter\milkdrop_presets` |
 | `milkdrop_textures` | 66 `.jpg` | 逐个复制 | `milkdrop_textures.zip` | `%APPDATA%\Y2Kmeter\milkdrop_textures` |
-| Tamagotchi 动画 | 2,652 `.png` | 逐个复制 | `tamagotchi_assets.zip` | `{app}\assets\Tamagotchi\` |
+| VirtuPet 动画 | 2,652 `.png` | 逐个复制 | `virtupet_assets.zip` | `{app}\assets\VirtuPet\` |
 
 **修改文件清单**：
 
 | 文件 | 改动 |
 |---|---|
-| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `[InstallDelete]` 新增旧版散装文件清理；`[Files]` Tamagotchi & 纹理改为 ZIP Source；`[Code]` 抽取 `ExtractZip()` 通用函数，`tar.exe` 优先 → PowerShell 回退 |
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `[InstallDelete]` 新增旧版散装文件清理；`[Files]` VirtuPet & 纹理改为 ZIP Source；`[Code]` 抽取 `ExtractZip()` 通用函数，`tar.exe` 优先 → PowerShell 回退 |
 | [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | `y2km_copy_projectm_runtime` 新增 `SKIP_TEXTURES` 选项；Standalone post-build 跳过纹理拷贝（走安装包 ZIP） |
 | `assets/milkdrop_textures.zip` | **新建**：预制作的纹理压缩包（~3.2 MB） |
-| `assets/tamagotchi_assets.zip` | **新建**：预制作的 Tamagotchi 动画压缩包（~1.5 MB，内部含 `Tamagotchi/` 前缀） |
+| `assets/virtupet_assets.zip` | **新建**：预制作的 VirtuPet 动画压缩包（~1.5 MB，内部含 `VirtuPet/` 前缀） |
 
-**运行时兼容性**：无需修改 C++ 代码。`FindMilkdropAssetsDir()` 优先查找 AppData 路径，`findTamagotchiAssetsRoot()` 从 exe 同级向上搜索 `assets/Tamagotchi` —— 解压后路径完全匹配原有搜索逻辑。
+**运行时兼容性**：无需修改 C++ 代码。`FindMilkdropAssetsDir()` 优先查找 AppData 路径，`findVirtuPetAssetsRoot()` 从 exe 同级向上搜索 `assets/VirtuPet` —— 解压后路径完全匹配原有搜索逻辑。
 
 ### 8.4 v2.3.3 遥测+更新检查 UAF 修复 & API 服务端部署
 
@@ -2519,7 +2519,7 @@ Standalone 模式下：
 - `PluginEditor`：增加浮动窗口创建/dock/close/置顶/锁定回调，`SuspendMilkdropEditorRendererForFloating()` / `ResumeMilkdropEditorRendererAfterFloating()`。
 - `ModuleWorkspace`：增加 `floatingModuleStates_` 容器与 `FloatingState` 结构，支持脱离态持久化。
 - `ModulePanel`：浮动态下按钮、右键、锁定分支处理。
-- `TamagotchiModule`：同步添加浮动按钮绘制。
+- `VirtuPetModule`：同步添加浮动按钮绘制。
 
 #### 阶段二：脱离→嵌入重置预设 & 脱离态重启丢失预设
 
@@ -2588,7 +2588,7 @@ Standalone 模式下：
 | [`MilkdropModule.h`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `SyncOwnerPresetIndexFromRenderer()` 声明；`restored_preset_index_` mutable |
 | [`ProjectMApi.cpp`](/I:/Y2KMeter/source/ui/modules/ProjectMApi.cpp) | `resetGlewInitialization()` 轻量复位 |
 | [`ProjectMApi.h`](/I:/Y2KMeter/source/ui/modules/ProjectMApi.h) | `resetGlewInitialization()` 声明 |
-| [`TamagotchiModule.cpp`](/I:/Y2KMeter/source/ui/modules/TamagotchiModule.cpp) | 浮动按钮绘制 |
+| [`VirtuPetModule.cpp`](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.cpp) | 浮动按钮绘制 |
 | [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 `2.3.6` → `2.5.0` |
 | [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | 版本号 `2.3.5` → `2.5.0` |
 
@@ -2715,7 +2715,7 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 
 ---
 
-## 9. v2.5.6：Milkdrop 预设重命名 + 三端共享 + Milkdrop/Tamagotchi 稳定性
+## 9. v2.5.6：Milkdrop 预设重命名 + 三端共享 + Milkdrop/VirtuPet 稳定性
 
 本节记录 v2.5.6 与前一版本对比的**跨平台通用改动**（macOS 独属改动见
 `MACOS_ADAPTATION_DIFFS.md`）。
@@ -2772,9 +2772,9 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 - 原因：脱离一个 Milkdrop 后能添加第二个 → libprojectM / GL context
   冲突崩溃
 
-### 9.6 Tamagotchi 模块空资源兜底
+### 9.6 VirtuPet 模块空资源兜底
 
-- 影响文件：`source/ui/modules/TamagotchiModule.cpp`
+- 影响文件：`source/ui/modules/VirtuPetModule.cpp`
 - `randomAnimFrom (std::initializer_list<int>) const`：`availableAnimIds`
   为空时返回默认 anim id `1`，避免访问空数组崩溃
 - `beginPatrolCycle()`：`availableAnimIds` 为空时提前 return，跳过巡逻
@@ -2783,8 +2783,8 @@ v2.5.1 发布前测试发现 VST 插件模式下 "120 FPS" 失效：选择 120 �
 
 ### 9.7 弹窗 UI 微调（跨平台通用）
 
-- 影响文件：`source/ui/modules/TamagotchiModule.cpp`
-  - `TamagotchiConfirmOverlay::paint`：确认弹窗文字色改为 `Colours::black`
+- 影响文件：`source/ui/modules/VirtuPetModule.cpp`
+  - `VirtuPetConfirmOverlay::paint`：确认弹窗文字色改为 `Colours::black`
     并把 "say bye to ur pet? :(" 表情改为 ":)"（原始文案有误导性）
   - `paint()` 中的"弹出/停靠按钮"绘制逻辑挪出（改由 ModulePanel 通用
     路径处理，去除重复绘制）
@@ -3180,7 +3180,7 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 
 ### 改动 1：深色主题弹窗正文文本看不清修复
 
-- **问题**：使用 `jungle` / `crimson noir` / `void grey` / `black pink` 等深色主题预设时，删除拓麻歌子（Tamagotchi）模块的二次确认弹窗正文文本仍用深色，与深色底色对比度不足、看不清。
+- **问题**：使用 `jungle` / `crimson noir` / `void grey` / `black pink` 等深色主题预设时，删除电子宠物（VirtuPet）模块的二次确认弹窗正文文本仍用深色，与深色底色对比度不足、看不清。
 - **修复**：该弹窗正文文本改用浅色（或弹窗底色改用浅色），保证深色主题下可读。
 
 ### 改动 2：日志输出统一走编译开关 + 宏
@@ -3303,7 +3303,7 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 
 ### 踩坑记录
 
-1. **枚举插入中间会重编号后续值**：`ModuleType::stereoField` 插入在 `spectrogram3d` 与 `tamagotchi` 之间，使 `tamagotchi`/`milkdrop` 枚举数值 +1。布局持久化走字符串映射（`moduleTypeToString`/`stringToModuleType`）不受影响，但**必须全量构建**（避免 Release 增量构建下的枚举重编号 0x80000003 崩溃，见 §6.16）。
+1. **枚举插入中间会重编号后续值**：`ModuleType::stereoField` 插入在 `spectrogram3d` 与 `virtuPet` 之间，使 `virtuPet`/`milkdrop` 枚举数值 +1。布局持久化走字符串映射（`moduleTypeToString`/`stringToModuleType`）不受影响，但**必须全量构建**（避免 Release 增量构建下的枚举重编号 0x80000003 崩溃，见 §6.16）。
 2. **TwoValue 滑块的 `drawLinearSlider` 只被调用一次**：JUCE 对 `TwoValueHorizontal` 只在 `sliderPos`/`minSliderPos`/`maxSliderPos` 三个参数里传递两个 thumb 位置，若 LookAndFeel 忽略后两个参数就只剩单滑块，且选中区填充错误。
 3. **Stereo Field 散点收缩成三角形**：半径曾用 `(|L|+|R|)/2`（平均能量），纯左/纯右满幅时半径只有 R/2，散点最大包络收缩成倒三角形；改用 `max(|L|,|R|)` 后三种满幅极端情况都落回半圆边界。
 4. **Stereo Field 大窗口卡顿**：点数量曾随画布宽度线性增长（`cw*2`）+ 离屏图 1:1 全分辨率，拖大后每帧数千次 `fillRect` + 全图 `multiplyAlpha` 遍历；改为固定 512 点 + 700px 阈值降采样（下限 25%）后显著缓解。
@@ -3471,6 +3471,43 @@ wave 状态全局共享，`SetMilkdropWaveState()` 写回 `Processor::setSavedMi
 1. **模块显示逻辑被低估**：最初预设把 Spectrum/Spectrogram3D 压成窄高条、把 VU 拉成超宽，用户实测发现频谱可读性差、3D 掉帧、半圆仪表大量空白。结论：布局预设不能只做几何均分，必须结合每个模块的渲染形态（宽高比敏感、帧率敏感）来取舍。
 2. **环境变量对进程是「启动时快照」**：`Y2KM_SIMULATE_SCREEN` 在系统属性里设置后，已运行中的 IDE/终端不会自动刷新环境，需重启 IDE 或新开终端才能读到；否则出现「变量已设置但无效果」的假象。
 3. **版本号字面量分散且缩进不一致**：延续 v2.7.2 的坑——`PluginEditor.cpp` 中版本字面量有 `getStringWidth("v2.7.x")` 与 `versionText = "v2.7.x"` 两种写法，其中 `versionW` 一处顶格、一处带 8 空格缩进，批量替换 `replace_all` 会因缩进差异失败，需按缩进分别精确替换。
+
+---
+
+## v2.7.4：Milkdrop 脱离态收藏库切换数据竞争修复
+
+本章记录 v2.7.4 版本相对 v2.7.3 的改动：修复 **Standalone 脱离态（浮动态）** 下 Milkdrop 模块右下角「切换收藏库」按钮无法正常切换当前预设文件夹的问题。
+
+### 问题现象
+
+脱离态下点击 Milkdrop 模块右下角的「双向箭头」切换收藏库 / 内置库按钮后，当前预设文件夹没有正常切换（表现为预设名/计数显示异常，或在 Debug 构建下触发 `juce::StringArray` 越界断言 / 崩溃）。
+
+### 根因
+
+Milkdrop 脱离态由 `GLView` 自己的本地 OpenGL 线程驱动渲染。切换收藏库的时序为：
+
+1. UI 线程点击按钮 → `RequestLibraryToggle()` 翻转 `milkdrop_use_like_library_` 并置 `requested_library_toggle_`；
+2. GL 线程在 `renderOpenGL()` 里 `ConsumePresetRequests()` → `ScanPresetFiles()` 会对 `local_preset_paths_`（`juce::StringArray`）执行 `clear()` + `add()` + `sort()`，再更新 `local_current_preset_`。
+
+与此同时，UI 线程在 `paintOverlayControlBar` / `paintLibraryButtons` 里通过 `GetCurrentPresetIndex / GetTotalPresetCount / GetCurrentPresetName / GetCurrentPresetFilePath` 读取这两个成员——**没有任何同步**。`juce::StringArray` 非线程安全，UI 线程可能读到被 `clear()` 到一半的数组（脏数据 / 越界 / 释放后访问），导致切换后显示异常或崩溃。
+
+### 修复方案
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/modules/MilkdropModule.h`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `int local_current_preset_` → `std::atomic<int>`；新增 `mutable std::mutex preset_paths_mutex_` 保护 `local_preset_paths_` |
+| [`source/ui/modules/MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) | `ScanPresetFiles()` 写端加锁（磁盘 `findChildFiles` 留在锁外）；`GetCurrentPresetIndex / GetTotalPresetCount / GetCurrentPresetName / GetCurrentPresetFilePath` 读端加锁，名称/路径读取把 `local_current_preset_` 一次 `load()` 进局部变量避免多次原子读不一致；`ConsumePresetRequests()` 里 `+=` 改为 `fetch_add`、三元表达式改为先 `load()` 再比较 |
+
+### 关键设计
+
+- **写端锁粒度最小化**：`ScanPresetFiles()` 只把 `clear/add/sort` 放进锁内，磁盘 IO（`findChildFiles`）留在锁外，避免 GL 线程长时间持锁阻塞 UI 绘制。
+- **索引与列表分开保护**：`local_current_preset_` 用原子类型消除 int 读写竞争；`local_preset_paths_`（非线程安全的 `juce::StringArray`）用互斥锁保护。二者读入时在锁内先 `load()` 索引一次，保证「索引 + 列表」在单次快照内一致。
+
+### 踩坑记录
+
+1. **`std::atomic<int>` 不能隐式拷贝**：三元表达式 `cond ? atomic : -1` 会让编译器尝试调用 `std::atomic<int>` 已删除的拷贝构造函数（MSVC `C2280`），需先用 `.load()` 读入普通 `int` 再参与表达式。
+2. **`+=` 等复合赋值不适用于 atomic**：`local_current_preset_ += n` 无法编译，需改用 `fetch_add(n, std::memory_order_relaxed)`。
+3. **数据竞争比逻辑错误更隐蔽**：切换库逻辑本身正确（状态翻转 + 索引双向记忆），问题出在 GL 线程重扫列表与 UI 线程绘制预设名之间的无锁并发读写，静态读码时容易被「逻辑正确」掩盖。
 
 ---
 

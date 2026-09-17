@@ -1,5 +1,5 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "2.7.3"
+#define MyAppVersion   "2.7.4"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
@@ -62,10 +62,10 @@ Name: "vst3";       Description: "VST3 Plugin";                   Types: full cu
 [InstallDelete]
 ; Standalone：删除旧 EXE（若存在）
 Type: files; Name: "{app}\{#MyAppExeName}"; Components: standalone
-; Standalone：删除旧 Tamagotchi 动画资源目录（若存在，v2.3.1 及之前为散装文件安装）
-Type: filesandordirs; Name: "{app}\assets\Tamagotchi"; Components: standalone
-; Standalone：删除旧 Tamagotchi 压缩包（升级清理）
-Type: files; Name: "{app}\assets\tamagotchi_assets.zip"; Components: standalone
+; Standalone：删除旧 VirtuPet 动画资源目录（若存在，v2.3.1 及之前为散装文件安装）
+Type: filesandordirs; Name: "{app}\assets\VirtuPet"; Components: standalone
+; Standalone：删除旧 VirtuPet 压缩包（升级清理）
+Type: files; Name: "{app}\assets\virtupet_assets.zip"; Components: standalone
 ; Standalone：删除旧 Milkdrop 运行时（projectM DLL + glew32 + 预设/纹理目录/压缩包，确保升级时全量覆盖）
 Type: files; Name: "{app}\projectM-4.dll"; Components: standalone
 Type: files; Name: "{app}\glew32.dll"; Components: standalone
@@ -94,10 +94,10 @@ Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\Standalone
     Flags: ignoreversion; \
     Components: standalone
 
-; Standalone Tamagotchi 动画资源（打包为 ZIP 以加速安装，2652 个 PNG 文件合并为 1 个）
-;   · ZIP 预置于 assets/tamagotchi_assets.zip，更新动画资源后需重新手动打包
-;   · 内部路径保留 Tamagotchi/ 前缀，安装后由 [Code] CurStepChanged(ssPostInstall) 解压到 {app}\assets\
-Source: "assets\tamagotchi_assets.zip"; \
+; Standalone VirtuPet 动画资源（打包为 ZIP 以加速安装，2652 个 PNG 文件合并为 1 个）
+;   · ZIP 预置于 assets/virtupet_assets.zip，更新动画资源后需重新手动打包
+;   · 内部路径保留 VirtuPet/ 前缀，安装后由 [Code] CurStepChanged(ssPostInstall) 解压到 {app}\assets\
+Source: "assets\virtupet_assets.zip"; \
     DestDir: "{app}\assets"; \
     Flags: ignoreversion; \
     Components: standalone
@@ -407,7 +407,7 @@ end;
 // ssPostInstall：文件复制完成后、[Run] 执行前，自动解压三个 ZIP
 //   · milkdrop_presets.zip   → %APPDATA%\Y2Kmeter\milkdrop_presets
 //   · milkdrop_textures.zip  → %APPDATA%\Y2Kmeter\milkdrop_textures
-//   · tamagotchi_assets.zip  → {app}\assets\ (内部含 Tamagotchi/ 前缀)
+//   · virtupet_assets.zip  → {app}\assets\ (内部含 VirtuPet/ 前缀)
 //   · 注意：[Run] 中的 shell 命令在不可见窗口下可能静默失败；
 //     CurStepChanged(ssPostInstall) 由 Inno Setup 内部事件驱动，
 //     不依赖窗口消息循环，执行时序更可靠。
@@ -450,8 +450,8 @@ begin
     // ---------- Standalone 专属资源 ----------
     if IsComponentSelected('standalone') then
     begin
-      // Tamagotchi 动画资源
-      ZipPath  := ExpandConstant('{app}') + '\assets\tamagotchi_assets.zip';
+      // VirtuPet 动画资源
+      ZipPath  := ExpandConstant('{app}') + '\assets\virtupet_assets.zip';
       DestPath := ExpandConstant('{app}') + '\assets';
       ExtractZip(ZipPath, DestPath);
     end;

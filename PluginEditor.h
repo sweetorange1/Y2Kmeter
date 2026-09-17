@@ -5,6 +5,7 @@
 #include "PluginProcessor.h"
 #include "BinaryData.h"
 #include "projectM-4/types.h"  // projectm_handle
+#include <memory>
 
 // 前向声明（把 ModuleWorkspace/ModulePanel/ModuleType 的头文件下沉到 .cpp，
 // 以规避 MSVC 多文件编译时 include guard 串扰的问题）
@@ -446,9 +447,9 @@ private:
     int                      userRequestedFpsLimit  = 120;
     int                      activeDispatchHz       = 120;
 
-    // Tamagotchi 信号保活：仅当工作区存在 Tamagotchi 模块时，
-    // 才临时 retain(Loudness) 以驱动孵化/行为状态机；无 Tamagotchi 时立刻 release。
-    bool tamagotchiSignalRetained = false;
+    // VirtuPet 信号保活：仅当工作区存在 VirtuPet 模块时，
+    // 才临时 retain(Loudness) 以驱动孵化/行为状态机；无 VirtuPet 时立刻 release。
+    bool virtuPetSignalRetained = false;
 
     // —— GPU 合成层（统一迁移绘制到 GPU，Standalone + VST3 共用）——
     //   · 在 Editor 构造末尾 attachTo(*this)，析构最开始 detach()。
@@ -483,10 +484,10 @@ private:
 
     // v1.9.0：workspace 嵌套子组件鼠标监听器（修复 auto-hide 下模块上的鼠标事件无法触发
     //   auto-show/hide 的问题）。
-    //   · ModulePanel/TamagotchiModule 是 workspace 的子组件，mouseMove 只发给最深子组件
+    //   · ModulePanel/VirtuPetModule 是 workspace 的子组件，mouseMove 只发给最深子组件
     //     不向上传播 → workspace.onMouseMoved 对模块区域无效。
     //   · 此监听器以 addMouseListener(workspace, true) 注册，第二个参数 true 表示接收
-    //     workspace 所有嵌套子组件的鼠标事件（包括 ModulePanel 和 TamagotchiModule）。
+    //     workspace 所有嵌套子组件的鼠标事件（包括 ModulePanel 和 VirtuPetModule）。
     //   · onMouseMove/Enter：触发 auto-show；onMouseExit：触发 auto-hide。
     class AutoHideChildWatcher : public juce::MouseListener
     {
@@ -556,7 +557,7 @@ private:
     // ================================================================
     // v1.9.x：新手引导（仅 Standalone 模式生效，插件宿主模式忽略）
     //   · step_hidden:      不显示引导
-    //   · step1_rightClick: 右键点击画布添加拓麻歌子
+    //   · step1_rightClick: 右键点击画布添加电子宠物
     //   · step2_playAudio:  播放音频孵化宠物蛋
     //   · tutorialWasSkipped: 用户在引导期间切换了非 default 预设 → 跳过
     // ================================================================

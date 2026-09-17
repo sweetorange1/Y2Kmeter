@@ -6,14 +6,14 @@
 #include "source/ui/ModuleWorkspace.h"
 
 // ==========================================================
-// TamagotchiConfirmOverlay —— 删除二次确认覆盖层
+// VirtuPetConfirmOverlay —— 删除二次确认覆盖层
 //   · 添加到 workspace 层级渲染，不受模块边界裁剪
 //   · 半透明遮罩 + PinkXP 凸起边框对话框
 // ==========================================================
-class TamagotchiConfirmOverlay : public juce::Component
+class VirtuPetConfirmOverlay : public juce::Component
 {
 public:
-    TamagotchiConfirmOverlay (const juce::Rectangle<int>& moduleBoundsInWorkspace,
+    VirtuPetConfirmOverlay (const juce::Rectangle<int>& moduleBoundsInWorkspace,
                               std::function<void()> onConfirm,
                               std::function<void()> onDismiss);
 
@@ -35,18 +35,18 @@ private:
 };
 
 // ==========================================================
-// TamagotchiModule —— 独立小宠物模块（非拖图）
-//   · 模块名固定：Tamagotchi
+// VirtuPetModule —— 独立小宠物模块（非拖图）
+//   · 模块名固定：VirtuPet
 //   · 通过右键/双击 ModuleWorkspace 空白区添加
 //   · 默认尺寸 80x80
 //   · 当前阶段：随机播放角色动画（20 角色 / 33 动画），1 秒 1 帧
 // ==========================================================
-class TamagotchiModule : public ModulePanel,
+class VirtuPetModule : public ModulePanel,
                          private juce::Timer
 {
 public:
-    TamagotchiModule();
-    ~TamagotchiModule() override;
+    VirtuPetModule();
+    ~VirtuPetModule() override;
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -287,7 +287,7 @@ private:
     static constexpr int jumpFightCount = 2;
     static constexpr float jumpFightAmplitudePx = 6.0f;
 
-    // Tamagotchi 需求数值（0..100）
+    // VirtuPet 需求数值（0..100）
 
     float signalLevel01 = 0.0f;
     float hunger = 75.0f;
@@ -326,5 +326,5 @@ private:
     static constexpr int minW = 128;
     static constexpr int minH = 128;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TamagotchiModule)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VirtuPetModule)
 };

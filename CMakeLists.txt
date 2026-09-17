@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 2.7.3 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.7.4 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -354,7 +354,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.7.3
+VERSION 2.7.4
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -536,8 +536,8 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/ui/modules/Spectrogram3DModule.cpp
   source/ui/modules/StereoFieldModule.h
   source/ui/modules/StereoFieldModule.cpp
-  source/ui/modules/TamagotchiModule.h
-  source/ui/modules/TamagotchiModule.cpp
+  source/ui/modules/VirtuPetModule.h
+  source/ui/modules/VirtuPetModule.cpp
   source/ui/modules/MilkdropModule.h
   source/ui/modules/MilkdropModule.cpp
   source/ui/modules/ProjectMApi.h
@@ -549,7 +549,6 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/standalone/WasapiLoopbackCapture.h
   source/standalone/WasapiLoopbackCapture.cpp
 
-  # === 网络模块（遥测 + 自动更新检查）===
   source/network/Version.h
   source/network/Version.cpp
   source/network/TelemetryClient.h
@@ -810,24 +809,24 @@ if (APPLE AND TARGET Y2Kmeter_Standalone)
 endif()
 
 # ==========================================================
-# Tamagotchi 模块的动画 / 蛋资源打包（macOS）
-#   · 运行时查找逻辑（TamagotchiModule.cpp 中的 findTamagotchiSubDir）会优先从
-#     本 bundle 的 Contents/Resources/assets/Tamagotchi 读取，因此构建数 bundle
-#     后需要把源仓库 assets/Tamagotchi 同步进去。
+# VirtuPet 模块的动画 / 蛋资源打包（macOS）
+#   · 运行时查找逻辑（VirtuPetModule.cpp 中的 findVirtuPetSubDir）会优先从
+#     本 bundle 的 Contents/Resources/assets/VirtuPet 读取，因此构建数 bundle
+#     后需要把源仓库 assets/VirtuPet 同步进去。
 #   · Windows：使用 ZIP 压缩包 + 安装后解压方式（Y2Kmeter_installer.iss 处理），
 #     避免 Inno Setup 逐个复制 2652 个 PNG 导致的性能问题。
 #   · macOS：保持散装文件拷贝进 .app Bundle。
 #     macOS 使用自包含 Bundle 体系 + DMG 镜像，不存在 Windows Inno Setup 的
 #     "大量零散文件拖慢安装"问题；且 Bundle 内文件由 Finder 直接管理，无需
-#     运行时解压步骤。如需后续迁移为 ZIP 方案，需同步修改 TamagotchiModule.cpp
+#     运行时解压步骤。如需后续迁移为 ZIP 方案，需同步修改 VirtuPetModule.cpp
 #     添加首次启动时的 ZIP 解压逻辑。
 #   · Windows / Linux：暂按源仓库 / 运行目录兜底（Y2Kmeter_installer.iss 另行处理），
 #     这里的 bundle 路径模式只适用于 macOS .app / .vst3。
 # ==========================================================
 if (APPLE)
-  set(Y2KM_TAMAGOTCHI_SRC "${CMAKE_CURRENT_SOURCE_DIR}/assets/Tamagotchi")
+  set(Y2KM_VIRTUPET_SRC "${CMAKE_CURRENT_SOURCE_DIR}/assets/VirtuPet")
 
-  function(y2km_copy_tamagotchi_into_bundle tgt bundle_subpath)
+  function(y2km_copy_virtupet_into_bundle tgt bundle_subpath)
     if (NOT TARGET ${tgt})
       return()
     endif()
@@ -835,19 +834,19 @@ if (APPLE)
     # JUCE 会把产物放在 $<TARGET_BUNDLE_DIR:${tgt}>，指向 bundle 根（.vst3 / .app）
     add_custom_command(TARGET ${tgt} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E rm -rf
-              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/Tamagotchi"
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/VirtuPet"
       COMMAND ${CMAKE_COMMAND} -E make_directory
               "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets"
       COMMAND ${CMAKE_COMMAND} -E copy_directory
-              "${Y2KM_TAMAGOTCHI_SRC}"
-              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/Tamagotchi"
-      COMMENT "Y2Kmeter: sync Tamagotchi assets into ${bundle_subpath}/Contents/Resources/assets/Tamagotchi"
+              "${Y2KM_VIRTUPET_SRC}"
+              "$<TARGET_BUNDLE_DIR:${tgt}>/Contents/Resources/assets/VirtuPet"
+      COMMENT "Y2Kmeter: sync VirtuPet assets into ${bundle_subpath}/Contents/Resources/assets/VirtuPet"
       VERBATIM
     )
   endfunction()
 
   if (TARGET Y2Kmeter_Standalone)
-    y2km_copy_tamagotchi_into_bundle(Y2Kmeter_Standalone "Y2Kmeter.app")
+    y2km_copy_virtupet_into_bundle(Y2Kmeter_Standalone "Y2Kmeter.app")
   endif()
 endif()
 

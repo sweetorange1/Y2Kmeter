@@ -1,6 +1,6 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
-#include "source/ui/modules/TamagotchiModule.h"
+#include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 
 // ==========================================================
@@ -11,15 +11,15 @@
 // ==========================================================
 namespace
 {
-    void clearTamagotchiFocusVisuals (juce::OwnedArray<ModulePanel>& modules)
+    void clearVirtuPetFocusVisuals (juce::OwnedArray<ModulePanel>& modules)
     {
         for (auto* m : modules)
         {
-            if (m == nullptr || m->getModuleType() != ModuleType::tamagotchi)
+            if (m == nullptr || m->getModuleType() != ModuleType::virtuPet)
                 continue;
 
-            if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
-                tamagotchi->setFocusVisual (false);
+            if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (m))
+                virtuPet->setFocusVisual (false);
         }
     }
 
@@ -142,7 +142,7 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::spectrogram:       return "spectrogram";
         case ModuleType::spectrogram3d:    return "spectrogram3d";
         case ModuleType::stereoField:       return "stereo_field";
-        case ModuleType::tamagotchi:        return "tamagotchi";
+        case ModuleType::virtuPet:        return "virtuPet";
         case ModuleType::milkdrop:         return "milkdrop";
     }
 
@@ -176,7 +176,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "spectrogram",        ModuleType::spectrogram },
         { "spectrogram3d",     ModuleType::spectrogram3d },
         { "stereo_field",      ModuleType::stereoField },
-        { "tamagotchi",         ModuleType::tamagotchi },
+        { "virtuPet",         ModuleType::virtuPet },
         { "milkdrop",          ModuleType::milkdrop },
     };
     for (auto& p : kv)
@@ -897,7 +897,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     //   · 仅在 focusedPerlerIdx 有效时执行 repaint，避免无聚焦时的无谓刷新
     panel.onBroughtToFront = [this](ModulePanel& p)
     {
-        clearTamagotchiFocusVisuals (modules);
+        clearVirtuPetFocusVisuals (modules);
         clearMilkdropFocus (modules);
 
         if (focusedPerlerIdx >= 0)
@@ -917,12 +917,12 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
             repaint();
         }
 
-        // Tamagotchi 始终置顶：其他模块 mouseDown → toFront(true) 会把自己冒到
-        // 所有子组件之上（包括 Tamagotchi）。这里在模块冒前之后，再把所有
-        // Tamagotchi 模块抬回最上层，保证宠物永远不被其他模块遮挡。
+        // VirtuPet 始终置顶：其他模块 mouseDown → toFront(true) 会把自己冒到
+        // 所有子组件之上（包括 VirtuPet）。这里在模块冒前之后，再把所有
+        // VirtuPet 模块抬回最上层，保证宠物永远不被其他模块遮挡。
         for (auto* m : modules)
         {
-            if (m->getModuleType() == ModuleType::tamagotchi)
+            if (m->getModuleType() == ModuleType::virtuPet)
                 m->toFront (false);
         }
 
@@ -935,7 +935,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
         //   强制置顶（含 CoreGraphics 绘制的边框和抬头）。
         //   脱离态：每个模块有独立 NSWindow，窗口级 z-order 正常工作，无需处理。
         //   Windows：Editor GL 上下文渲染，无独立原生视图，无此问题。
-        //   参考：Tamagotchi 始终置顶采用相同思路。
+        //   参考：VirtuPet 始终置顶采用相同思路。
 #if JUCE_MAC
         for (auto* m : modules)
         {
@@ -992,7 +992,7 @@ ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool
 
     notifyLayoutChanged();
 
-    // 通知外部订阅者（如新手引导检测 Tamagotchi 模块已添加）
+    // 通知外部订阅者（如新手引导检测 VirtuPet 模块已添加）
     if (onModuleAdded)
         onModuleAdded (*raw);
 
@@ -1293,7 +1293,7 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
     };
 
     // ------------------------------------------------------------
-    // VST3 运行时限制：拓麻歌子模块仅在 Standalone 中可用，
+    // VST3 运行时限制：电子宠物模块仅在 Standalone 中可用，
     //   在 VST3/AU 插件形态下从菜单中排除。
     //   使用运行时检测而非编译期 #if，因为 JUCE NMake 共享代码
     //   同时定义 JucePlugin_Build_VST3=1 和
@@ -1303,9 +1303,9 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
 
     auto isTypeAllowedInCurrentHost = [isPluginHost](ModuleType t) -> bool
     {
-        if (t != ModuleType::tamagotchi)
+        if (t != ModuleType::virtuPet)
             return true;
-        // Tamagotchi 仅在 Standalone 中可用
+        // VirtuPet 仅在 Standalone 中可用
         return !isPluginHost;
     };
 
@@ -1383,10 +1383,10 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
         if (idx < 0 || idx >= availableTypes.size())
             return;
 
-        // 运行时安全防护：插件形态下不允许添加 Tamagotchi
+        // 运行时安全防护：插件形态下不允许添加 VirtuPet
         // （正常情况下菜单中不会显示该项，此处为纵深防御）
         if (!juce::JUCEApplicationBase::isStandaloneApp()
-            && availableTypes[idx] == ModuleType::tamagotchi)
+            && availableTypes[idx] == ModuleType::virtuPet)
             return;
 
         if (! hasPlacement)
@@ -1581,7 +1581,7 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
     if (layoutLocked)
         return;
 
-    clearTamagotchiFocusVisuals (modules);
+    clearVirtuPetFocusVisuals (modules);
     clearMilkdropFocus (modules);
 
     // 事件来源区分：workspace 原生 / layer 转发
@@ -1705,12 +1705,12 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
             }
             if (auto* focusedLayer = perlerLayers[draggingPerlerIdx])
                 focusedLayer->toFront (true);
-            // Tamagotchi 始终置顶：图片聚焦后 toFront(true) 会把 perlerLayer
-            //   冒到所有子组件之上（包括 Tamagotchi 模块）。这里再把所有
-            //   Tamagotchi 模块抬回最上层，保证宠物永远不被图片遮挡。
+            // VirtuPet 始终置顶：图片聚焦后 toFront(true) 会把 perlerLayer
+            //   冒到所有子组件之上（包括 VirtuPet 模块）。这里再把所有
+            //   VirtuPet 模块抬回最上层，保证宠物永远不被图片遮挡。
             for (auto* m : modules)
             {
-                if (m->getModuleType() == ModuleType::tamagotchi)
+                if (m->getModuleType() == ModuleType::virtuPet)
                     m->toFront (false);
             }
             // 设为聚焦 + 请求键盘焦点，以监听 Delete
@@ -2820,9 +2820,9 @@ static const juce::Identifier kPropCellsH   ("cellsH");
 static const juce::Identifier kPropCellSize ("cellSize");
 static const juce::Identifier kPropPerlerBeads ("perlerBeads");
 static const juce::Identifier kPropOpacity  ("perlerOpacity");
-static const juce::Identifier kPropTamaRoleName ("tamaRoleName");
-static const juce::Identifier kPropTamaHunger   ("tamaHunger");
-static const juce::Identifier kPropTamaHealth   ("tamaHealth");
+static const juce::Identifier kPropVirtuPetRoleName ("virtuPetRoleName");
+static const juce::Identifier kPropVirtuPetHunger   ("virtuPetHunger");
+static const juce::Identifier kPropVirtuPetHealth   ("virtuPetHealth");
 static const juce::Identifier kPropFloating     ("floating");  // 模块是否处于脱离态（Standalone 模式）
 static const juce::Identifier kPropScreenX  ("sx");  // 浮动窗口屏幕 X 坐标（持久化用）
 static const juce::Identifier kPropScreenY  ("sy");  // 浮动窗口屏幕 Y 坐标（持久化用）
@@ -2866,13 +2866,13 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
             node.setProperty(kPropW, b.getWidth(),  nullptr);
             node.setProperty(kPropH, b.getHeight(), nullptr);
 
-            if (m->getModuleType() == ModuleType::tamagotchi)
+            if (m->getModuleType() == ModuleType::virtuPet)
             {
-                if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
+                if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (m))
                 {
-                    node.setProperty (kPropTamaRoleName, tamagotchi->getRoleName(), nullptr);
-                    node.setProperty (kPropTamaHunger, (double) tamagotchi->getHunger(), nullptr);
-                    node.setProperty (kPropTamaHealth, (double) tamagotchi->getHealth(), nullptr);
+                    node.setProperty (kPropVirtuPetRoleName, virtuPet->getRoleName(), nullptr);
+                    node.setProperty (kPropVirtuPetHunger, (double) virtuPet->getHunger(), nullptr);
+                    node.setProperty (kPropVirtuPetHealth, (double) virtuPet->getHealth(), nullptr);
                 }
             }
 
@@ -3081,14 +3081,14 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree)
         hookPanel(*raw);
         raw->setBounds({ x, y, w, h });
 
-        if (type == ModuleType::tamagotchi)
+        if (type == ModuleType::virtuPet)
         {
-            if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (raw))
+            if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (raw))
             {
-                const auto savedRole = node.getProperty (kPropTamaRoleName).toString();
-                const float savedHunger = (float) (double) node.getProperty (kPropTamaHunger, 75.0);
-                const float savedHealth = (float) (double) node.getProperty (kPropTamaHealth, 75.0);
-                tamagotchi->restorePersistentState (savedRole, savedHunger, savedHealth);
+                const auto savedRole = node.getProperty (kPropVirtuPetRoleName).toString();
+                const float savedHunger = (float) (double) node.getProperty (kPropVirtuPetHunger, 75.0);
+                const float savedHealth = (float) (double) node.getProperty (kPropVirtuPetHealth, 75.0);
+                virtuPet->restorePersistentState (savedRole, savedHunger, savedHealth);
 
             }
         }

@@ -169,7 +169,7 @@
   - `source/ui/PinkXPStyle.cpp`
   - `source/ui/ModulePanel.cpp`
   - `PluginEditor.cpp`
-  - `source/ui/modules/TamagotchiModule.cpp`
+  - `source/ui/modules/VirtuPetModule.cpp`
 - 目的：统一界面行为和主题呈现细节，保证 macOS 端体验一致性。
 
 ## 回归验证建议
@@ -313,7 +313,7 @@ macOS 下会重建 GLView 并短暂黑屏。
 ### 修复 3：脱离模式下拖动误移动（macOS 回归 Windows 已有修复）
 
 **现象**：macOS 上所有模块脱离后，鼠标按住模块内部任意位置拖动会带着整个浮窗移动，
-覆盖了模块内自身的交互（MilkDrop 预设按钮、Tamagotchi 按钮等）。
+覆盖了模块内自身的交互（MilkDrop 预设按钮、VirtuPet 按钮等）。
 
 **根因**：`ModulePanel` 的 `mouseDrag` 在 macOS 分支下未沿用 Windows 的 hit-test 白名单
 （"只有标题栏 / 边缘区域拖动才发起窗口移动"），导致模块内部子组件的鼠标事件也被吞掉转成拖窗。
@@ -543,21 +543,21 @@ if (result == 0) {
 - `source/ui/modules/MilkdropModule.cpp`：`FindMilkdropAssetsDirForModule` 同步策略 + GL error 清空 + 首帧黑屏 + 预扫盘
 - `source/ui/modules/MilkdropModule.h`：`ScanPresetFiles` 提升为 public
 - `source/ui/modules/ProjectMApi.cpp`：dlopen 诊断日志
-- `source/ui/modules/TamagotchiModule.cpp`：新增 `findBundleResourcesBaseDir()` + 4 个资源查找函数追加 bundle 分支 + `randomAnimFrom/beginPatrolCycle` 空表兜底
+- `source/ui/modules/VirtuPetModule.cpp`：新增 `findBundleResourcesBaseDir()` + 4 个资源查找函数追加 bundle 分支 + `randomAnimFrom/beginPatrolCycle` 空表兜底
 - `source/ui/ModuleWorkspace.cpp`：非脱离态 Milkdrop 模块整体强制置顶
 - `source/standalone/MacDesktopAudioCapture.mm`：屏幕录制权限失败文案改为"移除 + 重新添加"分步引导
 - `source/standalone/Y2KStandaloneApp.cpp`：TCC reset 版本自检 + `showSystemFontAlertAsync` 系统字体弹窗
 
-### 修复 1：安装后启动崩溃（Tamagotchi 资源查找漏 bundle 分支）
+### 修复 1：安装后启动崩溃（VirtuPet 资源查找漏 bundle 分支）
 
-**现象**：DMG 安装后从启动台打开 Y2Kmeter，`TamagotchiModule::randomAnimFrom(std::initializer_list<int>) const + 375` 处 EXC_BAD_ACCESS 空指针崩溃。IDE 直跑正常。
+**现象**：DMG 安装后从启动台打开 Y2Kmeter，`VirtuPetModule::randomAnimFrom(std::initializer_list<int>) const + 375` 处 EXC_BAD_ACCESS 空指针崩溃。IDE 直跑正常。
 
-**根因**：`findTamagotchiAssetsRoot()` 等 4 个资源查找函数仅遍历 CWD 与可执行文件父目录链，而启动台启动时 CWD=`/`，可执行文件在 `.app/Contents/MacOS/` 向上遍历也到不了 `Contents/Resources/assets/`。资源找不到导致 `availableAnimIds` 为空，随后 `randomAnimFrom` 越界访问空数组。
+**根因**：`findVirtuPetAssetsRoot()` 等 4 个资源查找函数仅遍历 CWD 与可执行文件父目录链，而启动台启动时 CWD=`/`，可执行文件在 `.app/Contents/MacOS/` 向上遍历也到不了 `Contents/Resources/assets/`。资源找不到导致 `availableAnimIds` 为空，随后 `randomAnimFrom` 越界访问空数组。
 
-**修复**（`TamagotchiModule.cpp`）：
+**修复**（`VirtuPetModule.cpp`）：
 - 新增 `findBundleResourcesBaseDir()` 静态函数：从 `currentApplicationFile`（.app bundle 根）向下取 `Contents/Resources/`，兼容 IDE 直跑（`currentApplicationFile` 指向可执行文件）时向上两级的场景。
-- **★ 关键陷阱**：函数返回 `Contents/Resources/`（**不含 `assets/` 层级**），因为下游 `tryFromBase(base)` lambda 内部会再拼一次 `.getChildFile("assets")`；若这里就返回 `.../Resources/assets/`，就会变成 `.../Resources/assets/assets/Tamagotchi/...` 双层 assets 命中不了。
-- 4 个查找函数（`findTamagotchiAssetsRoot`、`findTamagotchiMirrorAssetsRoot`、`findTamagotchiRolePngDir`、`findTamagotchiEggAssetsDir`）在 `__APPLE__` 分支加入 `tryFromBase (findBundleResourcesBaseDir())` 兜底。
+- **★ 关键陷阱**：函数返回 `Contents/Resources/`（**不含 `assets/` 层级**），因为下游 `tryFromBase(base)` lambda 内部会再拼一次 `.getChildFile("assets")`；若这里就返回 `.../Resources/assets/`，就会变成 `.../Resources/assets/assets/VirtuPet/...` 双层 assets 命中不了。
+- 4 个查找函数（`findVirtuPetAssetsRoot`、`findVirtuPetMirrorAssetsRoot`、`findVirtuPetRolePngDir`、`findVirtuPetEggAssetsDir`）在 `__APPLE__` 分支加入 `tryFromBase (findBundleResourcesBaseDir())` 兜底。
 - `randomAnimFrom()` 追加空表兜底 `if (availableAnimIds.isEmpty()) return 1;`。
 - `beginPatrolCycle()` 入口空表提前返回。
 

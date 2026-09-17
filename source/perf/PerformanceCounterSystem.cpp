@@ -76,7 +76,7 @@ juce::String moduleTypeNameById(int id)
         case 15: return "vuMeter";
         case 16: return "spectrogram";
         case 17: return "spectrogram3d";
-        case 18: return "tamagotchi";
+        case 18: return "virtuPet";
         default: return juce::String("unknown(") + juce::String(id) + ")";
     }
 }

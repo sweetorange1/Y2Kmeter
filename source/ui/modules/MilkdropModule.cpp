@@ -29,7 +29,7 @@
 #include <vector>
 
 // ==========================================================
-// 布局锁定判断（ModulePanel / TamagotchiModule 各自都有一份,
+// 布局锁定判断（ModulePanel / VirtuPetModule 各自都有一份,
 //   供 mouseDown 中判断是否禁止拖拽/缩放/关闭等操作）
 // ==========================================================
 namespace
@@ -1878,17 +1878,22 @@ void MilkdropModule::GLView::DetachOpenGL() {
 }
 
 void MilkdropModule::GLView::ScanPresetFiles() {
-  local_preset_paths_.clear();
   // 根据全局收藏库状态选择预设目录（浮动态 / macOS 本地渲染路径）。
+  // 磁盘 IO（findChildFiles）在锁外完成，避免 GL 线程长时间持锁阻塞 UI 绘制。
   const bool use_like = (owner_.editor_ != nullptr)
                         && owner_.editor_->IsMilkdropUseLikeLibrary();
   auto presets_dir = use_like
                          ? FindMilkdropLikeDirForModule()
                          : FindMilkdropAssetsDirForModule("milkdrop_presets");
-  if (!presets_dir.exists())
+  if (!presets_dir.exists()) {
+    std::lock_guard<std::mutex> lock(preset_paths_mutex_);
+    local_preset_paths_.clear();
     return;
+  }
 
   auto files = presets_dir.findChildFiles(juce::File::findFiles, false, "*.milk");
+  std::lock_guard<std::mutex> lock(preset_paths_mutex_);
+  local_preset_paths_.clear();
   for (auto& file : files)
     local_preset_paths_.add(file.getFullPathName());
   local_preset_paths_.sort(false);
@@ -2144,8 +2149,8 @@ void MilkdropModule::GLView::ConsumePresetRequests() {
       switched = true;
     } else {
       // 排除当前预设：从 n-1 个候选中均匀随机，选中 >= 当前索引则 +1 跳过。
-      const int cur = (local_current_preset_ >= 0 && local_current_preset_ < n)
-                          ? local_current_preset_ : -1;
+      const int cur_val = local_current_preset_.load();
+      const int cur = (cur_val >= 0 && cur_val < n) ? cur_val : -1;
       if (cur < 0) {
         local_current_preset_ = juce::Random::getSystemRandom().nextInt(n);
       } else {
@@ -2157,9 +2162,9 @@ void MilkdropModule::GLView::ConsumePresetRequests() {
       switched = true;
     }
   } else if (delta != 0 && !local_preset_paths_.isEmpty()) {
-    local_current_preset_ = (local_current_preset_ + delta) % local_preset_paths_.size();
-    if (local_current_preset_ < 0)
-      local_current_preset_ += local_preset_paths_.size();
+    local_current_preset_ = (local_current_preset_.load() + delta) % local_preset_paths_.size();
+    if (local_current_preset_.load() < 0)
+      local_current_preset_.fetch_add(local_preset_paths_.size(), std::memory_order_relaxed);
     switched = true;
   }
 
@@ -2537,6 +2542,7 @@ int MilkdropModule::GLView::GetCurrentPresetIndex() const {
   const bool use_local = owner_.isFloating() || attached_;
 #endif
   if (use_local) {
+    std::lock_guard<std::mutex> lock(preset_paths_mutex_);
     const int total = local_preset_paths_.size();
     if (total <= 0)
       return local_current_preset_;
@@ -2572,10 +2578,13 @@ void MilkdropModule::GLView::SyncOwnerPresetIndexFromRenderer() const {
 int MilkdropModule::GLView::GetTotalPresetCount() const {
   // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
 #if JUCE_MAC
+  std::lock_guard<std::mutex> lock(preset_paths_mutex_);
   return local_preset_paths_.size();
 #else
-  if (owner_.isFloating())
+  if (owner_.isFloating()) {
+    std::lock_guard<std::mutex> lock(preset_paths_mutex_);
     return local_preset_paths_.size();
+  }
   if (owner_.editor_ != nullptr)
     return owner_.editor_->GetMilkdropTotalPresets();
   return 0;
@@ -2590,8 +2599,10 @@ juce::String MilkdropModule::GLView::GetCurrentPresetName() const {
   const bool use_local = owner_.isFloating();
 #endif
   if (use_local) {
-    if (local_current_preset_ >= 0 && local_current_preset_ < local_preset_paths_.size()) {
-      return local_preset_paths_[local_current_preset_]
+    std::lock_guard<std::mutex> lock(preset_paths_mutex_);
+    const int current = local_current_preset_.load();
+    if (current >= 0 && current < local_preset_paths_.size()) {
+      return local_preset_paths_[current]
           .fromLastOccurrenceOf("/", false, false)
           .fromLastOccurrenceOf("\\", false, false)
           .upToLastOccurrenceOf(".milk", false, false);
@@ -2611,8 +2622,10 @@ juce::String MilkdropModule::GLView::GetCurrentPresetFilePath() const {
   const bool use_local = owner_.isFloating();
 #endif
   if (use_local) {
-    if (local_current_preset_ >= 0 && local_current_preset_ < local_preset_paths_.size())
-      return local_preset_paths_[local_current_preset_];
+    std::lock_guard<std::mutex> lock(preset_paths_mutex_);
+    const int current = local_current_preset_.load();
+    if (current >= 0 && current < local_preset_paths_.size())
+      return local_preset_paths_[current];
     return {};
   }
   if (owner_.editor_ != nullptr)

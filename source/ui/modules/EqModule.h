@@ -26,7 +26,7 @@ public:
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
 
     // 右键模块区域 → 弹出"添加模块"选择器（子组件 eqGraph 会拦截鼠标，
-    //   需要在此显式处理右键，与 Milkdrop / Tamagotchi 的做法一致）
+    //   需要在此显式处理右键，与 Milkdrop / VirtuPet 的做法一致）
     void mouseDown(const juce::MouseEvent& e) override;
 
 protected:

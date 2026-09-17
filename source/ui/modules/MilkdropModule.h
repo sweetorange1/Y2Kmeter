@@ -304,7 +304,13 @@ private:
         bool local_render_ready_ = false;
         juce::String local_error_;
         juce::StringArray local_preset_paths_;
-        int local_current_preset_ = -1;
+        std::atomic<int> local_current_preset_{-1};
+        // 保护 local_preset_paths_ 的跨线程读写：
+        // GL 线程（ScanPresetFiles）写，UI 线程（Get* 显示）读。
+        // 脱离态下切换收藏库会触发 GL 线程重扫预设列表，同时 UI 线程正在绘制预设名，
+        // 不加锁会导致 UI 读到被 clear 到一半的 StringArray（脏读 / 越界 / 崩溃）。
+        // local_current_preset_ 已是 atomic，无需额外加锁。
+        mutable std::mutex preset_paths_mutex_;
         int local_render_scale_ = 1;
         std::atomic<int> requested_preset_delta_{0};
         std::atomic<int> requested_preset_jump_{-1};

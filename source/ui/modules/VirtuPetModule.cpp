@@ -1,4 +1,4 @@
-#include "source/ui/modules/TamagotchiModule.h"
+#include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/PinkXPStyle.h"
 
 #include <cmath>
@@ -6,7 +6,7 @@
 
 namespace
 {
-// v1.8.3：从任一 Tamagotchi 面板查取父 workspace 的布局锁定态（与 ModulePanel.cpp 内
+// v1.8.3：从任一 VirtuPet 面板查取父 workspace 的布局锁定态（与 ModulePanel.cpp 内
 //   同名 helper 作用相同，但位于不同翻译单元，互不影响）。
 bool isPanelLayoutLocked (const juce::Component& panel) noexcept
 {
@@ -24,10 +24,10 @@ bool isPanelLayoutLocked (const juce::Component& panel) noexcept
 //   必须额外搜索 bundle 内部 Contents/Resources/assets/ 路径。
 //
 // 注意：本函数返回的是 Contents/Resources/（即"assets/"的父目录），
-//   因为下方 findTamagotchi*Root() 里 tryFromBase 会在 base 上再拼一次
+//   因为下方 findVirtuPet*Root() 里 tryFromBase 会在 base 上再拼一次
 //   "assets"，若这里返回 ".../Resources/assets"，就会变成
-//   ".../Resources/assets/assets/Tamagotchi/..."，多一层 assets 导致找不到
-//   （这是 v2.5.x 出现"assets/Tamagotchi not found"的根因）。
+//   ".../Resources/assets/assets/VirtuPet/..."，多一层 assets 导致找不到
+//   （这是 v2.5.x 出现"assets/VirtuPet not found"的根因）。
 //   currentApplicationFile 在 .app 里指向 bundle 根目录，其内
 //   Contents/Resources/assets/ 才是真实资源目录。
 static juce::File findBundleResourcesBaseDir()
@@ -52,7 +52,7 @@ static juce::File findBundleResourcesBaseDir()
 }
 #endif
 
-juce::File findTamagotchiAssetsRoot()
+juce::File findVirtuPetAssetsRoot()
 
 {
     auto tryFromBase = [] (juce::File base) -> juce::File
@@ -60,7 +60,7 @@ juce::File findTamagotchiAssetsRoot()
         for (int i = 0; i < 10 && base.exists(); ++i)
         {
             auto roleCut = base.getChildFile ("assets")
-                               .getChildFile ("Tamagotchi")
+                               .getChildFile ("VirtuPet")
                                .getChildFile ("role_cut_by_xlsx_40x40");
             if (roleCut.isDirectory())
                 return roleCut;
@@ -85,7 +85,7 @@ juce::File findTamagotchiAssetsRoot()
     return {};
 }
 
-juce::File findTamagotchiMirrorAssetsRoot()
+juce::File findVirtuPetMirrorAssetsRoot()
 
 {
     auto tryFromBase = [] (juce::File base) -> juce::File
@@ -93,7 +93,7 @@ juce::File findTamagotchiMirrorAssetsRoot()
         for (int i = 0; i < 10 && base.exists(); ++i)
         {
             auto roleCut = base.getChildFile ("assets")
-                               .getChildFile ("Tamagotchi")
+                               .getChildFile ("VirtuPet")
                                .getChildFile ("role_cut_by_xlsx_40x40_fan");
             if (roleCut.isDirectory())
                 return roleCut;
@@ -118,14 +118,14 @@ juce::File findTamagotchiMirrorAssetsRoot()
     return {};
 }
 
-juce::File findTamagotchiRolePngDir()
+juce::File findVirtuPetRolePngDir()
 {
     auto tryFromBase = [] (juce::File base) -> juce::File
     {
         for (int i = 0; i < 10 && base.exists(); ++i)
         {
             auto roleDir = base.getChildFile ("assets")
-                               .getChildFile ("Tamagotchi")
+                               .getChildFile ("VirtuPet")
                                .getChildFile ("role");
             if (roleDir.isDirectory())
                 return roleDir;
@@ -150,14 +150,14 @@ juce::File findTamagotchiRolePngDir()
     return {};
 }
 
-juce::File findTamagotchiEggAssetsDir()
+juce::File findVirtuPetEggAssetsDir()
 {
     auto tryFromBase = [] (juce::File base) -> juce::File
     {
         for (int i = 0; i < 10 && base.exists(); ++i)
         {
             auto eggDir = base.getChildFile ("assets")
-                              .getChildFile ("Tamagotchi")
+                              .getChildFile ("VirtuPet")
                               .getChildFile ("egg_38x38");
             if (eggDir.isDirectory())
                 return eggDir;
@@ -187,7 +187,7 @@ bool loadRandomEggFrames (juce::Array<juce::Image>& outEggFrames, int& outStyleI
     outEggFrames.clearQuick();
     outStyleId = 1;
 
-    const auto eggDir = findTamagotchiEggAssetsDir();
+    const auto eggDir = findVirtuPetEggAssetsDir();
     if (! eggDir.isDirectory())
         return false;
 
@@ -327,8 +327,8 @@ juce::String randomIdleSpeech()
 
 } // namespace
 
-TamagotchiModule::TamagotchiModule()
-    : ModulePanel (ModuleType::tamagotchi)
+VirtuPetModule::VirtuPetModule()
+    : ModulePanel (ModuleType::virtuPet)
 {
     setDefaultSize (128, 128);
     setMinSize (minW, minH);
@@ -367,12 +367,12 @@ TamagotchiModule::TamagotchiModule()
     startTimerHz (currentVisualHz);
 }
 
-TamagotchiModule::~TamagotchiModule()
+VirtuPetModule::~VirtuPetModule()
 {
     stopTimer();
 }
 
-void TamagotchiModule::setFocusVisual (bool shouldFocus)
+void VirtuPetModule::setFocusVisual (bool shouldFocus)
 
 {
     if (focused == shouldFocus)
@@ -391,7 +391,7 @@ void TamagotchiModule::setFocusVisual (bool shouldFocus)
     repaintSelfAndParent();
 }
 
-void TamagotchiModule::paint (juce::Graphics& g)
+void VirtuPetModule::paint (juce::Graphics& g)
 
 {
     auto bounds = getLocalBounds();
@@ -414,11 +414,11 @@ void TamagotchiModule::paint (juce::Graphics& g)
     {
         g.setColour (PinkXP::ink.withAlpha (0.7f));
         g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-        g.drawText ("Tamagotchi", bounds.removeFromTop (18), juce::Justification::centred, false);
+        g.drawText ("VirtuPet", bounds.removeFromTop (18), juce::Justification::centred, false);
 
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.setFont (PinkXP::getFont (9.0f));
-        g.drawFittedText ("assets/Tamagotchi not found", bounds.reduced (4), juce::Justification::centred, 2);
+        g.drawFittedText ("assets/VirtuPet not found", bounds.reduced (4), juce::Justification::centred, 2);
     }
     else
     {
@@ -514,11 +514,11 @@ void TamagotchiModule::paint (juce::Graphics& g)
         }
     }
 
-    // 删除确认对话框已迁移到 TamagotchiConfirmOverlay（workspace 层级渲染，
+    // 删除确认对话框已迁移到 VirtuPetConfirmOverlay（workspace 层级渲染，
     // 不受模块边界裁剪），见 showConfirmOverlay()。
 }
 
-void TamagotchiModule::resized()
+void VirtuPetModule::resized()
 {
     const auto now = getLocalBounds();
 
@@ -615,7 +615,7 @@ void TamagotchiModule::resized()
     lastLocalBounds = now;
 }
 
-void TamagotchiModule::mouseMove (const juce::MouseEvent& e)
+void VirtuPetModule::mouseMove (const juce::MouseEvent& e)
 {
     if (! focused)
     {
@@ -646,7 +646,7 @@ void TamagotchiModule::mouseMove (const juce::MouseEvent& e)
 
 }
 
-void TamagotchiModule::mouseExit (const juce::MouseEvent& e)
+void VirtuPetModule::mouseExit (const juce::MouseEvent& e)
 {
     juce::ignoreUnused (e);
     deleteBtnHovered = false;
@@ -655,7 +655,7 @@ void TamagotchiModule::mouseExit (const juce::MouseEvent& e)
     repaintSelfAndParent (getDeleteButtonBounds());
 }
 
-void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
+void VirtuPetModule::mouseDown (const juce::MouseEvent& e)
 {
     // 右键 → 冒泡给 workspace 弹出"添加模块"菜单（任何位置均可）
     if (e.mods.isPopupMenu())
@@ -706,7 +706,7 @@ void TamagotchiModule::mouseDown (const juce::MouseEvent& e)
     repaintSelfAndParent();
 }
 
-void TamagotchiModule::mouseDrag (const juce::MouseEvent& e)
+void VirtuPetModule::mouseDrag (const juce::MouseEvent& e)
 {
     if (dragMode == DragMode::none)
         return;
@@ -799,7 +799,7 @@ void TamagotchiModule::mouseDrag (const juce::MouseEvent& e)
         onBoundsDragging (*this);
 }
 
-void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
+void VirtuPetModule::mouseUp (const juce::MouseEvent& e)
 {
     if (deleteBtnPressed)
     {
@@ -845,7 +845,7 @@ void TamagotchiModule::mouseUp (const juce::MouseEvent& e)
     }
 }
 
-void TamagotchiModule::timerCallback()
+void VirtuPetModule::timerCallback()
 {
     const int targetHz = getTargetVisualHzForMode (evaluateAutoMotionMode());
 
@@ -876,7 +876,7 @@ void TamagotchiModule::timerCallback()
     flushVisualRepaintQueue (false);
 }
 
-bool TamagotchiModule::loadRandomRoleAnimations()
+bool VirtuPetModule::loadRandomRoleAnimations()
 {
     for (auto& arr : animFrames)
         arr.clearQuick();
@@ -894,8 +894,8 @@ bool TamagotchiModule::loadRandomRoleAnimations()
 
     const bool hasEggFrames = loadRandomEggFrames (eggFrames, eggStyleId);
 
-    const auto root = findTamagotchiAssetsRoot();
-    const auto mirrorRoot = findTamagotchiMirrorAssetsRoot();
+    const auto root = findVirtuPetAssetsRoot();
+    const auto mirrorRoot = findVirtuPetMirrorAssetsRoot();
 
     if (root.isDirectory())
 
@@ -922,7 +922,7 @@ bool TamagotchiModule::loadRandomRoleAnimations()
     }
 
     // 兜底：如果切帧目录不可用，退化为 role 目录随机单图（至少有可见内容）
-    const auto rolePngDir = findTamagotchiRolePngDir();
+    const auto rolePngDir = findVirtuPetRolePngDir();
     if (! rolePngDir.isDirectory())
         return false;
 
@@ -956,7 +956,7 @@ bool TamagotchiModule::loadRandomRoleAnimations()
 
 }
 
-void TamagotchiModule::chooseNextAnimation()
+void VirtuPetModule::chooseNextAnimation()
 {
     if (availableAnimIds.isEmpty())
         return;
@@ -974,7 +974,7 @@ void TamagotchiModule::chooseNextAnimation()
         petPos.x = petGroundAnchorX - (float) newFrame.getWidth() * 0.5f;
 }
 
-void TamagotchiModule::stepOneFrame()
+void VirtuPetModule::stepOneFrame()
 {
     const auto oldMode = motionMode;
     const int oldAnimId = currentAnimId;
@@ -1057,7 +1057,7 @@ void TamagotchiModule::stepOneFrame()
         enqueuePetDirtyRepaint (oldPetBounds.getUnion (newPetBounds));
 }
 
-int TamagotchiModule::randomAnimFrom (std::initializer_list<int> ids) const
+int VirtuPetModule::randomAnimFrom (std::initializer_list<int> ids) const
 {
     juce::Array<int> candidates;
     for (int id : ids)
@@ -1077,13 +1077,13 @@ int TamagotchiModule::randomAnimFrom (std::initializer_list<int> ids) const
     return candidates.getReference (juce::Random::getSystemRandom().nextInt (candidates.size()));
 }
 
-bool TamagotchiModule::hasAnimation (int animId) const
+bool VirtuPetModule::hasAnimation (int animId) const
 {
     const int safeId = juce::jlimit (1, 33, animId);
     return availableAnimIds.contains (safeId) && ! animFrames[(size_t) (safeId - 1)].isEmpty();
 }
 
-void TamagotchiModule::forceAnimation (int animId, bool restartFrame)
+void VirtuPetModule::forceAnimation (int animId, bool restartFrame)
 {
     if (! hasAnimation (animId))
         return;
@@ -1101,7 +1101,7 @@ void TamagotchiModule::forceAnimation (int animId, bool restartFrame)
         petPos.x = petGroundAnchorX - (float) newFrame.getWidth() * 0.5f;
 }
 
-bool TamagotchiModule::shouldUseRightVariantForAnim (int animId) const
+bool VirtuPetModule::shouldUseRightVariantForAnim (int animId) const
 {
     const int safeId = juce::jlimit (1, 33, animId);
 
@@ -1127,25 +1127,25 @@ bool TamagotchiModule::shouldUseRightVariantForAnim (int animId) const
     return false;
 }
 
-const juce::Array<juce::Image>& TamagotchiModule::getFramesForAnim (int animId) const
+const juce::Array<juce::Image>& VirtuPetModule::getFramesForAnim (int animId) const
 {
     const int safeId = juce::jlimit (1, 33, animId);
     return animFrames[(size_t) (safeId - 1)];
 }
 
-const juce::Array<juce::Image>& TamagotchiModule::getRightFramesForAnim (int animId) const
+const juce::Array<juce::Image>& VirtuPetModule::getRightFramesForAnim (int animId) const
 {
     const int safeId = juce::jlimit (1, 33, animId);
     return animFramesRight[(size_t) (safeId - 1)];
 }
 
-bool TamagotchiModule::hasRightVariantFrames (int animId) const
+bool VirtuPetModule::hasRightVariantFrames (int animId) const
 {
     const auto& rightFrames = getRightFramesForAnim (animId);
     return ! rightFrames.isEmpty();
 }
 
-int TamagotchiModule::chooseNextAnimByState() const
+int VirtuPetModule::chooseNextAnimByState() const
 
 {
     switch (motionMode)
@@ -1251,7 +1251,7 @@ int TamagotchiModule::chooseNextAnimByState() const
     return randomAnimFrom ({ (int) PetAnim::lookAround });
 }
 
-void TamagotchiModule::onAnimationFinished()
+void VirtuPetModule::onAnimationFinished()
 {
     currentFrameIdx = 0;
 
@@ -1313,17 +1313,17 @@ void TamagotchiModule::onAnimationFinished()
     }
 }
 
-void TamagotchiModule::setSignalLevel01 (float level01) noexcept
+void VirtuPetModule::setSignalLevel01 (float level01) noexcept
 {
     signalLevel01 = juce::jlimit (0.0f, 1.0f, level01);
 }
 
-bool TamagotchiModule::isInEggPhase() const noexcept
+bool VirtuPetModule::isInEggPhase() const noexcept
 {
     return motionMode == MotionMode::egg || motionMode == MotionMode::hatching;
 }
 
-void TamagotchiModule::updateNeeds()
+void VirtuPetModule::updateNeeds()
 {
     // 使用当前 tick 时长，保证动态刷新率下需求变化仍按真实时间推进
     const float dt = currentTickDtSec;
@@ -1408,7 +1408,7 @@ void TamagotchiModule::updateNeeds()
         repaintSelfAndParent (getHudBounds());
 }
 
-void TamagotchiModule::drawPixelBar (juce::Graphics& g,
+void VirtuPetModule::drawPixelBar (juce::Graphics& g,
                                      juce::Rectangle<int> area,
                                      float value01,
                                      juce::Colour fill,
@@ -1446,13 +1446,13 @@ void TamagotchiModule::drawPixelBar (juce::Graphics& g,
     g.drawText (label, area.removeFromLeft (22), juce::Justification::centredLeft, false);
 }
 
-juce::Rectangle<int> TamagotchiModule::getHudBounds() const
+juce::Rectangle<int> VirtuPetModule::getHudBounds() const
 {
     auto b = getLocalBounds();
     return b.removeFromTop (juce::jmin (hudHeight, b.getHeight()));
 }
 
-TamagotchiModule::MotionMode TamagotchiModule::evaluateAutoMotionMode() const
+VirtuPetModule::MotionMode VirtuPetModule::evaluateAutoMotionMode() const
 {
     // egg/hatching 启动流程：蛋阶段等待音频，孵化阶段必须完整播放
     if (motionMode == MotionMode::egg)
@@ -1509,7 +1509,7 @@ TamagotchiModule::MotionMode TamagotchiModule::evaluateAutoMotionMode() const
     return MotionMode::patrol;
 }
 
-void TamagotchiModule::switchMotionMode (MotionMode newMode)
+void VirtuPetModule::switchMotionMode (MotionMode newMode)
 
 {
     if (motionMode == newMode)
@@ -1618,7 +1618,7 @@ void TamagotchiModule::switchMotionMode (MotionMode newMode)
     enqueuePetDirtyRepaint (oldPetBounds.getUnion (getCurrentPetVisualBounds()));
 }
 
-juce::Image TamagotchiModule::getCurrentFrame() const
+juce::Image VirtuPetModule::getCurrentFrame() const
 
 {
     if (motionMode == MotionMode::egg || motionMode == MotionMode::hatching)
@@ -1645,7 +1645,7 @@ juce::Image TamagotchiModule::getCurrentFrame() const
     return frames.getReference (frameIdx);
 }
 
-juce::Rectangle<int> TamagotchiModule::getPetVisualBoundsFor (const juce::Image& frame,
+juce::Rectangle<int> VirtuPetModule::getPetVisualBoundsFor (const juce::Image& frame,
                                                               juce::Point<float> pos,
                                                               bool bubbleVisible,
                                                               const juce::String& bubbleText,
@@ -1695,12 +1695,12 @@ juce::Rectangle<int> TamagotchiModule::getPetVisualBoundsFor (const juce::Image&
     return bounds.getIntersection (getLocalBounds());
 }
 
-juce::Rectangle<int> TamagotchiModule::getCurrentPetVisualBounds() const
+juce::Rectangle<int> VirtuPetModule::getCurrentPetVisualBounds() const
 {
     return getPetVisualBoundsFor (getCurrentFrame(), petPos, showSpeechBubble, currentSpeechText, motionMode);
 }
 
-int TamagotchiModule::getTargetVisualHzForMode (MotionMode mode) const noexcept
+int VirtuPetModule::getTargetVisualHzForMode (MotionMode mode) const noexcept
 {
     switch (mode)
     {
@@ -1730,7 +1730,7 @@ int TamagotchiModule::getTargetVisualHzForMode (MotionMode mode) const noexcept
     return 10;
 }
 
-void TamagotchiModule::enqueuePetDirtyRepaint (juce::Rectangle<int> area)
+void VirtuPetModule::enqueuePetDirtyRepaint (juce::Rectangle<int> area)
 {
     area = area.getIntersection (getLocalBounds());
     if (area.isEmpty())
@@ -1749,7 +1749,7 @@ void TamagotchiModule::enqueuePetDirtyRepaint (juce::Rectangle<int> area)
 // 必须让父组件先把底色画一遍再把本组件叠上去，否则旧像素残留形成拖影或
 // focus/delete 的残留。JUCE 对嵌套 non-opaque 链路的 repaint 不会自动追到根，
 // 所以在这里显式转换坐标并调父组件 repaint()。
-void TamagotchiModule::repaintSelfAndParent (juce::Rectangle<int> localRect)
+void VirtuPetModule::repaintSelfAndParent (juce::Rectangle<int> localRect)
 {
     localRect = localRect.getIntersection (getLocalBounds());
     if (localRect.isEmpty())
@@ -1764,12 +1764,12 @@ void TamagotchiModule::repaintSelfAndParent (juce::Rectangle<int> localRect)
     repaint (localRect);
 }
 
-void TamagotchiModule::repaintSelfAndParent()
+void VirtuPetModule::repaintSelfAndParent()
 {
     repaintSelfAndParent (getLocalBounds());
 }
 
-void TamagotchiModule::flushVisualRepaintQueue (bool forceNow)
+void VirtuPetModule::flushVisualRepaintQueue (bool forceNow)
 {
     if (! hasQueuedPetDirty)
         return;
@@ -1791,7 +1791,7 @@ void TamagotchiModule::flushVisualRepaintQueue (bool forceNow)
         repaintSelfAndParent (dirty);
 }
 
-void TamagotchiModule::beginPatrolCycle()
+void VirtuPetModule::beginPatrolCycle()
 
 {
     if (availableAnimIds.isEmpty())
@@ -1815,7 +1815,7 @@ void TamagotchiModule::beginPatrolCycle()
                         : randomAnimFrom ({ (int) PetAnim::lookLeft, (int) PetAnim::moveLeft }));
 }
 
-void TamagotchiModule::beginPatrolAction (PatrolAction action)
+void VirtuPetModule::beginPatrolAction (PatrolAction action)
 {
     currentPatrolAction = action;
     patrolCooldownTicksRemaining = 0;
@@ -1896,7 +1896,7 @@ void TamagotchiModule::beginPatrolAction (PatrolAction action)
     }
 }
 
-void TamagotchiModule::stepJumpFight()
+void VirtuPetModule::stepJumpFight()
 {
     if (! jumpFightActive)
         return;
@@ -1914,7 +1914,7 @@ void TamagotchiModule::stepJumpFight()
     }
 }
 
-void TamagotchiModule::stepPatrolAction()
+void VirtuPetModule::stepPatrolAction()
 {
     if (motionMode != MotionMode::patrol)
         return;
@@ -2017,22 +2017,22 @@ void TamagotchiModule::stepPatrolAction()
     beginPatrolAction (candidates.getReference (juce::Random::getSystemRandom().nextInt (candidates.size())));
 }
 
-juce::String TamagotchiModule::getRoleName() const noexcept
+juce::String VirtuPetModule::getRoleName() const noexcept
 {
     return roleName;
 }
 
-float TamagotchiModule::getHunger() const noexcept
+float VirtuPetModule::getHunger() const noexcept
 {
     return hunger;
 }
 
-float TamagotchiModule::getHealth() const noexcept
+float VirtuPetModule::getHealth() const noexcept
 {
     return health;
 }
 
-void TamagotchiModule::restorePersistentState (const juce::String& savedRoleName,
+void VirtuPetModule::restorePersistentState (const juce::String& savedRoleName,
                                                float savedHunger,
                                                float savedHealth)
 {
@@ -2046,8 +2046,8 @@ void TamagotchiModule::restorePersistentState (const juce::String& savedRoleName
         return;
     }
 
-    const auto root = findTamagotchiAssetsRoot();
-    const auto mirrorRoot = findTamagotchiMirrorAssetsRoot();
+    const auto root = findVirtuPetAssetsRoot();
+    const auto mirrorRoot = findVirtuPetMirrorAssetsRoot();
     if (root.isDirectory())
     {
         juce::Array<juce::File> roleDirs;
@@ -2080,7 +2080,7 @@ void TamagotchiModule::restorePersistentState (const juce::String& savedRoleName
     repaintSelfAndParent();
 }
 
-void TamagotchiModule::stepWander()
+void VirtuPetModule::stepWander()
 
 {
     const auto oldMode = motionMode;
@@ -2243,18 +2243,18 @@ void TamagotchiModule::stepWander()
         enqueuePetDirtyRepaint (oldPetBounds.getUnion (newPetBounds));
 }
 
-juce::Rectangle<int> TamagotchiModule::getFocusBounds() const
+juce::Rectangle<int> VirtuPetModule::getFocusBounds() const
 {
     return getLocalBounds().reduced (1);
 }
 
-juce::Rectangle<int> TamagotchiModule::getDeleteButtonBounds() const
+juce::Rectangle<int> VirtuPetModule::getDeleteButtonBounds() const
 {
     auto focus = getFocusBounds();
     return { focus.getRight() - deleteButtonSize - 2, focus.getY() + 2, deleteButtonSize, deleteButtonSize };
 }
 
-TamagotchiModule::Edge TamagotchiModule::detectEdge (juce::Point<int> pos) const
+VirtuPetModule::Edge VirtuPetModule::detectEdge (juce::Point<int> pos) const
 {
     const auto b = getLocalBounds();
     const bool nearRight  = pos.x >= b.getRight()  - edgeHotSize;
@@ -2266,7 +2266,7 @@ TamagotchiModule::Edge TamagotchiModule::detectEdge (juce::Point<int> pos) const
     return Edge::none;
 }
 
-void TamagotchiModule::updateCursorFor (Edge e)
+void VirtuPetModule::updateCursorFor (Edge e)
 {
     switch (e)
     {
@@ -2278,7 +2278,7 @@ void TamagotchiModule::updateCursorFor (Edge e)
 }
 
 // ==========================================================
-// TamagotchiConfirmOverlay —— 删除二次确认覆盖层
+// VirtuPetConfirmOverlay —— 删除二次确认覆盖层
 //   添加到 workspace 层级渲染，不受模块边界裁剪。
 // ==========================================================
 
@@ -2289,7 +2289,7 @@ static juce::Rectangle<int> calcDlgBounds (const juce::Rectangle<int>& modArea)
     return juce::Rectangle<int> (dlgW, dlgH).withCentre (modArea.getCentre());
 }
 
-TamagotchiConfirmOverlay::TamagotchiConfirmOverlay (
+VirtuPetConfirmOverlay::VirtuPetConfirmOverlay (
     const juce::Rectangle<int>& moduleBoundsInWorkspace,
     std::function<void()> onConfirm,
     std::function<void()> onDismiss)
@@ -2313,7 +2313,7 @@ TamagotchiConfirmOverlay::TamagotchiConfirmOverlay (
     setInterceptsMouseClicks (true, true);
 }
 
-void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
+void VirtuPetConfirmOverlay::paint (juce::Graphics& g)
 {
     // 半透明遮罩（仅覆盖模块区域，不遮住 workspace 其他内容）
     g.setColour (juce::Colours::black.withAlpha (0.55f));
@@ -2366,7 +2366,7 @@ void TamagotchiConfirmOverlay::paint (juce::Graphics& g)
     g.drawText ("OK", confirmBounds, juce::Justification::centred, false);
 }
 
-void TamagotchiConfirmOverlay::mouseDown (const juce::MouseEvent& e)
+void VirtuPetConfirmOverlay::mouseDown (const juce::MouseEvent& e)
 {
     const int hit = hitTestButton (e.getPosition());
     if (hit == 1)       // 确认 → 删除模块
@@ -2381,7 +2381,7 @@ void TamagotchiConfirmOverlay::mouseDown (const juce::MouseEvent& e)
     }
 }
 
-void TamagotchiConfirmOverlay::mouseMove (const juce::MouseEvent& e)
+void VirtuPetConfirmOverlay::mouseMove (const juce::MouseEvent& e)
 {
     const int hit = hitTestButton (e.getPosition());
     if (hit != hoveredBtn)
@@ -2391,13 +2391,13 @@ void TamagotchiConfirmOverlay::mouseMove (const juce::MouseEvent& e)
     }
 }
 
-void TamagotchiConfirmOverlay::dismiss()
+void VirtuPetConfirmOverlay::dismiss()
 {
     if (onDismissCb)
         onDismissCb();
 }
 
-juce::Rectangle<int> TamagotchiConfirmOverlay::getButtonBounds (int idx) const
+juce::Rectangle<int> VirtuPetConfirmOverlay::getButtonBounds (int idx) const
 {
     auto inner = dlgBounds.reduced (6);
     inner.removeFromTop (juce::jmin (18, inner.getHeight() - 24));
@@ -2415,7 +2415,7 @@ juce::Rectangle<int> TamagotchiConfirmOverlay::getButtonBounds (int idx) const
                                       btnRow.getY(), btnW, btnH);
 }
 
-int TamagotchiConfirmOverlay::hitTestButton (juce::Point<int> pos) const
+int VirtuPetConfirmOverlay::hitTestButton (juce::Point<int> pos) const
 {
     if (getButtonBounds (1).contains (pos)) return 1;
     if (getButtonBounds (0).contains (pos)) return 0;
@@ -2423,16 +2423,16 @@ int TamagotchiConfirmOverlay::hitTestButton (juce::Point<int> pos) const
 }
 
 // ==========================================================
-// TamagotchiModule 覆盖层管理
+// VirtuPetModule 覆盖层管理
 // ==========================================================
-void TamagotchiModule::showConfirmOverlay()
+void VirtuPetModule::showConfirmOverlay()
 {
     if (confirmOverlay != nullptr) return;
 
     auto* ws = getParentComponent();
     if (ws == nullptr) return;
 
-    confirmOverlay = std::make_unique<TamagotchiConfirmOverlay> (
+    confirmOverlay = std::make_unique<VirtuPetConfirmOverlay> (
         getBounds(),  // 模块在 workspace 坐标系中的矩形
 
         // 确认 → 删除模块
@@ -2454,7 +2454,7 @@ void TamagotchiModule::showConfirmOverlay()
     confirmOverlay->toFront (false);
 }
 
-void TamagotchiModule::dismissConfirmOverlay()
+void VirtuPetModule::dismissConfirmOverlay()
 {
     if (confirmOverlay != nullptr)
     {

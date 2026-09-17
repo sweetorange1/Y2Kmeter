@@ -47,7 +47,7 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::spectrogram:       return "Spectrogram";
         case ModuleType::spectrogram3d:    return "Spectrogram 3D";
         case ModuleType::stereoField:       return "Stereo Field";
-        case ModuleType::tamagotchi:        return "Tamagotchi";
+        case ModuleType::virtuPet:        return "VirtuPet";
         case ModuleType::milkdrop:         return "Milkdrop";
 
         default:                            return "Module";
@@ -73,7 +73,7 @@ ModulePanel::ModulePanel(ModuleType type)
     //   为我们这块区域再刷一层背景，减少一次全区 fillRect 开销。
     //   子组件（各模块内容）内部该怎么重绘不受影响。
     //
-    //   【例外】某些模块（如 TamagotchiModule）在构造时会显式 setOpaque(false)
+    //   【例外】某些模块（如 VirtuPetModule）在构造时会显式 setOpaque(false)
     //   覆盖这里的默认值，以获得"透背景叠加"的效果；那类模块必须用自己的
     //   repaintSelfAndParent 机制来避免拖影，属于 per-module 决策。
     setOpaque (true);
@@ -283,7 +283,7 @@ void ModulePanel::paint(juce::Graphics& g)
 void ModulePanel::paintOverChildren(juce::Graphics& g)
 {
     // 重绘合并标记在这里统一清理：
-    // 某些模块（如 Tamagotchi）会重写 paint()，导致 ModulePanel::paint() 不一定执行；
+    // 某些模块（如 VirtuPet）会重写 paint()，导致 ModulePanel::paint() 不一定执行；
     // 若仅在 paint() 里清理，pendingFullRepaint 可能长期为 true，后续 repaint 全被合并掉。
     pendingFullRepaint = false;
     pendingAreaRepaint = false;

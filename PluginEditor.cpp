@@ -19,7 +19,7 @@
 #include "source/ui/modules/SpectrogramModule.h"
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/modules/StereoFieldModule.h"
-#include "source/ui/modules/TamagotchiModule.h"
+#include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
@@ -226,7 +226,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.7.3");
+const int versionW = versionFont.getStringWidth ("v2.7.4");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -267,7 +267,7 @@ const int versionW = versionFont.getStringWidth ("v2.7.3");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.3";
+const juce::String versionText = "v2.7.4";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -351,7 +351,7 @@ private:
 // 职责：
 //   · 半透明遮罩 + "聚光灯"镂空区域（高亮引导目标）
 //   · Y2K 风格气泡对话框提示（右上角带 × 关闭按钮）
-//   · STEP 1：右键画布添加 Tamagotchi
+//   · STEP 1：右键画布添加 VirtuPet
 //   · STEP 2：播放音频孵化宠物蛋
 //   · 点击 × 按钮 → 弹出二次确认对话框（"跳过引导不可撤销"）
 //
@@ -359,7 +359,7 @@ private:
 //   · 覆盖整个 Editor，z-order 最高（在 workspace 之上）
 //   · setInterceptsMouseClicks (true, true)：拦截点击
 //   · 仅右键点击聚光灯区域触发回调；左键/其他区域忽略
-//   · 视觉风格参考 TamagotchiConfirmOverlay（PinkXP 凸起边框对话框）
+//   · 视觉风格参考 VirtuPetConfirmOverlay（PinkXP 凸起边框对话框）
 // ==========================================================
 class Y2KmeterAudioProcessorEditor::TutorialOverlay : public juce::Component
 {
@@ -625,7 +625,7 @@ private:
     {
         const auto fullArea = getLocalBounds();
 
-        // 半透明黑色遮罩 —— 镂空聚光灯区域（Tamagotchi 模块保持可见）
+        // 半透明黑色遮罩 —— 镂空聚光灯区域（VirtuPet 模块保持可见）
         {
             juce::Graphics::ScopedSaveState save (g);
             g.excludeClipRegion (highlightArea);
@@ -650,7 +650,7 @@ private:
 
     // 气泡位置：
     //   STEP 1：优先聚光灯上方 → 下方 → 居中（canvas 占满整个区域）
-    //   STEP 2：放在 Tamagotchi 模块的左侧或右侧（取决于模块在 Editor 中的位置），
+    //   STEP 2：放在 VirtuPet 模块的左侧或右侧（取决于模块在 Editor 中的位置），
     //           绝不覆盖模块本身
     juce::Rectangle<int> getBubbleBounds() const
     {
@@ -739,8 +739,8 @@ private:
         g.setFont (PinkXP::getFont (9.0f));
         const juce::String text = (currentStep == Step::step1)
             ? (menuIsOpen
-                ? "Click 'Tamagotchi' in\nthe menu to add ur pet! <3"
-                : "Right-click the canvas to\nadd ur Tamagotchi pet! <3")
+                ? "Click 'VirtuPet' in\nthe menu to add ur pet! <3"
+                : "Right-click the canvas to\nadd ur VirtuPet pet! <3")
             : "Play some audio to\nhatch the egg! :3";
         g.drawFittedText (text, body, juce::Justification::centred, 2);
 
@@ -877,7 +877,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::stereoField,
 
         // 独立小宠物模块（右键/双击空白区添加）
-        ModuleType::tamagotchi,
+        ModuleType::virtuPet,
 
         // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
         ModuleType::milkdrop
@@ -1930,11 +1930,11 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
 
-    // 兜底：若曾为 Tamagotchi 临时保活 Loudness，析构前配平 release。
-    if (tamagotchiSignalRetained)
+    // 兜底：若曾为 VirtuPet 临时保活 Loudness，析构前配平 release。
+    if (virtuPetSignalRetained)
     {
         processor.getAnalyserHub().release (AnalyserHub::Kind::Loudness);
-        tamagotchiSignalRetained = false;
+        virtuPetSignalRetained = false;
     }
 
     // 取消订阅帧分发（在 stopFrameDispatcher 之前取消，更严谨）
@@ -2043,8 +2043,8 @@ void Y2KmeterAudioProcessorEditor::loadInitialModules()
 
 // ----------------------------------------------------------
 // v1.9.x：新手引导流程控制（仅 Standalone 模式）
-//   · startTutorial()       —— 启动 STEP 1：右键添加 Tamagotchi
-//   · advanceTutorialStep2()—— 用户添加了 Tamagotchi → 推进到 STEP 2
+//   · startTutorial()       —— 启动 STEP 1：右键添加 VirtuPet
+//   · advanceTutorialStep2()—— 用户添加了 VirtuPet → 推进到 STEP 2
 //   · completeTutorial()    —— 宠物孵化完成 → 标记完成并持久化
 //   · skipTutorial()        —— 用户切换预设时跳过引导
 //   · dismissTutorialOverlay—— 隐藏覆盖层，清空 step 状态
@@ -2072,13 +2072,13 @@ void Y2KmeterAudioProcessorEditor::startTutorial()
                 const auto wsPos = workspace->getPosition();
                 const auto canvasPos = clickPos - wsPos;
 
-                // 不销毁 overlay！切换文案引导用户点击菜单中的 Tamagotchi
+                // 不销毁 overlay！切换文案引导用户点击菜单中的 VirtuPet
                 tutorialOverlay->showStep1MenuOpened();
                 tutorialStep = TutorialStep::step1_menuOpened;
 
-                // 弹出受限菜单：仅 Tamagotchi 可选，关闭时恢复 STEP1 文案
+                // 弹出受限菜单：仅 VirtuPet 可选，关闭时恢复 STEP1 文案
                 workspace->showAddMenu (screenPos, canvasPos,
-                    { ModuleType::tamagotchi },
+                    { ModuleType::virtuPet },
                     [this]()
                     {
                         // 用户关闭了菜单但没有选择 → 恢复文案，回到 STEP1
@@ -2120,7 +2120,7 @@ void Y2KmeterAudioProcessorEditor::advanceTutorialStep2()
     // overlay 一直存活（STEP1 右键后未销毁），直接切换到 STEP2
     jassert (tutorialOverlay != nullptr);
 
-    // 查找刚添加的 Tamagotchi 模块所在位置
+    // 查找刚添加的 VirtuPet 模块所在位置
     juce::Rectangle<int> petAreaInEditor;
     if (workspace != nullptr)
     {
@@ -2129,7 +2129,7 @@ void Y2KmeterAudioProcessorEditor::advanceTutorialStep2()
         {
             if (auto* m = workspace->getModule (i))
             {
-                if (m->getModuleType() == ModuleType::tamagotchi)
+                if (m->getModuleType() == ModuleType::virtuPet)
                 {
                     const auto modBounds = m->getBounds();
                     petAreaInEditor = modBounds.translated (wsPos.x, wsPos.y);
@@ -2155,7 +2155,7 @@ void Y2KmeterAudioProcessorEditor::completeTutorial()
     // 持久化完成状态
     processor.setTutorialCompleted (true);
 
-    // 清理 Tamagotchi 信号保留（由正常的 tick 逻辑接管）
+    // 清理 VirtuPet 信号保留（由正常的 tick 逻辑接管）
 }
 
 void Y2KmeterAudioProcessorEditor::skipTutorial()
@@ -2184,16 +2184,16 @@ void Y2KmeterAudioProcessorEditor::checkTutorialStep2Condition()
 {
     if (workspace == nullptr || isPluginHost) return;
 
-    // ------ STEP 1: 等待用户从右键菜单中选中 Tamagotchi -------
+    // ------ STEP 1: 等待用户从右键菜单中选中 VirtuPet -------
     if (tutorialStep == TutorialStep::step1_menuOpened)
     {
         for (int i = 0; i < workspace->getNumModules(); ++i)
         {
             if (auto* m = workspace->getModule (i))
             {
-                if (m->getModuleType() == ModuleType::tamagotchi)
+                if (m->getModuleType() == ModuleType::virtuPet)
                 {
-                    // 用户已添加 Tamagotchi → 推进到 STEP 2
+                    // 用户已添加 VirtuPet → 推进到 STEP 2
                     advanceTutorialStep2();
                     return;
                 }
@@ -2205,17 +2205,17 @@ void Y2KmeterAudioProcessorEditor::checkTutorialStep2Condition()
     // ------ STEP 2: 等待蛋孵化 -------
     if (tutorialStep != TutorialStep::step2_playAudio) return;
 
-    // 遍历寻找 Tamagotchi 模块：检查是否已从蛋阶段孵化
+    // 遍历寻找 VirtuPet 模块：检查是否已从蛋阶段孵化
     for (int i = 0; i < workspace->getNumModules(); ++i)
     {
         if (auto* m = workspace->getModule (i))
         {
-            if (m->getModuleType() == ModuleType::tamagotchi)
+            if (m->getModuleType() == ModuleType::virtuPet)
             {
-                if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (m))
+                if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (m))
                 {
                     // 宠物已不再处于蛋/孵化阶段 → 孵化完成
-                    if (! tamagotchi->isInEggPhase())
+                    if (! virtuPet->isInEggPhase())
                     {
                         completeTutorial();
                         return;
@@ -2225,23 +2225,23 @@ void Y2KmeterAudioProcessorEditor::checkTutorialStep2Condition()
         }
     }
 
-    // 如果没有找到 Tamagotchi（被用户删除了），则重试 STEP 1
-    bool hasTamagotchi = false;
+    // 如果没有找到 VirtuPet（被用户删除了），则重试 STEP 1
+    bool hasVirtuPet = false;
     for (int i = 0; i < workspace->getNumModules(); ++i)
     {
         if (auto* m = workspace->getModule (i))
         {
-            if (m->getModuleType() == ModuleType::tamagotchi)
+            if (m->getModuleType() == ModuleType::virtuPet)
             {
-                hasTamagotchi = true;
+                hasVirtuPet = true;
                 break;
             }
         }
     }
 
-    if (! hasTamagotchi)
+    if (! hasVirtuPet)
     {
-        // 用户删除了 Tamagotchi，重新回到 STEP 1
+        // 用户删除了 VirtuPet，重新回到 STEP 1
         dismissTutorialOverlay();
         startTutorial();
     }
@@ -2326,15 +2326,15 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 {
     if (workspace == nullptr) return;
 
-    // 保存所有 Tamagotchi 模块的状态（切换预设时保留，不被清除）
-    struct TamagotchiState { juce::String roleName; float hunger; float health; };
-    juce::Array<TamagotchiState> tamagotchiStates;
+    // 保存所有 VirtuPet 模块的状态（切换预设时保留，不被清除）
+    struct VirtuPetState { juce::String roleName; float hunger; float health; };
+    juce::Array<VirtuPetState> virtuPetStates;
     for (int i = 0; i < workspace->getNumModules(); ++i)
     {
         auto* m = workspace->getModule (i);
-        if (m->getModuleType() == ModuleType::tamagotchi)
-            if (auto* t = dynamic_cast<TamagotchiModule*> (m))
-                tamagotchiStates.add ({ t->getRoleName(), t->getHunger(), t->getHealth() });
+        if (m->getModuleType() == ModuleType::virtuPet)
+            if (auto* t = dynamic_cast<VirtuPetModule*> (m))
+                virtuPetStates.add ({ t->getRoleName(), t->getHunger(), t->getHealth() });
     }
 
     // 先清空现有模块 / 拼豆贴画（clearAllModules 不触发 onLayoutChanged）
@@ -2859,21 +2859,21 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 #endif
     }
 
-    // 重新添加 Tamagotchi 模块到 canvas 右下角（切换预设时保留宠物不被清除）
-    for (const auto& state : tamagotchiStates)
+    // 重新添加 VirtuPet 模块到 canvas 右下角（切换预设时保留宠物不被清除）
+    for (const auto& state : virtuPetStates)
     {
-        auto tamagotchi = std::make_unique<TamagotchiModule>();
+        auto virtuPet = std::make_unique<VirtuPetModule>();
         if (state.roleName.isNotEmpty())
-            tamagotchi->restorePersistentState (state.roleName, state.hunger, state.health);
+            virtuPet->restorePersistentState (state.roleName, state.hunger, state.health);
 
         const auto canvas = workspace->getCanvasArea();
         constexpr int padding = 8;
-        const int petW = tamagotchi->getDefaultWidth();
-        const int petH = tamagotchi->getDefaultHeight();
-        tamagotchi->setBounds (canvas.getRight()  - petW - padding,
+        const int petW = virtuPet->getDefaultWidth();
+        const int petH = virtuPet->getDefaultHeight();
+        virtuPet->setBounds (canvas.getRight()  - petW - padding,
                                canvas.getBottom() - petH - padding,
                                petW, petH);
-        workspace->addModule (std::move (tamagotchi), false);
+        workspace->addModule (std::move (virtuPet), false);
     }
 
     // 手动回写布局到 Processor（clearAllModules + 批量 addModule 会触发多次
@@ -3087,8 +3087,8 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
         case ModuleType::stereoField:
             return std::make_unique<StereoFieldModule>(processor.getAnalyserHub());
 
-        case ModuleType::tamagotchi:
-            return std::make_unique<TamagotchiModule>();
+        case ModuleType::virtuPet:
+            return std::make_unique<VirtuPetModule>();
 
         case ModuleType::milkdrop:
             return std::make_unique<MilkdropModule>(&processor.getAnalyserHub(), this);
@@ -3357,7 +3357,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.3";
+const juce::String versionText = "v2.7.4";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3365,7 +3365,7 @@ const juce::String versionText = "v2.7.3";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.7.3");
+        const int versionW = versionFont.getStringWidth ("v2.7.4");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -3665,7 +3665,7 @@ void Y2KmeterAudioProcessorEditor::visibilityChanged()
 
     // v1.9.0：注册 workspace 嵌套子组件鼠标监听器（修复 auto-hide 下模块上鼠标事件无法
     //   触发 auto-show/hide 的问题）。addMouseListener 第二个参数 true 表示接收 workspace
-    //   所有嵌套子组件（ModulePanel/TamagotchiModule 等）的鼠标事件。
+    //   所有嵌套子组件（ModulePanel/VirtuPetModule 等）的鼠标事件。
     if (autoHideChildWatcher == nullptr && workspace != nullptr)
     {
         autoHideChildWatcher = std::make_unique<AutoHideChildWatcher>();
@@ -3838,7 +3838,7 @@ void Y2KmeterAudioProcessorEditor::handleMinimiseClicked()
 //   · 生效范围：
 //       1) 顶层窗口不可拖动（Editor::mouseDown 在锁定态跳过 startDraggingComponent）
 //       2) 顶层窗口不可 resize（setResizeLimits(w,h,w,h) 夹紧当前尺寸；不 recreatePeer）
-//       3) 模块 tile 不可拖动/缩放/关闭（ModulePanel/Tamagotchi mouseDown 锁定态早退）
+//       3) 模块 tile 不可拖动/缩放/关闭（ModulePanel/VirtuPet mouseDown 锁定态早退）
 //       4) 拼豆贴画不可拖动/缩放/滑块拖动/添加（ModuleWorkspace::mouseDown 锁定态早退）
 //       5) 空白区右键"添加模块"菜单/双击"添加"/文件拖入 均被阻断
 //   · 关闭 / 固定 / 最小化 / 双击标题栏切换全屏 均**不**受锁定影响
@@ -4661,28 +4661,28 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
         }
     }
 
-    // 仅当存在 Tamagotchi 模块时，才保活/计算对应的音频信号。
+    // 仅当存在 VirtuPet 模块时，才保活/计算对应的音频信号。
     const int n = workspace->getNumModules();
-    juce::Array<TamagotchiModule*> tamagotchiModules;
-    tamagotchiModules.ensureStorageAllocated (n);
+    juce::Array<VirtuPetModule*> virtuPetModules;
+    virtuPetModules.ensureStorageAllocated (n);
 
     for (int i = 0; i < n; ++i)
-        if (auto* tamagotchi = dynamic_cast<TamagotchiModule*> (workspace->getModule (i)))
-            tamagotchiModules.add (tamagotchi);
+        if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (workspace->getModule (i)))
+            virtuPetModules.add (virtuPet);
 
-    const bool hasTamagotchi = ! tamagotchiModules.isEmpty();
-    if (hasTamagotchi != tamagotchiSignalRetained)
+    const bool hasVirtuPet = ! virtuPetModules.isEmpty();
+    if (hasVirtuPet != virtuPetSignalRetained)
     {
-        if (hasTamagotchi)
+        if (hasVirtuPet)
             processor.getAnalyserHub().retain (AnalyserHub::Kind::Loudness);
         else
             processor.getAnalyserHub().release (AnalyserHub::Kind::Loudness);
 
-        tamagotchiSignalRetained = hasTamagotchi;
+        virtuPetSignalRetained = hasVirtuPet;
     }
 
     float signal01 = 0.0f;
-    if (hasTamagotchi)
+    if (hasVirtuPet)
     {
         if (auto frame = processor.getAnalyserHub().getLatestFrame())
         {
@@ -4720,8 +4720,8 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
         if (auto* m = workspace->getModule (i))
             m->setCpuLoad (cpu01);
 
-    for (auto* tamagotchi : tamagotchiModules)
-        tamagotchi->setSignalLevel01 (signal01);
+    for (auto* virtuPet : virtuPetModules)
+        virtuPet->setSignalLevel01 (signal01);
 
     // FPS 统计：每秒更新一次显示（使用高精度时戳防止 wall-clock 跨日问题）
     const double nowMs   = juce::Time::getMillisecondCounterHiRes();

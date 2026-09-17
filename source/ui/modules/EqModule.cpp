@@ -523,7 +523,7 @@ void EqModule::mouseDown(const juce::MouseEvent& e)
 {
     // 右键模块区域 → 弹出"添加模块"选择器。
     //   由于 eqGraph 等子组件会拦截鼠标，需在此显式处理右键（与 Milkdrop、
-    //   Tamagotchi 的做法一致）；左键仍交还基类处理标题栏/边缘拖拽。
+    //   VirtuPet 的做法一致）；左键仍交还基类处理标题栏/边缘拖拽。
     if (e.mods.isPopupMenu())
     {
         if (!isFloating() && onRightClick)

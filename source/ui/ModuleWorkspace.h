@@ -46,8 +46,8 @@ enum class ModuleType
     // 声相指示（半圆雷达，复用 Oscilloscope 立体声样本，幅度驱动声像位置）
     stereoField,
 
-    // Tamagotchi 小宠物模块（独立模块，不走拖图逻辑）
-    tamagotchi,
+    // VirtuPet 小宠物模块（独立模块，不走拖图逻辑）
+    virtuPet,
 
     // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
     milkdrop
@@ -588,7 +588,7 @@ public:
 
     // 模块添加回调：每当 addModule() 成功添加一个模块时触发
     //   · 参数为已添加模块的引用（面板已挂载、已 makeVisible）
-    //   · 供 Editor 层订阅（如新手引导检测 Tamagotchi 模块已添加）
+    //   · 供 Editor 层订阅（如新手引导检测 VirtuPet 模块已添加）
     std::function<void(ModulePanel&)> onModuleAdded;
 
     // 弹出"添加模块"右键菜单（供外部如 TutorialOverlay 触发）
@@ -891,7 +891,7 @@ private:
         ModuleType::waveform,
         ModuleType::spectrum, ModuleType::eq, ModuleType::spectrogram, ModuleType::spectrogram3d,
         ModuleType::stereoField,
-        ModuleType::tamagotchi,
+        ModuleType::virtuPet,
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 
         ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest,

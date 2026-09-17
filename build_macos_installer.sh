@@ -266,7 +266,7 @@ Y2Kmeter ${VERSION} · macOS 安装说明
     该过程约耗时 3-5 秒（复制约 200 MB）。之后 Standalone / VST3 / AU
     三端都从此共享目录读取预设，用户手动增删预设立即对三端生效。
   · Milkdrop 纹理（milkdrop_textures，约 3 MB）三端 bundle 各自内置。
-  · Tamagotchi 动画资源三端 bundle 各自内置。
+  · VirtuPet 动画资源三端 bundle 各自内置。
   · 因此若只安装 VST3 / AU 而不安装 Standalone，Milkdrop 预设无法自动
     seed，请先安装并运行一次 ${APP_BUNDLE_NAME}，或手动把预设目录放到
         ~/Library/Application Support/Y2Kmeter/milkdrop_presets/
