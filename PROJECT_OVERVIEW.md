@@ -18,19 +18,53 @@
 - **开源协议**：GPL-3.0（详见 [LICENSE](/I:/Y2KMeter/LICENSE)）。
 
 ### 1.2 主要功能一览
-- 立体声电平表（RMS L/R + True Peak L/R）
-- ITU-R BS.1770-4 响度计（LUFS-M / LUFS-S / LUFS-I）
-- 立体声相位相关仪（Correlation / Width / Balance / Goniometer）
-- 动态范围检测（Peak / RMS / Crest / Short-DR / Integrated-DR）
-- 高精度频谱分析仪（对数轴 20Hz~20kHz、双路 FFT：2048 主路 + 8192 低频路）
-- 频谱瀑布图（Spectrogram，像素方格风格）
-- 立体声示波器（Waveform / X-Y / Lissajous）
-- 持续滚动瀑布波形（Waveform Module）
-- 模拟指针 VU 表（VuMeterModule）
-- Y2K 主题的 EQ 频谱可视化（**注意：仅可视化，不做实际 EQ 处理**）
-- **VirtuPet 电子宠物模块**（用音频信号驱动的一只像素小怪，含孵化 / 觅食 / 睡眠 / 生病 / 死亡等状态机）
-- 用户可以拖入图片生成"拼豆像素画"贴到桌面背景
-- **Milkdrop 可视化模块**（v2.5.2，基于 libprojectM 4 + offscreen FBO + 跨 FBO glBlitFramebuffer 零拷贝 GPU 管线，支持 1:1/1:2/1:4 内部降采样 + GL_LINEAR 上采样，本地 1114 个预设；新增 Standalone 脱离/浮动窗口支持；v2.7.1 新增预设收藏库 like + 切换 + 随机去重）
+
+**① 音频分析与计量**（21 个可组合模块，由 `AnalyserHub` 的 5 路分析统一驱动、按引用计数按需启用）
+
+- **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
+- **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
+- **动态范围**：Peak / RMS / Crest / Short-term DR / Integrated DR
+- **相位分析**：相关度 Correlation / 宽度 Width / 平衡 Balance / Goniometer 相位图
+- **频谱分析**：对数轴 20Hz~20kHz、双路 FFT（2048 主路 + 8192 低频路）
+- **示波器**：Waveform / X-Y / Lissajous 李萨如图
+- **持续滚动瀑布波形**（Waveform）
+- **频谱瀑布图**（Spectrogram 像素方格风格 / Spectrogram 3D 三维曲面）
+- **模拟指针 VU 表**（半圆扇形表盘 + 单指针 + LED 信号灯，非对称弹道）
+- **声像雷达**（Stereo Field，半圆雷达，幅度驱动声像位置）
+- **EQ 频谱可视化**（Y2K 主题，**仅可视化，不做实际 EQ 处理**）
+
+> 细粒度拆分模块（实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest）复用同一路分析结果，后端零新增计算。
+
+**② Milkdrop 可视化**（libprojectM 4 原生 OpenGL）
+
+- 预设浏览（←→ 切换 / 空格随机 + 随机去重），本地 9000+ 个预设
+- **预设收藏库（Like）**：收藏 / 取消收藏 / 内置库 ↔ 收藏库切换，状态持久化
+- **后处理效果面板**：38 个开关型效果（invert / 万花镜 / 漩涡 / 鱼眼 / 像素化 / 故障 / 色调分离 / 复古 / 灰度 / 边缘 / 暗角 / 隧道 / 水波 / 融化 / 噪声 / 镜像 / 破碎 / 螺旋 / 扭转 / 色散 / 霓虹 / 热成像 / 酸性 / VHS / CRT / 双色调 / 泛光 / 二值化 / 棱镜等）
+- **color 面板**（整体染色）、**tweak 面板**（uv 几何畸变 + 万花镜对称）、**wave 面板**（简单波形样式编辑）
+- 脱离 / 浮动窗口渲染、内部降采样、wave 参数持久化
+- macOS 专属性能治理：num_inst / GetPixel / wavecode_samples 自动归一化（防高开销预设拖垮帧率）
+
+**③ VirtuPet 电子宠物**
+
+- 音频信号驱动的像素电子宠物，完整状态机（孵化蛋 / 觅食 / 睡眠 / 生病 / 死亡），随机蛋样式、巡逻 / 说话 / 跳跃行为
+
+**④ 主题与视觉系统**（Y2K / Pink XP 像素复古风）
+
+- **12 个预设主题**：糖果粉 / 星空深蓝 / 赛博紫 / 橘色波普 / 水蓝珠光 / 苏打绿 / 丛林绿 / Windows XP 经典 / 红黑暗夜 / 纯黑灰（OLED 友好）/ 纯白灰 / 黑粉（默认主题）
+- **自定义主题**：双色取色器实时生成个性化配色
+- **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
+- 拖入图片生成「拼豆像素画」贴到桌面背景
+
+**⑤ 布局预设**（8 个，编号 4 / 8 已废弃）
+
+- 默认网格 / 横向铺满（顶部 / 底部）/ MV（全屏 + 模块条 + Milkdrop）/ Studio Monitor 双行监听 / Focus + Sidecar 主视觉 + 仪表列 / Broadcast Loudness 广播响度合规 / Only Milkdrop 全屏单模块
+
+**⑥ 桌面集成（Standalone 专属）**
+
+- 音频源选择：麦克风 / 桌面系统音频采集（macOS 走 ScreenCaptureKit、Windows 走 WASAPI Loopback）
+- 无边框窗口 + 自定义标题栏（关闭 / 置顶 / 最小化 / 布局锁定 / 双击标题栏全屏）
+- 模块脱离 / 停靠（浮动窗口）、预设导出 / 导入（Save / Load）
+- 自动更新检查、可选匿名遥测、新手引导（右键添加 VirtuPet → 播放音频孵化）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
