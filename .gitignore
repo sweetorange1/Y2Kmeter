@@ -21,6 +21,8 @@ build
 
 # Test directories
 /pngtest/
+# 性能测试报告（本地生成，无需入库）
+/性能测试/
 
 # Large binary files
 /grid_plugin.zip
