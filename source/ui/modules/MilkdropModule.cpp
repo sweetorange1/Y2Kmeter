@@ -304,6 +304,72 @@ namespace
           }
         }
 
+        // ---- F. 修复「前两个分量相同」的 swizzle（.xx / .xxy / .xxx / .yy 等）----
+        // 对比实测：.xxy 会触发 hlslparser "(N) : Syntax error: expected ';'
+        // near '.'" 导致 shader 编译失败；而 .xyy / .zww（重复在后两个分量）正常。
+        // 因此只需处理「前两个分量相同」的 swizzle，改写为等价的显式构造函数
+        // （语义不变，跨平台生效）。例如 ret.xxy → float3(ret.x, ret.x, ret.y)。
+        {
+          const std::string kSwizChars = "xyzwrgba";
+          size_t pos = 0;
+          while (pos < line.size())
+          {
+            const size_t dot = line.find('.', pos);
+            if (dot == std::string::npos)
+              break;
+
+            // 跳过小数点（后面紧跟数字）以及非 swizzle 的 '.' 用法
+            if (dot + 2 >= line.size()
+                || kSwizChars.find(line[dot + 1]) == std::string::npos)
+            {
+              pos = dot + 1;
+              continue;
+            }
+
+            // 收集连续 swizzle 字母（最多 4 个分量）
+            size_t end = dot + 1;
+            while (end < line.size()
+                   && (end - dot - 1) < 4
+                   && kSwizChars.find(line[end]) != std::string::npos)
+              ++end;
+            const size_t swizLen = end - (dot + 1);
+
+            // 仅处理「前两个分量相同」的 swizzle（至少 2 个分量）
+            if (swizLen < 2 || line[dot + 1] != line[dot + 2])
+            {
+              pos = dot + 1;
+              continue;
+            }
+
+            // 向前扫描出被 swizzle 的变量名（标识符 [A-Za-z0-9_]）
+            size_t idStart = dot;
+            while (idStart > 0
+                   && (std::isalnum((unsigned char)line[idStart - 1])
+                       || line[idStart - 1] == '_'))
+              --idStart;
+            const std::string id = line.substr(idStart, dot - idStart);
+            if (id.empty())
+            {
+              pos = dot + 1;
+              continue;
+            }
+
+            // 构造 floatN(id.c0, id.c1, ...)，例如 .xxy → float3(id.x, id.x, id.y)
+            std::string repl = "float" + std::to_string(swizLen) + "(" + id;
+            for (size_t i = 0; i < swizLen; ++i)
+            {
+              repl += '.';
+              repl += line[dot + 1 + i];
+              if (i + 1 < swizLen)
+                repl += ", ";
+            }
+            repl += ')';
+
+            line.replace(dot, end - dot, repl);
+            pos = dot + repl.size();
+          }
+        }
+
 #if JUCE_MAC
         // ---- C. 限制 shapecode_N_num_inst 过高值，防止 GPU 负载激增（仅 macOS）----
         // 采用「单个上限 + 总量上限」双重策略（详见文件顶部 kMaxNumInst / kMaxTotalNumInst

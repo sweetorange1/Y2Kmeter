@@ -48,6 +48,10 @@ APP_BUNDLE_NAME="${PRODUCT_NAME}.app"
 VST3_BUNDLE_NAME="${PRODUCT_NAME}.vst3"
 AU_BUNDLE_NAME="${PRODUCT_NAME}.component"
 
+# 签名用的 entitlements：给 ad-hoc 签名补一个可读的 entitlements blob，
+# 消除启动时 Security/CoreAudio 反复打印的 SecTaskLoadEntitlements 报错。
+ENTITLEMENTS_FILE="${PROJECT_ROOT}/scripts/macos_entitlements.plist"
+
 # DMG 视觉布局常量 —— **必须与 scripts/macos_dmg_background.m 里的坐标保持一致**。
 # 图标坐标是 Finder 窗口坐标（原点在左上角、y 向下增长）。
 WINDOW_W=720
@@ -157,9 +161,12 @@ if [[ "${DO_SIGN}" -eq 1 ]]; then
   log "Step 2/5 ad-hoc 代码签名 (codesign --sign -，不启用 hardened runtime)"
   sign_bundle() {
     local bundle="$1"
-    # 先深度签内部所有 Mach-O（dylib / helper / framework），再签外壳 bundle
+    # 先深度签内部所有 Mach-O（dylib / helper / framework），再签外壳 bundle。
+    # 附带 entitlements（macos_entitlements.plist）消除 SecTaskLoadEntitlements
+    # 控制台噪音；不启用 hardened runtime（见下方注释）。
     codesign --force --deep --sign - \
       --timestamp=none \
+      --entitlements "${ENTITLEMENTS_FILE}" \
       "${bundle}"
     codesign --verify --deep --strict --verbose=2 "${bundle}" || true
   }

@@ -251,6 +251,17 @@ if (APPLE)
     message(FATAL_ERROR "缺少工具源码：${Y2KM_ICONIZE_SRC}")
   endif()
 
+  # ----------------------------------------------------------------
+  # 图标变更自动重建：把 icon.ico / macos_iconize.m 登记为 configure 依赖。
+  #   下方图标生成均为 configure 阶段的 execute_process（JUCE 的 juceaide
+  #   macicon 也依赖 configure 期生成的 icon.png），换图标后若不重新 configure，
+  #   增量 build 不会重新生成、程序仍带旧图标。CMAKE_CONFIGURE_DEPENDS 让
+  #   Makefiles / Ninja 在下次 build 开始时检测到这两个文件变化就自动重跑
+  #   configure，无需手动清构建目录或重新 configure。
+  # ----------------------------------------------------------------
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${Y2KM_ICON_ICO_SRC}" "${Y2KM_ICONIZE_SRC}")
+
   execute_process(
     COMMAND /usr/bin/clang
             -framework AppKit

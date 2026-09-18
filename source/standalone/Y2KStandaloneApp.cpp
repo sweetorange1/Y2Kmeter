@@ -378,9 +378,18 @@ public:
     Y2KMainWindow (const juce::String& name, juce::Colour bg)
         : juce::DocumentWindow (name,
                                 bg,
-                                0,  // 无原生标题栏按钮（去掉 minimiseButton 以防止 WS_SYSMENU
+#if JUCE_MAC
+                                juce::DocumentWindow::minimiseButton,
+                                // macOS：无边框窗口（setUsingNativeTitleBar(false) → Borderless）
+                                // 默认不带 NSWindowStyleMaskMiniaturizable 样式位，导致自定义
+                                // 最小化按钮调 setMinimised(true) 时 [window miniaturize:] 空操作。
+                                // 显式声明 minimiseButton 只追加该样式位（titleBarHeight=0 下原生
+                                // 按钮不可见），让最小化真正生效。
+#else
+                                0,  // Windows：无原生标题栏按钮（去掉 minimiseButton 以防止 WS_SYSMENU
                                     // 在 Windows 上产生系统菜单区域，该区域会响应双击为最大化，
                                     // 最大化后主窗口铺满屏幕导致 PopupMenu 不可见）
+#endif
                                 false /*addToDesktop*/)
     {
         setUsingNativeTitleBar (false);

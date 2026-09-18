@@ -3511,4 +3511,42 @@ Milkdrop 脱离态由 `GLView` 自己的本地 OpenGL 线程驱动渲染。切�
 
 ---
 
+## v2.7.4 补充：macOS 适配收尾 + 资产清理（本轮开发，不升级版本号）
+
+本章记录 v2.7.4 发布后在 macOS 环境完成的一轮适配与清理工作，共 5 项，均未升级版本号。
+
+### 1. Milkdrop shader 编译报错修复（`(97) Syntax error`）
+
+- **现象**：macOS 上启动/浏览预设时控制台报 `(97) : Syntax error: expected ';' near '.'`，对应预设渲染黑屏。
+- **根因**：部分 `.milk` 预设的 warp/comp shader 使用「前两个分量相同」的重复分量 swizzle（如 `ret.xxy`），projectM 内置 hlslparser 在 HLSL→GLSL 转换时对此报语法错误。对比实测：`.xxy`（前两个相同）失败，`.xyy` / `.zww`（重复在后两个）正常。
+- **修复**：在 [`MilkdropModule.cpp`](/I:/Y2KMeter/source/ui/modules/MilkdropModule.cpp) 的 `FixMilkdropShaderTypes()` 中新增预处理（通用段、跨平台生效），把「前两个分量相同」的 swizzle 改写为等价显式构造函数（`ret.xxy` → `float3(ret.x, ret.x, ret.y)`），消除 hlslparser 语法歧义。
+- **跨平台注意**：hlslparser 是编译进 dylib/dll 的同一套代码，此 bug 在 Windows 上同样存在（此前仅因未浏览到此类预设而未暴露），需同步 Windows。
+
+### 2. macOS 最小化按钮失效修复
+
+- **现象**：无边框窗口右上角自定义最小化按钮点击无反应。
+- **根因**：窗口用 `setUsingNativeTitleBar(false)`（对应 `NSWindowStyleMaskBorderless`），且 `DocumentWindow` 构造时 `requiredButtons=0`，导致窗口缺少 `NSWindowStyleMaskMiniaturizable` 样式位；`setMinimised(true)` 底层 `[window miniaturize:]` 成为空操作。
+- **修复**：在 [`Y2KStandaloneApp.cpp`](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) 中，macOS 上把 `requiredButtons` 改为 `minimiseButton`（`#if JUCE_MAC`），只追加样式位（`titleBarHeight=0` 下原生按钮不可见），Windows 保持 `0` 以规避 WS_SYSMENU 双击最大化问题。
+
+### 3. ad-hoc 签名 entitlements（消除 SecTaskLoadEntitlements 刷屏）
+
+- **现象**：启动控制台大量 `SecTaskLoadEntitlements failed error=22 cs_flags=20` 刷屏。
+- **根因**：ad-hoc 签名（`codesign --sign -`）不含 entitlements，Security/CoreAudio 查询进程权限时返回 EINVAL（无害但刷屏）。
+- **修复**：新增 [`scripts/macos_entitlements.plist`](/I:/Y2KMeter/scripts/macos_entitlements.plist)（含 `com.apple.security.device.audio-input`），[`build_macos_installer.sh`](/I:/Y2KMeter/build_macos_installer.sh) 签名时加 `--entitlements`。
+- **踩坑**：entitlements plist 内**不能有 XML 注释**（AMFI 的 `AMFIUnserializeXML` 解析器不支持，会报 `syntax error`），只能放纯 `<key>` / 值元素。
+
+### 4. 图标变更自动重建
+
+- **现象**：换 `assets/icon.ico` 后增量 build 不重新生成图标，打包仍用旧图标。
+- **根因**：macOS 图标流水线全是 configure 阶段的 `execute_process`，无 `icon.ico` 依赖，增量 build 不会重跑 configure。
+- **修复**：在 [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) 图标段新增 `CMAKE_CONFIGURE_DEPENDS` 登记 `icon.ico` / `macos_iconize.m`，换图标后下次 build 自动重跑 configure 重新生成图标（Makefiles/Ninja 生效，Xcode generator 不支持）。
+
+### 5. 资产清理（VirtuPet 更名收尾）
+
+- 删除游离目录 `assets/virtupetmodule/`（1300 个 png，v2.7.4 误提交、代码零引用）。
+- 删除空目录 `assets/Tamagotchi/`（更名残留，仅含 `.DS_Store`）。
+- `tools/tamagotchi_cutter/` → `tools/virtupet_cutter/`（切图工具旧名收尾）。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
