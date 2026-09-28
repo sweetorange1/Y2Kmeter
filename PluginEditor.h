@@ -94,6 +94,13 @@ public:
     void SetMilkdropWaveState(const MilkdropWaveState& state);
     MilkdropWaveState GetMilkdropWaveState() const;
 
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // Milkdrop-only：把当前渲染状态（visual/wave/auto）回写到宿主参数。
+    //   public 供 MilkdropModule 在 UI 修改 auto 轮播状态后调用，使宿主参数
+    //   跟随 UI 状态，避免 10Hz pull 反向覆盖。详见 .cpp。
+    void pushMilkdropAutomationParams();
+#endif
+
     Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcessor&);
     ~Y2KmeterAudioProcessorEditor() override;
 
@@ -233,6 +240,13 @@ private:
     void updateUiScaleForCurrentDisplay();
     void moved() override;
 
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // ---- Milkdrop-only：宿主自动化参数双向同步（pull：宿主 → 渲染）----
+    //   在 timerCallback 里以 10Hz 轮询，检测参数变化并应用到 Milkdrop 状态。
+    //   （push 已移到 public 区，供 MilkdropModule 修改 auto 后回写宿主参数。）
+    void pullMilkdropAutomationParams();
+#endif
+
     void handleCloseClicked();
     void handlePinClicked();       // 切换 alwaysOnTop
     void handleMinimiseClicked();  // 最小化顶层窗口
@@ -309,6 +323,16 @@ private:
     bool desktopCacheDirty = true;
 
     Y2KmeterAudioProcessor& processor;
+
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // pull 期间置位，抑制 SetMilkdropVisualState 内部触发的 push，
+    // 避免 pull 中途用"尚未更新的状态"回滚宿主刚写入的参数。
+    bool pullingParams_ = false;
+    // 预设切换开关的上一次轮询值，用于检测宿主 off→on 上升沿（触发一次动作）。
+    bool lastPresetNext_   = false;
+    bool lastPresetPrev_   = false;
+    bool lastPresetRandom_ = false;
+#endif
 
     // true = 被 DAW 宿主加载的插件模式（VST3 / AU / AAX / LV2 等）；
     // false = Standalone 模式。

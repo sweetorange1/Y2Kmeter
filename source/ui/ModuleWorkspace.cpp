@@ -711,15 +711,17 @@ void ModuleWorkspace::GainPopupDismissListener::mouseDown (const juce::MouseEven
 // ----------------------------------------------------------
 juce::Rectangle<int> ModuleWorkspace::getCanvasArea() const
 {
-    // chrome 隐藏时，canvas 满铺（不再留 toolbar 空间）
+    // chrome 隐藏 / 极简模式时，canvas 满铺（不再留 toolbar 空间）
     auto r = getLocalBounds();
-    if (chromeVisible)
+    if (chromeVisible && ! minimalMode_)
         r = r.withTrimmedBottom(PinkXP::ui(toolbarHeight));
     return r.reduced(margin);
 }
 
 juce::Rectangle<int> ModuleWorkspace::getToolbarArea() const
 {
+    if (minimalMode_)
+        return {};
     auto r = getLocalBounds();
     return r.removeFromBottom(PinkXP::ui(toolbarHeight));
 }
@@ -1768,7 +1770,8 @@ void ModuleWorkspace::mouseDoubleClick(const juce::MouseEvent& e)
 //   paint() 中仅需一次 drawImageAt，将每帧 13000+ 次 fillRect(1,1) 缩减为 1 次 blit。
 void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
 {
-    auto canvasOuter = getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
+    auto canvasOuter = minimalMode_ ? getLocalBounds()
+                                    : getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
     const int w = canvasOuter.getWidth();
     const int h = canvasOuter.getHeight();
     if (w <= 0 || h <= 0)
@@ -1835,7 +1838,8 @@ void ModuleWorkspace::paint(juce::Graphics& g)
         rebuildCanvasBgCacheIfNeeded();
         if (canvasBgCache.isValid())
         {
-            auto canvasOuter = getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
+            auto canvasOuter = minimalMode_ ? getLocalBounds()
+                                    : getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
             g.drawImageAt (canvasBgCache, canvasOuter.getX(), canvasOuter.getY());
         }
 
@@ -2233,7 +2237,7 @@ void ModuleWorkspace::resized()
     const int btnH = PinkXP::ui(22);
     constexpr int btnMargin = 6;
 
-    if (chromeVisible)
+    if (chromeVisible && ! minimalMode_)
     {
         // 底部工具栏：从右到左依次放 hideBtn、音频源下拉 (+Label)、FPS 控件，余下给 themeBar
         auto tb = getToolbarArea().reduced(4, 4);
@@ -2413,9 +2417,16 @@ void ModuleWorkspace::resized()
         toolbarDividerX3 = -1;
         toolbarDividerXLayout = -1;
         auto r = getLocalBounds();
-        hideBtn.setBounds(r.getRight()  - btnW - btnMargin,
-                          r.getBottom() - btnH - btnMargin,
-                          btnW, btnH);
+        if (minimalMode_)
+        {
+            hideBtn.setVisible(false);
+        }
+        else
+        {
+            hideBtn.setBounds(r.getRight()  - btnW - btnMargin,
+                              r.getBottom() - btnH - btnMargin,
+                              btnW, btnH);
+        }
     }
 
     // 模块自身保留各自 bounds；但要保证不越界（窗口缩小时裁剪）
@@ -2439,7 +2450,14 @@ void ModuleWorkspace::resized()
     //   resize；但作为防御层，若因 auto-hide resizeLimits 竞态等原因意外触发
     //   resized()，跳过模块 clamp 以保护模块尺寸不被意外压缩。
     auto canvas = getCanvasArea();
-    if (! chromeTransitionActive && ! isLayoutLocked())
+    if (minimalMode_)
+    {
+        // 极简模式（milkdrop-only）：唯一模块始终铺满 canvas，随窗口 resize 自适应。
+        for (auto* m : modules)
+            if (m->getBounds() != canvas)
+                m->setBounds(canvas);
+    }
+    else if (! chromeTransitionActive && ! isLayoutLocked())
     {
         for (auto* m : modules)
         {

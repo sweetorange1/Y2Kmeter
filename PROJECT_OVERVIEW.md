@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.7.5`）
+- **产品名**：`Y2Kmeter` （版本：`2.7.6`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -3629,6 +3629,53 @@ Milkdrop 脱离态由 `GLView` 自己的本地 OpenGL 线程驱动渲染。切�
 
 1. **`Editor::moved()` 在窗口跨屏时不触发**：Editor 是顶层窗口子组件，窗口被拖到另一台显示器时其在窗口内的相对位置不变，`moved()` 不会触发，导致缩放因子停留在旧显示器。修复：在 10Hz `timerCallback()` 里轮询当前显示器兜底（插件态 / Standalone 态统一生效）。
 2. **缩放必须早于首次布局生效**：若在 `loadInitialModules()` 之后才设缩放，模块会按未缩放的 canvas 先摆好、再留出多余间隙。修复：构造函数开头先按主显示器 `setUiScale` 预估初值。
+
+---
+
+## v2.7.6：Milkdrop-only 插件变体 + 宿主自动化参数 + 编译提速
+
+本章记录 v2.7.6 版本相对 v2.7.5 的改动：新增 **Y2Kmeter_milkdrop 插件变体**（整个窗口 = 单个满屏 Milkdrop 实时可视化模块），并为其实现**宿主自动化参数双向同步**；同时修复若干 Milkdrop 交互 bug、优化编译速度、更新安装包。
+
+### 1. 新增 Y2Kmeter_milkdrop 插件变体
+
+- 在 `CMakeLists.txt` 用 `juce_add_plugin` 新增第二个插件目标 `Y2Kmeter_milkdrop`（VST3；macOS 额外 AU），通过编译宏 `Y2KMETER_MILKDROP_ONLY=1` 与完整版区分；与完整版共享同一批源码，宏敏感的文件（PluginEditor/PluginProcessor/MilkdropModule）按宏编译出不同行为。
+- **裸模式**（`ModulePanel::setBareMode`）：隐藏卡片外壳（标题栏 / 边框 / 关闭 / 弹出按钮），内容区铺满整个面板。
+- **极简模式**（`ModuleWorkspace::setMinimalMode`）：隐藏底部 toolbar、canvas 满铺、唯一模块始终铺满并随窗口自适应、隐藏 Hide 按钮。
+- Editor 在 milkdrop-only 下不画标题栏 / 桌面纹理，只显示单个满屏 Milkdrop 模块并锁定布局。
+
+### 2. 宿主自动化参数双向同步（milkdrop-only）
+
+- 新增 [`source/ui/MilkdropParamIds.h`](/I:/Y2KMeter/source/ui/MilkdropParamIds.h)：定义 Milkdrop 宿主自动化参数（color / effects / wave / tweak / auto + 预设切换开关），并生成 APVTS 布局。
+- `PluginProcessor` 在 milkdrop-only 下创建 `AudioProcessorValueTreeState` 参数树，宿主即可通过 MIDI CC / automation 驱动。
+- `PluginEditor` 实现 `pullMilkdropAutomationParams`（宿主→渲染，10Hz 轮询）与 `pushMilkdropAutomationParams`（渲染→宿主），双向同步 color/effects/wave/tweak/auto 状态。
+- 预设切换通过 `preset_next / preset_prev / preset_random` 三个「off→on 触发一次」的开关参数暴露给宿主（删除冗余的 `preset_index` / `use_like_library`）。
+
+### 3. 修复的 bug
+
+- **auto 模式控制栏不自动隐藏**：`checkOverlayAutoHide` 原先在 `isAutoMode_` 时直接 return；改为允许 auto 模式下也自动隐藏（hover 重新显示）。
+- **拖动 auto interval 跳回**：拖动时只改本地值、未同步宿主参数，10Hz pull 用旧参数覆盖；改为拖动时实时 `push` 同步。
+- **push 量纲错误**：`setF/setI` 用归一化值 `getValue()`（0~1）与实际值直接比较，差异判断永远为真；改为统一 `convertTo0to1` 后再比较。
+- **resize 斜线不跟随控制栏隐藏**：右下角 `ResizableCornerComponent` 是 Editor 级组件，不随 Milkdrop overlay 隐藏；改为在 10Hz timerCallback 里按 `MilkdropModule::isFocused()` 同步其可见性。
+
+### 4. 编译提速
+
+- `RelWithDebInfo`（开发/排障配置）不再启用 LTO（/GL + /LTCG），只在 Release/MinSizeRel 保留，显著缩短开发迭代的编译与链接时间。
+- 注：曾尝试引入预编译头（PCH），因 JUCE 的 `JuceHeader.h` 是构建期生成物、与 PCH 配置期编译冲突而回退；Ninja 生成器经实测需绑定 MSVC 工具链（`-G Ninja` + Visual Studio 工具链）使用。
+
+### 5. 安装包
+
+- 新增 `Y2Kmeter_milkdrop.vst3` 到安装包（与完整版 VST3 同装到用户选择的 VST3 目录）。
+- 移除安装时的隐私授权页面，遥测改为默认静默开启（安装即写 `TelemetryEnabled=1`）。
+
+### 6. 版本号
+
+- 2.7.5 → 2.7.6（`CMakeLists.txt` 三处 / `Y2Kmeter_installer.iss` / `PluginEditor.cpp` 四处字面量 / `PROJECT_OVERVIEW.md`）。
+
+### 踩坑记录
+
+1. **PCH 与 JUCE 生成头冲突**：`JuceHeader.h` 由 `juce_generate_juce_header` 的 `add_custom_command` 在构建期生成，而 `target_precompile_headers` 在配置期（CLion reload 的编译器信息收集）就要编译 PCH，导致 `fatal error C1083: JuceHeader.h`。已回退 PCH。
+2. **Ninja preset 默认套用 MinGW**：`ninja-msvc` preset 只写 `generator: Ninja` 未指定编译器，CLion 默认套用 MinGW（JUCE 不支持）导致构建失败；改用「Visual Studio 工具链 + `-G Ninja`」的方式。
+3. **auto 状态双向同步的方向判断**：纯轮询无法区分「宿主改参数」还是「UI 改状态」，需在 UI 改动后主动 `push` 回写参数，使 pull 不再反向覆盖（auto / interval / 预设切换均遵循此模式）。
 
 ---
 

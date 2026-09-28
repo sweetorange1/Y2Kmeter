@@ -23,6 +23,9 @@
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
+#ifdef Y2KMETER_MILKDROP_ONLY
+#include "source/ui/MilkdropParamIds.h"
+#endif
 
 // ==========================================================
 // 屏幕尺寸模拟（仅开发调试用）
@@ -226,7 +229,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.7.5");
+const int versionW = versionFont.getStringWidth ("v2.7.6");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -267,7 +270,7 @@ const int versionW = versionFont.getStringWidth ("v2.7.5");
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.5";
+const juce::String versionText = "v2.7.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -957,7 +960,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     }
 
     // 3) 再装载默认/已保存模块
+#ifndef Y2KMETER_MILKDROP_ONLY
     loadInitialModules();
+#endif
 
     // 4) 用户布局变更 → 立即写回 Processor state
     workspace->onLayoutChanged = [this]()
@@ -1801,6 +1806,43 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         // 触发一次重排：workspace 在插件模式下从 y=0 起铺满整个 Editor
         resized();
     }
+
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // ==================================================================
+    // Milkdrop-only 插件变体：整个窗口 = 单个满屏 Milkdrop 模块。
+    //   · 隐藏底部 toolbar / 标题栏 / 主题 / 布局预设 / Save-Load / Source。
+    //   · 锁定布局（禁拖拽/缩放/右键添加菜单）。
+    //   · 添加一个裸模式 Milkdrop 模块铺满 canvas（无卡片外壳）。
+    // ==================================================================
+    if (workspace != nullptr)
+    {
+        workspace->setMinimalMode (true);
+        workspace->setAvailableModuleTypes ({ ModuleType::milkdrop });
+        workspace->setLayoutLocked (true);
+        workspace->setAudioSourceUiVisible (false);
+        workspace->setLayoutPresetUiVisible (false);
+        workspace->setSaveLoadUiVisible (false);
+        workspace->setPopOutEnabled (false);
+
+        const auto canvas = workspace->getCanvasArea();
+        auto milk = createModule (ModuleType::milkdrop);
+        if (milk != nullptr)
+        {
+            if (auto* md = dynamic_cast<MilkdropModule*> (milk.get()))
+                md->setBareMode (true);
+            milk->setBounds (canvas.getX(), canvas.getY(),
+                             canvas.getWidth(), canvas.getHeight());
+            workspace->addModule (std::move (milk), false);
+        }
+    }
+
+    // Milkdrop-only：无标题栏，workspace 铺满整个 Editor
+    resized();
+
+    // 把从 Processor 恢复的初始状态同步到宿主参数（避免 timer 首次 pull 用
+    // 默认参数值覆盖已恢复的 Milkdrop 状态）。
+    pushMilkdropAutomationParams();
+#endif
 
     // ==================================================================
     // GPU 合成层挂载（Standalone + VST3 共用此入口）
@@ -3320,6 +3362,12 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 {
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // Milkdrop-only：整个窗口由 projectM 帧（Editor GL 渲染）填充，
+    // 不画桌面纹理 / 标题栏。
+    juce::ignoreUnused (g);
+    return;
+#endif
     // 1) 桌面纹理底图：只在 workspace 矩形范围内绘制
     //    workspace 是半透明的，纹理会作为模块背后的视觉肌理透出来
     if (workspace != nullptr)
@@ -3364,7 +3412,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.5";
+const juce::String versionText = "v2.7.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3372,7 +3420,7 @@ const juce::String versionText = "v2.7.5";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.7.5");
+        const int versionW = versionFont.getStringWidth ("v2.7.6");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -3496,8 +3544,10 @@ void Y2KmeterAudioProcessorEditor::resized()
     // 插件宿主模式（VST3 等）：也为标题栏预留 titleBarHeight —— 我们会画一个
     //   "精简抬头"（只有软件名 + 版本号 + 官网文字，无右侧最小化/固定/关闭按钮），
     //   宿主窗口已提供自己的系统标题栏和边框，不会与此抬头冲突。
+#ifndef Y2KMETER_MILKDROP_ONLY
     if (! chromeDim)
         r.removeFromTop (PinkXP::ui(titleBarHeight));
+#endif
     workspace->setBounds (r);
 
     // 浮层固定在顶部，与 TitleBar 同尺寸（Editor 同宽 × titleBarHeight）。
@@ -4672,6 +4722,23 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
     //   拖到另一台显示器时 Editor::moved() 不会触发，因此必须用轮询兜底。
     updateUiScaleForCurrentDisplay();
 
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // Milkdrop-only：10Hz 拉取宿主自动化参数 → 应用到 Milkdrop 渲染。
+    pullMilkdropAutomationParams();
+
+    // 同步右下角 resize 斜线（ResizableCornerComponent）的可见性，使其跟随
+    // Milkdrop 顶部 overlay 控制栏的显隐：控制栏自动隐藏时斜线一起隐藏，
+    // hover 重新显示时斜线恢复。（用轮询兜底，覆盖 editorResized 对可见性的重置）
+    if (resizableCorner != nullptr)
+    {
+        bool milkdropFocused = false;
+        for (int i = 0; i < workspace->getNumModules(); ++i)
+            if (auto* md = dynamic_cast<MilkdropModule*> (workspace->getModule (i)))
+            { milkdropFocused = md->isFocused(); break; }
+        resizableCorner->setVisible (milkdropFocused);
+    }
+#endif
+
     // v1.8.6：递减 auto-show 抑制计数器（用于 onChromeVisibleChanged 异步事件窗口保护）
     if (suppressAutoShowCounter > 0)
         --suppressAutoShowCounter;
@@ -5570,6 +5637,7 @@ void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {
 void Y2KmeterAudioProcessorEditor::SetMilkdropUseLikeLibrary(bool use_like) {
   milkdrop_use_like_library_.store(use_like);
   processor.setSavedMilkdropUseLikeLibrary(use_like);
+  // 注：use_like_library 不再是宿主自动化参数，无需 push。
 }
 
 void Y2KmeterAudioProcessorEditor::ToggleMilkdropLibraryState() {
@@ -5689,6 +5757,10 @@ void Y2KmeterAudioProcessorEditor::SetMilkdropVisualState(const MilkdropVisualSt
   }
   // 同步写回 Processor，作为 host state 顶层属性持久化（关闭→重开复原）。
   processor.setSavedMilkdropVisualState(state);
+#ifdef Y2KMETER_MILKDROP_ONLY
+  // UI 改了视觉状态 → 回写宿主参数，保持参数与渲染一致。
+  pushMilkdropAutomationParams();
+#endif
 }
 
 MilkdropVisualState Y2KmeterAudioProcessorEditor::GetMilkdropVisualState() const {
@@ -5702,10 +5774,250 @@ void Y2KmeterAudioProcessorEditor::SetMilkdropWaveState(const MilkdropWaveState&
     milkdrop_wave_state_ = state;
   }
   processor.setSavedMilkdropWaveState(state);
+#ifdef Y2KMETER_MILKDROP_ONLY
+  // UI 改了波形状态 → 回写宿主参数。
+  pushMilkdropAutomationParams();
+#endif
 }
 
 MilkdropWaveState Y2KmeterAudioProcessorEditor::GetMilkdropWaveState() const {
   std::lock_guard<std::mutex> lock(milkdrop_wave_mutex_);
   return milkdrop_wave_state_;
 }
+
+#ifdef Y2KMETER_MILKDROP_ONLY
+// ==========================================================
+// Milkdrop-only：宿主自动化参数 ↔ Milkdrop 渲染状态 双向同步
+//
+//   · pullMilkdropAutomationParams：宿主（CC/automation）→ 渲染。
+//     在 timerCallback 里 10Hz 轮询；参数值 ≠ 渲染状态 → 应用参数。
+//   · pushMilkdropAutomationParams：渲染 → 宿主。
+//     在 SetMilkdropVisualState / SetMilkdropWaveState /
+//     SetMilkdropUseLikeLibrary 里调用；渲染状态 ≠ 参数 → 回写参数。
+//
+//   方向判断：pull 只在"参数 != 状态"时把参数写进状态；push 只在
+//   "状态 != 参数"时把状态写进参数。二者互为镜像且幂等，不会形成循环：
+//   · UI 改状态 → push 让参数=状态 → 下次 pull 无差异；
+//   · 宿主改参数 → pull 让状态=参数 → 途中触发的 push 无差异。
+//
+//   · auto_mode / auto_interval：双向（宿主↔UI）。UI 修改后 MilkdropModule
+//     会调 push 回写宿主参数，pull 只在参数 ≠ 状态时把参数写进模块状态。
+//   · preset_next/prev/random：开关型，只做 off→on 上升沿触发一次动作。
+// ==========================================================
+
+void Y2KmeterAudioProcessorEditor::pullMilkdropAutomationParams()
+{
+    pullingParams_ = true;   // 抑制 pull 过程中 SetMilkdrop*State 内部触发的 push
+    auto& apvts = processor.getApvts();
+
+    // 从 workspace 中找到唯一的 MilkdropModule（milkdrop-only 下只有一个）。
+    MilkdropModule* md = nullptr;
+    if (workspace != nullptr)
+        for (int i = 0; i < workspace->getNumModules(); ++i)
+            if (auto* m = dynamic_cast<MilkdropModule*> (workspace->getModule (i)))
+            { md = m; break; }
+
+    // ---- 1. Visual state（color + effects + tweak offset）----
+    {
+        auto vs = GetMilkdropVisualState();
+        bool changed = false;
+
+        auto f = [&](float& field, float v) {
+            if (std::fabs (field - v) > 1e-6f) { field = v; changed = true; }
+        };
+
+        f (vs.tint_r,     apvts.getRawParameterValue (MilkdropParams::kTintR)->load());
+        f (vs.tint_g,     apvts.getRawParameterValue (MilkdropParams::kTintG)->load());
+        f (vs.tint_b,     apvts.getRawParameterValue (MilkdropParams::kTintB)->load());
+        f (vs.brightness, apvts.getRawParameterValue (MilkdropParams::kBrightness)->load());
+
+        for (const auto& def : GetMilkdropEffectDefs())
+        {
+            if (! def.implemented) continue;
+            auto* p = apvts.getRawParameterValue (MilkdropParams::fxId (def));
+            if (p == nullptr) continue;
+            const bool v = p->load() >= 0.5f;
+            if (def.get (vs) != v) { def.set (vs, v); changed = true; }
+        }
+
+        static const char* kOffIds[MilkdropVisualOffsetState::kParamCount] = {
+            MilkdropParams::kTweakZoom, MilkdropParams::kTweakRot,  MilkdropParams::kTweakWarp,
+            MilkdropParams::kTweakDx,   MilkdropParams::kTweakDy,   MilkdropParams::kTweakSx,
+            MilkdropParams::kTweakSy,
+        };
+        for (int i = 0; i < MilkdropVisualOffsetState::kParamCount; ++i)
+            f (vs.offset.value[i], apvts.getRawParameterValue (kOffIds[i])->load());
+
+        static const char* kIntIds[MilkdropVisualOffsetState::kIntParamCount] = {
+            MilkdropParams::kTweakKaleido, MilkdropParams::kTweakFoldX, MilkdropParams::kTweakFoldY,
+        };
+        for (int i = 0; i < MilkdropVisualOffsetState::kIntParamCount; ++i)
+        {
+            const int v = juce::roundToInt (apvts.getRawParameterValue (kIntIds[i])->load());
+            if (v != vs.offset.ivalue[i]) { vs.offset.ivalue[i] = v; changed = true; }
+        }
+
+        if (changed)
+        {
+            SetMilkdropVisualState (vs);
+            if (md != nullptr) md->refreshStateFromEditor();   // 刷新二级面板控件
+        }
+    }
+
+    // ---- 2. Wave state ----
+    {
+        auto ws = GetMilkdropWaveState();
+        bool changed = false;
+
+        auto f = [&](float& field, float v) {
+            if (std::fabs (field - v) > 1e-6f) { field = v; changed = true; }
+        };
+        auto b = [&](bool& field, float v) {
+            const bool nv = v >= 0.5f; if (field != nv) { field = nv; changed = true; }
+        };
+        auto i = [&](int& field, float v) {
+            const int nv = juce::roundToInt (v); if (field != nv) { field = nv; changed = true; }
+        };
+
+        b (ws.enabled,  apvts.getRawParameterValue (MilkdropParams::kWaveEnabled)->load());
+        i (ws.mode,     apvts.getRawParameterValue (MilkdropParams::kWaveMode)->load());
+        f (ws.x,        apvts.getRawParameterValue (MilkdropParams::kWaveX)->load());
+        f (ws.y,        apvts.getRawParameterValue (MilkdropParams::kWaveY)->load());
+        f (ws.r,        apvts.getRawParameterValue (MilkdropParams::kWaveR)->load());
+        f (ws.g,        apvts.getRawParameterValue (MilkdropParams::kWaveG)->load());
+        f (ws.b,        apvts.getRawParameterValue (MilkdropParams::kWaveB)->load());
+        f (ws.a,        apvts.getRawParameterValue (MilkdropParams::kWaveA)->load());
+        f (ws.mystery,  apvts.getRawParameterValue (MilkdropParams::kWaveMystery)->load());
+        b (ws.usedots,  apvts.getRawParameterValue (MilkdropParams::kWaveDots)->load());
+        b (ws.thick,    apvts.getRawParameterValue (MilkdropParams::kWaveThick)->load());
+        b (ws.additive, apvts.getRawParameterValue (MilkdropParams::kWaveAdditive)->load());
+        b (ws.brighten, apvts.getRawParameterValue (MilkdropParams::kWaveBrighten)->load());
+
+        if (changed)
+        {
+            SetMilkdropWaveState (ws);
+            if (md != nullptr) md->refreshStateFromEditor();   // 刷新二级面板控件
+        }
+    }
+
+    // ---- 3. Auto（模块级，双向：UI 改后 push 回写参数）----
+    if (md != nullptr)
+    {
+        const bool autoParam = apvts.getRawParameterValue (MilkdropParams::kAutoMode)->load() >= 0.5f;
+        if (autoParam != md->isAutoModeActive())
+            md->toggleAutoMode();
+
+        const float interval = apvts.getRawParameterValue (MilkdropParams::kAutoInterval)->load();
+        if (std::fabs (interval - md->getAutoIntervalSeconds()) > 1e-3f)
+            md->applyAutoInterval (interval);
+    }
+
+    // ---- 4. 预设切换开关（宿主 off→on 触发一次，on→off 不触发）----
+    {
+        const bool next = apvts.getRawParameterValue (MilkdropParams::kPresetNext)->load() >= 0.5f;
+        if (next && ! lastPresetNext_)  RequestMilkdropPresetDelta (+1);
+        lastPresetNext_ = next;
+
+        const bool prev = apvts.getRawParameterValue (MilkdropParams::kPresetPrev)->load() >= 0.5f;
+        if (prev && ! lastPresetPrev_)  RequestMilkdropPresetDelta (-1);
+        lastPresetPrev_ = prev;
+
+        const bool rnd = apvts.getRawParameterValue (MilkdropParams::kPresetRandom)->load() >= 0.5f;
+        if (rnd && ! lastPresetRandom_) RequestMilkdropPresetRandom();
+        lastPresetRandom_ = rnd;
+    }
+
+    pullingParams_ = false;
+}
+
+void Y2KmeterAudioProcessorEditor::pushMilkdropAutomationParams()
+{
+    if (pullingParams_) return;   // pull 期间跳过，避免用未更新状态回滚宿主参数
+    auto& apvts = processor.getApvts();
+
+    auto setF = [&](juce::StringRef id, float value) {
+        if (auto* p = apvts.getParameter (id))
+        {
+            const float normalized = p->convertTo0to1 (value);
+            if (std::fabs (p->getValue() - normalized) > 1e-6f)
+                p->setValueNotifyingHost (normalized);
+        }
+    };
+    auto setB = [&](juce::StringRef id, bool v) {
+        if (auto* p = apvts.getParameter (id))
+        {
+            const float target = v ? 1.0f : 0.0f;
+            if (std::fabs (p->getValue() - target) > 1e-6f)
+                p->setValueNotifyingHost (target);
+        }
+    };
+    auto setI = [&](juce::StringRef id, int v) {
+        if (auto* p = apvts.getParameter (id))
+        {
+            const float normalized = p->convertTo0to1 ((float) v);
+            if (std::fabs (p->getValue() - normalized) > 1e-6f)
+                p->setValueNotifyingHost (normalized);
+        }
+    };
+
+    // ---- Visual state ----
+    {
+        auto vs = GetMilkdropVisualState();
+        setF (MilkdropParams::kTintR,      vs.tint_r);
+        setF (MilkdropParams::kTintG,      vs.tint_g);
+        setF (MilkdropParams::kTintB,      vs.tint_b);
+        setF (MilkdropParams::kBrightness, vs.brightness);
+
+        for (const auto& def : GetMilkdropEffectDefs())
+            if (def.implemented)
+                setB (MilkdropParams::fxId (def), def.get (vs));
+
+        static const char* kOffIds[MilkdropVisualOffsetState::kParamCount] = {
+            MilkdropParams::kTweakZoom, MilkdropParams::kTweakRot,  MilkdropParams::kTweakWarp,
+            MilkdropParams::kTweakDx,   MilkdropParams::kTweakDy,   MilkdropParams::kTweakSx,
+            MilkdropParams::kTweakSy,
+        };
+        for (int i = 0; i < MilkdropVisualOffsetState::kParamCount; ++i)
+            setF (kOffIds[i], vs.offset.value[i]);
+
+        static const char* kIntIds[MilkdropVisualOffsetState::kIntParamCount] = {
+            MilkdropParams::kTweakKaleido, MilkdropParams::kTweakFoldX, MilkdropParams::kTweakFoldY,
+        };
+        for (int i = 0; i < MilkdropVisualOffsetState::kIntParamCount; ++i)
+            setI (kIntIds[i], vs.offset.ivalue[i]);
+    }
+
+    // ---- Wave state ----
+    {
+        auto ws = GetMilkdropWaveState();
+        setB (MilkdropParams::kWaveEnabled,  ws.enabled);
+        setI (MilkdropParams::kWaveMode,     ws.mode);
+        setF (MilkdropParams::kWaveX,        ws.x);
+        setF (MilkdropParams::kWaveY,        ws.y);
+        setF (MilkdropParams::kWaveR,        ws.r);
+        setF (MilkdropParams::kWaveG,        ws.g);
+        setF (MilkdropParams::kWaveB,        ws.b);
+        setF (MilkdropParams::kWaveA,        ws.a);
+        setF (MilkdropParams::kWaveMystery,  ws.mystery);
+        setB (MilkdropParams::kWaveDots,     ws.usedots);
+        setB (MilkdropParams::kWaveThick,    ws.thick);
+        setB (MilkdropParams::kWaveAdditive, ws.additive);
+        setB (MilkdropParams::kWaveBrighten, ws.brighten);
+    }
+
+    // ---- Auto（模块级）----
+    {
+        MilkdropModule* md = nullptr;
+        if (workspace != nullptr)
+            for (int i = 0; i < workspace->getNumModules(); ++i)
+                if (auto* m = dynamic_cast<MilkdropModule*> (workspace->getModule (i)))
+                { md = m; break; }
+        if (md != nullptr)
+        {
+            setB (MilkdropParams::kAutoMode,     md->isAutoModeActive());
+            setF (MilkdropParams::kAutoInterval, md->getAutoIntervalSeconds());
+        }
+    }
+}
+#endif
 

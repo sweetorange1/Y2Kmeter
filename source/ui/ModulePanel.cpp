@@ -165,6 +165,10 @@ void ModulePanel::setPopOutEnabled(bool enabled) noexcept
 
 juce::Rectangle<int> ModulePanel::getContentBounds() const
 {
+    // 裸模式：内容区 = 整个面板（无标题栏/边框）
+    if (bareMode_)
+        return getLocalBounds();
+
     // 去掉外边框 2px + 标题栏高度 + 1px 分割线（标题栏高度随 UI 密度缩放）
     const int th = PinkXP::ui(titleBarHeight);
     return juce::Rectangle<int>(

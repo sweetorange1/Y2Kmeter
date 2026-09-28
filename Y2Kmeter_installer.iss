@@ -1,8 +1,9 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "2.7.5"
+#define MyAppVersion   "2.7.6"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
+#define MyPluginBundleMilkdrop "Y2Kmeter_milkdrop.vst3"
 
 ; -----------------------------------------------------------------------
 ; 安装目录说明：
@@ -80,6 +81,8 @@ Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_textures.zip"
 Type: files; Name: "{userappdata}\Y2Kmeter\milkdrop_presets.zip"
 ; VST3：删除旧 bundle 目录（若存在），用户选择的目录由 [Code] 段 GetVst3Dir 决定
 Type: filesandordirs; Name: "{code:GetVst3Dir}\{#MyPluginBundle}"; Components: vst3
+; VST3：删除旧 milkdrop-only bundle 目录（升级时强制覆盖）
+Type: filesandordirs; Name: "{code:GetVst3Dir}\{#MyPluginBundleMilkdrop}"; Components: vst3
 ; VST3：删除系统默认 VST3 路径下的旧版 Milkdrop 预设/纹理（迁移至 AppData 集中存储后不再随 VST3 bundle 分发）
 Type: filesandordirs; Name: "{commoncf}\VST3\iisaacbeats.cn\{#MyPluginBundle}\Contents\x86_64-win\milkdrop_presets"; Components: vst3
 Type: filesandordirs; Name: "{commoncf}\VST3\iisaacbeats.cn\{#MyPluginBundle}\Contents\x86_64-win\milkdrop_textures"; Components: vst3
@@ -140,6 +143,13 @@ Source: "cmake-build-release-visual-studio\Y2Kmeter_artefacts\Release\VST3\{#MyP
     Excludes: "milkdrop_presets\*;milkdrop_textures\*"; \
     Components: vst3
 
+; Y2Kmeter_milkdrop（Milkdrop-only VST3 变体，独立插件，与完整版同装到 VST3 目录）
+;   · 预设/纹理与完整版共享 AppData，bundle 内不携带
+Source: "cmake-build-release-visual-studio\Y2Kmeter_milkdrop_artefacts\Release\VST3\{#MyPluginBundleMilkdrop}\*"; \
+    DestDir: "{code:GetVst3Dir}\{#MyPluginBundleMilkdrop}"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: vst3
+
 ; -----------------------------------------------------------------------
 ; 快捷方式：仅 Standalone 组件安装时创建
 ; -----------------------------------------------------------------------
@@ -168,10 +178,6 @@ Filename: "{app}\{#MyAppExeName}"; \
 var
   Vst3DirPage:         TInputDirWizardPage;
   Vst3DirWarningShown: Boolean;
-  TelemetryPage:       TWizardPage;
-  TelemetryMemo:       TNewMemo;
-  TelemetryCheckBox:   TNewCheckBox;
-  TelemetryAgreed:     Boolean;
 
 function DefaultVst3Dir: string;
 begin
@@ -189,79 +195,6 @@ end;
 
 procedure InitializeWizard;
 begin
-  // ============================================================
-  // 隐私授权页：安装在选择目录后、选择组件前显示
-  //   · 锚点 wpSelectDir：内置页顺序为
-  //     Welcome → SelectDir → [本页] → SelectComponents → Ready
-  //   · 使用标准用户协议页布局：上方可滚动文本区 + 下方同意勾选框
-  //   · 用户必须勾选 CheckBox 方可继续（NextButtonClick 阻止）
-  //   · 同意后会在 ssPostInstall 中写入注册表
-  //     HKCU\Software\iisaacbeats\Y2Kmeter\TelemetryEnabled = 1
-  //   · 不同意则注册表键不存在或为 0，软件默认不发送数据
-  //   · 软件安装后不提供界面开关，用户只能通过重装/卸载改变此设置
-  // ============================================================
-  TelemetryPage := CreateCustomPage(
-    wpSelectDir,
-    'Anonymous Usage Statistics',
-    'Help improve Y2Kmeter'
-  );
-
-  // 可滚动文本区域 —— 展示完整的隐私政策说明（中英双语）
-  TelemetryMemo := TNewMemo.Create(WizardForm);
-  TelemetryMemo.Parent := TelemetryPage.Surface;
-  TelemetryMemo.Left := 0;
-  TelemetryMemo.Top := 0;
-  TelemetryMemo.Width := TelemetryPage.SurfaceWidth;
-  TelemetryMemo.Height := TelemetryPage.SurfaceHeight - ScaleY(40);
-  TelemetryMemo.ReadOnly := True;
-  TelemetryMemo.ScrollBars := ssVertical;
-  TelemetryMemo.Lines.Text :=
-    'Y2Kmeter collects anonymous usage statistics to help us understand ' +
-    'how the software is being used and to improve future versions.' + #13#10#13#10 +
-
-    'The collected data includes:' + #13#10 +
-    '  • Software version and build type' + #13#10 +
-    '  • Operating system and CPU information' + #13#10 +
-    '  • Host application name (for VST3 plugin mode)' + #13#10 +
-    '  • Display count and primary screen resolution' + #13#10 +
-    '  • System language/region and timezone offset' + #13#10#13#10 +
-
-    'What we DO NOT collect:' + #13#10 +
-    '  • User name, host name, IP address, MAC address' + #13#10 +
-    '  • Audio file paths or content' + #13#10 +
-    '  • Any personally identifiable information' + #13#10#13#10 +
-
-    'This setting can only be changed by reinstalling the software.' + #13#10 +
-    'There is no toggle to disable this after installation.' + #13#10#13#10 +
-
-    '-------------------------------------------------------------' + #13#10#13#10 +
-
-    'Y2Kmeter 收集匿名使用统计数据，以帮助我们了解软件的使用情况' +
-    '并改进未来版本。' + #13#10#13#10 +
-
-    '收集的数据包括：' + #13#10 +
-    '  • 软件版本与构建类型' + #13#10 +
-    '  • 操作系统与 CPU 信息' + #13#10 +
-    '  • 宿主软件名称（VST3 插件模式）' + #13#10 +
-    '  • 显示器数量与主屏分辨率' + #13#10 +
-    '  • 系统语言/区域与时区偏移' + #13#10#13#10 +
-
-    '明确不会收集：' + #13#10 +
-    '  • 用户名、主机名、IP 地址、MAC 地址' + #13#10 +
-    '  • 音频文件路径或内容' + #13#10 +
-    '  • 任何个人身份信息' + #13#10#13#10 +
-
-    '此设置仅可通过重新安装软件来更改。安装完成后不提供关闭选项。';
-
-  // 同意勾选框 —— 位于页面底部，用户必须勾选才能继续
-  TelemetryCheckBox := TNewCheckBox.Create(WizardForm);
-  TelemetryCheckBox.Parent := TelemetryPage.Surface;
-  TelemetryCheckBox.Left := 0;
-  TelemetryCheckBox.Top := TelemetryPage.SurfaceHeight - ScaleY(24);
-  TelemetryCheckBox.Width := TelemetryPage.SurfaceWidth;
-  TelemetryCheckBox.Caption := 'I agree to send anonymous usage statistics (我同意发送匿名使用统计)';
-  TelemetryCheckBox.Checked := False;
-
   // 新建一个"选择 VST3 安装目录"的向导页。
   //   · 锚点必须是 wpSelectComponents，不是 wpSelectDir —— 内置页顺序是
   //     SelectDir 先于 SelectComponents，所以要想"先让用户勾 VST3 组件，
@@ -283,13 +216,11 @@ begin
 end;
 
 // 只有勾选了 vst3 组件才显示独立目录页；未勾选时直接跳过。
-// 隐私授权页始终显示（不可跳过）。
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   if (Vst3DirPage <> nil) and (PageID = Vst3DirPage.ID) then
     Result := not WizardIsComponentSelected('vst3');
-  // TelemetryPage 永不跳过
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -297,21 +228,6 @@ var
   ChosenPath: string;
 begin
   Result := True;
-
-  // 隐私授权页：必须勾选 CheckBox 才能继续安装
-  if (TelemetryPage <> nil) and (CurPageID = TelemetryPage.ID) then
-  begin
-    if not TelemetryCheckBox.Checked then
-    begin
-      MsgBox(
-        'You must agree to send anonymous usage statistics to continue installation.' + #13#10#13#10 +
-        '您必须同意发送匿名使用统计才能继续安装。',
-        mbError, MB_OK);
-      Result := False;
-      Exit;
-    end;
-    TelemetryAgreed := True;
-  end;
 
   // VST3 目录页：Next 时校验一下，若非默认路径则给出一次性提示
   if (Vst3DirPage <> nil) and (CurPageID = Vst3DirPage.ID) then
@@ -415,23 +331,15 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ZipPath, DestPath: String;
-  TelemetryValue: Cardinal;
 begin
   if CurStep = ssPostInstall then
   begin
-    // ---------- 遥测授权：写入注册表 ----------
-    // 只有用户在隐私授权页面勾选了"同意"才写入 TelemetryEnabled=1；
-    // 否则不写入（或写入 0），客户端默认视为未授权。
-    if TelemetryAgreed then
-      TelemetryValue := 1
-    else
-      TelemetryValue := 0;
-
+    // ---------- 遥测授权：默认开启（已移除安装时的授权页面）----------
     RegWriteDWordValue(
       HKEY_CURRENT_USER,
       'Software\iisaacbeats\Y2Kmeter',
       'TelemetryEnabled',
-      TelemetryValue);
+      1);
 
     // ---------- Milkdrop 预设与纹理：始终解压到 AppData，不绑定组件 ----------
     //   v2.5.6: Standalone 和 VST3 共享 AppData 中的预设/纹理，

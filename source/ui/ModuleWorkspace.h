@@ -178,6 +178,11 @@ public:
     void setPopOutEnabled(bool enabled) noexcept;
     bool isPopOutEnabled() const noexcept { return popOutEnabled_; }
 
+    // 裸模式：隐藏卡片外壳（标题栏/边框/关闭/弹出按钮），内容区铺满整个面板。
+    // 仅 milkdrop-only 插件变体使用。
+    void setBareMode(bool bare) noexcept { if (bareMode_ == bare) return; bareMode_ = bare; repaint(); }
+    bool isBareMode() const noexcept { return bareMode_; }
+
     std::function<void(ModulePanel&)> onBoundsChangedByUser;
     std::function<void(ModulePanel&)> onBoundsDragging;   // 拖拽过程中持续回调（吸附预览用）
     std::function<void(ModulePanel&)> onCloseClicked;
@@ -245,6 +250,7 @@ private:
     static constexpr int edgeHotSize     = 8;
 
 private:
+    bool bareMode_ = false;        // 裸模式：隐藏卡片外壳（milkdrop-only 变体）
     bool isFloating_ = false;      // 当前是否处于浮动窗口态
     bool floatingLayoutLocked_ = false; // 浮动窗口态下由 Editor 下发的全局布局锁定状态
     bool popOutEnabled_ = true;    // 弹出按钮是否可用（插件模式下由 workspace 关闭）
@@ -431,6 +437,11 @@ public:
     // 隐藏/显示"白色底框 + 底部控制区"（右下角 Hide 按钮驱动，也可外部调用）
     void setChromeVisible(bool shouldBeVisible);
     bool isChromeVisible() const noexcept { return chromeVisible; }
+
+    // 极简模式（milkdrop-only 插件变体）：隐藏底部 toolbar、canvas 满铺。
+    // 不触发 onChromeVisibleChanged（避免 auto-hide 状态机副作用）。
+    void setMinimalMode(bool minimal) noexcept { if (minimalMode_ == minimal) return; minimalMode_ = minimal; resized(); repaint(); }
+    bool isMinimalMode() const noexcept { return minimalMode_; }
 
     // ======================================================
     // 布局锁定态（v1.8.3 新增）
@@ -684,6 +695,9 @@ private:
     static constexpr int gridSize       = 8;
     static constexpr int margin         = 0;   // 0 = 模块可以紧贴窗口边框
     static constexpr int toolbarHeight  = 36;
+
+    // 极简模式（milkdrop-only 插件变体）：隐藏 toolbar、canvas 满铺。
+    bool minimalMode_ = false;
     // 注：原先这里还有 defaultModuleW/H 两个 workspace 级常量，现已废弃。
     //   每个模块的"初始大小"由派生类在构造里调用 ModulePanel::setDefaultSize
     //   自行声明，Workspace 通过 panel->getDefaultWidth/Height 或

@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 2.7.5 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.7.6 LANGUAGES C CXX)
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -365,7 +365,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.7.5
+VERSION 2.7.6
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -400,6 +400,48 @@ VERSION 2.7.5
 )
 
 juce_generate_juce_header(Y2Kmeter)
+
+# ==========================================================
+# Y2Kmeter_milkdrop —— Milkdrop-only 插件变体
+#   整个窗口 = 单个满屏 Milkdrop 实时可视化模块（VST3；macOS 额外 AU）。
+#   与 Y2Kmeter 共享同一批源码，通过 Y2KMETER_MILKDROP_ONLY 编译宏区分行为。
+#   仅作为插件形态存在（不进宿主 Standalone，故不生成 Standalone 目标）。
+# ==========================================================
+set(Y2KM_MILKDROP_FORMATS VST3)
+if (APPLE)
+  list(APPEND Y2KM_MILKDROP_FORMATS AU)
+endif()
+
+juce_add_plugin(
+Y2Kmeter_milkdrop
+        PRODUCT_NAME "Y2Kmeter_milkdrop"
+        PLUGIN_NAME "Y2Kmeter_milkdrop"
+        # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
+        BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
+        VERSION 2.7.6
+        COMPANY_NAME "iisaacbeats.cn"
+        PLUGIN_MANUFACTURER_CODE Y2KM
+        PLUGIN_CODE Y2Kd
+        FORMATS ${Y2KM_MILKDROP_FORMATS}
+        # macOS 下展开为 ICON_BIG/ICON_SMALL，其它平台为空
+        ${Y2KM_ICON_PLUGIN_ARGS}
+        VST3_CATEGORIES "Analyzer" "Fx"
+        IS_SYNTH FALSE
+        NEEDS_MIDI_INPUT FALSE
+        NEEDS_MIDI_OUTPUT FALSE
+        VST3_AUTO_MANIFEST FALSE
+        COPY_PLUGIN_AFTER_BUILD TRUE
+)
+
+juce_generate_juce_header(Y2Kmeter_milkdrop)
+
+# 构建 Y2Kmeter_All（JUCE 为完整版生成的聚合 target，见 JUCEUtils.cmake 的
+# add_custom_target(${target}_All)）时，顺带把 milkdrop 变体也一并编译，
+# 避免后续版本漏编该插件。add_dependencies 只让 Y2Kmeter_All 在构建前额外
+# 构建 milkdrop 的聚合 target，不改变其它 target 的依赖，两插件相互独立。
+if (TARGET Y2Kmeter_All AND TARGET Y2Kmeter_milkdrop_All)
+  add_dependencies(Y2Kmeter_All Y2Kmeter_milkdrop_All)
+endif()
 
 # 字体资源打包：
 #   - SilkscreenRegular.ttf ← Silkscreen 像素英文字体
@@ -455,8 +497,7 @@ if (APPLE AND NOT EXISTS "${Y2KM_PROJECTM_BIN_MACOS}/libprojectM-4.dylib")
                       "参考：cmake -S <projectm-src> -B <build> -DBUILD_SHARED_LIBS=ON -DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' && cmake --install <build> --prefix <install>")
 endif()
 
-target_compile_definitions(Y2Kmeter
-  PUBLIC
+set(Y2KM_COMMON_COMPILE_DEFS
     JUCE_VST3_CAN_REPLACE_VST2=0
     # 关闭 JUCE 内置的 ARA / LV2 宿主集成。
     #   · 本项目既不作为 ARA/LV2 宿主、也不作为 ARA 插件运行，
@@ -481,12 +522,18 @@ target_compile_definitions(Y2Kmeter
     # 因此不再启用 JUCE_WEB_BROWSER。如果未来其他模块需要，可以按需重新打开。
 )
 
+target_compile_definitions(Y2Kmeter PUBLIC ${Y2KM_COMMON_COMPILE_DEFS})
+target_compile_definitions(Y2Kmeter_milkdrop PUBLIC ${Y2KM_COMMON_COMPILE_DEFS})
+# Milkdrop-only 变体：Editor 只显示单个满屏 Milkdrop 模块（VST3/AU）。
+target_compile_definitions(Y2Kmeter_milkdrop PRIVATE Y2KMETER_MILKDROP_ONLY=1)
+
 # MSVC: 强制按 UTF-8 解析源码，支持中文注释与字符串
 if (MSVC)
   target_compile_options(Y2Kmeter PRIVATE /utf-8)
+  target_compile_options(Y2Kmeter_milkdrop PRIVATE /utf-8)
 endif()
 
-target_sources(Y2Kmeter PRIVATE
+set(Y2KM_PLUGIN_SOURCES
   PluginProcessor.cpp
   PluginProcessor.h
   PluginEditor.cpp
@@ -512,6 +559,8 @@ target_sources(Y2Kmeter PRIVATE
   source/ui/ModulePanel.cpp
   source/ui/ModuleWorkspace.h
   source/ui/ModuleWorkspace.cpp
+  # Milkdrop-only 宿主自动化参数定义（仅 milkdrop 变体使用，完整版不编译其内容）
+  source/ui/MilkdropParamIds.h
   # 阶段1 性能改造：统一 UI 帧时钟节拍器（支持自适应降频）
   #   · 当前不强制接线，各模块仍旧在 AnalyserHub::startFrameDispatcher 的
   #     驱动下 onFrame 重绘；但源文件先入库，便于后续分阶段迁移。
@@ -568,6 +617,9 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/network/UpdateChecker.cpp
 )
 
+target_sources(Y2Kmeter PRIVATE ${Y2KM_PLUGIN_SOURCES})
+target_sources(Y2Kmeter_milkdrop PRIVATE ${Y2KM_PLUGIN_SOURCES})
+
 # ==========================================================
 # macOS 专属源文件：桌面音频采集 + 音频转储调试 + Milkdrop 子窗口绑定
 #   · MacDesktopAudioCapture.h/.mm —— ScreenCaptureKit 桌面音频采集
@@ -576,7 +628,7 @@ source/ui/modules/OscilloscopeWaveModule.cpp
 #   · Windows 构建中完全不编译这些文件，保持主干零影响。
 # ==========================================================
 if (APPLE)
-  target_sources(Y2Kmeter PRIVATE
+  set(Y2KM_PLUGIN_SOURCES_APPLE
     source/standalone/MacDesktopAudioCapture.h
     source/standalone/MacDesktopAudioCapture.mm
     source/standalone/AudioDumpRecorder.h
@@ -584,6 +636,8 @@ if (APPLE)
     source/ui/modules/MilkdropModule_mac.h
     source/ui/modules/MilkdropModule_mac.mm
   )
+  target_sources(Y2Kmeter PRIVATE ${Y2KM_PLUGIN_SOURCES_APPLE})
+  target_sources(Y2Kmeter_milkdrop PRIVATE ${Y2KM_PLUGIN_SOURCES_APPLE})
 endif()
 
 target_include_directories(Y2Kmeter PRIVATE
@@ -591,7 +645,12 @@ target_include_directories(Y2Kmeter PRIVATE
   ${Y2KM_PROJECTM_INCLUDE}
 )
 
-target_link_libraries(Y2Kmeter PRIVATE
+target_include_directories(Y2Kmeter_milkdrop PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${Y2KM_PROJECTM_INCLUDE}
+)
+
+set(Y2KM_COMMON_LINK_LIBS
   Y2Kmeter_BinaryData
   juce::juce_audio_utils
   juce::juce_dsp
@@ -606,12 +665,16 @@ target_link_libraries(Y2Kmeter PRIVATE
   juce::juce_opengl
 )
 
+target_link_libraries(Y2Kmeter PRIVATE ${Y2KM_COMMON_LINK_LIBS})
+target_link_libraries(Y2Kmeter_milkdrop PRIVATE ${Y2KM_COMMON_LINK_LIBS})
+
 # Windows 下 WASAPI Loopback 采集（source/standalone/WasapiLoopbackCapture.cpp）所需系统库：
 #   · ole32 / uuid —— CoCreateInstance / IID_IMMDeviceEnumerator 等 COM 符号
 #   · avrt         —— AvSetMmThreadCharacteristics（把采集线程提升为 Pro Audio 优先级，
 #                      减少 loopback 丢帧；未启用 loopback 时不会调用，纯开销 0）
 if (WIN32)
   target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt)
+  target_link_libraries(Y2Kmeter_milkdrop PRIVATE ole32 uuid avrt)
 endif()
 
 # ==========================================================
@@ -624,6 +687,12 @@ endif()
 # ==========================================================
 if (APPLE)
   target_link_libraries(Y2Kmeter PRIVATE
+    "-framework ScreenCaptureKit"
+    "-framework AVFoundation"
+    "-framework CoreMedia"
+    "-framework Foundation"
+  )
+  target_link_libraries(Y2Kmeter_milkdrop PRIVATE
     "-framework ScreenCaptureKit"
     "-framework AVFoundation"
     "-framework CoreMedia"
@@ -642,8 +711,13 @@ endif()
 # ==========================================================
 if (MSVC)
   target_compile_options(Y2Kmeter PRIVATE /MP)
+  target_compile_options(Y2Kmeter_milkdrop PRIVATE /MP)
 
   target_compile_options(Y2Kmeter PRIVATE
+    $<$<CONFIG:Debug>:/Z7>
+    $<$<CONFIG:RelWithDebInfo>:/Z7>
+  )
+  target_compile_options(Y2Kmeter_milkdrop PRIVATE
     $<$<CONFIG:Debug>:/Z7>
     $<$<CONFIG:RelWithDebInfo>:/Z7>
   )
@@ -651,8 +725,14 @@ if (MSVC)
   target_compile_options(Y2Kmeter PRIVATE
     $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /Gy /Gw>
   )
+  target_compile_options(Y2Kmeter_milkdrop PRIVATE
+    $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /Gy /Gw>
+  )
 
   target_link_options(Y2Kmeter PRIVATE
+    $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>
+  )
+  target_link_options(Y2Kmeter_milkdrop PRIVATE
     $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>
   )
 
@@ -666,7 +746,7 @@ if (Y2K_ENABLE_LTO)
   include(CheckIPOSupported)
   check_ipo_supported(RESULT Y2K_IPO_SUPPORTED OUTPUT Y2K_IPO_ERROR LANGUAGES CXX)
   if (Y2K_IPO_SUPPORTED)
-    message(STATUS "Y2Kmeter: LTO/IPO enabled for Release, RelWithDebInfo, and MinSizeRel")
+    message(STATUS "Y2Kmeter: LTO/IPO enabled for Release and MinSizeRel (RelWithDebInfo excluded for faster dev builds)")
   else()
     message(WARNING "Y2Kmeter: LTO/IPO requested but not supported by this toolchain: ${Y2K_IPO_ERROR}")
   endif()
@@ -678,8 +758,9 @@ function(y2k_apply_release_lto target_name)
   endif()
 
   if (Y2K_ENABLE_LTO AND Y2K_IPO_SUPPORTED)
+    # 只在 Release / MinSizeRel 开 LTO；RelWithDebInfo 是日常开发/排障配置，
+    # LTO（/GL + /LTCG）会拖慢编译与链接，开发迭代应关闭。
     set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
     set_property(TARGET "${target_name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL TRUE)
   endif()
 endfunction()
@@ -739,7 +820,11 @@ foreach(_y2k_target IN ITEMS
     Y2Kmeter
     Y2Kmeter_SharedCode
     Y2Kmeter_VST3
-    Y2Kmeter_Standalone)
+    Y2Kmeter_Standalone
+    Y2Kmeter_milkdrop
+    Y2Kmeter_milkdrop_SharedCode
+    Y2Kmeter_milkdrop_VST3
+    Y2Kmeter_milkdrop_AU)
   y2k_apply_release_lto("${_y2k_target}")
   y2k_apply_release_pgo("${_y2k_target}")
 endforeach()
@@ -952,6 +1037,12 @@ if (APPLE)
   if (TARGET Y2Kmeter_AU)
     y2km_deploy_projectm_into_bundle(Y2Kmeter_AU SKIP_PRESETS)
   endif()
+  if (TARGET Y2Kmeter_milkdrop_VST3)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_milkdrop_VST3 SKIP_PRESETS)
+  endif()
+  if (TARGET Y2Kmeter_milkdrop_AU)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_milkdrop_AU SKIP_PRESETS)
+  endif()
 endif()
 
 # ==========================================================
@@ -1039,6 +1130,14 @@ if (WIN32)
       "VST3"
       SKIP_PRESETS)
   endif()
+
+  # Milkdrop-only VST3：同样只拷贝 projectM DLL，预设/纹理与完整版共享 AppData。
+  if (TARGET Y2Kmeter_milkdrop_VST3)
+    y2km_copy_projectm_runtime(Y2Kmeter_milkdrop_VST3
+      "$<TARGET_FILE_DIR:Y2Kmeter_milkdrop_VST3>"
+      "VST3-milkdrop"
+      SKIP_PRESETS)
+  endif()
 endif()
 
 # ==========================================================
@@ -1065,4 +1164,20 @@ if (WIN32 AND TARGET Y2Kmeter_VST3)
 
   # 预设/纹理不再随 VST3 部署到系统目录；改为集中存放在
   # {userappdata}\Y2Kmeter\，由安装包一次性解压，Standalone 和 VST3 共享。
+endif()
+
+# Milkdrop-only VST3 系统部署：projectM DLL 同步到系统 VST3 目录。
+# 预设/纹理与完整版共享 {userappdata}\Y2Kmeter\（由完整版安装包 seed）。
+if (WIN32 AND TARGET Y2Kmeter_milkdrop_VST3)
+  set(Y2KM_MILKDROP_VST3_INSTALL_DEST
+      "$ENV{CommonProgramFiles}/VST3/Y2Kmeter_milkdrop.vst3/Contents/x86_64-win")
+
+  foreach(_dll IN LISTS Y2KM_PROJECTM_DLLS)
+    add_custom_command(TARGET Y2Kmeter_milkdrop_VST3 POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${_dll}" "${Y2KM_MILKDROP_VST3_INSTALL_DEST}/"
+      COMMENT "Y2Kmeter_milkdrop[VST3 deploy]: copy $<PATH:GET_FILENAME,${_dll}> to system VST3 dir"
+      VERBATIM
+    )
+  endforeach()
 endif()

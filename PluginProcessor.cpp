@@ -96,6 +96,13 @@ Y2KmeterAudioProcessor::Y2KmeterAudioProcessor()
                 });
         });
     }
+
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // Milkdrop-only：创建宿主自动化参数树。
+    // APVTS 构造函数内部会 addParameterGroup 到 *this，宿主即可枚举并自动化。
+    apvts = std::make_unique<juce::AudioProcessorValueTreeState>(
+        *this, nullptr, "Y2KmeterMilkdropParams", MilkdropParams::createLayout());
+#endif
 }
 
 Y2KmeterAudioProcessor::~Y2KmeterAudioProcessor() {}
@@ -404,8 +411,22 @@ juce::AudioProcessorEditor* Y2KmeterAudioProcessor::createEditor()
 }
 bool Y2KmeterAudioProcessor::hasEditor() const { return true; }
 
-const juce::String Y2KmeterAudioProcessor::getName() const { return "Y2Kmeter"; }
-bool Y2KmeterAudioProcessor::acceptsMidi()  const { return false; }
+const juce::String Y2KmeterAudioProcessor::getName() const
+{
+#ifdef Y2KMETER_MILKDROP_ONLY
+    return "Y2Kmeter_milkdrop";
+#else
+    return "Y2Kmeter";
+#endif
+}
+bool Y2KmeterAudioProcessor::acceptsMidi() const
+{
+#ifdef Y2KMETER_MILKDROP_ONLY
+    return true;   // milkdrop-only 接入宿主 MIDI CC / automation
+#else
+    return false;
+#endif
+}
 bool Y2KmeterAudioProcessor::producesMidi() const { return false; }
 bool Y2KmeterAudioProcessor::isMidiEffect() const { return false; }
 double Y2KmeterAudioProcessor::getTailLengthSeconds() const { return 0.0; }
@@ -530,6 +551,12 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
         }
     }
 
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // Milkdrop-only：把参数树 state 作为 <Y2KmeterMilkdropParams> 子节点嵌入，随宿主工程持久化。
+    if (apvts != nullptr)
+        root.appendChild (apvts->copyState(), nullptr);
+#endif
+
     if (auto xml = root.createXml())
         juce::AudioProcessor::copyXmlToBinary(*xml, destData);
 }
@@ -541,6 +568,16 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
 
     const auto root = juce::ValueTree::fromXml(*xml);
     if (! root.isValid() || ! root.hasType("PBEQ_State")) return;
+
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // Milkdrop-only：恢复参数树 state（旧存档缺失时保持默认值）。
+    if (apvts != nullptr)
+    {
+        const auto paramsState = root.getChildWithName (apvts->state.getType());
+        if (paramsState.isValid())
+            apvts->replaceState (paramsState);
+    }
+#endif
 
     if (root.hasProperty ("analysisInputGainDb"))
         setAnalysisInputGainDb ((float) (double) root.getProperty ("analysisInputGainDb", 0.0));

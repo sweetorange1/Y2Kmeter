@@ -212,13 +212,18 @@ public:
 
     // === 焦点与叠加层交互 ===
     void setFocusVisual(bool shouldFocus);
+    bool isFocused() const noexcept { return focused_; }  ///< overlay 控制栏当前是否可见（供 Editor 同步 resize 斜线显隐）
     void touchOverlayIdleTimer() { lastInteractionTime_ = juce::Time::getMillisecondCounter(); }
     void checkOverlayAutoHide();  ///< 由 GLView::timerCallback 在 UI 线程轮询调用
     void checkAutoMode();         ///< 由 GLView::timerCallback 在 UI 线程轮询，自动切换预设
 
     // === 自动轮播模式 ===
     bool isAutoModeActive() const noexcept { return isAutoMode_; }
+    float getAutoIntervalSeconds() const noexcept { return autoIntervalSeconds_; }
     void toggleAutoMode();
+    void applyAutoInterval(float seconds);  // 供宿主自动化直接设置轮播间隔
+    // 宿主自动化 pull 修改 Editor 全局状态后，刷新本地缓存与二级面板控件。
+    void refreshStateFromEditor();
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
     void mouseMove(const juce::MouseEvent& e) override;
@@ -479,7 +484,6 @@ private:
     juce::Rectangle<int> getAutoRowBounds(juce::Rectangle<int> topBar) const;
     juce::Rectangle<int> getSliderBounds(juce::Rectangle<int> autoRow) const;
     void updateAutoIntervalFromSlider(float proportion);
-    void applyAutoInterval(float seconds);
 
     // ---- 整体染色控制（color 按钮 + RGB/Bright 控制器）----
     void toggleColorPanel();                                            ///< 展开/收起染色控制器

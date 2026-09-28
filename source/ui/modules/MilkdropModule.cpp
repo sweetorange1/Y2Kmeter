@@ -1616,7 +1616,10 @@ void MilkdropModule::paint(juce::Graphics& g) {
   // Editor::renderOpenGL 已经将 projectM 帧渲染到 Editor CachedImage FBO 中
   // 本模块内容区屏幕坐标对应的区域。这里绘制卡片外壳（边框、标题栏、关闭按钮），
   // 内容区保持透明以保留 GPU 渲染的 projectM 帧。
-  const auto bounds = getLocalBounds();
+  // 裸模式（milkdrop-only）下跳过卡片外壳，让 projectM 帧铺满整个面板。
+  if (! isBareMode())
+  {
+    const auto bounds = getLocalBounds();
 
   // 1. 像素凸起窗口边框（边框必须不透明，内容区必须透明以透出 projectM 帧）
   //   · macOS：Editor GL 未启用，GLView 自己的 GL surface 高于 paint，用不透明 face。
@@ -1670,6 +1673,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
     if (popOutButtonPressed_) popBtnText.translate(1, 1);
     g.drawText(isFloating() ? "=" : "-", popBtnText, juce::Justification::centred, false);
   }
+  } // if (!isBareMode())
 
   // 4. 内容区叠加控件（不填充背景 — projectM 帧已由 GPU 渲染）
   auto content = getContentBounds();
@@ -2809,9 +2813,9 @@ void MilkdropModule::checkOverlayAutoHide()
   if (!focused_)
     return;
 
-  // color / effects / auto 面板展开期间不自动隐藏，避免用户调整参数时
-  // 控制台中途消失。
-  if (isColorPanelOpen_ || isEffectsPanelOpen_ || isAutoMode_)
+  // color / effects 面板展开期间不自动隐藏，避免用户调整参数时控制台中途消失。
+  // auto 模式下允许自动隐藏：进入"纯粹可视化"状态，hover 时重新显示控制栏。
+  if (isColorPanelOpen_ || isEffectsPanelOpen_)
     return;
 
   // overlay 无交互超过 4 秒 → 自动隐藏
@@ -3094,7 +3098,11 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
 
     setFocusVisual(true);
 
-    if (isPanelLayoutLocked(*this))
+    // 布局锁定只锁"布局交互"（拖拽/缩放/关闭，已在基类 ModulePanel::mouseDown
+    // 内部单独拦截）；模块内容按钮（预设切换/color/收藏等）不应被锁。
+    // 裸模式（milkdrop-only）下即使布局锁定，仍要放行 overlay 按钮，
+    // 否则整个 milkdrop-only 插件的按钮全部失效（键盘切换预设走 keyPressed 不受影响）。
+    if (isPanelLayoutLocked(*this) && ! isBareMode())
         return;
 
     // 内容区 overlay 按钮点击（顶部控制栏 + 右下角收藏/切换按钮）
@@ -3122,6 +3130,11 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     if (isDraggingSlider_)
     {
         isDraggingSlider_ = false;
+#ifdef Y2KMETER_MILKDROP_ONLY
+        // 拖动结束提交：把 auto_interval 回写宿主参数，避免 10Hz pull 反向覆盖。
+        if (editor_ != nullptr)
+            editor_->pushMilkdropAutomationParams();
+#endif
         repaint();
         glView->repaint();
         return;
@@ -4555,6 +4568,11 @@ void MilkdropModule::toggleAutoMode()
   layoutContent(getContentBounds());
   repaint();
   glView->repaint();
+#ifdef Y2KMETER_MILKDROP_ONLY
+  // UI 修改 auto 状态 → 回写宿主参数，避免 10Hz pull 反向覆盖。
+  if (editor_ != nullptr)
+    editor_->pushMilkdropAutomationParams();
+#endif
 }
 
 void MilkdropModule::checkAutoMode()
@@ -4581,6 +4599,11 @@ void MilkdropModule::applyAutoInterval(float seconds)
   lastAutoSwitchTime_ = juce::Time::getMillisecondCounter();
   repaint();
   glView->repaint();
+#ifdef Y2KMETER_MILKDROP_ONLY
+  // UI 修改 auto 间隔 → 回写宿主参数，避免 10Hz pull 反向覆盖。
+  if (editor_ != nullptr)
+    editor_->pushMilkdropAutomationParams();
+#endif
 }
 
 void MilkdropModule::updateAutoIntervalFromSlider(float proportion)
@@ -4596,6 +4619,11 @@ void MilkdropModule::updateAutoIntervalFromSlider(float proportion)
   {
     autoIntervalSeconds_ = seconds;
     // 不重置计时器：用户拖动期间不触发自动切换
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // 拖动过程中实时回写宿主参数，避免 10Hz pull 用旧参数把值覆盖回去。
+    if (editor_ != nullptr)
+      editor_->pushMilkdropAutomationParams();
+#endif
   }
 }
 
@@ -4815,6 +4843,17 @@ void MilkdropModule::applyVisualToEditor()
 {
   if (editor_ != nullptr)
     editor_->SetMilkdropVisualState(visualState_);
+}
+
+void MilkdropModule::refreshStateFromEditor()
+{
+  // 宿主自动化 pull 修改 Editor 全局状态后调用：把 Editor 的 visual/wave
+  // 状态读回本地缓存并重绘，让二级面板（染色/波形）控件实时反映新值。
+  syncVisualFromEditor();
+  syncWaveFromEditor();
+  repaint();
+  if (glView != nullptr)
+    glView->repaint();
 }
 
 // ==========================================================

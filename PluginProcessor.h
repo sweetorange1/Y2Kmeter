@@ -5,6 +5,9 @@
 
 #include "source/ui/modules/MilkdropVisualState.h"
 #include "source/ui/modules/MilkdropWaveState.h"
+#ifdef Y2KMETER_MILKDROP_ONLY
+#include "source/ui/MilkdropParamIds.h"
+#endif
 
 // 前向声明（AnalyserHub 的完整头下沉到 .cpp，规避 MSVC 多文件同进程编译时
 // include guard 跨 TU 串扰问题）
@@ -172,6 +175,13 @@ public:
 
     bool bypassed = false;
 
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // ---- Milkdrop-only：宿主自动化参数树 ----
+    // 暴露 Milkdrop 渲染参数（color/effects/wave/tweak/auto + 预设切换开关），
+    // 供宿主通过 MIDI CC / automation 控制。完整版 Y2Kmeter 不包含此接口。
+    juce::AudioProcessorValueTreeState& getApvts() noexcept { return *apvts; }
+#endif
+
 private:
     // pimpl：头里只用前向声明的指针，完整类型只在 .cpp 中可见
     std::unique_ptr<AnalyserHub> analyserHub;
@@ -231,6 +241,11 @@ private:
     juce::AudioBuffer<float> analysisGainBufferStereo;
     juce::HeapBlock<float>   analysisGainBufferMono;
     int                      analysisGainBufferMonoCapacity = 0;
+
+#ifdef Y2KMETER_MILKDROP_ONLY
+    // Milkdrop-only：宿主自动化参数树（用 unique_ptr 延迟构造，APVTS 需绑定 *this）。
+    std::unique_ptr<juce::AudioProcessorValueTreeState> apvts;
+#endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessor)
 };
