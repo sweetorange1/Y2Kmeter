@@ -139,6 +139,19 @@ namespace PinkXP
     // 坐标轴刻度专用字体：不做放大，保持原始 height
     juce::Font getAxisFont(float height, int styleFlags = juce::Font::plain);
 
+    // ==========================================================
+    // UI 密度缩放（低分辨率适配）
+    //   低分辨率屏幕上，标题栏 / 工具栏 / 模块面板 chrome 的固定像素
+    //   尺寸会挤占过多仪表显示区。这里提供全局缩放因子，让所有 chrome
+    //   尺寸与正文字号按屏幕逻辑分辨率统一缩放（0.75 ~ 1.3）。
+    //   · 仅在 UI 线程读写（所有布局/绘制都发生在 UI 线程）。
+    //   · getFont 内部会自动乘上该因子；坐标轴刻度 getAxisFont 不缩放。
+    // ==========================================================
+    float uiScale() noexcept;                                   // 当前密度缩放因子
+    int   ui (int px) noexcept;                                 // round(px * uiScale())，最小 1
+    void  setUiScale (float s) noexcept;                        // 由 Editor 按显示器分辨率设置
+    float uiScaleForDisplay (const juce::Rectangle<int>& userArea) noexcept; // 按逻辑分辨率计算建议缩放
+
     // 格式化频率读数：<1kHz 显示 "xxx Hz"，>=1kHz 显示 "x.x kHz"
     juce::String formatFreqHz(float hz);
 

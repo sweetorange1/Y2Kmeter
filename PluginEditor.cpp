@@ -226,7 +226,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-const int versionW = versionFont.getStringWidth ("v2.7.4");
+const int versionW = versionFont.getStringWidth ("v2.7.5");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -251,7 +251,7 @@ const int versionW = versionFont.getStringWidth ("v2.7.4");
     juce::Rectangle<int> getFloatingCloseButtonRect() const
     {
         constexpr int margin = 4;
-        constexpr int size   = 18; // 与 Editor::closeButtonSize 保持一致
+        const int size = PinkXP::ui(18); // 与 Editor::closeButtonSize 保持一致
         return { getWidth() - margin - size, margin, size, size };
     }
 
@@ -260,14 +260,14 @@ const int versionW = versionFont.getStringWidth ("v2.7.4");
     {
         const int x = 28;
         const int w = juce::jmax (0, cachedTitleTextW);
-        return { x, 0, w, juce::jmin (26, getHeight()) };
+        return { x, 0, w, getHeight() };
     }
 
     void paint (juce::Graphics& g) override
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.4";
+const juce::String versionText = "v2.7.5";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -283,7 +283,7 @@ const juce::String versionText = "v2.7.4";
 
         const int x0 = 28;
         const int y  = 0;
-        const int h  = juce::jmin (26, getHeight());
+        const int h  = getHeight();
 
         // chrome 隐藏态：文字淡淡贴在底图上，hover 时略亮并加下划线
         const float textAlpha = titleTextHovered ? 0.95f : 0.55f;
@@ -829,6 +829,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
     initLookAndFeel();
 
+    // 0.5) 低分辨率适配：先按主显示器 userArea 预估 UI 密度缩放，让紧接着的
+    //   setSize()/loadInitialModules() 就用上正确的缩放 chrome 布局。
+    //   （此时 Editor 尚未挂到顶层窗口，无法确定最终所在显示器，故用主显示器
+    //    先给一个合理初值；visibilityChanged 会按实际窗口所在显示器再校准一次。）
+    if (auto* primary = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        PinkXP::setUiScale (PinkXP::uiScaleForDisplay (primary->userArea));
+
     // 1) 先创建 ChromeHiddenOverlay 并以 invisible 状态加入 —— 让它成为"最底层"子组件
     //    （后续 workspace / 其它组件 addAndMakeVisible 时都会排到它之上）。
     //    这样 chrome 隐藏态下，overlay 的抬头文字和浮动关闭按钮会被模块自然遮挡。
@@ -1362,7 +1369,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         //   setChromeVisible，此时 Editor 还未上屏，不应改窗口尺寸。
         // ------------------------------------------------------------
         constexpr int kToolbarHeight = 36; // 与 ModuleWorkspace::toolbarHeight 保持一致
-        const int shrink = titleBarHeight + kToolbarHeight; // 62px
+        const int shrink = PinkXP::ui(titleBarHeight) + PinkXP::ui(kToolbarHeight); // 随 UI 密度缩放
 
         auto* topComp = getTopLevelComponent();
         const bool isStandalone = juce::JUCEApplicationBase::isStandaloneApp()
@@ -3357,7 +3364,7 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-const juce::String versionText = "v2.7.4";
+const juce::String versionText = "v2.7.5";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3365,7 +3372,7 @@ const juce::String versionText = "v2.7.4";
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-        const int versionW = versionFont.getStringWidth ("v2.7.4");
+        const int versionW = versionFont.getStringWidth ("v2.7.5");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -3490,12 +3497,12 @@ void Y2KmeterAudioProcessorEditor::resized()
     //   "精简抬头"（只有软件名 + 版本号 + 官网文字，无右侧最小化/固定/关闭按钮），
     //   宿主窗口已提供自己的系统标题栏和边框，不会与此抬头冲突。
     if (! chromeDim)
-        r.removeFromTop (titleBarHeight);
+        r.removeFromTop (PinkXP::ui(titleBarHeight));
     workspace->setBounds (r);
 
     // 浮层固定在顶部，与 TitleBar 同尺寸（Editor 同宽 × titleBarHeight）。
     if (chromeHiddenOverlay != nullptr)
-        chromeHiddenOverlay->setBounds (0, 0, getWidth(), titleBarHeight);
+        chromeHiddenOverlay->setBounds (0, 0, getWidth(), PinkXP::ui(titleBarHeight));
 
     // 教程覆盖层始终铺满整个 Editor
     if (tutorialOverlay != nullptr && tutorialOverlay->isVisible())
@@ -3590,6 +3597,10 @@ void Y2KmeterAudioProcessorEditor::parentHierarchyChanged()
 void Y2KmeterAudioProcessorEditor::visibilityChanged()
 {
     processor.setAnalysisActive(true);
+
+    // 低分辨率适配：首次上屏时按所在显示器分辨率计算 UI 密度缩放，
+    // 让标题栏 / 工具栏 / 模块 chrome 在低分辨率下更紧凑。
+    updateUiScaleForCurrentDisplay();
 
     // 默认启用"固定窗口置顶"（alwaysOnTopActive 初始 true）：
     //   · 仅在 Standalone 下应用（插件模式下顶层是宿主窗口，setAlwaysOnTop
@@ -3711,7 +3722,7 @@ void Y2KmeterAudioProcessorEditor::visibilityChanged()
 // ==========================================================
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getTitleBarBounds() const
 {
-    return { 0, 0, getWidth(), titleBarHeight };
+    return { 0, 0, getWidth(), PinkXP::ui(titleBarHeight) };
 }
 
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getTitleTextBounds() const
@@ -3729,41 +3740,85 @@ juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getTitleTextBounds() const
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getCloseButtonBounds() const
 {
     auto tb = getTitleBarBounds();
-    const int y = tb.getY() + (tb.getHeight() - closeButtonSize) / 2;
-    return { tb.getRight() - closeButtonMargin - closeButtonSize, y,
-             closeButtonSize, closeButtonSize };
+    const int s = PinkXP::ui(closeButtonSize);
+    const int y = tb.getY() + (tb.getHeight() - s) / 2;
+    return { tb.getRight() - closeButtonMargin - s, y, s, s };
 }
 
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getPinButtonBounds() const
 {
     // 关闭按钮左侧（中间那一个）：固定（置顶）按钮
     auto cb = getCloseButtonBounds();
-    return { cb.getX() - titleButtonGap - closeButtonSize, cb.getY(),
-             closeButtonSize, closeButtonSize };
+    const int s = PinkXP::ui(closeButtonSize);
+    const int gap = PinkXP::ui(titleButtonGap);
+    return { cb.getX() - gap - s, cb.getY(), s, s };
 }
 
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getMinimiseButtonBounds() const
 {
     // Pin 按钮左侧（中间那一个）：最小化按钮
     auto pb = getPinButtonBounds();
-    return { pb.getX() - titleButtonGap - closeButtonSize, pb.getY(),
-             closeButtonSize, closeButtonSize };
+    const int s = PinkXP::ui(closeButtonSize);
+    const int gap = PinkXP::ui(titleButtonGap);
+    return { pb.getX() - gap - s, pb.getY(), s, s };
 }
 
 // 最小化按钮左侧（最左那一个）：布局锁定按钮（v1.8.3 新增）
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getLockButtonBounds() const
 {
     auto mb = getMinimiseButtonBounds();
-    return { mb.getX() - titleButtonGap - closeButtonSize, mb.getY(),
-             closeButtonSize, closeButtonSize };
+    const int s = PinkXP::ui(closeButtonSize);
+    const int gap = PinkXP::ui(titleButtonGap);
+    return { mb.getX() - gap - s, mb.getY(), s, s };
 }
 
 juce::Rectangle<int> Y2KmeterAudioProcessorEditor::getFloatingCloseButtonBounds() const
 {
     // chrome 隐藏态下的悬浮关闭按钮：右上角，距边距 4px
     constexpr int margin = 4;
-    return { getWidth()  - margin - closeButtonSize, margin,
-             closeButtonSize, closeButtonSize };
+    const int s = PinkXP::ui(closeButtonSize);
+    return { getWidth() - margin - s, margin, s, s };
+}
+
+// ==========================================================
+// UI 密度缩放（低分辨率适配）
+//   根据顶层窗口所在显示器的逻辑分辨率计算缩放因子并写入 PinkXP 全局。
+//   只在缩放因子真正变化时触发一次 resized() + repaint()，避免频繁重排。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::updateUiScaleForCurrentDisplay()
+{
+    juce::Rectangle<int> userArea;
+
+    if (auto* top = getTopLevelComponent())
+    {
+        const auto sb = (top == this) ? getScreenBounds() : top->getScreenBounds();
+        if (auto* display = juce::Desktop::getInstance()
+                                 .getDisplays()
+                                 .getDisplayForRect (sb))
+        {
+            userArea = display->userArea;
+        }
+    }
+
+    if (userArea.isEmpty())
+    {
+        if (auto* primary = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+            userArea = primary->userArea;
+    }
+
+    const float target = PinkXP::uiScaleForDisplay (userArea);
+    if (std::abs (target - PinkXP::uiScale()) < 0.001f)
+        return;
+
+    PinkXP::setUiScale (target);
+    resized();
+    repaint();
+}
+
+void Y2KmeterAudioProcessorEditor::moved()
+{
+    juce::AudioProcessorEditor::moved();
+    updateUiScaleForCurrentDisplay();
 }
 
 // chrome 可见时恒为 1.0；chrome 隐藏时本函数已废弃（整个标题栏直接不绘制，
@@ -4611,6 +4666,11 @@ void Y2KmeterAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 void Y2KmeterAudioProcessorEditor::timerCallback()
 {
     if (workspace == nullptr) return;
+
+    // 低分辨率适配（多屏）：10Hz 轮询当前窗口所在显示器，跨屏移动或显示器
+    //   分辨率变化时自动校准 UI 密度缩放。Editor 是顶层窗口的子组件，窗口被
+    //   拖到另一台显示器时 Editor::moved() 不会触发，因此必须用轮询兜底。
+    updateUiScaleForCurrentDisplay();
 
     // v1.8.6：递减 auto-show 抑制计数器（用于 onChromeVisibleChanged 异步事件窗口保护）
     if (suppressAutoShowCounter > 0)

@@ -105,23 +105,25 @@ void ModulePanel::setTitleText(const juce::String& s)
 
 juce::Rectangle<int> ModulePanel::getTitleBarBounds() const
 {
-    // 标题栏在外框 2px 内
-    return juce::Rectangle<int>(2, 2, getWidth() - 4, titleBarHeight);
+    // 标题栏在外框 2px 内（高度随 UI 密度缩放，低分辨率下更紧凑）
+    return juce::Rectangle<int>(2, 2, getWidth() - 4, PinkXP::ui(titleBarHeight));
 }
 
 juce::Rectangle<int> ModulePanel::getCloseButtonBounds() const
 {
     auto tb = getTitleBarBounds();
-    const int y = tb.getY() + (tb.getHeight() - closeButtonSize) / 2;
-    return juce::Rectangle<int>(tb.getRight() - 4 - closeButtonSize, y, closeButtonSize, closeButtonSize);
+    const int s = PinkXP::ui(closeButtonSize);
+    const int y = tb.getY() + (tb.getHeight() - s) / 2;
+    return juce::Rectangle<int>(tb.getRight() - 4 - s, y, s, s);
 }
 
 juce::Rectangle<int> ModulePanel::getPopOutButtonBounds() const
 {
     auto cb = getCloseButtonBounds();
     constexpr int gap = 2;
-    return juce::Rectangle<int>(cb.getX() - gap - popOutButtonSize,
-                                 cb.getY(), popOutButtonSize, popOutButtonSize);
+    const int s = PinkXP::ui(popOutButtonSize);
+    return juce::Rectangle<int>(cb.getX() - gap - s,
+                                 cb.getY(), s, s);
 }
 
 void ModulePanel::setFloating(bool floating) noexcept
@@ -163,12 +165,13 @@ void ModulePanel::setPopOutEnabled(bool enabled) noexcept
 
 juce::Rectangle<int> ModulePanel::getContentBounds() const
 {
-    // 去掉外边框 2px + 标题栏高度 + 1px 分割线
+    // 去掉外边框 2px + 标题栏高度 + 1px 分割线（标题栏高度随 UI 密度缩放）
+    const int th = PinkXP::ui(titleBarHeight);
     return juce::Rectangle<int>(
         2,
-        2 + titleBarHeight + 1,
+        2 + th + 1,
         getWidth() - 4,
-        getHeight() - 4 - titleBarHeight - 1);
+        getHeight() - 4 - th - 1);
 }
 
 // 右下角 CPU 小字区域：贴着内容区右下角，宽 74px × 高 12px（留内邊 3px）
@@ -415,8 +418,9 @@ void ModulePanel::resized()
 // ----------------------------------------------------------
 ModulePanel::Edge ModulePanel::detectEdge(juce::Point<int> pos) const
 {
-    const bool nearRight  = pos.x >= getWidth()  - edgeHotSize;
-    const bool nearBottom = pos.y >= getHeight() - edgeHotSize;
+    const int hot = PinkXP::ui(edgeHotSize);
+    const bool nearRight  = pos.x >= getWidth()  - hot;
+    const bool nearBottom = pos.y >= getHeight() - hot;
 
     if (nearRight && nearBottom) return Edge::bottomRight;
     if (nearRight)                return Edge::right;

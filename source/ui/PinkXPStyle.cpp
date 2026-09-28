@@ -42,6 +42,41 @@ namespace PinkXP
             BinaryData::SilkscreenRegular_ttfSize);
     }
 
+    // ==========================================================
+    // UI 密度缩放（低分辨率适配）
+    // ==========================================================
+    static float gUiScale = 1.0f;
+
+    float uiScale() noexcept { return gUiScale; }
+
+    void setUiScale (float s) noexcept
+    {
+        gUiScale = juce::jlimit (0.75f, 1.3f, s);
+    }
+
+    int ui (int px) noexcept
+    {
+        return juce::jmax (1, juce::roundToInt ((float) px * uiScale()));
+    }
+
+    float uiScaleForDisplay (const juce::Rectangle<int>& userArea) noexcept
+    {
+        const int w = userArea.getWidth();
+        const int h = userArea.getHeight();
+        const int minDim = juce::jmin (w, h);
+
+        // 按"逻辑分辨率"分级（JUCE 的 userArea 已是 DPI 缩放后的逻辑像素，
+        // 直接反映可用的界面空间大小）：
+        //   · ≤720 / ≤768 矮屏：1280×720、1024×768 等 → 0.75 紧凑
+        //   · ≤800：1366×768、1280×800 等 → 0.8
+        //   · ≤900：1440×900、1600×900 等 → 0.9
+        //   · 更高分辨率 → 1.0 原始
+        if (h <= 720 || minDim <= 768)  return 0.75f;
+        if (h <= 800)                   return 0.80f;
+        if (h <= 900)                   return 0.90f;
+        return 1.0f;
+    }
+
     // 内部工厂：按原始 height 生成字体
     //
     // 关键说明（JUCE 8 + macOS 字体回退问题修复）：
@@ -83,7 +118,7 @@ namespace PinkXP
     juce::Font getFont(float height, int styleFlags)
     {
         const float scaled = (height >= 8.0f) ? height * 1.5f : height;
-        return makeFontRaw(scaled, styleFlags);
+        return makeFontRaw(scaled * uiScale(), styleFlags);
     }
 
     // 坐标轴/刻度专用字体：不放大，保持原始尺寸

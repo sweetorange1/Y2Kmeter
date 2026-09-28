@@ -296,7 +296,7 @@ ModuleWorkspace::ModuleWorkspace()
             });
         // 取色器定位到 workspace 左下角（toolbar 上方）
         customThemePicker.setTopLeftPosition(
-            8, getHeight() - toolbarHeight - customThemePicker.getHeight() - 6);
+            8, getHeight() - PinkXP::ui(toolbarHeight) - customThemePicker.getHeight() - 6);
     };
 
     // 底部工具栏中部：音频信号源下拉（默认只放一个占位项 "System Output (Loopback)"，
@@ -714,14 +714,14 @@ juce::Rectangle<int> ModuleWorkspace::getCanvasArea() const
     // chrome 隐藏时，canvas 满铺（不再留 toolbar 空间）
     auto r = getLocalBounds();
     if (chromeVisible)
-        r = r.withTrimmedBottom(toolbarHeight);
+        r = r.withTrimmedBottom(PinkXP::ui(toolbarHeight));
     return r.reduced(margin);
 }
 
 juce::Rectangle<int> ModuleWorkspace::getToolbarArea() const
 {
     auto r = getLocalBounds();
-    return r.removeFromBottom(toolbarHeight);
+    return r.removeFromBottom(PinkXP::ui(toolbarHeight));
 }
 
 // ----------------------------------------------------------
@@ -1768,7 +1768,7 @@ void ModuleWorkspace::mouseDoubleClick(const juce::MouseEvent& e)
 //   paint() 中仅需一次 drawImageAt，将每帧 13000+ 次 fillRect(1,1) 缩减为 1 次 blit。
 void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
 {
-    auto canvasOuter = getLocalBounds().withTrimmedBottom(toolbarHeight);
+    auto canvasOuter = getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
     const int w = canvasOuter.getWidth();
     const int h = canvasOuter.getHeight();
     if (w <= 0 || h <= 0)
@@ -1835,7 +1835,7 @@ void ModuleWorkspace::paint(juce::Graphics& g)
         rebuildCanvasBgCacheIfNeeded();
         if (canvasBgCache.isValid())
         {
-            auto canvasOuter = getLocalBounds().withTrimmedBottom(toolbarHeight);
+            auto canvasOuter = getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
             g.drawImageAt (canvasBgCache, canvasOuter.getX(), canvasOuter.getY());
         }
 
@@ -2228,9 +2228,9 @@ void ModuleWorkspace::resized()
     if (customThemePicker.isShowing())
         customThemePicker.dismiss();
 
-    // ---- 按钮尺寸（常量）----
-    constexpr int btnW = 52;
-    constexpr int btnH = 22;
+    // ---- 按钮尺寸（随 UI 密度缩放，低分辨率下更紧凑）----
+    const int btnW = PinkXP::ui(52);
+    const int btnH = PinkXP::ui(22);
     constexpr int btnMargin = 6;
 
     if (chromeVisible)
@@ -2252,7 +2252,7 @@ void ModuleWorkspace::resized()
 
         // gain 弹出控制条的滑条位置（固定在 gain 按钮上方）
         {
-            constexpr int gainPopupW = 380;
+            const int gainPopupW = PinkXP::ui(380);
             const auto toolbar = getToolbarArea();
             const int popupX = juce::jlimit (toolbar.getX() + 8,
                                              toolbar.getRight() - gainPopupW - 8,
@@ -2281,8 +2281,8 @@ void ModuleWorkspace::resized()
             tb.removeFromRight (4);
 
             // 3) 紧邻分隔线 #2 的左侧：音频源下拉 + 前缀标签
-            constexpr int sourceBoxW   = 180;
-            constexpr int sourceLabelW = 52;
+            const int sourceBoxW   = PinkXP::ui(180);
+            const int sourceLabelW = PinkXP::ui(52);
             auto sourceArea = tb.removeFromRight (sourceBoxW);
             audioSourceBox.setBounds (sourceArea.withSizeKeepingCentre (sourceBoxW, btnH));
             auto labelArea = tb.removeFromRight (sourceLabelW);
@@ -2306,11 +2306,11 @@ void ModuleWorkspace::resized()
 
         // 5) 紧邻分隔线 #1 的左侧：FPS 按钮 + FPS 标签（FPS 标签靠近下拉，按钮更靠左）
         //   · FPS 按钮文字："30FPS"/"60FPS"/"120FPS"/"∞FPS"
-        constexpr int fpsLabelW = 64;
+        const int fpsLabelW = PinkXP::ui(64);
         auto fpsLblArea = tb.removeFromRight (fpsLabelW);
         fpsLabel.setBounds (fpsLblArea.withSizeKeepingCentre (fpsLabelW, btnH));
         // FPS 按钮比通用 btnW 再宽 12px，容纳最长文字"120FPS"不挤
-        constexpr int fpsBtnW = btnW + 12; // 52 + 12 = 64
+        const int fpsBtnW = btnW + PinkXP::ui(12); // 52 + 12 = 64
         auto fpsBtnArea = tb.removeFromRight (fpsBtnW + 4);
         fpsBtn.setBounds (fpsBtnArea.withSizeKeepingCentre (fpsBtnW, btnH));
 
@@ -2351,7 +2351,7 @@ void ModuleWorkspace::resized()
             // 布局预设下拉框：与音频源下拉同高。
             //   · 弹出菜单的宽度由 PinkXPLookAndFeel::getIdealPopupMenuItemSize
             //     按实际文字宽度自适应撑开，所以这里 ComboBox 本体保持紧凑即可。
-            constexpr int layoutBoxW = 150;
+            const int layoutBoxW = PinkXP::ui(150);
             auto layoutArea = tb.removeFromRight (layoutBoxW);
             layoutPresetBox.setBounds (layoutArea.withSizeKeepingCentre (layoutBoxW, btnH));
             layoutPresetBox.setVisible (true);

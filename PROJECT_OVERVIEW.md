@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.7.4`）
+- **产品名**：`Y2Kmeter` （版本：`2.7.5`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -292,7 +292,8 @@
 - **10 种主题**：`bubblegum / starlight / cyberLilac / tangerinePop / aquaPearl / matchaSoda / winXP / crimsonNoir / voidGrey / paperGrey`。
 - **主题订阅**：`subscribeThemeChanged(cb) → token`，用于组件切主题时刷新缓存的颜色。
 - **桌面纹理共享缓存**：`getSharedDesktopTexture(w,h)` 跨实例复用（多插件实例共用同一张 Image），主题切换时 `invalidateDesktopTextureCache()`。
-- **两种字体接口**：`getFont(h)` 有 1.5x 放大（正文）；`getAxisFont(h)` 保持原大小（坐标轴刻度专用）。
+- **两种字体接口**：`getFont(h)` 有 1.5x 放大（正文），并叠加全局 UI 密度缩放 `uiScale()`（低分辨率下更紧凑）；`getAxisFont(h)` 保持原大小（坐标轴刻度专用，不缩放）。
+- **UI 密度缩放（v2.7.5 新增）**：`uiScale() / ui(px) / setUiScale() / uiScaleForDisplay(userArea)` —— 按屏幕逻辑分辨率自动分级（0.75~1.0），统一缩放标题栏 / 工具栏 / 模块 chrome 尺寸与正文字号，解决低分辨率屏幕上"非仪表部分过大、仪表区被压缩"的问题；支持多屏跨屏自动校准。
 - **悬停标尺公共辅助（v2.7.0 新增）**：`formatFreqHz(hz)` 格式化频率读数（`<1kHz → "xxx Hz"`，`≥1kHz → "x.x kHz"`）；`drawHoverRuler(g, canvas, pos, readout)` 在仪表区绘制十字线 + 鼠标右上方读数框（自动越界回退），供频谱类/时序类模块复用。
 - **默认主题（v2.7.0 变更）**：全局默认主题由 `winXP` 改为 `blackPink`（首次无存档启动时的缺省配色）。
 
@@ -3580,6 +3581,54 @@ Milkdrop 脱离态由 `GLView` 自己的本地 OpenGL 线程驱动渲染。切�
 - 删除游离目录 `assets/virtupetmodule/`（1300 个 png，v2.7.4 误提交、代码零引用）。
 - 删除空目录 `assets/Tamagotchi/`（更名残留，仅含 `.DS_Store`）。
 - `tools/tamagotchi_cutter/` → `tools/virtupet_cutter/`（切图工具旧名收尾）。
+
+---
+
+## v2.7.5：低分辨率适配 —— 全局 UI 密度缩放 + 多屏自动校准
+
+本章记录 v2.7.5 版本相对 v2.7.4 的改动：新增**全局 UI 密度缩放**机制，让标题栏 / 工具栏 / 模块面板 chrome 及正文字号按屏幕逻辑分辨率自动缩放，解决低分辨率屏幕上「非仪表部分过大、仪表区被压缩」的问题；并支持多显示器（不同分辨率）下窗口跨屏移动时自动重新校准。
+
+### 问题现象
+
+低分辨率（如 1366×768）下，标题栏（26px）、工具栏（36px）、模块标题（22px）、按钮（16~18px）等固定像素 chrome 占比较高，挤压音频仪表显示区。
+
+### 方案
+
+在 `PinkXP` 命名空间新增全局密度缩放因子 `uiScale()`（0.75 ~ 1.3），按显示器 `userArea` 逻辑分辨率分级：
+
+| 分辨率档位 | 缩放 |
+|---|---|
+| `h ≤ 720` 或 `minDim ≤ 768`（1280×720 / 1024×768 / 1366×768） | 0.75 |
+| `h ≤ 800`（1280×800） | 0.80 |
+| `h ≤ 900`（1440×900 / 1600×900） | 0.90 |
+| 更高分辨率 | 1.0 |
+
+- `getFont()` 内部乘上缩放因子（`getAxisFont` 不缩放，仪表刻度保持原大小）；
+- `ModulePanel` / `ModuleWorkspace` / `PluginEditor` 的标题栏、工具栏、按钮、内容区、边缘热区等尺寸均经 `PinkXP::ui()` 缩放；
+- 缩放只作用于 chrome 与正文字号，仪表图形本身不缩放（自动填满变大后的内容区）。
+
+### 多屏自动校准（三层）
+
+1. **构造时**：按主显示器 `userArea` 预估初值（保证首次布局即用正确缩放）；
+2. **首次显示** `visibilityChanged()`：按实际所在显示器校准；
+3. **运行时** 10Hz `timerCallback()`：轮询当前显示器，跨屏移动 / 分辨率变化后 ~100ms 内自动跟随（`updateUiScaleForCurrentDisplay` 内部有 0.001 差值防抖，常态零开销）。
+
+### 文件变更
+
+| 文件 | 主要变更 |
+|---|---|
+| [`source/ui/PinkXPStyle.h/.cpp`](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 新增 `uiScale() / ui(px) / setUiScale() / uiScaleForDisplay()`；`getFont()` 叠加缩放 |
+| [`source/ui/ModulePanel.cpp`](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 标题栏 / 关闭 / 弹出按钮 / 内容区 / 边缘热区按缩放 |
+| [`source/ui/ModuleWorkspace.cpp`](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | 工具栏高度 / 画布区 / 工具栏按钮与下拉框宽度按缩放 |
+| [`PluginEditor.h/.cpp`](/I:/Y2KMeter/PluginEditor.h) | 标题栏与四按钮几何、`resized()`、Hide/Show 收缩量、ChromeHiddenOverlay 按缩放；新增 `updateUiScaleForCurrentDisplay()`；构造 / `visibilityChanged` / `timerCallback` 三处校准 |
+| [`source/standalone/Y2KStandaloneApp.cpp`](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | 隐藏态窗口尺寸反算同步缩放，避免 Hide 后重启尺寸漂移 |
+| [`CMakeLists.txt`](/I:/Y2KMeter/CMakeLists.txt) | 版本号 2.7.4 → 2.7.5（project 与 juce_add_plugin 两处） |
+| [`Y2Kmeter_installer.iss`](/I:/Y2KMeter/Y2Kmeter_installer.iss) | `MyAppVersion` 2.7.4 → 2.7.5 |
+
+### 踩坑记录
+
+1. **`Editor::moved()` 在窗口跨屏时不触发**：Editor 是顶层窗口子组件，窗口被拖到另一台显示器时其在窗口内的相对位置不变，`moved()` 不会触发，导致缩放因子停留在旧显示器。修复：在 10Hz `timerCallback()` 里轮询当前显示器兜底（插件态 / Standalone 态统一生效）。
+2. **缩放必须早于首次布局生效**：若在 `loadInitialModules()` 之后才设缩放，模块会按未缩放的 canvas 先摆好、再留出多余间隙。修复：构造函数开头先按主显示器 `setUiScale` 预估初值。
 
 ---
 

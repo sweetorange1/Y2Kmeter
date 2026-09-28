@@ -227,6 +227,12 @@ private:
     //   · 鼠标未悬停时半透明（与底部 Hide 按钮的 dim-when-idle 语义一致）
     juce::Rectangle<int> getFloatingCloseButtonBounds() const;
 
+    // 根据当前窗口所在显示器（或主显示器）的 userArea 计算并应用 UI 密度缩放。
+    //   低分辨率屏幕会得到 <1.0 的缩放，让标题栏 / 工具栏 / 模块 chrome 更紧凑，
+    //   为音频仪表显示区让出更多空间。缩放因子变化时触发一次 resized() 重新布局。
+    void updateUiScaleForCurrentDisplay();
+    void moved() override;
+
     void handleCloseClicked();
     void handlePinClicked();       // 切换 alwaysOnTop
     void handleMinimiseClicked();  // 最小化顶层窗口

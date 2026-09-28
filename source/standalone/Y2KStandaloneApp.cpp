@@ -964,7 +964,7 @@ private:
         // 反算为 show 态等效尺寸：仅当当前处于 hide 态（Editor 的 chromeVisible=false）
         if (cachedEditor != nullptr && ! cachedEditor->isChromeVisible())
         {
-            constexpr int kChromeShrink = 26 /*titleBarHeight*/ + 36 /*toolbarHeight*/; // = 62
+            const int kChromeShrink = PinkXP::ui(26) /*titleBarHeight*/ + PinkXP::ui(36) /*toolbarHeight*/; // 随 UI 密度缩放
 
             // 判断 hide 时窗口是"上半贴顶"还是"下半贴底"：与 onChromeVisibleChanged
             //   lambda 中 bottomAligned 的判定保持一致（窗口中心 Y vs 屏幕 userArea 中心 Y）
