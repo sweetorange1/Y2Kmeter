@@ -1026,6 +1026,38 @@ if (APPLE)
       COMMENT "Y2Kmeter[${tgt}]: sync milkdrop_textures into bundle Resources/"
       VERBATIM
     )
+
+    # 5) 资源拷贝会破坏 JUCE 在构建产物 bundle 上做的 ad-hoc 签名（签名先于本函数
+    #    的 dylib / 预设 / 纹理 POST_BUILD 命令执行，签名后新增文件导致 sealed
+    #    resource 校验失败），因此这里先重新签名构建产物 bundle。
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND /usr/bin/codesign --force --deep --sign - --timestamp=none
+              "$<TARGET_BUNDLE_DIR:${tgt}>"
+      COMMENT "Y2Kmeter[${tgt}]: re-sign full bundle after asset copy"
+      VERBATIM
+    )
+
+    # 6) 重新同步完整 bundle 到系统插件目录（宿主实际加载的是系统目录里的插件）。
+    #    COPY_PLUGIN_AFTER_BUILD 在 juce_add_plugin 内部注册的拷贝命令先于本函数的
+    #    dylib / 预设 / 纹理 POST_BUILD 命令执行，导致系统目录里的 bundle 缺少这些
+    #    运行时资源。这里在资源全部拷贝进构建产物 bundle 之后，再把完整 bundle 重新
+    #    同步到 JUCE 的插件拷贝目录（VST3 → ~/Library/Audio/Plug-Ins/VST3，
+    #    AU → ~/Library/Audio/Plug-Ins/Components），并对同步后的 bundle 重新签名，
+    #    保证宿主加载到资源完整且签名有效的插件。
+    get_target_property(_y2km_copy_dir ${tgt} JUCE_PLUGIN_COPY_DIR)
+    if(_y2km_copy_dir)
+      add_custom_command(TARGET ${tgt} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+                "${_y2km_copy_dir}/$<TARGET_BUNDLE_DIR_NAME:${tgt}>"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<TARGET_BUNDLE_DIR:${tgt}>"
+                "${_y2km_copy_dir}/$<TARGET_BUNDLE_DIR_NAME:${tgt}>"
+        COMMAND /usr/bin/codesign --force --deep --sign - --timestamp=none
+                "${_y2km_copy_dir}/$<TARGET_BUNDLE_DIR_NAME:${tgt}>"
+        COMMENT "Y2Kmeter[${tgt}]: re-sync full bundle (dylib/presets/textures) to system plugin dir"
+        VERBATIM
+      )
+    endif()
   endfunction()
 
   if (TARGET Y2Kmeter_Standalone)
@@ -1037,11 +1069,16 @@ if (APPLE)
   if (TARGET Y2Kmeter_AU)
     y2km_deploy_projectm_into_bundle(Y2Kmeter_AU SKIP_PRESETS)
   endif()
+  # Milkdrop-only 变体没有 Standalone 目标（见上方 juce_add_plugin，仅 VST3/AU），
+  # 无法像完整版那样依赖 "Standalone 首次启动 seed 到 AppData" 的共享预设机制。
+  # 因此这里必须让 VST3 / AU bundle 内置 milkdrop_presets，否则 macOS 宿主中
+  # FindMilkdropAssetsDirForModule 在 bundle 内找不到预设、AppData 又为空，
+  # 导致插件读不到预设。代价是 DMG 体积增加约 200MB × 2，可接受。
   if (TARGET Y2Kmeter_milkdrop_VST3)
-    y2km_deploy_projectm_into_bundle(Y2Kmeter_milkdrop_VST3 SKIP_PRESETS)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_milkdrop_VST3)
   endif()
   if (TARGET Y2Kmeter_milkdrop_AU)
-    y2km_deploy_projectm_into_bundle(Y2Kmeter_milkdrop_AU SKIP_PRESETS)
+    y2km_deploy_projectm_into_bundle(Y2Kmeter_milkdrop_AU)
   endif()
 endif()
 

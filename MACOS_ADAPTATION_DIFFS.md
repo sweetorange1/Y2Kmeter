@@ -819,3 +819,68 @@ if (isTweakPanelOpen_)
 |------|------|
 | **JUCE `Point` 宏污染** | macOS 下 `juce_IncludeModuleHeaders.h` 定义的 `#define Point juce::Point` 不会被自动 undef，会与项目代码中带 `juce::` 前缀的 `juce::Point<T>` 二次展开成 `juce::juce::Point<T>`。凡在包含 JUCE plugin_client 头文件后、再包含项目自身头文件的 `.cpp`，若自身头文件用到 `juce::Point`，务必在中间 `#undef Point`。 |
 | **NSOpenGLView 顶层 overlay 窗口高度** | macOS 上因 native GL 遮挡而用独立 NSWindow 绘制控制栏时，窗口高度必须与绘制内容高度一致，否则超出 bounds 的内容会被裁剪。新增可展开面板时，除更新 paint 逻辑外，还要同步更新该 overlay 窗口的高度计算，否则面板"逻辑打开但视觉不可见"。 |
+
+---
+
+## v2.7.6 后续修复：Milkdrop-only 插件 macOS 预设读取 + pkg 安装包改造（不升级版本号）
+
+本轮在 v2.7.6 基础上完成三件事：① 修复 milkdrop-only 插件（`Y2Kmeter_milkdrop`）在 macOS 宿主中读不到预设的问题；② 把 macOS 打包脚本从「DMG 拖拽」改造为「pkg 安装包」；③ 补齐旧安装方式的向下兼容。
+
+涉及文件：
+
+- `CMakeLists.txt`：milkdrop 变体预设部署 + 资源拷贝后重新签名 / 重新同步系统目录
+- `build_macos_installer.sh`：整体重写为 pkg 安装包方案
+
+### 问题一：Y2Kmeter_milkdrop 插件在 macOS 宿主中读不到预设
+
+#### 现象
+
+- Windows 端正常；切换到 macOS 后，宿主中添加 `Y2Kmeter_milkdrop` 插件读不到预设、无法正常使用。
+- Standalone（完整版）正常。
+
+#### 根因（两层）
+
+1. milkdrop 变体只有 VST3/AU 形态（无 Standalone），却在 CMake 里被 `SKIP_PRESETS` 部署（bundle 不内置预设），又无法像完整版那样依赖「Standalone 首次启动 seed 到 AppData」的共享预设机制。
+2. **关键根因（POST_BUILD 顺序）**：`COPY_PLUGIN_AFTER_BUILD TRUE` 让 JUCE 在 `juce_add_plugin` 内部注册了「拷贝 bundle 到系统目录」的 POST_BUILD 命令；而项目里 `y2km_deploy_projectm_into_bundle` 拷贝 dylib / 预设 / 纹理的 POST_BUILD 命令在 `juce_add_plugin` 之后才注册。CMake 规定同一 target 的 POST_BUILD 按注册顺序执行，于是：
+   1. 先执行 JUCE 的拷贝 → 系统目录里的 bundle 还是「裸」的（无 dylib / 预设 / 纹理）；
+   2. 后才把 dylib / 预设 / 纹理拷进构建产物 bundle。
+
+   结果：构建产物 bundle 资源齐全（已验证 9921 个预设 + dylib + 66 张纹理），但宿主实际加载的系统目录 bundle 是空的（0 预设、Frameworks 空）。
+
+#### 修复（CMakeLists.txt）
+
+1. 去掉 `Y2Kmeter_milkdrop_VST3` / `Y2Kmeter_milkdrop_AU` 的 `SKIP_PRESETS`，让 milkdrop 插件 bundle 内置预设、独立可用。
+2. 在 `y2km_deploy_projectm_into_bundle` 里，资源拷贝之后：
+   - 重新 ad-hoc 签名构建产物 bundle（资源拷贝发生在 JUCE 签名之后，会破坏 sealed resource 校验，`codesign --verify` 报 `a sealed resource is missing or invalid`）；
+   - 读取 `JUCE_PLUGIN_COPY_DIR`，把完整 bundle 重新同步到系统目录并再次签名。
+
+**副产品**：完整版 `Y2Kmeter_VST3` / `Y2Kmeter_AU` 的系统目录 bundle 同样缺 dylib（此前被 AppData 预设掩盖），本修复一并解决。
+
+### 问题二：macOS 打包脚本改造为 pkg 安装包
+
+- 参考 SpectrumTag 的 `pkgbuild + productbuild` 方案，重写 `build_macos_installer.sh`。
+- 三个组件（Installer 可「自定义」勾选）：
+  - Standalone（必装，`enabled="false" selected="true"`）→ `/Applications/Y2Kmeter.app`
+  - 完整版插件 VST3/AU（可选，默认勾选）→ `/Library/Audio/Plug-Ins/...`
+  - milkdrop 插件 VST3/AU（可选，默认勾选）→ `/Library/Audio/Plug-Ins/...`
+- 保留 Y2Kmeter 与 SpectrumTag 的两点差异：
+  - 签名**不启用 `--options runtime`**（hardened runtime 会导致 projectM 的 `libprojectM-4.dylib` 被 dyld 拒载）；
+  - 签名带 `macos_entitlements.plist`。
+- 新增参数：`--skip-plugins`、`--skip-milkdrop`、`--identity`、`--keep-work`、`--version`、`--no-sign`。
+- 产物：`dist/Y2Kmeter-<version>-macOS.pkg` + `.dmg`。
+
+### 问题三：向下兼容（旧 DMG 拖拽 → 新 pkg）
+
+- 旧版 DMG 允许用户把插件拖到 `/Library` 或 `~/Library`；新版 pkg 固定装 `/Library`。
+- 隐患：旧版若在 `~/Library`，新版装 `/Library` 后宿主会同时扫到两份同 bundle id 插件（VST3 只加载一份、AU 可能重复注册）。
+- 修复：pkg 的 `preinstall`（standalone 组件，必装故总会执行）遍历 `/Users/*`，清理用户目录下的旧版插件副本。
+- 系统目录旧版由 pkg 安装时按 bundle 覆盖；bundle id（`cn.iisaacbeats.Y2Kmeter` / `cn.iisaacbeats.Y2KmeterMilkdrop`）与 TCC 授权、设置文件路径均未变，升级后无需重新授权、设置与预设数据延续。
+
+### 教训
+
+| 类别 | 教训 |
+|------|------|
+| **CMake POST_BUILD 顺序** | 同一 target 的 POST_BUILD 命令按注册顺序执行；`COPY_PLUGIN_AFTER_BUILD` 在 `juce_add_plugin` 内部注册，项目自定义资源拷贝在其后，导致系统目录 bundle 缺资源。 |
+| **签名与资源拷贝顺序** | ad-hoc 签名之后再往 bundle 里新增文件会破坏 sealed resource 校验（`codesign --verify` 报 `a sealed resource is missing or invalid`），需在资源拷贝完成后重新签名。 |
+| **pkg preinstall 的 `~`** | preinstall / postinstall 以 root 运行，`~` 展开为 `/var/root`；清理「用户目录」里的内容必须显式遍历 `/Users/*`。 |
+| **打包产物验证** | 用 `xar -tf` / `pkgutil --expand` 解包检查 product 包的组件结构、Distribution.xml 与 preinstall 脚本，比只看脚本输出更可靠。 |

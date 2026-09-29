@@ -1,422 +1,610 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Y2Kmeter · macOS 打包脚本（DMG 安装镜像，带可视化拖拽引导）
+# Y2Kmeter · macOS 打包脚本（pkg 安装包 + DMG 分发镜像）
+#
+# 安装形态参考 SpectrumTag（pkgbuild + productbuild）：
+#   · 组件一：Y2Kmeter Standalone 应用 —— 必装（对应 Inno Setup 的 Flags: fixed）
+#   · 组件二：Y2Kmeter 插件（VST3 + AU）—— 可选，默认勾选
+#   · 组件三：Y2Kmeter_milkdrop 插件（VST3 + AU）—— 可选，默认勾选
+#   用户在 Installer 的"安装类型"步骤可点"自定义"取消勾选插件组件。
+#
+# 产物：
+#   dist/Y2Kmeter-<version>-macOS.pkg   （Installer 安装包，含组件选择页）
+#   dist/Y2Kmeter-<version>-macOS.dmg   （分发用磁盘镜像，内含上面的 pkg）
 #
 # 前置条件：
-#   在 IDE（CLion 等）里已经用 Release 配置把 Y2Kmeter_Standalone、Y2Kmeter_VST3
-#   与 Y2Kmeter_AU 三个 target 构建出来，产物应位于：
+#   在 IDE（CLion 等）里已经用 Release 配置把下面 5 个 target 构建出来：
 #     cmake-build-release/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.app
 #     cmake-build-release/Y2Kmeter_artefacts/Release/VST3/Y2Kmeter.vst3
 #     cmake-build-release/Y2Kmeter_artefacts/Release/AU/Y2Kmeter.component
-#   本脚本不再负责触发 cmake 构建，只基于现有产物做签名 + 打包。
+#     cmake-build-release/Y2Kmeter_milkdrop_artefacts/Release/VST3/Y2Kmeter_milkdrop.vst3
+#     cmake-build-release/Y2Kmeter_milkdrop_artefacts/Release/AU/Y2Kmeter_milkdrop.component
+#   本脚本不负责触发 cmake 构建，只基于现有产物做签名 + 打包。
 #
-# 功能：
-#   1. 校验 Standalone (.app)、VST3 (.vst3) 与 AU (.component) 产物是否已经存在
-#   2. 对三个 bundle 做 ad-hoc 代码签名（codesign --sign -），让 macOS 不会因未签名
-#      直接 Gatekeeper 拦截，也让 LaunchServices 正确读取 Icon
-#   3. 刷新本机 LaunchServices / Dock 图标缓存
-#   4. 用 scripts/macos_dmg_background.m 生成一张带箭头的引导背景图
-#   5. 创建 UDRW 可写 DMG → osascript 摆好图标/背景图/窗口尺寸 → 转 UDZO 只读
-#      用户双击 DMG 时会看到：
-#           Y2Kmeter.app       ──▶  Applications
-#           Y2Kmeter.vst3      ──▶  VST3 Plug-Ins
-#           Y2Kmeter.component ──▶  Components
-#      三行清晰的拖拽引导。
+# 依赖：command line tools 自带的 ditto / pkgbuild / productbuild / hdiutil / codesign
 #
 # 使用：
 #   chmod +x build_macos_installer.sh
-#   ./build_macos_installer.sh                  # 完整打包流程
-#   ./build_macos_installer.sh --no-sign        # 跳过 ad-hoc 签名
-#   ./build_macos_installer.sh --version 1.6.0  # 覆盖版本号（默认读 CMakeLists）
-#
-# 产物：
-#   dist/Y2Kmeter-<version>-macOS.dmg
+#   ./build_macos_installer.sh                        # 完整打包（ad-hoc 签名）
+#   ./build_macos_installer.sh --no-sign              # 跳过签名
+#   ./build_macos_installer.sh --version 2.7.6        # 覆盖版本号
+#   ./build_macos_installer.sh --skip-plugins         # 只打 Standalone + milkdrop
+#   ./build_macos_installer.sh --skip-milkdrop        # 只打 Standalone + 完整版插件
+#   ./build_macos_installer.sh --identity "Developer ID Application: ... (TEAMID)"
 # ==============================================================================
 set -euo pipefail
 
-# ---- 路径常量 -----------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
 BUILD_DIR="${PROJECT_ROOT}/cmake-build-release"
-ARTEFACTS_DIR="${BUILD_DIR}/Y2Kmeter_artefacts/Release"
 DIST_DIR="${PROJECT_ROOT}/dist"
-STAGE_DIR="${DIST_DIR}/.dmg_stage"
-TOOLS_DIR="${DIST_DIR}/.tools"
+WORK_DIR="${DIST_DIR}/.mac_installer_work"
+STAGE_DIR="${WORK_DIR}/stage"
+COMPONENTS_DIR="${WORK_DIR}/components"
+SCRIPTS_DIR="${WORK_DIR}/scripts"
+DMG_STAGE_DIR="${WORK_DIR}/dmg_stage"
 
 PRODUCT_NAME="Y2Kmeter"
-APP_BUNDLE_NAME="${PRODUCT_NAME}.app"
-VST3_BUNDLE_NAME="${PRODUCT_NAME}.vst3"
-AU_BUNDLE_NAME="${PRODUCT_NAME}.component"
+MILKDROP_NAME="Y2Kmeter_milkdrop"
+PKG_ID_BASE="cn.iisaacbeats.y2kmeter"
+STANDALONE_PKG_ID="${PKG_ID_BASE}.standalone"
+PLUGINS_PKG_ID="${PKG_ID_BASE}.plugins"
+MILKDROP_PKG_ID="${PKG_ID_BASE}.milkdrop"
+
+# ---- 构建产物路径 -------------------------------------------------------------
+STANDALONE_APP="${BUILD_DIR}/Y2Kmeter_artefacts/Release/Standalone/${PRODUCT_NAME}.app"
+VST3_BUNDLE="${BUILD_DIR}/Y2Kmeter_artefacts/Release/VST3/${PRODUCT_NAME}.vst3"
+AU_BUNDLE="${BUILD_DIR}/Y2Kmeter_artefacts/Release/AU/${PRODUCT_NAME}.component"
+MILKDROP_VST3_BUNDLE="${BUILD_DIR}/Y2Kmeter_milkdrop_artefacts/Release/VST3/${MILKDROP_NAME}.vst3"
+MILKDROP_AU_BUNDLE="${BUILD_DIR}/Y2Kmeter_milkdrop_artefacts/Release/AU/${MILKDROP_NAME}.component"
+
+# ---- 暂存区副本（签名只作用于这些副本，构建目录里的原始产物保持不动）--------
+STAGED_APP="${STAGE_DIR}/standalone/${PRODUCT_NAME}.app"
+STAGED_VST3="${STAGE_DIR}/plugins/Library/Audio/Plug-Ins/VST3/${PRODUCT_NAME}.vst3"
+STAGED_AU="${STAGE_DIR}/plugins/Library/Audio/Plug-Ins/Components/${PRODUCT_NAME}.component"
+STAGED_MILKDROP_VST3="${STAGE_DIR}/milkdrop/Library/Audio/Plug-Ins/VST3/${MILKDROP_NAME}.vst3"
+STAGED_MILKDROP_AU="${STAGE_DIR}/milkdrop/Library/Audio/Plug-Ins/Components/${MILKDROP_NAME}.component"
 
 # 签名用的 entitlements：给 ad-hoc 签名补一个可读的 entitlements blob，
 # 消除启动时 Security/CoreAudio 反复打印的 SecTaskLoadEntitlements 报错。
 ENTITLEMENTS_FILE="${PROJECT_ROOT}/scripts/macos_entitlements.plist"
 
-# DMG 视觉布局常量 —— **必须与 scripts/macos_dmg_background.m 里的坐标保持一致**。
-# 图标坐标是 Finder 窗口坐标（原点在左上角、y 向下增长）。
-WINDOW_W=720
-WINDOW_H=600
-ICON_SIZE=128
-TEXT_SIZE=12
-ROW1_Y=170    # 上行（Y2Kmeter.app → Applications）
-ROW2_Y=290    # 中行（Y2Kmeter.vst3 → VST3 Plug-Ins）
-ROW3_Y=410    # 下行（Y2Kmeter.component → Components）
-LEFT_X=150    # 左侧源 bundle
-RIGHT_X=570   # 右侧安装目标链接
+HAVE_VST3=0
+HAVE_AU=0
+HAVE_MILKDROP_VST3=0
+HAVE_MILKDROP_AU=0
 
-# ---- 参数解析 -----------------------------------------------------------------
 DO_SIGN=1
+DO_PLUGINS=1
+DO_MILKDROP=1
+KEEP_WORK=0
+SIGN_IDENTITY="-"     # 默认 ad-hoc 签名；用 --identity 指定 Developer ID
 VERSION=""
+
+log() { echo "[build_macos_installer] $*"; }
+
+# ---- 架构探测：确认产物是 Intel / Apple Silicon 双架构 universal ------------
+bundle_binary() {
+  local bundle="$1"
+  case "${bundle}" in
+    *.app)       printf '%s' "${bundle}/Contents/MacOS/$(basename "${bundle}" .app)" ;;
+    *.vst3)      printf '%s' "${bundle}/Contents/MacOS/$(basename "${bundle}" .vst3)" ;;
+    *.component) printf '%s' "${bundle}/Contents/MacOS/$(basename "${bundle}" .component)" ;;
+    *)           printf '%s' "" ;;
+  esac
+}
+
+bundle_archs() {
+  local bin
+  bin="$(bundle_binary "$1")"
+  if [[ -z "${bin}" || ! -f "${bin}" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+  /usr/bin/lipo -archs "${bin}" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./build_macos_installer.sh [options]
+
+Options:
+  --version VER     Override version (default: parsed from CMakeLists.txt).
+  --no-sign         Skip codesign before packaging.
+  --identity NAME   Codesign identity (default: "-" ad-hoc).
+                    e.g. --identity "Developer ID Application: Your Name (TEAMID)"
+  --skip-plugins    Package the standalone app only (no Y2Kmeter VST3 / AU).
+  --skip-milkdrop   Skip the Y2Kmeter_milkdrop plug-in component.
+  --keep-work       Keep dist/.mac_installer_work for troubleshooting.
+  -h, --help        Show this help.
+
+Examples:
+  # 本地自测：ad-hoc 签名，打完整包（Standalone + 完整版插件 + milkdrop 插件）
+  ./build_macos_installer.sh
+
+  # 正式发布：Developer ID 签名（之后仍需 notarize）
+  ./build_macos_installer.sh --identity "Developer ID Application: iisaacbeats (XXXXXXXXXX)"
+EOF
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --no-sign)    DO_SIGN=0; shift ;;
-    --version)    VERSION="${2:-}"; shift 2 ;;
+    --no-sign)       DO_SIGN=0; shift ;;
+    --skip-plugins)  DO_PLUGINS=0; shift ;;
+    --skip-milkdrop) DO_MILKDROP=0; shift ;;
+    --keep-work)     KEEP_WORK=1; shift ;;
+    --identity)
+      SIGN_IDENTITY="${2:-}"
+      if [[ -z "${SIGN_IDENTITY}" ]]; then
+        echo "[ERROR] --identity requires a value" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    --version)
+      VERSION="${2:-}"
+      if [[ -z "${VERSION}" ]]; then
+        echo "[ERROR] --version requires a value" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
     -h|--help)
-      grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'
+      usage
       exit 0
       ;;
     *)
-      echo "[build_macos_installer] 未知参数：$1" >&2
+      echo "[ERROR] Unknown argument: $1" >&2
+      usage
       exit 1
       ;;
   esac
 done
 
-# ---- 版本号：若未显式传入，从 CMakeLists 的 juce_add_plugin(... VERSION x.y.z) 抓取
-if [[ -z "${VERSION}" ]]; then
-  VERSION="$(awk '
-    /juce_add_plugin/,/\)/ {
-      if ($1 == "VERSION") { print $2; exit }
-    }
-  ' "${PROJECT_ROOT}/CMakeLists.txt" | tr -d '"' )"
-fi
-if [[ -z "${VERSION}" ]]; then
-  echo "[build_macos_installer] 无法识别 VERSION，请 --version 1.x.y 显式指定" >&2
-  exit 1
-fi
-
-DMG_NAME="${PRODUCT_NAME}-${VERSION}-macOS.dmg"
-DMG_PATH="${DIST_DIR}/${DMG_NAME}"
-DMG_RW_PATH="${DIST_DIR}/.${PRODUCT_NAME}-${VERSION}-rw.dmg"
-DMG_VOLNAME="${PRODUCT_NAME} ${VERSION}"
-
-log() { echo "[build_macos_installer] $*"; }
-
-# ---- 环境检查 -----------------------------------------------------------------
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "此脚本仅支持在 macOS 上执行" >&2
-  exit 1
-fi
-command -v hdiutil  >/dev/null || { echo "缺少 hdiutil";  exit 1; }
-command -v codesign >/dev/null || { echo "缺少 codesign"; exit 1; }
-command -v clang    >/dev/null || { echo "缺少 clang";    exit 1; }
-command -v osascript>/dev/null || { echo "缺少 osascript";exit 1; }
-
-# ---- Step 1: 校验 IDE 已构建出的产物 -----------------------------------------
-log "Step 1/5 校验 Release 产物"
-
-APP_BUNDLE="${ARTEFACTS_DIR}/Standalone/${APP_BUNDLE_NAME}"
-VST3_BUNDLE="${ARTEFACTS_DIR}/VST3/${VST3_BUNDLE_NAME}"
-AU_BUNDLE="${ARTEFACTS_DIR}/AU/${AU_BUNDLE_NAME}"
-
-if [[ ! -d "${APP_BUNDLE}" ]]; then
-  cat >&2 <<EOF
-找不到 Standalone 产物：${APP_BUNDLE}
-请先在 IDE（CLion 等）里以 Release 配置构建 target: Y2Kmeter_Standalone
-EOF
-  exit 1
-fi
-if [[ ! -d "${VST3_BUNDLE}" ]]; then
-  cat >&2 <<EOF
-找不到 VST3 产物：${VST3_BUNDLE}
-请先在 IDE（CLion 等）里以 Release 配置构建 target: Y2Kmeter_VST3
-EOF
-  exit 1
-fi
-if [[ ! -d "${AU_BUNDLE}" ]]; then
-  cat >&2 <<EOF
-找不到 AU 产物：${AU_BUNDLE}
-请先在 IDE（CLion 等）里以 Release 配置构建 target: Y2Kmeter_AU
-EOF
+  echo "[ERROR] This script must run on macOS." >&2
   exit 1
 fi
 
-log "  · Standalone: ${APP_BUNDLE}"
-log "  · VST3     : ${VST3_BUNDLE}"
-log "  · AU       : ${AU_BUNDLE}"
-
-# ---- Step 2: ad-hoc 代码签名 --------------------------------------------------
-# 注意：**不要**加 `--options runtime`。
-#   hardened runtime 会强制校验：主进程与它 dlopen 的所有 dylib 必须拥有
-#   一致的 Team ID。而 ad-hoc 签名的 dylib 会得到一个基于内容哈希的"隐式
-#   Team ID"（例如 libprojectM 会被算成 A060AF26-12D3-3E02-...），与主
-#   binary 的 Team ID 不相同，dyld 会拒绝加载并报：
-#     "code signature ... not valid for use in process: mapping process
-#      and mapped file (non-platform) have different Team IDs"
-#   这直接导致 Milkdrop 模块 dlopen libprojectM-4.dylib 失败、界面纯黑。
-#   只有走 Apple Developer ID + notarization 的正式签名，才应该配合
-#   `--options runtime` 使用。本脚本走 ad-hoc，因此必须去掉这个选项。
-if [[ "${DO_SIGN}" -eq 1 ]]; then
-  log "Step 2/5 ad-hoc 代码签名 (codesign --sign -，不启用 hardened runtime)"
-  sign_bundle() {
-    local bundle="$1"
-    # 先深度签内部所有 Mach-O（dylib / helper / framework），再签外壳 bundle。
-    # 附带 entitlements（macos_entitlements.plist）消除 SecTaskLoadEntitlements
-    # 控制台噪音；不启用 hardened runtime（见下方注释）。
-    codesign --force --deep --sign - \
-      --timestamp=none \
-      --entitlements "${ENTITLEMENTS_FILE}" \
-      "${bundle}"
-    codesign --verify --deep --strict --verbose=2 "${bundle}" || true
-  }
-  sign_bundle "${APP_BUNDLE}"
-  sign_bundle "${VST3_BUNDLE}"
-  sign_bundle "${AU_BUNDLE}"
-else
-  log "Step 2/5 跳过签名（--no-sign）"
-fi
-
-# ---- Step 3: 刷新 LaunchServices 图标缓存 -------------------------------------
-log "Step 3/5 刷新 LaunchServices 注册（仅本机生效）"
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [[ -x "${LSREGISTER}" ]]; then
-  "${LSREGISTER}" -f "${APP_BUNDLE}" >/dev/null 2>&1 || true
-fi
-
-# ---- Step 4: 生成 DMG 引导背景图 ----------------------------------------------
-#   · scripts/macos_dmg_background.m 是一个一次性 Objective-C 工具，用 CoreGraphics
-#     画出带箭头的安装引导图，输出 @1x / @2x 两张 PNG。
-#   · 每次脚本都重新编译一次，免得本地工具二进制和源码脱节；编译产物放在
-#     dist/.tools/，随 stage 清理一起消失。
-log "Step 4/5 生成 DMG 引导背景图"
-mkdir -p "${TOOLS_DIR}"
-DMG_BG_TOOL_SRC="${PROJECT_ROOT}/scripts/macos_dmg_background.m"
-DMG_BG_TOOL_BIN="${TOOLS_DIR}/macos_dmg_background"
-
-if [[ ! -f "${DMG_BG_TOOL_SRC}" ]]; then
-  echo "找不到背景图工具源码：${DMG_BG_TOOL_SRC}" >&2
-  exit 1
-fi
-
-clang -framework AppKit \
-      -framework CoreGraphics \
-      -framework ImageIO \
-      -framework CoreFoundation \
-      -framework Foundation \
-      -fobjc-arc -O2 \
-      "${DMG_BG_TOOL_SRC}" \
-      -o "${DMG_BG_TOOL_BIN}"
-
-DMG_BG_BASE="${TOOLS_DIR}/dmg_background"
-"${DMG_BG_TOOL_BIN}" "${DMG_BG_BASE}" "${PRODUCT_NAME}" "${VERSION}" >/dev/null
-
-DMG_BG_1X="${DMG_BG_BASE}.png"
-DMG_BG_2X="${DMG_BG_BASE}@2x.png"
-
-if [[ ! -f "${DMG_BG_1X}" || ! -f "${DMG_BG_2X}" ]]; then
-  echo "背景图生成失败：缺少 ${DMG_BG_1X} 或 ${DMG_BG_2X}" >&2
-  exit 1
-fi
-
-# ---- Step 5: 组装 DMG ---------------------------------------------------------
-log "Step 5/5 组装 DMG（UDRW → 布局 → UDZO）"
-
-mkdir -p "${DIST_DIR}"
-rm -rf  "${STAGE_DIR}"
-mkdir -p "${STAGE_DIR}"
-
-# Step 5.1 准备 stage 目录 —— 与最终 DMG 内容完全一致
-ditto "${APP_BUNDLE}"  "${STAGE_DIR}/${APP_BUNDLE_NAME}"
-ditto "${VST3_BUNDLE}" "${STAGE_DIR}/${VST3_BUNDLE_NAME}"
-ditto "${AU_BUNDLE}"   "${STAGE_DIR}/${AU_BUNDLE_NAME}"
-
-# 安装目标的符号链接 —— 让用户在 DMG 里直接拖拽即可安装
-ln -s /Applications                       "${STAGE_DIR}/Applications"
-ln -s /Library/Audio/Plug-Ins/VST3        "${STAGE_DIR}/VST3 Plug-Ins"
-ln -s /Library/Audio/Plug-Ins/Components  "${STAGE_DIR}/Components"
-
-# 背景图放到 .background/（Finder 习惯，并且 Finder 对隐藏目录的 resolve 最稳）
-mkdir -p "${STAGE_DIR}/.background"
-cp "${DMG_BG_1X}" "${STAGE_DIR}/.background/background.png"
-cp "${DMG_BG_2X}" "${STAGE_DIR}/.background/background@2x.png"
-
-# 简短 README（图示已经表达了拖拽语义，这里只留关键补充说明）
-cat > "${STAGE_DIR}/README.txt" <<README
-Y2Kmeter ${VERSION} · macOS 安装说明
-==========================================================
-
-安装方式（窗口里已有可视化引导）：
-
-  • Standalone（桌面应用）：
-      把 ${APP_BUNDLE_NAME} 拖到 "Applications"
-      系统路径为 /Applications
-
-  • VST3 插件：
-      把 ${VST3_BUNDLE_NAME} 拖到 "VST3 Plug-Ins"
-      系统路径为 /Library/Audio/Plug-Ins/VST3/
-      若该路径因权限问题拒绝写入，可改放：
-          ~/Library/Audio/Plug-Ins/VST3/
-
-  • AU 插件（Audio Unit）：
-      把 ${AU_BUNDLE_NAME} 拖到 "Components"
-      系统路径为 /Library/Audio/Plug-Ins/Components/
-      若该路径因权限问题拒绝写入，可改放：
-          ~/Library/Audio/Plug-Ins/Components/
-
-资源说明（v2.4+ Milkdrop 预设共享机制）：
-  · Milkdrop 预设仅内置于 ${APP_BUNDLE_NAME}（Standalone）中，
-    VST3 / AU bundle 已剥离预设副本以瘦身安装包。
-  · 首次运行 Standalone 并添加 Milkdrop 模块时，程序会把 bundle 内的
-    预设一次性复制到共享目录：
-        ~/Library/Application Support/Y2Kmeter/milkdrop_presets/
-    该过程约耗时 3-5 秒（复制约 200 MB）。之后 Standalone / VST3 / AU
-    三端都从此共享目录读取预设，用户手动增删预设立即对三端生效。
-  · Milkdrop 纹理（milkdrop_textures，约 3 MB）三端 bundle 各自内置。
-  · VirtuPet 动画资源三端 bundle 各自内置。
-  · 因此若只安装 VST3 / AU 而不安装 Standalone，Milkdrop 预设无法自动
-    seed，请先安装并运行一次 ${APP_BUNDLE_NAME}，或手动把预设目录放到
-        ~/Library/Application Support/Y2Kmeter/milkdrop_presets/
-    然后重启 DAW。
-
-首次打开注意：
-  本包采用本地 ad-hoc 签名，未经过 Apple 公证。若打开 ${APP_BUNDLE_NAME}
-  时系统提示"无法验证开发者"，请在 Finder 中右键点击 → 选择"打开"，
-  然后在弹窗中再次确认"打开"，系统会记住该选择。
-
-卸载：
-  从 /Applications 删除 ${APP_BUNDLE_NAME}
-  从 /Library/Audio/Plug-Ins/VST3 删除 ${VST3_BUNDLE_NAME}
-  从 /Library/Audio/Plug-Ins/Components 删除 ${AU_BUNDLE_NAME}
-README
-
-# 让 Finder 少一些无关文件可见
-touch "${STAGE_DIR}/.background/.keep"
-
-# Step 5.2 计算 stage 大小（预留 30% 余量，避免"格式化时磁盘不足"）
-STAGE_KB=$(du -sk "${STAGE_DIR}" | awk '{print $1}')
-DMG_KB=$(( STAGE_KB * 13 / 10 + 2048 ))
-log "  · stage=$(du -sh "${STAGE_DIR}" | awk '{print $1}')  → rw dmg ~ ${DMG_KB} KB"
-
-# Step 5.3 创建可写 UDRW DMG 并挂载
-#   · 先检查是否有同名残留 Volume 没卸载（多次失败尝试会累积 /Volumes/XXX 1、XXX 2）
-for stale in "/Volumes/${DMG_VOLNAME}" "/Volumes/${DMG_VOLNAME} 1" "/Volumes/${DMG_VOLNAME} 2"; do
-  if [[ -d "${stale}" ]]; then
-    log "  · 清理残留挂载点 ${stale}"
-    hdiutil detach "${stale}" -force >/dev/null 2>&1 || true
+for cmd in ditto pkgbuild productbuild hdiutil codesign; do
+  if ! command -v "${cmd}" >/dev/null 2>&1; then
+    echo "[ERROR] Missing required command: ${cmd}" >&2
+    exit 1
   fi
 done
 
-rm -f "${DMG_RW_PATH}"
-hdiutil create \
-  -volname "${DMG_VOLNAME}" \
-  -srcfolder "${STAGE_DIR}" \
-  -ov \
-  -format UDRW \
-  -fs HFS+ \
-  -size "${DMG_KB}k" \
-  "${DMG_RW_PATH}" >/dev/null
+# ----------------------------------------------------------------------------
+# Step 1/7  解析版本号
+# ----------------------------------------------------------------------------
+log "Step 1/7 Resolve version"
 
-log "  · attach rw DMG"
-ATTACH_OUT="$(hdiutil attach -readwrite -noverify -noautoopen "${DMG_RW_PATH}")"
-MOUNT_DEV=$(echo "${ATTACH_OUT}" | awk '/\/dev\// { print $1; exit }')
-MOUNT_DIR=$(echo "${ATTACH_OUT}" | sed -n 's|.*\(/Volumes/.*\)$|\1|p' | head -n1)
+parse_version() {
+  local file="${PROJECT_ROOT}/CMakeLists.txt"
+  local v=""
 
-if [[ -z "${MOUNT_DIR}" || ! -d "${MOUNT_DIR}" ]]; then
-  echo "挂载 DMG 失败，无法定位挂载点" >&2
-  hdiutil detach "${MOUNT_DEV}" 2>/dev/null || true
+  # 优先：project(Y2Kmeter VERSION x.y.z ...)
+  v="$(awk '/^[[:space:]]*project[[:space:]]*\(/ {
+              for (i = 1; i <= NF; i++)
+                if ($i == "VERSION") { print $(i + 1); exit }
+            }' "${file}" | tr -d '"')"
+
+  # 兜底：juce_add_plugin( ... VERSION x.y.z ... )
+  if [[ -z "${v}" ]]; then
+    v="$(awk '/juce_add_plugin/,/^[[:space:]]*\)/ {
+                for (i = 1; i <= NF; i++)
+                  if ($i == "VERSION") { print $(i + 1); exit }
+              }' "${file}" | tr -d '"')"
+  fi
+
+  printf '%s' "${v}"
+}
+
+if [[ -z "${VERSION}" ]]; then
+  VERSION="$(parse_version)"
+fi
+
+if [[ -z "${VERSION}" ]]; then
+  echo "[ERROR] Could not resolve VERSION from CMakeLists.txt. Use --version x.y.z" >&2
   exit 1
 fi
-log "  · mounted at ${MOUNT_DIR}"
 
-# AppleScript 里用来寻址的 "disk" 名称 —— 必须是挂载点的 basename，
-# 不一定等于 DMG_VOLNAME（macOS 遇到同名 volume 会自动加 " 1" 后缀）
-MOUNT_VOLNAME="$(basename "${MOUNT_DIR}")"
-BG_ABSPATH="${MOUNT_DIR}/.background/background.png"
+PKG_NAME="${PRODUCT_NAME}-${VERSION}-macOS.pkg"
+PKG_PATH="${DIST_DIR}/${PKG_NAME}"
+DMG_NAME="${PRODUCT_NAME}-${VERSION}-macOS.dmg"
+DMG_PATH="${DIST_DIR}/${DMG_NAME}"
 
-# Step 5.4 osascript 设定 Finder 窗口视觉布局
-#   · AppleScript 里 position 是"图标中心坐标"，origin 在窗口左上角、y 向下。
-#   · 背景图用 "POSIX file <绝对路径>" 的写法最稳（新版 Finder 对冒号路径语法
-#     经常报 -10006）。
-log "  · 调整 Finder 窗口视觉布局（背景图 + 图标位置）"
+log "  - Version: ${VERSION}"
 
-osascript <<APPLESCRIPT
-tell application "Finder"
-    tell disk "${MOUNT_VOLNAME}"
-        open
-        set current view of container window to icon view
-        set toolbar visible of container window to false
-        set statusbar visible of container window to false
-        set sidebar width of container window to 0
-        set the bounds of container window to {200, 120, 200 + ${WINDOW_W}, 120 + ${WINDOW_H}}
-        set theViewOptions to the icon view options of container window
-        set arrangement of theViewOptions to not arranged
-        set icon size of theViewOptions to ${ICON_SIZE}
-        set text size of theViewOptions to ${TEXT_SIZE}
-        set background picture of theViewOptions to POSIX file "${BG_ABSPATH}"
-        set position of item "${APP_BUNDLE_NAME}" of container window to {${LEFT_X},  ${ROW1_Y}}
-        set position of item "Applications"             of container window to {${RIGHT_X}, ${ROW1_Y}}
-        set position of item "${VST3_BUNDLE_NAME}" of container window to {${LEFT_X},  ${ROW2_Y}}
-        set position of item "VST3 Plug-Ins"            of container window to {${RIGHT_X}, ${ROW2_Y}}
-        set position of item "${AU_BUNDLE_NAME}"   of container window to {${LEFT_X},  ${ROW3_Y}}
-        set position of item "Components"               of container window to {${RIGHT_X}, ${ROW3_Y}}
-        -- README 放到窗口下方，靠左，不抢主视觉
-        try
-            set position of item "README.txt" of container window to {${LEFT_X}, ${WINDOW_H} - 70}
-        end try
-        update without registering applications
-        delay 1
-        close
-    end tell
-end tell
-APPLESCRIPT
+# ----------------------------------------------------------------------------
+# Step 2/7  校验构建产物
+#   Standalone 是主组件，缺失直接失败；插件是可选组件，缺失只告警
+# ----------------------------------------------------------------------------
+log "Step 2/7 Validate build artifacts"
 
-# 等一下让 .DS_Store 落盘
-sync
-sleep 1
+if [[ ! -d "${STANDALONE_APP}" ]]; then
+  echo "[ERROR] Missing standalone app: ${STANDALONE_APP}" >&2
+  echo "[HINT] Build first:" >&2
+  echo "       cmake --build cmake-build-release --target Y2Kmeter_Standalone" >&2
+  exit 1
+fi
+log "  - App : ${STANDALONE_APP} [$(bundle_archs "${STANDALONE_APP}")]"
 
-# Step 5.5 签名 .DS_Store 所在的 volume、卸载
-log "  · detach rw DMG"
-hdiutil detach "${MOUNT_DEV}" >/dev/null
+if [[ "${DO_PLUGINS}" -eq 1 ]]; then
+  if [[ -d "${VST3_BUNDLE}" ]]; then HAVE_VST3=1; log "  - VST3: ${VST3_BUNDLE} [$(bundle_archs "${VST3_BUNDLE}")]";
+  else log "  - VST3: NOT FOUND (skipped)"; fi
+  if [[ -d "${AU_BUNDLE}" ]]; then HAVE_AU=1; log "  - AU  : ${AU_BUNDLE} [$(bundle_archs "${AU_BUNDLE}")]";
+  else log "  - AU  : NOT FOUND (skipped)"; fi
+  if [[ "${HAVE_VST3}" -eq 0 && "${HAVE_AU}" -eq 0 ]]; then
+    log "[WARN] No Y2Kmeter plug-in bundles found, packaging standalone only."
+    log "[HINT] Build Release target Y2Kmeter_VST3 / Y2Kmeter_AU to include them."
+    DO_PLUGINS=0
+  fi
+else
+  log "  - Plug-ins: skipped (--skip-plugins)"
+fi
 
-# Step 5.6 转为只读压缩 UDZO
-log "  · convert UDRW → UDZO"
+if [[ "${DO_MILKDROP}" -eq 1 ]]; then
+  if [[ -d "${MILKDROP_VST3_BUNDLE}" ]]; then HAVE_MILKDROP_VST3=1; log "  - Milkdrop VST3: ${MILKDROP_VST3_BUNDLE} [$(bundle_archs "${MILKDROP_VST3_BUNDLE}")]";
+  else log "  - Milkdrop VST3: NOT FOUND (skipped)"; fi
+  if [[ -d "${MILKDROP_AU_BUNDLE}" ]]; then HAVE_MILKDROP_AU=1; log "  - Milkdrop AU  : ${MILKDROP_AU_BUNDLE} [$(bundle_archs "${MILKDROP_AU_BUNDLE}")]";
+  else log "  - Milkdrop AU  : NOT FOUND (skipped)"; fi
+  if [[ "${HAVE_MILKDROP_VST3}" -eq 0 && "${HAVE_MILKDROP_AU}" -eq 0 ]]; then
+    log "[WARN] No Y2Kmeter_milkdrop plug-in bundles found, packaging without milkdrop component."
+    log "[HINT] Build Release target Y2Kmeter_milkdrop_VST3 / Y2Kmeter_milkdrop_AU to include them."
+    DO_MILKDROP=0
+  fi
+else
+  log "  - Milkdrop plug-in: skipped (--skip-milkdrop)"
+fi
+
+# ---- 双架构校验：任一产物缺少 arm64 或 x86_64 就告警 ------------------------
+ARCH_TEXT=""
+UNIVERSAL_OK=1
+verify_universal() {
+  local archs
+  archs="$(bundle_archs "$1")"
+  [[ -n "${ARCH_TEXT}" ]] || ARCH_TEXT="${archs}"
+  if [[ "${archs}" != *arm64* || "${archs}" != *x86_64* ]]; then
+    log "[WARN] Not a universal binary: $1 -> ${archs}"
+    log "[HINT] Configure with -DCMAKE_OSX_ARCHITECTURES=\"x86_64;arm64\" and rebuild."
+    UNIVERSAL_OK=0
+  fi
+}
+verify_universal "${STANDALONE_APP}"
+if [[ "${HAVE_VST3}" -eq 1 ]]; then verify_universal "${VST3_BUNDLE}"; fi
+if [[ "${HAVE_AU}"   -eq 1 ]]; then verify_universal "${AU_BUNDLE}";   fi
+if [[ "${HAVE_MILKDROP_VST3}" -eq 1 ]]; then verify_universal "${MILKDROP_VST3_BUNDLE}"; fi
+if [[ "${HAVE_MILKDROP_AU}"   -eq 1 ]]; then verify_universal "${MILKDROP_AU_BUNDLE}";   fi
+if [[ "${UNIVERSAL_OK}" -eq 1 ]]; then
+  log "  - Universal binary OK (arm64 + x86_64)"
+fi
+
+# ----------------------------------------------------------------------------
+# Step 3/7  复制产物到暂存区
+#   签名一律只作用于这里的副本，绝不改动 cmake 构建目录里的原始产物。
+# ----------------------------------------------------------------------------
+log "Step 3/7 Stage bundles"
+
+rm -rf "${WORK_DIR}"
+mkdir -p "${DIST_DIR}" "${COMPONENTS_DIR}" "${SCRIPTS_DIR}"
+
+mkdir -p "${STAGE_DIR}/standalone"
+/usr/bin/ditto "${STANDALONE_APP}" "${STAGED_APP}"
+log "  - ${PRODUCT_NAME}.app"
+
+if [[ "${DO_PLUGINS}" -eq 1 ]]; then
+  mkdir -p "${STAGE_DIR}/plugins/Library/Audio/Plug-Ins/VST3"
+  mkdir -p "${STAGE_DIR}/plugins/Library/Audio/Plug-Ins/Components"
+  if [[ "${HAVE_VST3}" -eq 1 ]]; then
+    /usr/bin/ditto "${VST3_BUNDLE}" "${STAGED_VST3}"
+    log "  - ${PRODUCT_NAME}.vst3"
+  fi
+  if [[ "${HAVE_AU}" -eq 1 ]]; then
+    /usr/bin/ditto "${AU_BUNDLE}" "${STAGED_AU}"
+    log "  - ${PRODUCT_NAME}.component"
+  fi
+fi
+
+if [[ "${DO_MILKDROP}" -eq 1 ]]; then
+  mkdir -p "${STAGE_DIR}/milkdrop/Library/Audio/Plug-Ins/VST3"
+  mkdir -p "${STAGE_DIR}/milkdrop/Library/Audio/Plug-Ins/Components"
+  if [[ "${HAVE_MILKDROP_VST3}" -eq 1 ]]; then
+    /usr/bin/ditto "${MILKDROP_VST3_BUNDLE}" "${STAGED_MILKDROP_VST3}"
+    log "  - ${MILKDROP_NAME}.vst3"
+  fi
+  if [[ "${HAVE_MILKDROP_AU}" -eq 1 ]]; then
+    /usr/bin/ditto "${MILKDROP_AU_BUNDLE}" "${STAGED_MILKDROP_AU}"
+    log "  - ${MILKDROP_NAME}.component"
+  fi
+fi
+
+# ----------------------------------------------------------------------------
+# Step 4/7  签名（只签暂存区副本）
+#
+#   重要：**不要**加 `--options runtime`（hardened runtime）。
+#   hardened runtime 会强制校验：主进程与它 dlopen 的所有 dylib 必须拥有一致的
+#   Team ID。而 ad-hoc 签名的 libprojectM-4.dylib 会得到一个基于内容哈希的
+#   "隐式 Team ID"，与主 binary 不同，dyld 会拒绝加载，导致 Milkdrop 模块
+#   dlopen 失败、界面纯黑。只有走 Apple Developer ID + notarization 的正式
+#   签名才应配合 `--options runtime` 使用。
+# ----------------------------------------------------------------------------
+if [[ "${DO_SIGN}" -eq 1 ]]; then
+  log "Step 4/7 Codesign staged bundles (identity: ${SIGN_IDENTITY})"
+
+  sign_bundle() {
+    local bundle="$1"
+    local ts_args=()
+    if [[ "${SIGN_IDENTITY}" == "-" ]]; then
+      ts_args=(--timestamp=none)
+    else
+      ts_args=(--timestamp)
+    fi
+
+    codesign --force --deep --sign "${SIGN_IDENTITY}" \
+             "${ts_args[@]}" \
+             --entitlements "${ENTITLEMENTS_FILE}" \
+             "${bundle}"
+    codesign --verify --deep --strict --verbose=2 "${bundle}" >/dev/null || true
+  }
+
+  sign_bundle "${STAGED_APP}"
+  if [[ "${HAVE_VST3}" -eq 1 ]]; then sign_bundle "${STAGED_VST3}"; fi
+  if [[ "${HAVE_AU}"   -eq 1 ]]; then sign_bundle "${STAGED_AU}";   fi
+  if [[ "${HAVE_MILKDROP_VST3}" -eq 1 ]]; then sign_bundle "${STAGED_MILKDROP_VST3}"; fi
+  if [[ "${HAVE_MILKDROP_AU}"   -eq 1 ]]; then sign_bundle "${STAGED_MILKDROP_AU}";   fi
+else
+  log "Step 4/7 Skip signing (--no-sign)"
+fi
+
+# ----------------------------------------------------------------------------
+# Step 5/7  打 component 包
+# ----------------------------------------------------------------------------
+log "Step 5/7 Build component packages"
+
+# ---- 5a. Standalone 组件的 preinstall / postinstall ----
+mkdir -p "${SCRIPTS_DIR}/standalone"
+cat > "${SCRIPTS_DIR}/standalone/preinstall" <<'EOF'
+#!/bin/sh
+# 安装前关闭正在运行的旧版本，避免旧文件被占用（对应 Windows 侧的 CloseApplications=force）
+/usr/bin/osascript -e 'tell application "Y2Kmeter" to quit' >/dev/null 2>&1 || true
+/usr/bin/pkill -x "Y2Kmeter" >/dev/null 2>&1 || true
+
+# 向下兼容：清理旧版 DMG「拖拽安装」可能残留在用户目录里的插件。
+#   旧版 README 引导用户把插件拖到 /Library/Audio/Plug-Ins/，权限不足时可改放
+#   ~/Library/Audio/Plug-Ins/。新版 pkg 固定装到 /Library（系统目录），若不清掉
+#   用户目录里的旧版（同 bundle id），宿主会同时扫到两份并冲突（VST3 只加载一份、
+#   AU 可能重复注册）。系统目录里的旧版由 pkg 安装时按 bundle 覆盖，无需在此删除。
+#   注意：preinstall 以 root 运行，`~` 会展开成 root 的 home（/var/root），因此这里
+#   显式遍历 /Users/* 来定位各用户的 home，清理用户级插件副本。
+for user_home in /Users/*; do
+  [ -d "${user_home}/Library/Audio/Plug-Ins" ] || continue
+  /bin/rm -rf \
+    "${user_home}/Library/Audio/Plug-Ins/VST3/Y2Kmeter.vst3" \
+    "${user_home}/Library/Audio/Plug-Ins/VST3/Y2Kmeter_milkdrop.vst3" \
+    "${user_home}/Library/Audio/Plug-Ins/Components/Y2Kmeter.component" \
+    "${user_home}/Library/Audio/Plug-Ins/Components/Y2Kmeter_milkdrop.component" \
+    2>/dev/null || true
+done
+
+exit 0
+EOF
+cat > "${SCRIPTS_DIR}/standalone/postinstall" <<'EOF'
+#!/bin/sh
+APP_PATH="/Applications/Y2Kmeter.app"
+# 清掉隔离属性：ad-hoc 签名的 app 若带 com.apple.quarantine，首次启动会被 Gatekeeper 拦截
+/usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" >/dev/null 2>&1 || true
+/bin/chmod -R a+rX "$APP_PATH" >/dev/null 2>&1 || true
+exit 0
+EOF
+/bin/chmod +x "${SCRIPTS_DIR}/standalone/preinstall" "${SCRIPTS_DIR}/standalone/postinstall"
+
+pkgbuild \
+  --root "${STAGE_DIR}/standalone" \
+  --identifier "${STANDALONE_PKG_ID}" \
+  --version "${VERSION}" \
+  --install-location "/Applications" \
+  --scripts "${SCRIPTS_DIR}/standalone" \
+  "${COMPONENTS_DIR}/standalone.pkg"
+log "  - standalone.pkg -> /Applications/${PRODUCT_NAME}.app"
+
+# ---- 5b. 完整版插件组件（可选） ----
+if [[ "${DO_PLUGINS}" -eq 1 ]]; then
+  mkdir -p "${SCRIPTS_DIR}/plugins"
+  {
+    echo '#!/bin/sh'
+    echo '# 清掉插件 bundle 的隔离属性，避免 Logic / 宿主把插件判定为不可用'
+    if [[ "${HAVE_VST3}" -eq 1 ]]; then
+      echo '/usr/bin/xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/VST3/Y2Kmeter.vst3" >/dev/null 2>&1 || true'
+    fi
+    if [[ "${HAVE_AU}" -eq 1 ]]; then
+      echo '/usr/bin/xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/Components/Y2Kmeter.component" >/dev/null 2>&1 || true'
+    fi
+    echo 'exit 0'
+  } > "${SCRIPTS_DIR}/plugins/postinstall"
+  /bin/chmod +x "${SCRIPTS_DIR}/plugins/postinstall"
+
+  pkgbuild \
+    --root "${STAGE_DIR}/plugins" \
+    --identifier "${PLUGINS_PKG_ID}" \
+    --version "${VERSION}" \
+    --install-location "/" \
+    --scripts "${SCRIPTS_DIR}/plugins" \
+    "${COMPONENTS_DIR}/plugins.pkg"
+  log "  - plugins.pkg"
+fi
+
+# ---- 5c. milkdrop 插件组件（可选） ----
+if [[ "${DO_MILKDROP}" -eq 1 ]]; then
+  mkdir -p "${SCRIPTS_DIR}/milkdrop"
+  {
+    echo '#!/bin/sh'
+    echo '# 清掉 milkdrop 插件 bundle 的隔离属性'
+    if [[ "${HAVE_MILKDROP_VST3}" -eq 1 ]]; then
+      echo '/usr/bin/xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/VST3/Y2Kmeter_milkdrop.vst3" >/dev/null 2>&1 || true'
+    fi
+    if [[ "${HAVE_MILKDROP_AU}" -eq 1 ]]; then
+      echo '/usr/bin/xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/Components/Y2Kmeter_milkdrop.component" >/dev/null 2>&1 || true'
+    fi
+    echo 'exit 0'
+  } > "${SCRIPTS_DIR}/milkdrop/postinstall"
+  /bin/chmod +x "${SCRIPTS_DIR}/milkdrop/postinstall"
+
+  pkgbuild \
+    --root "${STAGE_DIR}/milkdrop" \
+    --identifier "${MILKDROP_PKG_ID}" \
+    --version "${VERSION}" \
+    --install-location "/" \
+    --scripts "${SCRIPTS_DIR}/milkdrop" \
+    "${COMPONENTS_DIR}/milkdrop.pkg"
+  log "  - milkdrop.pkg"
+fi
+
+# ----------------------------------------------------------------------------
+# Step 6/7  合成带组件选择页的 product 包
+#   standalone : selected="true" enabled="false"  —— 必装，勾选框置灰
+#   plugins    : selected="true" enabled="true"   —— 默认勾选，可取消
+#   milkdrop   : selected="true" enabled="true"   —— 默认勾选，可取消
+# ----------------------------------------------------------------------------
+log "Step 6/7 Build product package"
+
+# 有任意可选组件时显示"自定义安装"；只有 standalone 时隐藏
+if [[ "${DO_PLUGINS}" -eq 1 || "${DO_MILKDROP}" -eq 1 ]]; then
+  CUSTOMIZE_ATTR="always"
+else
+  CUSTOMIZE_ATTR="never"
+fi
+
+{
+  echo '<?xml version="1.0" encoding="utf-8"?>'
+  echo '<installer-gui-script minSpecVersion="1">'
+  echo "    <title>${PRODUCT_NAME} ${VERSION}</title>"
+  echo "    <options customize=\"${CUSTOMIZE_ATTR}\"/>"
+  echo '    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>'
+  echo '    <choices-outline>'
+  echo "        <line choice=\"${STANDALONE_PKG_ID}\"/>"
+  if [[ "${DO_PLUGINS}" -eq 1 ]]; then
+    echo "        <line choice=\"${PLUGINS_PKG_ID}\"/>"
+  fi
+  if [[ "${DO_MILKDROP}" -eq 1 ]]; then
+    echo "        <line choice=\"${MILKDROP_PKG_ID}\"/>"
+  fi
+  echo '    </choices-outline>'
+
+  echo "    <choice id=\"${STANDALONE_PKG_ID}\""
+  echo "            title=\"${PRODUCT_NAME} (Standalone Application)\""
+  echo "            description=\"The standalone desktop application.\""
+  echo '            enabled="false" selected="true">'
+  echo "        <pkg-ref id=\"${STANDALONE_PKG_ID}\"/>"
+  echo '    </choice>'
+
+  if [[ "${DO_PLUGINS}" -eq 1 ]]; then
+    echo "    <choice id=\"${PLUGINS_PKG_ID}\""
+    echo "            title=\"${PRODUCT_NAME} Plug-ins (VST3 + AU)\""
+    echo "            description=\"Audio plug-ins for your DAW.\""
+    echo '            enabled="true" selected="true">'
+    echo "        <pkg-ref id=\"${PLUGINS_PKG_ID}\"/>"
+    echo '    </choice>'
+  fi
+
+  if [[ "${DO_MILKDROP}" -eq 1 ]]; then
+    echo "    <choice id=\"${MILKDROP_PKG_ID}\""
+    echo "            title=\"${PRODUCT_NAME} Milkdrop Plug-in (VST3 + AU)\""
+    echo "            description=\"A Milkdrop-only visualizer plug-in — a single fullscreen Milkdrop module.\""
+    echo '            enabled="true" selected="true">'
+    echo "        <pkg-ref id=\"${MILKDROP_PKG_ID}\"/>"
+    echo '    </choice>'
+  fi
+
+  echo "    <pkg-ref id=\"${STANDALONE_PKG_ID}\" version=\"${VERSION}\" onConclusion=\"none\">standalone.pkg</pkg-ref>"
+  if [[ "${DO_PLUGINS}" -eq 1 ]]; then
+    echo "    <pkg-ref id=\"${PLUGINS_PKG_ID}\" version=\"${VERSION}\" onConclusion=\"none\">plugins.pkg</pkg-ref>"
+  fi
+  if [[ "${DO_MILKDROP}" -eq 1 ]]; then
+    echo "    <pkg-ref id=\"${MILKDROP_PKG_ID}\" version=\"${VERSION}\" onConclusion=\"none\">milkdrop.pkg</pkg-ref>"
+  fi
+  echo '</installer-gui-script>'
+} > "${WORK_DIR}/Distribution.xml"
+
+rm -f "${PKG_PATH}"
+productbuild \
+  --distribution "${WORK_DIR}/Distribution.xml" \
+  --package-path "${COMPONENTS_DIR}" \
+  "${PKG_PATH}"
+
+# ----------------------------------------------------------------------------
+# Step 7/7  打 dmg
+# ----------------------------------------------------------------------------
+log "Step 7/7 Build .dmg"
+
+rm -rf "${DMG_STAGE_DIR}"
+mkdir -p "${DMG_STAGE_DIR}"
+/usr/bin/ditto "${PKG_PATH}" "${DMG_STAGE_DIR}/${PKG_NAME}"
+
+{
+  echo "${PRODUCT_NAME} ${VERSION} macOS installer"
+  echo "========================================"
+  echo
+  echo "Architectures: ${ARCH_TEXT:-unknown}"
+  echo
+  echo "Open \"${PKG_NAME}\" to install."
+  echo
+  echo "Components:"
+  echo
+  echo "  1) ${PRODUCT_NAME} (Standalone Application)       [required]"
+  echo "       -> /Applications/${PRODUCT_NAME}.app"
+  if [[ "${DO_PLUGINS}" -eq 1 ]]; then
+    echo
+    echo "  2) ${PRODUCT_NAME} Plug-ins (VST3 + AU)           [optional]"
+    if [[ "${HAVE_VST3}" -eq 1 ]]; then
+      echo "       -> /Library/Audio/Plug-Ins/VST3/${PRODUCT_NAME}.vst3"
+    fi
+    if [[ "${HAVE_AU}" -eq 1 ]]; then
+      echo "       -> /Library/Audio/Plug-Ins/Components/${PRODUCT_NAME}.component"
+    fi
+  fi
+  if [[ "${DO_MILKDROP}" -eq 1 ]]; then
+    echo
+    echo "  3) ${PRODUCT_NAME} Milkdrop Plug-in (VST3 + AU)   [optional]"
+    if [[ "${HAVE_MILKDROP_VST3}" -eq 1 ]]; then
+      echo "       -> /Library/Audio/Plug-Ins/VST3/${MILKDROP_NAME}.vst3"
+    fi
+    if [[ "${HAVE_MILKDROP_AU}" -eq 1 ]]; then
+      echo "       -> /Library/Audio/Plug-Ins/Components/${MILKDROP_NAME}.component"
+    fi
+  fi
+  echo
+  echo "Click \"Customize\" on the Installation Type step to select plug-ins."
+  echo
+  echo "After installation, reopen your DAW and rescan plug-ins if needed."
+  echo
+  echo "Note: this build uses an ad-hoc signature (not notarized)."
+  echo "If Gatekeeper blocks the app on first launch, right-click it in Finder"
+  echo "and choose Open."
+} > "${DMG_STAGE_DIR}/README.txt"
+
 rm -f "${DMG_PATH}"
-hdiutil convert "${DMG_RW_PATH}" \
+hdiutil create \
+  -volname "${PRODUCT_NAME} ${VERSION}" \
+  -srcfolder "${DMG_STAGE_DIR}" \
+  -ov \
   -format UDZO \
   -imagekey zlib-level=9 \
-  -o "${DMG_PATH}" >/dev/null
+  "${DMG_PATH}" >/dev/null
 
-# 如果启用了签名，顺手给 DMG 也加个 ad-hoc 签名
+# 如果启用了签名，顺手给 DMG 也加个 ad-hoc 签名（pkg 本身不单独签名，
+# ad-hoc 分发下无需 productsign，保持与 SpectrumTag 一致）。
 if [[ "${DO_SIGN}" -eq 1 ]]; then
   codesign --force --sign - "${DMG_PATH}" || true
 fi
 
-# 清理中间件
-rm -f  "${DMG_RW_PATH}"
-rm -rf "${STAGE_DIR}"
-rm -rf "${TOOLS_DIR}"
+if [[ "${KEEP_WORK}" -eq 1 ]]; then
+  log "Keep work dir: ${WORK_DIR}"
+else
+  log "Cleanup"
+  rm -rf "${WORK_DIR}"
+fi
 
-log "完成：${DMG_PATH}"
-log "DMG 大小：$(du -h "${DMG_PATH}" | awk '{print $1}')"
-
-cat <<POSTINFO
-
-下一步你可以：
-  1) 挂载 DMG 做一次冒烟测试：
-       open "${DMG_PATH}"
-     打开后应看到：
-       · 粉色背景 + 三条箭头
-       · 上行：Y2Kmeter.app        →  Applications
-       · 中行：Y2Kmeter.vst3       →  VST3 Plug-Ins
-       · 下行：Y2Kmeter.component  →  Components
-     用户拖拽即可完成安装，不用再读文字说明。
-
-  2) 直接从 Finder 打开 .app（走正常 LaunchServices 注册）：
-       open "${APP_BUNDLE}"
-
-  3) 如果之前从命令行直接跑过 .app/Contents/MacOS/Y2Kmeter 导致 Dock
-     图标缓存成"田字格"，可用以下命令清掉缓存并重建：
-       killall Dock
-       killall Finder
-POSTINFO
+log "Done"
+log "  - PKG: ${PKG_PATH}"
+log "  - DMG: ${DMG_PATH}"
