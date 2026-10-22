@@ -42,6 +42,13 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
     btnFreeze.onClick = [this]() { setFrozen(btnFreeze.getToggleState()); };
     addAndMakeVisible(btnFreeze);
 
+    // 自动缩放开关（仅对 X-Y / Lissajous 有效；Waveform 模式本来就是固定 ±1）
+    btnAuto.setClickingTogglesState(true);
+    btnAuto.setToggleState(autoScaleEnabled, juce::dontSendNotification);
+    btnAuto.setTooltip("Auto-scale X-Y / Lissajous to fit the peak level (turn off for fixed 1.0x)");
+    btnAuto.onClick = [this]() { setAutoScaleEnabled(btnAuto.getToggleState()); };
+    addAndMakeVisible(btnAuto);
+
     btnWave.setToggleState(true, juce::dontSendNotification);
 }
 
@@ -62,6 +69,7 @@ juce::ValueTree OscilloscopeModule::saveModuleSpecificState() const
     juce::ValueTree s("state");
     s.setProperty("displayMode", (int) displayMode, nullptr);
     s.setProperty("frozen", frozen, nullptr);
+    s.setProperty("autoScale", autoScaleEnabled, nullptr);
     return s;
 }
 
@@ -71,6 +79,8 @@ void OscilloscopeModule::restoreModuleSpecificState(const juce::ValueTree& state
         setDisplayMode((DisplayMode) (int) state.getProperty("displayMode"));
     if (state.hasProperty("frozen"))
         setFrozen((bool) state.getProperty("frozen"));
+    if (state.hasProperty("autoScale"))
+        setAutoScaleEnabled((bool) state.getProperty("autoScale"));
 }
 
 void OscilloscopeModule::setDisplayMode(DisplayMode m)
@@ -89,6 +99,26 @@ void OscilloscopeModule::setFrozen(bool b)
     frozen = b;
     btnFreeze.setToggleState(frozen, juce::dontSendNotification);
     invalidateDynamicLayer(); // 冻结状态右上角红点 + FROZEN 文本需要重绘
+    repaint();
+}
+
+void OscilloscopeModule::setAutoScaleEnabled(bool enabled)
+{
+    if (autoScaleEnabled == enabled) return;
+
+    autoScaleEnabled = enabled;
+    btnAuto.setToggleState(enabled, juce::dontSendNotification);
+
+    if (! enabled)
+    {
+        // 关闭自动缩放：立刻回到 1.0x，并清掉周期统计，避免重新开启时用旧数据跳变
+        autoGainFactor           = 1.0f;
+        periodicMaxAccum         = 0.0f;
+        prevPeriodicMax          = 1.0f;
+        lastPeriodicGainUpdateMs = 0.0;
+    }
+
+    invalidateDynamicLayer();
     repaint();
 }
 
@@ -124,7 +154,9 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         //   · 每帧取样本最大欧氏距离 sqrt(L²+R²)，累积到 periodicMaxAccum
         //   · 每秒结算一次：gain = 0.80 / periodicMaxAccum → 峰值落在边界 80%
         //   · 与上周期的 gain 差 <10% 则不缩放，避免频繁抖动
-        if ((displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous) && n > 0)
+        if (autoScaleEnabled
+            && (displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous)
+            && n > 0)
         {
             // 本帧峰值：取 sqrt(L²+R²) 的最大值
             {
@@ -213,6 +245,9 @@ void OscilloscopeModule::layoutContent(juce::Rectangle<int> contentBounds)
 
     const int freezeW = 64;
     btnFreeze.setBounds(tb.getRight() - freezeW, tb.getY(), freezeW, tb.getHeight());
+
+    const int autoW = 56;
+    btnAuto.setBounds(tb.getRight() - freezeW - gap - autoW, tb.getY(), autoW, tb.getHeight());
 }
 
 // ----------------------------------------------------------

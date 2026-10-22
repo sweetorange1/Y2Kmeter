@@ -55,6 +55,13 @@ public:
     void setFrozen(bool b);
     bool isFrozen() const noexcept { return frozen; }
 
+    // XY / Lissajous 自动缩放开关（v1.8.5 引入的 autoGainFactor）
+    //   · 默认开启，保持上游行为；
+    //   · 关闭后固定 1.0x（样本原始 ±1 映射），不再按峰值自动放大/缩小；
+    //   · 状态随模块存档持久化（"autoScale"）。
+    void setAutoScaleEnabled(bool enabled);
+    bool isAutoScaleEnabled() const noexcept { return autoScaleEnabled; }
+
     // v1.8.4 持久化：保存/恢复 displayMode + frozen
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
@@ -124,6 +131,7 @@ private:
     //   · 每秒统计样本最大欧氏距离 sqrt(L²+R²)，计算增益使峰值落在边界 80% 处
     //   · 避免 RMS 过度补偿：峰值驱动确保不出界
     //   · 更新频率限制：每秒最多 1 次实际缩放；波动 <10% 不更新
+    bool  autoScaleEnabled            = true;    // 自动缩放开关（关闭时固定 1.0x）
     float autoGainFactor              = 1.0f;    // 当前增益系数 [0.25, 8.0]
     float periodicMaxAccum            = 0.0f;    // 当前周期内累积的样本最大距离
     float prevPeriodicMax             = 1.0f;    // 上一周期的最大距离（初始 1.0 = 0dBFS）
@@ -135,6 +143,7 @@ private:
     juce::TextButton btnXY     { "X-Y"    };
     juce::TextButton btnLiss   { "Liss"   };
     juce::TextButton btnFreeze { "Freeze" };
+    juce::TextButton btnAuto   { "AUTO"   };   // 自动缩放开关（toggle）
 
     static constexpr int toolbarH = 26;
 
