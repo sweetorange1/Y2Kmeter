@@ -378,6 +378,10 @@ VERSION 2.8.6
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
+        # Linux：juce_core 的 URL/WebInputStream 走 libcurl（JUCE_USE_CURL 默认 1），
+        #   必须显式 NEEDS_CURL 才会把 pkg-config libcurl 加进链接行。
+        #   Windows/macOS 上该选项不产生任何链接依赖（JUCE 只对 Linux 生效）。
+        NEEDS_CURL TRUE
         # 注：Milkdrop 模块自 2.0.4 起改用 libprojectM（native OpenGL），
         # 因此不再声明 NEEDS_WEBVIEW2；相关的 juce_gui_extra + WebBrowser 依赖
         # 已经从下方 target_compile_definitions 中移除。projectM DLL 通过
@@ -429,6 +433,10 @@ Y2Kmeter_milkdrop
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
+        # Linux：juce_core 的 URL/WebInputStream 走 libcurl（JUCE_USE_CURL 默认 1），
+        #   必须显式 NEEDS_CURL 才会把 pkg-config libcurl 加进链接行。
+        #   Windows/macOS 上该选项不产生任何链接依赖（JUCE 只对 Linux 生效）。
+        NEEDS_CURL TRUE
         VST3_AUTO_MANIFEST FALSE
         COPY_PLUGIN_AFTER_BUILD TRUE
 )
@@ -520,6 +528,14 @@ set(Y2KM_COMMON_COMPILE_DEFS
     JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
     # Milkdrop 模块现在使用 libprojectM（native OpenGL）而不是 WebView2；
     # 因此不再启用 JUCE_WEB_BROWSER。如果未来其他模块需要，可以按需重新打开。
+    #
+    # ★ Linux 关键：JUCE_WEB_BROWSER 默认值是 1（见 juce_gui_extra.h），而 Linux
+    #   分支一旦为 1 就会 #include <gtk/gtk.h> + <webkit2/webkit2.h>。GTK/WebKitGTK
+    #   的头文件只在 pkg-config 能找到 webkit2gtk-4.x 时才会被 CMake 加进 include
+    #   路径，缺 webkit2gtk 的发行版（Arch 默认只装 gtk3）会直接 fatal error:
+    #   gtk/gtk.h: No such file or directory。显式关掉后 Linux 构建不再依赖
+    #   GTK/WebKit，Windows/macOS 行为不变（它们本来也没用到 WebView）。
+    JUCE_WEB_BROWSER=0
 )
 
 target_compile_definitions(Y2Kmeter PUBLIC ${Y2KM_COMMON_COMPILE_DEFS})
@@ -608,6 +624,14 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/standalone/Y2KStandaloneApp.cpp
   source/standalone/WasapiLoopbackCapture.h
   source/standalone/WasapiLoopbackCapture.cpp
+
+  # Linux 桌面集成：Hyprland 浮动/置顶/驻留条（通过 hyprctl IPC）
+  source/standalone/LinuxWindowSupport.h
+  source/standalone/LinuxWindowSupport.cpp
+
+  # Linux 系统输出采集：PipeWire 默认 sink 的 monitor（pw-record；PulseAudio 回退 parec）
+  source/standalone/LinuxMonitorCapture.h
+  source/standalone/LinuxMonitorCapture.cpp
 
   source/network/Version.h
   source/network/Version.cpp

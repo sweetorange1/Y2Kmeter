@@ -507,58 +507,16 @@ ModuleWorkspace::ModuleWorkspace()
     //     周期覆盖到回调触发；lambda 捕获 shared_ptr 保证不析构）。
     savePresetBtn.setButtonText ("Save");
     savePresetBtn.setTooltip    ("Save current settings (layout + theme + window) as a preset file");
-    savePresetBtn.onClick = [this]()
-    {
-        auto chooser = std::make_shared<juce::FileChooser> (
-            "Save current settings as preset",
-            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
-                .getChildFile (juce::String (JucePlugin_Name) + ".settings"),
-            "*.settings");
-
-        const auto flags = juce::FileBrowserComponent::saveMode
-                         | juce::FileBrowserComponent::canSelectFiles
-                         | juce::FileBrowserComponent::warnAboutOverwriting;
-
-        juce::Component::SafePointer<ModuleWorkspace> safe (this);
-        chooser->launchAsync (flags, [safe, chooser](const juce::FileChooser& fc)
-        {
-            if (safe == nullptr) return;
-            auto result = fc.getResult();
-            if (result == juce::File{}) return;                 // 用户取消
-            if (result.getFileExtension().isEmpty())
-                result = result.withFileExtension ("settings");  // 补全后缀
-            if (safe->onSavePresetRequested)
-                safe->onSavePresetRequested (result);
-        });
-    };
+    savePresetBtn.onClick = [this]() { launchSavePresetChooser(); };
     addAndMakeVisible (savePresetBtn);
 
     loadPresetBtn.setButtonText ("Load");
     loadPresetBtn.setTooltip    ("Load a previously saved preset file (reloads the app)");
-    loadPresetBtn.onClick = [this]()
-    {
-        auto chooser = std::make_shared<juce::FileChooser> (
-            "Load preset",
-            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
-            "*.settings");
-
-        const auto flags = juce::FileBrowserComponent::openMode
-                         | juce::FileBrowserComponent::canSelectFiles;
-
-        juce::Component::SafePointer<ModuleWorkspace> safe (this);
-        chooser->launchAsync (flags, [safe, chooser](const juce::FileChooser& fc)
-        {
-            if (safe == nullptr) return;
-            const auto result = fc.getResult();
-            if (result == juce::File{} || ! result.existsAsFile()) return;   // 用户取消/无效
-            if (safe->onLoadPresetRequested)
-                safe->onLoadPresetRequested (result);
-        });
-    };
+    loadPresetBtn.onClick = [this]() { launchLoadPresetChooser(); };
     addAndMakeVisible (loadPresetBtn);
 
-#if JUCE_WINDOWS
-    // stick 模式按钮（Windows 专属：AppBar 硬 stick 驻留）
+#if JUCE_WINDOWS || JUCE_LINUX
+    // stick 模式按钮（Windows：AppBar 硬驻留；Linux/Hyprland：浮动条贴边模拟）
     //   · STICK：进入 stick（未激活时显示）
     //   · X：退出 stick；T/B：顶/底切换（激活时显示，STICK 隐藏）
     stickBtn.setButtonText ("Stick");
@@ -1474,9 +1432,10 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
 
     options = options.withTargetScreenArea (targetArea);
 
-   #if JUCE_WINDOWS
-    // stick 驻留态：AppBar 把条带从系统工作区（userArea）里挖掉了，JUCE 默认会把
-    //   菜单整体 clamp 到 userArea，结果菜单被顶到条带上方、远离鼠标。这里把允许
+   #if JUCE_WINDOWS || JUCE_LINUX
+    // stick 驻留态：Windows AppBar 把条带从工作区挖掉；Hyprland 是浮动条覆盖，
+    //   两者都需要把菜单允许区域放宽到整块显示器 —— JUCE 默认会把菜单整体
+    //   clamp 到 userArea，结果菜单被顶到条带上方、远离鼠标。这里把允许
     //   区域放宽到整个显示器，让菜单贴着点击位置弹出（可以盖在条带上）。
     //   withParentAreaOverride 是本仓库 JUCE 的本地扩展；用平台宏包住，保证
     //   macOS 端即使链接官方 JUCE 也能编译。
@@ -2393,6 +2352,82 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
     g.strokePath (dashed, juce::PathStrokeType (1.5f));
 }
 
+// ==========================================================
+// 弹出“另存为”文件对话框（Save 预设）
+//   · 从按钮 onClick 中抽成独立方法，便于复用与单独测试；
+//   · FileChooser 传入顶层窗口作为 parent（对话框归属/居中更合理）；
+//   · 打开/关闭时通知 Editor 临时摘掉/恢复主窗 AlwaysOnTop，避免对话框
+//     出现在置顶主窗下方（Linux 上 zenity / JUCE 自绘对话框都是独立顶层窗）。
+// ==========================================================
+void ModuleWorkspace::launchSavePresetChooser()
+{
+    auto chooser = std::make_shared<juce::FileChooser> (
+        "Save current settings as preset",
+        juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+            .getChildFile (juce::String (JucePlugin_Name) + ".settings"),
+        "*.settings",
+        /*useNativeDialogBox*/ true,
+        /*treatFilePackagesAsDirectories*/ false,
+        /*parentComponentToUse*/ getTopLevelComponent());
+
+    const auto flags = juce::FileBrowserComponent::saveMode
+                     | juce::FileBrowserComponent::canSelectFiles
+                     | juce::FileBrowserComponent::warnAboutOverwriting;
+
+    if (onSaveLoadDialogOpenChanged)
+        onSaveLoadDialogOpenChanged (true);
+
+    juce::Component::SafePointer<ModuleWorkspace> safe (this);
+    chooser->launchAsync (flags, [safe, chooser](const juce::FileChooser& fc)
+    {
+        if (safe == nullptr) return;
+        if (safe->onSaveLoadDialogOpenChanged)
+            safe->onSaveLoadDialogOpenChanged (false);
+
+        auto result = fc.getResult();
+        if (result == juce::File{}) return;                 // 用户取消
+        if (result.getFileExtension().isEmpty())
+            result = result.withFileExtension ("settings");  // 补全后缀
+        if (safe->onSavePresetRequested)
+            safe->onSavePresetRequested (result);
+    });
+}
+
+// ==========================================================
+// 弹出“打开”文件对话框（Load 预设）
+//   · 与 Save 侧同样传入顶层窗口 parent，并在打开/关闭时通知 Editor 摘/挂
+//     AlwaysOnTop，避免对话框被置顶主窗遮挡。
+// ==========================================================
+void ModuleWorkspace::launchLoadPresetChooser()
+{
+    auto chooser = std::make_shared<juce::FileChooser> (
+        "Load preset",
+        juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+        "*.settings",
+        /*useNativeDialogBox*/ true,
+        /*treatFilePackagesAsDirectories*/ false,
+        /*parentComponentToUse*/ getTopLevelComponent());
+
+    const auto flags = juce::FileBrowserComponent::openMode
+                     | juce::FileBrowserComponent::canSelectFiles;
+
+    if (onSaveLoadDialogOpenChanged)
+        onSaveLoadDialogOpenChanged (true);
+
+    juce::Component::SafePointer<ModuleWorkspace> safe (this);
+    chooser->launchAsync (flags, [safe, chooser](const juce::FileChooser& fc)
+    {
+        if (safe == nullptr) return;
+        if (safe->onSaveLoadDialogOpenChanged)
+            safe->onSaveLoadDialogOpenChanged (false);
+
+        const auto result = fc.getResult();
+        if (result == juce::File{} || ! result.existsAsFile()) return;   // 用户取消/无效
+        if (safe->onLoadPresetRequested)
+            safe->onLoadPresetRequested (result);
+    });
+}
+
 void ModuleWorkspace::resized()
 {
     // 窗口尺寸变化时关闭可能处于错误位置的取色器
@@ -2573,8 +2608,8 @@ void ModuleWorkspace::resized()
                 tb.removeFromRight (6);
         }
 
-#if JUCE_WINDOWS
-        // stick 按钮组（Windows 专属）：贴在 Save/Load 左侧、themeBar 右侧
+#if JUCE_WINDOWS || JUCE_LINUX
+        // stick 按钮组（Windows：AppBar；Linux/Hyprland：浮动条）：贴在 Save/Load 左侧、themeBar 右侧
         //   · 未激活：显示 "Stick"；激活：显示 "X"（退出）+ "T/B"（顶/底切换）
         //   · 插件宿主模式（stickUiVisible=false）：整组隐藏，且不占工具栏宽度
         //     （否则 DAW 里会把宿主窗口注册成 AppBar）

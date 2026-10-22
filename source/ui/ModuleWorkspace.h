@@ -653,6 +653,11 @@ public:
     std::function<void(juce::File)> onSavePresetRequested;
     std::function<void(juce::File)> onLoadPresetRequested;
 
+    // Save/Load 文件对话框打开/关闭通知（true=对话框已弹出，false=已关闭）
+    //   · 供 Editor 在对话框期间临时取消 always-on-top，避免非原生对话框
+    //     被置顶主窗遮挡（Linux/Hyprland 下 zenity 也是独立顶层窗口）。
+    std::function<void(bool)> onSaveLoadDialogOpenChanged;
+
     // stick 模式回调（Windows 专属）：STICK 按钮进入 / X 退出 / T-B 顶底切换
     std::function<void()> onStickClicked;
     std::function<void()> onStickExitClicked;
@@ -755,6 +760,10 @@ public:
     juce::Rectangle<int> getToolbarArea() const;
 
 private:
+    // 弹出“另存为”/“打开”文件对话框（Save/Load 预设）
+    void launchSavePresetChooser();
+    void launchLoadPresetChooser();
+
     static constexpr int gridSize       = 8;
     static constexpr int margin         = 0;   // 0 = 模块可以紧贴窗口边框
     static constexpr int toolbarHeight  = 36;

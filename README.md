@@ -8,7 +8,7 @@
 
 <p align="center">
 <img src="https://img.shields.io/badge/version-2.8.6-blue" alt="Version">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
 </p>
 
@@ -82,6 +82,21 @@ cmake --build cmake-build-release --config Release
 ```
 
 **Windows 用户**：构建前请将 `third_party/projectm/bin/projectM-4.dll` 和 `glew32.dll` 放置到可执行文件同目录（CMake Post-build 脚本会自动处理）。
+
+### Linux（Arch + Hyprland / PipeWire）
+
+```bash
+# 依赖：base-devel cmake ninja gcc libcurl alsa-lib freetype2 libpng libx11 libxrandr libxinerama libxcursor
+cmake --preset linux-release
+cmake --build --preset linux-release --target Y2Kmeter_Standalone
+# 产物：build/linux/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter
+```
+
+Linux 适配细节（Hyprland 浮动/驻留条、PipeWire 系统输出采集、Milkdrop、已知限制）见
+[`docs/Linux_Arch_Hyprland.md`](docs/Linux_Arch_Hyprland.md)。
+
+- 一键安装（二进制 + Milkdrop 资源 + 启动项）：`scripts/linux_install.sh`
+- Milkdrop 需要 libprojectM 4.x：`sudo pacman -S libprojectm`（Arch）
 
 ---
 

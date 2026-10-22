@@ -100,3 +100,8 @@ tools/MilkDrop 3.33
 /build_temp.bat
 /incr_build.bat
 
+# Linux 本地构建/诊断产物
+/.ccache/
+/.test/
+/.dsh/
+/run-local/

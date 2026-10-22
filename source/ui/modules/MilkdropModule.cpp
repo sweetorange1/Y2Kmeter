@@ -538,6 +538,21 @@ namespace
       //    Windows: %APPDATA%\Y2Kmeter\）—— 最高优先级，允许用户自行替换预设。
       //    仅当目录"有效"（含 .milk / 子文件）时才使用；空目录会继续 fallback，
       //    避免旧版本残留空目录屏蔽 bundle 内合法资源。
+      // Linux：JUCE 的 userApplicationDataDirectory 映射到 XDG_CONFIG_HOME
+      //   （~/.config），把 100+MB 的预设/纹理塞进配置目录不合适；这里优先用
+      //   XDG 数据目录 ~/.local/share/Y2Kmeter/<subdir>。若不存在再回退到
+      //   ~/.config/Y2Kmeter/<subdir>（兼容旧布局）。
+     #if defined (__linux__)
+      {
+        juce::File dataDir = juce::File::getSpecialLocation(
+            juce::File::userHomeDirectory)
+            .getChildFile(".local/share/Y2Kmeter")
+            .getChildFile(subdir);
+        if (isValidAssetsDir(dataDir))
+          return dataDir;
+      }
+     #endif
+
       juce::File appDataDir = juce::File::getSpecialLocation(
           juce::File::userApplicationDataDirectory)
           .getChildFile("Y2Kmeter")

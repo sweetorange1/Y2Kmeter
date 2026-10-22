@@ -223,8 +223,8 @@ private:
     //   直接保留会让本机下次启动莫名进入 stick。
     void syncStickSessionFlagToProcessor();
 
-#if JUCE_WINDOWS
-    // ---- stick 模式（Windows 专属：AppBar 硬 stick 驻留）----
+#if JUCE_WINDOWS || JUCE_LINUX
+    // ---- stick 模式（Windows：AppBar 硬驻留；Linux：浮动条贴边模拟）----
     //   进入：备份当前布局 + 窗口 bounds → 切换 Horizontal Bar(T) → AppBar 驻留
     //         （SHAppBarMessage 缩小屏幕工作区，其他窗口被挤走）→ 隐藏最小化/置顶按钮
     //   退出：取消 AppBar → 恢复备份布局 + 窗口 bounds → 恢复按钮
@@ -451,13 +451,15 @@ private:
     bool lockButtonHovered    = false;   // v1.8.3
     bool lockButtonPressed    = false;
     bool alwaysOnTopActive    = true;  // 固定按钮当前状态：默认启用（置顶不被遮挡）
+    // Save/Load 文件对话框期间临时摘下置顶（避免对话框被置顶主窗遮挡）
+    bool alwaysOnTopSuspendedForDialog = false;
     bool layoutLocked         = false; // v1.8.3：布局锁定态（抱锁后不可拖动/resize）
 
     // stick 模式是否激活（Windows 专属；非 Windows 恒 false，供 paint 判断隐藏按钮）
     bool stickActive = false;
 
-#if JUCE_WINDOWS
-    // ---- stick 模式状态（Windows 专属）----
+#if JUCE_WINDOWS || JUCE_LINUX
+    // ---- stick 模式状态（Windows/Hyprland）----
     bool                 stickBottomAligned  = false;  // false=T(顶), true=B(底)
     juce::ValueTree      stickBackupLayout;            // 进入 stick 前的模块布局备份
     juce::Rectangle<int> stickBackupWindowBounds;       // 进入 stick 前的窗口 bounds 备份

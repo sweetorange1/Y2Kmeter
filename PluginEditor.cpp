@@ -24,6 +24,7 @@
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/MilkdropParamIds.h"
+#include "source/standalone/LinuxWindowSupport.h"
 
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
@@ -173,6 +174,93 @@ namespace {
     }
 } // namespace
 #endif
+
+#if JUCE_LINUX
+namespace {
+    // Linux/Hyprland 版窗口几何封装：
+    //   平铺式合成器（Hyprland 默认）会把普通顶层窗口塞进平铺布局，导致
+    //   setBounds 无效（窗口被拉满屏）。所以任何"贴边/固定尺寸"操作前都先
+    //   通过 hyprctl 把本窗口转成 floating；非 Hyprland 环境此调用是 no-op，
+    //   setBounds 依赖窗口管理器自身行为（GNOME/KDE 下浮动窗都能正常 setBounds）。
+    juce::Rectangle<int> y2kGetWindowRectPx (juce::Component* window) noexcept
+    {
+        if (window == nullptr) return {};
+        return window->getScreenBounds();
+    }
+
+    int y2kGetWindowHeightPx (juce::Component* window) noexcept
+    {
+        return y2kGetWindowRectPx (window).getHeight();
+    }
+
+    bool y2kMoveWindowToRectPx (juce::Component* window, juce::Rectangle<int> r) noexcept
+    {
+        if (window == nullptr || r.isEmpty())
+            return false;
+
+        window->setBounds (r);
+
+        // Hyprland 对 X11 窗口只采纳尺寸、不采纳位置（映射时居中）——位置得走
+        // hyprctl dispatch 显式搬一次，否则 stick 条会停在屏幕中间。
+        if (auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForRect (r))
+        {
+            const y2k::linuxwm::X11DisplayArea area {
+                d->totalArea.getX(), d->totalArea.getY(),
+                d->totalArea.getWidth(), d->totalArea.getHeight() };
+            y2k::linuxwm::moveWindowToX11Pixels (0, r.getX(), r.getY(), area);
+        }
+
+        return true;
+    }
+
+    // Linux 没有 AppBar/SHAppBarMessage：这里用"全宽浮动条 + 贴边"模拟驻留。
+    //   注意：无法像 Windows 那样真正压缩其它窗口的工作区（Wayland 无此 API），
+    //   Hyprland 下表现为一条覆盖在屏幕顶/底边的浮动条。这是平台能力差异，
+    //   已在 README/移植文档中说明。
+    bool y2kAppBarDock (juce::Component* window, bool bottom,
+                        juce::Rectangle<int>* outDockedRectPx = nullptr) noexcept
+    {
+        if (window == nullptr)
+            return false;
+
+        // 关键：先转浮动，否则后续 setBounds 会被合成器的平铺布局覆盖
+        y2k::linuxwm::ensureFloating (0, true);
+
+        // Hyprland 的 pin ≈ Windows AppBar 的"全局驻留"：所有工作区都可见、保持最前。
+        y2k::linuxwm::setPinned (0, true);
+        y2k::linuxwm::raiseToTop (0);
+
+        const int thickness = juce::jmax (1, y2kGetWindowHeightPx (window));
+
+        auto* display = juce::Desktop::getInstance().getDisplays()
+                            .getDisplayForPoint (window->getScreenBounds().getCentre());
+        const auto area = (display != nullptr) ? display->userArea
+                                               : juce::Rectangle<int> (0, 0, 1280, 720);
+
+        const auto docked = juce::Rectangle<int> (area.getX(),
+                                                  bottom ? (area.getBottom() - thickness)
+                                                         : area.getY(),
+                                                  area.getWidth(),
+                                                  thickness);
+
+        if (! y2kMoveWindowToRectPx (window, docked))
+            return false;
+
+        if (outDockedRectPx != nullptr)
+            *outDockedRectPx = docked;
+
+        return true;
+    }
+
+    void y2kAppBarUndock (juce::Component* window) noexcept
+    {
+        // 让窗口留在当前几何位置即可；调用方会恢复 stick 前的 bounds。
+        //   pin 需要撤销，否则退出驻留后窗口仍会钉在所有工作区上。
+        if (window != nullptr)
+            y2k::linuxwm::setPinned (0, false);
+    }
+} // namespace
+#endif // JUCE_LINUX
 
 // ==========================================================
 // 屏幕尺寸模拟（仅开发调试用）
@@ -1176,6 +1264,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     setResizable(true, true);
     if (isPluginHost)
         setResizeLimits(50, 50, 8192, 8192);
+   #if JUCE_LINUX
+    // Linux/桌面场景：窗口由用户自己在合成器里拖拽缩放，可能希望铺满整块
+    //   显示器（HiDPI 下 2560×1600 很常见）。把上限放到 8192，避免用户想拉大
+    //   到全屏时被 1600×1100 的上限卡住。
+    else if (juce::JUCEApplicationBase::isStandaloneApp())
+        setResizeLimits(640, 420, 8192, 8192);
+   #endif
     else
         setResizeLimits(640, 420, 1600, 1100);
 
@@ -1480,8 +1575,27 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         if (onLoadSettingsRequested) onLoadSettingsRequested (src);
     };
 
-#if JUCE_WINDOWS
-    // 4.05c) stick 模式按钮（Windows 专属）：STICK 进入 / X 退出 / T-B 顶底切换
+    // 4.05b2) Save/Load 文件对话框打开期间临时取消 always-on-top：
+    //   · Linux 上 FileChooser 走 zenity（独立顶层窗口），JUCE 非原生对话框也是
+    //     独立顶层窗口；主窗若处于置顶状态，对话框会出现在主窗下方，表现为
+    //     “点了 Save 却什么都没发生”。这里在对话框生命周期内降级置顶，关闭后恢复。
+    workspace->onSaveLoadDialogOpenChanged = [this](bool isOpen)
+    {
+        if (isOpen)
+        {
+            alwaysOnTopSuspendedForDialog = alwaysOnTopActive;
+            if (alwaysOnTopActive)
+                setAlwaysOnTopActive (false);
+        }
+        else if (alwaysOnTopSuspendedForDialog)
+        {
+            alwaysOnTopSuspendedForDialog = false;
+            setAlwaysOnTopActive (true);
+        }
+    };
+
+#if JUCE_WINDOWS || JUCE_LINUX
+    // 4.05c) stick 模式按钮：Windows 走 AppBar 硬驻留，Linux/Hyprland 走浮动条贴边
     workspace->onStickClicked       = [this]() { enterStickMode(); };
     workspace->onStickExitClicked   = [this]() { exitStickMode(); };
     workspace->onStickToggleClicked = [this]() { toggleStickTopBottom(); };
@@ -1972,7 +2086,7 @@ void Y2KmeterAudioProcessorEditor::loadInitialModules()
     //    让窗口上屏时显示的就是用户上次看到的条状布局；AppBar 驻留本身
     //    要等 HWND 就绪，由 timerCallback → restoreSavedStickSession() 补做。
     juce::String savedXml;
-#if JUCE_WINDOWS
+#if JUCE_WINDOWS || JUCE_LINUX
     if (pendingStickRestore)
     {
         savedXml = processor.getSavedLayoutXml (
@@ -3835,6 +3949,7 @@ void Y2KmeterAudioProcessorEditor::setAlwaysOnTopActive (bool shouldBeOnTop)
     repaint (getTitleBarBounds());
 }
 
+
 // 最小化：仅在 Standalone 下有意义；调用顶层窗口的 peer 将其最小化
 void Y2KmeterAudioProcessorEditor::handleMinimiseClicked()
 {
@@ -3857,7 +3972,7 @@ void Y2KmeterAudioProcessorEditor::handleMinimiseClicked()
 // ==========================================================
 int Y2KmeterAudioProcessorEditor::activeLayoutSlot() const noexcept
 {
-#if JUCE_WINDOWS
+#if JUCE_WINDOWS || JUCE_LINUX
     if (stickActive)
         return stickBottomAligned ? 2 : 1;
 
@@ -3875,7 +3990,7 @@ void Y2KmeterAudioProcessorEditor::persistCurrentLayoutToProcessor()
 {
     if (workspace == nullptr) return;
 
-#if JUCE_WINDOWS
+#if JUCE_WINDOWS || JUCE_LINUX
     // 启动恢复窗口期：窗口还是普通窗口尺寸，模块可能已被 resized() 夹紧，
     //   此时布局只是过渡态 —— 一律不写回任何槽（否则会把过渡态固化：
     //   旧 bug 正是把条状布局写进非 stick 槽，或把夹紧后的条状布局写回 stick 槽）。
@@ -3894,7 +4009,7 @@ void Y2KmeterAudioProcessorEditor::persistCurrentLayoutToProcessor()
     // 2) 脱离态模块独立存档：与布局槽解耦，切换 stick / T-B 不会改动它。
     processor.setSavedFloatingModulesXml (workspace->saveFloatingModulesAsXml());
 
-#if JUCE_WINDOWS
+#if JUCE_WINDOWS || JUCE_LINUX
     // stick 驻留条高度随布局一起存档（按当前侧）：退出 stick / 重启后按该侧高度恢复。
     //   仅当窗口确实完成过驻留（stickDockedHeightPx>0）时才记录：启动恢复期间
     //   窗口还处在普通/条状过渡尺寸，此时记录会覆盖存档里的真实条高。
@@ -3905,16 +4020,16 @@ void Y2KmeterAudioProcessorEditor::persistCurrentLayoutToProcessor()
 
 void Y2KmeterAudioProcessorEditor::syncStickSessionFlagToProcessor()
 {
-#if JUCE_WINDOWS
+#if JUCE_WINDOWS || JUCE_LINUX
     processor.setSavedStickSession (stickActive, stickBottomAligned);
 #else
     processor.setSavedStickSession (false, false);
 #endif
 }
 
-#if JUCE_WINDOWS
+#if JUCE_WINDOWS || JUCE_LINUX
 // ==========================================================
-// stick 模式（Windows 专属：AppBar 硬 stick 驻留）
+// stick 模式（Windows：AppBar 硬驻留；Linux/Hyprland：浮动条贴边模拟）
 //   进入：备份当前布局 + 窗口 bounds → 切换 Horizontal Bar(T) → AppBar 驻留
 //         （缩小工作区，其他窗口被挤走）→ 隐藏最小化/置顶按钮
 //   退出：取消 AppBar → 恢复备份布局 + 窗口 bounds → 恢复按钮

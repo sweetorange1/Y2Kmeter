@@ -17,7 +17,7 @@
  #define WIN32_LEAN_AND_MEAN
  #define NOMINMAX
  #include <windows.h>
-#elif defined (__APPLE__)
+#elif defined (__APPLE__) || defined (__linux__)
  #include <dlfcn.h>
 #endif
 
@@ -170,6 +170,55 @@ static juce::File locateProjectMDylib()
 }
 #endif
 
+#if defined (__linux__)
+/**
+ * @brief 猜测 libprojectM-4.so 的位置（Linux）。
+ *
+ * 顺序：
+ *   1) 与当前可执行文件同目录 —— 生产期把 .so 放到 exe 旁边。
+ *   2) 可执行文件所在目录的 ../lib、../../lib —— 构建树 / 安装树场景。
+ *   3) 源码树 third_party/projectm/bin/linux —— 开发期兜底。
+ *   4) 系统路径 —— 交给 dlopen 的默认搜索（ldconfig），在 loadLibrary() 里兜底。
+ */
+static juce::File locateProjectMSo()
+{
+    juce::StringArray candidates;
+
+    auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                      .getParentDirectory();
+
+    auto addVariants = [&candidates] (juce::File dir)
+    {
+        candidates.add (dir.getChildFile ("libprojectM-4.so").getFullPathName());
+        candidates.add (dir.getChildFile ("libprojectM-4.so.4").getFullPathName());
+    };
+
+    // 1) exe 同目录
+    addVariants (exeDir);
+
+    // 2) 构建树 / 安装树的 lib 目录
+    addVariants (exeDir.getChildFile ("../lib"));
+    addVariants (exeDir.getChildFile ("../../lib"));
+
+    // 3) 源码树 third_party/projectm/bin/linux（开发期直接跑构建产物）
+    {
+        auto up = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        for (int i = 0; i < 10 && up.exists(); ++i)
+        {
+            auto guess = up.getChildFile ("third_party/projectm/bin/linux/libprojectM-4.so");
+            if (guess.existsAsFile())
+            {
+                candidates.add (guess.getFullPathName());
+                break;
+            }
+            up = up.getParentDirectory();
+        }
+    }
+
+    return findExistingFile (candidates);
+}
+#endif
+
 Api& Api::instance()
 {
     static Api singleton;
@@ -205,7 +254,7 @@ void Api::unloadLibrary()
         ::FreeLibrary ((HMODULE) glewModule);
         glewModule = nullptr;
     }
-   #elif defined (__APPLE__)
+   #elif defined (__APPLE__) || defined (__linux__)
     if (moduleHandle != nullptr)
     {
         ::dlclose (moduleHandle);
@@ -369,6 +418,38 @@ void Api::loadLibrary()
         Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary OK: dlopen handle=")
                                   + juce::String (moduleHandle != nullptr ? "ok" : "null"));
     }
+   #elif defined (__linux__)
+    auto so = locateProjectMSo();
+    Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary: locate .so -> '")
+                              + so.getFullPathName()
+                              + "' exists=" + juce::String (so.existsAsFile() ? 1 : 0));
+
+    // RTLD_NOW: 立即解析所有符号，便于在加载时发现缺失依赖。
+    // RTLD_LOCAL: 不把符号导出到全局命名空间，避免与其他插件冲突。
+    if (so.existsAsFile())
+        moduleHandle = ::dlopen (so.getFullPathName().toRawUTF8(), RTLD_NOW | RTLD_LOCAL);
+
+    // 系统安装（pacman -S libprojectm / 发行版包）兜底：走 ldconfig 搜索路径。
+    if (moduleHandle == nullptr)
+        moduleHandle = ::dlopen ("libprojectM-4.so.4", RTLD_NOW | RTLD_LOCAL);
+    if (moduleHandle == nullptr)
+        moduleHandle = ::dlopen ("libprojectM-4.so", RTLD_NOW | RTLD_LOCAL);
+
+    if (moduleHandle == nullptr)
+    {
+        const char* err = ::dlerror();
+        errorMessage = "Cannot load libprojectM-4.so. "
+                       "Install it via your package manager (e.g. `libprojectm` on Arch), "
+                       "or put libprojectM-4.so next to the executable. dlopen error: "
+                     + std::string (err != nullptr ? err : "unknown error");
+        Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary FAIL: ")
+                                  + juce::String (errorMessage));
+    }
+    else
+    {
+        Y2K_LOG (juce::String ("[ProjectMApi] loadLibrary OK (linux): dlopen handle=")
+                                  + juce::String (moduleHandle != nullptr ? "ok" : "null"));
+    }
    #else
     errorMessage = "libprojectM dynamic loading is not implemented on this platform.";
    #endif
@@ -379,7 +460,7 @@ void* Api::resolveOptional (const char* name)
    #if defined (_WIN32)
     if (moduleHandle == nullptr) return nullptr;
     return (void*) ::GetProcAddress ((HMODULE) moduleHandle, name);
-   #elif defined (__APPLE__)
+   #elif defined (__APPLE__) || defined (__linux__)
     if (moduleHandle == nullptr) return nullptr;
     return ::dlsym (moduleHandle, name);
    #else
@@ -394,7 +475,7 @@ void* Api::resolveRequired (const char* name)
     if (p == nullptr)
     {
         if (errorMessage.empty())
-            errorMessage = std::string ("projectM-4.dll missing symbol: ") + name;
+            errorMessage = std::string ("libprojectM missing symbol: ") + name;
         available = false;
     }
     return p;

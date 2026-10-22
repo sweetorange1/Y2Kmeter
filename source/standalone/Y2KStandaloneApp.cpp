@@ -17,6 +17,8 @@
 //        → 由 Editor 内部的 Y2K 关闭按钮 + 标题区拖拽来控制窗口
 // ==========================================================
 
+#include <cstdio>
+
 #include <juce_core/system/juce_TargetPlatform.h>
 
 #if JucePlugin_Build_Standalone && JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP
@@ -56,6 +58,8 @@
 
 // WASAPI Loopback 采集器（捕捉系统混音输出）
 #include "WasapiLoopbackCapture.h"
+#include "LinuxWindowSupport.h"
+#include "LinuxMonitorCapture.h"
 
 // macOS 桌面音频采集器（ScreenCaptureKit）+ 音频调试转储器
 // 这两个头文件本身也由 CMakeLists 仅在 APPLE 分支加入 target_sources，
@@ -688,8 +692,25 @@ public:
         //
         //    chromeVisible 恢复通过 callAsync 延迟：setChromeVisible 内部依赖
         //    editor.isShowing() 和 canResizeWindow 的标准路径，必须在窗口可见后执行。
+#if JUCE_LINUX
+        const auto intendedWindowBounds = mainWindow->getBounds();
+#endif
+
         mainWindow->addToDesktop();
         mainWindow->setVisible(true);
+
+#if JUCE_LINUX
+        // 注意：desired bounds 必须在 addToDesktop/setVisible 之前取。
+        //   Hyprland 的 float 规则会在窗口 map 时重新决定浮动窗尺寸，JUCE 收到
+        //   ConfigureNotify 后会把 Component bounds 改成合成器给的值；如果这里
+        //   再用 setVisible 之后的 getBounds() 去"重新提交几何"，就会把被缩小
+        //   后的尺寸固化下来。用 map 前记录的期望值才是用户存档里的真实意图。
+        // Hyprland 等平铺式合成器会把新窗口直接塞进平铺布局（表现为窗口被拉满
+        // 屏幕、无法拖动、对话框被压在下面）。窗口上屏后把它转成浮动窗口并提到
+        // 最前，然后重新提交一次期望几何。窗口刚映射时 Hyprland 可能还没把它登记
+        // 进 clients 列表，所以用有限次异步重试。非 Hyprland 环境是 no-op。
+        tryAdoptLinuxWindow (intendedWindowBounds, 0);
+#endif
 
         if (cachedEditor != nullptr)
         {
@@ -757,6 +778,9 @@ public:
 
         // -1) 停掉 Loopback 采集线程（若在跑）
         stopLoopbackCapture();
+       #if JUCE_LINUX
+        stopLinuxMonitorCapture();
+       #endif
 
        #if JUCE_MAC
         // macOS 专属：停掉 ScreenCaptureKit 桌面采集 + 落地音频转储摘要
@@ -848,6 +872,44 @@ private:
     //   · 不保存 maximized / fullscreen 状态（按用户设计此软件不会最大化）。
     //   · 对多屏拔掉 / 分辨率变化的情况做越界修正：整窗至少 80% 面积在主屏内。
     // ----------------------------------------------------
+#if JUCE_LINUX
+    // 把窗口几何提交给 JUCE + 显式搬位置（Hyprland 会忽略 X11 ConfigureRequest 的坐标）
+    void applyLinuxWindowGeometry (juce::Rectangle<int> desiredBounds)
+    {
+        if (mainWindow == nullptr) return;
+
+        mainWindow->setBounds (desiredBounds);
+
+        if (auto* d = juce::Desktop::getInstance().getDisplays()
+                          .getDisplayForRect (desiredBounds))
+        {
+            const y2k::linuxwm::X11DisplayArea area {
+                d->totalArea.getX(), d->totalArea.getY(),
+                d->totalArea.getWidth(), d->totalArea.getHeight() };
+            y2k::linuxwm::moveWindowToX11Pixels (0, desiredBounds.getX(),
+                                                 desiredBounds.getY(), area);
+        }
+    }
+
+    // 异步重试把主窗"收养"为 Hyprland 浮动窗（最多 8 次 × 250ms）
+    void tryAdoptLinuxWindow (juce::Rectangle<int> desiredBounds, int attempt)
+    {
+        if (mainWindow == nullptr) return;
+
+        if (y2k::linuxwm::adoptMainWindow())
+        {
+            applyLinuxWindowGeometry (desiredBounds);
+            return;
+        }
+
+        if (attempt < 8)
+            juce::Timer::callAfterDelay (250, [this, desiredBounds, attempt]()
+            {
+                tryAdoptLinuxWindow (desiredBounds, attempt + 1);
+            });
+    }
+#endif
+
     bool restoreMainWindowBounds()
     {
         if (mainWindow == nullptr) return false;
@@ -1074,13 +1136,17 @@ private:
 
     // ----------------------------------------------------
     // 预设导出：把当前 settings 文件"另存为"到用户指定路径
-    //   · 完全静默 —— 不弹任何 AlertWindow（用户要求）。
-    //   · 失败时仅通过 DBG 输出日志；成功时不做任何可见反馈。
-    //   · 步骤：先把当前运行时状态刷到物理文件 → File::copyFileTo。
+    //   · 成功时保持静默（原需求）；失败时必须给出可见提示 —— 旧实现只有 DBG
+    //     日志，Release 下 DBG 是空宏，用户看到的只是"点了 Save 什么都没发生"。
+    //   · 步骤：先把当前运行时状态刷到物理文件 → 复制 → 校验目标文件存在。
     // ----------------------------------------------------
     void handleExportSettings (juce::File dest)
     {
         if (dest == juce::File{}) return;
+
+        // 0) 目标若是目录，补上默认文件名（用户在文件对话框里只选了目录的情况）
+        if (dest.isDirectory())
+            dest = dest.getChildFile (juce::String (JucePlugin_Name) + ".settings");
 
         // 1) 先把当前运行时状态全部落到 PropertiesFile 的物理文件，
         //    保证导出快照包含用户所有未落盘的最新修改
@@ -1089,18 +1155,58 @@ private:
         // 2) 拿到 PropertiesFile 的实际磁盘文件
         auto* props = appProperties.getUserSettings();
         const juce::File src = (props != nullptr ? props->getFile() : juce::File{});
+
+        // 兜底：Linux 上 ~/.config 首次写入失败（目录权限/只读挂载等）时，
+        //   PropertiesFile 可能还没有物理文件 —— 再显式 save 一次并给出明确错误。
         if (src == juce::File{} || ! src.existsAsFile())
         {
-            DBG ("handleExportSettings: settings file does not exist on disk yet");
-            return;
+            appProperties.saveIfNeeded();
+
+            if (src == juce::File{} || ! src.existsAsFile())
+            {
+                showSaveFailureAsync (
+                    "Cannot locate the application settings file on disk.\n\n"
+                    "Expected: " + (src == juce::File{} ? juce::String ("(unknown)")
+                                                          : src.getFullPathName())
+                    + "\n\nCheck that the config directory is writable, then retry.");
+                return;
+            }
         }
 
         // 3) 复制到目标路径（父目录不存在则自动创建；同名覆盖由 FileChooser
         //    的 warnAboutOverwriting 确认过，这里直接覆盖）
-        dest.getParentDirectory().createDirectory();
-        const bool ok = src.copyFileTo (dest);
-        if (! ok)
-            DBG ("handleExportSettings: copy failed → " + dest.getFullPathName());
+        if (! dest.getParentDirectory().createDirectory())
+        {
+            showSaveFailureAsync ("Cannot create destination folder:\n"
+                                  + dest.getParentDirectory().getFullPathName());
+            return;
+        }
+
+        const bool copied = src.copyFileTo (dest);
+
+        // 4) 以"目标文件真实存在且非空"为最终判据：copyFileTo 返回 true 但目标
+        //    被外部因素（只读挂载、沙箱、磁盘满）丢弃的情况也在这里暴露出来。
+        if (! copied || ! dest.existsAsFile() || dest.getSize() <= 0)
+        {
+            showSaveFailureAsync ("Saving preset failed.\n\nDestination: "
+                                  + dest.getFullPathName()
+                                  + "\n\nCheck the folder exists and is writable, then retry.");
+            return;
+        }
+
+        DBG ("handleExportSettings: saved preset → " + dest.getFullPathName());
+    }
+
+    // 保存失败的可见提示（纯 ASCII，避免字体回退问题；弹窗不阻塞）
+    void showSaveFailureAsync (const juce::String& detail)
+    {
+        juce::AlertWindow::showAsync (
+            juce::MessageBoxOptions()
+                .withIconType (juce::MessageBoxIconType::WarningIcon)
+                .withTitle ("Save preset failed")
+                .withMessage (detail)
+                .withButton ("OK"),
+            nullptr);
     }
 
     // ----------------------------------------------------
@@ -1422,8 +1528,36 @@ private:
             if (cachedEditor != nullptr)
                 syncDropdownToCurrentDevice (*cachedEditor);
             return;
+           #elif JUCE_LINUX
+            // Linux：直接采集 PipeWire 默认 sink 的 monitor（系统正在播放的声音）。
+            //   注意不能走下面的"虚拟回环输入设备"分支：PipeWire 的 monitor 源
+            //   不是 ALSA 物理设备，JUCE 的 ALSA 输入列表里根本没有它；旧逻辑会
+            //   误把 ALSA 的 default 播放 PCM 当成输入打开（== 麦克风）。
+            stopLoopbackCapture();
+            disableHardwareInput();
+            if (startLinuxMonitorCapture())
+            {
+                DBG ("[Y2K] Linux monitor capture started.");
+                return;
+            }
+
+            juce::AlertWindow::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle ("System Loopback unavailable")
+                    .withMessage ((linuxMonitor != nullptr
+                                      ? juce::String (linuxMonitor->getLastError().c_str())
+                                      : juce::String ("(unknown error)"))
+                                  + "\n\nFalling back to Microphone.")
+                    .withButton ("OK"),
+                nullptr);
+
+            enableDefaultInput();
+            if (cachedEditor != nullptr)
+                syncDropdownToCurrentDevice (*cachedEditor);
+            return;
            #else
-            // Linux / 其他：通过"虚拟回环输入设备"（BlackHole/Loopback/...）实现 Output
+            // 其他平台（BSD 等）：通过"虚拟回环输入设备"实现 Output
             stopLoopbackCapture();
             if (enablePreferredVirtualLoopbackInput())
             {
@@ -1451,6 +1585,9 @@ private:
 
         // "Microphone Input" → 先停 Loopback，再启用默认输入设备
         stopLoopbackCapture();
+       #if JUCE_LINUX
+        stopLinuxMonitorCapture();
+       #endif
        #if JUCE_MAC
         stopMacDesktopAudioCapture();
        #endif
@@ -1699,6 +1836,88 @@ private:
         //   loopback 侧已经没有线程在动 AnalyserHub 了，不会并发。
         attachHolderCallback();
     }
+
+   #if JUCE_LINUX
+    // ----------------------------------------------------
+    // Linux 系统输出采集（PipeWire 默认 sink 的 monitor）
+    //   · 通过 LinuxMonitorCapture 起 pw-record/parec 子进程抓默认 sink 的
+    //     monitor 裸流（f32le/48k/2ch），绕开 JUCE 的 ALSA 设备枚举 ——
+    //     PipeWire 的 monitor 源不是 ALSA 物理设备，JUCE 列表里看不到。
+    //   · 与 Windows WASAPI loopback 完全等价的"单路写 AnalyserHub"约束：
+    //     start 前先 detachHolderCallback()，stop 后再 attach，避免并发 push。
+    // ----------------------------------------------------
+    bool startLinuxMonitorCapture()
+    {
+        if (pluginHolder == nullptr || pluginHolder->processor == nullptr)
+            return false;
+
+        if (linuxMonitor == nullptr)
+            linuxMonitor = std::make_unique<y2k::LinuxMonitorCapture>();
+
+        auto* y2kProc = dynamic_cast<Y2KmeterAudioProcessor*> (pluginHolder->processor.get());
+        if (y2kProc == nullptr) return false;
+
+        detachHolderCallback();
+        loopbackLastSampleRate.store (0.0, std::memory_order_release);
+
+        linuxMonitor->onAudio = [y2kProc, this] (const float* L, const float* R, int n, double sr)
+        {
+            const double cached = loopbackLastSampleRate.load (std::memory_order_acquire);
+            if (std::abs (cached - sr) > 0.5)
+            {
+                const int blk = juce::jmax (64, (int) (sr * 0.01));
+                y2kProc->getAnalyserHub().prepare (sr, blk);
+                loopbackLastSampleRate.store (sr, std::memory_order_release);
+            }
+
+            if (! y2kProc->isAnalysisActive()) return;
+
+            y2kProc->consumePendingLoudnessReset();
+
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            const float gainLin = y2kProc->getAnalysisInputGainLinear();
+            if (std::abs (gainLin - 1.0f) < 0.0001f)
+            {
+                y2kProc->getAnalyserHub().pushStereo (L, R, n);
+            }
+            else
+            {
+                if (loopbackGainScratch.getNumSamples() < n)
+                    loopbackGainScratch.setSize (2, n, false, false, true);
+
+                loopbackGainScratch.copyFrom (0, 0, L, n);
+                loopbackGainScratch.copyFrom (1, 0, R, n);
+                loopbackGainScratch.applyGain (0, 0, n, gainLin);
+                loopbackGainScratch.applyGain (1, 0, n, gainLin);
+
+                y2kProc->getAnalyserHub().pushStereo (loopbackGainScratch.getReadPointer (0),
+                                                      loopbackGainScratch.getReadPointer (1),
+                                                      n);
+            }
+            const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - t0;
+            y2kProc->registerLoopbackRenderTime (elapsedMs, n, sr);
+        };
+
+        if (! linuxMonitor->start())
+        {
+            attachHolderCallback();
+            return false;
+        }
+
+        loopbackActive.store (true, std::memory_order_release);
+        virtualLoopbackInputActive.store (false, std::memory_order_release);
+        return true;
+    }
+
+    void stopLinuxMonitorCapture()
+    {
+        if (linuxMonitor != nullptr)
+            linuxMonitor->stop();
+        loopbackActive.store (false, std::memory_order_release);
+        loopbackLastSampleRate.store (0.0, std::memory_order_release);
+        attachHolderCallback();
+    }
+   #endif // JUCE_LINUX
 
     // ======================================================
     // 以下方法仅在 non-Windows 平台编译 —— Windows 构建不产生任何符号
@@ -1954,6 +2173,11 @@ private:
     std::unique_ptr<WasapiLoopbackCapture>          loopback;
     std::atomic<bool>                               loopbackActive { false };
     std::atomic<double>                             loopbackLastSampleRate { 0.0 };
+
+   #if JUCE_LINUX
+    // Linux 系统输出采集（PipeWire monitor / PulseAudio parec）
+    std::unique_ptr<y2k::LinuxMonitorCapture>       linuxMonitor;
+   #endif
 
     // WASAPI 采集线程应用前置增益用的临时缓冲（与 macGainScratch 同思路）。
     //   只在采集线程内访问，预分配后避免逐块堆分配。

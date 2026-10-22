@@ -242,7 +242,11 @@ juce::File PerformanceCounterSystem::doExportSnapshot(bool resetAfterExport)
 
     const auto now = nowNs();
     const auto start = windowStartNs.load(std::memory_order_relaxed);
-    const auto elapsedNs = juce::jmax<juce::int64>(1, now - start);
+    // 注意：不要写成 juce::jmax<juce::int64>(...)。JUCE 为并排的 SIMDRegister<Type> 也提供了
+    //   jmax 重载，显式指定模板实参会让编译器走到那个重载上，实例化 SIMDRegister<int64>；
+    //   而 x86 的 SIMDNativeOps 只特化了 32 位/浮点类型（GCC 下直接报 incomplete type）。
+    //   让模板实参自然推导即可（入参均是 int64，走标量重载）。
+    const auto elapsedNs = juce::jmax ((juce::int64) 1, now - start);
     const double windowSec = (double) elapsedNs / 1.0e9;
 
     const auto json = buildJson(now, windowSec);
