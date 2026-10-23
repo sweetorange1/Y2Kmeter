@@ -28,10 +28,12 @@ namespace y2kpal
             }
         }
 
-        // ---- 氛围(Vibe) → Accent 彩度（§5.2：0.08 ~ 0.26）----
+        // ---- 氛围(Vibe) → Accent 彩度（vibe∈[0,2] 单调映射到 C 0.06~0.28）----
+        //   斜率放慢到 0.11：vibe=1（默认居中）≈ 旧 vibe=0.55 的鲜艳度，
+        //   vibe=2（上限）才触及多数色相的 sRGB 色域边界，全段都在变鲜艳。
         float accentChroma(float vibe) noexcept
         {
-            return 0.08f + 0.18f * vibe;
+            return 0.06f + 0.11f * vibe;
         }
 
         // ---- 背景 C 上限（Q4）----
@@ -96,8 +98,8 @@ namespace y2kpal
     GeneratedTheme generate(const ThemeSpec& spec)
     {
         const float hue  = wrapHue(spec.hue);
-        const float vibe = clamp01(spec.vibe);
-        const float tint = clamp01(spec.bgTint);
+        const float vibe = clamp02(spec.vibe);
+        const float tint = clamp02(spec.bgTint);
         const bool  dark  = (spec.brightness == Brightness::Dark);
         const bool  light = (spec.brightness == Brightness::Light);
         // AutoMid 走中间调专用值，其余按 dark/light
@@ -366,7 +368,7 @@ namespace y2kpal
             //   chartRamp 低阶，L 过低会让浅色主题出现"比 dark 还黑"的色块。
             const float l0 = dark || !light ? 0.28f : 0.55f;
             const float l1 = dark || !light ? 0.92f : 0.92f;
-            const float cPeak = 0.06f + 0.22f * vibe;
+            const float cPeak = 0.05f + 0.13f * vibe;
 
             for (int i = 0; i < 8; ++i)
             {
@@ -458,7 +460,7 @@ namespace y2kpal
 
         out = ThemeSpec{};
         out.hue = a.H;
-        out.vibe = clamp01((a.C - 0.08f) / 0.18f);
+        out.vibe = clamp02((a.C - 0.08f) / 0.18f);
 
         if (bg.L < 0.35f)
             out.brightness = Brightness::Dark;
@@ -467,7 +469,7 @@ namespace y2kpal
         else
             out.brightness = Brightness::AutoMid;
 
-        out.bgTint = clamp01((bg.C - 0.005f) / 0.03f);
+        out.bgTint = clamp02((bg.C - 0.005f) / 0.03f);
         out.harmony = Harmony::Analogous;
 
         // 迁移/新建起点：锁定关键色为手动覆盖，保证与源外观一致（R10 保真）

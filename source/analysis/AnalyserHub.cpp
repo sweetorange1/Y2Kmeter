@@ -603,7 +603,7 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
                 }
             }
 
-            // 2) 像素 EQ 用的粗粒度平滑频谱（保留原有逻辑）
+            // 2) 像素 EQ 用的粗粒度平滑频谱
             for (int iBin = 0; iBin < spectrumBins; ++iBin)
             {
                 const float norm  = static_cast<float> (iBin) / static_cast<float> (juce::jmax(1, spectrumBins - 1));
@@ -615,10 +615,20 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
                 // 否则会读到错位的 re/im 值（FFT 改造后的回归点）。
                 const float re    = fftData[static_cast<size_t> (2 * fBin)];
                 const float im    = fftData[static_cast<size_t> (2 * fBin + 1)];
-                const float mag   = std::sqrt (re * re + im * im);
-                const float db     = juce::Decibels::gainToDecibels(juce::jmax(1.0e-6f, mag));
+                // 与高精度 magData 保持一致：乘 2/fftSize 归一化（满幅正弦 → -6dB）。
+                const float mag   = std::sqrt (re * re + im * im) * (2.0f / static_cast<float> (fftSize));
+                float db = juce::Decibels::gainToDecibels(juce::jmax(1.0e-6f, mag));
+
+                // Slope 补偿：+4.5dB/oct（基准 1kHz），与 SpectrumModule 的 slope 一致。
+                //   音乐/音频高频能量天然远低于低频，不做抬升时高频几乎贴底看不到。
+                const double sr   = cachedSampleRate.load (std::memory_order_relaxed);
+                const double nyq  = (sr > 0.0) ? sr * 0.5 : 24000.0;
+                const double freq = static_cast<double> (fBin) * nyq / static_cast<double> (maxBin - 1);
+                db += 4.5f * static_cast<float> (std::log2 (juce::jmax (20.0, freq) / 1000.0));
+
+                // 满幅到顶：dB 映射 [-80, 0]（对齐 SpectrumModule 的 minDb/maxDb）。
                 const float mapped = juce::jlimit(0.0f, 1.0f,
-                                        juce::jmap(db, -50.0f, 50.0f, 0.0f, 1.0f));
+                                        juce::jmap(db, -80.0f, 0.0f, 0.0f, 1.0f));
 
                 const float prev  = specDataWork[static_cast<size_t> (iBin)];
                 const float alpha = (mapped > prev) ? 0.6f : 0.15f;

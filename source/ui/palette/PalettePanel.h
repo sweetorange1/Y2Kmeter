@@ -43,7 +43,14 @@ public:
 
     void setHue(float h)               { hue_ = y2kpal::wrapHue(h); repaint(); }
     float getHue() const noexcept      { return hue_; }
-    void setContext(float vibe, int brightness) noexcept { vibe_ = vibe; brightness_ = brightness; repaint(); }
+    void setContext(float vibe, int brightness) noexcept
+    {
+        if (vibe != vibe_ || brightness != brightness_)
+            ringDirty_ = true;   // 环颜色只随 vibe/明暗变化，标脏待重建
+        vibe_ = vibe;
+        brightness_ = brightness;
+        repaint();
+    }
 
     std::function<void(float)> onHueChanged;          // 拖动中实时回调
     std::function<void()>      onHueDragStart;        // 按下瞬间
@@ -51,9 +58,17 @@ public:
 
 private:
     float hue_ = 330.0f;
-    float vibe_ = 0.55f;
+    float vibe_ = 1.0f;
     int   brightness_ = 0;
     bool  dragging_ = false;
+
+    // 环预渲染缓存：逐像素填充（含边界 1px 羽化），消除旧实现用 360 个独立
+    //   fillPath 扇形在低物理像素密度（如 2k 屏）下因抗锯齿边缘产生的放射状
+    //   "缝合线"（表现为摩尔纹）。环颜色与当前选中 hue 无关，仅 vibe/明暗变化时重建。
+    juce::Image ringImage_;
+    bool        ringDirty_ = true;
+
+    void rebuildRing(int w, int h, float scale);
 };
 
 // ------------------------------------------------------------

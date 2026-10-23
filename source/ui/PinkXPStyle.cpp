@@ -1364,8 +1364,8 @@ namespace PinkXP
             ov.set = false;
         spec.pattern = patternFromSpecInv(t.desktopPattern);
         // 氛围/染色从中间值起步（fit 反推会把它们算到接近 0，用户期望默认居中）
-        spec.vibe   = 0.55f;
-        spec.bgTint = 0.30f;
+        spec.vibe   = 1.0f;
+        spec.bgTint = 1.0f;
         return spec;
     }
 

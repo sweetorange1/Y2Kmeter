@@ -66,7 +66,9 @@ void DynamicRangeMeter::finishBlock()
     };
 
     const float peakDb   = toDb(juce::jmax(peakL, peakR));
-    const float rmsMixed = 0.5f * (rmsL + rmsR);
+    // 能量平均：sqrt((rmsL² + rmsR²)/2)。算术平均 0.5*(rmsL+rmsR) 会在左右
+    //   声道不均衡时低估混合 RMS（单声道时最多差 3 dB）。
+    const float rmsMixed = std::sqrt (0.5f * (rmsL * rmsL + rmsR * rmsR));
     const float rmsDb    = toDb(rmsMixed);
 
     // 写入短时队列

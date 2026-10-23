@@ -959,6 +959,14 @@ private:
         }
 
         mainWindow->setBounds (target);
+
+        // v2.x 修复：若恢复出的窗口尺寸超过编辑器 constrainer 上限（1600×1100，
+        //   例如上次退出时窗口是伪全屏/userArea 尺寸），放宽编辑器 constrainer 使其
+        //   能容纳当前尺寸，否则 Hide/Show 切 chrome 会经 setBoundsConstrained 把
+        //   编辑器夹回 1600 宽，窗口跟着被压小（与双击伪全屏同源的问题）。
+        if (cachedEditor != nullptr)
+            cachedEditor->relaxConstrainerForWindowSize (target.getWidth(), target.getHeight());
+
         return true;
     }
 

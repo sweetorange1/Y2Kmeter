@@ -73,8 +73,8 @@ namespace y2kpal
     {
         float      hue        = 330.0f;             // 主色相 [0, 360)
         Brightness brightness = Brightness::Dark;
-        float      vibe       = 0.55f;              // 氛围 [0,1]：Soft → Vivid
-        float      bgTint     = 0.30f;              // 背景染色 [0,1]：Neutral → Tinted
+        float      vibe       = 1.0f;               // 氛围 [0,2]：Soft → Vivid（默认 1.0 居中）
+        float      bgTint     = 1.0f;               // 背景染色 [0,2]：Neutral → Tinted（默认 1.0 居中）
         Harmony    harmony    = Harmony::Analogous;
         Pattern    pattern    = Pattern::Checker;   // 桌面纹理
         uint8_t    titleIcon  = 0;                  // 标题图标索引（0..7）

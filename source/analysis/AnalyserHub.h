@@ -124,11 +124,19 @@ private:
     ChannelFilter filterL, filterR;
     TruePeakState tpL, tpR;
 
-    // 400ms 块（Momentary）
+    // 400ms 块（Momentary，供 Short-term / Integrated 做块级累积）
     int momentaryBlockSize  = 0;   // 采样数
     int momentaryWriteCount = 0;
     double momentarySumL    = 0.0;
     double momentarySumR    = 0.0;
+
+    // Momentary 实时滑动窗口（400ms，逐样本滑动）：LUFS-M 用它做实时响度，
+    //   信号停止后旧样本被逐样本替换，最多 400ms 内归零（不再依赖块凑满）。
+    int    momentaryWindowSize = 0;
+    std::deque<double> momentaryHistL;
+    std::deque<double> momentaryHistR;
+    double momentarySlideSumL = 0.0;
+    double momentarySlideSumR = 0.0;
 
     // 短期（Short-term）：用 400ms 块的滑动队列（8 块 ≈ 3.2s）
     static constexpr int shortTermBlocks = 8;
@@ -140,15 +148,16 @@ private:
     //   · 相对门限：对通过绝对门限的所有块求平均，再 -10 LU（×0.1）
     //   · 最终 Integrated = 对 blockMean >= 相对门限 的块求平均
     std::deque<double> gatedBlocks; // 通过绝对门限的 400ms 块能量（左右合成均方）
-    // 绝对门限（-70 LUFS 线性均方）
-    static constexpr double absGateThreshold = 1.0e-7;
+    // 绝对门限（-45 LUFS 线性均方 ≈ 10^(-45/10)）。原 -70 LUFS 太深，会导致
+    //   loopback / 输入本底噪声（约 -55 dB）也被计入 Integrated，I 无法归零。
+    static constexpr double absGateThreshold = 3.162e-5;
 
     // ---- Integrated 静音自动重置 ----
     //   连续 silenceResetSeconds 秒无音频信号（合成 RMS 均方 < silenceMeanSqThreshold）
     //   时，自动清空 integrated 积分，下次出现信号时重新开始累积。
     //   目的：DAW 停止播放 / loopback 静音后，旧的节目响度不应继续污染新段落。
-    static constexpr double silenceMeanSqThreshold = 1.0e-6; // -60 dBFS 线性均方
-    static constexpr double silenceResetSeconds    = 5.0;
+    static constexpr double silenceMeanSqThreshold = 3.162e-5; // -45 dBFS 线性均方
+    static constexpr double silenceResetSeconds    = 2.0;       // 静音 2s 后重置 Integrated
     double silenceSamples = 0.0; // 连续静音累计样本数
 
     // RMS（100ms 滑动窗口）

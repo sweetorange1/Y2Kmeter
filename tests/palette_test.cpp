@@ -3,7 +3,7 @@
 //
 //   1. 全遍历断言：H 步进 5° × {Dark, Light, AutoMid} × Vibe 5 档
 //      → Q1-Q6 护栏全通过、无 NaN、颜色均在 sRGB 色域内
-//   2. 分享码往返（ThemeSpec → `Y2KT1-xxx` → ThemeSpec）
+//   2. 分享码往返（ThemeSpec → `Y2KT2-xxx` → ThemeSpec）
 //   3. 手动覆盖路径：生成不崩 + 产生提示（Q7）
 //   4. `--overview <file.html>`：输出"色相 x 明暗 x Vibe"总览图（P0 评审用）
 //   5. `--golden`：输出 12 组代表参数的 19 槽位 hex 快照（AC8 存档用）
@@ -141,13 +141,13 @@ static void testShareCodeRoundTrip()
     spec.overrides[(int) Role::Text].rgb = { 0xab, 0xcd, 0xef };
 
     const std::string code = spec.shareCode();
-    CHECK(code.rfind("Y2KT1-", 0) == 0, "share code prefix");
+    CHECK(code.rfind("Y2KT2-", 0) == 0, "share code prefix");
     CHECK(code.size() <= 80, "share code length <= 80");
 
     ThemeSpec back;
     CHECK(ThemeSpec::fromShareCode(code, back), "share code decode");
 
-    // hue 精度 0.1°、vibe/tint 精度 1/255
+    // hue 精度 0.1°、vibe/tint 精度 2/255（范围 [0,2]）
     CHECK(std::fabs(back.hue - spec.hue) < 0.2f, "share code hue");
     CHECK(back.brightness == spec.brightness, "share code brightness");
     CHECK(std::fabs(back.vibe - spec.vibe) < 0.01f, "share code vibe");

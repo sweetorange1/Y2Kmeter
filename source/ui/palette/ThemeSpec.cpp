@@ -113,7 +113,43 @@ namespace y2kpal
         // 二进制布局（28 字节定长，见 ThemeSpec.h 说明）：
         //   12 hue | 2 brightness | 3 harmony | 3 pattern | 3 icon | 5 locks
         //   | 8 vibe | 8 tint | 7 x (1 set + 24 rgb) | 5 保留
+        // vibe/tint 语义范围 [0,2]，8bit 量化 = (v/2)*255；旧 Y2KT1 数据为 [0,1]
+        //   量化 = v*255，故解码时按前缀传入 vibeScale（新 2.0 / 旧 1.0）。
         constexpr size_t kBinarySize = 28;
+
+        // 从二进制解码（vibeScale 用于区分新旧 vibe/tint 范围）
+        bool fromBinaryImpl(const std::string& bin, ThemeSpec& out, float vibeScale)
+        {
+            if (bin.size() < kBinarySize)
+                return false;
+
+            BitReader r(bin);
+            out = ThemeSpec{};
+
+            out.hue        = (float) r.get(12) * (360.0f / 3599.0f);
+            out.brightness = (Brightness) std::min<uint32_t>(r.get(2), 2);
+            out.harmony    = (Harmony)    std::min<uint32_t>(r.get(3), 4);
+            out.pattern    = (Pattern)    std::min<uint32_t>(r.get(3), 6);
+            out.titleIcon  = (uint8_t) r.get(3);
+
+            out.lockHue        = r.get(1) != 0;
+            out.lockBrightness = r.get(1) != 0;
+            out.lockVibe       = r.get(1) != 0;
+            out.lockHarmony    = r.get(1) != 0;
+            out.lockBgTint     = r.get(1) != 0;
+
+            out.vibe   = (float) r.get(8) / 255.0f * vibeScale;
+            out.bgTint = (float) r.get(8) / 255.0f * vibeScale;
+
+            for (auto& ov : out.overrides)
+            {
+                ov.set     = r.get(1) != 0;
+                ov.rgb.r   = (uint8_t) r.get(8);
+                ov.rgb.g   = (uint8_t) r.get(8);
+                ov.rgb.b   = (uint8_t) r.get(8);
+            }
+            return true;
+        }
     }
 
     std::string ThemeSpec::toBinary() const
@@ -131,8 +167,8 @@ namespace y2kpal
         w.put(lockVibe ? 1u : 0u, 1);
         w.put(lockHarmony ? 1u : 0u, 1);
         w.put(lockBgTint ? 1u : 0u, 1);
-        w.put((uint32_t) std::lroundf(clamp01(vibe) * 255.0f), 8);
-        w.put((uint32_t) std::lroundf(clamp01(bgTint) * 255.0f), 8);
+        w.put((uint32_t) std::lroundf(clamp01(vibe * 0.5f) * 255.0f), 8);
+        w.put((uint32_t) std::lroundf(clamp01(bgTint * 0.5f) * 255.0f), 8);
 
         for (const auto& ov : overrides)
         {
@@ -146,59 +182,33 @@ namespace y2kpal
 
     bool ThemeSpec::fromBinary(const std::string& bin, ThemeSpec& out)
     {
-        if (bin.size() < kBinarySize)
-            return false;
-
-        BitReader r(bin);
-        out = ThemeSpec{};
-
-        out.hue        = (float) r.get(12) * (360.0f / 3599.0f);
-        out.brightness = (Brightness) std::min<uint32_t>(r.get(2), 2);
-        out.harmony    = (Harmony)    std::min<uint32_t>(r.get(3), 4);
-        out.pattern    = (Pattern)    std::min<uint32_t>(r.get(3), 6);
-        out.titleIcon  = (uint8_t) r.get(3);
-
-        out.lockHue        = r.get(1) != 0;
-        out.lockBrightness = r.get(1) != 0;
-        out.lockVibe       = r.get(1) != 0;
-        out.lockHarmony    = r.get(1) != 0;
-        out.lockBgTint     = r.get(1) != 0;
-
-        out.vibe   = (float) r.get(8) / 255.0f;
-        out.bgTint = (float) r.get(8) / 255.0f;
-
-        for (auto& ov : out.overrides)
-        {
-            ov.set     = r.get(1) != 0;
-            ov.rgb.r   = (uint8_t) r.get(8);
-            ov.rgb.g   = (uint8_t) r.get(8);
-            ov.rgb.b   = (uint8_t) r.get(8);
-        }
-        return true;
+        return fromBinaryImpl(bin, out, 2.0f);
     }
 
     std::string ThemeSpec::shareCode() const
     {
-        return "Y2KT1-" + base64Encode(toBinary());
+        return "Y2KT2-" + base64Encode(toBinary());
     }
 
     bool ThemeSpec::fromShareCode(const std::string& code, ThemeSpec& out)
     {
-        // 允许 `Y2KT1-` / `Y2KT1:` 前缀，也容忍无前缀的裸 base64
+        // 前缀版本：Y2KT2（新，vibe/tint ∈ [0,2]）、Y2KT1（旧，[0,1]）；
+        //   也容忍无前缀的裸 base64（按新格式解析）。
         std::string body = code;
-        for (const char* prefix : { "Y2KT1-", "Y2KT1:" })
+        float vibeScale = 2.0f;
+
+        if (body.rfind("Y2KT2-", 0) == 0 || body.rfind("Y2KT2:", 0) == 0)
+            body = body.substr(6);
+        else if (body.rfind("Y2KT1-", 0) == 0 || body.rfind("Y2KT1:", 0) == 0)
         {
-            if (body.rfind(prefix, 0) == 0)
-            {
-                body = body.substr(std::strlen(prefix));
-                break;
-            }
+            body = body.substr(6);
+            vibeScale = 1.0f;
         }
 
         std::string bin;
         if (!base64Decode(body, bin))
             return false;
-        return fromBinary(bin, out);
+        return fromBinaryImpl(bin, out, vibeScale);
     }
 
     const char* roleName(Role r)

@@ -3768,6 +3768,24 @@ Milkdrop 脱离态由 `GLView` 自己的本地 OpenGL 线程驱动渲染。切�
 
 ---
 
+## v2.9.2：响度模块修复与实时化
+
+本轮聚焦 `LoudnessMeter` / `DynamicRangeMeter` / Loopback 采集的响度计算正确性与静音归零行为。
+
+- **LUFS 立体声求和修复（-3.01 dB）**：BS.1770-4 立体声两通道能量应为"相加"（G_L = G_R = 1.0），旧实现误用 `(zL + zR) / 2` 平均，导致 Momentary / Short-term / Integrated 系统性偏低 3.01 dB。
+- **LUFS-M 实时滑动窗口**：M 从"400ms 非重叠块"改为"400ms 逐样本滑动窗口"，每次 `pushStereo` 实时刷新，静音 400ms 内归零（不再依赖块凑满）。
+- **LUFS-I 静音 2s 重置**：`silenceResetSeconds` 5s → 2s。
+- **静音/本底门限统一 -45 dB**：`absGateThreshold`（-70 LUFS）与 `silenceMeanSqThreshold`（-60 dBFS）统一到 -45 dB，避免 loopback/输入本底噪声被当作信号计入。
+- **RMS 修复**：修正 -0.691 dB 的 LUFS 偏移（改用 `10·log10` 的 dBFS），并加 -45 dB 归零门限。
+- **True Peak 门限**：改用 -35 dBFS 幅度门限（峰值比 RMS 高 crest factor，避免本底峰值误判）。
+- **Dynamics RMS 能量平均**：混合 RMS 从算术平均 `0.5*(rmsL+rmsR)` 改为能量平均 `sqrt((rmsL²+rmsR²)/2)`。
+- **Loopback 静音续喂**：系统静音时 WASAPI loopback 不再产包会导致分析器冻结；现静音超过 100ms 主动喂全 0 数据，使各表持续归零。
+- **UI**：读数右上角"心跳灯"改为信号灯（有信号常亮、亮度随数值、静音熄灭）；静音归零显示 `-144`（原 `-∞`）。
+- 移除调试日志（`[Loudness]` 系列）。
+- 版本：2.9.1 → **2.9.2**（`CMakeLists.txt`、`Y2Kmeter_installer.iss`、`README.md`、`PluginEditor.cpp`、`PROJECT_OVERVIEW.md`）。
+
+---
+
 ## v2.9.1：vblank 帧时钟掉帧修复
 
 v2.9.0 的 vblank 驱动在 Windows 上出现"分发锁死 ~30fps"（FPS 标签显示 30，旧版虚标 ~100）。
@@ -3998,7 +4016,7 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 ### 5. 工具链与构建
 
 - **重要**：中文 MSVC + NMake 生成器下 `cmake_cl_compile_depends` 生成空 `.d` 依赖文件 → 改头文件后增量构建漏编依赖 obj → ABI 错配启动崩溃。已切 **Ninja**（`deps = msvc` 内建依赖跟踪可靠）；`_clean_project_objs.ps1` 可删项目 obj 保留 JUCE 库 obj 做半量重建。
-- 版本号 2.9.1（JUCE 8、VS2026）。
+- 版本号 2.9.2（JUCE 8、VS2026）。
 
 ---
 

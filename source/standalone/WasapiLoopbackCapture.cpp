@@ -305,6 +305,11 @@ void WasapiLoopbackCapture::runCaptureThread()
     bufL.reserve (4096);
     bufR.reserve (4096);
 
+    // 记录"上次有真实数据"的时间：系统静音时 WASAPI loopback 可能不再产生
+    //   packet（GetNextPacketSize 返回 0），onAudio 不再触发 → 分析器冻结。
+    //   这里在静音超过 100ms 后主动喂一段全 0 数据，让 LoudnessMeter 等持续归零。
+    auto lastDataTime = std::chrono::steady_clock::now();
+
     while (! shouldStop.load (std::memory_order_acquire))
     {
         UINT32 packetLength = 0;
@@ -313,9 +318,22 @@ void WasapiLoopbackCapture::runCaptureThread()
 
         if (packetLength == 0)
         {
+            const auto now = std::chrono::steady_clock::now();
+            const auto silentMs = std::chrono::duration_cast<std::chrono::milliseconds> (now - lastDataTime).count();
+            if (silentMs >= 100)
+            {
+                const int frames = juce::jmax (1, (int) (sampleRate * 0.1));
+                bufL.assign ((size_t) frames, 0.0f);
+                bufR.assign ((size_t) frames, 0.0f);
+                if (onAudio)
+                    onAudio (bufL.data(), bufR.data(), frames, sampleRate);
+                lastDataTime = now;
+            }
             Sleep (pollMs);
             continue;
         }
+
+        lastDataTime = std::chrono::steady_clock::now();
 
         while (packetLength != 0)
         {

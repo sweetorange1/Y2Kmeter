@@ -266,8 +266,7 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     const int gap = 4;
     const int barW = juce::jmax(1, (area.getWidth() - gap * (barCount - 1)) / barCount);
 
-    // 无穷符号字符串（UTF-8：E2 88 9E）作为常量，避免每次进 lambda 重新构造
-    static const juce::String kMinusInf = juce::String::fromUTF8("-\xe2\x88\x9e");
+    // 静音/归零时统一显示 -144（与数据层归零值一致）
 
     const auto drawLabel = [&](int idx, const MeterBar& bar, bool isLUFS)
     {
@@ -288,7 +287,7 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
 
         juce::String readout;
         if (!isFinite || val <= -60.0f)
-            readout = kMinusInf;
+            readout = "-144";
         else
             readout = juce::String(juce::jlimit(-60.0f, 60.0f, val), 1);
 

@@ -7,7 +7,7 @@
 <p align="center"><strong>Y2K 像素复古音频分析仪</strong> — VST3 / AU / Standalone</p>
 
 <p align="center">
-<img src="https://img.shields.io/badge/version-2.9.1-blue" alt="Version">
+<img src="https://img.shields.io/badge/version-2.9.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
 </p>
@@ -79,7 +79,7 @@ cd Y2Kmeter
 # CMake 配置 & 构建（Release）
 cmake -B cmake-build-release -DCMAKE_BUILD_TYPE=Release
 cmake --build cmake-build-release --config Release
-```
+``` 
 
 **Windows 用户**：构建前请将 `third_party/projectm/bin/projectM-4.dll` 和 `glew32.dll` 放置到可执行文件同目录（CMake Post-build 脚本会自动处理）。
 

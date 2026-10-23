@@ -44,6 +44,7 @@ namespace y2kpal
 
     // ---- 基本工具 ----
     inline float clamp01(float x) noexcept { return std::max(0.0f, std::min(1.0f, x)); }
+    inline float clamp02(float x) noexcept { return std::max(0.0f, std::min(2.0f, x)); }
 
     inline float wrapHue(float h) noexcept
     {

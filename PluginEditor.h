@@ -167,6 +167,12 @@ public:
     bool isChromeVisible() const;
     void setChromeVisible (bool shouldBeVisible);
 
+    // 当窗口被程序性设置成超过编辑器 constrainer 上限的尺寸（如启动时恢复历史
+    //   bounds、双击伪全屏）时，把 constrainer 的 max 放宽到能容纳 w×h（min 不变）。
+    //   否则后续任何 setResizeLimits 都会经 setBoundsConstrained 把编辑器夹回 1600，
+    //   再经 ResizableWindow 的 resizeToFitContent 反噬把窗口一并压小。
+    void relaxConstrainerForWindowSize (int w, int h);
+
     bool isAlwaysOnTopActive() const noexcept { return alwaysOnTopActive; }
     // 设置"固定置顶"状态。内部会：
     //   · 同步按钮视觉态（alwaysOnTopActive）
@@ -491,6 +497,14 @@ private:
     int                  preFullScreenMinW = 0, preFullScreenMinH = 0;
     int                  preFullScreenMaxW = 0, preFullScreenMaxH = 0;
     bool                 preFullScreenLimitsValid = false;
+
+    // 编辑器自身 constrainer 的进入前备份（v2.8.x 修复）：伪全屏若只放宽顶层窗口
+    //   constrainer、漏掉编辑器自己的 1600×1100，则后续任何编辑器级 setResizeLimits
+    //   都会把编辑器夹回 1600 宽，再经 ResizableWindow 的 resizeToFitContent 反噬
+    //   把窗口一并压小。进入伪全屏时同步放宽编辑器 constrainer，退出时还原。
+    int  preFullScreenEditorMinW = 0, preFullScreenEditorMinH = 0;
+    int  preFullScreenEditorMaxW = 0, preFullScreenEditorMaxH = 0;
+    bool preFullScreenEditorLimitsValid = false;
 
     // Windows 下强制关闭 Direct2D 渲染器的一次性 flag。
     //   背景：JUCE 8 默认在 Windows 上启用 Direct2D。VST3 DLL 被宿主

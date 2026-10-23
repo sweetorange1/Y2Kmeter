@@ -70,10 +70,7 @@ void SpectrumModule::setPeakHoldEnabled(bool b)
     peakHoldEnabled = b;
     // 关闭时清空峰值，再次开启从当前值重新开始
     if (! peakHoldEnabled)
-    {
         std::fill(peakDb.begin(), peakDb.end(), minDb);
-        globalPeakIdleMs = 0.0f;
-    }
     btnPeak.setToggleState(peakHoldEnabled, juce::dontSendNotification);
     buildGlSnapshot();
     repaint();
@@ -174,37 +171,21 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     rebuildDisplay();
 
-    // 峰值保持 / 下降更新（v2.9.4 重构：全局统一下落）
-    //   旧逻辑每列独立计时下落 → 各列超时时间不同，信号衰减后 peak 线呈
-    //   阶梯状碎裂（多条错落的虚线）。新逻辑：
-    //     · 任一列刷新峰值 → 全局计时器归零；
-    //     · 全部列都进入滞留后计时，超过 peakHoldDuration → 整条 peak 线
-    //       同步下降（保持峰谷形状），直到新信号刷新。
+    // 峰值下降更新（持续下落，无 hold / 无阈值）
+    //   · 任一列信号超过当前 peak → 顶上去（刷新该列峰值）；
+    //   · 否则该列以 peakFallRatePerSec 持续下降，直到 minDb。
+    //   不再有"保持"阶段：无论信号强度如何，peak 线始终处于缓慢下落的
+    //   动态——信号顶上来才抬升，否则一直回落，形成贴着信号、带下落惯性的虚线。
     if (peakHoldEnabled && ! peakDb.empty())
     {
-        bool anyRisen = false;
+        const float fallDelta = peakFallRatePerSec * (deltaMs / 1000.0f);
+
         for (size_t i = 0; i < peakDb.size(); ++i)
         {
             if (smoothedDb[i] > peakDb[i])
-            {
-                peakDb[i] = smoothedDb[i];
-                anyRisen = true;
-            }
-        }
-
-        if (anyRisen)
-        {
-            globalPeakIdleMs = 0.0f;
-        }
-        else
-        {
-            globalPeakIdleMs += deltaMs;
-            if (globalPeakIdleMs > peakHoldDuration)
-            {
-                const float fallDelta = peakFallRatePerSec * (deltaMs / 1000.0f);
-                for (size_t i = 0; i < peakDb.size(); ++i)
-                    peakDb[i] = juce::jmax (minDb, peakDb[i] - fallDelta);
-            }
+                peakDb[i] = smoothedDb[i];                                  // 信号超过峰值 → 顶上去
+            else
+                peakDb[i] = juce::jmax (minDb, peakDb[i] - fallDelta);      // 否则持续下落
         }
     }
 

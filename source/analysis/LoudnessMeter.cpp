@@ -99,6 +99,9 @@ void LoudnessMeter::prepare(double sr, int /*samplesPerBlock*/)
     momentaryWriteCount = 0;
     momentarySumL = momentarySumR = 0.0;
 
+    // Momentary 实时滑动窗口（400ms）
+    momentaryWindowSize = juce::roundToInt(sr * 0.4);
+
     // RMS 100ms 窗口
     rmsWindowSize = juce::roundToInt(sr * 0.1);
 
@@ -114,6 +117,10 @@ void LoudnessMeter::reset()
 
     momentaryWriteCount = 0;
     momentarySumL = momentarySumR = 0.0;
+
+    momentaryHistL.clear();
+    momentaryHistR.clear();
+    momentarySlideSumL = momentarySlideSumR = 0.0;
 
     shortTermBlocksL.clear();
     shortTermBlocksR.clear();
@@ -149,10 +156,26 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
         const double kl = applyKWeighting(l, filterL);
         const double kr = applyKWeighting(r, filterR);
 
-        // ---- 累积 400ms 块均方 ----
+        // ---- 累积 400ms 块均方（供 Short-term / Integrated）----
         momentarySumL += kl * kl;
         momentarySumR += kr * kr;
         ++momentaryWriteCount;
+
+        // ---- Momentary 实时滑动窗口（400ms，供 LUFS-M）----
+        momentaryHistL.push_back(kl);
+        momentaryHistR.push_back(kr);
+        momentarySlideSumL += kl * kl;
+        momentarySlideSumR += kr * kr;
+        if ((int)momentaryHistL.size() > momentaryWindowSize)
+        {
+            const double old = momentaryHistL.front(); momentaryHistL.pop_front();
+            momentarySlideSumL -= old * old;
+        }
+        if ((int)momentaryHistR.size() > momentaryWindowSize)
+        {
+            const double old = momentaryHistR.front(); momentaryHistR.pop_front();
+            momentarySlideSumR -= old * old;
+        }
 
         // ---- RMS（100ms 滑动）----
         {
@@ -190,20 +213,25 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
         {
             const double meanL = momentarySumL / (double) momentaryBlockSize;
             const double meanR = momentarySumR / (double) momentaryBlockSize;
-            const double blockMean = (meanL + meanR) * 0.5;
+            // BS.1770-4：立体声两通道能量"相加"（G_L = G_R = 1.0），不是平均。
+            //   平均会系统性偏低 3.01 dB。
+            const double blockMean = meanL + meanR;
+
+            // 静音/本底门限：低于门限的块视为静音，能量归零，
+            //   避免 loopback / 输入本底噪声污染 Short-term / Integrated。
+            const bool silentBlock = (blockMean < absGateThreshold);
 
             // 短期队列（保留最近 shortTermBlocks 个块）
-            shortTermBlocksL.push_back(meanL);
-            shortTermBlocksR.push_back(meanR);
+            shortTermBlocksL.push_back(silentBlock ? 0.0 : meanL);
+            shortTermBlocksR.push_back(silentBlock ? 0.0 : meanR);
             if ((int)shortTermBlocksL.size() > shortTermBlocks)
             {
                 shortTermBlocksL.pop_front();
                 shortTermBlocksR.pop_front();
             }
 
-            // 积分（绝对门限 -70 LUFS）：保存通过绝对门限的块能量，
-            // 供 updateSnapshot 计算相对门限与最终 Integrated
-            if (blockMean >= absGateThreshold)
+            // 积分：只保存超过绝对门限的块
+            if (!silentBlock)
                 gatedBlocks.push_back(blockMean);
 
             momentarySumL = momentarySumR = 0.0;
@@ -242,6 +270,18 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
             }
         }
     }
+
+    // 每次 pushStereo 都刷新 LUFS-M（实时滑动窗口；静音时 400ms 内归零）。
+    //   这是修复"停止后 M 不归零"的关键：不再依赖 400ms 块凑满才更新。
+    {
+        const int n = juce::jmax(1, (int)momentaryHistL.size());
+        const double msL = momentarySlideSumL / (double) n;
+        const double msR = momentarySlideSumR / (double) n;
+        const double ms  = msL + msR;
+        const float lufsM = (ms >= absGateThreshold) ? linearToLUFS(ms) : -144.0f;
+        const juce::SpinLock::ScopedLockType sl(snapshotLock);
+        snapshot.lufsM = lufsM;
+    }
 }
 
 // ==========================================================
@@ -251,12 +291,13 @@ void LoudnessMeter::updateSnapshot()
 {
     Snapshot s;
 
-    // Momentary（最新一块）
-    if (!shortTermBlocksL.empty())
+    // Momentary（400ms 实时滑动窗口）
     {
-        const double mL = shortTermBlocksL.back();
-        const double mR = shortTermBlocksR.back();
-        s.lufsM = linearToLUFS((mL + mR) * 0.5);
+        const int n = juce::jmax(1, (int)momentaryHistL.size());
+        const double msL = momentarySlideSumL / (double) n;
+        const double msR = momentarySlideSumR / (double) n;
+        const double ms  = msL + msR;
+        s.lufsM = (ms >= absGateThreshold) ? linearToLUFS(ms) : -144.0f;
     }
 
     // Short-term（最近 shortTermBlocks 块均值）
@@ -266,7 +307,8 @@ void LoudnessMeter::updateSnapshot()
         for (auto v : shortTermBlocksL) sumL += v;
         for (auto v : shortTermBlocksR) sumR += v;
         const int n = (int)shortTermBlocksL.size();
-        s.lufsS = linearToLUFS((sumL + sumR) * 0.5 / (double) n);
+        const double meanS = (sumL + sumR) / (double) n;
+        s.lufsS = (meanS >= absGateThreshold) ? linearToLUFS(meanS) : -144.0f;
     }
 
     // Integrated（BS.1770 两阶段门限）
@@ -291,18 +333,24 @@ void LoudnessMeter::updateSnapshot()
         }
     }
 
-    // RMS
+    // RMS（dBFS = 10·log10(均方)）。不能用 linearToLUFS —— 它带 -0.691 的
+    //   LUFS 校准偏移，会让 RMS 读数偏低 0.691 dB。
     {
         const int n = juce::jmax(1, (int)rmsHistL.size());
-        s.rmsL = linearToLUFS(rmsSumL / (double) n);
-        s.rmsR = linearToLUFS(rmsSumR / (double) n);
+        const double msL = rmsSumL / (double) n;
+        const double msR = rmsSumR / (double) n;
+        // 低于 -45 dBFS 均方视为静音/本底，归零（原 1e-10 太深，本底会被显示）
+        s.rmsL = (msL >= absGateThreshold) ? (float)(10.0 * std::log10(msL)) : -144.0f;
+        s.rmsR = (msR >= absGateThreshold) ? (float)(10.0 * std::log10(msR)) : -144.0f;
     }
 
-    // True Peak
-    s.truePeakL = (tpL.peak > 1.0e-7f)
+    // True Peak：峰值比 RMS 高 crest factor（噪声约 10~15dB），用 -45dB 均方门限的
+    //   开方（-45dB 幅度）会把本底峰值（约 -40dB）误判为有效值。改用 -35dB 幅度门限。
+    const float tpGate = 1.78e-2f;  // 10^(-35/20)
+    s.truePeakL = (tpL.peak >= tpGate)
         ? juce::Decibels::gainToDecibels(tpL.peak)
         : -144.0f;
-    s.truePeakR = (tpR.peak > 1.0e-7f)
+    s.truePeakR = (tpR.peak >= tpGate)
         ? juce::Decibels::gainToDecibels(tpR.peak)
         : -144.0f;
 

@@ -315,8 +315,8 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
 
     // dB 刻度
     {
-        const float dbMin = -50.0f;
-        const float dbMax =  50.0f;
+        const float dbMin = -80.0f;
+        const float dbMax =  0.0f;
         const float dbRange = dbMax - dbMin;
 
         const float gridTop    = (float) offsetY;
@@ -369,10 +369,10 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
             const float specPos = bandStart + colNorm * (bandEnd - bandStart);
             const float freqHz  = (float) std::pow((double) specPos, 2.3) * (float) nyquist;
 
-            // Y → dB：-50 ~ +50
+            // Y → dB：-80 ~ 0
             const float level = juce::jlimit(0.0f, 1.0f,
                 (float)(offsetY + totalGridH - gy) / (float) juce::jmax(1, totalGridH));
-            const float db = -50.0f + level * 100.0f;
+            const float db = -80.0f + level * 80.0f;
 
             const juce::String readout = PinkXP::formatFreqHz(freqHz)
                                        + "  " + juce::String(db, 1) + " dB";

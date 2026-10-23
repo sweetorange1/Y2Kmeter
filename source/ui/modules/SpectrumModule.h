@@ -87,9 +87,8 @@ private:
 
     // 平滑后的 dB 值（按显示列数）
     std::vector<float> smoothedDb;
-    // 峰值保持（dB）—— v2.9.4：全局统一下落（globalPeakIdleMs 计时）
+    // 峰值（dB）—— 持续下落：信号超过就顶上去，否则以 peakFallRatePerSec 回落
     std::vector<float> peakDb;
-    float globalPeakIdleMs = 0.0f;   // 全部列都未刷新峰值的持续时间
 
     // 每帧复用的显示层缓冲，避免 rebuild/paint 中反复分配。
     std::vector<float> blurredDb;
@@ -110,8 +109,7 @@ private:
     static constexpr float maxFreqHz = 20000.0f;
     static constexpr float minDb     = -80.0f;
     static constexpr float maxDb     = 0.0f;
-    static constexpr float peakHoldDuration   = 7000.0f; // v2.9.4：7s 滞留（旧 3.5s，按用户要求翻倍）
-    static constexpr float peakFallRatePerSec = 12.0f;   // dB/s 连续下降速率
+    static constexpr float peakFallRatePerSec = 6.0f;    // dB/s 持续下降速率（无 hold/阈值，peak 线始终缓慢下落）
 
     bool peakHoldEnabled = true;
     bool slopeEnabled    = true;

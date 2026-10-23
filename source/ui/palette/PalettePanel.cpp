@@ -61,45 +61,101 @@ HueRing::HueRing()
     setMouseCursor(juce::MouseCursor::PointingHandCursor);
 }
 
+void HueRing::rebuildRing(int w, int h, float scale)
+{
+    const int pw = juce::jmax(2, (int) std::lroundf((float) w * scale));
+    const int ph = juce::jmax(2, (int) std::lroundf((float) h * scale));
+
+    ringImage_ = juce::Image(juce::Image::ARGB, pw, ph, true);
+    juce::Image::BitmapData bd(ringImage_, juce::Image::BitmapData::writeOnly);
+
+    const float cx = (float) pw * 0.5f;
+    const float cy = (float) ph * 0.5f;
+    const float rOuter = (float) juce::jmin(pw, ph) * 0.5f - 4.0f * scale;
+    const float rInner = rOuter - 14.0f * scale;
+
+    // 环颜色 = 该色相在当前明暗/vibe 下的 accent（与 PaletteGenerator 一致，所见即所得）
+    const float accentL = (brightness_ == 1) ? 0.575f : (brightness_ == 2 ? 0.72f : 0.74f);
+    const float accentC = 0.06f + 0.11f * vibe_;
+
+    // 环颜色只取决于角度（色相），预计算 720 阶查表，避免逐像素 OKLCH 转换
+    constexpr int kTable = 720;
+    std::array<y2kpal::Rgb8, kTable> tab;
+    for (int i = 0; i < kTable; ++i)
+    {
+        const float hueDeg = 360.0f * (float) i / (float) kTable;
+        tab[(size_t) i] = y2kpal::okLchToRgb8(
+            y2kpal::gamutClamp({ accentL, accentC, hueDeg }));
+    }
+
+    constexpr float kPi = 3.14159265358979323846f;
+
+    for (int y = 0; y < ph; ++y)
+    {
+        auto* row = reinterpret_cast<juce::PixelARGB*> (bd.getLinePointer(y));
+        for (int x = 0; x < pw; ++x)
+        {
+            const float dx = (float) x + 0.5f - cx;
+            const float dy = (float) y + 0.5f - cy;
+            const float r = std::sqrt(dx * dx + dy * dy);
+
+            // 边界 1px 线性羽化（AA）：逐像素填充没有 Graphics 的抗锯齿，
+            //   这里对环的内外边缘做覆盖率过渡，避免出现阶梯锯齿。
+            float cov = 1.0f;
+            cov = juce::jmin(cov, r - (rInner - 0.5f));
+            cov = juce::jmin(cov, (rOuter + 0.5f) - r);
+            cov = y2kpal::clamp01(cov);
+
+            if (cov <= 0.0f)
+            {
+                row[x] = juce::PixelARGB((juce::uint8) 0, 0, 0, 0);
+                continue;
+            }
+
+            // 0° 在顶部（12 点）、顺时针——与 mouseDown 的 atan2(dx, -dy) 对齐
+            float ang = std::atan2(dx, -dy) * (180.0f / kPi);
+            if (ang < 0.0f) ang += 360.0f;
+            const int idx = (int) (ang * ((float) kTable / 360.0f)) % kTable;
+            const y2kpal::Rgb8& c = tab[(size_t) idx];
+            const juce::uint8 a = (juce::uint8) juce::jlimit(0, 255,
+                (int) std::lroundf(cov * 255.0f));
+            row[x] = juce::PixelARGB(a, c.r, c.g, c.b);
+        }
+    }
+}
+
 void HueRing::paint(juce::Graphics& g)
 {
     const auto area = getLocalBounds();
+    const int w = area.getWidth();
+    const int h = area.getHeight();
     const int cx = area.getCentreX();
     const int cy = area.getCentreY();
-    const int rOuter = juce::jmin(area.getWidth(), area.getHeight()) / 2 - 4;
+    const int rOuter = juce::jmin(w, h) / 2 - 4;
     const int rInner = rOuter - 14;
 
-    // 环：每 1° 一小段，颜色 = 该色相在当前明暗/vibe 下的 accent（所见即所得）
-    const float accentL = (brightness_ == 1) ? 0.575f : (brightness_ == 2 ? 0.72f : 0.74f);
-    const float accentC = 0.08f + 0.18f * vibe_;
+    // 物理像素缩放（与 SpectrumModule 一致，上限 4 避免极端 DPI 内存膨胀）
+    const float scale = juce::jlimit(1.0f, 4.0f,
+        g.getInternalContext().getPhysicalPixelScaleFactor());
+    const int pw = juce::jmax(2, (int) std::lroundf((float) w * scale));
+    const int ph = juce::jmax(2, (int) std::lroundf((float) h * scale));
 
-    for (int deg = 0; deg < 360; ++deg)
+    if (ringDirty_ || !ringImage_.isValid()
+        || ringImage_.getWidth() != pw || ringImage_.getHeight() != ph)
     {
-        // 0° 在顶部（12 点），顺时针——与 mouseDown 的 atan2(dx, -dy) 对齐
-        const float rad = (float) (deg - 90) * (3.14159265358979323846f / 180.0f);
-        const float ca = std::cos(rad);
-        const float sa = std::sin(rad);
-        const float r1 = (float) rInner;
-        const float r2 = (float) rOuter;
-
-        juce::Path seg;
-        seg.startNewSubPath(cx + r1 * ca, cy + r1 * sa);
-        seg.lineTo(cx + r2 * ca, cy + r2 * sa);
-        seg.lineTo(cx + r2 * std::cos(rad + 0.018f), cy + r2 * std::sin(rad + 0.018f));
-        seg.lineTo(cx + r1 * std::cos(rad + 0.018f), cy + r1 * std::sin(rad + 0.018f));
-        seg.closeSubPath();
-
-        const y2kpal::Rgb8 col = y2kpal::okLchToRgb8(
-            y2kpal::gamutClamp({ accentL, accentC, (float) deg }));
-        g.setColour(juce::Colour(col.r, col.g, col.b));
-        g.fillPath(seg);
+        rebuildRing(w, h, scale);
+        ringDirty_ = false;
     }
+
+    g.drawImage(ringImage_, area.toFloat());
 
     // 环中心：当前 accent 色块 + hue 数字
     g.setColour(PinkXP::dark);
     g.drawEllipse(cx - rOuter, cy - rOuter, rOuter * 2, rOuter * 2, 1.0f);
     g.drawEllipse(cx - rInner, cy - rInner, rInner * 2, rInner * 2, 1.0f);
 
+    const float accentL = (brightness_ == 1) ? 0.575f : (brightness_ == 2 ? 0.72f : 0.74f);
+    const float accentC = 0.06f + 0.11f * vibe_;
     const y2kpal::Rgb8 accentNow = y2kpal::okLchToRgb8(
         y2kpal::gamutClamp({ accentL, accentC, hue_ }));
     g.setColour(juce::Colour(accentNow.r, accentNow.g, accentNow.b));
@@ -683,7 +739,7 @@ PalettePanel::PalettePanel()
     // 滑条拖动：与色相环一致——拖动中只刷新面板内预览，松手提交。
     auto commitIfNotDragging = [this] { if (!sliderDragging_) applyCurrentSpec(); };
 
-    vibeSlider_.setRange(0.0, 1.0, 0.0);
+    vibeSlider_.setRange(0.0, 2.0, 0.0);
     vibeSlider_.setSliderStyle(juce::Slider::LinearHorizontal);
     vibeSlider_.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     vibeSlider_.onDragStart = [this] { sliderDragging_ = true; };
@@ -700,7 +756,7 @@ PalettePanel::PalettePanel()
     };
     addAndMakeVisible(vibeSlider_);
 
-    tintSlider_.setRange(0.0, 1.0, 0.0);
+    tintSlider_.setRange(0.0, 2.0, 0.0);
     tintSlider_.setSliderStyle(juce::Slider::LinearHorizontal);
     tintSlider_.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     tintSlider_.onDragStart = [this] { sliderDragging_ = true; };

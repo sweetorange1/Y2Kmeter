@@ -94,14 +94,23 @@ namespace
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
         g.drawText(label, titleRow, juce::Justification::centredLeft, false);
 
-        // 右上角活活方块 6x6：心跳亮度脉动
+        // 右上角信号灯 6x6：有信号（tNorm>0）时呼吸脉动，静音时熄灭
         {
             const int sz = 6;
             auto dot = juce::Rectangle<int>(titleRow.getRight() - sz - 2,
                                              titleRow.getY() + (titleRow.getHeight() - sz) / 2,
                                              sz, sz);
-            const float pulse = 0.5f + 0.5f * std::sin(pulsePhase);
-            g.setColour(PinkXP::pink500.withAlpha(0.35f + 0.55f * pulse));
+            const bool hasSignal = (tNorm > 0.005f);
+            if (hasSignal)
+            {
+                // 常亮：亮度随信号强度 tNorm 变化（不再正弦闪烁）
+                const float bright = 0.35f + 0.65f * juce::jlimit(0.0f, 1.0f, tNorm);
+                g.setColour(PinkXP::pink500.withAlpha(bright));
+            }
+            else
+            {
+                g.setColour(PinkXP::pink500.withAlpha(0.08f));  // 静音：几乎熄灭
+            }
             g.fillRect(dot);
             g.setColour(PinkXP::pink700.withAlpha(0.6f));
             g.drawRect(dot, 1);
@@ -112,7 +121,10 @@ namespace
         const auto flashCol   = juce::Colour(0xffffffff); // 纯白高光
         g.setColour(baseNumCol.interpolatedWith(flashCol, juce::jlimit(0.0f, 1.0f, flash) * 0.65f));
         g.setFont(PinkXP::getFont(20.0f, juce::Font::bold));
-        g.drawText(juce::String(v, 1), inner, juce::Justification::centredLeft, false);
+        const juce::String numStr = (v <= -60.0f)
+            ? juce::String("-144")
+            : juce::String(v, 1);
+        g.drawText(numStr, inner, juce::Justification::centredLeft, false);
 
         g.setColour(PinkXP::ink.withAlpha(0.7f));
         g.setFont(PinkXP::getFont(10.0f, juce::Font::plain));
