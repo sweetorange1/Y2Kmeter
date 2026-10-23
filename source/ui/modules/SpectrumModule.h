@@ -2,7 +2,7 @@
 
 #include <JuceHeader.h>
 #include <vector>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -22,7 +22,7 @@
 // 刷新率：30Hz
 // ==========================================================
 
-class SpectrumModule : public ModulePanel,
+class SpectrumModule : public GlDirectModuleBase,
                        public AnalyserHub::FrameListener
 {
 public:
@@ -48,7 +48,12 @@ public:
 
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
-    void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+
+    // ---- GlDirectModuleBase 钩子（v2.9.4 迁移）----
+    void buildGlSnapshot() override;
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
 
@@ -82,9 +87,9 @@ private:
 
     // 平滑后的 dB 值（按显示列数）
     std::vector<float> smoothedDb;
-    // 峰值保持（dB）+ 保持计时
+    // 峰值保持（dB）—— v2.9.4：全局统一下落（globalPeakIdleMs 计时）
     std::vector<float> peakDb;
-    std::vector<float> peakHoldMs;
+    float globalPeakIdleMs = 0.0f;   // 全部列都未刷新峰值的持续时间
 
     // 每帧复用的显示层缓冲，避免 rebuild/paint 中反复分配。
     std::vector<float> blurredDb;
@@ -105,24 +110,29 @@ private:
     static constexpr float maxFreqHz = 20000.0f;
     static constexpr float minDb     = -80.0f;
     static constexpr float maxDb     = 0.0f;
-    static constexpr float peakHoldDuration   = 3500.0f; // 3.5s 滞留
+    static constexpr float peakHoldDuration   = 7000.0f; // v2.9.4：7s 滞留（旧 3.5s，按用户要求翻倍）
     static constexpr float peakFallRatePerSec = 12.0f;   // dB/s 连续下降速率
 
     bool peakHoldEnabled = true;
     bool slopeEnabled    = true;
 
     juce::Time lastTickTime;
+    float      frameDtSec = 1.0f / 120.0f; // v2.9：本帧间隔（rebuildDisplay 平滑换算用）
 
-    // 性能优化（阶段1）：按 UI 缩放动态限制最短重绘间隔，降低宿主消息线程压力。
-    double lastRepaintMs = 0.0;
 
-    // 性能优化（阶段2）：离屏 Image 缓存。每次新数据到达时标脏，
-    // paintContent 用一次 drawImage blit 替代每帧重建 Path+rasterize。
-    mutable juce::Image cached_curve_image_;
-    mutable bool        curve_cache_dirty_  = true;
-    mutable int         curve_cache_w_      = 0;
-    mutable int         curve_cache_h_      = 0;
-    void renderCurvesToCache(juce::Rectangle<int> content) const;
+
+    // v2.9：静态层缓存（底衬 + 凹陷画布 + 网格 + 坐标轴文字），仅在尺寸 / DPI /
+    //   主题配色变化时重建；GL 渲染器对未修改的 Image 复用纹理，不再每帧上传。
+    //   曲线（填充 + 双层描边 + 峰值虚线）每帧直接画到 GL 上下文。
+    //   旧实现每帧"新建整张 ARGB Image → 软件光栅化全部内容 → 整图上传纹理"，
+    //   在 120Hz 下是本模块最大的开销。
+    mutable juce::Image  staticLayer_;
+    mutable juce::Rectangle<int> staticLayerBounds_;
+    mutable float        staticLayerScale_     = 0.0f;
+    mutable juce::uint32 staticLayerColourKey_ = 0;
+    mutable bool         curve_cache_dirty_    = true; // 兼容保留：onFrame 标脏（不再触发重建）
+    void renderStaticLayer (juce::Rectangle<int> content, float physicalScale) const;
+    static juce::uint32 computeThemeColourKey() noexcept;
 
     // ---- 顶部工具栏 ----
     juce::TextButton btnPeak  { "Peak"  };

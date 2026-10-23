@@ -152,26 +152,32 @@ void LufsRealtimeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Loudness)) return;
 
     const auto& s = frame.loudness;
+    const float dt = frame.dtSec;
+    using namespace y2k::pacing;
 
     // 记录上一帧值用于"显著变化"检测→吸打闪烁
+    //   v2.9：平滑 / 闪烁衰减 / 心跳相位均按 dt 换算（120Hz 标定，与旧版 120Hz 下观感一致）
     prevM = lufsM; prevS = lufsS; prevI = lufsI;
-    lufsM = lufsM + 0.30f * (s.lufsM - lufsM);
-    lufsS = lufsS + 0.20f * (s.lufsS - lufsS);
-    lufsI = lufsI + 0.08f * (s.lufsI - lufsI);
+    lufsM = lufsM + alphaForDt (0.30f, dt) * (s.lufsM - lufsM);
+    lufsS = lufsS + alphaForDt (0.20f, dt) * (s.lufsS - lufsS);
+    lufsI = lufsI + alphaForDt (0.08f, dt) * (s.lufsI - lufsI);
 
-    // 变化 > 0.3 LUFS 就触发闪烁；flash 按每帧 0.08 衰减
-    if (std::abs(lufsM - prevM) > 0.3f) flashM = 1.0f;
-    if (std::abs(lufsS - prevS) > 0.3f) flashS = 1.0f;
-    if (std::abs(lufsI - prevI) > 0.2f) flashI = 1.0f;
-    flashM = juce::jmax(0.0f, flashM - 0.08f);
-    flashS = juce::jmax(0.0f, flashS - 0.08f);
-    flashI = juce::jmax(0.0f, flashI - 0.06f);
+    // 变化阈值按"每 120Hz 帧"标定，换算到本帧间隔
+    const float th = juce::jmax (0.05f, dt * kRefHz);
+    if (std::abs(lufsM - prevM) > 0.3f * th) flashM = 1.0f;
+    if (std::abs(lufsS - prevS) > 0.3f * th) flashS = 1.0f;
+    if (std::abs(lufsI - prevI) > 0.2f * th) flashI = 1.0f;
+    flashM = juce::jmax(0.0f, flashM - stepForDt (0.08f, dt));
+    flashS = juce::jmax(0.0f, flashS - stepForDt (0.08f, dt));
+    flashI = juce::jmax(0.0f, flashI - stepForDt (0.06f, dt));
 
-    // 心跳相位每帧推进（30fps 下约 0.86s 一个脉动周期）
-    pulsePhase += 0.24f;
-    if (pulsePhase > juce::MathConstants<float>::twoPi)
+    pulsePhase += stepForDt (0.24f, dt);
+    while (pulsePhase > juce::MathConstants<float>::twoPi)
         pulsePhase -= juce::MathConstants<float>::twoPi;
 
+    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
+    if ((frame.tickCount & 1ull) != 0)
+        return;
     repaint();
 }
 
@@ -214,44 +220,52 @@ void TruePeakModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Loudness)) return;
 
     const auto& s = frame.loudness;
+    const float dt = frame.dtSec;
+    using namespace y2k::pacing;
     const float prevTpShown = tpDisplay;
     const float prevRmsMax  = juce::jmax(rmsL, rmsR);
     prevTp = prevTpShown;
     prevRms = prevRmsMax;
 
-    // RMS 维持原有轻平滑
-    rmsL = rmsL + 0.12f * (s.rmsL - rmsL);
-    rmsR = rmsR + 0.12f * (s.rmsR - rmsR);
+    // RMS 维持原有轻平滑（v2.9：按 dt 换算，120Hz 标定）
+    const float aRms = alphaForDt (0.12f, dt);
+    rmsL = rmsL + aRms * (s.rmsL - rmsL);
+    rmsR = rmsR + aRms * (s.rmsR - rmsR);
 
     // TP-L/TP-R：短保持 + 自动回落（避免长时间钉在历史最大值）
+    //   v2.9：保持时长 / 回落速度按时间计（数值取旧版 120Hz 分发下的实际表现：
+    //   60 帧 = 0.5s 保持，0.28 dB/帧 = 33.6 dB/s 回落）
     const float tpInstantMax = juce::jmax (s.truePeakL, s.truePeakR);
-    constexpr int holdFrames = 60;      // 约 2.0s @30fps
-    constexpr float fallPerFrameDb = 0.28f; // 约 8.4 dB/s @30fps
+    constexpr float holdSec = framesToSec (60.0f);
 
     if (tpInstantMax >= tpDisplay - 0.0001f)
     {
         tpDisplay = tpInstantMax;
-        tpHoldFrames = holdFrames;
+        tpHoldSec = holdSec;
     }
-    else if (tpHoldFrames > 0)
+    else if (tpHoldSec > 0.0f)
     {
-        --tpHoldFrames;
+        tpHoldSec -= dt;
     }
     else
     {
-        tpDisplay = juce::jmax (tpInstantMax, tpDisplay - fallPerFrameDb);
+        tpDisplay = juce::jmax (tpInstantMax, tpDisplay - stepForDt (0.28f, dt));
     }
 
     const float rmsMax = juce::jmax(rmsL, rmsR);
-    if (std::abs(tpDisplay - prevTp)  > 0.3f) flashTp  = 1.0f;
-    if (std::abs(rmsMax    - prevRms) > 0.3f) flashRms = 1.0f;
-    flashTp  = juce::jmax(0.0f, flashTp  - 0.08f);
-    flashRms = juce::jmax(0.0f, flashRms - 0.08f);
+    const float th = juce::jmax (0.05f, dt * kRefHz);
+    if (std::abs(tpDisplay - prevTp)  > 0.3f * th) flashTp  = 1.0f;
+    if (std::abs(rmsMax    - prevRms) > 0.3f * th) flashRms = 1.0f;
+    flashTp  = juce::jmax(0.0f, flashTp  - stepForDt (0.08f, dt));
+    flashRms = juce::jmax(0.0f, flashRms - stepForDt (0.08f, dt));
 
-    pulsePhase += 0.24f;
-    if (pulsePhase > juce::MathConstants<float>::twoPi)
+    pulsePhase += stepForDt (0.24f, dt);
+    while (pulsePhase > juce::MathConstants<float>::twoPi)
         pulsePhase -= juce::MathConstants<float>::twoPi;
 
+    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
+    if ((frame.tickCount & 1ull) != 0)
+        return;
     repaint();
 }
 
@@ -296,7 +310,11 @@ void PhaseCorrelationModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Phase)) return;
 
     const auto& s = frame.phase;
-    corr = corr + 0.25f * (s.correlation - corr);
+    corr = corr + y2k::pacing::alphaForDt (0.25f, frame.dtSec) * (s.correlation - corr);
+
+    // v2.9.2：读数类模块 30Hz 重绘
+    if ((frame.tickCount & 1ull) != 0)
+        return;
     repaint();
 }
 
@@ -371,8 +389,13 @@ void PhaseBalanceModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Phase)) return;
 
     const auto& s = frame.phase;
-    width = width + 0.20f * (s.width - width);
-    balance = balance + 0.20f * (s.balance - balance);
+    const float a = y2k::pacing::alphaForDt (0.20f, frame.dtSec);
+    width = width + a * (s.width - width);
+    balance = balance + a * (s.balance - balance);
+
+    // v2.9.2：读数类模块 30Hz 重绘
+    if ((frame.tickCount & 1ull) != 0)
+        return;
     repaint();
 }
 
@@ -438,10 +461,16 @@ void DynamicsMetersModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Dynamics)) return;
 
     const auto& s = frame.dynamics;
-    meterDb[0] = meterDb[0] + 0.25f * (s.peakL - meterDb[0]);
-    meterDb[1] = meterDb[1] + 0.25f * (s.peakR - meterDb[1]);
-    meterDb[2] = meterDb[2] + 0.18f * (s.rmsL  - meterDb[2]);
-    meterDb[3] = meterDb[3] + 0.18f * (s.rmsR  - meterDb[3]);
+    const float aPk  = y2k::pacing::alphaForDt (0.25f, frame.dtSec);
+    const float aRms = y2k::pacing::alphaForDt (0.18f, frame.dtSec);
+    meterDb[0] = meterDb[0] + aPk  * (s.peakL - meterDb[0]);
+    meterDb[1] = meterDb[1] + aPk  * (s.peakR - meterDb[1]);
+    meterDb[2] = meterDb[2] + aRms * (s.rmsL  - meterDb[2]);
+    meterDb[3] = meterDb[3] + aRms * (s.rmsR  - meterDb[3]);
+
+    // v2.9.2：读数类模块 30Hz 重绘
+    if ((frame.tickCount & 1ull) != 0)
+        return;
     repaint();
 }
 
@@ -536,22 +565,28 @@ void DynamicsDrModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Dynamics)) return;
 
     const auto& s = frame.dynamics;
+    const float dt = frame.dtSec;
+    using namespace y2k::pacing;
     prevShort = shortDR; prevInteg = integDR; prevCrest = crest;
-    shortDR = shortDR + 0.20f * (s.shortDR - shortDR);
-    integDR = integDR + 0.08f * (s.integratedDR - integDR);
-    crest   = crest   + 0.25f * (s.crest - crest);
+    shortDR = shortDR + alphaForDt (0.20f, dt) * (s.shortDR - shortDR);
+    integDR = integDR + alphaForDt (0.08f, dt) * (s.integratedDR - integDR);
+    crest   = crest   + alphaForDt (0.25f, dt) * (s.crest - crest);
 
-    if (std::abs(shortDR - prevShort) > 0.3f) flashShort = 1.0f;
-    if (std::abs(integDR - prevInteg) > 0.2f) flashInteg = 1.0f;
-    if (std::abs(crest   - prevCrest) > 0.3f) flashCrest = 1.0f;
-    flashShort = juce::jmax(0.0f, flashShort - 0.08f);
-    flashInteg = juce::jmax(0.0f, flashInteg - 0.07f);
-    flashCrest = juce::jmax(0.0f, flashCrest - 0.08f);
+    const float th = juce::jmax (0.05f, dt * kRefHz);
+    if (std::abs(shortDR - prevShort) > 0.3f * th) flashShort = 1.0f;
+    if (std::abs(integDR - prevInteg) > 0.2f * th) flashInteg = 1.0f;
+    if (std::abs(crest   - prevCrest) > 0.3f * th) flashCrest = 1.0f;
+    flashShort = juce::jmax(0.0f, flashShort - stepForDt (0.08f, dt));
+    flashInteg = juce::jmax(0.0f, flashInteg - stepForDt (0.07f, dt));
+    flashCrest = juce::jmax(0.0f, flashCrest - stepForDt (0.08f, dt));
 
-    pulsePhase += 0.24f;
-    if (pulsePhase > juce::MathConstants<float>::twoPi)
+    pulsePhase += stepForDt (0.24f, dt);
+    while (pulsePhase > juce::MathConstants<float>::twoPi)
         pulsePhase -= juce::MathConstants<float>::twoPi;
 
+    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
+    if ((frame.tickCount & 1ull) != 0)
+        return;
     repaint();
 }
 
@@ -651,10 +686,23 @@ void DynamicsCrestModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     const auto& s = frame.dynamics;
 
-    // 固定每帧都写入缓冲 → 图像始终按 30fps 的速率流畅流动
-    //   后端分析量零新增（dynamics 原本就会每帧产出 frame.dynamics.crest）
-    crestHist[(size_t) writePos] = juce::jlimit(0.0f, 40.0f, s.crest);
-    writePos = (writePos + 1) % histMaxLen;
+    // v2.9：按时间以固定 30 样本/秒写入（与 spanSeconds × 30 的显示窗口约定一致）。
+    //   旧实现"每次 onFrame 写一个点"，分发 120Hz 时 "20s history" 实际只覆盖 5 秒。
+    //   两次写入之间取 crest 最大值，避免丢失短促尖峰。
+    pendingCrestMax  = juce::jmax (pendingCrestMax, juce::jlimit (0.0f, 40.0f, s.crest));
+    crestSampleAccum += frame.dtSec * 30.0f;
+    int pushes = juce::jmin ((int) crestSampleAccum, 8);
+    crestSampleAccum -= (float) (int) crestSampleAccum;
+    if (pushes <= 0)
+        return; // 本帧没有新样本，曲线不变，无需重绘
+
+    while (pushes-- > 0)
+    {
+        crestHist[(size_t) writePos] = pendingCrestMax;
+        writePos = (writePos + 1) % histMaxLen;
+        writePosFloat += 1.0;
+    }
+    pendingCrestMax = 0.0f;
 
     repaint();
 }
@@ -707,19 +755,30 @@ void DynamicsCrestModule::paintContent(juce::Graphics& g, juce::Rectangle<int> c
     //     最旧点 = crestHist[(writePos - N + histMaxLen) % histMaxLen]
     const int N = juce::jmin (spanSeconds * 30, histMaxLen);
     const int denom = juce::jmax (1, N - 1);
-    juce::Path p;
+
+    // v2.9.2：恢复"全样本点绘制"（N ≤ 1050 点，路径光栅化 ~1ms 可接受）。
+    //   上一版按像素列做 max 抽稀：尖峰（单样本）在相邻列间来回跳变，
+    //   span 越大列聚合样本越多、混叠越明显 —— 这是"尖尖闪现再消失"的根因，
+    //   已确认修复方向。全点绘制下每个样本都是路径顶点，尖峰稳定连续。
+    //   滚动相位：写入 30 样本/秒、显示 ~37fps 不同步，用累计写入数的小数部分
+    //   做亚像素平移，滚动连续不抖动。
+    const double frac = writePosFloat - std::floor (writePosFloat);
+    const float  invN = 1.0f / (float) juce::jmax (1, N - 1);
+    auto& p    = crestPath;
+    auto& fill = crestFillPath;
+    p.clear();
+    p.preallocateSpace ((size_t) N * 3 + 8);
     for (int i = 0; i < N; ++i)
     {
         const int idx = ((writePos - N + i) % histMaxLen + histMaxLen) % histMaxLen;
         const float v = crestHist[(size_t) idx];
-        const float t = (float) i / (float) denom;
-        const float x = (float) plot.getX() + t * (float) plot.getWidth();
+        const float x = (float) plot.getX() + ((float) i - (float) frac) * invN * (float) plot.getWidth();
         const float y = (float) plot.getBottom() - juce::jlimit(0.0f, 1.0f, v / 30.0f) * (float) plot.getHeight();
         if (i == 0) p.startNewSubPath(x, y);
         else        p.lineTo(x, y);
     }
 
-    juce::Path fill = p;
+    fill = p;
     fill.lineTo((float) plot.getRight(), (float) plot.getBottom());
     fill.lineTo((float) plot.getX(),     (float) plot.getBottom());
     fill.closeSubPath();
@@ -817,10 +876,10 @@ VuMeterModule::VuMeterModule(AnalyserHub& h)
     setDefaultSize(320, 224);
     setTitleText("VU Meter");
 
-    // 启动 60Hz 自有 Timer 做补帧插值。按真实 dt 把 displayed 连续推进到 target，
-    // 视觉上是丝滑扫动。
+    // v2.9：主路径改为 onFrame 推进弹道 + 重绘（跟随帧分发频率，可达 120fps）；
+    //   Timer 仅作 10Hz 兜底 —— onFrame 超过 100ms 未到达时主动拉最新帧推进。
     lastTickMs = juce::Time::getMillisecondCounterHiRes();
-    startTimerHz(60);
+    startTimerHz(10);
 }
 
 VuMeterModule::~VuMeterModule()
@@ -866,12 +925,27 @@ void VuMeterModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     };
     targetL = msToDb(meanSqL);
     targetR = msToDb(meanSqR);
+
+    // v2.9：主路径由分发帧直接推进弹道 + repaint。
+    // v2.9.2：读数类 30Hz 重绘 —— 隔帧推进弹道（dt 翻倍保持时间常数一致）。
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    lastOnFrameMs = nowMs;
+    lastTickMs    = nowMs;
+    if ((frame.tickCount & 1ull) == 0)
+        advanceBallistics (frame.dtSec * 2000.0f);
 }
 
 void VuMeterModule::timerCallback()
 {
-    // 按真实 dt（毫秒）推进 —— 不假设 60Hz 准确
+    // v2.9：Timer 降级为兜底（见构造函数）：onFrame 正常到达时什么都不做
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (nowMs - lastOnFrameMs < 100.0)
+    {
+        lastTickMs = nowMs;
+        return;
+    }
+
+    // 按真实 dt（毫秒）推进
     double dtMs = nowMs - lastTickMs;
     lastTickMs  = nowMs;
     if (dtMs < 0.0)   dtMs = 16.0;
@@ -935,6 +1009,13 @@ void VuMeterModule::timerCallback()
             }
         }
     }
+
+    advanceBallistics (dt);
+}
+
+void VuMeterModule::advanceBallistics (float dt)
+{
+    dt = juce::jlimit (0.0f, 100.0f, dt);
 
     // 非对称弹道：上升 τ=tauRiseMs（抓瞬态），下降 τ=tauFallMs（模拟 VU 回落）。
     //   · 连续瞬态情形：每个瞬态都通过上升项立刻把指针抬到新高，之间的回落

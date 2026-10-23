@@ -68,7 +68,17 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 2.8.6 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.9.1 LANGUAGES C CXX)
+
+# ==========================================================
+# v2.9.2：帧耗时统计日志（仅开发者诊断构建，默认 OFF）
+#   开启方式：cmake ... -DY2K_ENABLE_FRAME_PERF_LOG=ON
+#   关闭时零开销、不产生任何产物，不影响对外 Release 版本。
+# ==========================================================
+option(Y2K_ENABLE_FRAME_PERF_LOG "Enable per-frame perf log dump (dev diagnostics only)" OFF)
+if (Y2K_ENABLE_FRAME_PERF_LOG)
+    add_compile_definitions(Y2K_ENABLE_FRAME_PERF_LOG=1)
+endif()
 
 # ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
@@ -99,6 +109,18 @@ endif()
 set(CMAKE_CXX_STANDARD 17)  
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ==========================================================
+# AddressSanitizer（仅开发者诊断，默认 OFF）
+#   · 开启时自动关闭 LTO（两者不兼容）；
+#   · 建议配合独立构建目录使用（如 build/skill-verify-asan）。
+# ==========================================================
+option(Y2K_ENABLE_ASAN "Enable AddressSanitizer (dev diagnostics only)" OFF)
+if (Y2K_ENABLE_ASAN AND MSVC)
+  add_compile_options(/fsanitize=address)
+  add_link_options(/fsanitize=address)
+  set(Y2K_ENABLE_LTO OFF)
+endif()
 
 # ==========================================================
 # Release 性能优化开关
@@ -365,7 +387,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.8.6
+VERSION 2.9.1
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -418,7 +440,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 2.8.6
+        VERSION 2.9.1
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -550,6 +572,9 @@ set(Y2KM_PLUGIN_SOURCES
   # === 性能计数系统 ===
   source/perf/PerformanceCounterSystem.h
   source/perf/PerformanceCounterSystem.cpp
+  # v2.9.2：帧耗时统计日志（Y2K_ENABLE_FRAME_PERF_LOG 宏隔离，默认不编译内容）
+  source/perf/FramePerfLog.h
+  source/perf/FramePerfLog.cpp
 
   # === 模块化 UI 框架 ===
 
@@ -559,6 +584,19 @@ set(Y2KM_PLUGIN_SOURCES
   source/ui/ModulePanel.cpp
   source/ui/ModuleWorkspace.h
   source/ui/ModuleWorkspace.cpp
+  # v2.9.4：GL 直渲染统一框架（Spectrogram3D / Oscilloscope / OscilloscopeWave 基类）
+  source/ui/GlDirectModule.h
+  source/ui/GlDirectModule.cpp
+  # === 调色板重构（Palette Redesign）：OKLCH 生成器 + 新面板 + 主题库 ===
+  source/ui/palette/OkLchUtils.h
+  source/ui/palette/ThemeSpec.h
+  source/ui/palette/ThemeSpec.cpp
+  source/ui/palette/PaletteGenerator.h
+  source/ui/palette/PaletteGenerator.cpp
+  source/ui/palette/PalettePanel.h
+  source/ui/palette/PalettePanel.cpp
+  source/ui/palette/ThemeLibrary.h
+  source/ui/palette/ThemeLibrary.cpp
   # Milkdrop-only 宿主自动化参数定义（仅 milkdrop 变体使用，完整版不编译其内容）
   source/ui/MilkdropParamIds.h
   # 阶段1 性能改造：统一 UI 帧时钟节拍器（支持自适应降频）
@@ -1218,3 +1256,22 @@ if (WIN32 AND TARGET Y2Kmeter_milkdrop_VST3)
     )
   endforeach()
 endif()
+
+# ==========================================================
+# 调色板生成器冒烟测试（AC7）—— 纯 C++，不链接 JUCE
+#   · 默认运行：全遍历护栏断言 + 分享码往返（打印 ALL_OK）
+#   · --overview <file.html>：输出"色相 x 明暗 x Vibe"总览图（P0 评审）
+#   · --golden：输出 12 组代表参数的黄金色板快照（AC8 存档）
+# ==========================================================
+enable_testing()
+add_executable(Y2Kmeter_palette_test
+  tests/palette_test.cpp
+  source/ui/palette/ThemeSpec.cpp
+  source/ui/palette/PaletteGenerator.cpp
+)
+target_compile_features(Y2Kmeter_palette_test PRIVATE cxx_std_17)
+target_include_directories(Y2Kmeter_palette_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if (MSVC)
+  target_compile_options(Y2Kmeter_palette_test PRIVATE /utf-8)
+endif()
+add_test(NAME Y2Kmeter_palette_test COMMAND Y2Kmeter_palette_test)

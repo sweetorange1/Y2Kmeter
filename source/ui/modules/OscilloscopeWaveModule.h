@@ -1,7 +1,8 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
+#include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -26,7 +27,7 @@
 //   三者功能严重重叠，v1.8.4 合并为 OscilloscopeWave（L/R/Both 一键切换）。
 // ==========================================================
 
-class OscilloscopeWaveModule : public ModulePanel,
+class OscilloscopeWaveModule : public GlDirectModuleBase,
                                public AnalyserHub::FrameListener
 {
 public:
@@ -47,7 +48,12 @@ public:
 
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
-    void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+
+    // ---- GlDirectModuleBase 钩子（v2.9.4 迁移自 v2.9.3 直渲染样板）----
+    void buildGlSnapshot() override;
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
     // ---- 绘制 ----
@@ -81,9 +87,6 @@ private:
     // 快照（UI 线程独占使用）
     juce::Array<float> snapshotL;
     juce::Array<float> snapshotR;
-
-    // 性能优化：repaint 节流
-    double lastRepaintMs = 0.0;
 
     // 静态层（背景）
     juce::Image staticLayer;

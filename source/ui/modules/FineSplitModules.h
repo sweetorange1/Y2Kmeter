@@ -4,6 +4,7 @@
 #include <array>
 #include "source/ui/ModuleWorkspace.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/ui/FramePacing.h"
 
 class LufsRealtimeModule : public ModulePanel,
                            public AnalyserHub::FrameListener
@@ -50,7 +51,7 @@ private:
 
     // TP 显示：短保持 + 自动回落
     float tpDisplay = -144.0f;
-    int   tpHoldFrames = 0;
+    float tpHoldSec = 0.0f;
 
     float pulsePhase = 0.0f;
     float prevTp = -144.0f, prevRms = -144.0f;
@@ -159,17 +160,22 @@ private:
     std::vector<float> crestHist;
     int writePos = 0;
 
-    // 颗粒度控制：缓冲长度固定为 3600 点（预留空间，当前最大只需 35s×30=1050）
-    //   · 每一帧 onFrame 都写入一个样本（framesPerSample 恒为 1）
+    // 颗粒度控制：缓冲长度固定为 3600 点（v2.9 起按时间以 30 样本/秒写入，帧率无关）
     //   · 显示窗口按 spanSeconds 取"最近 spanSeconds × 30"个点绘制
     //   · 这样无论 span 大小，图像每帧都推进 1 像素（不再"调大 span 就卡"）
     //   滑条维度："时间跨度"（秒） – 滑条越高→显示窗口越长→看长期趋势
     //   → 直观上对用户就是“颗粒度”
     int   spanSeconds      = 20;   // 默认 20 秒，范围 [1, 35]
-    int   framesPerSample  = 1;    // 保留为 1（每帧写入），此字段保留兼容但不再参与颗粒度计算
-    int   frameCounter     = 0;    // 保留为 0
+    int   framesPerSample  = 1;    // 保留兼容字段（已不参与写入节拍）
+    int   frameCounter     = 0;    // 保留兼容字段（已不参与写入节拍）
 
-    static constexpr int histMaxLen = 3600; // 120s × 30fps 的最大容量
+    static constexpr int histMaxLen = 3600; // 120s × 30 样本/秒 的最大容量
+
+    // v2.9：按时间以 30 样本/秒写入（帧率无关）
+    float crestSampleAccum = 0.0f;
+    float pendingCrestMax  = 0.0f;
+    double writePosFloat   = 0.0;        // v2.9.2：累计写入总数（连续），绘制滚动相位用
+    juce::Path crestPath, crestFillPath; // paint 复用，避免每帧分配
 
     // 右侧的额外滑条 UI（与 EqModule 的 SIZE 滑条同样风格）
     juce::Slider spanSlider;
@@ -281,6 +287,8 @@ private:
 
     // Timer tick 之间的真实时间（毫秒），用 HiRes counter 计算
     double lastTickMs = 0.0;
+    double lastOnFrameMs = 0.0;          // v2.9：最近一次 onFrame 时间（兜底 Timer 判定用）
+    void advanceBallistics (float dtMs); // v2.9：弹道 / LED / 相位推进 + repaint
 
     // 脉动相位（用于 LED 呼吸/脉动，也由 Timer 推进）
     float pulsePhase = 0.0f;

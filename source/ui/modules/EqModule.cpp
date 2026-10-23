@@ -1,6 +1,7 @@
 #include "source/ui/modules/EqModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/ui/FramePacing.h"
 #include <cmath>
 
 // ==========================================================
@@ -80,38 +81,30 @@ void EqModule::PixelEqGraph::onFrame (const AnalyserHub::FrameSnapshot& frame)
     }
     else
     {
-        // Peak 线每帧向下衰减的像素速率（单位：归一化电平 / 帧）。
-        //   timer = 30Hz；这里选 0.008 ≈ 每秒下落 24% 电平，和 Spectrum 的 peak
-        //   缓降节奏一致，足够让"历史最高"逐步回落、但又不会快到看不清。
-        constexpr float kPeakFallPerFrame = 0.008f;
+        // Peak 线下落 / 平滑：v2.9 起按 dt 换算（120Hz 标定，与旧版 120Hz 下观感一致）
+        const float kPeakFall   = y2k::pacing::stepForDt (0.008f, frame.dtSec);
+        const float kAlphaUp    = y2k::pacing::alphaForDt (0.35f, frame.dtSec);
+        const float kAlphaDown  = y2k::pacing::alphaForDt (0.08f, frame.dtSec);
 
         for (int i = 0; i < count; ++i)
         {
             const float raw = spectrumSnapshot.getUnchecked(i);
             const float prev = smoothedSpectrum.getUnchecked(i);
-            const float alpha = (raw > prev) ? 0.35f : 0.08f;
+            const float alpha = (raw > prev) ? kAlphaUp : kAlphaDown;
             const float smoothed = prev + alpha * (raw - prev);
             smoothedSpectrum.set(i, smoothed);
 
             // Peak 线：上升瞬时跟随、下降匀速衰减（≥ 当前 smoothed 时才保留）
             const float prevPeak = peakSpectrum.getUnchecked(i);
-            const float decayed  = juce::jmax(smoothed, prevPeak - kPeakFallPerFrame);
+            const float decayed  = juce::jmax(smoothed, prevPeak - kPeakFall);
             peakSpectrum.set(i, juce::jlimit(0.0f, 1.0f,
                                              (smoothed > prevPeak) ? smoothed : decayed));
         }
     }
 
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    //   Hub 以 60~100Hz 回调 onFrame，但像素 EQ 图肉眼 ~30Hz 已足够，
-    //   高 DPI 屏幕上每帧全量重绘像素网格开销较大。
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
-    const double minRepaintIntervalMs = 20.0 * (double) juce::jmin (1.8f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
-        return;
-
-    lastRepaintMs = nowMs;
-    repaint();
+    // v2.9：去掉 20ms×DPI 硬编码节流，每个分发帧重绘
+    if (isShowing())
+        repaint();
 }
 
 void EqModule::PixelEqGraph::setFreqRange(float minHz, float maxHz)
@@ -180,7 +173,8 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
 
     const juce::Colour litColour = PinkXP::pink400;
 
-    const juce::Colour dimColour = PinkXP::pink50;
+    // 未点亮格子：半透明淡灰装饰（light 下过重、dark 下过黑都会喧宾夺主）
+    const juce::Colour dimColour = PinkXP::pink50.withAlpha (0.45f);
     const int specCount = smoothedSpectrum.size();
 
     juce::Array<int> litCounts;

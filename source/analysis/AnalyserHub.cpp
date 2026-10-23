@@ -1,6 +1,7 @@
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
 #include "source/perf/PerformanceCounterSystem.h"
+#include "source/perf/FramePerfLog.h"
 
 // ==========================================================
 // Phase F —— FrameDispatcher 内部实现类
@@ -22,14 +23,37 @@ public:
 
     ~FrameDispatcher() override { stopTimer(); }
 
+    // 内部 Timer 回退路径（无 vblank 时）
     void timerCallback() override
     {
+        dispatch (juce::Time::getMillisecondCounterHiRes() * 0.001);
+    }
+
+    // v2.9：一帧完整分发（Timer 或外部 vblank 时钟共用）
+    void dispatch (double nowSec)
+    {
+        Y2K_PERF_FRAME_SCOPE ("dispatch");
+
+        // 防重入：fanout 用成员 scratch vector，嵌套 dispatch 会破坏正在迭代的列表
+        if (dispatching)
+            return;
+        const juce::ScopedValueSetter<bool> dispatchingScope (dispatching, true);
+
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::ui, "UI-FrameDispatcher");
         y2k::perf::ScopedPerfTimer frameTimer(y2k::perf::FunctionId::uiFrameDispatcher,
                                               y2k::perf::Partition::uiRendering,
                                               y2k::perf::ThreadRole::ui);
 #endif
+
+        // 0) 帧间隔：时钟源切换（Timer ↔ vblank）或长时间停顿时视为不连续，
+        //    回落到名义周期，避免模块拿到异常 dt 做一次巨大的衰减/滚动。
+        const int    hzNow     = juce::jmax (1, owner.currentFrameDispatcherHz.load (std::memory_order_relaxed));
+        const double nominalDt = 1.0 / (double) hzNow;
+        double dt = (lastDispatchSec > 0.0) ? (nowSec - lastDispatchSec) : nominalDt;
+        if (! (dt > 0.0) || dt > 0.25)
+            dt = nominalDt;
+        lastDispatchSec = nowSec;
 
         // 1) 组装活跃 mask
         juce::uint32 mask = 0;
@@ -40,12 +64,17 @@ public:
         if (mask == 0)
             return; // 所有路都无人订阅 —— 不生成帧
 
-        auto frame = std::make_shared<FrameSnapshot>();
+        // v2.9：快照池复用。FrameSnapshot ≈ 37KB，120Hz 下每 tick make_shared
+        //   等于每秒 4.5MB 的 malloc + 清零；池里找一个"只被池持有"的旧快照复用。
+        //   未激活 Kind 的字段可能残留旧值，但消费方一律先 has(kind) 判定，不受影响。
+        auto frame = acquireSnapshot();
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordMemoryAlloc(sizeof(FrameSnapshot));
 #endif
         frame->activeMask = mask;
         frame->tickCount  = ++dispatchTickCounter; // UI 侧模块自行分频
+        frame->timeSec    = nowSec;
+        frame->dtSec      = (float) juce::jlimit (0.001, 0.1, dt);
 
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::ScopedPerfTimer assembleTimer(y2k::perf::FunctionId::uiFrameAssemble,
@@ -146,8 +175,12 @@ public:
 #endif
 
         // 4) 通知所有监听器（UI 线程）
-        //    拷贝一份 vector 避免在回调里触发 add/remove 导致迭代失效
-        std::vector<FrameListener*> localCopy;
+        //    拷贝一份 vector 避免在回调里触发 add/remove 导致迭代失效。
+        //    v2.9：两个 vector 改为成员复用（clear 不释放容量），fanout 零分配。
+        auto& localCopy       = listenerScratch;
+        auto& activeListeners = activeScratch;
+        localCopy.clear();
+        activeListeners.clear();
         {
 #if Y2K_ENABLE_PERF_COUNTERS
             const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
@@ -162,7 +195,7 @@ public:
                 0,
                 lockNs - waitStart);
 #endif
-            localCopy = owner.frameListeners;
+            localCopy.assign (owner.frameListeners.begin(), owner.frameListeners.end());
         }
 
         // 空 listener 列表直接返回，避免后续 reserve/活跳 component 检查等无谓开销。
@@ -178,7 +211,6 @@ public:
             0);
 #endif
 
-        std::vector<FrameListener*> activeListeners;
         // 用 reserved 水位避免反复扩容；push后不会 shrink 回去。
         activeListeners.reserve (static_cast<size_t> (juce::jmax (owner.frameListenersReserved,
                                                                    static_cast<int> (localCopy.size()))));
@@ -229,11 +261,44 @@ public:
     }
 
 private:
+    // 快照池：只在 UI 线程访问。use_count()==1 表示只有池本身持有
+    //   （latestFrame 持有的那份 use_count>=2，绝不会被复用改写）。
+    //   getLatestFrame() 的所有调用方都在 UI 线程，因此这里的判定没有跨线程竞争。
+    std::shared_ptr<FrameSnapshot> acquireSnapshot()
+    {
+        for (auto& s : snapshotPool)
+            if (s != nullptr && s.use_count() == 1)
+                return s;
+
+        for (auto& s : snapshotPool)
+        {
+            if (s == nullptr)
+            {
+                s = std::make_shared<FrameSnapshot>();
+                return s;
+            }
+        }
+
+        // 池满且都被外部持有：轮换替换一个槽（外部持有者仍保有旧对象，安全）
+        auto& slot = snapshotPool[evictCursor++ % snapshotPool.size()];
+        slot = std::make_shared<FrameSnapshot>();
+        return slot;
+    }
+
     AnalyserHub& owner;
 
     // 单调递增的 tick 序号，每次 timerCallback 自增 1 并写入 FrameSnapshot，
     //   供 UI 侧各模块自行分频（如 Spectrum/Spectrogram 每 2 帧实际 repaint 一次）。
     juce::uint64 dispatchTickCounter = 0;
+
+    double lastDispatchSec = 0.0;
+    bool   dispatching     = false;
+
+    std::array<std::shared_ptr<FrameSnapshot>, 4> snapshotPool {};
+    size_t evictCursor = 0;
+
+    std::vector<FrameListener*> listenerScratch;
+    std::vector<FrameListener*> activeScratch;
 };
 
 // ==========================================================
@@ -1076,8 +1141,11 @@ void AnalyserHub::startFrameDispatcher (int hz)
     if (curHz == safeHz)
         return;
 
-    frameDispatcher->startTimerHz (safeHz);
     currentFrameDispatcherHz.store (safeHz, std::memory_order_relaxed);
+
+    // 外部 vblank 时钟接管期间只记录目标频率（供回退时使用），不启动 Timer
+    if (! externalFrameClock)
+        frameDispatcher->startTimerHz (safeHz);
 }
 
 void AnalyserHub::stopFrameDispatcher()
@@ -1085,4 +1153,33 @@ void AnalyserHub::stopFrameDispatcher()
     if (frameDispatcher != nullptr)
         frameDispatcher->stopTimer();
     currentFrameDispatcherHz.store (0, std::memory_order_relaxed);
+    externalFrameClock = false;
+}
+
+void AnalyserHub::setExternalFrameClock (bool shouldUseExternalClock)
+{
+    if (frameDispatcher == nullptr || externalFrameClock == shouldUseExternalClock)
+        return;
+
+    externalFrameClock = shouldUseExternalClock;
+
+    if (externalFrameClock)
+    {
+        frameDispatcher->stopTimer();
+    }
+    else
+    {
+        const int hz = currentFrameDispatcherHz.load (std::memory_order_relaxed);
+        if (hz > 0)
+            frameDispatcher->startTimerHz (hz);
+    }
+}
+
+void AnalyserHub::dispatchFrameNow (double timestampSec)
+{
+    if (frameDispatcher == nullptr)
+        return;
+
+    frameDispatcher->dispatch (timestampSec >= 0.0 ? timestampSec
+                                                   : juce::Time::getMillisecondCounterHiRes() * 0.001);
 }

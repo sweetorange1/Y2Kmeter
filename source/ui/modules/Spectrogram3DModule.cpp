@@ -1,7 +1,9 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
+#include <juce_opengl/juce_opengl.h>
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <array>
 
@@ -11,7 +13,7 @@
 // ==========================================================
 
 Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
-    : ModulePanel (ModuleType::spectrogram3d), hub (h)
+    : GlDirectModuleBase (ModuleType::spectrogram3d), hub (h)
 {
     hub.retain (AnalyserHub::Kind::Spectrum);
     hub.addFrameListener (this);
@@ -56,6 +58,8 @@ Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
         speedSlider.setColour (juce::Slider::textBoxTextColourId,  PinkXP::ink);
         speedLabel.repaint();
         speedSlider.repaint();
+        // GL 快照底色跟随主题（瀑布图基色走下方 depthPalettesDirty 重建）
+        buildGlSnapshot();
         themeColourBtn.repaint();
         // 主题切换 → 山峰主题色与背景 fade 目标变化 → 重建色板 + 重绘
         depthPalettesDirty = true;
@@ -86,6 +90,28 @@ Spectrogram3DModule::~Spectrogram3DModule()
 }
 
 // ----------------------------------------------------------
+// v2.9.3 持久化：TINT（山峰着色模式）按钮状态
+// ----------------------------------------------------------
+juce::ValueTree Spectrogram3DModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s ("state");
+    s.setProperty ("useThemeColours", useThemeColours, nullptr);
+    return s;
+}
+
+void Spectrogram3DModule::restoreModuleSpecificState (const juce::ValueTree& state)
+{
+    if (! state.hasProperty ("useThemeColours"))
+        return;
+
+    useThemeColours = (bool) state.getProperty ("useThemeColours");
+    themeColourBtn.setToggleState (useThemeColours, juce::dontSendNotification);
+    // 着色模式变化 → 色板与缓存重建
+    depthPalettesDirty = true;
+    imageCacheDirty    = true;
+}
+
+// ----------------------------------------------------------
 // 布局
 // ----------------------------------------------------------
 juce::Rectangle<int> Spectrogram3DModule::getCanvasBounds (juce::Rectangle<int> content) const
@@ -104,6 +130,11 @@ void Spectrogram3DModule::layoutContent (juce::Rectangle<int> contentBounds)
     auto btnArea = rightPanel.removeFromBottom (18);
     speedSlider.setBounds (rightPanel);
     themeColourBtn.setBounds (btnArea);
+
+    // v2.9.5：尺寸守卫 —— 拖动窗口/dock 时 layoutContent 每帧调用，
+    //   无条件重建（S3D ~2ms）会把消息线程打满导致交互卡顿
+    if (glCanvasSizeChanged (getGlCanvasBounds (contentBounds)))
+        buildGlSnapshot();
 }
 
 void Spectrogram3DModule::resized()
@@ -358,6 +389,13 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     dtMs = juce::jlimit (0.0f, 500.0f, dtMs);
 
     columnAccumulator += dtMs * pixelsPerSecond * 0.001f;
+
+    // v2.9.2：滚动更新按分发 tick 隔帧降频。列累计按 dt 连续进行（跳过期间
+    //   nCols 自动翻倍），滚动速度不变；离屏图重建成本减半。用 tick 而非
+    //   33ms 门控 —— 低帧率（GL 26fps 时帧间隔 38ms）下 33ms 门控会失效。
+    if ((frame.tickCount & 1ull) != 0)
+        return;
+
     int nCols = (int) columnAccumulator;
     if (historyLen > 0 && nCols > historyLen) nCols = historyLen;
     if (nCols < 0) nCols = 0;
@@ -371,35 +409,203 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         pushFrame (rowMagBuf);
     imageCacheDirty = true;
 
-    // repaint 节流（P1-1）：限制最短重绘间隔为 20ms（~50fps），
-    //   与整体 UI 帧率对齐，消除频谱瀑布与其它模块的视觉帧率差。
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    if ((nowMs - lastRepaintMs) >= 20.0)
-    {
-        lastRepaintMs = nowMs;
-        repaint();
-    }
+    // v2.9.3：更新 GL 直渲染快照（UI 线程，推列后数据已变化）
+    buildGlSnapshot();
+
+    // v2.9：去掉 20ms（≈50fps）硬编码节流；仅在本帧确有新列推入时重绘
+    repaint();
 }
 
 // ----------------------------------------------------------
-// paintContent —— 离屏 Image 缓存版（P2+P4）
-//
-//   P2 性能优化：将 3D 视图渲染到离屏 juce::Image，paintContent
-//   只需一次 g.drawImage。无论 macOS CoreGraphics 软光栅还是
-//   Windows OpenGL，单次位图 blit 都远快于逐层 38,100 次 fillRect
-//   + 300 次 strokePath 的分散绘制。
-//
-//   P4 动态分辨率：当 canvas 对角线超过 900px 时，renderToImage
-//   以低于 1:1 的分辨率渲染，paintContent 用 drawImage 放大到屏上
-//   尺寸。像素风 UI 对此类上采样高度宽容，主观质量几乎无损。
+// buildGlSnapshot —— GL 直渲染快照（v2.9.3 引入，v2.9.4 迁移到统一框架）
+//   与 renderToImage 共用同一套投影/色板逻辑；顶点为模块本地坐标，
+//   Editor 侧负责模块屏幕偏移 + DPI + Y-flip 变换。
 // ----------------------------------------------------------
-void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
+void Spectrogram3DModule::buildGlSnapshot()
 {
-    g.setColour (PinkXP::btnFace);
-    g.fillRect (contentBounds);
+    // 浮动态无 GL 渲染目标，跳过快照构建（v2.9.5：拖动浮动窗口 resize 时
+    //   若仍每帧全量重建 ~2ms，消息线程被打满 → 交互卡死）
+    if (! wantsGlSnapshot())
+        return;
 
+    // v2.9.3 诊断开关：环境变量 Y2K_NO_S3D_GL 非空时禁用 GL 直渲染（两端），
+    //   用于二分定位启动崩溃（旧软件渲染路径不受影响）。
+    static const bool glDisabled = juce::SystemStats::getEnvironmentVariable ("Y2K_NO_S3D_GL", "").isNotEmpty();
+    if (glDisabled)
+        return;
+
+    const auto canvas = getCanvasBounds (getContentBounds());
+    const auto plot   = canvas.reduced (2);
+    if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
+        return;
+
+    recomputeProjection (plot.getWidth(), plot.getHeight());
+    const int effRows = juce::jmin (historyLen, juce::jmin (juce::jmax (1, frameCount), visibleRows));
+    if (depthPalettesDirty || depthPalettesRows != effRows)
+        rebuildDepthPalettes (effRows);
+
+    auto snap = beginGlSnapshot();
+    // v2.9.4：逻辑 FBO 渲染（与 Waveform 同路径 —— 内容自包含在独立 FBO，
+    //   与组件缓存的交互和旧版"逻辑纹理 + 放大"一致，规避后缓冲直渲染在
+    //   dock/聚焦时的透明与拖影问题）
+    snap->renderToLogical = true;
+    snap->logicalW = canvas.getWidth();
+    snap->logicalH = canvas.getHeight();
+    snap->canvasLocal = canvas;
+
+    const int strips = numBins - 1;
+
+    // 单一顶点流布局（条带 triangles 与轮廓 lines 混排在同一 VBO，
+    //   逐层 drawArrays 用 offset 区分）：[背景 9 矩形][层0 条带+轮廓]...
+    //   层序 = 旧→新（新层后画覆盖旧层，3D 前后层次正确）。
+    constexpr int kBgRectCount = 9;
+    constexpr int kBgVertices  = kBgRectCount * 6;
+    const int vertsPerLayer = strips * 6;
+    const int linesPerLayer = numBins;
+    snap->vertices.resize ((size_t) (kBgVertices + effRows * (vertsPerLayer + linesPerLayer)) * 6);
+
+    {
+        float* bv = snap->vertices.data();
+        auto pushRect = [&] (juce::Rectangle<float> r, juce::Colour c)
+        {
+            const float x0 = r.getX(), y0 = r.getY(), x1 = r.getRight(), y1 = r.getBottom();
+            const float rr = c.getFloatRed(), gg = c.getFloatGreen(),
+                        bb = c.getFloatBlue(), aa = c.getFloatAlpha();
+            const float quad[36] = {
+                x0, y0, rr, gg, bb, aa,  x1, y0, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
+                x1, y0, rr, gg, bb, aa,  x1, y1, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
+            };
+            std::memcpy (bv, quad, sizeof (quad));
+            bv += 36;
+        };
+        // 与 PinkXP::drawSunken(g, canvas, PinkXP::content) 逐笔对应
+        auto cr = canvas.toFloat();
+        pushRect (cr, PinkXP::content);
+        pushRect ({ cr.getX(), cr.getY(), (float) cr.getWidth(), 2.0f }, PinkXP::dark);
+        pushRect ({ cr.getX(), cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::dark);
+        pushRect ({ cr.getX(), cr.getBottom() - 2.0f, (float) cr.getWidth(), 2.0f }, PinkXP::hl);
+        pushRect ({ cr.getRight() - 2.0f, cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::hl);
+        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, (float) cr.getWidth() - 4.0f, 1.0f }, PinkXP::shdw);
+        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, PinkXP::shdw);
+        pushRect ({ cr.getX() + 2.0f, cr.getBottom() - 3.0f, (float) cr.getWidth() - 4.0f, 1.0f }, juce::Colours::white);
+        pushRect ({ cr.getRight() - 3.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, juce::Colours::white);
+    }
+
+    // 绘制段描述：背景 + 逐层[条带 + 轮廓]
+    snap->segments.push_back ({ 0, kBgVertices, Primitive::Triangles });
+    {
+        int offset = kBgVertices;
+        for (int s = 0; s < effRows; ++s)
+        {
+            snap->segments.push_back ({ offset, vertsPerLayer, Primitive::Triangles });
+            offset += vertsPerLayer;
+            snap->segments.push_back ({ offset, linesPerLayer, Primitive::Lines });
+            offset += linesPerLayer;
+        }
+    }
+
+    const float inv255 = 1.0f / 255.0f;
+    const float ox = (float) plot.getX();
+    const float oy = (float) plot.getY();
+    float* v = snap->vertices.data() + (size_t) kBgVertices * 6;  // 条带顶点从背景之后开始
+
+    // v2.9.3：按"旧层→新层"顺序构建顶点流。GPU 按提交顺序光栅化，
+    //   与旧软件路径（renderToImage 的 d 从 effRows-1 递减到 0）一致 ——
+    //   新层后画、覆盖旧层，3D 前后层次正确（旧层不会盖住新层）。
+    for (int seg = 0; seg < effRows; ++seg)
+    {
+        const int d = effRows - 1 - seg;   // d 仍是深度索引（色板/投影按 d 取），仅提交顺序按 seg
+        const int readIdx = (writeIdx - 1 - d + historyLen * 2) % historyLen;
+        const auto& row = historyRing[(size_t) readIdx];
+
+        const float baseY  = oy + projOriginY - (float) d * projSlantY;
+        const float depthX = (float) d * projSlantX;
+
+        // 该层颜色：magToIdx → depthPalettes（ARGB → RGBA floats）
+        std::array<float, 256 * 4> rgba;
+        for (int i = 0; i < numBins; ++i)
+        {
+            const float mag = row[(size_t) i];
+            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
+            const int   idx = (int) magToIdx[(size_t) mi];
+            const juce::Colour c = depthPalettes[(size_t) d][(size_t) idx];
+            rgba[(size_t) i * 4 + 0] = c.getFloatRed();
+            rgba[(size_t) i * 4 + 1] = c.getFloatGreen();
+            rgba[(size_t) i * 4 + 2] = c.getFloatBlue();
+            rgba[(size_t) i * 4 + 3] = c.getFloatAlpha();
+        }
+
+        // 条带三角形（GL_TRIANGLES，6 顶点/条带，颜色与顶部 y 取自该列幅度）
+        //   —— 同层内先画条带，轮廓线随后（与旧软件路径一致）
+        for (int i = 0; i < strips; ++i)
+        {
+            const float mag = row[(size_t) i];
+            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
+            const int   idx = (int) magToIdx[(size_t) mi];
+            const float x0  = ox + projOriginX + depthX + (float) i * projBinWidth;
+            const float x1  = x0 + projBinWidth;
+            const float top = baseY - (float) idx * inv255 * projMaxH;
+            const float yb  = baseY;
+
+            const float r = rgba[(size_t) i * 4 + 0];
+            const float g = rgba[(size_t) i * 4 + 1];
+            const float b = rgba[(size_t) i * 4 + 2];
+            const float a = rgba[(size_t) i * 4 + 3];
+
+            // 三角形 1: (x0,top) (x1,top) (x0,yb)
+            *v++ = x0; *v++ = top; *v++ = r; *v++ = g; *v++ = b; *v++ = a;
+            *v++ = x1; *v++ = top; *v++ = r; *v++ = g; *v++ = b; *v++ = a;
+            *v++ = x0; *v++ = yb;  *v++ = r; *v++ = g; *v++ = b; *v++ = a;
+            // 三角形 2: (x1,top) (x1,yb) (x0,yb)
+            *v++ = x1; *v++ = top; *v++ = r; *v++ = g; *v++ = b; *v++ = a;
+            *v++ = x1; *v++ = yb;  *v++ = r; *v++ = g; *v++ = b; *v++ = a;
+            *v++ = x0; *v++ = yb;  *v++ = r; *v++ = g; *v++ = b; *v++ = a;
+        }
+
+        // 轮廓线顶点（GL_LINES，白色 25% alpha）：顶部折线（画在本层条带之后）
+        for (int i = 0; i < numBins; ++i)
+        {
+            const float mag = row[(size_t) i];
+            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
+            const int   idx = (int) magToIdx[(size_t) mi];
+            const float x   = ox + projOriginX + depthX + (float) i * projBinWidth;
+            const float top = baseY - (float) idx * inv255 * projMaxH;
+            *v++ = x;
+            *v++ = top;
+            *v++ = 1.0f; *v++ = 1.0f; *v++ = 1.0f; *v++ = 0.25f;
+        }
+    }
+
+    publishGlSnapshot (std::move (snap));
+}
+
+// ----------------------------------------------------------
+// GlDirectModuleBase 钩子（v2.9.4 迁移自 v2.9.3 直渲染样板）
+// ----------------------------------------------------------
+juce::Rectangle<int> Spectrogram3DModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
+{
+    return getCanvasBounds (contentBounds);
+}
+
+void Spectrogram3DModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    // 轴标签 / 悬停标尺画在组件缓存，合成后位于 GL 内容之上（层级正确）
+    drawAxisLabels (g, canvas.reduced (2));
+    if (hoverActive)
+        drawHoverRuler (g, canvas);
+}
+
+// 旧软件路径（未接管时）：离屏 Image 缓存版（P2+P4）
+//
+//   P2：将 3D 视图渲染到离屏 juce::Image，paintContent 只需一次 drawImage。
+//   P4：canvas 对角线超过 900px 时降分辨率渲染，像素风 UI 对此高度宽容。
+void Spectrogram3DModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
+{
     const auto canvas = getCanvasBounds (contentBounds);
     const auto plot   = canvas.reduced (2);
+
+    g.setColour (PinkXP::btnFace);
+    g.fillRect (contentBounds);
 
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
         return;
@@ -407,9 +613,10 @@ void Spectrogram3DModule::paintContent (juce::Graphics& g, juce::Rectangle<int> 
     const int effLen = juce::jmax (1, frameCount);
     if (effLen <= 0) return;
 
-    // 离屏 Image 缓存：数据脏或 canvas 尺寸变化时重建。
+    // 离屏 Image 缓存：数据脏 / canvas 尺寸变化 / GL 上下文变化时重建。
     //   每层全量 strokePath（配 Path 复用）已消除 P6 降频的视觉回退。
     if (imageCacheDirty || cached3DImage.isNull()
+        || glImageContext != static_cast<void*> (juce::OpenGLContext::getCurrentContext())
         || cachedCanvasW != canvas.getWidth()
         || cachedCanvasH != canvas.getHeight())
     {
@@ -510,6 +717,13 @@ void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
     if (nRows == depthPalettesRows && ! depthPalettesDirty)
         return;
 
+    // v2.9.3 修复：depthPalettes 的 resize 在构造函数末尾才执行，但构造中
+    //   addAndMakeVisible 会提前触发 layoutContent → updateGlSnapshot →
+    //   本函数 —— 此前对空 vector 越界写（[d][i]），导致启动堆损坏崩溃。
+    //   这里显式保证容量，任何调用时机都安全。
+    if ((int) depthPalettes.size() < nRows)
+        depthPalettes.resize ((size_t) nRows);
+
     // 深度 fade 目标：主题模式向画布底色融合，热力图模式向深蓝黑融合
     const juce::Colour fadeTarget = useThemeColours ? PinkXP::content : juce::Colour (8, 8, 24);
     // 先算基准色板（无深度 fade）
@@ -562,16 +776,30 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     const int rw = juce::jmax (8, (int) ((float) cw * scale));
     const int rh = juce::jmax (8, (int) ((float) ch * scale));
 
-    // 复用 Image：尺寸匹配时只清空，避免 malloc
-    if (cached3DImage.isNull()
-        || cached3DImage.getWidth()  != rw
-        || cached3DImage.getHeight() != rh)
+    // v2.9.2：GL 上下文可用时使用 FBO 驻留 Image —— 12600 次 fillRect 由
+    //   GPU 光栅化、drawImage 直接复用 FBO 纹理（零上传），绕开 CPU 软光栅
+    //   与每帧整图纹理重传两大成本。上下文不可用（软光栅回退 / 浮动窗口
+    //   过渡态）时回退软件 Image。
+    if (auto* ctx = juce::OpenGLContext::getCurrentContext())
     {
-        cached3DImage = juce::Image (juce::Image::ARGB, rw, rh, true);
+        if (cached3DImage.isNull()
+            || glImageContext != static_cast<void*> (ctx)
+            || cached3DImage.getWidth()  != rw
+            || cached3DImage.getHeight() != rh)
+        {
+            cached3DImage = juce::Image (juce::OpenGLImageType().create (juce::Image::ARGB, rw, rh, false));
+            glImageContext = static_cast<void*> (ctx);
+        }
     }
     else
     {
-        cached3DImage.clear (cached3DImage.getBounds());
+        glImageContext = nullptr;
+        if (cached3DImage.isNull()
+            || cached3DImage.getWidth()  != rw
+            || cached3DImage.getHeight() != rh)
+        {
+            cached3DImage = juce::Image (juce::Image::ARGB, rw, rh, true);
+        }
     }
 
     juce::Graphics ig (cached3DImage);
@@ -580,7 +808,10 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     ig.addTransform (juce::AffineTransform::scale (scale));
 
     // 底衬（Image-local 坐标 → 由变换转为 scaled 坐标）
+    //   先整图铺底（FBO Image 无初始内容且避免每帧 BitmapData clear 的昂贵路径）
     juce::Rectangle<int> imgCanvas (0, 0, cw, ch);
+    ig.setColour (PinkXP::content);
+    ig.fillRect (imgCanvas.toFloat());
     drawBackground (ig, imgCanvas);
 
     const auto plot = imgCanvas.reduced (2);
@@ -604,6 +835,9 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     juce::Path outline;
     const juce::PathStrokeType outlineStroke(0.6f);
 
+    // v2.9.2：恢复旧版单遍全高绘制。上一版"楔形裁剪"虽减少像素量，但轮廓线
+    //   超出楔形部分不再被后续层覆盖，露出逐列竖线（立方体 + 分界线观感），
+    //   被确认视觉回归。性能改用 onFrame 的 30Hz 滚动更新降频换取。
     for (int d = effRows - 1; d >= 0; --d)
     {
         const int readIdx = (writeIdx - 1 - d + historyLen * 2) % historyLen;

@@ -2,6 +2,7 @@
 #define PBEQ_PINKXP_STYLE_H_INCLUDED
 
 #include <JuceHeader.h>
+#include "source/ui/palette/ThemeSpec.h"
 
 // ==========================================================
 // Pink XP · 像素复古风（Win95/98 + 粉色主题）
@@ -44,8 +45,33 @@ namespace PinkXP
     // 按钮/小控件专用底色（深色主题下也保持浅色，保证按钮文字/图标可读）
     inline juce::Colour btnFace  { 0xffffd6e7 };
 
+    // ---- 调色板重构扩展槽位（S3：向后兼容，原 19 槽位语义不变）----
+    inline juce::Colour accent2 { 0xffec4d85 };    // 次强调色（和谐方式派生）
+    inline juce::Colour chartRamp[8] {             // 图表渐变 8 阶（OKLab 均匀）
+        juce::Colour(0xffffe9f2), juce::Colour(0xffffd6e7),
+        juce::Colour(0xffffb6d1), juce::Colour(0xffff8fb5),
+        juce::Colour(0xffff6fa0), juce::Colour(0xffec4d85),
+        juce::Colour(0xffc23368), juce::Colour(0xff8a2048)
+    };
+    inline juce::Colour danger { 0xffe0403c };     // 语义状态色（过载）
+    inline juce::Colour warn   { 0xffe0a028 };     // 语义状态色（临界）
+    inline juce::Colour ok     { 0xff3cae58 };     // 语义状态色（安全）
+
+    // ---- 图表渐变采样（调色板重构 A3/S4）----
+    //   sampleChartRamp(t)：t∈[0,1] → 在 8 阶 chartRamp 上做 OKLab 空间插值。
+    //   替代各模块在 sRGB 空间 interpolatedWith 的手工色阶（中段不发灰）。
+    juce::Colour sampleChartRamp (float t);
+
+    //   interpolateOkLab(a, b, t)：任意两色在 OKLab 空间插值。
+    //   预设主题的 base→accent 渐变（Spectrogram）沿用此函数，保持数据驱动。
+    juce::Colour interpolateOkLab (juce::Colour a, juce::Colour b, float t);
+
     // ---- 绘制工具 ----
     void drawRaised   (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill = face);
+    // v2.9.5：仅边框 + 内层高光/阴影（无填充）—— GL 直渲染模块的"透明外壳"
+    //   用 face 填充（挖掉 canvas）+ 本函数画边框，保证 canvas 外所有像素
+    //   不透明（透明填充会让标题栏/分割线与内容区之间的缝隙透出 FBO 0）。
+    void drawRaisedFrame (juce::Graphics& g, juce::Rectangle<int> r);
     void drawSunken   (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill);
     void drawPressed  (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill = face);
     void drawHardShadow(juce::Graphics& g, juce::Rectangle<int> r, int offset = 4);
@@ -207,15 +233,18 @@ namespace PinkXP
         bigDots,     // 大圆点
         bubbles,     // 横条泡泡
         diagStripes, // 斜条纹
-        hearts       // 像素爱心（均匀排列的小桃心）
+        hearts,      // 像素爱心（均匀排列的小桃心）
+        zigzag,      // 锯齿波纹
+        crossHatch,  // 交叉斜线网
+        pixelFlower  // 像素小花（中心+四花瓣）
     };
 
     // 单一主题定义
     struct Theme
     {
         ThemeId        id;
-        const char*    displayName;   // UI 显示名（含 emoji）
-        const char*    keywordHint;   // 关键词（tooltip 用）
+        juce::String   displayName;   // UI 显示名（含 emoji）
+        juce::String   keywordHint;   // 关键词（tooltip 用）
 
         juce::Colour pink50, pink100, pink200, pink300, pink400, pink500, pink600, pink700;
         juce::Colour hl, face, shdw, dark;
@@ -230,6 +259,11 @@ namespace PinkXP
 
         // 模块标题栏左侧的文本符号图标（跟随主题变化）
         const char* titleIconText;
+
+        // ---- 调色板重构扩展字段（S3，带默认值，12 个预设无需改动）----
+        juce::Colour accent2;                    // 次强调色
+        juce::Colour danger, warn, ok;           // 语义状态色
+        std::array<juce::Colour, 8> chartRamp;   // 图表渐变（默认透明 → 回退 pink 阶梯）
     };
 
     // 取所有预设主题（按 ThemeId 顺序排列）
@@ -247,6 +281,8 @@ namespace PinkXP
     //                 推子轨道）、swatch（Spectrogram 瀑布图主色）、desktop2（纹理）
     //   secondary（右）：base 基色 → desktop/content/btnFace（背景/画布/按钮）、
     //                    hl/face/shdw/dark（Win95 边框）、ink（正文墨色）
+    //   v2.10 起内部改走 OKLCH 生成器：双色 fit 成 ThemeSpec → applyThemeFromSpec，
+    //   视觉接近旧外观但由护栏保证质量（R20 迁移）。
     void applyCustomTheme(juce::Colour primary, juce::Colour secondary);
 
     // 获取当前自定义主题的两种颜色（供 ThemeSwatchBar 绘制预览方块）
@@ -255,6 +291,27 @@ namespace PinkXP
 
     // 当前激活的主题是否为自定义主题
     bool isCustomThemeActive();
+
+    // ==================================================
+    // 调色板重构（Palette Redesign）对外 API（S2）
+    //   applyTheme / applyCustomTheme 保留；模块仍读 PinkXP::pinkXXX 等符号。
+    //   新链路：ThemeSpec → PaletteGenerator → Theme(19+扩展槽位) → 写入 + 通知。
+    // ==================================================
+
+    // 由 ThemeSpec 生成并应用完整主题（实时预览/自定义主题共用）
+    void applyThemeFromSpec(const y2kpal::ThemeSpec& spec,
+                            const juce::String& displayName);
+
+    // 当前主题对应的 ThemeSpec：
+    //   · 若当前为生成器主题（custom），返回其原始 spec；
+    //   · 否则从当前主题的 Accent/Background 反推（"基于预设新建"入口，R10）。
+    y2kpal::ThemeSpec getCurrentThemeSpec();
+
+    // 供 ThemeLibrary 应用"我的主题"（命名主题，随 ui.themeLibrary 持久化）
+    void applyUserTheme(const y2kpal::ThemeSpec& spec, const juce::String& name);
+
+    // 当前自定义主题的显示名（供色票条展示）
+    juce::String getCustomThemeName();
 
     // 订阅主题变更事件（例如顶层 Editor 注册一个 repaint 全局刷新）
     // 返回订阅 token，调用 unsubscribeThemeChanged(token) 取消。

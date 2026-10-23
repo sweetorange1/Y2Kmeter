@@ -71,9 +71,6 @@ private:
         juce::Point<int> hoverPos;
         bool             hoverActive = false;
 
-        // 性能优化（阶段1）：UI 侧 repaint 节流，避免 Hub 回调时每帧都整块重绘。
-        double lastRepaintMs = 0.0;
-
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PixelEqGraph)
     };
 

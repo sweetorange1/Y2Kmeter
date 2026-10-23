@@ -2,6 +2,10 @@
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/MilkdropModule.h"
+#include "source/perf/FramePerfLog.h"
+#include "source/ui/palette/PalettePanel.h"
+#include "source/ui/palette/ThemeLibrary.h"
+#include "source/Y2KLogging.h"
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
@@ -44,6 +48,22 @@ namespace
             // 基线：min(14, h*0.55)；这里再 × 0.78 得到一个更紧凑的字号
             const float base = juce::jmin (14.0f, buttonHeight * 0.55f);
             return PinkXP::getFont (base * 0.78f, juce::Font::bold);
+        }
+
+        // 完全自绘文字（不经过 findColour 颜色链）：恒用主题 ink——
+        //   fpsBtn 此前 dark 下未按下态文字颜色异常，查不出是颜色链哪一环
+        //   被污染，直接在这里硬编码 ink 一劳永逸。
+        //   字号与 GRID 等同级按钮一致（基类 drawButtonText 的 12px bold）。
+        void drawButtonText (juce::Graphics& g, juce::TextButton& button,
+                             bool, bool shouldDrawButtonAsDown) override
+        {
+            g.setColour (PinkXP::ink);
+            g.setFont (PinkXP::getFont (12.0f, juce::Font::bold));
+
+            auto area = button.getLocalBounds();
+            if (shouldDrawButtonAsDown || button.getToggleState())
+                area.translate (1, 1);
+            g.drawText (button.getButtonText(), area, juce::Justification::centred, false);
         }
     };
 
@@ -274,6 +294,8 @@ private:
 // ==========================================================
 ModuleWorkspace::ModuleWorkspace()
 {
+    Y2K_LOG ("[boot] ModuleWorkspace ctor begin");
+
     // 工作区自身接收鼠标事件（用于双击/右键添加模块）
     setInterceptsMouseClicks(true, true);
     // 支持键盘焦点：聚焦拼豆图片后按 Delete 删除
@@ -281,22 +303,38 @@ ModuleWorkspace::ModuleWorkspace()
 
     // 底部工具栏：主题选择器（XP 画图调色板样式）
     addAndMakeVisible(themeBar);
+    Y2K_LOG ("[boot] themeBar added");
 
-    // 自定义主题双色取色器（点击预览方块时在左下角弹出）
-    addChildComponent(customThemePicker);
-    themeBar.onPreviewClicked = [this]()
+    // 调色面板（点击预览方块/"+"时在左下角展开；调色板重构，替换旧双色取色器）
+    palettePanel = std::make_unique<PalettePanel>();
+    Y2K_LOG ("[boot] palettePanel created");
+    addChildComponent(*palettePanel);
+
+    auto positionPalettePanel = [this]()
     {
-        customThemePicker.show(
-            PinkXP::getCustomPrimary(),
-            PinkXP::getCustomSecondary(),
-            [this](juce::Colour primary, juce::Colour secondary)
-            {
-                PinkXP::applyCustomTheme(primary, secondary);
-                if (auto* top = getTopLevelComponent()) top->repaint();
-            });
-        // 取色器定位到 workspace 左下角（toolbar 上方）
-        customThemePicker.setTopLeftPosition(
-            8, getHeight() - PinkXP::ui(toolbarHeight) - customThemePicker.getHeight() - 6);
+        if (palettePanel != nullptr)
+            palettePanel->setTopLeftPosition(
+                8, getHeight() - PinkXP::ui(toolbarHeight) - palettePanel->getHeight() - 6);
+    };
+
+    themeBar.onPreviewClicked = [this, positionPalettePanel]()
+    {
+        if (palettePanel == nullptr)
+            return;
+        if (palettePanel->isShowing())
+        {
+            palettePanel->dismiss();
+            return;
+        }
+        palettePanel->show();
+        positionPalettePanel();
+    };
+
+    palettePanel->onHeightChanged = positionPalettePanel;
+    palettePanel->onClosed = [this]()
+    {
+        if (palettePanel != nullptr)
+            palettePanel->setVisible(false);
     };
 
     // 底部工具栏中部：音频信号源下拉（默认只放一个占位项 "System Output (Loopback)"，
@@ -367,6 +405,9 @@ ModuleWorkspace::ModuleWorkspace()
     // 专用 mini LookAndFeel：把 "30FPS/60FPS/120FPS/∞FPS" 渲染得更紧凑（仅影响此按钮）
     fpsMiniLnf = std::make_unique<FpsMiniLookAndFeel>();
     fpsBtn.setLookAndFeel (fpsMiniLnf.get());
+    // 文字色显式跟随主题 ink（与其他 toolbar 按钮一致，dark 下浅字可读）
+    fpsBtn.setColour (juce::TextButton::textColourOffId, PinkXP::ink);
+    fpsBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
     addAndMakeVisible (fpsBtn);
 
     // gain：输入增益按钮（位于 hide 左侧）
@@ -1901,12 +1942,20 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     if (w <= 0 || h <= 0)
         return;
 
-    const int currentThemeId = static_cast<int>(PinkXP::getCurrentThemeId());
+    // 缓存 key：themeId*100 + 明暗。custom 主题的 ThemeId 恒为 11，
+    //   但 Dark/Light/AutoMid 的画布底色（content）差异巨大 —— 只按
+    //   themeId 判定会导致"明暗切换后画布背景还是旧色"（用户可见的
+    //   "蒙版"）。把 custom 的明暗并入 key 即可在明暗切换时强制重建；
+    //   色相/氛围拖动（content 仅微染色）不触发重建，保持 P7 缓存收益。
+    int themeKey = static_cast<int>(PinkXP::getCurrentThemeId()) * 100;
+    if (PinkXP::isCustomThemeActive())
+        themeKey += static_cast<int>(PinkXP::getCurrentThemeSpec().brightness);
+
     if (! canvasBgCacheDirty
         && canvasBgCache.isValid()
         && canvasBgCache.getWidth()  == w
         && canvasBgCache.getHeight() == h
-        && canvasBgCacheThemeId == currentThemeId)
+        && canvasBgCacheKey == themeKey)
         return;
 
     canvasBgCache = juce::Image (juce::Image::ARGB, w, h, true);
@@ -1949,8 +1998,8 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
             cg.fillRect (localCanvas.getX(), y, localCanvas.getWidth(), 1);
     }
 
-    canvasBgCacheDirty   = false;
-    canvasBgCacheThemeId = currentThemeId;
+    canvasBgCacheDirty = false;
+    canvasBgCacheKey   = themeKey;
 }
 
 // ----------------------------------------------------------
@@ -2008,8 +2057,8 @@ void ModuleWorkspace::setToolbarOverlayRevealed (bool revealed)
     if (! revealed)
     {
         setGainPopupVisible (false);
-        if (customThemePicker.isShowing())
-            customThemePicker.dismiss();
+        if (palettePanel != nullptr && palettePanel->isShowing())
+            palettePanel->dismiss();
     }
 
     // canvas 不受影响（只看 chromeVisible），因此 resized() 不会移动/夹紧任何模块
@@ -2050,26 +2099,35 @@ void ModuleWorkspace::raiseToolbarOverlay()
 
     for (auto* c : toolbarComps)
         c->toFront (false);
-    if (customThemePicker.isShowing())
-        customThemePicker.toFront (false);
+    if (palettePanel != nullptr && palettePanel->isShowing())
+        palettePanel->toFront (false);
 }
 
 void ModuleWorkspace::paint(juce::Graphics& g)
 {
+    Y2K_PERF_FRAME_SCOPE ("workspace");
+
     if (chromeVisible)
     {
         // P7 · 画布背景（drawSunken + 网格点阵 + Grid 叠加线）使用离屏 Image 缓存。
         //   每帧仅一次 drawImageAt，避免 ~13000 次 fillRect(1,1) 的循环绘制。
-        rebuildCanvasBgCacheIfNeeded();
+        {
+            Y2K_PERF_FRAME_SCOPE ("ws-rebuild-check");
+            rebuildCanvasBgCacheIfNeeded();
+        }
         if (canvasBgCache.isValid())
         {
+            Y2K_PERF_FRAME_SCOPE ("ws-bg-blit");
             auto canvasOuter = minimalMode_ ? getLocalBounds()
                                     : getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
             g.drawImageAt (canvasBgCache, canvasOuter.getX(), canvasOuter.getY());
         }
 
         // 底部工具栏：凸起面板（深色主题下也保持浅色底，让文字/色票可读）
-        paintToolbarBackground (g, getToolbarArea());
+        {
+            Y2K_PERF_FRAME_SCOPE ("ws-toolbar");
+            paintToolbarBackground (g, getToolbarArea());
+        }
     }
     // else: chrome 隐藏 —— 不画任何背景/工具栏，让 Editor 的桌面底图透过来
     //   （Hide 浮层的工具栏背景由 toolbarBackdrop 子组件绘制，位于模块之上）
@@ -2395,9 +2453,9 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
 
 void ModuleWorkspace::resized()
 {
-    // 窗口尺寸变化时关闭可能处于错误位置的取色器
-    if (customThemePicker.isShowing())
-        customThemePicker.dismiss();
+    // 窗口尺寸变化时关闭可能处于错误位置的调色面板
+    if (palettePanel != nullptr && palettePanel->isShowing())
+        palettePanel->dismiss();
 
     // ---- 按钮尺寸（随 UI 密度缩放，低分辨率下更紧凑）----
     const int btnW = PinkXP::ui(52);
@@ -3552,6 +3610,9 @@ bool ModuleWorkspace::loadLayoutFromXml(const juce::String& xmlString, bool impo
 
 // ==========================================================
 // ThemeSwatchBar —— XP 画图底部调色板样式的主题选择器
+//   调色板重构（R1）：
+//     [当前主题预览块] [预设色票 x12] [我的主题 xN] [+] [主题名]
+//   我的主题色票带右上角角标；空间不足时滚轮横向滚动。
 // ==========================================================
 
 namespace
@@ -3560,81 +3621,154 @@ namespace
     constexpr int kSwatchW    = 18;   // 单个主题色票宽
     constexpr int kSwatchH    = 18;   // 单个主题色票高
     constexpr int kSwatchGap  = 3;    // 色票间距
-    constexpr int kGroupGap   = 10;   // 预览与色票组之间的间距
+    constexpr int kGroupGap   = 10;   // 组间间距
     constexpr int kBarLeftPad = 6;    // 整体左内边距
+}
+
+namespace
+{
+    // 我的主题色票颜色：由 ThemeSpec 快速推导 accent 色（轻量，paint 帧可承受）
+    juce::Colour quickAccentForSpec(const y2kpal::ThemeSpec& s)
+    {
+        if (s.overrides[(int) y2kpal::Role::Accent].set)
+        {
+            const auto& c = s.overrides[(int) y2kpal::Role::Accent].rgb;
+            return juce::Colour(c.r, c.g, c.b);
+        }
+        const float L = (s.brightness == y2kpal::Brightness::Light) ? 0.575f
+                      : (s.brightness == y2kpal::Brightness::AutoMid) ? 0.72f : 0.74f;
+        const float C = 0.08f + 0.18f * s.vibe;
+        const auto c = y2kpal::okLchToRgb8(y2kpal::gamutClamp({ L, C, s.hue }));
+        return juce::Colour(c.r, c.g, c.b);
+    }
 }
 
 ThemeSwatchBar::ThemeSwatchBar()
 {
     setInterceptsMouseClicks(true, false);
     setMouseCursor(juce::MouseCursor::PointingHandCursor);
+
+    // 我的主题库变化（增删改）时刷新色票
+    libToken_ = PinkXP::ThemeLibrary::instance().subscribe([this]
+    {
+        updateScrollLimits();
+        repaint();
+    });
 }
 
-ThemeSwatchBar::~ThemeSwatchBar() = default;
+ThemeSwatchBar::~ThemeSwatchBar()
+{
+    PinkXP::ThemeLibrary::instance().unsubscribe(libToken_);
+}
 
 juce::Rectangle<int> ThemeSwatchBar::getPreviewBounds() const
 {
-    // 预览方块统一使用正方形：边长 = min(getHeight()-6, kPreviewW)
-    // 旧版本宽=kPreviewW(30) 而高 = min(getHeight()-6, 30)，
-    //   在 toolbar 只有 22-24px 高时出现"宽 30 × 高 18"的长方形。
     const int side = juce::jmin(getHeight() - 6, kPreviewW);
     const int y = (getHeight() - side) / 2;
-    return { kBarLeftPad, y, side, side };
+    return { kBarLeftPad - scrollX_, y, side, side };
 }
 
-juce::Rectangle<int> ThemeSwatchBar::getSwatchBounds(int index) const
+juce::Rectangle<int> ThemeSwatchBar::getPresetSwatchBounds(int index) const
 {
-    const auto prev = getPreviewBounds();
-    const int startX = prev.getRight() + kGroupGap;
+    const int startX = kBarLeftPad + juce::jmin(getHeight() - 6, kPreviewW) + kGroupGap;
     const int y = (getHeight() - kSwatchH) / 2;
-    return { startX + index * (kSwatchW + kSwatchGap), y, kSwatchW, kSwatchH };
+    return { startX - scrollX_ + index * (kSwatchW + kSwatchGap), y, kSwatchW, kSwatchH };
 }
 
-int ThemeSwatchBar::hitTestSwatch(juce::Point<int> p) const
+juce::Rectangle<int> ThemeSwatchBar::getUserSwatchBounds(int index) const
 {
+    const int presetCount = (int) PinkXP::getAllThemes().size();
+    const int usersX = kBarLeftPad + juce::jmin(getHeight() - 6, kPreviewW) + kGroupGap
+                       + presetCount * (kSwatchW + kSwatchGap) + kGroupGap;
+    const int y = (getHeight() - kSwatchH) / 2;
+    return { usersX - scrollX_ + index * (kSwatchW + kSwatchGap), y, kSwatchW, kSwatchH };
+}
+
+juce::Rectangle<int> ThemeSwatchBar::getNewButtonBounds() const
+{
+    const auto& lib = PinkXP::ThemeLibrary::instance();
+    const int x = (lib.size() > 0)
+        ? getUserSwatchBounds(lib.size() - 1).getRight() + 6
+        : getUserSwatchBounds(0).getX();
+    const int y = (getHeight() - kSwatchH) / 2;
+    return { x, y, kSwatchH, kSwatchH };
+}
+
+int ThemeSwatchBar::totalContentWidth() const
+{
+    const auto& lib = PinkXP::ThemeLibrary::instance();
+    const int usersW = lib.size() > 0
+        ? lib.size() * (kSwatchW + kSwatchGap) - kSwatchGap : 0;
+    return getNewButtonBounds().getRight() + kGroupGap + 90;  // 90 = 主题名最小宽度
+}
+
+void ThemeSwatchBar::updateScrollLimits()
+{
+    const int maxScroll = juce::jmax(0, totalContentWidth() - getWidth());
+    scrollX_ = juce::jlimit(0, maxScroll, scrollX_);
+}
+
+ThemeSwatchBar::Hit ThemeSwatchBar::hitTest(juce::Point<int> p) const
+{
+    if (getPreviewBounds().contains(p))
+        return { 1, 0 };
+
     const auto& themes = PinkXP::getAllThemes();
     for (int i = 0; i < (int) themes.size(); ++i)
-        if (getSwatchBounds(i).contains(p))
-            return i;
-    return -1;
+        if (getPresetSwatchBounds(i).contains(p))
+            return { 2, i };
+
+    const auto& lib = PinkXP::ThemeLibrary::instance();
+    for (int i = 0; i < lib.size(); ++i)
+        if (getUserSwatchBounds(i).contains(p))
+            return { 3, i };
+
+    if (getNewButtonBounds().contains(p))
+        return { 4, 0 };
+
+    return {};
 }
 
 void ThemeSwatchBar::paint(juce::Graphics& g)
 {
-    // 左侧预览方块（复刻 XP 画图的前景/背景色预览块：双色对角斜分）
+    // ---- 左侧预览方块（复刻 XP 画图的前景/背景色预览块：双色对角斜分）----
     {
         const auto prev = getPreviewBounds();
-        const auto& th  = PinkXP::getCurrentTheme();
-        const bool isCustom = PinkXP::isCustomThemeActive();
-        PinkXP::drawSunken(g, prev, juce::Colours::white);
-        auto inner = prev.reduced(3);
+        if (prev.getX() < getWidth() && prev.getRight() > 0)
+        {
+            const auto& th  = PinkXP::getCurrentTheme();
+            const bool isCustom = PinkXP::isCustomThemeActive();
+            PinkXP::drawSunken(g, prev, juce::Colours::white);
+            auto inner = prev.reduced(3);
 
-        // 右下三角 = 主色（swatch 或 custom primary）
-        g.setColour(isCustom ? PinkXP::getCustomPrimary() : th.swatch);
-        g.fillRect(inner);
+            g.setColour(isCustom ? PinkXP::getCustomPrimary() : th.swatch);
+            g.fillRect(inner);
 
-        // 左上三角 = 次色（hl 或 custom secondary）
-        juce::Path tri;
-        tri.startNewSubPath((float) inner.getX(),     (float) inner.getY());
-        tri.lineTo        ((float) inner.getRight(),  (float) inner.getY());
-        tri.lineTo        ((float) inner.getX(),     (float) inner.getBottom());
-        tri.closeSubPath();
-        g.setColour(isCustom ? PinkXP::getCustomSecondary() : th.hl);
-        g.fillPath(tri);
+            juce::Path tri;
+            tri.startNewSubPath((float) inner.getX(),     (float) inner.getY());
+            tri.lineTo        ((float) inner.getRight(),  (float) inner.getY());
+            tri.lineTo        ((float) inner.getX(),     (float) inner.getBottom());
+            tri.closeSubPath();
+            g.setColour(isCustom ? PinkXP::getCustomSecondary() : th.hl);
+            g.fillPath(tri);
+
+            // hover：提示"打开调色面板"
+            if (hoverHit_.kind == 1)
+            {
+                g.setColour(PinkXP::ink.withAlpha(0.55f));
+                g.drawRect(prev.expanded(1), 1);
+            }
+        }
     }
 
-    // 右侧色票
-    const auto& themes = PinkXP::getAllThemes();
-    for (int i = 0; i < (int) themes.size(); ++i)
+    // ---- 色票绘制公共逻辑 ----
+    auto drawSwatch = [&](juce::Rectangle<int> r, juce::Colour fillColour,
+                          bool isCurrent, bool isHover, bool withCornerMark)
     {
-        const auto r = getSwatchBounds(i);
-        if (r.getRight() > getWidth()) break;
+        if (r.getRight() <= 0 || r.getX() >= getWidth())
+            return;
 
-        const auto& th = themes[(size_t) i];
-        const bool isCurrent = (th.id == PinkXP::getCurrentThemeId());
-        const bool isHover   = (i == hoverIndex);
-
-        // 色票底：用 drawSunken 的外 2px 浅高光 + 深阴影，模拟 XP 色块凹槽
+        // XP 色块凹槽
         g.setColour(PinkXP::dark);
         g.fillRect(r.getX(), r.getY(), r.getWidth(), 1);
         g.fillRect(r.getX(), r.getY(), 1, r.getHeight());
@@ -3642,67 +3776,127 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
         g.fillRect(r.getX() + 1, r.getBottom() - 1, r.getWidth() - 1, 1);
         g.fillRect(r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 1);
 
-        // 色票主体
-        g.setColour(th.swatch);
+        g.setColour(fillColour);
         g.fillRect(r.reduced(1));
 
-        // 选中态：外围 2px 反色框 + 打勾
+        // 我的主题角标：右上角小三角
+        if (withCornerMark)
+        {
+            juce::Path mark;
+            mark.startNewSubPath((float) r.getRight() - 1, (float) r.getY() + 1);
+            mark.lineTo((float) r.getRight() - 1, (float) r.getY() + 6);
+            mark.lineTo((float) r.getRight() - 6, (float) r.getY() + 1);
+            mark.closeSubPath();
+            g.setColour(PinkXP::ink);
+            g.fillPath(mark);
+        }
+
         if (isCurrent)
         {
-            auto sel = r.expanded(2);
             g.setColour(PinkXP::ink);
-            g.drawRect(sel, 2);
-
-            // 小打勾像素点（右下角 3x3 像素 check）
-            const int cx = r.getRight() - 4;
-            const int cy = r.getBottom() - 4;
-            g.setColour(juce::Colours::white);
-            g.fillRect(cx,     cy - 1, 1, 2);
-            g.fillRect(cx - 1, cy,     1, 2);
-            g.fillRect(cx - 2, cy - 1, 1, 2);
+            g.drawRect(r.expanded(2), 2);
         }
         else if (isHover)
         {
             g.setColour(PinkXP::ink.withAlpha(0.55f));
             g.drawRect(r.expanded(1), 1);
         }
+    };
+
+    // ---- 预设色票（12 个，外观不变）----
+    const auto& themes = PinkXP::getAllThemes();
+    for (int i = 0; i < (int) themes.size(); ++i)
+    {
+        const auto& th = themes[(size_t) i];
+        drawSwatch(getPresetSwatchBounds(i), th.swatch,
+                   th.id == PinkXP::getCurrentThemeId(),
+                   hoverHit_.kind == 2 && hoverHit_.index == i,
+                   false);
     }
 
-    // 右侧显示当前主题名（Y2K 小标签感）
+    // ---- 我的主题（R1/R11：与预设同款色票 + 角标区分）----
+    const auto& lib = PinkXP::ThemeLibrary::instance();
+    const bool customActive = PinkXP::isCustomThemeActive();
+    for (int i = 0; i < lib.size(); ++i)
+    {
+        drawSwatch(getUserSwatchBounds(i),
+                   quickAccentForSpec(lib.themes()[(size_t) i].spec),
+                   customActive && PinkXP::getCustomThemeName() == lib.themes()[(size_t) i].name,
+                   hoverHit_.kind == 3 && hoverHit_.index == i,
+                   true);
+    }
+
+    // ---- "+" 新建/编辑入口（R1）----
+    {
+        const auto r = getNewButtonBounds();
+        if (r.getX() < getWidth() && r.getRight() > 0)
+        {
+            g.setColour(PinkXP::dark);
+            g.fillRect(r.getX(), r.getY(), r.getWidth(), 1);
+            g.fillRect(r.getX(), r.getY(), 1, r.getHeight());
+            g.setColour(PinkXP::hl);
+            g.fillRect(r.getX() + 1, r.getBottom() - 1, r.getWidth() - 1, 1);
+            g.fillRect(r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 1);
+            g.setColour(PinkXP::btnFace);
+            g.fillRect(r.reduced(1));
+            g.setColour(PinkXP::ink);
+            g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+            g.drawText("+", r, juce::Justification::centred, false);
+            if (hoverHit_.kind == 4)
+            {
+                g.setColour(PinkXP::ink.withAlpha(0.55f));
+                g.drawRect(r.expanded(1), 1);
+            }
+        }
+    }
+
+    // ---- 右侧当前主题名 ----
     {
         const auto& th = PinkXP::getCurrentTheme();
-        const int lastSwatchRight = (int) themes.size() > 0
-            ? getSwatchBounds((int) themes.size() - 1).getRight()
-            : getPreviewBounds().getRight();
-        const int tx = lastSwatchRight + kGroupGap;
+        const int tx = getNewButtonBounds().getRight() + kGroupGap;
         const int tw = juce::jmax(0, getWidth() - tx - 4);
-        if (tw > 10)
+        if (tw > 10 && tx < getWidth())
         {
             g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
             g.setColour(PinkXP::ink);
-            g.drawText(juce::String(th.displayName),
-                       tx, 0, tw, getHeight(),
+            g.drawText(th.displayName, tx, 0, tw, getHeight(),
                        juce::Justification::centredLeft, true);
         }
     }
 }
 
-void ThemeSwatchBar::resized() {}
+void ThemeSwatchBar::resized()
+{
+    updateScrollLimits();
+}
 
 void ThemeSwatchBar::mouseMove(const juce::MouseEvent& e)
 {
-    const int idx = hitTestSwatch(e.getPosition());
-    if (idx != hoverIndex)
+    const Hit h = hitTest(e.getPosition());
+    if (h.kind != hoverHit_.kind || h.index != hoverHit_.index)
     {
-        hoverIndex = idx;
-        if (idx >= 0)
+        hoverHit_ = h;
+        switch (h.kind)
         {
-            const auto& th = PinkXP::getAllThemes()[(size_t) idx];
-            setTooltip(juce::String(th.displayName) + "  --  " + juce::String(th.keywordHint));
-        }
-        else
-        {
-            setTooltip({});
+            case 1:
+                setTooltip("Open palette studio");
+                break;
+            case 2:
+            {
+                const auto& th = PinkXP::getAllThemes()[(size_t) h.index];
+                setTooltip(th.displayName + "  --  " + th.keywordHint);
+                break;
+            }
+            case 3:
+                setTooltip(PinkXP::ThemeLibrary::instance().themes()[(size_t) h.index].name
+                           + "  --  My theme");
+                break;
+            case 4:
+                setTooltip("New / edit palette");
+                break;
+            default:
+                setTooltip({});
+                break;
         }
         repaint();
     }
@@ -3710,251 +3904,50 @@ void ThemeSwatchBar::mouseMove(const juce::MouseEvent& e)
 
 void ThemeSwatchBar::mouseExit(const juce::MouseEvent&)
 {
-    if (hoverIndex != -1) { hoverIndex = -1; repaint(); }
+    if (hoverHit_.kind != 0) { hoverHit_ = {}; repaint(); }
 }
 
 void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
 {
-    // 检查是否点击了左侧预览方块 → 弹出自定义取色器
-    if (getPreviewBounds().contains(e.getPosition()))
+    const Hit h = hitTest(e.getPosition());
+
+    if (h.kind == 1 || h.kind == 4)
     {
+        // 预览块 / "+" → 展开调色面板
         if (onPreviewClicked)
             onPreviewClicked();
         return;
     }
 
-    const int idx = hitTestSwatch(e.getPosition());
-    if (idx >= 0)
+    if (h.kind == 2)
     {
         const auto& themes = PinkXP::getAllThemes();
-        PinkXP::applyTheme(themes[(size_t) idx].id);
-        // 回调里一般会 repaint 顶层；此处也自己 repaint 一下以同步
+        PinkXP::applyTheme(themes[(size_t) h.index].id);
+        if (auto* top = getTopLevelComponent()) top->repaint();
+        else                                    repaint();
+        return;
+    }
+
+    if (h.kind == 3)
+    {
+        PinkXP::ThemeLibrary::instance().applyThemeAt(h.index);
         if (auto* top = getTopLevelComponent()) top->repaint();
         else                                    repaint();
     }
 }
 
-// ==========================================================
-// CustomThemePicker —— 自定义主题双色取色器弹出面板
-// ==========================================================
-
-// 全局点击外部关闭监听器（点击取色器外部区域时自动关闭）
-class CustomThemePicker::DismissListener : public juce::MouseListener
+void ThemeSwatchBar::mouseWheelMove(const juce::MouseEvent&,
+                                    const juce::MouseWheelDetails& wheel)
 {
-public:
-    explicit DismissListener(CustomThemePicker& ownerRef) : owner_(ownerRef) {}
-
-    void mouseDown(const juce::MouseEvent& e) override
-    {
-        // 如果点击不在取色器范围内，关闭之
-        if (!owner_.getScreenBounds().contains(e.getScreenPosition()))
-            owner_.dismiss();
-    }
-
-private:
-    CustomThemePicker& owner_;
-};
-
-CustomThemePicker::CustomThemePicker()
-    : dismissListener_(std::make_unique<DismissListener>(*this))
-{
-    // 不在构造阶段创建任何复杂子控件（ColourSelector 内部会创建 Slider 等，
-    //   在 ModuleWorkspace 构造期间初始化这些控件可能触发空 vtable 崩溃）。
-    //   所有子控件延迟到 createChildComponents()（首次 show() 调用时）创建。
-
-    // 设置组件基本尺寸（不创建子控件）
-    setSize(560, 280);
-    setVisible(false);
-}
-
-CustomThemePicker::~CustomThemePicker()
-{
-    detachDismissListener();
-}
-
-void CustomThemePicker::createChildComponents()
-{
-    if (primarySelector_ != nullptr)
-        return;  // 已经创建过
-
-    // ---- Primary 取色器 ----
-    primarySelector_ = std::make_unique<juce::ColourSelector>(
-        juce::ColourSelector::showColourAtTop
-        | juce::ColourSelector::editableColour
-        | juce::ColourSelector::showSliders
-        | juce::ColourSelector::showColourspace,
-        4, 7);
-    primarySelector_->setSize(240, 200);
-    // 内部面板底色跟随主题
-    primarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
-    primarySelector_->setColour(juce::ColourSelector::labelTextColourId, juce::Colours::black);
-    addAndMakeVisible(*primarySelector_);
-
-    // ---- Secondary 取色器 ----
-    secondarySelector_ = std::make_unique<juce::ColourSelector>(
-        juce::ColourSelector::showColourAtTop
-        | juce::ColourSelector::editableColour
-        | juce::ColourSelector::showSliders
-        | juce::ColourSelector::showColourspace,
-        4, 7);
-    secondarySelector_->setSize(240, 200);
-    secondarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
-    secondarySelector_->setColour(juce::ColourSelector::labelTextColourId, juce::Colours::black);
-    addAndMakeVisible(*secondarySelector_);
-
-    // ---- 标签 ----
-    primaryLabel_.setText("Accent (Charts / Title)", juce::dontSendNotification);
-    primaryLabel_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    primaryLabel_.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(primaryLabel_);
-
-    secondaryLabel_.setText("Base (Background / UI)", juce::dontSendNotification);
-    secondaryLabel_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    secondaryLabel_.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(secondaryLabel_);
-
-    // ---- 标题 ----
-    titleLabel_.setText("Custom Theme Picker", juce::dontSendNotification);
-    titleLabel_.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
-    titleLabel_.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(titleLabel_);
-
-    // ---- Apply 按钮 ----
-    applyBtn_.setButtonText("Apply");
-    applyBtn_.onClick = [this] { applyAndDismiss(); };
-    addAndMakeVisible(applyBtn_);
-
-    // ---- Cancel 按钮 ----
-    cancelBtn_.setButtonText("Cancel");
-    cancelBtn_.onClick = [this] { dismiss(); };
-    addAndMakeVisible(cancelBtn_);
-
-    // 触发首次布局
-    resized();
-}
-
-void CustomThemePicker::paint(juce::Graphics& g)
-{
-    // 子控件未创建时不绘制内部
-    if (primarySelector_ == nullptr)
+    const int maxScroll = juce::jmax(0, totalContentWidth() - getWidth());
+    if (maxScroll <= 0)
         return;
 
-    // 凹槽边框 + PinkXP 样式背景
-    PinkXP::drawSunken(g, getLocalBounds(), PinkXP::btnFace);
-    auto inner = getLocalBounds().reduced(3);
-    g.setColour(PinkXP::content);
-    g.fillRect(inner);
-
-    // 两个取色器之间的垂直线分隔
-    const int midX = inner.getCentreX();
-    g.setColour(PinkXP::dark);
-    g.fillRect(midX - 1, inner.getY() + 24, 2, inner.getHeight() - 28);
+    scrollX_ = juce::jlimit(0, maxScroll,
+                            scrollX_ - (int) std::lroundf(wheel.deltaY * 40.0f));
+    repaint();
 }
 
-void CustomThemePicker::resized()
-{
-    // 子控件未创建时跳过布局
-    if (primarySelector_ == nullptr)
-        return;
-
-    auto area = getLocalBounds().reduced(6);
-
-    // 标题栏
-    const int titleH = 20;
-    titleLabel_.setBounds(area.removeFromTop(titleH));
-    area.removeFromTop(4);
-
-    // 两个色盘并排，中间留分隔区
-    const int halfW = (area.getWidth() - 14) / 2;
-    auto leftArea  = area.removeFromLeft(halfW);
-    auto rightArea = area.removeFromRight(halfW);
-
-    auto leftLabel  = leftArea.removeFromTop(16);
-    auto rightLabel = rightArea.removeFromTop(16);
-    primaryLabel_.setBounds(leftLabel);
-    secondaryLabel_.setBounds(rightLabel);
-
-    primarySelector_->setBounds(leftArea.reduced(2));
-    secondarySelector_->setBounds(rightArea.reduced(2));
-
-    // Apply / Cancel 按钮（水平居中）
-    const int btnW = 70;
-    const int btnH = 24;
-    const int btnY = getHeight() - btnH - 5;
-    const int gap  = 8;
-    const int totalBtnW = btnW * 2 + gap;
-    const int btnX = (getWidth() - totalBtnW) / 2;
-    cancelBtn_.setBounds(btnX, btnY, btnW, btnH);
-    applyBtn_.setBounds(btnX + btnW + gap, btnY, btnW, btnH);
-}
-
-void CustomThemePicker::show(juce::Colour primary, juce::Colour secondary,
-                             std::function<void(juce::Colour, juce::Colour)> onApply)
-{
-    onApplyCallback_ = std::move(onApply);
-
-    // 延迟创建子控件（首次 show 时才创建 ColourSelector 等复杂控件）
-    createChildComponents();
-
-    // 每次弹出时刷新底色为当前 base 色（PinkXP::content 可能已因之前 Apply 而改变）
-    primarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
-    secondarySelector_->setColour(juce::ColourSelector::backgroundColourId, PinkXP::content);
-
-    primarySelector_->setCurrentColour(primary);
-    secondarySelector_->setCurrentColour(secondary);
-    visible_ = true;
-    setVisible(true);
-    toFront(false);
-
-    // 关键：不能在这里直接 attachDismissListener()。
-    // 当前 mouseDown 事件既触发了 show()，又会冒泡到 DismissListener，
-    // 而取色器刚弹出、点击位置（底部 toolbar）不在取色器区域内，
-    // 导致 DismissListener 立即判定为"外部点击"并 dismiss()——取色器闪一下就消失。
-    // 把监听器的挂载延迟到下一个消息循环，让本次点击事件完全消费后再启用外部关闭逻辑。
-    juce::Component::SafePointer<CustomThemePicker> safe(this);
-    juce::MessageManager::callAsync([safe]() {
-        if (safe != nullptr && safe->visible_)
-            safe->attachDismissListener();
-    });
-}
-
-void CustomThemePicker::dismiss()
-{
-    visible_ = false;
-    setVisible(false);
-    onApplyCallback_ = nullptr;
-    detachDismissListener();
-}
-
-void CustomThemePicker::applyAndDismiss()
-{
-    if (primarySelector_ == nullptr || secondarySelector_ == nullptr)
-    {
-        dismiss();
-        return;
-    }
-
-    const juce::Colour primary   = primarySelector_->getCurrentColour();
-    const juce::Colour secondary = secondarySelector_->getCurrentColour();
-
-    if (onApplyCallback_)
-        onApplyCallback_(primary, secondary);
-
-    dismiss();
-}
-
-void CustomThemePicker::attachDismissListener()
-{
-    if (auto* top = getTopLevelComponent())
-        top->addMouseListener(dismissListener_.get(),
-                              /*wantsEventsForAllNestedChildComponents=*/true);
-}
-
-void CustomThemePicker::detachDismissListener()
-{
-    if (auto* top = getTopLevelComponent())
-        top->removeMouseListener(dismissListener_.get());
-}
 
 // ==========================================================
 // HideChromeButton —— 右下角的隐藏/显示按钮
@@ -4080,8 +4073,11 @@ juce::Image ModuleWorkspace::buildPerlerImage (const juce::Image& source,
     const double stepX = (double) srcW / (double) cellsW;
     const double stepY = (double) srcH / (double) cellsH;
 
-    // 用 BitmapData 读原图（仅读）和写目标图（读写）
-    juce::Image outImage (juce::Image::ARGB, cellsW * cellSize, cellsH * cellSize, true);
+    // 目标图初始化：必须清成"透明"而非默认的不透明黑——完全透明的格子
+    //   不绘制（见下方 count<=0 continue），若底是黑色，浅色主题下这些
+    //   "未亮起的格子"会显示成黑色小方块，非常突兀。透明后透出画布底色。
+    juce::Image outImage (juce::Image::ARGB, cellsW * cellSize, cellsH * cellSize, false);
+    outImage.clear (outImage.getBounds(), juce::Colours::transparentBlack);
 
     juce::Image::BitmapData srcBits (source,  juce::Image::BitmapData::readOnly);
 
@@ -5166,7 +5162,9 @@ juce::Image ModuleWorkspace::buildPerlerImageFixed (const juce::Image& source,
     const double stepX = (double) srcW / (double) targetCellsW;
     const double stepY = (double) srcH / (double) targetCellsH;
 
-    juce::Image outImage (juce::Image::ARGB, targetCellsW * cellSize, targetCellsH * cellSize, true);
+    // 与 buildPerlerImage 一致：透明底而非不透明黑，避免"未亮格子"显示成黑方块
+    juce::Image outImage (juce::Image::ARGB, targetCellsW * cellSize, targetCellsH * cellSize, false);
+    outImage.clear (outImage.getBounds(), juce::Colours::transparentBlack);
     juce::Image::BitmapData srcBits (source, juce::Image::BitmapData::readOnly);
 
     // Bug2：Graphics 的创建/析构较重，原实现在内层循环每个格都 new，

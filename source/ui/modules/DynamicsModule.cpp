@@ -40,39 +40,40 @@ void DynamicsModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! isShowing()) return;
     if (! frame.has (AnalyserHub::Kind::Dynamics)) return;
 
-    const auto now = juce::Time::getCurrentTime();
-    const float dMs = (float)(now - lastTickTime).inMilliseconds();
-    lastTickTime = now;
+    // v2.9：使用分发器提供的高精度帧间隔（旧实现用 Time::getCurrentTime 整数毫秒，
+    //   120Hz 下在 8/9ms 间跳动，平滑会抖）
+    const float dtSec = frame.dtSec;
+    lastTickTime = juce::Time::getCurrentTime();
 
     const auto& s = frame.dynamics;
-    bPeakL.update(s.peakL, dMs);
-    bPeakR.update(s.peakR, dMs);
-    bRmsL .update(s.rmsL,  dMs);
-    bRmsR .update(s.rmsR,  dMs);
+    bPeakL.update(s.peakL, dtSec);
+    bPeakR.update(s.peakR, dtSec);
+    bRmsL .update(s.rmsL,  dtSec);
+    bRmsR .update(s.rmsR,  dtSec);
 
-    auto smoothNum = [](float cur, float target, float a)
+    auto smoothNum = [dtSec](float cur, float target, float a)
     {
         if (! std::isfinite(target)) target = 0.0f;
-        return cur + a * (target - cur);
+        return cur + y2k::pacing::alphaForDt (a, dtSec) * (target - cur);
     };
     smoothedShortDR = smoothNum(smoothedShortDR, s.shortDR,      0.2f);
     smoothedIntegDR = smoothNum(smoothedIntegDR, s.integratedDR, 0.05f);
     smoothedCrest   = smoothNum(smoothedCrest,   s.crest,        0.3f);
 
-    // 历史带写入
-    crestHist[(size_t) crestHistWrite] = juce::jlimit(0.0f, 40.0f, s.crest);
-    crestHistWrite = (crestHistWrite + 1) % crestHistLen;
+    // 历史带写入（按时间推进，帧率无关）
+    crestHistAccum += dtSec * y2k::pacing::kRefHz;
+    int pushes = juce::jmin ((int) crestHistAccum, crestHistLen);
+    crestHistAccum -= (float) (int) crestHistAccum;
+    const float crestVal = juce::jlimit(0.0f, 40.0f, s.crest);
+    while (pushes-- > 0)
+    {
+        crestHist[(size_t) crestHistWrite] = crestVal;
+        crestHistWrite = (crestHistWrite + 1) % crestHistLen;
+    }
 
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    //   Hub 可能以 60~100Hz 回调 onFrame，但 Dynamics 显示的峰值/DR 数字
-    //   肉眼 ~30Hz 已足够。这里用最小刷新间隔（高DPI适度放大）避免每次都刷。
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
-    const double minRepaintIntervalMs = 20.0 * (double) juce::jmin (1.8f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
+    if ((frame.tickCount & 1ull) != 0)
         return;
-
-    lastRepaintMs = nowMs;
     repaint();
 }
 

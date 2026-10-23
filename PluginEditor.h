@@ -581,6 +581,38 @@ private:
     juce::int64              lastFrameCounterSample = 0;
     double                   lastFpsTimeMs          = 0.0;
 
+    // —— v2.9 真实出帧统计 ——
+    //   frameCounter 统计的是"分发次数"，GL 线程跟不上时多个 repaint 会被合并成
+    //   一帧，分发数仍是 120 但屏幕实际只换了更少的帧。glFrameCounter 在
+    //   renderOpenGL()（GL 线程，每次真正出帧一次）里 +1，FPS 标签以它为准。
+    std::atomic<juce::int64> glFrameCounter { 0 };
+    juce::int64              lastGlFrameCounterSample = 0;
+
+    // —— v2.9.1 vblank 对齐的帧时钟（wall-clock 判据 + 兜底 Timer）——
+    //   VBlankAttachment 在 UI 线程按显示器 vblank 回调，只用来"对齐相位"；
+    //   分发频率由墙钟判据保证：
+    //     · vblank 入口：距上次分发 ≥ 0.85×目标间隔才分发（错过一个 vblank 后
+    //       下一个回调立即追帧，不会因 JUCE AsyncUpdater 的合并语义被永久吞掉）；
+    //     · 兜底 Timer：距上次分发 ≥ 1.0×目标间隔即补帧 —— vblank 回调被 GL
+    //       持锁阻塞而大量丢弃时（JUCE Windows VBlankThread 在消息线程没处理完
+    //       上一个回调时会丢事件），仍能维持用户设定的分发频率。
+    //   vblank 停摆（显示器休眠/远程桌面）由 10Hz 看门狗切回 Hub 内部 Timer。
+    void onDisplayVBlank (double timestampSec);
+    void updateFrameClockWatchdog();
+    void performFrameDispatch (double timestampSec);
+    void tryDispatchFromVBlank (double nowWallMs, double timestampSec);
+    void tryDispatchFromFallbackTimer (double nowWallMs);
+    void updateFramePacingFallbackTimer();
+    std::unique_ptr<juce::VBlankAttachment> vblankAttachment;
+
+    class FramePacingFallbackTimer;
+    std::unique_ptr<FramePacingFallbackTimer> framePacingFallback;
+
+    double vblankLastWallMs     = 0.0;   // 上一次 vblank 回调的墙钟（看门狗用）
+    double lastDispatchWallMs   = 0.0;   // 上一次实际分发的墙钟（vblank 与兜底共用去重）
+    double vblankLastSec        = 0.0;   // 上一次 vblank 事件时间戳（credit 累加用）
+    double vblankCreditMs       = 0.0;   // vblank 时间信用累加器（分数倍率节流）
+
     // FPS 上限控制状态：
     //   · userRequestedFpsLimit —— 用户通过 UI 按钮设定的目标上限
     //     （0=无上限，30/60/120=有上限），默认 120。
@@ -604,6 +636,34 @@ private:
     //   · 本成员**必须**在类的末尾（所有子组件之后）声明，保证析构时最先执行
     //     （反向声明顺序），而我们在 ~Editor 起始处已显式 detach 一次兜底。
     juce::OpenGLContext openGLContext;
+
+    // —— v2.9.3 Spectrogram3D GL 直渲染 ——
+    //   renderOpenGL 里用 VBO 直接画 S3D 条带 + 轮廓 + 凹陷背景，绕开 JUCE 的
+    //   CPU 路径光栅化；组件缓存里 plot 区域保持透明（模块 paintContent 配合）。
+    //   shader 编译失败时 s3dGlReady=false，模块自动回退旧软件渲染路径。
+    // v2.9.3：按组件树 z 序统一绘制 GL 直渲染内容（Milkdrop projectM blit +
+    //   Spectrogram3D 条带）—— 重叠区域由 z 序决定遮挡（聚焦模块覆盖另一个）。
+    //   milkdropReady=false 时只画 S3D（Milkdrop 未就绪或挂起）。
+    void renderGlDirectModulesZOrdered (float dpiScale, int editorLogicalHeight,
+                                        int editorPhysHeight,
+                                        bool milkdropReady, unsigned int milkdropBlitSourceFbo);
+    std::unique_ptr<juce::OpenGLShaderProgram> s3dShader;
+    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTransformUniform;
+    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dNdcUniform;
+    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dSnapUniform;
+    // v2.9.5：纹理 shader（纹理通道 quad 绘制 + trail FBO 合成）
+    std::unique_ptr<juce::OpenGLShaderProgram> s3dTexShader;
+    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTexTransformUniform;
+    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTexNdcUniform;
+    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTexWindowUniform;
+    int s3dTexPosAttrib = 0, s3dTexUvAttrib = 1;
+    unsigned int s3dVao = 0;       // VAO：attrib 布局容器（VBO 为 per-module 懒创建）
+    unsigned int s3dQuadVbo = 0;   // v2.9.5：临时 quad VBO（纹理 quad / trail 衰减 quad 专用 ——
+                                    //   不能借模块 glVbo，否则 needUpload=false 帧会用残留的
+                                    //   quad 数据当快照顶点画 → 全部模块画面污染）
+    int s3dPosAttrib = 0, s3dColAttrib = 1;
+    bool s3dShaderUseChecked = false;
+    bool s3dGlReady = false;
 
     // ================================================================
     // 模块浮动窗口（Standalone 模式下的模块弹出/脱离功能）

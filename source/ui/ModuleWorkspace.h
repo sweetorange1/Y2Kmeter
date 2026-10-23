@@ -61,8 +61,9 @@ ModuleType   stringToModuleType(const juce::String& s, bool* ok = nullptr);
 
 // ------------------------------------------------------------
 // ThemeSwatchBar —— 参考 Win XP 画图底部调色板样式的主题选择器
-//   左侧：当前主题预览方块（双色斜分，复刻画图的前景/背景色预览）
-//   右侧：N 个主题色票（点击即切换主题）
+//   调色板重构（R1）布局：
+//     [当前主题预览块] [预设色票 x12] [我的主题 xN(角标)] [+] [主题名]
+//   超宽时支持滚轮横向滚动。
 // ------------------------------------------------------------
 class ThemeSwatchBar : public juce::Component,
                        public juce::SettableTooltipClient
@@ -76,16 +77,28 @@ public:
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
     void mouseDown(const juce::MouseEvent& e) override;
+    void mouseWheelMove(const juce::MouseEvent& e,
+                        const juce::MouseWheelDetails& wheel) override;
 
-    // 用户点击预览方块时触发，由父组件挂载以弹出取色器
+    // 用户点击预览方块或"+"时触发，由父组件挂载以展开调色面板（R1/R2）
     std::function<void()> onPreviewClicked;
 
 private:
     juce::Rectangle<int> getPreviewBounds() const;
-    juce::Rectangle<int> getSwatchBounds(int index) const;
-    int hitTestSwatch(juce::Point<int> p) const;
+    juce::Rectangle<int> getPresetSwatchBounds(int index) const;
+    juce::Rectangle<int> getUserSwatchBounds(int index) const;
+    juce::Rectangle<int> getNewButtonBounds() const;
 
-    int hoverIndex = -1;
+    // hitTest：kind = 0 无 / 1 预览块 / 2 预设 / 3 我的主题 / 4 "+"
+    struct Hit { int kind = 0; int index = -1; };
+    Hit hitTest(juce::Point<int> p) const;
+
+    int  totalContentWidth() const;
+    void updateScrollLimits();
+
+    Hit hoverHit_;
+    int  scrollX_ = 0;
+    int  libToken_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ThemeSwatchBar)
 };
@@ -171,7 +184,8 @@ public:
     int  getDefaultHeight() const noexcept { return defaultH; }
 
     // 弹出/停靠状态管理（由 ModuleWorkspace / FloatingModuleWindow 调用）
-    void setFloating(bool floating) noexcept;
+    // v2.9.4：改为 virtual —— GlDirectModuleBase 浮动态需复位 GL 接管标志
+    virtual void setFloating(bool floating) noexcept;
     bool isFloating() const noexcept { return isFloating_; }
     void setFloatingLayoutLocked(bool locked) noexcept;
     bool isFloatingLayoutLocked() const noexcept { return floatingLayoutLocked_; }
@@ -205,6 +219,13 @@ public:
 protected:
     virtual void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds);
     virtual void layoutContent(juce::Rectangle<int> contentBounds) { juce::ignoreUnused(contentBounds); }
+
+    // v2.9.3：外壳（drawRaised）填充色。GL 直渲染接管内容区的模块（如
+    //   Spectrogram3D）覆写返回 transparentBlack，组件缓存的内容区保持透明，
+    //   透出 FBO 0 上 GL 直画的内容（与 MilkdropModule 覆写 paint() 同理，
+    //   只是用钩子避免整段复制标题栏/按钮绘制代码）。
+    //   实现位于 ModulePanel.cpp（本头文件不包含 PinkXPStyle.h）。
+    virtual juce::Colour getShellFillColour() const;
 
     juce::Rectangle<int> getContentBounds() const;
     juce::Rectangle<int> getCloseButtonBounds() const;
@@ -278,51 +299,11 @@ private:
 };
 
 // ------------------------------------------------------------
-// CustomThemePicker —— 自定义主题双色取色器弹出面板
-//   位于 workspace 左下角，包含两个 RGB 色盘 + Apply/Cancel 按钮
-//   用户选择 primary（左上三角）和 secondary（右下三角）后点击 Apply 生成主题
+// PalettePanel —— 调色面板（调色板重构，替换旧 CustomThemePicker）
+//   完整类定义在 source/ui/palette/PalettePanel.h；这里仅前向声明，
+//   ModuleWorkspace 用 unique_ptr 持有，避免把面板实现拖进公共头。
 // ------------------------------------------------------------
-class CustomThemePicker : public juce::Component
-{
-public:
-    CustomThemePicker();
-    ~CustomThemePicker() override;
-
-    void paint(juce::Graphics& g) override;
-    void resized() override;
-
-    // 弹出取色器，传入当前双色
-    void show(juce::Colour primary, juce::Colour secondary,
-              std::function<void(juce::Colour, juce::Colour)> onApply);
-    void dismiss();
-
-    // 取色器是否正在显示中
-    bool isShowing() const noexcept { return visible_; }
-
-private:
-    void applyAndDismiss();
-    void createChildComponents();  // 延迟创建子控件（show时调用）
-
-    std::unique_ptr<juce::ColourSelector> primarySelector_;
-    std::unique_ptr<juce::ColourSelector> secondarySelector_;
-    juce::TextButton applyBtn_;
-    juce::TextButton cancelBtn_;
-    juce::Label primaryLabel_;
-    juce::Label secondaryLabel_;
-    juce::Label titleLabel_;
-
-    std::function<void(juce::Colour, juce::Colour)> onApplyCallback_;
-    bool visible_ = false;
-
-    // 全局点击外部关闭监听器（内部类，在 .cpp 中实现）
-    class DismissListener;
-    std::unique_ptr<DismissListener> dismissListener_;
-
-    void attachDismissListener();
-    void detachDismissListener();
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CustomThemePicker)
-};
+class PalettePanel;
 
 // ------------------------------------------------------------
 // ModuleWorkspace —— 模块拖拽/停靠/吸附工作区
@@ -794,8 +775,8 @@ private:
     // 底部工具栏里的主题选择器（XP 画图调色板样式）
     ThemeSwatchBar themeBar;
 
-    // 自定义主题双色取色器弹出面板（点击预览方块时在左下角弹出）
-    CustomThemePicker customThemePicker;
+    // 调色面板（点击预览方块/"+"时在左下角展开；调色板重构，替换旧双色取色器）
+    std::unique_ptr<PalettePanel> palettePanel;
 
     // 底部工具栏里的音频信号源下拉（位于主题栏与 Hide 按钮之间）
     juce::ComboBox                 audioSourceBox;
@@ -946,7 +927,7 @@ private:
     //   · 缓存键：尺寸 + gridOverlayVisible + 当前主题 ID。
     juce::Image canvasBgCache;
     bool        canvasBgCacheDirty   = true;
-    int         canvasBgCacheThemeId = -1;
+    int         canvasBgCacheKey     = -1;   // themeId*100 + (custom 时的明暗)，见 rebuildCanvasBgCacheIfNeeded
 
     // 布局预设下拉（位于 Grid 按钮左侧，中间用一条竖直分割线和 Grid 分开）
     //   · 样式：与 audioSourceBox 一致 —— PinkXP LookAndFeel 下的 ComboBox

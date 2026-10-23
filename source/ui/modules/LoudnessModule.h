@@ -4,6 +4,7 @@
 #include <cmath>
 #include "source/ui/ModuleWorkspace.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/ui/FramePacing.h"
 
 // ==========================================================
 // LoudnessModule —— Pink XP 像素风响度计模块
@@ -57,8 +58,9 @@ private:
             if (! std::isfinite(newValue))
                 newValue = -144.0f;
 
-            // 平滑：上升快，下降慢
-            const float alpha = (newValue > smoothed) ? 0.5f : 0.05f;
+            // 平滑：上升快，下降慢（v2.9：按 dt 换算，120Hz 标定）
+            const float dtSec = deltaMs * 0.001f;
+            const float alpha = y2k::pacing::alphaForDt ((newValue > smoothed) ? 0.5f : 0.05f, dtSec);
             smoothed = smoothed + alpha * (newValue - smoothed);
 
             // 再夹一次，严防浮点累计误差飘出合理区间
@@ -74,7 +76,7 @@ private:
             {
                 peakHoldMs += deltaMs;
                 if (peakHoldMs > peakHoldDuration)
-                    peakValue -= peakFallRate;
+                    peakValue -= y2k::pacing::stepForDt (peakFallRate, dtSec);
             }
             peakValue = juce::jmax(-144.0f, peakValue);
         }
@@ -128,10 +130,6 @@ private:
     static constexpr int cellGap   = 1;
     static constexpr int labelH    = 14;  // 底部标签高度
     static constexpr int readoutH  = 14;  // 底部数字读数高度
-
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    //   Hub 以 60~100Hz 回调，但响度柱状表 ~30Hz 已足够肉眼分辨。
-    double lastRepaintMs = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessModule)
 };

@@ -2,7 +2,7 @@
 
 #include <JuceHeader.h>
 #include <cmath>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -24,7 +24,7 @@
 // 刷新率：30Hz
 // ==========================================================
 
-class PhaseModule : public ModulePanel,
+class PhaseModule : public GlDirectModuleBase,
                     public AnalyserHub::FrameListener
 {
 public:
@@ -36,7 +36,12 @@ public:
 
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
-    void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+
+    // ---- GlDirectModuleBase 钩子（v2.9.4 迁移）----
+    void buildGlSnapshot() override;
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
 
@@ -69,11 +74,6 @@ private:
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
     int themeSubToken = -1;
-
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    //   onFrame 可能以 60~100Hz 频率被 Hub 回调，本模块绘制成本较高（点云 + 3 条仪表），
-    //   对 UI 来说 30Hz 已足够；用 lastRepaintMs 做最小刷新间隔节流。
-    double lastRepaintMs = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PhaseModule)
 };

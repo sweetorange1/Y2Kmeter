@@ -49,6 +49,7 @@
 
 // 主题持久化：从 settings 读取/写回 PinkXP 全局主题 id
 #include "../ui/PinkXPStyle.h"
+#include "../ui/palette/ThemeLibrary.h"
 
 // 网络遥测 + 自动更新检查
 #include "../network/TelemetryClient.h"
@@ -477,6 +478,7 @@ public:
        #endif
 
         // 1) 创建音频 + 插件宿主
+        Y2K_LOG ("[boot] creating pluginHolder...");
         pluginHolder = std::make_unique<juce::StandalonePluginHolder> (
             appProperties.getUserSettings(),   // 设置持久化
             false,                             // takeOwnershipOfSettings
@@ -485,6 +487,7 @@ public:
             juce::Array<juce::StandalonePluginHolder::PluginInOuts>{},
             false                              // shouldAutoOpenMidiDevices
         );
+        Y2K_LOG ("[boot] pluginHolder created");
 
         // 1.0) 关键：关闭 JUCE Standalone 默认的"静音输入"开关
         //      StandalonePluginHolder 为了"防新手把麦克风 → 扬声器的反馈"，首次启动时把
@@ -516,24 +519,45 @@ public:
         //         以构造时的配色固化后需要额外 sendLookAndFeelChange 才能彻底刷新。
         //       · settings 里存整数（强转 ThemeId），缺键/越界兜底为 blackPink。
         //       · ThemeId 枚举的数值顺序不会被动（新主题追加到末尾），因此存值稳定。
-        //       · 自定义主题（custom）需要额外读取双色并调用 applyCustomTheme。
+        //       · 调色板重构：先恢复"我的主题库"，再恢复当前主题；
+        //         custom 优先按新格式（ui.customSpec 分享码）完整恢复，
+        //         旧存档回退双色迁移（R20）。
         {
+            Y2K_LOG ("[boot] 1.15 theme restore begin");
+            PinkXP::ThemeLibrary::instance().loadFromSettings(&getUserSettings());
+            Y2K_LOG ("[boot] themeLib loaded");
+
             const int savedThemeRaw = getUserSettings()
                 .getIntValue ("ui.themeId", (int) PinkXP::ThemeId::blackPink);
+            Y2K_LOG ("[boot] savedThemeRaw=" + juce::String (savedThemeRaw));
 
             if (savedThemeRaw == (int) PinkXP::ThemeId::custom)
             {
-                // 自定义主题：读取保存的双色并重建
                 auto& s = getUserSettings();
-                const juce::String primaryStr =
-                    s.getValue ("ui.customPrimary", "ffec4d85");
-                const juce::String secondaryStr =
-                    s.getValue ("ui.customSecondary", "ffffffff");
-                const juce::Colour primary =
-                    juce::Colour::fromString (primaryStr);
-                const juce::Colour secondary =
-                    juce::Colour::fromString (secondaryStr);
-                PinkXP::applyCustomTheme (primary, secondary);
+
+                // 新格式：完整 ThemeSpec 分享码 + 名字
+                const juce::String specCode = s.getValue ("ui.customSpec", {});
+                Y2K_LOG ("[boot] customSpec=" + (specCode.isEmpty() ? juce::String("<empty>") : specCode));
+                y2kpal::ThemeSpec spec;
+                if (specCode.isNotEmpty() &&
+                    y2kpal::ThemeSpec::fromShareCode (specCode.toStdString(), spec))
+                {
+                    const juce::String name =
+                        s.getValue ("ui.customThemeName", "Custom");
+                    PinkXP::applyThemeFromSpec (spec, name);
+                    Y2K_LOG ("[boot] custom theme restored from spec");
+                }
+                else
+                {
+                    // 旧存档迁移：双色 fit 成 ThemeSpec（内部走 OKLCH 生成器）
+                    const juce::Colour primary =
+                        juce::Colour::fromString (s.getValue ("ui.customPrimary", "ffec4d85"));
+                    const juce::Colour secondary =
+                        juce::Colour::fromString (s.getValue ("ui.customSecondary", "ffffffff"));
+                    Y2K_LOG ("[boot] migrating legacy custom: " + primary.toString() + "/" + secondary.toString());
+                    PinkXP::applyCustomTheme (primary, secondary);
+                    Y2K_LOG ("[boot] legacy custom migrated");
+                }
             }
             else
             {
@@ -544,7 +568,9 @@ public:
                     if ((int) t.id == savedThemeRaw) { targetId = t.id; break; }
                 }
                 PinkXP::applyTheme (targetId);
+                Y2K_LOG ("[boot] preset theme applied");
             }
+            Y2K_LOG ("[boot] 1.15 theme restore done");
         }
 
         // 1.2) 关键：在 createEditor 之前把上一次保存的 plugin state 恢复到 Processor。
@@ -1029,7 +1055,14 @@ private:
             "ui.themeId",
             "audio.sourceId",
             "milkdrop.currentPreset",
-            "filterState"     // 插件状态（EQ/布局 XML）— 保证用当前值重写
+            "filterState",     // 插件状态（EQ/布局 XML）— 保证用当前值重写
+            // 调色板重构（R22）：主题相关键纳入保护式重写，
+            //   启动/退出路径不会被丢弃（custom 键仅在 custom 激活时重写）。
+            "ui.customPrimary",
+            "ui.customSecondary",
+            "ui.customSpec",
+            "ui.customThemeName",
+            "ui.themeLibrary"
         };
         for (auto* k : managedKeys)
             s.removeValue (k);
@@ -1237,14 +1270,22 @@ private:
         //     这里只是在退出前快照一次 gCurrentThemeId。
         s.setValue ("ui.themeId", (int) PinkXP::getCurrentThemeId());
 
-        // 若当前为自定义主题，同步保存双色以便下次启动恢复
+        // 若当前为自定义主题，保存：
+        //   · 旧键双色（向后兼容降级）
+        //   · 新格式完整 ThemeSpec 分享码 + 主题名（调色板重构 R18）
         if (PinkXP::isCustomThemeActive())
         {
             s.setValue ("ui.customPrimary",
                         PinkXP::getCustomPrimary().toString());
             s.setValue ("ui.customSecondary",
                         PinkXP::getCustomSecondary().toString());
+            s.setValue ("ui.customSpec",
+                        juce::String (PinkXP::getCurrentThemeSpec().shareCode()));
+            s.setValue ("ui.customThemeName", PinkXP::getCustomThemeName());
         }
+
+        // 我的主题库（调色板重构 R18：ui.themeLibrary）
+        PinkXP::ThemeLibrary::instance().persistToSettings(&getUserSettings());
 
         // 保存 FPS 限制档位（30/60/120/0=无上限）
         s.setValue ("ui.fpsLimit", (int) cachedEditor->GetUserRequestedFpsLimit());

@@ -50,8 +50,9 @@
 
 **④ 主题与视觉系统**（Y2K / Pink XP 像素复古风）
 
-- **12 个预设主题**：糖果粉 / 星空深蓝 / 赛博紫 / 橘色波普 / 水蓝珠光 / 苏打绿 / 丛林绿 / Windows XP 经典 / 红黑暗夜 / 纯黑灰（OLED 友好）/ 纯白灰 / 黑粉（默认主题）
-- **自定义主题**：双色取色器实时生成个性化配色
+- **12 个手工调校预设主题**（数据驱动、外观零回归）：糖果粉 / 星空深蓝 / 赛博紫 / 橘色波普 / 水蓝珠光 / 苏打绿 / 丛林绿 / Windows XP 经典 / 红黑暗夜 / 纯黑灰（OLED 友好）/ 纯白灰 / 黑粉（默认主题）
+- **调色板重构（v2.10）**：左下角「Palette Studio」面板 —— 色相环 + 明暗（Dark/Light/Auto）+ 氛围 + 和谐方式 + 随机；`OKLCH` 感知均匀色彩空间 + Recipe 配方 + WCAG 对比度护栏（自动修复可读性）；支持 7 个语义角色微调（自动/手动锁定）、撤销/重做（40 步）、A/B 对比、迷你预览卡、质量徽章
+- **我的主题**（自定义 = 一等公民）：可命名保存 ≤12 套、重命名/删除/排序、分享码（`Y2KT1-xxxx` ≤80 字符）复制/粘贴、`.y2kpalette` 文件导入导出、桌面纹理（7 种）+ 标题图标（8 候选）自选、恢复默认（Reset）
 - **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
 - 拖入图片生成「拼豆像素画」贴到桌面背景
 
@@ -147,7 +148,7 @@
 
 ### 2.1 关键调用关系
 1. **音频入口 → 分析**：`Y2KmeterAudioProcessor::processBlock` → `AnalyserHub::pushStereo` → 分发到 5 路：`Oscilloscope / Spectrum / Loudness / Phase / Dynamics`。
-2. **UI 拉分析结果**：`AnalyserHub` 内部 `FrameDispatcher` 每 33ms（30Hz，可提升到 60Hz）在 UI 线程构造一个 `FrameSnapshot`，通过 `FrameListener::onFrame(frame)` 派发给所有订阅的模块。
+2. **UI 拉分析结果**：`AnalyserHub` 内部 `FrameDispatcher` 在 UI 线程按目标频率（FPS 按钮 30/60/120/无上限）组装 `FrameSnapshot`，通过 `FrameListener::onFrame(frame)` 派发给所有订阅的模块。v2.9 起由 Editor 的 vblank 同步时钟驱动（§4.2），与显示器刷新同相。
 3. **模块的 UI 生命周期**：模块继承 `ModulePanel + AnalyserHub::FrameListener`，构造时 `hub.retain(Kind::xxx)` + `hub.addFrameListener(this)`，析构时对称 release + remove。**未加载的模块 → 引用计数为 0 → `pushStereo` 自动跳过对应计算路径**。
 4. **Standalone 音频源**：`Y2KStandaloneApp` 通过 `WasapiLoopbackCapture`（Win）或 `MacDesktopAudioCapture`（macOS 使用 ScreenCaptureKit）获取"系统外放音频"，直接 push 到 `AnalyserHub`（不走 `processBlock`）。DAW 场景则由宿主经 `processBlock` 送入。
 
@@ -182,7 +183,8 @@
 | [ModuleWorkspace.cpp](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | 拖拽 / 网格吸附 / 布局持久化 / 拼豆图片 / 底部 toolbar / 添加菜单 / 鼠标事件 |
 | [ModulePanel.cpp](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 各模块统一的像素窗口：标题栏 + 关闭按钮 + 边缘/角拖拽缩放 + 右下 CPU 小字 |
 | [ModulePanel.h](/I:/Y2KMeter/source/ui/ModulePanel.h) | **只是一个兼容 shim**，内部只 `#include "source/ui/ModuleWorkspace.h"` |
-| [PinkXPStyle.h/.cpp](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 主题调色板（10 个主题）+ 桌面纹理（棋盘/星星/网格/圆点/泡泡/斜条纹）+ `PinkXPLookAndFeel` |
+| [PinkXPStyle.h/.cpp](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 主题系统（12 预设 + 生成器 custom）+ 19 色槽位 + 扩展槽（`accent2`/`chartRamp[8]`/`danger`/`warn`/`ok`）+ OKLab 渐变采样 + 桌面纹理 + `PinkXPLookAndFeel` |
+| [source/ui/palette/](/I:/Y2KMeter/source/ui/palette/) | 调色板重构模块：`OkLchUtils`（OKLCH/色域裁剪/WCAG）、`ThemeSpec`（意图参数+分享码）、`PaletteGenerator`（Recipe+护栏，纯 C++）、`ThemeLibrary`（我的主题）、`PalettePanel`（新面板 UI） |
 | [UiFrameClock.h/.cpp](/I:/Y2KMeter/source/ui/UiFrameClock.h) | 统一 UI 帧时钟（阶段1性能改造，目前尚未强制接线，主流数据流仍走 `AnalyserHub::FrameDispatcher`） |
 
 ### 3.4 `source/ui/modules`（分析模块 UI）
@@ -242,7 +244,7 @@
 - **枚举** `AnalyserHub::Kind`：`Oscilloscope=0 / Spectrum=1 / Loudness=2 / Phase=3 / Dynamics=4 / NumKinds=5`。
 - **引用计数** `retain(Kind)` / `release(Kind)` / `isActive(Kind)` —— UI 线程调用；`pushStereo` 里读原子决定是否跳过某路计算。
 - **FrameSnapshot**：一帧一份聚合数据（`activeMask`、`tickCount`、示波器 L/R 2048 样本、频谱 mag 1024/4096、Loudness/Phase/Dynamics 快照）。
-- **FrameDispatcher**（pimpl）：默认 30Hz `juce::Timer`；`startFrameDispatcher(hz)` 可改频（Editor 会随 FPS 按钮切到 60Hz，且做**自适应降/升档**）。
+- **FrameDispatcher**（pimpl）：`startFrameDispatcher(hz)` 设定目标频率（上限 120Hz）。v2.9 起支持**外部帧时钟**：Editor 挂 `juce::VBlankAttachment` 后调用 `setExternalFrameClock(true)`，内部 Timer 停转，改由 Editor 在每个 vblank（按 FPS 上限抽稀后）调用 `dispatchFrameNow(ts)` —— 分发与显示器刷新同相；vblank 停摆（显示器休眠/远程桌面）由 Editor 10Hz 看门狗切回 Timer。`FrameSnapshot` 新增 `timeSec/dtSec` 供模块做帧率无关动画，快照本身走 4 槽复用池（不再每帧 37KB make_shared）。
 - **模块订阅**：`addFrameListener(listener)` / `removeFrameListener`；每帧 UI 线程回调 `onFrame(const FrameSnapshot&)`。
 - **兼容旧接口**：`getOscilloscopeSnapshot / getSpectrumSnapshot / getSpectrumMagnitudes(Lo) / getSpectrumMagnitudesBlended`。
 - **常量**：`fftOrder=11 (2048)`，`fftOrderLo=13 (8192)`，`spectrumXoverHz=500Hz`，`oscilloscopeBufferSize=2048`，`spectrumBins=160`。
@@ -253,7 +255,8 @@
   - **插件模式**下：不画自画标题栏、不接管窗口拖拽 / 关闭 / 置顶，隐藏"信号源"下拉与布局预设（保留 Save/Load）。
   - **Standalone 模式**下：完整 Y2K 外壳（标题栏 + 三按钮 + 无边框窗口拖拽 + 系统 Loopback）。
 - **GPU**：类末尾持有 `juce::OpenGLContext openGLContext;`，构造末尾 `attachTo(*this)`，析构起始 `detach()`。
-- **自适应 FPS**：`applyAdaptiveFrameRate(measuredFps)`；用户目标 30/60，动态在 20/24/30/45/60 Hz 之间下探/回升。
+- **FPS 上限（封顶语义）**：FPS 按钮选择 30/60/120/无上限；`applyAdaptiveFrameRate` 仅保证 FrameDispatcher 目标频率与上限一致，不再动态降档。v2.9 起上限由 vblank 抽稀实现（上限 ≥ 显示器刷新率时每帧分发 = 跟随刷新率）。
+- **真实帧率统计（v2.9）**：FPS 标签以 GL 线程实际出帧数（`renderOpenGL` 里 `glFrameCounter`）为准，而非分发次数 —— GL 跟不上时多次 repaint 会被合并，分发数不变但屏幕实际掉帧，旧统计会把掉帧"藏"起来。
 - **持久化协作**：Editor 构造时读 `Processor.getSavedLayoutXml` 恢复布局；`workspace->onLayoutChanged` → 写回 Processor。
 - **Windows Direct2D 处理**：首次 `visibilityChanged` 时通过 `renderingEngineConfigured` flag 强制切换到软光栅/GDI，规避 AMD `atidxx64.dll` 卸载死锁（详见头文件相关注释）。
 - **Chrome 隐藏态**：Hide 按钮收缩窗口；实现"幂等化" —— Hide 前完整快照 bounds 与 resizeLimits，Show 时直接 setBounds 回快照，避免累积漂移。
@@ -289,7 +292,9 @@
 - `isVisuallyActiveInWorkspace()`：判断模块是否真的在 workspace 可见区，用于跳过重绘。
 
 ### 4.6 `PinkXP`（[PinkXPStyle.h](/I:/Y2KMeter/source/ui/PinkXPStyle.h)）
-- **10 种主题**：`bubblegum / starlight / cyberLilac / tangerinePop / aquaPearl / matchaSoda / winXP / crimsonNoir / voidGrey / paperGrey`。
+- **13 个主题槽**（`ThemeId` 只追加不重排，保护旧存档）：12 个手工调校预设（数据驱动原值）+ `custom`（=11，生成器主题）。默认主题 `blackPink`。
+- **调色板重构 API（S2）**：`applyThemeFromSpec(spec, name)` / `applyUserTheme(spec, name)` / `getCurrentThemeSpec()` —— 模块仍读 `PinkXP::pinkXXX` 等 19 槽位符号，映射层保证兼容；扩展槽 `accent2` / `chartRamp[8]` / `danger` / `warn` / `ok`。
+- **图表渐变（A3/S4）**：`sampleChartRamp(t)` / `interpolateOkLab(a, b, t)` 在 OKLab 空间插值；Spectrogram / Spectrum / Waveform / Oscilloscope 已改用 `chartRamp`。
 - **主题订阅**：`subscribeThemeChanged(cb) → token`，用于组件切主题时刷新缓存的颜色。
 - **桌面纹理共享缓存**：`getSharedDesktopTexture(w,h)` 跨实例复用（多插件实例共用同一张 Image），主题切换时 `invalidateDesktopTextureCache()`。
 - **两种字体接口**：`getFont(h)` 有 1.5x 放大（正文），并叠加全局 UI 密度缩放 `uiScale()`（低分辨率下更紧凑）；`getAxisFont(h)` 保持原大小（坐标轴刻度专用，不缩放）。
@@ -360,38 +365,32 @@ main
 
 > 附：v1.8.3 起 XML 根节点新增 `layoutLocked="1"` 属性（true 才写出，false 或缺省视为未锁）。反序列化在 `Y2KmeterAudioProcessor::setStateInformation` 里；Editor 构造末尾会调 `applyLayoutLocked(processor.getLayoutLocked(), initial=true)` 恢复初始态，若顶层窗口尺寸尚未就绪则延迟到 `visibilityChanged` 应用。
 
-### 5.4 主题切换流程
+### 5.4 主题切换流程（调色板重构 v2.10）
 
 ```
 预设主题切换：
-  用户点 ThemeSwatchBar 色票
-  → PinkXP::applyTheme(id)
-  → 全局调色板变量（pink50..pink700, ink, sel, desktop, ...）就地覆盖
-  → PinkXP::invalidateDesktopTextureCache()（下一帧重烘焙）
-  → 触发所有 ThemeChangedCallback（组件订阅重绘）
-  → workspace.hoverPreviewCache 全部失效（下次 hover 重新渲染）
+  用户点 ThemeSwatchBar 预设色票
+  → PinkXP::applyTheme(id)（数据驱动原值，不经过生成器，视觉零回归）
+  → 19 槽位 + chartRamp（回退 pink 阶梯）写入全局
+  → invalidateDesktopTextureCache() → ThemeChangedCallback 全组件重绘
 
-自定义主题创建：
-  用户点 ThemeSwatchBar 最左侧双三角方块 → 弹出 CustomThemePicker（RGB 色盘 ×2，无 alpha 通道）
-  → 用户分别选取 primary/accent（左，映射 pink50-700 图表色阶/sel 标题栏/swatch/desktop2）
-    和 secondary/base（右，映射 desktop/content/btnFace/hl/face/shdw/dark/ink）
-  → 点 Apply → PinkXP::applyCustomTheme(primary, secondary)
-  → 内部根据双色派生完整 Theme 结构写入 gCustomTheme
-  → gCurrentThemeId = ThemeId::custom
-  → 触发 ThemeChangedCallback（与预设主题切换一致）
+调色面板（Palette Studio）实时预览：
+  点预览方块 / "+" → PalettePanel::show()
+  → 快照当前主题（还原点）+ spec = getCurrentThemeSpec()（预设则从 Accent/Background fit）
+  → 色相环/明暗/氛围/和谐/随机 → spec 变化 → 16ms 节流 → PinkXP::applyThemeFromSpec(spec, "Custom")
+  → 内部：ThemeSpec → PaletteGenerator（OKLCH Recipe + 护栏）→ Theme(19+扩展槽) → commitTheme
+  → 撤销/重做 40 步；A/B 按住临时回到快照；Revert 回打开前主题
+  → 关闭面板保留当前效果（未命名 Custom）；「Apply & Save」命名存入 ThemeLibrary
 
 自定义主题持久化：
-  退出软件 → saveUiAndAudioState()
-    → setValue("ui.themeId", (int)ThemeId::custom)
-    → setValue("ui.customPrimary", primary.toString())     // 如 "ff39ff14"
-    → setValue("ui.customSecondary", secondary.toString())
+  Standalone 退出 → saveUiAndAudioState()
+    → ui.themeId / ui.customPrimary+Secondary（旧键兼容）/ ui.customSpec（分享码）
+      / ui.customThemeName / ui.themeLibrary（我的主题 XML）—— 均已纳入 managedKeys 保护式重写
+  重启 → ThemeLibrary::loadFromSettings() → ui.customSpec 完整恢复（旧存档回退双色迁移 R20）
 
-  重启软件 → initialise() 1.15)
-    → 检测 savedThemeRaw == ThemeId::custom
-    → getValue("ui.customPrimary")   → Colour::fromString → primary
-    → getValue("ui.customSecondary") → Colour::fromString → secondary
-    → applyCustomTheme(primary, secondary)
-    → 之后 Editor 构造 applyTheme(getCurrentThemeId()) 再次确认一致
+  VST3（随宿主工程保存，R19）：
+    getStateInformation → themeId / themeName / themeSpec / themeLib 写入 <PBEQ_State>
+    setStateInformation → 插件态恢复（Standalone 跳过，避免与 ui.* 双写冲突）
 ```
 
 ---
@@ -445,13 +444,59 @@ main
 - 坐标系统：`getLocalPoint(milk, point)` 纯组件树遍历 + `openGLContext.getRenderingScale()` DPI 缩放 + Y-flip。
 
 ### 6.6 性能优化点
-- 大部分 UI 模块 **禁止在 `onFrame` 里直接 repaint 全画面**，都用 `lastRepaintMs` 节流 或 `tickCount % 2 == 0` 分频。
-- `LoudnessModule` / `OscilloscopeModule` 等采用 **静态层缓存**（`staticLayer` juce::Image）：只在尺寸/主题变化时重建，帧循环里只 `drawImageAt`。
-- `SpectrogramModule` 的方案 B：把 grid 强度写入离屏 Image，paint 用一次 `drawImage` 完成，避免 rows×cols 次 fillRect。
-- 模块**按需计算**：模块加载 → `hub.retain(Kind)` → 卸载 → `hub.release(Kind)`。全 5 路引用计数为 0 时，`pushStereo` 里对应分支被跳过。
-- `AnalysisActive` 开关：Editor 的 `visibilityChanged` 决定；宿主折叠/切换轨道时 UI 不可见，直接跳过整段分析。
-- **Spectrogram3DModule P2（v1.9.0）**：离屏 `juce::Image` 缓存。将 150 层 × 127 bars 的 3D 曲面渲染到离屏 Image，`paintContent` 只需一次 `drawImageAt`。macOS CoreGraphics 软光栅路径下单次位图 blit 远快于分散的 19,050 次 `fillRect`。
-- **Spectrogram3DModule P3（v1.9.0）**：三项微观优化 —— (1) `magToIdx` LUT：4096 级 `float mag → uint8_t 色板下标`，消除每帧 19,200 次 `gainToDecibels`(log10)+`jlimit`+`lround`；(2) `depthPalettes` 预计算：可见层数稳定后一次性生成 `visibleRows×256` 深度fade色板，消除每帧 19,050 次 `interpolatedWith`；(3) `cached3DImage.clear()` 复用替代每帧 `new juce::Image (malloc)`。
+
+> **v2.9 性能优化轮（目标：跑满 120fps 不掉帧）重写本节。**
+> 历史策略（`lastRepaintMs` 毫秒节流 + `tickCount % N` 分频 + DPI×倍率）**已全部移除** ——
+> 这些节流把各模块锁在 30~60fps，与 120fps 目标直接冲突，且节流常量随 DPI 缩放、
+> 与刷新率拍频，是帧率不稳定的元凶之一。
+
+**帧调度层**
+- 帧分发由 **vblank 对齐时钟**驱动（见 §4.2 / §4.3）：数据更新 → repaint → GL 合成与显示器刷新同相，
+  消除旧 `startTimerHz(120)`（实际 8ms = 125Hz）与 120Hz 刷新之间的 5Hz 拍频（每 200ms 一次双更/空更抖动）。
+- **v2.9.1 修正**：v2.9 首版把分发完全押在 vblank 回调上，但 JUCE Windows VBlankThread 通过
+  AsyncUpdater 派发事件、消息线程繁忙时会**直接丢弃**回调（`flagPaintPending` 合并），而 GL 渲染
+  线程持锁执行 `renderOpenGL` + `paintComponent` 又周期性阻塞消息线程 → 负反馈把分发锁死到 ~30fps。
+  修复：vblank 只提供相位参考，采用 **vblank 时间信用（credit）模型** —— 每个回调把真实间隔累加进
+  credit，满一个目标间隔就消费并分发（144Hz 显示器限 120fps 的 6/5 分频由余量自动实现、被吞的
+  回调由 credit 自动追帧）；同时启动**兜底 Timer**（周期=目标间隔），墙钟判据下 vblank 被吞期间
+  分发频率仍不低于上限；两入口共用 `lastDispatchWallMs` 去重。vblank 停摆（显示器休眠/远程桌面）
+  由 10Hz 看门狗切回 Hub 内部 Timer。
+- 每个分发帧都允许 repaint；**不再有模块级硬编码节流**。负载上限统一由用户的 FPS 按钮（封顶语义）控制。
+- 掉帧可观测性：FPS 标签统计 GL 实际出帧数（§4.3），掉一帧就能看到 119/120 而不是自欺的"120"。
+  注意：若显示器物理刷新率低于上限（如 60Hz 屏设 120fps），标签会如实显示 60 —— 旧版显示的是
+  "分发次数"（虚高 ~100），新版显示真实出帧。
+
+**帧率无关动画（[FramePacing.h](/I:/Y2KMeter/source/ui/FramePacing.h)）**
+- 所有"每帧系数"按 **120Hz 标定**（= 旧版默认分发率，换算后 120Hz 下观感与旧版一致），
+  用 `alphaForDt / stepForDt / framesToSec` 按 `frame.dtSec` 换算。已覆盖：Dynamics（平滑/峰值保持/
+  Crest 历史带）、Loudness、Eq（peak 下落）、Phase、Spectrum（曲线平滑）、FineSplit 全族
+  （LUFS/TruePeak/PhaseBalance/DynamicsMeters/DR 的平滑、闪烁、心跳相位、TP 保持）、
+  StereoField（残影衰减）、DynamicsCrest（历史带按 30 样本/秒时间推进，修复 120Hz 下
+  "20s 跨度实际只有 5 秒"的旧 bug）。
+- VuMeter 由自有 60Hz Timer 驱动改为 **onFrame 驱动弹道 + repaint**（可达 120fps），
+  Timer 降级为 10Hz 兜底（onFrame 断流 >100ms 时主动拉最新帧）。
+
+**模块级开销削减**
+- `SpectrumModule`：旧"每帧新建整张 ARGB Image → 软件光栅化全部内容 → 整图上传纹理"的缓存
+  改为**静态层缓存**（底衬/网格/坐标文字，按物理像素渲染，尺寸/DPI/主题色变化才重建，GL 复用纹理）
+  + 曲线每帧直接画。
+- `DynamicsCrestModule`：历史曲线 Path 抽稀到绘图区像素宽度（1050 点 → ~几百点），
+  Path 复用成员缓冲，填充路径直接 `fill = p` 复用。
+- `renderOpenGL`（Editor）：Milkdrop 静音 PCM 用静态只读数组（免 120Hz 下每帧 16KB 堆分配清零），
+  组件树遍历的 `std::function` 递归改泛型递归 lambda（免类型擦除/堆分配）。
+- FrameSnapshot 组装走复用池 + 成员 scratch vector，fanout 零分配。
+
+**保留的既有优化（仍然有效）**
+- 模块**按需计算**：`hub.retain(Kind)` / `release(Kind)` 引用计数为 0 时 `pushStereo` 跳过对应分析。
+- `AnalysisActive`：宿主折叠/隐藏时跳过整段分析。
+- 各模块静态层/离屏 Image 缓存：Loudness、Oscilloscope、Spectrogram、Spectrogram3D（P2/P3）等。
+- Spectrogram3D `magToIdx` LUT、`depthPalettes` 预计算、`cached3DImage.clear()` 复用。
+
+**已知边界（后续可继续优化）**
+- JUCE GL 渲染线程在组件需要重绘时**持锁执行** `renderOpenGL()`（projectM 的 CPU 逐顶点求值在锁内），
+  消息线程会随之停顿；Milkdrop 可见且 120Hz 时这是最大的单点。彻底解法需 patch 内嵌 JUCE，
+  把 `renderOpenGL` 移出 MessageManager 锁（出锁后仅允许 FBO 渲染 + 合成，禁止触碰组件树）。
+- JUCE 2D GL 渲染器的路径/描边在 CPU 光栅化，复杂 Path（波形、频谱虚线峰值）仍是每帧成本主体。
 
 ### 6.7 编译期宏
 | 宏 | 默认值 | 作用 |
@@ -3723,6 +3768,32 @@ Milkdrop 脱离态由 `GLView` 自己的本地 OpenGL 线程驱动渲染。切�
 
 ---
 
+## v2.9.1：vblank 帧时钟掉帧修复
+
+v2.9.0 的 vblank 驱动在 Windows 上出现"分发锁死 ~30fps"（FPS 标签显示 30，旧版虚标 ~100）。
+
+- **根因**：JUCE Windows VBlankThread 用 `AsyncUpdater` 派发 vblank 事件，消息线程没处理完上一个回调时新事件被丢弃（`flagPaintPending` 合并语义）；GL 渲染线程持锁执行 `renderOpenGL` + `paintComponent` 周期性阻塞消息线程 → "分发越慢 → vblank 事件丢得越多"的负反馈，帧率锁死在吞吐平衡点。
+- **修复**（`PluginEditor`）：vblank 只提供相位参考，改为 **vblank 时间信用（credit）模型** + **兜底 Timer**：
+  - 每个 vblank 回调把真实间隔累加进 credit，满一个目标间隔就消费并分发；144Hz 屏限 120fps 的 6/5 分频由余量自动实现；被吞的回调由 credit 自动追帧；
+  - 兜底 Timer（周期 = 目标间隔，墙钟判据 ≥ 1 个间隔才补帧）在 vblank 被吞期间维持分发频率 ≥ 上限；
+  - 两入口共用 `lastDispatchWallMs` 去重（1ms 窗口），vblank 正常时兜底不触发。
+- 版本：2.9.0 → **2.9.1**（`CMakeLists.txt` 三处、`Y2Kmeter_installer.iss`、`README.md`、`PluginEditor.cpp` 四处字面量）。
+
+---
+
+## v2.9.0：120fps 性能优化轮
+
+目标：跑满 120fps 不掉帧。详见 §6.6（已整体重写）。
+
+- **帧调度改造**：`AnalyserHub::FrameDispatcher` 支持外部帧时钟（`setExternalFrameClock` / `dispatchFrameNow`）；Editor 挂 `juce::VBlankAttachment`，按用户 FPS 上限做相位累加抽稀后驱动分发，与显示器刷新同相 —— 消除旧 8ms(125Hz) Timer 与 120Hz 刷新的拍频抖动；10Hz 看门狗在 vblank 停摆时自动切回 Timer。
+- **真实帧率统计**：FPS 标签改以 GL 线程实际出帧数为准（`renderOpenGL` 计数），掉帧可见。
+- **帧率无关动画**：新增 `source/ui/FramePacing.h`（`alphaForDt` / `stepForDt` / `framesToSec`，120Hz 标定）；Dynamics / Loudness / Eq / Phase / Spectrum / FineSplit 全族 / StereoField 残影 / VU 弹道全部改为按 `frame.dtSec` 换算。
+- **删除模块级硬编码节流**：移除全部 `lastRepaintMs`（15~20ms×DPI）与 `tickCount % 2` 分频，每个分发帧都重绘。
+- **模块级开销削减**：Spectrum 静态层缓存（物理像素、主题色 key）；DynamicsCrest 按时间 30 样本/秒写入（修复 120Hz 下 20s 历史实际只有 5 秒）+ 曲线抽稀；VuMeter 改 onFrame 驱动（60Hz Timer 降为 10Hz 兜底）；Milkdrop 静音 PCM 静态数组、`std::function` 递归改泛型 lambda；FrameSnapshot 复用池。
+- 版本：2.8.6 → **2.9.0**（`CMakeLists.txt` 三处、`Y2Kmeter_installer.iss`、`README.md`、`PluginEditor.cpp` 四处字面量）。
+
+---
+
 ## v2.8.6：Stick 三槽布局与浮动模块独立存档
 
 本轮把"布局形态"与"脱离模块"彻底拆开，解决 Stick 与常驻布局互相覆盖、脱离模块在切换 Stick 时反复复活/丢失的问题，并修复驻留态弹出菜单被 AppBar 挤出窗口的定位错误。
@@ -3888,6 +3959,46 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 - 2.8.1 → 2.8.5（`CMakeLists.txt` 三处 / `Y2Kmeter_installer.iss` / `README.md` / `PluginEditor.cpp` 四处字面量）。
 - `Y2Kmeter_installer.iss` 的 `Source` 路径由 `cmake-build-release-visual-studio\` 更新为当前预设的 `build\msvc\`。
 - **踩坑**：只改 `CMakeLists.txt` 版本号后直接 `cmake --build --target ...` 不会重写 JUCE 生成的 `*_resources.rc`（EXE 版本信息仍是旧值）；必须先 `cmake --preset msvc` 重新 configure，必要时删除 `build/msvc/*/JuceLibraryCode/*_resources.rc` 触发重新生成。
+
+---
+
+## v2.10：调色板重构（Palette Redesign）
+
+需求案 `docs/Palette_Redesign_Requirements.md`（P0–P5 全阶段交付，2026-10）。核心目标：用户只做一两个简单动作就能得到一套协调、可读、所见即所得的完整配色。
+
+### 1. 算法层（`source/ui/palette/`，纯 C++ 不依赖 JUCE）
+
+- `OkLchUtils.h` —— sRGB↔OKLCH、色域裁剪（保 L/H 降 C）、OKLab 插值、WCAG 对比度。
+- `ThemeSpec.h/.cpp` —— 意图参数（色相/明暗/氛围/染色/和谐/纹理/图标）+ 7 角色手动覆盖 + 随机锁定；28 字节定长二进制 + 分享码 `Y2KT1-xxxx`（≤80 字符）。
+- `PaletteGenerator.h/.cpp` —— Dark/Light/AutoMid 三套 OKLCH 配方 + Q1–Q7 护栏（文字/OnAccent 对比度自动修复、强调色可见度、背景饱和度上限、渐变单调、边框明度顺序；手动覆盖只提示不强改）+ 20 组精选随机库。
+- `ThemeLibrary.h/.cpp` —— 我的主题库（≤12）：命名/重命名/删除/排序、XML 持久化、`.y2kpalette` 导入导出。
+- `tests/palette_test.cpp` + CMake target `Y2Kmeter_palette_test` —— 1080 组合全遍历护栏断言（ALL_OK）、`--overview` 总览图、`--golden` 黄金色板。护栏测试真实暴露并修复了 AutoMid Control 面对比度物理无解、Light accent 中间亮度带 OnAccent 无解两个配方 bug。
+
+### 2. 映射层与 UI
+
+- `PinkXP` 扩展槽位：`accent2` / `chartRamp[8]`（OKLab 8 阶、横跨主题色相→accent2 色相）/ `danger` / `warn` / `ok`；`applyThemeFromSpec` / `applyUserTheme` / `getCurrentThemeSpec`；旧 custom 双色存档自动迁移（R20）。
+- 新面板 `PalettePanel` 替换旧 `CustomThemePicker`：色相环（顶部 0° 顺时针）、明暗两段（Auto 已删）、vibe/tint 滑条、和谐 5 图标、随机、A/B 对比、Revert、SAVE（自动命名 `My Palette N` 直接入库）、高级区 7 角色行（hex + 展示色块 + Auto 开关 + ▶ 取色器）、SV-色相取色器、迷你预览卡（拖动中实时）、质量徽章（✓/⚠）。
+- 交互原则：**拖动只刷面板内预览、松手统一提交**（避免每帧重烘焙桌面纹理）；生成器重算 <1ms，主题应用同步化（旧 16ms Timer 节流曾断链导致面板操作整体失效）。
+- 色票条升级：`[预览块][预设12][我的主题(角标)][+][主题名]`，超宽滚轮滚动。
+
+### 3. 主题与模块视觉修复
+
+- 桌面底色卡死（切明暗不刷新）→ `canvasBgCache` 失效 key 从 `ThemeId` 升级为 `themeId×100+明暗`（custom 主题 id 恒 11 导致 key 永不变化）；Editor 本地桌面缓存失效时直接置空图走实时绘制分支；主题通知循环加 try/catch 隔离防中断。
+- GL 直渲染模块（Phase/Osc/Spectrogram 等）主题订阅回调统一 `buildGlSnapshot()` 重建，修"底色卡住"。
+- 图表色谱：Waveform/Spectrum/Spectrogram/Oscilloscope 接入 `chartRamp` 与 OKLab 渐变；Spectrogram 强度映射与 Waveform 同源（`content` 底 → `sampleChartRamp` 8 阶色相渐变）。
+- light 模式整体提亮（桌面 0.87、chartRamp 0.55→0.92）；peak 虚线改 ink；PerlerBeads 未点亮格 45% 透明；拼豆贴画透明格不再黑底；StereoField 浮动窗口回退 CPU trail 每帧重建（修脱离后画面定格）。
+- 桌面纹理增强 + 新增 3 种：Checker 4px、PixelStars 加大、BigDots 高光、DiagStripes 加粗；新增 Zigzag / CrossHatch / FlowerDots（`ThemeSpec::Pattern` 与 `DesktopPattern` 三层同步，旧分享码兼容）。
+- 大量字符/交互修复：乱码统一 `\xNN` 转义 + `fromUTF8`；fps 按钮文字自绘（恒 ink、12px bold）；Auto 开关改 TextButton（V4 ToggleButton 勾选框颜色链不可控）；取色器 hue 统一 JUCE `[0,1]` 体系（`getHue()` 返回 [0,1] 而非度数，曾导致色相条恒红/打不开定位到当前色）。
+
+### 4. 持久化
+
+- Standalone：`ui.themeLibrary` / `ui.customSpec` / `ui.customThemeName` 纳入 managedKeys 保护式重写；启动恢复新格式优先、旧双色迁移兜底。
+- VST3：`<PBEQ_State>` 内写入 `themeId/themeName/themeSpec/themeLib`，读取端跳过 Standalone 避免双写冲突。
+
+### 5. 工具链与构建
+
+- **重要**：中文 MSVC + NMake 生成器下 `cmake_cl_compile_depends` 生成空 `.d` 依赖文件 → 改头文件后增量构建漏编依赖 obj → ABI 错配启动崩溃。已切 **Ninja**（`deps = msvc` 内建依赖跟踪可靠）；`_clean_project_objs.ps1` 可删项目 obj 保留 JUCE 库 obj 做半量重建。
+- 版本号 2.9.1（JUCE 8、VS2026）。
 
 ---
 

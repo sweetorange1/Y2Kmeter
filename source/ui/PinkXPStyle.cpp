@@ -1,6 +1,8 @@
 #include "source/ui/PinkXPStyle.h"
 #include "BinaryData.h"
 #include "source/perf/PerformanceCounterSystem.h"
+#include "source/ui/palette/PaletteGenerator.h"
+#include "source/Y2KLogging.h"
 
 // ==========================================================
 // PinkXPStyle.cpp —— 像素风配色/绘制/LookAndFeel 的实现
@@ -189,7 +191,11 @@ namespace PinkXP
     {
         g.setColour(fill);
         g.fillRect(r);
+        drawRaisedFrame (g, r);
+    }
 
+    void drawRaisedFrame(juce::Graphics& g, juce::Rectangle<int> r)
+    {
         // 外层 2px 硬边框：左+上 白高光，右+下 深色
         g.setColour(hl);
         g.fillRect(r.getX(), r.getY(), r.getWidth(), 2);
@@ -268,29 +274,33 @@ namespace PinkXP
             case DesktopPattern::checker:
             default:
             {
-                // 棋盘格（经典 XP 风）
+                // 棋盘格（经典 XP 风，v2.10 增大色块让纹理更醒目）
                 g.setColour(desktop2);
-                for (int y = r.getY(); y < r.getBottom(); y += 4)
-                    for (int x = r.getX() + ((y / 4) % 2) * 4; x < r.getRight(); x += 8)
-                        g.fillRect(x, y, 2, 2);
+                for (int y = r.getY(); y < r.getBottom(); y += 8)
+                    for (int x = r.getX() + ((y / 8) % 2) * 8; x < r.getRight(); x += 16)
+                        g.fillRect(x, y, 4, 4);
                 break;
             }
 
             case DesktopPattern::pixelStars:
             {
-                // 像素小星星（"+" 字形，稀疏分布）
-                const int step = 22;
-                for (int y = r.getY() + 6; y < r.getBottom(); y += step)
+                // 像素星星（"+" 字 + 对角小臂，v2.10 更大更密）
+                const int step = 18;
+                for (int y = r.getY() + 8; y < r.getBottom(); y += step)
                 {
                     for (int x = r.getX() + ((y / step) % 2) * (step / 2); x < r.getRight(); x += step)
                     {
-                        // 黄色小星
                         g.setColour(desktop2);
-                        g.fillRect(x,     y - 1, 1, 3);
-                        g.fillRect(x - 1, y,     3, 1);
+                        g.fillRect(x,     y - 2, 1, 5);          // 竖臂
+                        g.fillRect(x - 2, y,     5, 1);          // 横臂
+                        g.fillRect(x - 1, y - 1, 1, 1);          // 对角
+                        g.fillRect(x + 1, y + 1, 1, 1);
+                        g.fillRect(x + 1, y - 1, 1, 1);
+                        g.fillRect(x - 1, y + 1, 1, 1);
                         // 次级小点
                         g.setColour(desktop2.withAlpha(0.5f));
-                        g.fillRect(x + (step / 3), y + (step / 3), 1, 1);
+                        g.fillRect(x + step / 3, y + step / 3, 1, 1);
+                        g.fillRect(x - step / 3, y + step / 3, 1, 1);
                     }
                 }
                 break;
@@ -314,9 +324,9 @@ namespace PinkXP
 
             case DesktopPattern::bigDots:
             {
-                // 大圆点（2003 MSN / 复古 iPod 感）
-                const int step = 26;
-                const int radius = 5;
+                // 大圆点（2003 MSN / 复古 iPod 感，v2.10 圆点更大 + 高光点）
+                const int step = 30;
+                const int radius = 7;
                 for (int y = r.getY() + step / 2; y < r.getBottom(); y += step)
                 {
                     for (int x = r.getX() + ((y / step) % 2) * (step / 2); x < r.getRight(); x += step)
@@ -324,6 +334,10 @@ namespace PinkXP
                         g.setColour(desktop2);
                         g.fillEllipse((float)(x - radius), (float)(y - radius),
                                       (float)(radius * 2), (float)(radius * 2));
+                        // 左上高光小点，增加立体感
+                        g.setColour(juce::Colours::white.withAlpha(0.35f));
+                        g.fillEllipse((float)(x - radius + 3), (float)(y - radius + 3),
+                                      3.0f, 3.0f);
                     }
                 }
                 break;
@@ -356,15 +370,20 @@ namespace PinkXP
 
             case DesktopPattern::diagStripes:
             {
-                // 斜条纹（45°）
-                const int step = 10;
-                g.setColour(desktop2.withAlpha(0.45f));
+                // 斜条纹（45°，v2.10 加粗 + 双色深浅交替）
+                const int step = 16;
                 for (int k = -r.getHeight(); k < r.getWidth(); k += step)
                 {
                     const juce::Line<float> line(
                         (float)(r.getX() + k),                (float) r.getY(),
                         (float)(r.getX() + k + r.getHeight()), (float) r.getBottom());
-                    g.drawLine(line, 2.0f);
+                    g.setColour(desktop2.withAlpha(0.55f));
+                    g.drawLine(line, 4.0f);
+                    const juce::Line<float> line2(
+                        (float)(r.getX() + k + 2),                (float) r.getY(),
+                        (float)(r.getX() + k + 2 + r.getHeight()), (float) r.getBottom());
+                    g.setColour(juce::Colours::white.withAlpha(0.18f));
+                    g.drawLine(line2, 1.0f);
                 }
                 break;
             }
@@ -402,6 +421,66 @@ namespace PinkXP
                   for (int x = r.getX() + 6 + xPhase; x < r.getRight(); x += kStep) {
                     drawHeart(x, y);
                   }
+                }
+                break;
+            }
+
+            case DesktopPattern::zigzag:
+            {
+                // 锯齿波纹：水平折线，每行错相位，形成波浪感
+                const int period = 48;
+                const int amp = 8;
+                for (int y = r.getY() + 4; y < r.getBottom(); y += 26)
+                {
+                    g.setColour(desktop2.withAlpha(0.5f));
+                    for (int x = r.getX(); x < r.getRight(); x += 1)
+                    {
+                        const int phase = (x / period) % 2;
+                        const int zy = (phase == 0)
+                            ? y + ((x % period) * amp / (period / 2))
+                            : y + amp - (((x % period) - period / 2) * amp / (period / 2));
+                        if (zy >= r.getY() && zy < r.getBottom())
+                            g.fillRect(x, zy, 1, 2);
+                    }
+                }
+                break;
+            }
+
+            case DesktopPattern::crossHatch:
+            {
+                // 交叉斜线网：两组 45° 线交织，形成菱形格网
+                const int step = 22;
+                for (int k = -r.getHeight(); k < r.getWidth(); k += step)
+                {
+                    g.setColour(desktop2.withAlpha(0.4f));
+                    const juce::Line<float> a(
+                        (float)(r.getX() + k),                (float) r.getY(),
+                        (float)(r.getX() + k + r.getHeight()), (float) r.getBottom());
+                    g.drawLine(a, 2.0f);
+                    const juce::Line<float> b(
+                        (float)(r.getX() + k),                (float) r.getBottom(),
+                        (float)(r.getX() + k + r.getHeight()), (float) r.getY());
+                    g.drawLine(b, 2.0f);
+                }
+                break;
+            }
+
+            case DesktopPattern::pixelFlower:
+            {
+                // 像素小花：中心点 + 上下左右四花瓣（5x5 十字花），错位平铺
+                const int step = 26;
+                for (int y = r.getY() + 8; y < r.getBottom(); y += step)
+                {
+                    for (int x = r.getX() + 8 + ((y / step) % 2) * (step / 2); x < r.getRight(); x += step)
+                    {
+                        g.setColour(desktop2);
+                        g.fillRect(x - 1, y - 3, 3, 2);      // 上花瓣
+                        g.fillRect(x - 1, y + 2, 3, 2);      // 下花瓣
+                        g.fillRect(x - 3, y - 1, 2, 3);      // 左花瓣
+                        g.fillRect(x + 2, y - 1, 2, 3);      // 右花瓣
+                        g.setColour(juce::Colours::white.withAlpha(0.7f));
+                        g.fillRect(x, y, 1, 1);              // 花蕊
+                    }
                 }
                 break;
             }
@@ -466,6 +545,9 @@ namespace PinkXP
         }
 
         // 未命中：烘焙一张新的（左上角原点 = (0,0)，尺寸 = width × height）
+        Y2K_LOG ("[palette] bake desktop texture: theme=" + juce::String ((int) currentTheme)
+                 + " desktopGlobal=" + desktop.toString()
+                 + " cacheEntries=" + juce::String ((int) cache.size()));
         juce::Image img(juce::Image::RGB, width, height, true);
         {
             juce::Graphics gg(img);
@@ -1027,6 +1109,9 @@ namespace PinkXP
     // 自定义主题状态
     static juce::Colour gCustomPrimary { 0xffec4d85 };     // 默认粉色
     static juce::Colour gCustomSecondary { 0xffffffff };    // 默认白色
+    // 调色板重构：生成器主题的原始 ThemeSpec + 动态显示名
+    static y2kpal::ThemeSpec gCustomSpec;
+    static juce::String gCustomThemeName;
     static Theme gCustomTheme;                              // 运行时动态构建的完整Theme
 
     juce::Colour getCustomPrimary()  { return gCustomPrimary; }
@@ -1046,12 +1131,10 @@ namespace PinkXP
         return all.front();
     }
 
-    void applyTheme(ThemeId id)
+    // 把 Theme 的全部槽位写入全局调色板并通知订阅者
+    //   （applyTheme / applyThemeFromSpec 共用，保证写入 + 通知流程一致）
+    void commitTheme(const Theme& t)
     {
-        gCurrentThemeId = id;
-        const Theme& t  = getCurrentTheme();
-
-        // 写入全局调色板
         pink50 = t.pink50;   pink100 = t.pink100; pink200 = t.pink200; pink300 = t.pink300;
         pink400 = t.pink400; pink500 = t.pink500; pink600 = t.pink600; pink700 = t.pink700;
 
@@ -1062,18 +1145,66 @@ namespace PinkXP
         content  = t.content;
         btnFace  = t.btnFace;
 
+        // 调色板重构扩展槽位（S3）：预设主题未填时回退到 pink 阶梯/占位色
+        accent2 = t.accent2.isTransparent() ? t.swatch : t.accent2;
+        danger  = t.danger.isTransparent()  ? sel : t.danger;
+        warn    = t.warn.isTransparent()    ? pink500 : t.warn;
+        ok      = t.ok.isTransparent()      ? pink200 : t.ok;
+
+        // 预设主题无 chartRamp 数据（默认透明）→ 回退 pink50..pink700 阶梯
+        if (t.chartRamp[0].isTransparent())
+        {
+            chartRamp[0] = t.pink50;  chartRamp[1] = t.pink100;
+            chartRamp[2] = t.pink200; chartRamp[3] = t.pink300;
+            chartRamp[4] = t.pink400; chartRamp[5] = t.pink500;
+            chartRamp[6] = t.pink600; chartRamp[7] = t.pink700;
+        }
+        else
+        {
+            for (int i = 0; i < 8; ++i)
+                chartRamp[i] = t.chartRamp[(size_t) i];
+        }
+
         // 刷新 LookAndFeel 内部 ColourScheme 缓存 —— 让 ComboBox 的
         //   arrowColourId/textColourId 等通过 findColour() 读取的控件颜色
         //   立刻跟随新主题（否则会保留构造时的旧配色）。
+        //   注：ComboBox 内嵌 Label 的显式颜色残留由 PalettePanel 在
+        //   应用主题后单独刷新（全局 sendLookAndFeelChange 会递归整棵
+        //   组件树，拖动滑条高频触发时是明显的卡顿源，不能放在这里）。
         syncPinkXPColours (getPinkXPLookAndFeel());
 
         // P6: 主题切换时让"跨实例共享桌面纹理"全部失效，下一帧各 Editor
         //     paint 会拿到 key=(newThemeId,size) 的全新共享 Image。
         invalidateDesktopTextureCache();
 
-        // 通知所有订阅者
+        // 通知所有订阅者。每个回调单独 try/catch 隔离：任一订阅者抛异常
+        //   都不能中断后续订阅者（Editor 的桌面缓存失效回调排在队列末尾，
+        //   若被前面模块的异常截断，桌面纹理就会永远画旧缓存图）。
         for (auto& s : gThemeSubs)
-            if (s.cb) s.cb();
+        {
+            if (!s.cb)
+                continue;
+            try
+            {
+                s.cb();
+            }
+            catch (const std::exception& e)
+            {
+                Y2K_LOG ("[palette] theme sub callback #" + juce::String (s.token)
+                         + " threw: " + e.what());
+            }
+            catch (...)
+            {
+                Y2K_LOG ("[palette] theme sub callback #" + juce::String (s.token)
+                         + " threw (unknown)");
+            }
+        }
+    }
+
+    void applyTheme(ThemeId id)
+    {
+        gCurrentThemeId = id;
+        commitTheme(getCurrentTheme());
     }
 
     int subscribeThemeChanged(ThemeChangedCallback cb)
@@ -1091,104 +1222,183 @@ namespace PinkXP
         }
     }
 
+    // DesktopPattern ↔ y2kpal::Pattern（ThemeSpec 存储的是生成器枚举）
+    DesktopPattern patternFromSpec(y2kpal::Pattern p)
+    {
+        switch (p)
+        {
+            case y2kpal::Pattern::PixelStars:  return DesktopPattern::pixelStars;
+            case y2kpal::Pattern::ScanGrid:    return DesktopPattern::scanGrid;
+            case y2kpal::Pattern::BigDots:     return DesktopPattern::bigDots;
+            case y2kpal::Pattern::Bubbles:     return DesktopPattern::bubbles;
+            case y2kpal::Pattern::DiagStripes: return DesktopPattern::diagStripes;
+            case y2kpal::Pattern::Hearts:      return DesktopPattern::hearts;
+            case y2kpal::Pattern::Zigzag:      return DesktopPattern::zigzag;
+            case y2kpal::Pattern::CrossHatch:  return DesktopPattern::crossHatch;
+            case y2kpal::Pattern::PixelFlower: return DesktopPattern::pixelFlower;
+            case y2kpal::Pattern::Checker:
+            default:                           return DesktopPattern::checker;
+        }
+    }
+
+    y2kpal::Pattern patternFromSpecInv(DesktopPattern p)
+    {
+        switch (p)
+        {
+            case DesktopPattern::pixelStars:  return y2kpal::Pattern::PixelStars;
+            case DesktopPattern::scanGrid:    return y2kpal::Pattern::ScanGrid;
+            case DesktopPattern::bigDots:     return y2kpal::Pattern::BigDots;
+            case DesktopPattern::bubbles:     return y2kpal::Pattern::Bubbles;
+            case DesktopPattern::diagStripes: return y2kpal::Pattern::DiagStripes;
+            case DesktopPattern::hearts:      return y2kpal::Pattern::Hearts;
+            case DesktopPattern::zigzag:      return y2kpal::Pattern::Zigzag;
+            case DesktopPattern::crossHatch:  return y2kpal::Pattern::CrossHatch;
+            case DesktopPattern::pixelFlower: return y2kpal::Pattern::PixelFlower;
+            case DesktopPattern::checker:
+            default:                          return y2kpal::Pattern::Checker;
+        }
+    }
+
     void applyCustomTheme(juce::Colour primary, juce::Colour secondary)
     {
         gCustomPrimary   = primary;
         gCustomSecondary = secondary;
 
-        // primary   = accent（强调色：标题栏、推子轨道、图表色階、图表高亮）
-        // secondary = base（基色：背景、按钮面、桌面、Win95 边框、正文墨色）
-        const float baseBrightness = secondary.getBrightness();
-        const bool  baseIsDark     = (baseBrightness <= 0.45f);
+        // v2.10 调色板重构（R20 迁移）：双色 fit 成 ThemeSpec → OKLCH 生成器。
+        //   accent/background 锁定为旧双色（视觉接近旧外观），其余角色由
+        //   配方生成并受护栏保护（允许因质量提升略有差异）。
+        y2kpal::ThemeSpec spec;
+        y2kpal::fitSpecFromThemeColors(
+            { primary.getRed(),   primary.getGreen(),   primary.getBlue()   },
+            { secondary.getRed(), secondary.getGreen(), secondary.getBlue() },
+            spec);
+        applyThemeFromSpec(spec, "Custom (migrated)");
+    }
 
-        // pink50→pink700：以 primary（accent）为 pivot(pink400)，向暗→亮两端拉伸 8 阶
-        //   所有模块图表（Spectrum 频谱曲线、Waveform 波形幅度、Oscilloscope 示波器
-        //   波形、Spectrogram 瀑布图格子等）通过 pinkXXX 取值，跟随左侧 accent 控制器。
-        auto stretch = [](juce::Colour c, float f) {
-            f = juce::jlimit(-1.0f, 1.0f, f);
-            if (f < 0.0f) return c.darker(-f);  // f ∈ [-1,0) → darker(0..1]
-            if (f > 0.0f) return c.brighter(f);  // f ∈ (0,1] → brighter(0..1]
-            return c;
+    // ==================================================
+    // 调色板重构（S2）：ThemeSpec → PaletteGenerator → Theme
+    // ==================================================
+    void applyThemeFromSpec(const y2kpal::ThemeSpec& spec, const juce::String& displayName)
+    {
+        gCustomSpec = spec;
+        gCustomThemeName = displayName.isNotEmpty() ? displayName : juce::String("Custom");
+
+        const y2kpal::GeneratedTheme gen = y2kpal::generate(spec);
+
+        // 诊断日志（RelWithDebInfo）：桌面底色不随明暗切换的问题定位。
+        //   bg/surface/control 的角色锁定会让 desktop/content/btnFace 槽位
+        //   恒等于锁定色 —— mode 切换自然"看起来无效"。
+        Y2K_LOG ("[palette] applyThemeFromSpec: bright=" + juce::String ((int) spec.brightness)
+                 + " hue=" + juce::String (spec.hue, 1)
+                 + " vibe=" + juce::String (spec.vibe, 2)
+                 + " bgLock=" + (spec.overrides[(int) y2kpal::Role::Background].set ? "YES" : "no")
+                 + " sfLock=" + (spec.overrides[(int) y2kpal::Role::Surface].set ? "YES" : "no")
+                 + " ctlLock=" + (spec.overrides[(int) y2kpal::Role::Control].set ? "YES" : "no")
+                 + " desktop=" + [&gen]() {
+                       auto byte = [](uint8_t v) {
+                           const juce::String s = juce::String::toHexString ((int) v);
+                           return (s.length() < 2 ? "0" : "") + s;
+                       };
+                       return "#" + byte (gen.desktop.r) + byte (gen.desktop.g)
+                            + byte (gen.desktop.b);
+                   }());
+        const auto toColour = [](y2kpal::Rgb8 c)
+        {
+            return juce::Colour(c.r, c.g, c.b);
         };
 
-        const juce::Colour pk50  = stretch(primary, -0.65f);
-        const juce::Colour pk100 = stretch(primary, -0.50f);
-        const juce::Colour pk200 = stretch(primary, -0.32f);
-        const juce::Colour pk300 = stretch(primary, -0.15f);
-        const juce::Colour pk400 = stretch(primary,  0.00f);
-        const juce::Colour pk500 = stretch(primary,  0.12f);
-        const juce::Colour pk600 = stretch(primary,  0.25f);
-        const juce::Colour pk700 = stretch(primary,  0.40f);
+        // 标题图标候选（R14：5-8 个，与预设图标风格一致）
+        static const char* const kTitleIcons[] = { "♡", "★", "◆", "●", "✦", "⌁", "♥", "▲" };
+        const char* icon = kTitleIcons[spec.titleIcon % 8];
 
-        const juce::Colour desCol  = secondary.darker(0.35f);
-        const juce::Colour hlCol   = secondary.brighter(0.80f);
-        const juce::Colour des2Col = primary;           // 桌面纹理跟随 accent
+        // 逐字段赋值（MSVC 对含 std::array 成员的嵌套聚合初始化较挑剔）
+        Theme t;
+        t.id          = ThemeId::custom;
+        t.displayName = gCustomThemeName;
+        t.keywordHint = "Custom palette";
+        t.pink50 = toColour(gen.pink[0]); t.pink100 = toColour(gen.pink[1]);
+        t.pink200 = toColour(gen.pink[2]); t.pink300 = toColour(gen.pink[3]);
+        t.pink400 = toColour(gen.pink[4]); t.pink500 = toColour(gen.pink[5]);
+        t.pink600 = toColour(gen.pink[6]); t.pink700 = toColour(gen.pink[7]);
+        t.hl = toColour(gen.hl);        t.face = toColour(gen.face);
+        t.shdw = toColour(gen.shdw);    t.dark = toColour(gen.dark);
+        t.ink = toColour(gen.ink);      t.sel = toColour(gen.sel);
+        t.selInk = toColour(gen.selInk);
+        t.desktop = toColour(gen.desktop); t.desktop2 = toColour(gen.desktop2);
+        t.content = toColour(gen.content); t.btnFace = toColour(gen.btnFace);
+        t.swatch = toColour(gen.accent);
+        t.desktopPattern = patternFromSpec(spec.pattern);
+        t.titleIconText = icon;
+        t.accent2 = toColour(gen.accent2);
+        t.danger = toColour(gen.danger);
+        t.warn   = toColour(gen.warn);
+        t.ok     = toColour(gen.ok);
+        for (int i = 0; i < 8; ++i)
+            t.chartRamp[(size_t) i] = toColour(gen.chartRamp[(size_t) i]);
 
-        // Win95 边框四色由基色（secondary）派生
-        const juce::Colour darkCol = desCol.darker(0.30f);
-        const juce::Colour shdwCol = desCol.darker(0.18f);
-        const juce::Colour faceCol = desCol.brighter(0.12f);
+        gCustomTheme = t;
 
-        // 文字色自适应：
-        //   ink    = 正文墨色，绘制在基色背景上 → 基于 secondary 亮度
-        //   selInk = 标题栏文字色，绘制在 accent 背景上 → 基于 primary 亮度
-        const float accentBrightness = primary.getBrightness();
-        const bool  accentIsDark     = (accentBrightness <= 0.45f);
+        // 预览方块/色票条使用的双色快照
+        gCustomPrimary   = gCustomTheme.sel;
+        gCustomSecondary = gCustomTheme.desktop;
 
-        const juce::Colour inkCol    = baseIsDark ? juce::Colour(0xffe0e0e0)
-                                                  : juce::Colour(0xff1a1a1a);
-        const juce::Colour selInkCol = accentIsDark ? juce::Colour(0xff050505)
-                                                    : juce::Colour(0xffffffff);
-        const juce::Colour btnFaceCol = baseIsDark ? desCol.brighter(0.25f)
-                                                   : secondary.brighter(0.35f);
-        const juce::Colour contentCol = baseIsDark ? desCol.brighter(0.08f)
-                                                   : secondary.brighter(0.65f);
-
-        // 构建完整 Theme
-        //   primary   → pink50-700（图表色階）、sel（标题栏/推子）、swatch（Spectrogram主色）、
-        //               desktop2（纹理）、selInk
-        //   secondary → desktop、content、btnFace、hl/face/shdw/dark（Win95 边框）、
-        //               ink（正文墨色）
-        gCustomTheme = Theme{
-            ThemeId::custom,
-            "Custom",
-            "RGB / Your colors",
-            pk50,  pk100, pk200, pk300, pk400, pk500, pk600, pk700,
-            hlCol,        // hl      ← 基色高光
-            faceCol,      // face    ← 基色按钮面
-            shdwCol,      // shdw    ← 基色阴影
-            darkCol,      // dark    ← 基色最深边框
-            inkCol,       // ink     ← 基色正文墨色
-            primary,      // sel     ← accent（标题栏/推子轨道/图表高亮）
-            selInkCol,    // selInk  ← accent 上的文字色
-            desCol,       // desktop ← 基色桌面底色
-            des2Col,      // desktop2← accent 桌面纹理
-            contentCol,   // content ← 基色模块画布底色
-            btnFaceCol,   // btnFace ← 基色按钮面
-            primary,      // swatch  ← accent（SpectrogramModule 图表主色）
-            DesktopPattern::checker,
-            "+"           // titleIconText
-        };
-
-        // 走统一主题切换流程（复用 applyTheme 后半的写入 + 通知逻辑）
         gCurrentThemeId = ThemeId::custom;
-        const Theme& t  = gCustomTheme;
+        commitTheme(gCustomTheme);
+    }
 
-        pink50 = t.pink50;   pink100 = t.pink100; pink200 = t.pink200; pink300 = t.pink300;
-        pink400 = t.pink400; pink500 = t.pink500; pink600 = t.pink600; pink700 = t.pink700;
+    y2kpal::ThemeSpec getCurrentThemeSpec()
+    {
+        if (gCurrentThemeId == ThemeId::custom)
+            return gCustomSpec;
 
-        hl  = t.hl;   face = t.face; shdw = t.shdw; dark = t.dark;
-        ink = t.ink;  sel  = t.sel;  selInk = t.selInk;
-        desktop  = t.desktop;
-        desktop2 = t.desktop2;
-        content  = t.content;
-        btnFace  = t.btnFace;
+        // 预设主题：从 Accent(swatch)/Background(desktop) 反推意图参数
+        //   （R10"基于预设新建"入口）。清除 fit 产生的覆盖锁定，
+        //   保证色相环/氛围滑条等意图控件立即可用。
+        const Theme& t = getCurrentTheme();
+        y2kpal::ThemeSpec spec;
+        y2kpal::fitSpecFromThemeColors(
+            { t.swatch.getRed(),   t.swatch.getGreen(),   t.swatch.getBlue()   },
+            { t.desktop.getRed(),  t.desktop.getGreen(),  t.desktop.getBlue()  },
+            spec);
+        for (auto& ov : spec.overrides)
+            ov.set = false;
+        spec.pattern = patternFromSpecInv(t.desktopPattern);
+        // 氛围/染色从中间值起步（fit 反推会把它们算到接近 0，用户期望默认居中）
+        spec.vibe   = 0.55f;
+        spec.bgTint = 0.30f;
+        return spec;
+    }
 
-        syncPinkXPColours(getPinkXPLookAndFeel());
-        invalidateDesktopTextureCache();
+    void applyUserTheme(const y2kpal::ThemeSpec& spec, const juce::String& name)
+    {
+        applyThemeFromSpec(spec, name);
+    }
 
-        for (auto& s : gThemeSubs)
-            if (s.cb) s.cb();
+    juce::String getCustomThemeName()
+    {
+        return gCustomThemeName;
+    }
+
+    // ==================================================
+    // 图表渐变采样（A3/S4）：OKLab 空间插值替代 sRGB 线性插值
+    // ==================================================
+    juce::Colour sampleChartRamp(float t)
+    {
+        t = juce::jlimit(0.0f, 1.0f, t);
+        const float pos = t * 7.0f;
+        const int   i = juce::jmin(6, (int) pos);
+        const float u = pos - (float) i;
+        return interpolateOkLab(chartRamp[i], chartRamp[i + 1], u);
+    }
+
+    juce::Colour interpolateOkLab(juce::Colour a, juce::Colour b, float t)
+    {
+        t = juce::jlimit(0.0f, 1.0f, t);
+        const y2kpal::Rgb8 c = y2kpal::interpolateOkLab(
+            { a.getRed(), a.getGreen(), a.getBlue() },
+            { b.getRed(), b.getGreen(), b.getBlue() },
+            t);
+        return juce::Colour(c.r, c.g, c.b);
     }
 }
 
@@ -1264,7 +1474,13 @@ void PinkXPLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& bu
 void PinkXPLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& button,
                                        bool, bool shouldDrawButtonAsDown)
 {
-    g.setColour(PinkXP::ink);
+    // 组件显式覆盖的文字色优先（RoleRow 的 Auto 开关等需要自适应对比）；
+    // 未覆盖时回退 PinkXP::ink（与历史行为一致）。TextButton 的文字色 id
+    // 是 textColourOffId / textColourOnId（按下/选中态用 On）。
+    const bool toggled = shouldDrawButtonAsDown || button.getToggleState();
+    const juce::Colour tc = button.findColour(toggled ? juce::TextButton::textColourOnId
+                                                      : juce::TextButton::textColourOffId);
+    g.setColour(tc.isOpaque() ? tc : PinkXP::ink);
     g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
 
     auto area = button.getLocalBounds();

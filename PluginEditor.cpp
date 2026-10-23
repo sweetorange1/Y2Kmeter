@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include <JuceHeader.h>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -24,6 +25,9 @@
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/MilkdropParamIds.h"
+#include "source/ui/GlDirectModule.h"
+#include "source/perf/FramePerfLog.h"
+#include "source/Y2KLogging.h"
 
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
@@ -441,6 +445,29 @@ private:
 };
 
 // ==========================================================
+// FramePacingFallbackTimer —— vblank 被吞时的分发兜底（v2.9.1）
+//   JUCE Windows 的 VBlankThread 用 AsyncUpdater 把 vblank 事件派发到消息线程，
+//   消息线程没处理完上一个回调时新事件会被直接丢弃（flagPaintPending 合并语义）；
+//   GL 渲染线程持锁执行 renderOpenGL + swapBuffers（等 vsync）又会周期性阻塞
+//   消息线程，形成负反馈：分发越慢 → vblank 事件丢得越多 → 帧率锁死。
+//   兜底 Timer 按"距上次分发 ≥ 1 个目标间隔"补帧，与 vblank 入口共用
+//   lastDispatchWallMs 去重：vblank 正常时它永远不触发，只在 vblank 失效时接管。
+// ==========================================================
+class Y2KmeterAudioProcessorEditor::FramePacingFallbackTimer : public juce::Timer
+{
+public:
+    explicit FramePacingFallbackTimer (Y2KmeterAudioProcessorEditor& ownerRef) : owner (ownerRef) {}
+
+    void timerCallback() override
+    {
+        owner.tryDispatchFromFallbackTimer (juce::Time::getMillisecondCounterHiRes());
+    }
+
+private:
+    Y2KmeterAudioProcessorEditor& owner;
+};
+
+// ==========================================================
 // ChromeHiddenOverlay —— chrome 隐藏态的"纯视觉"浮层
 //
 // 职责：
@@ -472,7 +499,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.8.6");
+        const int versionW = versionFont.getStringWidth ("v2.9.1");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -513,7 +540,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.8.6";
+        const juce::String versionText = "v2.9.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -1031,6 +1058,8 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
       // Standalone 以外的一切情况我们都视为"插件宿主模式"。
       isPluginHost (p.wrapperType != juce::AudioProcessor::wrapperType_Standalone)
 {
+    Y2K_LOG ("[boot] PluginEditor ctor begin");
+
     // 0) 异步加载自定义字体。
     //   VST3/AU 宿主在创建插件 Editor 时，Direct2D/DirectWrite 基础
     //   设施可能尚未初始化。同步调用 createSystemTypefaceFor() 会触发
@@ -1529,6 +1558,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         // 立即重置统计起点，避免切换后显示跨区间的均值
         frameCounter.store (0, std::memory_order_relaxed);
         lastFrameCounterSample = 0;
+        lastGlFrameCounterSample = glFrameCounter.load (std::memory_order_relaxed);
+        lastDispatchWallMs = 0.0;
+        vblankCreditMs     = 0.0;
+        updateFramePacingFallbackTimer();
         lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
     };
 
@@ -1542,6 +1575,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // 订阅主题变更 → 切主题后刷新全局重绘
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
+        Y2K_LOG ("[palette] editor theme callback: invalidate desktop cache");
         if (auto* lnf = dynamic_cast<juce::LookAndFeel_V4*>(&getLookAndFeel()))
             juce::ignoreUnused(lnf);
         invalidateDesktopCache();
@@ -1576,6 +1610,15 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     fpsListener = std::make_unique<FpsFrameListener> (*this);
     processor.getAnalyserHub().addFrameListener (fpsListener.get());
     lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
+
+    // v2.9：挂 vblank 帧时钟。首个 vblank 到来时才切换到外部时钟，
+    //   在此之前（peer 尚未创建）仍由 Hub 内部 Timer 驱动，不会出现空窗。
+    // v2.9.1：兜底 Timer 在外部时钟接管后启用（vblank 被 GL 持锁吞掉时补帧）。
+    framePacingFallback = std::make_unique<FramePacingFallbackTimer> (*this);
+    vblankAttachment = std::make_unique<juce::VBlankAttachment> (this, [this] (double ts)
+    {
+        onDisplayVBlank (ts);
+    });
 
     // ------------------------------------------------------
     // 插件宿主（VST3 / AU / AAX / LV2）模式下的一次性差异化配置
@@ -1873,6 +1916,10 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
 
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
+
+    // v2.9：先拆掉 vblank 帧时钟与兜底 Timer，避免之后的析构过程中仍有分发
+    vblankAttachment.reset();
+    framePacingFallback.reset();
 
     // 兜底：若曾为 VirtuPet 临时保活 Loudness，析构前配平 release。
     if (virtuPetSignalRetained)
@@ -3267,7 +3314,13 @@ void Y2KmeterAudioProcessorEditor::loadStateFromSettingsFile (const juce::File& 
 
 void Y2KmeterAudioProcessorEditor::invalidateDesktopCache() noexcept
 {
+    // 除置 dirty 外，直接把缓存图与 bounds 清空：
+    //   paint 里的判定（isValid && bounds 匹配）会失败 → 走 drawDesktop 直接
+    //   绘制分支（实时读全局色）→ 下一帧 rebuildDesktopCacheIfNeeded 重建缓存。
+    //   这样即使 dirty 标志因任何原因丢失，桌面也不会停留在旧主题的图。
     desktopCacheDirty = true;
+    desktopCacheImage = {};
+    desktopCacheBounds = {};
 }
 
 void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
@@ -3301,6 +3354,15 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
     // 1) 从进程级共享池取（或新建）底图 —— 多个 Editor 同尺寸时共用像素数据
     juce::Image sharedBase = PinkXP::getSharedDesktopTexture (bounds.getWidth(),
                                                               bounds.getHeight());
+
+    Y2K_LOG ("[palette] rebuild desktop cache: dirty="
+             + juce::String (desktopCacheDirty ? "yes" : "no")
+             + " sharedValid=" + juce::String (sharedBase.isValid() ? "yes" : "no")
+             + " pixel00=" + (sharedBase.isValid()
+                                  ? sharedBase.getPixelAt (0, 0).toString()
+                                  : juce::String ("(invalid)"))
+             + " bounds=" + juce::String (bounds.getWidth()) + "x"
+             + juce::String (bounds.getHeight()));
 
     if (! sharedBase.isValid())
     {
@@ -3403,7 +3465,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.8.6";
+        const juce::String versionText = "v2.9.1";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3411,7 +3473,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v2.8.6");
+                const int versionW = versionFont.getStringWidth ("v2.9.1");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -5403,6 +5465,11 @@ void Y2KmeterAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 // ==========================================================
 void Y2KmeterAudioProcessorEditor::timerCallback()
 {
+    // v2.9.2：帧耗时统计周期性落盘（诊断构建；release 构建为空操作）
+   #if Y2K_ENABLE_FRAME_PERF_LOG
+    y2k::perflog::dumpIfDue();
+   #endif
+
     if (workspace == nullptr) return;
 
     // 低分辨率适配（多屏）：10Hz 轮询当前窗口所在显示器，跨屏移动或显示器
@@ -5520,13 +5587,29 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
         virtuPet->setSignalLevel01 (signal01);
 
     // FPS 统计：每秒更新一次显示（使用高精度时戳防止 wall-clock 跨日问题）
+    updateFrameClockWatchdog();
+
     const double nowMs   = juce::Time::getMillisecondCounterHiRes();
     const double deltaMs = nowMs - lastFpsTimeMs;
     if (deltaMs >= 1000.0)
     {
         const juce::int64 cur = frameCounter.load (std::memory_order_relaxed);
         const juce::int64 diff = cur - lastFrameCounterSample;
-        const float fps = (float) (diff * 1000.0 / deltaMs);
+        const float dispatchFps = (float) (diff * 1000.0 / deltaMs);
+
+        // v2.9：以 GL 线程真实出帧数为准。GL 跟不上时多次 repaint 会被合并，
+        //   分发数仍是 120 但屏幕实际帧更少 —— 旧逻辑只看分发数，会把掉帧"藏"起来。
+        //   取 min 是因为鼠标 hover 等非分发 repaint 也会额外出帧。
+        //   macOS（不挂 Editor GL）或 GL 尚未出过帧时回退到分发数。
+        const juce::int64 glCur  = glFrameCounter.load (std::memory_order_relaxed);
+        const juce::int64 glDiff = glCur - lastGlFrameCounterSample;
+        lastGlFrameCounterSample = glCur;
+
+        float fps = dispatchFps;
+       #if ! JUCE_MAC
+        if (glDiff > 0 && openGLContext.isAttached())
+            fps = juce::jmin (dispatchFps, (float) (glDiff * 1000.0 / deltaMs));
+       #endif
 
         float displayedFps;
         if (userRequestedFpsLimit == 0)
@@ -5566,6 +5649,135 @@ void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float /*measuredFps*/
     {
         activeDispatchHz = targetHz;
         hub.startFrameDispatcher (activeDispatchHz);
+    }
+
+    // v2.9.1：FPS 上限变化后同步兜底 Timer 的周期
+    updateFramePacingFallbackTimer();
+}
+
+// ==========================================================
+// v2.9.1 vblank 对齐帧时钟（credit 累加节流 + 兜底 Timer）
+//
+// 设计原则（v2.9.1 修正 v2.9 的两处问题）：
+//   · v2.9 把分发完全押在 vblank 回调上。但 JUCE Windows VBlankThread 通过
+//     AsyncUpdater 派发事件，消息线程没处理完上一个回调时新事件被直接丢弃
+//     （flagPaintPending 合并）；GL 渲染线程又持锁执行 renderOpenGL +
+//     swapBuffers（等 vsync）周期性阻塞消息线程 → 负反馈循环，分发频率
+//     断崖式掉到吞吐平衡点（实测 ~30fps）。
+//   · v2.9.1 改为"vblank 时间信用"模型：
+//       每个 vblank 事件把"距上一个事件的真实时间"累加进 credit；
+//       credit ≥ 目标间隔时消费一个间隔并分发。分数倍率（如 144Hz 显示器
+//       限 120fps = 6/5 分频）由 credit 余量自动实现，且错过若干 vblank 后
+//       下一次回调一定追帧（credit 已超额）。
+//       同时启动兜底 Timer：vblank 被吞期间按墙钟维持分发频率 ≥ 上限，
+//       两个入口共用 lastDispatchWallMs 去重（vblank 正常时兜底不触发）。
+//   · 无上限模式（userRequestedFpsLimit==0）每个 vblank 都分发 = 跟随刷新率。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::onDisplayVBlank (double timestampSec)
+{
+    const double nowWallMs = juce::Time::getMillisecondCounterHiRes();
+    vblankLastWallMs = nowWallMs;
+
+    // 首个 vblank（或看门狗回退后 vblank 恢复）：接管帧时钟并立即出一帧
+    if (! processor.getAnalyserHub().isUsingExternalFrameClock())
+    {
+        processor.getAnalyserHub().setExternalFrameClock (true);
+        updateFramePacingFallbackTimer();
+        vblankLastSec  = timestampSec;
+        vblankCreditMs = 0.0;
+        performFrameDispatch (timestampSec);
+        return;
+    }
+
+    tryDispatchFromVBlank (nowWallMs, timestampSec);
+}
+
+void Y2KmeterAudioProcessorEditor::performFrameDispatch (double timestampSec)
+{
+    // 双入口去重：vblank 与兜底 Timer 在 ~1ms 内竞争时只分发一次
+    const double nowWallMs = juce::Time::getMillisecondCounterHiRes();
+    if (lastDispatchWallMs > 0.0 && nowWallMs - lastDispatchWallMs < 1.0)
+        return;
+
+    lastDispatchWallMs = nowWallMs;
+    processor.getAnalyserHub().dispatchFrameNow (timestampSec);
+}
+
+void Y2KmeterAudioProcessorEditor::tryDispatchFromVBlank (double nowWallMs, double timestampSec)
+{
+    juce::ignoreUnused (nowWallMs);
+
+    // 无上限：每个 vblank 分发一次（跟随显示器刷新率）
+    if (userRequestedFpsLimit <= 0)
+    {
+        performFrameDispatch (timestampSec);
+        return;
+    }
+
+    // credit 累加：两次回调之间的真实 vblank 时间（回调被吞时一次补齐多个周期）
+    if (vblankLastSec > 0.0)
+    {
+        const double dtSec = timestampSec - vblankLastSec;
+        if (dtSec > 0.0 && dtSec < 0.25)
+            vblankCreditMs += dtSec * 1000.0;
+    }
+    vblankLastSec = timestampSec;
+
+    const double intervalMs = 1000.0 / (double) userRequestedFpsLimit;
+
+    // 追赶保护：credit 超额过多（长停顿）时清空，避免连续补帧风暴
+    if (vblankCreditMs > intervalMs * 2.0)
+        vblankCreditMs = intervalMs * 2.0;
+
+    if (vblankCreditMs >= intervalMs - 0.5)   // 0.5ms 容差吸收浮点/舍入抖动
+    {
+        vblankCreditMs = juce::jmin (vblankCreditMs - intervalMs, intervalMs); // 保留余量供 6/5 分频
+        performFrameDispatch (timestampSec);
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::tryDispatchFromFallbackTimer (double nowWallMs)
+{
+    if (userRequestedFpsLimit <= 0)
+        return; // 无上限：由 vblank 独占驱动，兜底不介入
+
+    const double intervalMs = 1000.0 / (double) userRequestedFpsLimit;
+    if (lastDispatchWallMs <= 0.0 || nowWallMs - lastDispatchWallMs >= intervalMs)
+        performFrameDispatch (juce::Time::getMillisecondCounterHiRes() * 0.001);
+}
+
+void Y2KmeterAudioProcessorEditor::updateFramePacingFallbackTimer()
+{
+    if (framePacingFallback == nullptr)
+        return;
+
+    if (userRequestedFpsLimit > 0
+        && processor.getAnalyserHub().isUsingExternalFrameClock())
+    {
+        // 兜底周期取目标间隔（1000/hz 整数除法 = 8ms@120Hz），实际出帧由
+        // 判据（≥ intervalMs）限制在 120Hz；仅在 vblank 被吞时承担分发。
+        framePacingFallback->startTimer (1000 / userRequestedFpsLimit);
+    }
+    else
+    {
+        framePacingFallback->stopTimer();
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::updateFrameClockWatchdog()
+{
+    auto& hub = processor.getAnalyserHub();
+    if (! hub.isUsingExternalFrameClock())
+        return;
+
+    // 250ms 内没有 vblank：显示器休眠 / 远程桌面 / 窗口被最小化到无输出 —— 交回内部 Timer
+    if (juce::Time::getMillisecondCounterHiRes() - vblankLastWallMs > 250.0)
+    {
+        hub.setExternalFrameClock (false);
+        updateFramePacingFallbackTimer();
+        lastDispatchWallMs = 0.0;
+        vblankLastSec      = 0.0;
+        vblankCreditMs     = 0.0;
     }
 }
 
@@ -5692,6 +5904,13 @@ static juce::File FindMilkdropLikeDir()
 }
 
 void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
+  // v2.9.2：调大 GL 图片纹理缓存（JUCE 默认仅 8MB）。
+  //   workspace 画布背景（~5.8MB）+ 二十个模块的静态/动态图层纹理总量远超 8MB，
+  //   默认缓存下每帧互相挤占 LRU —— workspace 背景纹理被逐出后整图重传
+  //   （实测 10.9ms/帧，占全场景帧预算的三分之一以上）。96MB 足以容纳全部
+  //   常驻图层，且只在实际用到时分配。
+  openGLContext.setImageCacheSize (96 * 1024 * 1024);
+
   // 脱离态期间 Editor renderer 被挂起，跳过创建，避免与 GLView 的本地
   // projectM handle 共存（Windows libprojectM/GLEW 全局指针表冲突）。
   if (milkdrop_renderer_suspended_)
@@ -5774,6 +5993,12 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
 void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   using namespace juce::gl;
+
+  // v2.9：真实出帧计数（GL 线程每出一帧调用一次 renderOpenGL）
+  glFrameCounter.fetch_add(1, std::memory_order_relaxed);
+
+  // v2.9.2：GL 帧耗时统计（诊断构建）
+  Y2K_PERF_FRAME_SCOPE("glFrame");
 
   // 保存原始 viewport 和 DPI 缩放（Milkdrop 和 Spectrogram3D 共用）
   GLint orig_viewport[4];
@@ -5899,18 +6124,13 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       milkdrop_last_real_pcm_ = milkdrop_pending_pcm_;
       milkdrop_last_real_frames_ = milkdrop_pending_frames_;
       milkdrop_pending_frames_ = 0;
-    } else if (milkdrop_has_ever_received_pcm_) {
-      // 无新音频时送入静音，projectM 内部音频缓冲自然衰减，
-      // bass/mid/treb → 0，驱动动画逐渐趋近静止
-      constexpr unsigned int kSilenceFrames = 2048;
-      std::vector<float> silence(kSilenceFrames * 2, 0.0f);
-      api.addPcmFloat(milkdrop_pm_handle_, silence.data(),
-                      kSilenceFrames, true);
     } else {
-      // 冷启动：尚无真实音频，送静音让 projectM 渲染 idle 预设
+      // 无新音频 / 冷启动：送入静音，projectM 内部音频缓冲自然衰减，
+      // bass/mid/treb → 0，驱动动画逐渐趋近静止（或渲染 idle 预设）。
+      // v2.9：静音缓冲改为静态只读数组，避免 GL 线程每帧 16KB 堆分配 + 清零。
       constexpr unsigned int kSilenceFrames = 2048;
-      std::vector<float> silence(kSilenceFrames * 2, 0.0f);
-      api.addPcmFloat(milkdrop_pm_handle_, silence.data(),
+      static const std::array<float, kSilenceFrames * 2> kSilence {};
+      api.addPcmFloat(milkdrop_pm_handle_, kSilence.data(),
                       kSilenceFrames, true);
     }
   }
@@ -5925,8 +6145,8 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   int max_w = 256, max_h = 256;
   int floating_cw = 0, floating_ch = 0;  // 浮动 Milkdrop 模块 content 尺寸（独立追踪）
   {
-    std::function<void(juce::Component*)> measureMax =
-        [&](juce::Component* root) {
+    // v2.9：泛型递归 lambda 替代 std::function（GL 线程每帧调用，避免类型擦除 + 可能的堆分配）
+    auto measureMax = [&](auto& self, juce::Component* root) -> void {
       for (int i = 0; i < root->getNumChildComponents(); ++i) {
         auto* child = root->getChildComponent(i);
         if (child == nullptr) continue;
@@ -5938,11 +6158,11 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
             max_h = std::max(max_h, cl.getHeight());
           }
         } else {
-          measureMax(child);
+          self(self, child);
         }
       }
     };
-    measureMax(this);
+    measureMax(measureMax, this);
 
     // 同时扫描浮动窗口，记录其 content 尺寸供共享帧捕获
     for (auto& wnd : floatingWindows_)
@@ -6090,44 +6310,12 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   }
 
   // ================================================================
-  // 跨 FBO blit：offscreen FBO → FBO 0，搬运到各模块正确位置
+  // v2.9.3：GL 直渲染 z 序统一遍历（Milkdrop blit + S3D 条带按组件树
+  //   顺序绘制，重叠区域由 z 序决定遮挡 —— 聚焦模块覆盖另一个）
   // ================================================================
-  juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, blit_source_fbo);
-  juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER, 0);
-
-  std::function<void(juce::Component*)> blitToModules =
-      [&](juce::Component* root) {
-    for (int i = 0; i < root->getNumChildComponents(); ++i) {
-      auto* child = root->getChildComponent(i);
-      if (!child) continue;
-      if (auto* milk = dynamic_cast<MilkdropModule*>(child)) {
-        if (!milk->isVisible() || !milk->isShowing()) continue;
-        auto cl = milk->GetContentLocalBounds();
-        auto tl = getLocalPoint(milk, cl.getPosition());
-        auto br = getLocalPoint(milk, cl.getBottomRight());
-        int lw = br.x - tl.x, lh = br.y - tl.y;
-        if (lw <= 0 || lh <= 0) continue;
-
-        int gx = static_cast<int>(tl.x * dpi_scale);
-        int gy = static_cast<int>((editor_h - (tl.y + lh)) * dpi_scale);
-        int gw = static_cast<int>(lw * dpi_scale);
-        int gh = static_cast<int>(lh * dpi_scale);
-
-        int sw = gw / milkdrop_render_scale_;
-        int sh = gh / milkdrop_render_scale_;
-        sw = std::max(sw, 1);
-        sh = std::max(sh, 1);
-
-        juce::gl::glBlitFramebuffer(0, 0, sw, sh,
-                                     gx, gy, gx + gw, gy + gh,
-                                     juce::gl::GL_COLOR_BUFFER_BIT,
-                                     juce::gl::GL_LINEAR);
-      } else {
-        blitToModules(child);
-      }
-    }
-  };
-  blitToModules(this);
+  renderGlDirectModulesZOrdered(dpi_scale, editor_h,
+                                (int)(editor_h * dpi_scale),
+                                true, blit_source_fbo);
 
   // ================================================================
   // 浮动 Milkdrop 窗口共享帧捕获
@@ -6208,13 +6396,586 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
 
   } // if Milkdrop ready
+  else
+  {
+    // Milkdrop 未就绪/挂起：仍要画 S3D（glDirectActive 已接管的模块不能变透明）
+    renderGlDirectModulesZOrdered(dpi_scale, editor_h,
+                                  (int)(editor_h * dpi_scale),
+                                  false, 0);
+  }
 
   // 恢复原始 viewport，供 JUCE CPE 渲染子组件 CachedImage
   juce::gl::glViewport(orig_viewport[0], orig_viewport[1],
                         orig_viewport[2], orig_viewport[3]);
 }
 
+// ================================================================
+// v2.9.3 GL 直渲染（z 序统一遍历）
+//   在 renderOpenGL（GL 线程、FBO 0 后缓冲）里按组件树顺序统一绘制：
+//     · Milkdrop 模块 → projectM 帧 blit；
+//     · Spectrogram3D 模块 → VBO 直画凹陷背景 + 条带 + 顶部轮廓线。
+//   一次遍历保证重叠区域由组件 z 序决定遮挡（聚焦模块覆盖另一个），
+//   而不是固定"Milkdrop 先画、S3D 后画"。
+//   shader 编译失败 → s3dGlReady=false → S3D 模块保持旧软件渲染路径。
+// ================================================================
+void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale, int editorLogicalH,
+                                                                  int editorPhysH,
+                                                                  bool milkdropReady,
+                                                                  unsigned int milkdropBlitSourceFbo)
+{
+  using namespace juce::gl;
+
+  // v2.9.3 诊断开关：Y2K_NO_S3D_GL 非空时禁用 S3D GL 直渲染（模块保持旧路径）
+  static const bool glDisabled = juce::SystemStats::getEnvironmentVariable ("Y2K_NO_S3D_GL", "").isNotEmpty();
+  const bool s3dEnabled = ! glDisabled;
+
+  if (s3dEnabled && ! s3dShaderUseChecked)
+  {
+    s3dShaderUseChecked = true;
+
+    const char* vs =
+      "attribute vec2 position;\n"
+      "attribute vec4 colour;\n"
+      "uniform vec4 transform;\n"   // xy = scale, zw = offset（物理像素）
+      "uniform vec4 ndcScale;\n"    // xy = 2/w, 2/h；zw = -1, -1
+      "uniform float snapMode;\n"   // >0.5：顶点对齐物理像素中心（像素风细线防混合闪动）
+      "varying vec4 vColour;\n"
+      "void main()\n"
+      "{\n"
+      "  vec2 px = position * transform.xy + transform.zw;\n"
+      "  if (snapMode > 0.5) px = floor (px) + vec2 (0.5);\n"
+      "  gl_Position = vec4 (px * ndcScale.xy + ndcScale.zw, 0.0, 1.0);\n"
+      "  vColour = colour;\n"
+      "}\n";
+    const char* fs =
+      "varying vec4 vColour;\n"
+      "void main() { gl_FragColor = vColour; }\n";
+
+    s3dShader = std::make_unique<juce::OpenGLShaderProgram> (openGLContext);
+    if (s3dShader->addVertexShader (vs)
+        && s3dShader->addFragmentShader (fs)
+        && s3dShader->link())
+    {
+      s3dShader->use();
+      s3dTransformUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dShader, "transform"));
+      s3dNdcUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dShader, "ndcScale"));
+      s3dSnapUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dShader, "snapMode"));
+      glUseProgram (s3dShader->getProgramID());
+      s3dPosAttrib = (int) glGetAttribLocation (s3dShader->getProgramID(), "position");
+      s3dColAttrib = (int) glGetAttribLocation (s3dShader->getProgramID(), "colour");
+
+      // VAO（attrib 布局容器；VBO 为 per-module 懒创建，避免多模块共享单
+      //   VBO 时"版本化跳过上传"导致画了别的模块的数据）
+      glGenVertexArrays (1, &s3dVao);
+      glBindVertexArray (s3dVao);
+      glBindVertexArray (0);
+      glBindBuffer (GL_ARRAY_BUFFER, 0);
+      // v2.9.5：临时 quad VBO（纹理 quad / trail 衰减 quad 专用，每次上传）
+      glGenBuffers (1, &s3dQuadVbo);
+
+      s3dGlReady = true;
+    }
+
+    // ---- v2.9.5：纹理 shader（纹理通道 + trail FBO 合成）----
+    const char* tvs =
+      "attribute vec2 position;\n"
+      "attribute vec2 texCoord;\n"
+      "uniform vec4 transform;\n"
+      "uniform vec4 ndcScale;\n"
+      "varying vec2 vUv;\n"
+      "void main()\n"
+      "{\n"
+      "  vec2 px = position * transform.xy + transform.zw;\n"
+      "  gl_Position = vec4 (px * ndcScale.xy + ndcScale.zw, 0.0, 1.0);\n"
+      "  vUv = texCoord;\n"
+      "}\n";
+    const char* tfs =
+      "varying vec2 vUv;\n"
+      "uniform sampler2D tex;\n"
+      "uniform vec2 texWindow;\n"   // x = uv 窗口起点，y = uv 窗口宽度
+      "void main()\n"
+      "{\n"
+      "  vec2 uv = vec2 (vUv.x * texWindow.y + texWindow.x, vUv.y);\n"
+      "  gl_FragColor = texture2D (tex, uv);\n"
+      "}\n";
+
+    s3dTexShader = std::make_unique<juce::OpenGLShaderProgram> (openGLContext);
+    if (s3dTexShader->addVertexShader (tvs)
+        && s3dTexShader->addFragmentShader (tfs)
+        && s3dTexShader->link())
+    {
+      s3dTexShader->use();
+      s3dTexTransformUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dTexShader, "transform"));
+      s3dTexNdcUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dTexShader, "ndcScale"));
+      s3dTexWindowUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dTexShader, "texWindow"));
+      glUseProgram (s3dTexShader->getProgramID());
+      s3dTexPosAttrib = (int) glGetAttribLocation (s3dTexShader->getProgramID(), "position");
+      s3dTexUvAttrib = (int) glGetAttribLocation (s3dTexShader->getProgramID(), "texCoord");
+      if (s3dTexPosAttrib < 0 || s3dTexUvAttrib < 0)
+        s3dTexShader.reset();   // 纹理 shader 不可用 → 纹理通道退化（模块走旧路径）
+    }
+    else
+    {
+      s3dTexShader.reset();
+    }
+  }
+
+  const bool s3dOk = s3dEnabled && s3dGlReady;
+  const bool milkOk = milkdropReady;
+
+  if (! s3dOk && ! milkOk)
+    return;
+
+  const int vw = juce::jmax (1, juce::roundToInt ((float) getWidth() * dpiScale));
+  const int vh = juce::jmax (1, editorPhysH);
+
+  // 固定画到后缓冲 FBO 0（blit 的 READ 绑定由调用方设置）
+  glBindFramebuffer (GL_FRAMEBUFFER, 0);
+  glViewport (0, 0, vw, vh);
+
+  // v2.9.3：projectM 是 3D 渲染，运行后会残留 GL_CULL_FACE /
+  //   GL_SCISSOR_TEST 等状态。Y 翻转后条带三角形绕序变成"背面"，若 cull 未关
+  //   会被全部剔除；scissor 残留则会把绘制裁剪掉。2D 直渲染不需要这些状态。
+  glDisable (GL_CULL_FACE);
+  glDisable (GL_SCISSOR_TEST);
+  glDisable (GL_STENCIL_TEST);
+  glDisable (GL_DEPTH_TEST);
+  glEnable (GL_BLEND);
+  glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  if (s3dOk)
+  {
+    s3dShader->use();
+    s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
+    glBindVertexArray (s3dVao);
+  }
+
+  // v2.9.4：统一 GL 直渲染入口 —— 所有 GlDirectModuleBase 模块共用同一条
+  //   "transform + 版本化上传 + 按 segments 逐段 draw"路径（此前三个模块
+  //   各复制一份 lambda）。
+  //   renderToLogical 模式：先渲染到模块专属的逻辑分辨率 FBO，再线性放大
+  //   blit 到后缓冲 —— 与旧版"CPU 光栅化到逻辑纹理 + 纹理放大"逐像素等效，
+  //   解决 150% DPI 下 1px 柱在物理网格上的交替混合闪动。
+  auto renderOneGlModule = [&] (GlDirectModuleBase& mod)
+  {
+    auto snap = mod.getGlSnapshot();
+    if (snap == nullptr || snap->segments.empty())
+      return;
+    if (snap->vertices.empty() && snap->texW <= 0 && ! snap->trailFbo)
+      return;
+
+    // v2.9.5：每个模块开始前恢复默认渲染目标与视口 —— renderToLogical 分支
+    //   结束时 GL_FRAMEBUFFER 仍绑定模块 FBO（blit 只解绑了 READ/DRAW 别名），
+    //   下一个走直接路径的模块若不恢复，会把内容画进上一个模块的 FBO、
+    //   且视口仍是 FBO 尺寸 → "底图画大、盖住所有模块"的根因。
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    glViewport (0, 0, vw, vh);
+
+    // VBO 版本化上传 —— 快照未变时跳过，只复用旧 VBO 内容重画。
+    //   每个模块独立 VBO（懒创建）：共享单 VBO 时，跳过上传的模块会画出
+    //   "别的模块刚上传的数据"。
+    const bool needUpload = snap->version != mod.lastUploadedVersion;
+    if (mod.glVbo == 0)
+      glGenBuffers (1, &mod.glVbo);
+
+    auto setVertexAttribs = [&] ()
+    {
+      glBindBuffer (GL_ARRAY_BUFFER, mod.glVbo);
+      glVertexAttribPointer ((GLuint) s3dPosAttrib, 2, GL_FLOAT, GL_FALSE, 24, nullptr);
+      glEnableVertexAttribArray ((GLuint) s3dPosAttrib);
+      glVertexAttribPointer ((GLuint) s3dColAttrib, 4, GL_FLOAT, GL_FALSE, 24, (void*) 8);
+      glEnableVertexAttribArray ((GLuint) s3dColAttrib);
+    };
+
+    // 纹理 quad 绘制（纹理通道显示 / trail FBO 合成共用）
+    auto drawTexQuad = [&] (GLuint tex, juce::Rectangle<int> target,
+                            float scrollU, float winW)
+    {
+      const auto tl = getLocalPoint (&mod, juce::Point<int>());
+      glActiveTexture (GL_TEXTURE0);
+      glBindTexture (GL_TEXTURE_2D, tex);
+      s3dTexShader->use();
+      s3dTexNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
+      s3dTexTransformUniform->set (dpiScale, -dpiScale,
+                                   (float) tl.x * dpiScale,
+                                   (float) editorPhysH - (float) tl.y * dpiScale);
+      s3dTexWindowUniform->set (scrollU, winW);
+      const float x0 = (float) target.getX(), y0 = (float) target.getY();
+      const float x1 = (float) target.getRight(), y1 = (float) target.getBottom();
+      // v2.9.5 修复：GL 纹理 v=0 是内存第一行（FBO 渲染时为底部）——
+      //   屏幕顶(y0)必须配 uv(0,1)（纹理顶），否则内容上下颠倒
+      //   （StereoField trail 合成实测点云翻转）。
+      const float quad[24] = {
+        x0, y0, 0.0f, 1.0f,  x1, y0, 1.0f, 1.0f,  x0, y1, 0.0f, 0.0f,
+        x1, y0, 1.0f, 1.0f,  x1, y1, 1.0f, 0.0f,  x0, y1, 0.0f, 0.0f,
+      };
+      // v2.9.5：用编辑器级 s3dQuadVbo（不能借模块 glVbo —— 模块 VBO 的
+      //   版本化复用会被 quad 数据覆盖，needUpload=false 帧画错）
+      glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
+      glVertexAttribPointer ((GLuint) s3dTexPosAttrib, 2, GL_FLOAT, GL_FALSE, 16, nullptr);
+      glEnableVertexAttribArray ((GLuint) s3dTexPosAttrib);
+      glVertexAttribPointer ((GLuint) s3dTexUvAttrib, 2, GL_FLOAT, GL_FALSE, 16, (void*) 8);
+      glEnableVertexAttribArray ((GLuint) s3dTexUvAttrib);
+      glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
+      glDrawArrays (GL_TRIANGLES, 0, 6);
+    };
+
+    if (snap->renderToLogical && snap->logicalW > 0 && snap->logicalH > 0)
+    {
+      // 恢复主 shader（上一模块的纹理 quad 可能切到了纹理 shader）
+      s3dShader->use();
+
+      // 2x 超采样（SSAA）：FBO 渲染 2 倍逻辑分辨率，blit 时线性缩小 ——
+      //   缩小滤波天然提供抗锯齿（旧版 JUCE path 渲染带 AA；顶点流是硬边
+      //   三角形，直接渲染会呈现 1px 台阶锯齿）。纯 2D 机制，无 MSAA 的
+      //   驱动兼容性风险（上一版 GL_TEXTURE_2D_MULTISAMPLE 在部分驱动上
+      //   创建失败导致 FBO 不完整 → 全部模块透明）。
+      constexpr int kSsaa = 2;
+      const int fboW = snap->logicalW * kSsaa;
+      const int fboH = snap->logicalH * kSsaa;
+
+      // 懒创建/重建逻辑分辨率 FBO
+      if (mod.glFbo == 0 || mod.glFboW != fboW || mod.glFboH != fboH)
+      {
+        if (mod.glFbo != 0)
+        {
+          glDeleteFramebuffers (1, &mod.glFbo);
+          glDeleteTextures (1, &mod.glFboTex);
+          mod.glFbo = 0;
+          mod.glFboTex = 0;
+        }
+        glGenFramebuffers (1, &mod.glFbo);
+        glGenTextures (1, &mod.glFboTex);
+        glBindTexture (GL_TEXTURE_2D, mod.glFboTex);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                      fboW, fboH, 0,
+                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture (GL_TEXTURE_2D, 0);
+        glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
+        glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                GL_TEXTURE_2D, mod.glFboTex, 0);
+        glBindFramebuffer (GL_FRAMEBUFFER, 0);
+        mod.glFboW = fboW;
+        mod.glFboH = fboH;
+      }
+
+      // 渲染到逻辑 FBO（模块本地坐标 → FBO：2x 缩放、x 减 canvas 偏移、
+      //   Y 翻转；背景 quad 每帧全量覆盖，无需 clear）
+      glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
+      glViewport (0, 0, fboW, fboH);
+      s3dNdcUniform->set (2.0f / (float) fboW, 2.0f / (float) fboH, -1.0f, -1.0f);
+      s3dTransformUniform->set ((float) kSsaa, (float) -kSsaa,
+                                -(float) snap->canvasLocal.getX() * (float) kSsaa,
+                                (float) (fboH + snap->canvasLocal.getY() * kSsaa));
+      s3dSnapUniform->set (0.0f);
+
+      // v2.9.5：显式设置 attrib（上一模块若是纹理/trail 路径，drawTexQuad
+      //   会把 attrib 切成"纹理布局（stride 16B、指向 s3dQuadVbo）"，z 序
+      //   变化后本分支若不重设，会用错误布局读 VBO → 顶点/颜色全错（黄斑））
+      setVertexAttribs();
+      if (needUpload)
+        glBufferData (GL_ARRAY_BUFFER,
+                      (GLsizeiptr) (snap->vertices.size() * sizeof (float)),
+                      snap->vertices.data(), GL_DYNAMIC_DRAW);
+      for (const auto& seg : snap->segments)
+        glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
+                      seg.offset, seg.count);
+
+      // 线性缩小 blit 到后缓冲的模块 canvas 物理区域（2x 缩小 = 4 采样 box AA）
+      const auto cPos = getLocalPoint (&mod, snap->canvasLocal.getPosition());
+      const auto cBR  = getLocalPoint (&mod, snap->canvasLocal.getBottomRight());
+      glBindFramebuffer (GL_READ_FRAMEBUFFER, mod.glFbo);
+      glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
+      glViewport (0, 0, vw, vh);
+      glBlitFramebuffer (0, 0, fboW, fboH,
+                         (int) (cPos.x * dpiScale),
+                         (int) (editorPhysH - cBR.y * dpiScale),
+                         (int) (cBR.x * dpiScale),
+                         (int) (editorPhysH - cPos.y * dpiScale),
+                         GL_COLOR_BUFFER_BIT, GL_LINEAR);
+      glBindFramebuffer (GL_READ_FRAMEBUFFER, 0);
+    }
+    else if (snap->trailFbo && snap->texW > 0 && snap->texH > 0 && s3dTexShader != nullptr)
+    {
+      // ============ trail 累积通道（v2.9.5，StereoField 残影）============
+      //   1) 持久 trail FBO（1x 逻辑尺寸，不清 —— 衰减 + 累积）
+      if (mod.glFbo == 0 || mod.glFboW != snap->texW || mod.glFboH != snap->texH)
+      {
+        if (mod.glFbo != 0)
+        {
+          glDeleteFramebuffers (1, &mod.glFbo);
+          glDeleteTextures (1, &mod.glFboTex);
+          mod.glFbo = 0;
+          mod.glFboTex = 0;
+        }
+        glGenFramebuffers (1, &mod.glFbo);
+        glGenTextures (1, &mod.glFboTex);
+        glBindTexture (GL_TEXTURE_2D, mod.glFboTex);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                      snap->texW, snap->texH, 0,
+                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture (GL_TEXTURE_2D, 0);
+        glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
+        glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                GL_TEXTURE_2D, mod.glFboTex, 0);
+        glBindFramebuffer (GL_FRAMEBUFFER, 0);
+        mod.glFboW = snap->texW;
+        mod.glFboH = snap->texH;
+        mod.glTrailCleared = false;
+      }
+
+      glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
+      glViewport (0, 0, snap->texW, snap->texH);
+      if (! mod.glTrailCleared)
+      {
+        glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+        glClear (GL_COLOR_BUFFER_BIT);
+        mod.glTrailCleared = true;
+      }
+
+      //   2) 衰减 pass：覆盖 quad，blend (ZERO, ONE_MINUS_SRC_ALPHA) → dst×decay
+      s3dShader->use();
+      s3dNdcUniform->set (2.0f / (float) snap->texW, 2.0f / (float) snap->texH, -1.0f, -1.0f);
+      s3dTransformUniform->set (1.0f, -1.0f, 0.0f, (float) snap->texH);
+      s3dSnapUniform->set (0.0f);
+      glBlendFunc (GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+      {
+        const float w = (float) snap->texW, h = (float) snap->texH;
+        const float a = 1.0f - snap->trailDecay;
+        const float quad[36] = {
+          0.0f, 0.0f, 1, 1, 1, a,   w, 0.0f, 1, 1, 1, a,   0.0f, h, 1, 1, 1, a,
+          w, 0.0f, 1, 1, 1, a,      w, h, 1, 1, 1, a,      0.0f, h, 1, 1, 1, a,
+        };
+        // v2.9.5：衰减 quad 用 s3dQuadVbo（勿污染模块 glVbo）
+        glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
+        glVertexAttribPointer ((GLuint) s3dPosAttrib, 2, GL_FLOAT, GL_FALSE, 24, nullptr);
+        glEnableVertexAttribArray ((GLuint) s3dPosAttrib);
+        glVertexAttribPointer ((GLuint) s3dColAttrib, 4, GL_FLOAT, GL_FALSE, 24, (void*) 8);
+        glEnableVertexAttribArray ((GLuint) s3dColAttrib);
+        glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
+        glDrawArrays (GL_TRIANGLES, 0, 6);
+      }
+
+      //   3) 点 pass：trail 段（叠加累积；点顶点为模块本地坐标，
+      //      经 canvasLocal 偏移换算到 trail FBO 坐标）
+      glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      s3dTransformUniform->set (1.0f, -1.0f,
+                                -(float) snap->canvasLocal.getX(),
+                                (float) (snap->texH + snap->canvasLocal.getY()));
+      setVertexAttribs();
+      if (needUpload)
+        glBufferData (GL_ARRAY_BUFFER,
+                      (GLsizeiptr) (snap->vertices.size() * sizeof (float)),
+                      snap->vertices.data(), GL_DYNAMIC_DRAW);
+      for (size_t si = (size_t) snap->trailSegStart; si < snap->segments.size(); ++si)
+      {
+        const auto& seg = snap->segments[si];
+        glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
+                      seg.offset, seg.count);
+      }
+
+      //   4) 背景段直接画后缓冲
+      glBindFramebuffer (GL_FRAMEBUFFER, 0);
+      glViewport (0, 0, vw, vh);
+      {
+        const auto tl = getLocalPoint (&mod, juce::Point<int>());
+        s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
+        s3dTransformUniform->set (dpiScale, -dpiScale,
+                                  (float) tl.x * dpiScale,
+                                  (float) editorPhysH - (float) tl.y * dpiScale);
+        s3dSnapUniform->set (snap->snapToPixels ? 1.0f : 0.0f);
+        setVertexAttribs();
+        for (size_t si = 0; si < (size_t) snap->trailSegStart && si < snap->segments.size(); ++si)
+        {
+          const auto& seg = snap->segments[si];
+          glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
+                        seg.offset, seg.count);
+        }
+      }
+
+      //   5) 合成：trail 纹理 alpha 混合到 texTargetRect
+      glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      drawTexQuad (mod.glFboTex, snap->texTargetRect, 0.0f, 1.0f);
+    }
+    else
+    {
+      // 直接渲染到后缓冲：快照顶点坐标是"模块本地"坐标（含 canvas 偏移），
+      //   transform 原点取模块左上角 (0,0)。
+      // v2.9.5 修复（两处状态残留，都必须在每个分支显式设置）：
+      //   1) use 顺序：Uniform::set 写入"当前绑定的 program"，上一模块（trail/
+      //      纹理路径）结束时当前 program 是纹理 shader —— 先 set 会写到错误
+      //      program，主 shader 的 transform 残留上一模块的 FBO 局部变换；
+      //   2) NDC：上一模块（renderToLogical）留下的是 FBO 尺寸 NDC —— 不重设
+      //      会让背景顶点被错误缩放画飞（四周透底 + 巨大错位底图）。
+      const auto tl = getLocalPoint (&mod, juce::Point<int>());
+      s3dShader->use();
+      s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
+      s3dTransformUniform->set (dpiScale, -dpiScale,
+                                (float) tl.x * dpiScale,
+                                (float) editorPhysH - (float) tl.y * dpiScale);
+      s3dSnapUniform->set (snap->snapToPixels ? 1.0f : 0.0f);
+
+      // 顶点段（背景/边框）先画 —— 背景 9 quad 含全 canvas 底色，若画在纹理
+      //   之后会把瀑布图整个盖住
+      setVertexAttribs();
+      if (needUpload)
+        glBufferData (GL_ARRAY_BUFFER,
+                      (GLsizeiptr) (snap->vertices.size() * sizeof (float)),
+                      snap->vertices.data(), GL_DYNAMIC_DRAW);
+      for (const auto& seg : snap->segments)
+        glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
+                      seg.offset, seg.count);
+
+      // 纹理通道：上传 + quad（画在背景之后 —— 瀑布图覆盖 content 底色）
+      if (snap->texW > 0 && snap->texH > 0 && s3dTexShader != nullptr
+          && ! snap->texPixels.empty())
+      {
+        if (mod.glTex == 0)
+          glGenTextures (1, &mod.glTex);
+        glBindTexture (GL_TEXTURE_2D, mod.glTex);
+        if (snap->texDirty)
+        {
+          // 像素为 0xAARRGGBB（juce::Colour::getPixelARGB），小端内存字节序
+          //   即 B,G,R,A → GL_BGRA 上传避免字节重排。
+          // 最近邻过滤（与旧版 lowResamplingQuality 一致）：像素风瀑布图
+          //   线性采样会在双拷贝环形窗口边缘混入镜像列 → 边缘 1px"拖影"。
+          glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                        snap->texW, snap->texH, 0,
+                        GL_BGRA, GL_UNSIGNED_BYTE, snap->texPixels.data());
+          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+        glBindTexture (GL_TEXTURE_2D, 0);
+        drawTexQuad (mod.glTex, snap->texTargetRect, snap->texScrollU, snap->texWinW);
+        s3dShader->use();   // 恢复主 shader（下一模块开头也会再设）
+      }
+    }
+
+    if (needUpload)
+      mod.lastUploadedVersion = snap->version;
+
+    // 首次成功绘制后接管组件绘制路径，并强制组件缓存重绘 —— 接管标志
+    //   变化后组件缓存的"软件路径不透明内容"若不同步失效，会盖住 GL 内容
+    //   （dock 回来图像丢失/拖影的根源；repaint 线程安全，GL 线程可调）。
+    if (! mod.glDirectActive.load())
+    {
+      mod.glDirectActive.store (true);
+      mod.repaint();
+    }
+  };
+
+  // 统一 z 序遍历：组件树先序（兄弟按索引序）即 z 从低到高，
+  //   重叠区域后画的覆盖先画的 —— 聚焦（toFront）模块自然在上层。
+  //   Milkdrop（FBO 渲染 + blit）与 GlDirectModuleBase（顶点流）在此同权参与。
+  auto walk = [&] (auto& self, juce::Component* root) -> void
+  {
+    for (int i = 0; i < root->getNumChildComponents(); ++i)
+    {
+      auto* child = root->getChildComponent (i);
+      if (child == nullptr)
+        continue;
+
+      if (auto* milk = dynamic_cast<MilkdropModule*> (child))
+      {
+        if (milkOk && milk->isVisible() && milk->isShowing())
+        {
+          auto cl = milk->GetContentLocalBounds();
+          auto tl = getLocalPoint (milk, cl.getPosition());
+          auto br = getLocalPoint (milk, cl.getBottomRight());
+          int lw = br.x - tl.x, lh = br.y - tl.y;
+          if (lw > 0 && lh > 0)
+          {
+            int gx = static_cast<int> (tl.x * dpiScale);
+            int gy = static_cast<int> ((editorLogicalH - (tl.y + lh)) * dpiScale);
+            int gw = static_cast<int> (lw * dpiScale);
+            int gh = static_cast<int> (lh * dpiScale);
+
+            int sw = gw / milkdrop_render_scale_;
+            int sh = gh / milkdrop_render_scale_;
+            sw = std::max (sw, 1);
+            sh = std::max (sh, 1);
+
+            glBindFramebuffer (GL_READ_FRAMEBUFFER, milkdropBlitSourceFbo);
+            glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
+            glBlitFramebuffer (0, 0, sw, sh,
+                               gx, gy, gx + gw, gy + gh,
+                               GL_COLOR_BUFFER_BIT, GL_LINEAR);
+          }
+        }
+      }
+      else if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (child))
+      {
+        if (s3dOk && gmod->isVisible() && gmod->isShowing())
+          renderOneGlModule (*gmod);
+      }
+      else
+      {
+        self (self, child);
+      }
+    }
+  };
+  walk (walk, this);
+
+  // v2.9.3：恢复 GL 状态。JUCE 组件绘制（paintComponent）在本函数之后执行，
+  //   其状态机假设"干净"的初始状态 —— 残留 program / blend / VAO 会让组件
+  //   绘制命令走错 shader 路径（示波器 paint 实测因此慢 3 倍）。
+  if (s3dOk)
+  {
+    glBindVertexArray (0);
+    glBindBuffer (GL_ARRAY_BUFFER, 0);
+    glUseProgram (0);
+    glEnable (GL_BLEND);
+    glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // JUCE GL 渲染器的预乘约定
+  }
+}
+
 void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
+  // v2.9.4：清理 GL 直渲染资源（VAO + 各 GlDirectModuleBase 模块专属 VBO）
+  if (s3dVao != 0) { juce::gl::glDeleteVertexArrays (1, &s3dVao); s3dVao = 0; }
+  if (s3dQuadVbo != 0) { juce::gl::glDeleteBuffers (1, &s3dQuadVbo); s3dQuadVbo = 0; }
+  {
+    auto releaseVbos = [&] (auto& self, juce::Component* root) -> void
+    {
+      for (int i = 0; i < root->getNumChildComponents(); ++i)
+      {
+        auto* child = root->getChildComponent (i);
+        if (child == nullptr) continue;
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (child))
+        {
+          if (gmod->glVbo != 0) { juce::gl::glDeleteBuffers (1, &gmod->glVbo); gmod->glVbo = 0; }
+          if (gmod->glFbo != 0)
+          {
+            juce::gl::glDeleteFramebuffers (1, &gmod->glFbo);
+            juce::gl::glDeleteTextures (1, &gmod->glFboTex);
+            gmod->glFbo = 0;
+            gmod->glFboTex = 0;
+          }
+          if (gmod->glTex != 0) { juce::gl::glDeleteTextures (1, &gmod->glTex); gmod->glTex = 0; }
+        }
+        else
+        {
+          self (self, child);
+        }
+      }
+    };
+    releaseVbos (releaseVbos, this);
+  }
+  s3dShader.reset();
+  s3dTransformUniform.reset();
+  s3dNdcUniform.reset();
+  s3dSnapUniform.reset();
+  s3dTexShader.reset();
+  s3dTexTransformUniform.reset();
+  s3dTexNdcUniform.reset();
+  s3dTexWindowUniform.reset();
+  s3dGlReady = false;
+
   if (milkdrop_pm_handle_ != nullptr) {
     auto& api = projectm_api::Api::instance();
     api.destroy(milkdrop_pm_handle_);

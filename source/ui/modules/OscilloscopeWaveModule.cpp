@@ -8,7 +8,7 @@
 // ==========================================================
 
 OscilloscopeWaveModule::OscilloscopeWaveModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::oscilloscopeWave),
+    : GlDirectModuleBase(ModuleType::oscilloscopeWave),
       hub(h)
 {
     // Phase F：订阅 Oscilloscope + 注册 FrameListener
@@ -23,6 +23,7 @@ OscilloscopeWaveModule::OscilloscopeWaveModule(AnalyserHub& h)
     {
         invalidateStaticLayer();
         invalidateDynamicLayer();
+        buildGlSnapshot();   // GL 快照含底色/几何颜色，主题切换必须重建
         repaint();
     });
 
@@ -101,15 +102,168 @@ void OscilloscopeWaveModule::onFrame(const AnalyserHub::FrameSnapshot& frame)
     if (snapshotChangedSinceLastDraw())
         dynamicLayerDirty = true;
 
-    // repaint 节流
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    const float  scale  = (float) juce::jmax(1.0, (double) juce::Component::getApproximateScaleFactorForComponent(this));
-    const double minRepaintIntervalMs = 15.0 * (double) juce::jmin(2.0f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+    // v2.9：去掉 15ms×DPI 硬编码节流；波形没变化时跳过重绘
+    // v2.9.3：同步生成 GL 直渲染快照
+    buildGlSnapshot();
+    if (dynamicLayerDirty)
+        repaint();
+}
+
+// ----------------------------------------------------------
+// buildGlSnapshot —— GL 直渲染快照（v2.9.3，与 OscilloscopeModule 同构；
+//   v2.9.4 迁移到统一框架）
+// ----------------------------------------------------------
+void OscilloscopeWaveModule::buildGlSnapshot()
+{
+    if (! wantsGlSnapshot())
+        return;   // v2.9.5：浮动态跳过
+
+    const auto canvas = getCanvasBounds (getContentBounds());
+    auto inner = canvas.reduced (4);
+    if (inner.getWidth() <= 8 || inner.getHeight() <= 8)
         return;
 
-    lastRepaintMs = nowMs;
-    repaint();
+    const bool hasL = (snapshotL.size() > 1);
+    const bool hasR = (snapshotR.size() > 1);
+    const bool drawL = (channelMode == ChannelMode::left || channelMode == ChannelMode::both) && hasL;
+    const bool drawR = (channelMode == ChannelMode::right || channelMode == ChannelMode::both) && hasR;
+    if (! drawL && ! drawR)
+        return;
+
+    auto snap = beginGlSnapshot();
+    // v2.9.4：逻辑 FBO 渲染（规避 dock/聚焦时的透明与拖影问题，见框架注释）
+    snap->renderToLogical = true;
+    snap->logicalW = canvas.getWidth();
+    snap->logicalH = canvas.getHeight();
+    snap->canvasLocal = canvas;
+
+    const int maxPts = juce::jmax (64, inner.getWidth());
+    snap->vertices.reserve ((size_t) (1500 * 6 * 6 + (size_t) 4 * maxPts * 6 * 6));
+
+    auto pushRect = [&] (juce::Rectangle<float> r, juce::Colour c)
+    {
+        const float x0 = r.getX(), y0 = r.getY(), x1 = r.getRight(), y1 = r.getBottom();
+        const float rr = c.getFloatRed(), gg = c.getFloatGreen(),
+                    bb = c.getFloatBlue(), aa = c.getFloatAlpha();
+        const float quad[36] = {
+            x0, y0, rr, gg, bb, aa,  x1, y0, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
+            x1, y0, rr, gg, bb, aa,  x1, y1, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
+        };
+        snap->vertices.insert (snap->vertices.end(), quad, quad + 36);
+    };
+
+    // 背景（与 drawBackground 逐笔对应）
+    {
+        auto cr = canvas.toFloat();
+        pushRect (cr, PinkXP::content);
+        pushRect ({ cr.getX(), cr.getY(), (float) cr.getWidth(), 2.0f }, PinkXP::dark);
+        pushRect ({ cr.getX(), cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::dark);
+        pushRect ({ cr.getX(), cr.getBottom() - 2.0f, (float) cr.getWidth(), 2.0f }, PinkXP::hl);
+        pushRect ({ cr.getRight() - 2.0f, cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::hl);
+        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, (float) cr.getWidth() - 4.0f, 1.0f }, PinkXP::shdw);
+        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, PinkXP::shdw);
+        pushRect ({ cr.getX() + 2.0f, cr.getBottom() - 3.0f, (float) cr.getWidth() - 4.0f, 1.0f }, juce::Colours::white);
+        pushRect ({ cr.getRight() - 3.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, juce::Colours::white);
+
+        const auto dot = PinkXP::pink200.withAlpha (0.35f);
+        constexpr int dotStep = 8;
+        for (int y = inner.getY(); y < inner.getBottom(); y += dotStep)
+            for (int x = inner.getX() + ((y / dotStep) % 2) * (dotStep / 2);
+                 x < inner.getRight(); x += dotStep)
+                pushRect ({ (float) x, (float) y, 1.0f, 1.0f }, dot);
+
+        const auto cross = PinkXP::pink300.withAlpha (0.6f);
+        const int cx = inner.getCentreX();
+        const int cy = inner.getCentreY();
+        pushRect ({ (float) inner.getX(), (float) cy, (float) inner.getWidth(), 1.0f }, cross);
+        pushRect ({ (float) cx, (float) inner.getY(), 1.0f, (float) inner.getHeight() }, cross);
+
+        const auto dash = PinkXP::pink200.withAlpha (0.5f);
+        const int q1x = inner.getX() + inner.getWidth() / 4;
+        const int q3x = inner.getX() + inner.getWidth() * 3 / 4;
+        for (int y = inner.getY(); y < inner.getBottom(); y += 4)
+        {
+            pushRect ({ (float) q1x, (float) y, 1.0f, 2.0f }, dash);
+            pushRect ({ (float) q3x, (float) y, 1.0f, 2.0f }, dash);
+        }
+    }
+
+    // 波形折线 strip（glow + main）
+    const float h     = (float) inner.getHeight();
+    const float cy    = (float) inner.getCentreY();
+    const float halfH = h * 0.45f;
+
+    auto pushWave = [&] (const juce::Array<float>& samples,
+                         juce::Colour glowCol, float glowHalfW,
+                         juce::Colour mainCol, float mainHalfW)
+    {
+        const int N = samples.size();
+        const int targetPoints = juce::jmax (64, inner.getWidth());
+        const int stride = juce::jmax (1, N / targetPoints);
+
+        std::vector<float> xs, ys;
+        xs.reserve ((size_t) (N / stride + 4));
+        ys.reserve ((size_t) (N / stride + 4));
+        for (int i = 0; i < N; i += stride)
+        {
+            const float raw = samples.getUnchecked (i);
+            const float s = std::isfinite (raw) ? juce::jlimit (-1.0f, 1.0f, raw) : 0.0f;
+            xs.push_back ((float) inner.getX() + (float) i / (float) juce::jmax (1, N - 1) * (float) inner.getWidth());
+            ys.push_back (cy - s * halfH);
+        }
+        if ((N - 1) % stride != 0)
+        {
+            const float raw = samples.getUnchecked (N - 1);
+            const float s = std::isfinite (raw) ? juce::jlimit (-1.0f, 1.0f, raw) : 0.0f;
+            xs.push_back ((float) inner.getRight());
+            ys.push_back (cy - s * halfH);
+        }
+
+        const float gr = glowCol.getFloatRed(),   gg = glowCol.getFloatGreen(),
+                    gb = glowCol.getFloatBlue(),  ga = glowCol.getFloatAlpha();
+        const float mr = mainCol.getFloatRed(),   mg = mainCol.getFloatGreen(),
+                    mb = mainCol.getFloatBlue(),  ma = mainCol.getFloatAlpha();
+
+        const size_t ptCount = xs.size();
+        for (int layer = 0; layer < 2; ++layer)
+        {
+            const float hw = (layer == 0) ? glowHalfW : mainHalfW;
+            const float r  = (layer == 0) ? gr : mr;
+            const float gg2= (layer == 0) ? gg : mg;
+            const float b  = (layer == 0) ? gb : mb;
+            const float a  = (layer == 0) ? ga : ma;
+
+            for (size_t i = 0; i + 1 < ptCount; ++i)
+            {
+                const float dx = xs[i + 1] - xs[i];
+                const float dy = ys[i + 1] - ys[i];
+                const float len = std::sqrt (dx * dx + dy * dy);
+                if (len < 1.0e-6f) continue;
+                const float nx = -dy / len * hw;
+                const float ny =  dx / len * hw;
+
+                const float q[36] = {
+                    xs[i] + nx,     ys[i] + ny,     r, gg2, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, gg2, b, a,
+                    xs[i] - nx,     ys[i] - ny,     r, gg2, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, gg2, b, a,
+                    xs[i + 1] - nx, ys[i + 1] - ny, r, gg2, b, a,
+                    xs[i] - nx,     ys[i] - ny,     r, gg2, b, a,
+                };
+                snap->vertices.insert (snap->vertices.end(), q, q + 36);
+            }
+        }
+    };
+
+    if (drawL)
+        pushWave (snapshotL, PinkXP::pink300.withAlpha (0.35f), 1.1f, PinkXP::pink400, 0.7f);
+    if (drawR)
+        pushWave (snapshotR, PinkXP::pink500.withAlpha (0.35f), 1.1f, PinkXP::pink600, 0.7f);
+
+    // 单段：全部为 GL_TRIANGLES
+    snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+
+    publishGlSnapshot (std::move (snap));
 }
 
 // ----------------------------------------------------------
@@ -150,15 +304,32 @@ namespace
 #endif
 }
 
-void OscilloscopeWaveModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
+// ---- GlDirectModuleBase 钩子（v2.9.4 迁移自 v2.9.3 直渲染样板）----
+juce::Rectangle<int> OscilloscopeWaveModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
+{
+    return getCanvasBounds (contentBounds);
+}
+
+void OscilloscopeWaveModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    // 接管时只保留通道模式标签（GL 波形之上的 overlay）
+    g.setColour (PinkXP::ink.withAlpha (0.85f));
+    g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
+    const juce::String modeLabel = (channelMode == ChannelMode::left)  ? "L" :
+                                   (channelMode == ChannelMode::right) ? "R" : "L+R";
+    g.drawText (modeLabel, canvas.getX() + 4, canvas.getBottom() - 14,
+                40, 12, juce::Justification::centredLeft, false);
+}
+
+void OscilloscopeWaveModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     g.setColour(PinkXP::btnFace);
     g.fillRect(contentBounds);
 
+    auto canvas = getCanvasBounds(contentBounds);
     rebuildStaticLayerIfNeeded(contentBounds);
     drawStaticLayer(g, contentBounds);
 
-    auto canvas = getCanvasBounds(contentBounds);
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
@@ -237,7 +408,7 @@ void OscilloscopeWaveModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int
         {
             auto pathL = buildWaveformPath(snapshotL, inner, cy, halfH);
             g.setColour(PinkXP::pink300.withAlpha(0.35f));
-            g.strokePath(pathL, juce::PathStrokeType(3.0f));
+            g.strokePath(pathL, juce::PathStrokeType(2.2f));
             g.setColour(PinkXP::pink400);
             g.strokePath(pathL, juce::PathStrokeType(1.4f));
         }
@@ -250,7 +421,7 @@ void OscilloscopeWaveModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int
         {
             auto pathR = buildWaveformPath(snapshotR, inner, cy, halfH);
             g.setColour(PinkXP::pink500.withAlpha(0.35f));
-            g.strokePath(pathR, juce::PathStrokeType(3.0f));
+            g.strokePath(pathR, juce::PathStrokeType(2.2f));
             g.setColour(PinkXP::pink600);
             g.strokePath(pathR, juce::PathStrokeType(1.4f));
         }

@@ -6,6 +6,7 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/ui/FramePacing.h"
 
 // ==========================================================
 // DynamicsModule —— Pink XP 像素风动态范围监测
@@ -50,10 +51,11 @@ private:
         float peakHold  = -144.0f;
         float peakHoldMs = 0.0f;
 
-        void update(float newVal, float deltaMs)
+        // v2.9：dtSec 驱动（120Hz 标定），帧率无关
+        void update(float newVal, float dtSec)
         {
             if (! std::isfinite(newVal)) newVal = -144.0f;
-            const float alpha = (newVal > smoothed) ? 0.5f : 0.08f;
+            const float alpha = y2k::pacing::alphaForDt ((newVal > smoothed) ? 0.5f : 0.08f, dtSec);
             smoothed = smoothed + alpha * (newVal - smoothed);
             smoothed = juce::jlimit(-144.0f, 60.0f, smoothed);
 
@@ -64,8 +66,8 @@ private:
             }
             else
             {
-                peakHoldMs += deltaMs;
-                if (peakHoldMs > 2000.0f) peakHold -= 0.05f;
+                peakHoldMs += dtSec * 1000.0f;
+                if (peakHoldMs > 2000.0f) peakHold -= y2k::pacing::stepForDt (0.05f, dtSec);
             }
             peakHold = juce::jmax(-144.0f, peakHold);
             value = newVal;
@@ -102,20 +104,16 @@ private:
     float smoothedIntegDR = 0.0f;
     float smoothedCrest   = 0.0f;
 
-    // Crest 历史带（120 帧 ≈ 4s）
+    // Crest 历史带（120 格；v2.9 起按时间推进，每 1/120s 一格 ≈ 1s）
     static constexpr int crestHistLen = 120;
     std::array<float, crestHistLen> crestHist {};
     int crestHistWrite = 0;
+    float crestHistAccum = 0.0f;
 
     // 布局缓存
     juce::Rectangle<int> areaMeters;
     juce::Rectangle<int> areaDr;
     juce::Rectangle<int> areaCrest;
-
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    //   Hub 可能以 60~100Hz 回调 onFrame，但 Dynamics 显示的峰值/DR 数字
-    //   肉眼 ~30Hz 已足够。用最小刷新间隔（高 DPI 适度放大）避免每次都刷。
-    double lastRepaintMs = 0.0;
 
     // ---- 鼠标悬停标尺 ----
     void drawHoverRuler(juce::Graphics& g);

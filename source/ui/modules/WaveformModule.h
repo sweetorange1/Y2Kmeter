@@ -2,7 +2,7 @@
 
 #include <JuceHeader.h>
 #include <vector>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -25,7 +25,7 @@
 //   └───────────────────────────────────────────┘
 // ==========================================================
 
-class WaveformModule : public ModulePanel,
+class WaveformModule : public GlDirectModuleBase,
                        public AnalyserHub::FrameListener
 {
 public:
@@ -52,7 +52,12 @@ public:
 
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
-    void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+
+    // ---- GlDirectModuleBase 钩子（v2.9.4 迁移）----
+    void buildGlSnapshot() override;
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
     // ---- 内部辅助 ----
@@ -111,8 +116,6 @@ private:
     // 上次 onFrame 的系统时间（用于估算该 append 多少新样本）
     double lastFrameTimeMs = 0.0;
     double cachedSampleRate = 0.0;  // 缓存 hub 的采样率（避免每帧查询）
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    double lastRepaintMs = 0.0;
 
     // 顶部按钮
     juce::TextButton btnRange3  { "3s"   };

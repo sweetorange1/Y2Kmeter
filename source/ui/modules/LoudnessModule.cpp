@@ -53,9 +53,9 @@ void LoudnessModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! frame.has (AnalyserHub::Kind::Loudness))
         return; // 本帧 Loudness 路没有活跃
 
-    const auto now = juce::Time::getCurrentTime();
-    const float deltaMs = (float)(now - lastTickTime).inMilliseconds();
-    lastTickTime = now;
+    // v2.9：用分发器高精度 dt（旧实现整数毫秒在 120Hz 下 8/9ms 跳动）
+    const float deltaMs = frame.dtSec * 1000.0f;
+    lastTickTime = juce::Time::getCurrentTime();
 
     const auto& snap = frame.loudness;
 
@@ -65,15 +65,10 @@ void LoudnessModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     barL.update(snap.rmsL,  deltaMs);
     barR.update(snap.rmsR,  deltaMs);
 
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    //   Hub 可能以 60~100Hz 回调 onFrame，但响度柱状表 ~30Hz 已足够。
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
-    const double minRepaintIntervalMs = 20.0 * (double) juce::jmin (1.8f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）。
+    //   60Hz 屏上读数/柱高 30Hz 刷新肉眼无差，光栅化成本减半。
+    if ((frame.tickCount & 1ull) != 0)
         return;
-
-    lastRepaintMs = nowMs;
     repaint();
 }
 

@@ -9,7 +9,7 @@
 // ==========================================================
 
 StereoFieldModule::StereoFieldModule (AnalyserHub& h)
-    : ModulePanel (ModuleType::stereoField), hub (h)
+    : GlDirectModuleBase (ModuleType::stereoField), hub (h)
 {
     hub.retain (AnalyserHub::Kind::Oscilloscope);
     hub.addFrameListener (this);
@@ -53,22 +53,67 @@ void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     std::memcpy (snapshotL.getRawDataPointer(), frame.oscL.data(), (size_t) n * sizeof (float));
     std::memcpy (snapshotR.getRawDataPointer(), frame.oscR.data(), (size_t) n * sizeof (float));
 
-    trailNeedsUpdate = true;
+    // v2.9.5：GPU trail 累积 —— 衰减在 GPU 每帧执行（decay 按累计 dt 换算，
+    //   残影时长与帧率无关）；点云每帧画进 trail FBO（GPU 光栅化，不再需要
+    //   旧版"隔帧 + CPU 全图 multiplyAlpha"）。
+    trailDtAccumSec = juce::jmin (0.5f, trailDtAccumSec + frame.dtSec);
 
-    // repaint 节流：最短 15ms（~60fps）
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    const float scale = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
-    const double minRepaintIntervalMs = 15.0 * (double) juce::jmin (2.0f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
-        return;
-    lastRepaintMs = nowMs;
+    // 浮动窗口没有 Editor 的 GL 渲染通道（wantsGlSnapshot=false），绘制回退
+    //   legacy CPU 路径 —— legacy 的 trail 只在 trailNeedsUpdate 置位时重建，
+    //   而 GL 接管期间该标志从未置位，脱离后 trailImage 停在旧图（画面定格）。
+    //   浮动期间每帧强制重建 CPU trail，恢复动态。
+    if (isFloating())
+        trailNeedsUpdate = true;
+
+    buildGlSnapshot();
+
+    // v2.9：去掉 15ms×DPI 硬编码节流，每个分发帧重绘
     repaint();
 }
 
 // ----------------------------------------------------------
 // paintContent —— 底衬 + 残影叠加
 // ----------------------------------------------------------
-void StereoFieldModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
+// ---- GlDirectModuleBase 钩子（v2.9.5 迁移，trail 累积通道）----
+juce::Rectangle<int> StereoFieldModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
+{
+    return contentBounds.reduced (2);
+}
+
+void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    // 接管时只保留文字：能量 dB 标签 + L/C/R 声像方位标签
+    auto plot = canvas.reduced (6);
+    if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
+
+    const auto geo = computeRadarGeometry (plot);
+    const int cx = geo.cx, baseY = geo.baseY, R = geo.radius;
+    const float labelFontSize = geo.labelFontSize;
+
+    g.setColour (PinkXP::ink.withAlpha (0.55f));
+    g.setFont (PinkXP::getAxisFont (juce::jmax (6.0f, labelFontSize - 1.5f), juce::Font::plain));
+    const float frac[4]   = { 0.25f, 0.50f, 0.75f, 1.00f };
+    const char* labels[4] = { "-12", "-6", "-2.5", "0 dB" };
+    for (int ri = 0; ri < 4; ++ri)
+    {
+        const float rr = (float) R * frac[ri];
+        if (rr < 8.0f || rr > (float) R) continue;
+        g.drawText (labels[ri], cx + 4, baseY - (int) rr - 6, 26, 12,
+                    juce::Justification::centredLeft, false);
+    }
+
+    const int actualMargin = plot.getWidth() / 2 - R;
+    const int labelH = juce::jmax (10, (int) std::ceil (labelFontSize) + 4);
+    const int y = baseY - labelH;
+    g.setColour (PinkXP::ink.withAlpha (0.7f));
+    g.setFont (PinkXP::getAxisFont (labelFontSize, juce::Font::bold));
+    g.drawText ("C", cx - 8, y, 16, labelH, juce::Justification::centred, false);
+    g.setFont (PinkXP::getAxisFont (juce::jmin (labelFontSize, 11.0f), juce::Font::bold));
+    g.drawText ("L", plot.getX(), y, actualMargin, labelH, juce::Justification::centredRight, false);
+    g.drawText ("R", plot.getRight() - actualMargin, y, actualMargin, labelH, juce::Justification::centredLeft, false);
+}
+
+void StereoFieldModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     g.setColour (PinkXP::btnFace);
     g.fillRect (contentBounds);
@@ -91,6 +136,139 @@ void StereoFieldModule::paintContent (juce::Graphics& g, juce::Rectangle<int> co
                      canvas.getX(), canvas.getY(), canvas.getWidth(), canvas.getHeight(),
                      0, 0, trailImage.getWidth(), trailImage.getHeight());
     }
+}
+
+// ----------------------------------------------------------
+// buildGlSnapshot —— trail 累积通道快照（v2.9.5）
+//   背景（凹陷/半圆/45°线/能量环）为顶点段，直接画后缓冲；
+//   点云为 trail 段，画进持久 trail FBO（Editor 每帧衰减 + 累积 + 合成）。
+// ----------------------------------------------------------
+void StereoFieldModule::buildGlSnapshot()
+{
+    if (! wantsGlSnapshot())
+        return;   // v2.9.5：浮动态跳过
+
+    const auto canvas = getContentBounds().reduced (2);
+    if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
+        return;
+
+    auto snap = beginGlSnapshot();
+    snap->canvasLocal = canvas;
+
+    // ---- trail 通道参数 ----
+    snap->trailFbo = true;
+    snap->trailDecay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f);
+    trailDtAccumSec = 0.0f;
+    snap->texW = canvas.getWidth();
+    snap->texH = canvas.getHeight();
+    snap->texTargetRect = canvas;
+
+    constexpr float kPi = juce::MathConstants<float>::pi;
+    auto plot = canvas.reduced (6);
+
+    // ---- 背景段（segments[0]）：凹陷（框架 helper）+ 雷达几何 ----
+    {
+        appendSunkenFrame (snap->vertices, canvas);
+
+        if (plot.getWidth() > 8 && plot.getHeight() > 8)
+        {
+            const auto geo = computeRadarGeometry (plot);
+            const float cx = (float) geo.cx, baseY = (float) geo.baseY, R = (float) geo.radius;
+            const float r45 = R * 0.70710678f;
+
+            // 半圆外轮廓弧（64 段，半宽 0.6）
+            const auto arcC = PinkXP::pink300.withAlpha (0.65f);
+            constexpr int arcSegs = 64;
+            for (int s = 0; s < arcSegs; ++s)
+            {
+                const float th0 = -kPi * 0.5f + kPi * (float) s / (float) arcSegs;
+                const float th1 = -kPi * 0.5f + kPi * (float) (s + 1) / (float) arcSegs;
+                // addCentredArc：0=顶部、顺时针；屏幕坐标 x = cx + R·sin(th), y = baseY - R·cos(th)
+                const float x0 = cx + R * std::sin (th0), y0 = baseY - R * std::cos (th0);
+                const float x1 = cx + R * std::sin (th1), y1 = baseY - R * std::cos (th1);
+                appendLineSegment (snap->vertices, x0, y0, x1, y1, 0.6f, arcC);
+            }
+
+            // 直径线
+            appendLineSegment (snap->vertices, cx - R, baseY, cx + R, baseY, 0.5f,
+                               PinkXP::pink300.withAlpha (0.5f));
+
+            // 45° 参考线 ×2 + 顶部中线
+            const auto refC = PinkXP::pink200.withAlpha (0.45f);
+            appendLineSegment (snap->vertices, cx, baseY, cx - r45, baseY - r45, 0.5f, refC);
+            appendLineSegment (snap->vertices, cx, baseY, cx + r45, baseY - r45, 0.5f, refC);
+            appendLineSegment (snap->vertices, cx, baseY, cx, baseY - R, 0.5f, refC);
+
+            // 能量环（4 个半圆，半宽 0.5）
+            const auto ringC = PinkXP::pink200.withAlpha (0.30f);
+            const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
+            for (int ri = 0; ri < 4; ++ri)
+            {
+                const float rr = R * frac[ri];
+                if (rr < 2.0f || rr > R) continue;
+                for (int s = 0; s < arcSegs; ++s)
+                {
+                    const float th0 = -kPi * 0.5f + kPi * (float) s / (float) arcSegs;
+                    const float th1 = -kPi * 0.5f + kPi * (float) (s + 1) / (float) arcSegs;
+                    const float x0 = cx + rr * std::sin (th0), y0 = baseY - rr * std::cos (th0);
+                    const float x1 = cx + rr * std::sin (th1), y1 = baseY - rr * std::cos (th1);
+                    appendLineSegment (snap->vertices, x0, y0, x1, y1, 0.5f, ringC);
+                }
+            }
+        }
+    }
+    snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+    snap->trailSegStart = (int) snap->segments.size();
+
+    // ---- trail 点段（segments[1..]）：当前帧新点 ----
+    {
+        const int N = juce::jmin (snapshotL.size(), snapshotR.size());
+        if (N > 1 && plot.getWidth() > 8 && plot.getHeight() > 8)
+        {
+            const auto geo = computeRadarGeometry (plot);
+            const float cx = (float) geo.cx, baseY = (float) geo.baseY, R = (float) geo.radius;
+
+            constexpr int kMaxPoints = 512;
+            const int stride = juce::jmax (1, N / kMaxPoints);
+            const juce::Rectangle<float> plotF = plot.toFloat();
+            const auto dotC = PinkXP::pink500.withAlpha (0.9f);
+            const float dr = dotC.getFloatRed(), dg = dotC.getFloatGreen(),
+                        db = dotC.getFloatBlue(), da = dotC.getFloatAlpha();
+
+            const int trailStartIdx = (int) snap->vertices.size() / 6;
+            for (int i = 0; i < N; i += stride)
+            {
+                const float rawL = snapshotL.getUnchecked (i);
+                const float rawR = snapshotR.getUnchecked (i);
+                if (! std::isfinite (rawL) || ! std::isfinite (rawR)) continue;
+                const float l = std::abs (rawL);
+                const float r = std::abs (rawR);
+                const float sum = l + r;
+                if (sum < 1.0e-4f) continue;
+                const float balance = (r - l) / sum;
+                const float peak = juce::jmax (l, r);
+                const float rho = peak * R;
+                const float ang = balance * (kPi * 0.5f);
+                const float px = cx + rho * std::sin (ang);
+                const float py = baseY - rho * std::cos (ang);
+                if (! plotF.contains (px, py)) continue;
+                const float q[36] = {
+                    px - 1.0f, py - 1.0f, dr, dg, db, da,
+                    px + 1.0f, py - 1.0f, dr, dg, db, da,
+                    px - 1.0f, py + 1.0f, dr, dg, db, da,
+                    px + 1.0f, py - 1.0f, dr, dg, db, da,
+                    px + 1.0f, py + 1.0f, dr, dg, db, da,
+                    px - 1.0f, py + 1.0f, dr, dg, db, da,
+                };
+                snap->vertices.insert (snap->vertices.end(), q, q + 36);
+            }
+            const int count = (int) snap->vertices.size() / 6 - trailStartIdx;
+            if (count > 0)
+                snap->segments.push_back ({ trailStartIdx, count, Primitive::Triangles });
+        }
+    }
+
+    publishGlSnapshot (std::move (snap));
 }
 
 // ----------------------------------------------------------
@@ -242,7 +420,10 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
         trailImage.clear (trailImage.getBounds());
     }
 
-    // 1) 衰减旧点：所有像素 alpha *= kDecayPerFrame（跳过透明像素加速）
+    // 1) 衰减旧点：所有像素 alpha *= decay（跳过透明像素加速）
+    //    v2.9：decay 由累计 dt 换算（60Hz 标定），残影时长与帧率无关
+    const float decay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f);
+    trailDtAccumSec = 0.0f;
     {
         juce::Image::BitmapData bd (trailImage, juce::Image::BitmapData::readWrite);
         for (int y = 0; y < bd.height; ++y)
@@ -252,7 +433,7 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
             {
                 auto& p = line[x];
                 if (p.getAlpha() == 0) continue;
-                p.multiplyAlpha (kDecayPerFrame);
+                p.multiplyAlpha (decay);
             }
         }
     }
@@ -282,7 +463,10 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
 
     const juce::Rectangle<float> plotF = plot.toFloat();
 
-    tg.setColour (PinkXP::pink500.withAlpha (0.9f));
+    // v2.9.2：所有点同色同 alpha —— 收集进 RectangleList 后一次 fillRectList 提交，
+    //   省掉最多 512 次 fillRect 调用 + 软光栅状态切换（每帧确定性的微省）。
+    juce::RectangleList<float> rects;
+    rects.ensureStorageAllocated (kMaxPoints);
 
     for (int i = 0; i < N; i += stride)
     {
@@ -314,7 +498,13 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
         if (! plotF.contains (px, py))
             continue;
 
-        tg.fillRect (px - 1.0f, py - 1.0f, 2.0f, 2.0f);
+        rects.addWithoutMerging ({ px - 1.0f, py - 1.0f, 2.0f, 2.0f });
+    }
+
+    if (! rects.isEmpty())
+    {
+        tg.setColour (PinkXP::pink500.withAlpha (0.9f));
+        tg.fillRectList (rects);
     }
 }
 

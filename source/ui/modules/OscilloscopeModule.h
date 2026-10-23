@@ -1,7 +1,8 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
+#include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -37,7 +38,7 @@
 // 冻结时 Timer 继续跑，但不再拉取新快照，保留当前内容。
 // ==========================================================
 
-class OscilloscopeModule : public ModulePanel,
+class OscilloscopeModule : public GlDirectModuleBase,
                            public AnalyserHub::FrameListener
 {
 public:
@@ -61,7 +62,12 @@ public:
 
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
-    void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+
+    // ---- GlDirectModuleBase 钩子（v2.9.4 迁移自 v2.9.3 直渲染样板）----
+    void buildGlSnapshot() override;
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
 
@@ -101,9 +107,6 @@ private:
     // 快照（UI 线程独占使用）
     juce::Array<float> snapshotL;
     juce::Array<float> snapshotR;
-
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    double lastRepaintMs = 0.0;
 
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;

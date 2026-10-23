@@ -397,6 +397,14 @@ public:
         //     对刷新率的敏感度差异很大，集中式调度难以普适。
         juce::uint64 tickCount = 0;
 
+        // v2.9 帧时钟：本帧呈现时间（秒，单调递增）与距上一帧的间隔（秒）。
+        //   · vblank 驱动时 timeSec 取显示器 vblank 时间戳，Timer 回退时取高精度时钟；
+        //   · dtSec 已钳制到 [1/1000, 0.1]，模块做"与帧率无关"的平滑/衰减/滚动时
+        //     直接用它（例如 a = 1 - pow(1 - a60, dtSec * 60)），避免 60→120Hz 后
+        //     动画速度/衰减时间常数随帧率变化。
+        double timeSec = 0.0;
+        float  dtSec   = 1.0f / 60.0f;
+
         // Oscilloscope：立体声 2048 样本（时间从旧到新）。仅在 activeMask 含 Oscilloscope 时有效。
         std::array<float, oscilloscopeBufferSize> oscL {};
         std::array<float, oscilloscopeBufferSize> oscR {};
@@ -444,6 +452,19 @@ public:
     {
         return currentFrameDispatcherHz.load (std::memory_order_relaxed);
     }
+
+    // ---- v2.9 外部帧时钟（vblank 同步）----
+    //   Editor 挂 juce::VBlankAttachment 后调用 setExternalFrameClock(true)：
+    //   内部 Timer 停止，改由 Editor 在每个（按 FPS 上限抽稀后的）vblank 回调里
+    //   调用 dispatchFrameNow()。这样分发节拍与显示器刷新严格同相，消除
+    //   "8ms Timer(125Hz) vs 120Hz 刷新"之间的拍频抖动（周期性一帧双更/一帧空更）。
+    //   vblank 长时间不来（显示器休眠 / 远程桌面 / 无 peer）时 Editor 会切回
+    //   setExternalFrameClock(false)，内部 Timer 以 startFrameDispatcher 记录的频率接管。
+    //   均只能在 UI 线程调用。
+    void setExternalFrameClock (bool shouldUseExternalClock);
+    bool isUsingExternalFrameClock() const noexcept { return externalFrameClock; }
+    // timestampSec < 0 表示使用当前高精度时钟。
+    void dispatchFrameNow (double timestampSec = -1.0);
 
     // ---- UI 线程调用（快照拷贝，线程安全）----
 
@@ -639,6 +660,9 @@ private:
     // 当前分发频率（Hz）—— 供 UI 自适应策略查询，避免重复 startTimerHz。
     //   初值 0 表示尚未启动，首次 startFrameDispatcher 一定会生效。
     std::atomic<int>                     currentFrameDispatcherHz { 0 };
+
+    // 外部帧时钟是否接管（UI 线程读写）
+    bool                                 externalFrameClock = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AnalyserHub)
 };

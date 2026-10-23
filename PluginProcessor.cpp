@@ -5,6 +5,8 @@
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/network/TelemetryClient.h"
 #include "source/network/UpdateChecker.h"
+#include "source/ui/PinkXPStyle.h"
+#include "source/ui/palette/ThemeLibrary.h"
 
 // macOS Standalone 专属：音频转储调试器（Windows 构建下此头文件不被编译，
 // 且 CMakeLists 中 AudioDumpRecorder.cpp 仅在 APPLE 分支加入 target_sources）
@@ -654,6 +656,16 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     if (apvts != nullptr)
         root.appendChild (apvts->copyState(), nullptr);
 
+    // 调色板重构（R19）：主题状态随宿主工程保存。
+    //   Standalone 的主题由 Y2KStandaloneApp 的 ui.* 键独立管理，这里同样写出，
+    //   但读取端会跳过 Standalone（见 setStateInformation），避免两套互相覆盖。
+    root.setProperty ("themeId",   (int) PinkXP::getCurrentThemeId(),   nullptr);
+    root.setProperty ("themeName", PinkXP::getCustomThemeName(),        nullptr);
+    root.setProperty ("themeSpec",
+                      juce::String(PinkXP::getCurrentThemeSpec().shareCode()), nullptr);
+    root.setProperty ("themeLib",
+                      PinkXP::ThemeLibrary::instance().toXmlString(),  nullptr);
+
     if (auto xml = root.createXml())
         juce::AudioProcessor::copyXmlToBinary(*xml, destData);
 }
@@ -697,6 +709,38 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
         tutorialCompleted = (bool) root.getProperty ("tutorialCompleted");
     else
         tutorialCompleted = true;   // old settings file → user already has experience
+
+    // 调色板重构（R19）：VST3 宿主工程恢复主题（主题库 + 当前主题）。
+    //   Standalone 的主题由 Y2KStandaloneApp 的 ui.* 键管理，且其恢复顺序
+    //   先于本函数（initialise 1.15 → 1.2 reloadPluginState），这里跳过
+    //   Standalone，避免 state 里的旧值覆盖 settings 里的最新值。
+    if (wrapperType != wrapperType_Standalone)
+    {
+        if (root.hasProperty ("themeLib"))
+            PinkXP::ThemeLibrary::instance().loadFromXmlString(
+                root.getProperty ("themeLib").toString());
+
+        const int themeId = (int) root.getProperty ("themeId", -1);
+        if (themeId == (int) PinkXP::ThemeId::custom)
+        {
+            y2kpal::ThemeSpec spec;
+            const juce::String code = root.getProperty ("themeSpec").toString();
+            const juce::String name = root.getProperty ("themeName").toString();
+            if (code.isNotEmpty() &&
+                y2kpal::ThemeSpec::fromShareCode(code.toStdString(), spec))
+                PinkXP::applyThemeFromSpec(spec, name);
+            else
+                PinkXP::applyTheme(PinkXP::ThemeId::blackPink);
+        }
+        else if (themeId >= 0)
+        {
+            const auto& themes = PinkXP::getAllThemes();
+            PinkXP::ThemeId target = PinkXP::ThemeId::blackPink;
+            for (const auto& t : themes)
+                if ((int) t.id == themeId) { target = t.id; break; }
+            PinkXP::applyTheme(target);
+        }
+    }
 
     // Milkdrop 整体染色 + 效果（旧存档缺失时保持默认值）
     if (root.hasProperty ("milkdropTintR"))

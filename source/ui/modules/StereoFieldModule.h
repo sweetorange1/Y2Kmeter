@@ -1,7 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 
@@ -29,7 +29,7 @@
 // 数据源：AnalyserHub::getLatestFrame() → frame.oscL / frame.oscR
 // ==========================================================
 
-class StereoFieldModule : public ModulePanel,
+class StereoFieldModule : public GlDirectModuleBase,
                           public AnalyserHub::FrameListener
 {
 public:
@@ -40,7 +40,11 @@ public:
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
 protected:
-    void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // ---- GlDirectModuleBase 钩子（v2.9.5 迁移，trail 累积通道）----
+    void buildGlSnapshot() override;
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
     // 雷达几何参数（圆心X / 底线Y / 半径 / 侧边留白 / 动态字号）
@@ -75,12 +79,13 @@ private:
     juce::Image trailImage;
     bool  trailNeedsUpdate = true;
 
-    // UI 侧 repaint 节流
-    double lastRepaintMs = 0.0;
     int    themeSubToken = -1;
 
     // 每帧 alpha 衰减系数（越大尾巴越长；1.0 = 永不消失）
+    //   v2.9：该值按 60Hz 标定（旧版 15ms 节流下的实际刷新率），实际衰减
+    //   = pow(kDecayPerFrame, 累计 dt × 60)，残影时长与帧率无关。
     static constexpr float kDecayPerFrame = 0.92f;
+    float trailDtAccumSec = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StereoFieldModule)
 };

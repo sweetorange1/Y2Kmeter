@@ -1,6 +1,7 @@
 #include "source/ui/ModulePanel.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/perf/PerformanceCounterSystem.h"
+#include "source/perf/FramePerfLog.h"
 
 namespace
 {
@@ -203,17 +204,45 @@ void ModulePanel::setCpuLoad (float load01) noexcept
 // ----------------------------------------------------------
 // 绘制
 // ----------------------------------------------------------
+juce::Colour ModulePanel::getShellFillColour() const
+{
+    return PinkXP::face;
+}
+
 void ModulePanel::paint(juce::Graphics& g)
 {
 #if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::ui, "UI-ModulePaint");
     const auto paintStartNs = y2k::perf::PerformanceCounterSystem::nowNs();
 #endif
+#if Y2K_ENABLE_FRAME_PERF_LOG
+    const juce::String y2kPerfCat = moduleTypeToString (moduleType);
+    Y2K_PERF_FRAME_SCOPE (y2kPerfCat.toRawUTF8());
+#endif
 
     const auto bounds = getLocalBounds();
 
     // 1. 像素凸起窗口外壳
-    PinkXP::drawRaised(g, bounds, PinkXP::face);
+    //   v2.9.3：填充色走 getShellFillColour() 钩子 —— GL 直渲染模块返回
+    //   transparentBlack，内容区透明以透出 FBO 0 的 GL 内容（边框/标题栏不变）。
+    //   v2.9.5：透明外壳改为"face 填充（挖掉 contentBounds）+ 仅边框"——
+    //   透明填充会让标题栏/分割线与内容区之间的缝隙行透出 FBO 0（抬头下方
+    //   1px 透底），face 兜底后 canvas 外所有像素都不透明；canvas 区域由
+    //   paintContent 的挖洞分支保持透明。
+    if (getShellFillColour().isTransparent())
+    {
+        g.setColour (PinkXP::face);
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            g.excludeClipRegion (getContentBounds());
+            g.fillRect (bounds);
+        }
+        PinkXP::drawRaisedFrame (g, bounds);
+    }
+    else
+    {
+        PinkXP::drawRaised(g, bounds, getShellFillColour());
+    }
 
     // 2. 玫瑰粉标题栏
     auto tb = getTitleBarBounds();

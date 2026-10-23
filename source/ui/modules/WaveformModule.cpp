@@ -14,7 +14,7 @@
 // ==========================================================
 
 WaveformModule::WaveformModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::waveform),
+    : GlDirectModuleBase(ModuleType::waveform),
       hub(h)
 {
     // 按需启用 Oscilloscope 计算（与其它模块一致）
@@ -61,6 +61,7 @@ WaveformModule::WaveformModule(AnalyserHub& h)
     gainSlider.onValueChange = [this]()
     {
         gainDb = (float) gainSlider.getValue();
+        buildGlSnapshot();   // v2.9.4：柱高随增益变化，立即重建快照
         repaint();
     };
     addAndMakeVisible (gainSlider);
@@ -142,6 +143,7 @@ void WaveformModule::setDisplaySeconds (float seconds)
     btnRange3.setToggleState (std::abs (displaySeconds - 3.0f) < 1.0e-3f, juce::dontSendNotification);
     btnRange6.setToggleState (std::abs (displaySeconds - 6.0f) < 1.0e-3f, juce::dontSendNotification);
 
+    buildGlSnapshot();   // v2.9.4：时间刻度随跨度变化，立即重建快照
     repaint();
 }
 
@@ -187,6 +189,7 @@ void WaveformModule::setFrozen (bool b)
     frozen = b;
     btnFreeze.setToggleState (frozen, juce::dontSendNotification);
     // 冻结态切换时显示层应立即生效（onFrame 在 frozen=true 后会跳过 repaint）
+    buildGlSnapshot();   // v2.9.4：解冻时数据可能已过期，立即重建快照
     repaint();
 }
 
@@ -227,13 +230,10 @@ void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     pushHistorySamples (frame.oscL.data(), frame.oscR.data(),
                         snapshotLen, numToAppend);
 
-    // 性能优化（阶段1）：UI 侧 repaint 节流，仅对 canvas 区域重绘（避免整块面板重绘）。
-    const float scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
-    const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (2.0f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
-        return;
+    // v2.9.4：同步生成 GL 直渲染快照（列数据已变化）
+    buildGlSnapshot();
 
-    lastRepaintMs = nowMs;
+    // v2.9：去掉 16ms×DPI 硬编码节流，每个分发帧仅重绘 canvas 区域
     repaint (getCanvasBounds (getContentBounds()));
 }
 
@@ -300,36 +300,20 @@ void WaveformModule::pushHistorySamples (const float* L, const float* R,
 //   0.00 – 0.10  → pink100 (最轻柔)
 //   0.10 – 0.35  → pink300
 //   0.35 – 0.65  → pink500
-//   0.65 – 0.90  → pink700 (深紫粉)
-//   0.90 – 1.00  → sel      (高亮洋红，接近 clip)
-// 中间段做线性插值避免色带感
+//   调色板重构（A3/S4）：幅度色阶改为 chartRamp 8 阶 OKLab 渐变采样
+//   0.00 – 0.90 → chartRamp（暗→亮，OKLab 插值）
+//   0.90 – 1.00 → 向 sel 高亮过渡（接近 clip）
 // ----------------------------------------------------------
 juce::Colour WaveformModule::mapAmplitudeToColour (float amp01) const
 {
     amp01 = juce::jlimit (0.0f, 1.0f, amp01);
 
-    // 色站（stops）—— 按 amp 阈值递增
-    struct Stop { float t; juce::Colour c; };
-    const Stop stops[] = {
-        { 0.00f, PinkXP::pink100 },
-        { 0.20f, PinkXP::pink300 },
-        { 0.50f, PinkXP::pink500 },
-        { 0.80f, PinkXP::pink700 },
-        { 1.00f, PinkXP::sel     }
-    };
-    constexpr int N = (int) (sizeof (stops) / sizeof (stops[0]));
-
-    // 找到所属区间做线性插值
-    for (int i = 0; i < N - 1; ++i)
+    if (amp01 >= 0.9f)
     {
-        if (amp01 <= stops[i + 1].t)
-        {
-            const float span = juce::jmax (1.0e-6f, stops[i + 1].t - stops[i].t);
-            const float u = (amp01 - stops[i].t) / span;
-            return stops[i].c.interpolatedWith (stops[i + 1].c, u);
-        }
+        const float u = (amp01 - 0.9f) / 0.1f;
+        return PinkXP::interpolateOkLab (PinkXP::chartRamp[7], PinkXP::sel, u);
     }
-    return stops[N - 1].c;
+    return PinkXP::sampleChartRamp (amp01 / 0.9f);
 }
 
 // ----------------------------------------------------------
@@ -375,12 +359,40 @@ void WaveformModule::layoutContent (juce::Rectangle<int> contentBounds)
     //   注意：canvas 已经排除 GAIN 面板，所以列数与实际绘制区域一致
     auto canvas = getCanvasBounds (contentBounds).reduced (4);
     rebuildColumnBuffer (juce::jmax (1, canvas.getWidth()));
+
+    // v2.9.4：几何变化 → 立即重建 GL 快照（v2.9.5 尺寸守卫防 layout 风暴）
+    if (glCanvasSizeChanged (getGlCanvasBounds (contentBounds)))
+        buildGlSnapshot();
 }
 
 // ----------------------------------------------------------
-// paintContent
+// GlDirectModuleBase 钩子（v2.9.4 迁移）
 // ----------------------------------------------------------
-void WaveformModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
+juce::Rectangle<int> WaveformModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
+{
+    return getCanvasBounds (contentBounds);
+}
+
+void WaveformModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    // 右上角冻结标记
+    if (frozen)
+    {
+        auto dot = juce::Rectangle<int> (canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
+        g.setColour (PinkXP::sel);
+        g.fillEllipse (dot.toFloat());
+        g.setColour (PinkXP::ink);
+        g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+        g.drawText ("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
+                    42, 12, juce::Justification::centredRight, false);
+    }
+
+    // 鼠标悬停标尺（时间 + 响度读数）
+    if (hoverActive)
+        drawHoverRuler (g, canvas);
+}
+
+void WaveformModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     g.setColour (PinkXP::btnFace);
     g.fillRect (contentBounds);
@@ -408,6 +420,113 @@ void WaveformModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     // 鼠标悬停标尺（时间 + 响度读数）
     if (hoverActive)
         drawHoverRuler(g, canvas);
+}
+
+// ----------------------------------------------------------
+// buildGlSnapshot —— 瀑布波形 GL 顶点流（v2.9.4）
+//   布局：[凹陷背景 + 中心线 + 时间刻度虚线] + [每列 1px 宽垂直柱]
+//   柱颜色直接按感知幅度映射（GPU 直画无需旧版的 32 档颜色分桶）。
+// ----------------------------------------------------------
+void WaveformModule::buildGlSnapshot()
+{
+    if (! wantsGlSnapshot())
+        return;   // v2.9.5：浮动态跳过
+
+    const auto canvas = getCanvasBounds (getContentBounds());
+    if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
+        return;
+
+    auto snap = beginGlSnapshot();
+    // v2.9.4：逻辑分辨率 FBO 渲染 —— 150% DPI 下 1 逻辑像素宽的柱在物理
+    //   像素网格上无解（1.5px 节距必然产生交替混合 → 滚动闪动），只有
+    //   "逻辑域渲染 + 线性放大 blit"与旧版（CPU 光栅化到逻辑纹理 + 纹理
+    //   放大）逐像素一致。
+    snap->renderToLogical = true;
+    snap->logicalW = canvas.getWidth();
+    snap->logicalH = canvas.getHeight();
+    snap->canvasLocal = canvas;
+
+    // ---- 背景：凹陷底（框架 helper）+ 中心线 + 时间刻度 ----
+    {
+        appendSunkenFrame (snap->vertices, canvas);
+
+        auto inner = canvas.reduced (2);
+        // 中心水平线（零幅度基准，1px 细条）
+        const int cy = inner.getCentreY();
+        appendQuad (snap->vertices, { (float) inner.getX(), (float) cy, (float) inner.getWidth(), 1.0f },
+                    PinkXP::pink300.withAlpha (0.55f));
+
+        // 时间刻度（每 1 秒一根竖虚线）
+        const int w = inner.getWidth();
+        if (displaySeconds > 0.0f && w > 0)
+        {
+            const float pxPerSec = (float) w / displaySeconds;
+            const auto dash = PinkXP::pink200.withAlpha (0.45f);
+            for (int s = 1; s * pxPerSec < (float) w; ++s)
+            {
+                const int x = inner.getRight() - (int) std::round ((float) s * pxPerSec);
+                for (int y = inner.getY(); y < inner.getBottom(); y += 4)
+                    appendQuad (snap->vertices, { (float) x, (float) y, 1.0f, 2.0f }, dash);
+            }
+        }
+    }
+
+    // ---- 瀑布主体：每列 1px 垂直柱（与 drawWaveform 相同的映射/平滑）----
+    {
+        const int colCap = (int) columnHistory.size();
+        auto inner = canvas.reduced (4);
+        if (colCap > 0 && validCols > 0 && inner.getWidth() > 0)
+        {
+            const int w  = juce::jmin (inner.getWidth(), colCap);
+            const int ix = inner.getX();
+            const int iy = inner.getY();
+            const int ih = inner.getHeight();
+            const int cy = iy + ih / 2;
+            const float gainMul = std::pow (10.0f, gainDb / 20.0f);
+            const float halfH = (float) ih * 0.48f * gainMul;
+
+            auto sampleCol = [&] (int k) -> Column
+            {
+                if (k < 0 || k >= validCols) return Column {};
+                const int idx = (writeCol - 1 - k + colCap) % colCap;
+                return columnHistory[(size_t) idx];
+            };
+
+            snap->vertices.reserve (snap->vertices.size() + (size_t) w * 6 * 6);
+            for (int xi = 0; xi < w; ++xi)
+            {
+                const int k = w - 1 - xi;   // xi=0 最左(最旧) ... 最右(最新)
+                if (k >= validCols) continue;
+
+                // 3-tap 均值平滑（与旧版一致）
+                const Column c0 = sampleCol (juce::jmax (0, k - 1));
+                const Column c1 = sampleCol (k);
+                const Column c2 = sampleCol (juce::jmin (validCols - 1, k + 1));
+                const float minV = (c0.minV + c1.minV + c2.minV) * (1.0f / 3.0f);
+                const float maxV = (c0.maxV + c1.maxV + c2.maxV) * (1.0f / 3.0f);
+                const float rms  = (c0.rms  + c1.rms  + c2.rms ) * (1.0f / 3.0f);
+                const float peak = juce::jmax (std::abs (maxV), std::abs (minV));
+                const float ampForColour = juce::jlimit (0.0f, 1.0f,
+                                                         std::sqrt (rms * 1.4f + peak * 0.3f));
+
+                const int px = ix + xi;
+                const int yTopRaw = cy - (int) std::round (maxV * halfH);
+                const int yBotRaw = cy - (int) std::round (minV * halfH);
+                const int yMin = juce::jlimit (iy, iy + ih, juce::jmin (yTopRaw, yBotRaw));
+                const int yMax = juce::jlimit (iy, iy + ih, juce::jmax (yTopRaw, yBotRaw));
+                const int hLine = juce::jmax (1, yMax - yMin);
+
+                appendQuad (snap->vertices,
+                            { (float) px, (float) yMin, 1.0f, (float) hLine },
+                            mapAmplitudeToColour (ampForColour));
+            }
+        }
+    }
+
+    // 顶点坐标域：模块本地（renderToLogical 分支的 transform 用 canvasLocal
+    //   偏移统一换算到 FBO 坐标）
+    snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+    publishGlSnapshot (std::move (snap));
 }
 
 void WaveformModule::mouseMove(const juce::MouseEvent& e)

@@ -1,13 +1,14 @@
 #include "source/ui/modules/PhaseModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/ui/FramePacing.h"
 
 // ==========================================================
 // PhaseModule
 // ==========================================================
 
 PhaseModule::PhaseModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::phase),
+    : GlDirectModuleBase(ModuleType::phase),
       hub(h)
 {
     // Phase F：本模块同时需要 Oscilloscope（Lissajous 点云）和 Phase（相关/宽度/平衡）
@@ -21,6 +22,7 @@ PhaseModule::PhaseModule(AnalyserHub& h)
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
         invalidateStaticLayer();
+        buildGlSnapshot();   // GL 快照含底色/几何颜色，主题切换必须重建
         repaint();
     });
 }
@@ -59,27 +61,20 @@ void PhaseModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (frame.has (AnalyserHub::Kind::Phase))
     {
         const auto& snap = frame.phase;
-        auto smooth = [](float cur, float target, float a)
+        const float a = y2k::pacing::alphaForDt (0.25f, frame.dtSec);
+        auto smooth = [a](float cur, float target)
         {
             if (! std::isfinite(target)) target = 0.0f;
             return cur + a * (target - cur);
         };
-        smoothedCorr    = smooth(smoothedCorr,    snap.correlation, 0.25f);
-        smoothedWidth   = smooth(smoothedWidth,   snap.width,       0.25f);
-        smoothedBalance = smooth(smoothedBalance, snap.balance,     0.25f);
+        smoothedCorr    = smooth(smoothedCorr,    snap.correlation);
+        smoothedWidth   = smooth(smoothedWidth,   snap.width);
+        smoothedBalance = smooth(smoothedBalance, snap.balance);
     }
 
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    //   Hub 可能以 60~100Hz 回调 onFrame，但本模块的 paint 成本较重
-    //   （Lissajous 点云 + 相关/宽度/平衡三条仪表），在高 DPI 屏幕上会显著吃 CPU。
-    //   这里用一个最小刷新间隔（高 DPI 适度放大），避免"数据一来就刷"。
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
-    const double minRepaintIntervalMs = 16.0 * (double) juce::jmin (1.8f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
-        return;
-
-    lastRepaintMs = nowMs;
+    // v2.9：去掉 16ms×DPI 硬编码节流（会把本模块锁在 ≤60fps），每个分发帧重绘
+    // v2.9.4：同步生成 GL 直渲染快照
+    buildGlSnapshot();
     repaint();
 }
 
@@ -101,12 +96,125 @@ void PhaseModule::layoutContent(juce::Rectangle<int> content)
 
     areaWidth   = lower.withHeight(barH);
     areaBalance = lower.withTrimmedTop(barH + barGap).withHeight(barH);
+
+    // v2.9.5：尺寸守卫（防 layoutContent 每帧触发导致的交互卡顿）
+    if (glCanvasSizeChanged (getGlCanvasBounds (content)))
+        buildGlSnapshot();
 }
 
 // ----------------------------------------------------------
-// paintContent
+// GlDirectModuleBase 钩子（v2.9.4 迁移）
 // ----------------------------------------------------------
-void PhaseModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
+juce::Rectangle<int> PhaseModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
+{
+    return contentBounds;
+}
+
+void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    // 接管时只画文字（几何全部由 GL 快照绘制）：轴标签、CORR 读数与刻度、
+    //   WIDTH/BAL 标签与数值。
+    const int barH    = 20;
+    const int barGap  = 2;
+    const int footer  = barH * 2 + barGap;
+    auto upper = canvas.withTrimmedBottom (footer + 6);
+    auto lower = canvas.withTop (upper.getBottom() + 6);
+    const int gonioSize = juce::jmin (upper.getWidth() * 5 / 9, upper.getHeight());
+    const auto areaGonio = upper.withWidth (gonioSize);
+    const auto areaDial  = upper.withTrimmedLeft (gonioSize + 8);
+    const auto areaWidth = lower.withHeight (barH);
+    const auto areaBalance = lower.withTrimmedTop (barH + barGap).withHeight (barH);
+
+    // ---- Gonio 轴标签 ----
+    {
+        auto inner = areaGonio.reduced (6);
+        const float cx = (float) inner.getCentreX();
+        const float cy = (float) inner.getCentreY();
+        const float R  = (float) juce::jmin (inner.getWidth(), inner.getHeight()) * 0.48f;
+        g.setColour (PinkXP::ink.withAlpha (0.85f));
+        g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::bold));
+        g.drawText ("M", juce::Rectangle<int> ((int) cx - 10, (int) (cy - R) - 12, 20, 12),
+                    juce::Justification::centred, false);
+        g.drawText ("S", juce::Rectangle<int> ((int) (cx + R) + 2, (int) cy - 6, 12, 12),
+                    juce::Justification::centredLeft, false);
+        g.setColour (PinkXP::ink.withAlpha (0.55f));
+        g.drawText ("L", juce::Rectangle<int> ((int) (cx - R) - 12, (int) (cy - R) - 12, 12, 12),
+                    juce::Justification::centredRight, false);
+        g.drawText ("R", juce::Rectangle<int> ((int) (cx + R), (int) (cy - R) - 12, 12, 12),
+                    juce::Justification::centredLeft, false);
+    }
+
+    // ---- Dial 刻度 + CORR 读数 ----
+    {
+        auto inner = areaDial.reduced (6);
+        const float cx = (float) inner.getCentreX();
+        const float cy = (float) inner.getBottom();
+        const int readoutReserve = 28;
+        const float R = juce::jmin ((float) inner.getWidth() * 0.46f,
+                                    (float) inner.getHeight() - (float) readoutReserve);
+        if (R >= 10.0f)
+        {
+            auto thetaFor = [] (float corr) -> float
+            {
+                const float t = juce::jlimit (-1.0f, 1.0f, corr) * 0.5f + 0.5f;
+                return t * juce::MathConstants<float>::pi;
+            };
+            const struct { float v; const char* s; } marks[] = {
+                { -1.0f, "-1" }, { -0.5f, "-.5" }, { 0.0f, "0" },
+                {  0.5f, "+.5"}, {  1.0f, "+1" }
+            };
+            g.setColour (PinkXP::ink.withAlpha (0.75f));
+            g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
+            for (auto& m : marks)
+            {
+                const float th = thetaFor (m.v);
+                const float px = cx - std::cos (th) * (R + 10.0f);
+                const float py = cy - std::sin (th) * (R + 10.0f);
+                g.drawText (m.s, juce::Rectangle<int> ((int) px - 12, (int) py - 6, 24, 12),
+                            juce::Justification::centred, false);
+            }
+
+            const juce::Colour needleCol = (smoothedCorr < 0.0f) ? PinkXP::sel : PinkXP::pink600;
+            g.setColour (PinkXP::ink);
+            g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
+            g.drawText ("CORR",
+                        juce::Rectangle<int> (inner.getX(), inner.getY() + 2, inner.getWidth(), 12),
+                        juce::Justification::centred, false);
+            g.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
+            g.setColour (needleCol);
+            juce::String numTxt = juce::String (smoothedCorr, 2);
+            if (smoothedCorr >= 0.0f) numTxt = "+" + numTxt;
+            g.drawText (numTxt,
+                        juce::Rectangle<int> (inner.getX(), inner.getY() + 14, inner.getWidth(), 14),
+                        juce::Justification::centred, false);
+        }
+    }
+
+    // ---- Width / Balance 标签与数值 ----
+    {
+        const int labelW = 56;
+        g.setColour (PinkXP::ink);
+        g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+        g.drawText ("WIDTH", areaWidth.withWidth (labelW), juce::Justification::centredLeft, false);
+        g.drawText ("BAL", areaBalance.withWidth (labelW), juce::Justification::centredLeft, false);
+
+        g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
+        g.drawText (juce::String ((int) std::round (smoothedWidth * 100.0f)) + "%",
+                    areaWidth.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
+                    juce::Justification::centredRight, false);
+
+        const float b = juce::jlimit (-1.0f, 1.0f, smoothedBalance);
+        juce::String txt;
+        if (std::abs (b) < 0.02f)      txt = "C";
+        else if (b < 0)                txt = "L" + juce::String ((int) std::round (-b * 100.0f));
+        else                           txt = "R" + juce::String ((int) std::round ( b * 100.0f));
+        g.drawText (txt,
+                    areaBalance.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
+                    juce::Justification::centredRight, false);
+    }
+}
+
+void PhaseModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> content)
 {
     g.setColour(PinkXP::btnFace);
     g.fillRect(content);
@@ -118,6 +226,254 @@ void PhaseModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
     drawCorrDial  (g, areaDial);
     drawWidthBar  (g, areaWidth);
     drawBalanceBar(g, areaBalance);
+}
+
+// ----------------------------------------------------------
+// buildGlSnapshot —— GL 顶点流（v2.9.4）
+//   全部几何（凹陷/菱形/十字/弧形轨/刻度/单元条）+ 动态（点云/指针/亮块）
+//   由 GL 绘制；文字由 paintGlOverlay 画在组件缓存。顶点为模块本地坐标。
+// ----------------------------------------------------------
+void PhaseModule::buildGlSnapshot()
+{
+    if (! wantsGlSnapshot())
+        return;   // v2.9.5：浮动态跳过
+
+    const auto content = getContentBounds();
+    if (content.getWidth() <= 8 || content.getHeight() <= 8)
+        return;
+
+    // 子区域（与 layoutContent 相同划分）
+    const int barH    = 20;
+    const int barGap  = 2;
+    const int footer  = barH * 2 + barGap;
+    auto upper = content.withTrimmedBottom (footer + 6);
+    auto lower = content.withTop (upper.getBottom() + 6);
+    const int gonioSize = juce::jmin (upper.getWidth() * 5 / 9, upper.getHeight());
+    const auto areaGonio = upper.withWidth (gonioSize);
+    const auto areaDial  = upper.withTrimmedLeft (gonioSize + 8);
+    const auto areaWidth = lower.withHeight (barH);
+    const auto areaBalance = lower.withTrimmedTop (barH + barGap).withHeight (barH);
+
+    auto snap = beginGlSnapshot();
+    snap->renderToLogical = true;
+    snap->logicalW = content.getWidth();
+    snap->logicalH = content.getHeight();
+    snap->canvasLocal = content;
+
+    auto pushSunken = [&] (juce::Rectangle<int> canvas, juce::Colour contentCol)
+    {
+        auto cr = canvas.toFloat();
+        appendQuad (snap->vertices, cr, contentCol);
+        appendQuad (snap->vertices, { cr.getX(), cr.getY(), (float) cr.getWidth(), 2.0f }, PinkXP::dark);
+        appendQuad (snap->vertices, { cr.getX(), cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::dark);
+        appendQuad (snap->vertices, { cr.getX(), cr.getBottom() - 2.0f, (float) cr.getWidth(), 2.0f }, PinkXP::hl);
+        appendQuad (snap->vertices, { cr.getRight() - 2.0f, cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::hl);
+        appendQuad (snap->vertices, { cr.getX() + 2.0f, cr.getY() + 2.0f, (float) cr.getWidth() - 4.0f, 1.0f }, PinkXP::shdw);
+        appendQuad (snap->vertices, { cr.getX() + 2.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, PinkXP::shdw);
+        appendQuad (snap->vertices, { cr.getX() + 2.0f, cr.getBottom() - 3.0f, (float) cr.getWidth() - 4.0f, 1.0f }, juce::Colours::white);
+        appendQuad (snap->vertices, { cr.getRight() - 3.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, juce::Colours::white);
+    };
+
+    // 主题底色铺底：WIDTH/BAL 标签区、子区域之间的间隙没有各自的
+    //   sunken 填充，GL FBO 未覆盖像素会透出黑色（浅色主题下尤其明显）。
+    //   整个画布一次铺满，覆盖 upper/lower 之间的 6px 间隙。
+    appendQuad (snap->vertices, content.toFloat(), PinkXP::content);
+
+    // ---- Goniometer ----
+    {
+        pushSunken (areaGonio, PinkXP::content);
+        auto inner = areaGonio.reduced (6);
+        if (inner.getWidth() > 4 && inner.getHeight() > 4)
+        {
+            const float cx = (float) inner.getCentreX();
+            const float cy = (float) inner.getCentreY();
+            const float R  = (float) juce::jmin (inner.getWidth(), inner.getHeight()) * 0.48f;
+
+            // 菱形边界
+            const auto diamondC = PinkXP::pink300.withAlpha (0.55f);
+            appendLineSegment (snap->vertices, cx, cy - R, cx + R, cy, 0.5f, diamondC);
+            appendLineSegment (snap->vertices, cx + R, cy, cx, cy + R, 0.5f, diamondC);
+            appendLineSegment (snap->vertices, cx, cy + R, cx - R, cy, 0.5f, diamondC);
+            appendLineSegment (snap->vertices, cx - R, cy, cx, cy - R, 0.5f, diamondC);
+
+            // 中心十字
+            const auto crossC = PinkXP::pink300.withAlpha (0.5f);
+            appendLineSegment (snap->vertices, cx - R, cy, cx + R, cy, 0.5f, crossC);
+            appendLineSegment (snap->vertices, cx, cy - R, cx, cy + R, 0.5f, crossC);
+
+            // L/R 对角虚线（2×2 点）
+            const auto diagC = PinkXP::pink200.withAlpha (0.6f);
+            for (int d = 0; d < (int) R; d += 5)
+            {
+                appendQuad (snap->vertices, { cx - R + d, cy - R + d, 2.0f, 2.0f }, diagC);
+                appendQuad (snap->vertices, { cx + R - d - 2, cy - R + d, 2.0f, 2.0f }, diagC);
+            }
+
+            // 样本点云：L/R → M/S
+            const int N = juce::jmin (oscL.size(), oscR.size());
+            if (N > 1)
+            {
+                const int targetPoints = juce::jmax (96, inner.getWidth() * 2);
+                const int stride = juce::jmax (1, N / targetPoints);
+                const auto dotC = PinkXP::pink500;
+                const float dr = dotC.getFloatRed(), dg = dotC.getFloatGreen(), db = dotC.getFloatBlue();
+                const float denom = (float) juce::jmax (1, N - 1);
+                const auto innerF = inner.toFloat().expanded (1.0f);
+
+                for (int i = 0; i < N; i += stride)
+                {
+                    const float L = oscL.getUnchecked (i);
+                    const float Rs = oscR.getUnchecked (i);
+                    if (! std::isfinite (L) || ! std::isfinite (Rs)) continue;
+                    const float Lc = juce::jlimit (-1.0f, 1.0f, L);
+                    const float Rc = juce::jlimit (-1.0f, 1.0f, Rs);
+                    const float M = (Lc + Rc) * 0.7071067f;
+                    const float S = (Lc - Rc) * 0.7071067f;
+                    const float px = cx + S * R;
+                    const float py = cy - M * R;
+                    if (! innerF.contains (px, py)) continue;
+                    const float a = 0.2f + 0.6f * ((float) i / denom);
+                    const float q[36] = {
+                        px - 0.5f, py - 0.5f, dr, dg, db, a,
+                        px + 1.5f, py - 0.5f, dr, dg, db, a,
+                        px - 0.5f, py + 1.5f, dr, dg, db, a,
+                        px + 1.5f, py - 0.5f, dr, dg, db, a,
+                        px + 1.5f, py + 1.5f, dr, dg, db, a,
+                        px - 0.5f, py + 1.5f, dr, dg, db, a,
+                    };
+                    snap->vertices.insert (snap->vertices.end(), q, q + 36);
+                }
+            }
+        }
+    }
+
+    // ---- Correlation Dial ----
+    {
+        pushSunken (areaDial, PinkXP::content);
+        auto inner = areaDial.reduced (6);
+        if (inner.getWidth() > 8 && inner.getHeight() > 8)
+        {
+            const float cx = (float) inner.getCentreX();
+            const float cy = (float) inner.getBottom();
+            const int readoutReserve = 28;
+            const float R = juce::jmin ((float) inner.getWidth() * 0.46f,
+                                        (float) inner.getHeight() - (float) readoutReserve);
+            if (R >= 10.0f)
+            {
+                auto thetaFor = [] (float corr) -> float
+                {
+                    const float t = juce::jlimit (-1.0f, 1.0f, corr) * 0.5f + 0.5f;
+                    return t * juce::MathConstants<float>::pi;
+                };
+                auto pointAt = [&] (float theta, float r) -> juce::Point<float>
+                {
+                    return { cx - std::cos (theta) * r, cy - std::sin (theta) * r };
+                };
+
+                // 弧形轨（上半圆，64 段）：粗 6px（半宽 3）+ 细 2px（半宽 1）
+                //   θ ∈ [0, π]（θ=0 正左 → θ=π 正右，θ=π/2 正上），与旧版
+                //   pointAt 的 "cx - cos / cy - sin" 公式一致（上一版误用标准
+                //   数学系 cos/sin，只画出了 0→+1 的右半段）。
+                constexpr int arcSegs = 64;
+                const auto trackWide = PinkXP::pink300.withAlpha (0.45f);
+                const auto trackThin = PinkXP::pink200;
+                for (int s = 0; s < arcSegs; ++s)
+                {
+                    const float th0 = juce::MathConstants<float>::pi * (float) s / (float) arcSegs;
+                    const float th1 = juce::MathConstants<float>::pi * (float) (s + 1) / (float) arcSegs;
+                    const float x0 = cx - std::cos (th0) * R, y0 = cy - std::sin (th0) * R;
+                    const float x1 = cx - std::cos (th1) * R, y1 = cy - std::sin (th1) * R;
+                    appendLineSegment (snap->vertices, x0, y0, x1, y1, 3.0f, trackWide);
+                    appendLineSegment (snap->vertices, x0, y0, x1, y1, 1.0f, trackThin);
+                }
+
+                // 刻度短线（5 条）
+                const float markVals[5] = { -1.0f, -0.5f, 0.0f, 0.5f, 1.0f };
+                const auto markC = PinkXP::pink400;
+                for (float v : markVals)
+                {
+                    const float th = thetaFor (v);
+                    const auto p1 = pointAt (th, R - 3.0f);
+                    const auto p2 = pointAt (th, R + 1.0f);
+                    appendLineSegment (snap->vertices, p1.x, p1.y, p2.x, p2.y, 0.6f, markC);
+                }
+
+                // 指针（阴影 + 本体 + 轴心）
+                const float th = thetaFor (smoothedCorr);
+                const auto tip = pointAt (th, R - 4.0f);
+                appendLineSegment (snap->vertices, cx + 1, cy + 1, tip.x + 1, tip.y + 1, 1.5f,
+                                   PinkXP::pink700.withAlpha (0.35f));
+                const juce::Colour needleCol = (smoothedCorr < 0.0f) ? PinkXP::sel : PinkXP::pink600;
+                appendLineSegment (snap->vertices, cx, cy, tip.x, tip.y, 1.0f, needleCol);
+                appendDisc (snap->vertices, cx, cy, 3.5f, PinkXP::dark, 16);
+                appendDisc (snap->vertices, cx, cy, 2.0f, PinkXP::pink500, 16);
+            }
+        }
+    }
+
+    // ---- Width bar ----
+    {
+        const int labelW = 56;
+        auto barArea = areaWidth.withTrimmedLeft (labelW + 4);
+        pushSunken (barArea, PinkXP::content.darker (0.05f));
+        auto innerBar = barArea.reduced (2);
+        if (! innerBar.isEmpty())
+        {
+            const int cellSize = 6, cellGap = 1, step = cellSize + cellGap;
+            const int N = juce::jmax (1, (innerBar.getWidth() + cellGap) / step);
+            const int litN = juce::jlimit (0, N, (int) std::round (smoothedWidth * N));
+            const int y = innerBar.getY() + 1;
+            const int h = innerBar.getHeight() - 2;
+            for (int i = 0; i < N; ++i)
+            {
+                const float t = (float) i / (float) juce::jmax (1, N - 1);
+                juce::Colour base;
+                if (t < 0.6f)      base = PinkXP::pink200;
+                else if (t < 0.85f) base = PinkXP::pink500;
+                else                base = PinkXP::sel;
+                appendQuad (snap->vertices,
+                            { (float) (innerBar.getX() + i * step), (float) y,
+                              (float) cellSize, (float) h },
+                            i < litN ? base : base.withAlpha (0.18f));
+            }
+        }
+    }
+
+    // ---- Balance bar ----
+    {
+        const int labelW = 56;
+        auto barArea = areaBalance.withTrimmedLeft (labelW + 4);
+        pushSunken (barArea, PinkXP::content.darker (0.05f));
+        auto innerBar = barArea.reduced (2);
+        if (! innerBar.isEmpty())
+        {
+            const int cx = innerBar.getCentreX();
+            appendLineSegment (snap->vertices,
+                               (float) cx, (float) innerBar.getY(),
+                               (float) cx, (float) innerBar.getBottom(),
+                               0.5f, PinkXP::pink300.withAlpha (0.6f));
+
+            const int cellSize = 4, cellGap = 1, step = cellSize + cellGap;
+            const int halfCells = juce::jmax (1, (innerBar.getWidth() / 2) / step);
+            const float b = juce::jlimit (-1.0f, 1.0f, smoothedBalance);
+            const int litCells = (int) std::round (std::abs (b) * halfCells);
+            const int y = innerBar.getY() + 2;
+            const int h = innerBar.getHeight() - 4;
+            const auto offC = PinkXP::pink200.withAlpha (0.25f);
+            for (int i = 0; i < halfCells; ++i)
+            {
+                const int xL = cx - (i + 1) * step;
+                const int xR = cx + i * step + cellGap;
+                appendQuad (snap->vertices, { (float) xL, (float) y, (float) cellSize, (float) h },
+                            (b < 0 && i < litCells) ? PinkXP::pink500 : offC);
+                appendQuad (snap->vertices, { (float) xR, (float) y, (float) cellSize, (float) h },
+                            (b > 0 && i < litCells) ? PinkXP::pink600 : offC);
+            }
+        }
+    }
+
+    snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+    publishGlSnapshot (std::move (snap));
 }
 
 // ----------------------------------------------------------

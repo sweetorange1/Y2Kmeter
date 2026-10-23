@@ -2,7 +2,7 @@
 
 #include <JuceHeader.h>
 #include <vector>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 
@@ -25,7 +25,7 @@
 // 数据源：AnalyserHub::getSpectrumMagnitudesBlended（低频 8192FFT + 高频 2048FFT）
 // ==========================================================
 
-class Spectrogram3DModule : public ModulePanel,
+class Spectrogram3DModule : public GlDirectModuleBase,
                              public AnalyserHub::FrameListener
 {
 public:
@@ -39,10 +39,19 @@ public:
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
 
+    // v2.9.3：持久化 TINT 按钮状态（山峰跟随主题着色开关）
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState (const juce::ValueTree& state) override;
+
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
-    void paintContent  (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
     void resized() override;
+
+    // ---- GlDirectModuleBase 钩子（v2.9.4 迁移自 v2.9.3 直渲染样板）----
+    void buildGlSnapshot() override;                                // UI 线程：顶点流
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;   // 轴标签 + 悬停标尺
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override; // 离屏 Image 旧路径
 
 private:
     // ---- 布局 ----
@@ -101,6 +110,7 @@ private:
     // ---- 滚动速度解耦 ----
     float  pixelsPerSecond  = 60.0f;  // 默认 60 px/s
     double lastFrameMs      = 0.0;
+    double lastPushMs       = 0.0;    // v2.9.2：滚动更新门控（~30Hz）
     float  columnAccumulator = 0.0f;
 
     // ---- 右侧控制条 ----
@@ -118,7 +128,7 @@ private:
     int lastCachedFrameCount = -1;
 
     // repaint 节流（P1）：最短重绘间隔 20ms（~50fps）
-    double lastRepaintMs = 0.0;
+
 
     // ---- 离屏 Image 缓存（P2 性能优化）----
     //   将 3D 视图渲染到离屏 Image，paintContent 只需一次 drawImageAt。
@@ -159,6 +169,7 @@ private:
     std::vector<std::array<juce::Colour, kPaletteLevels>> depthPalettes;
     int  depthPalettesRows  = 0;    // 当前 depthPalettes 对应的有效行数
     bool depthPalettesDirty = true;
+    void* glImageContext    = nullptr; // v2.9.2：cached3DImage 所属 GL 上下文（变化时重建）
 
     // ---- 鼠标悬停标尺 ----
     void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);

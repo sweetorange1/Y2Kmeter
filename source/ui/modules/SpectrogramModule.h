@@ -2,7 +2,7 @@
 
 #include <JuceHeader.h>
 #include <vector>
-#include "source/ui/ModuleWorkspace.h"
+#include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 
@@ -24,7 +24,7 @@
 // 数据源：AnalyserHub::getSpectrumMagnitudesBlended（低频 8192FFT + 高频 2048FFT 双路合并）
 // ==========================================================
 
-class SpectrogramModule : public ModulePanel,
+class SpectrogramModule : public GlDirectModuleBase,
                           public AnalyserHub::FrameListener
 {
 public:
@@ -50,10 +50,19 @@ public:
     void        setDisplayMode (DisplayMode m);
     DisplayMode getDisplayMode() const noexcept { return displayMode; }
 
+    // v2.9.3：持久化显示模式（Classic / Sharp / Sharper 按钮状态）
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState (const juce::ValueTree& state) override;
+
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
-    void paintContent  (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
     void resized() override;
+
+    // ---- GlDirectModuleBase 钩子（v2.9.5 迁移，纹理通道）----
+    void buildGlSnapshot() override;
+    juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
+    void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
+    void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
     // ---- 布局 ----
@@ -133,6 +142,14 @@ private:
 
     // 每帧复用的"rows 长度线性幅度"缓冲，避免 onFrame 里反复分配
     juce::Array<float> rowMagBuf;
+
+    // v2.9.5：纹理像素缓存（增量着色 —— 只有新列重新调色，其余复用；
+    //   12 万像素全量 interpolatedWith 每帧 ~2.4ms，是消息线程卡顿主因）
+    std::vector<juce::uint32> texPixelsCache_;
+    bool texCacheValid_ = false;
+    int  lastBuiltWriteCol_ = -1;   // 上次构建时 writeCol（用于整区间增量更新：
+                                    //   低帧率一帧 push 多列，只更新最后一列会让
+                                    //   中间列残留环形位置的历史数据 → 黑线）
 
     // ---- 滚动速度解耦 —— 按实时时间推进列数，清除 "帧率×1 列"的耦合 ----
     float  pixelsPerSecond  = 60.0f;   // 默认 60 px/s（滚动速度，与 UI 帧率解耦）

@@ -1,6 +1,7 @@
 #include "source/ui/modules/SpectrogramModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/ui/palette/OkLchUtils.h"
 #include <cmath>
 #include <algorithm>
 
@@ -9,7 +10,7 @@
 // ==========================================================
 
 SpectrogramModule::SpectrogramModule (AnalyserHub& h)
-    : ModulePanel (ModuleType::spectrogram), hub (h)
+    : GlDirectModuleBase (ModuleType::spectrogram), hub (h)
 {
     // 订阅 Spectrum 路 —— 与 SpectrumModule 共享同一路 1024 bin FFT 幅度，
     // 后端零新增计算。
@@ -61,11 +62,15 @@ SpectrogramModule::SpectrogramModule (AnalyserHub& h)
         speedSlider.setColour (juce::Slider::textBoxTextColourId,  PinkXP::ink);
         speedLabel.repaint();
         speedSlider.repaint();
+        // 频谱 base/accent 色 + GL 快照底色跟随主题
+        refreshSpectrogramColours();
+        buildGlSnapshot();
         modeBtn.repaint();
 
         // 刷新 Spectrogram 瀑布图 base/accent 颜色并失效 Image 缓存，
         // 下一帧 paint 会全量重绘为新配色。
         refreshSpectrogramColours();
+        texCacheValid_ = false;   // v2.9.5：纹理缓存随配色失效
         imageBuf = juce::Image();
     });
 
@@ -94,6 +99,8 @@ void SpectrogramModule::setCellPx (int px)
     cellPx = juce::jlimit (2, 32, px);
     // 强制下一次 ensureGrid 重建
     lastCanvasW = lastCanvasH = 0;
+    texCacheValid_ = false;      // v2.9.5：网格分辨率变化 → 纹理缓存失效
+    lastBuiltWriteCol_ = -1;
     repaint();
 }
 
@@ -108,12 +115,33 @@ const char* SpectrogramModule::displayModeText (DisplayMode m) noexcept
     }
 }
 
+// ----------------------------------------------------------
+// v2.9.3 持久化：显示模式（Classic / Sharp / Sharper）按钮状态
+// ----------------------------------------------------------
+juce::ValueTree SpectrogramModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s ("state");
+    s.setProperty ("displayMode", (int) displayMode, nullptr);
+    return s;
+}
+
+void SpectrogramModule::restoreModuleSpecificState (const juce::ValueTree& state)
+{
+    if (! state.hasProperty ("displayMode"))
+        return;
+
+    setDisplayMode ((DisplayMode) (int) state.getProperty ("displayMode"));
+}
+
 void SpectrogramModule::setDisplayMode (DisplayMode m)
 {
     if (displayMode == m) return;
 
     displayMode = m;
     modeBtn.setButtonText (displayModeText (m));
+
+    // v2.9.5：纹理缓存失效（颜色调色随模式/主题变化）
+    texCacheValid_ = false;
 
     // 切换模式后，grid 里已有的旧列仍是旧模式的数据（无法重算——重分配依赖
     // 相位历史），会随滚动自然过渡到新模式；这里仅重绘当前 image，新数据在
@@ -220,7 +248,23 @@ void SpectrogramModule::refreshSpectrogramColours()
 juce::Colour SpectrogramModule::intensityToColour (float t) noexcept
 {
     t = juce::jlimit (0.0f, 1.0f, t);
-    return spectrogramBaseColour_.interpolatedWith (spectrogramAccentColour_, t);
+
+    // 调色板重构（A3/S4）：生成器主题的强度色阶与 Waveform 保持完全一致的
+    //   色谱映射 —— chartRamp 8 阶本身横跨"主题色相 → accent2 色相"，
+    //   能量越高越亮且色相随阶渐变（蓝→粉），而非单一亮度的同色加深：
+    //   · t ∈ [0, 0.15]：画布底色 content 平滑融入色谱起点 ramp[0]；
+    //   · t ∈ (0.15, 1]：与 Waveform 相同的 sampleChartRamp 全阶渐变。
+    //   预设主题保持 base→accent 数据驱动（S7 保真），插值空间同样用 OKLab。
+    if (PinkXP::isCustomThemeActive())
+    {
+        constexpr float kBlend = 0.15f;
+        if (t < kBlend)
+            return PinkXP::interpolateOkLab (PinkXP::content,
+                                             PinkXP::chartRamp[0],
+                                             t / kBlend);
+        return PinkXP::sampleChartRamp ((t - kBlend) / (1.0f - kBlend));
+    }
+    return PinkXP::interpolateOkLab (spectrogramBaseColour_, spectrogramAccentColour_, t);
 }
 
 // ----------------------------------------------------------
@@ -335,13 +379,28 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         writeLatestColumnToImage();
     }
 
+    // v2.9.5：同步生成 GL 纹理快照（新列已写入）
+    buildGlSnapshot();
+
     repaint();
 }
 
 // ----------------------------------------------------------
-// 绘制
+// GlDirectModuleBase 钩子（v2.9.5 迁移，纹理通道）
 // ----------------------------------------------------------
-void SpectrogramModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
+juce::Rectangle<int> SpectrogramModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
+{
+    return getCanvasBounds (contentBounds);
+}
+
+void SpectrogramModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    drawAxisLabels (g, canvas.reduced (2));
+    if (hoverActive)
+        drawHoverRuler (g, canvas);
+}
+
+void SpectrogramModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     g.setColour (PinkXP::btnFace);
     g.fillRect (contentBounds);
@@ -352,18 +411,10 @@ void SpectrogramModule::paintContent (juce::Graphics& g, juce::Rectangle<int> co
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
-    // ===========================================================
-    // 绘图区 = canvas.reduced(2)
-    //   · 外围 2px 是 drawSunken 画的凹陷边框（上下左右对称）—— 与 Waveform 风格一致
-    //   · image 只贴到内部，永不覆盖边框也不被边框覆盖
-    //   · 之前 "最顶一条恒深色带" 的根源是：drawSunken 顶部画了 2 像素 dark、
-    //     drawImage 贴全 canvas 时因缩放插值留下一条 1-2px 的深色重合条
-    //     → 改成“image 只贴 canvas.reduced(2)”之后彻底消除。
-    // ===========================================================
+    // 绘图区 = canvas.reduced(2)：外围 2px 是凹陷边框，image 只贴内部
     const auto plot = canvas.reduced (2);
     if (plot.getWidth() <= 4 || plot.getHeight() <= 4) return;
 
-    // paint 期间兼底同步（窗口刚 resize、还没 onFrame 进来时）
     auto* self = const_cast<SpectrogramModule*> (this);
     self->ensureGrid (plot.getWidth(), plot.getHeight());
     self->ensureImage();
@@ -373,44 +424,101 @@ void SpectrogramModule::paintContent (juce::Graphics& g, juce::Rectangle<int> co
     g.reduceClipRegion (plot);
     g.setImageResamplingQuality (juce::Graphics::lowResamplingQuality);
 
-    // ===========================================================
-    // 单次 drawImage 贴屏（方案 C 配套改动）
-    //
-    //   imageBuf 是 2*cols 宽的"双拷贝环形瀑布图"，写入时对 c 和 c+cols
-    //   两列同步写，任何时刻截取 [writeCol, writeCol+cols) 的一段都是
-    //   "从老到新"的完整瀑布。
-    //
-    //   这里用 AffineTransform 把这段"子区窗口"映射到屏幕 plot 区：
-    //     1. 缩放：image 源像素尺寸 (cols × rows) → 屏幕目标尺寸 (plot.w × plot.h)
-    //     2. 平移：image 的 writeCol 列要贴到 plot 最左 (plot.x)，
-    //              且要先把 image 的 y=0 贴到 plot.y 顶部
-    //
-    //   与旧实现（两次 g.drawImage(..., sx, sy, sw, sh, ...)）的关键区别：
-    //   · 旧实现每次带 src 矩形 → JUCE 内部 new 临时 SubsectionPixelData →
-    //     OpenGLRendering::CachedImageList 以 ImagePixelData* 为键频繁失效 →
-    //     每帧 glDeleteTextures + glTexImage2D 重传全图。
-    //   · 新实现：始终把整张 imageBuf 的 ImagePixelData 指针（不变）交给
-    //     CachedImageList，纹理命中缓存，不再销毁/重建。超出 plot 的左右
-    //     多余部分由 reduceClipRegion(plot) 裁掉，结果像素上完全一致。
-    // ===========================================================
     const int cw = plot.getWidth();
     const int ch = plot.getHeight();
+    const float sx = (float) cw / (float) cols;
+    const float sy = (float) ch / (float) rows;
 
-    const float sx = (float) cw / (float) cols;   // 每列源像素 → 屏幕像素宽
-    const float sy = (float) ch / (float) rows;   // 每行源像素 → 屏幕像素高
-
-    // 先在 image 坐标里把 writeCol 移到原点，再缩放到屏幕尺寸，最后平移到 plot
+    // 双拷贝环形瀑布图：截取 [writeCol, writeCol+cols) 子区映射到 plot
     const auto xform = juce::AffineTransform::translation (- (float) writeCol, 0.0f)
                           .scaled (sx, sy)
                           .translated ((float) plot.getX(), (float) plot.getY());
-
     g.drawImageTransformed (imageBuf, xform, false);
 
     drawAxisLabels (g, plot);
-
-    // 鼠标悬停标尺（实时绘制，与滚动瀑布数据解耦）
     if (hoverActive)
-        drawHoverRuler(g, canvas);
+        drawHoverRuler (g, canvas);
+}
+
+// ----------------------------------------------------------
+// buildGlSnapshot —— 纹理通道快照（v2.9.5）
+//   双拷贝环形纹理（2*cols × rows 像素，与旧版 imageBuf 同布局）：
+//   texScrollU/texWinW 把 [writeCol, writeCol+cols) 子区映射到 plot ——
+//   零 memmove 滚动；背景（凹陷边框）为顶点流；轴标签/hover 为 overlay。
+// ----------------------------------------------------------
+void SpectrogramModule::buildGlSnapshot()
+{
+    if (! wantsGlSnapshot())
+        return;   // v2.9.5：浮动态跳过
+
+    const auto canvas = getCanvasBounds (getContentBounds());
+    const auto plot   = canvas.reduced (2);
+    if (plot.getWidth() <= 4 || plot.getHeight() <= 4)
+        return;
+
+    if (rows <= 0 || cols <= 0)
+        return;
+
+    auto snap = beginGlSnapshot();
+    snap->canvasLocal = canvas;
+
+    // ---- 纹理：gridData 着色（双拷贝环形）----
+    snap->texW = cols * 2;
+    snap->texH = rows;
+    snap->texDirty = true;
+    snap->texScrollU = (float) writeCol / (float) (cols * 2);
+    snap->texWinW = 0.5f;
+    snap->texTargetRect = plot;
+    {
+        // v2.9.5：增量着色 —— 只有新列重新调色（12 万像素全量 interpolatedWith
+        //   每帧 ~2.4ms，是消息线程卡顿主因）；其余列复用缓存。
+        //   行序翻转：内存行 0 = 低频（纹理 v=0 = 底，屏幕顶配 uv(0,1)）。
+        const size_t totalPix = (size_t) snap->texW * (size_t) snap->texH;
+        if (texPixelsCache_.size() != totalPix)
+            texCacheValid_ = false;
+
+        if (! texCacheValid_)
+        {
+            texPixelsCache_.resize (totalPix);
+            for (int r = 0; r < rows; ++r)
+                for (int c = 0; c < cols; ++c)
+                {
+                    const juce::uint32 argb = intensityToColour (gridData[(size_t) (r * cols + c)]).getARGB();
+                    const int rOut = rows - 1 - r;   // 内存行 0 = 低频
+                    texPixelsCache_[(size_t) rOut * (size_t) snap->texW + (size_t) c] = argb;
+                    texPixelsCache_[(size_t) rOut * (size_t) snap->texW + (size_t) (c + cols)] = argb;
+                }
+            texCacheValid_ = true;
+        }
+        else
+        {
+            // v2.9.5：增量更新整个"自上次构建以来写入的环形区间" ——
+            //   低帧率一帧 push 多列（nCols>1），只更新最后一列会让中间列
+            //   残留该环形位置的几十秒前历史数据 → 竖直黑线。
+            int pending = (lastBuiltWriteCol_ < 0)
+                              ? cols
+                              : ((writeCol - lastBuiltWriteCol_ + cols) % cols);
+            for (int k = 0; k < pending; ++k)
+            {
+                const int c = (writeCol - 1 - k + cols) % cols;
+                for (int r = 0; r < rows; ++r)
+                {
+                    const juce::uint32 argb = intensityToColour (gridData[(size_t) (r * cols + c)]).getARGB();
+                    const int rOut = rows - 1 - r;
+                    texPixelsCache_[(size_t) rOut * (size_t) snap->texW + (size_t) c] = argb;
+                    texPixelsCache_[(size_t) rOut * (size_t) snap->texW + (size_t) (c + cols)] = argb;
+                }
+            }
+        }
+        lastBuiltWriteCol_ = writeCol;
+        snap->texPixels = texPixelsCache_;   // 拷贝（480KB memcpy ~30μs）
+    }
+
+    // ---- 背景顶点：凹陷边框（框架 helper）----
+    appendSunkenFrame (snap->vertices, canvas);
+
+    snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+    publishGlSnapshot (std::move (snap));
 }
 
 void SpectrogramModule::mouseMove(const juce::MouseEvent& e)

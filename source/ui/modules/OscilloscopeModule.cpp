@@ -8,7 +8,7 @@
 // ==========================================================
 
 OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::oscilloscope),
+    : GlDirectModuleBase(ModuleType::oscilloscope),
       hub(h)
 {
     // Phase F：本模块只需要 Oscilloscope 一路 + 注册 FrameListener
@@ -22,6 +22,7 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
     {
         invalidateStaticLayer();
         invalidateDynamicLayer();
+        buildGlSnapshot();   // GL 快照含底色/几何颜色，主题切换必须重建
         repaint();
     });
     auto setupModeBtn = [this](juce::TextButton& b)
@@ -80,6 +81,8 @@ void OscilloscopeModule::setDisplayMode(DisplayMode m)
     refreshModeButtons();
     invalidateStaticLayer();
     invalidateDynamicLayer();
+    // v2.9.3：三种模式都支持 GL 直渲染；切换后立即重建快照，避免旧模式闪一帧
+    buildGlSnapshot();
     repaint();
 }
 
@@ -177,15 +180,267 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
-    // 性能优化（阶段1）：UI 侧 repaint 节流。
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    const float  scale  = (float) juce::jmax (1.0, (double) juce::Component::getApproximateScaleFactorForComponent (this));
-    const double minRepaintIntervalMs = 15.0 * (double) juce::jmin (2.0f, scale);
-    if ((nowMs - lastRepaintMs) < minRepaintIntervalMs)
+    // v2.9：去掉 15ms×DPI 硬编码节流（高 DPI 下会锁到 ≤33fps），每个分发帧重绘
+    // v2.9.3：同步生成 GL 直渲染快照（waveform / XY / Lissajous 三种模式）
+    buildGlSnapshot();
+    repaint();
+}
+
+// ----------------------------------------------------------
+// buildGlSnapshot —— GL 直渲染快照（v2.9.3，覆盖三种显示模式；
+//   v2.9.4 迁移到统一框架，单段 GL_TRIANGLES 顶点流）
+//   顶点流（模块本地坐标）：
+//     [背景 drawSunken + 点阵 + 十字线 + 虚线]
+//     waveform： [L glow strip][L main strip][R glow strip][R main strip]
+//     xy/lissajous：[标尺环 4×64 段] [点云 2×2 quad × N]
+// ----------------------------------------------------------
+void OscilloscopeModule::buildGlSnapshot()
+{
+    if (! wantsGlSnapshot())
+        return;   // v2.9.5：浮动态跳过（拖动浮动窗口 resize 会每帧触发重建）
+
+    const auto canvas = getCanvasBounds (getContentBounds());
+    auto inner = canvas.reduced (4);
+    if (inner.getWidth() <= 8 || inner.getHeight() <= 8)
         return;
 
-    lastRepaintMs = nowMs;
-    repaint();
+    const int N = snapshotL.size();
+    if (N <= 1)
+        return;
+
+    auto snap = beginGlSnapshot();
+    // v2.9.4：逻辑 FBO 渲染（规避 dock/聚焦时的透明与拖影问题，见框架注释）
+    snap->renderToLogical = true;
+    snap->logicalW = canvas.getWidth();
+    snap->logicalH = canvas.getHeight();
+    snap->canvasLocal = canvas;
+
+    // 预估容量：背景 ~1500 quad + 波形 4×(N-1) 段
+    const int maxPts = juce::jmax (64, inner.getWidth());
+    snap->vertices.reserve ((size_t) (1500 * 6 * 6 + (size_t) 4 * maxPts * 6 * 6));
+
+    auto pushRect = [&] (juce::Rectangle<float> r, juce::Colour c)
+    {
+        const float x0 = r.getX(), y0 = r.getY(), x1 = r.getRight(), y1 = r.getBottom();
+        const float rr = c.getFloatRed(), gg = c.getFloatGreen(),
+                    bb = c.getFloatBlue(), aa = c.getFloatAlpha();
+        const float quad[36] = {
+            x0, y0, rr, gg, bb, aa,  x1, y0, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
+            x1, y0, rr, gg, bb, aa,  x1, y1, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
+        };
+        snap->vertices.insert (snap->vertices.end(), quad, quad + 36);
+    };
+
+    // ---- 背景：凹陷底（框架 helper）+ 点阵 + 十字 + 虚线 ----
+    {
+        appendSunkenFrame (snap->vertices, canvas);
+
+        // 点阵（8px 间距、行错位）
+        const auto dot = PinkXP::pink200.withAlpha (0.35f);
+        constexpr int dotStep = 8;
+        for (int y = inner.getY(); y < inner.getBottom(); y += dotStep)
+            for (int x = inner.getX() + ((y / dotStep) % 2) * (dotStep / 2);
+                 x < inner.getRight(); x += dotStep)
+                pushRect ({ (float) x, (float) y, 1.0f, 1.0f }, dot);
+
+        // 中心十字线（1px 宽）
+        const auto cross = PinkXP::pink300.withAlpha (0.6f);
+        const int cx = inner.getCentreX();
+        const int cy = inner.getCentreY();
+        pushRect ({ (float) inner.getX(), (float) cy, (float) inner.getWidth(), 1.0f }, cross);
+        pushRect ({ (float) cx, (float) inner.getY(), 1.0f, (float) inner.getHeight() }, cross);
+
+        // 1/4 / 3/4 虚线
+        const auto dash = PinkXP::pink200.withAlpha (0.5f);
+        const int q1x = inner.getX() + inner.getWidth() / 4;
+        const int q3x = inner.getX() + inner.getWidth() * 3 / 4;
+        for (int y = inner.getY(); y < inner.getBottom(); y += 4)
+        {
+            pushRect ({ (float) q1x, (float) y, 1.0f, 2.0f }, dash);
+            pushRect ({ (float) q3x, (float) y, 1.0f, 2.0f }, dash);
+        }
+    }
+
+    // ---- 波形折线 strip ----
+    const float h     = (float) inner.getHeight();
+    const float cy    = (float) inner.getCentreY();
+    const float halfH = h * 0.45f;
+    const int   targetPoints = juce::jmax (64, inner.getWidth());
+    const int   stride = juce::jmax (1, N / targetPoints);
+
+    auto pushWave = [&] (const juce::Array<float>& samples,
+                         juce::Colour glowCol, float glowHalfW,
+                         juce::Colour mainCol, float mainHalfW)
+    {
+        // 抽稀采样点序列（与 buildWaveformPath 一致）
+        std::vector<float> xs, ys;
+        xs.reserve ((size_t) (N / stride + 4));
+        ys.reserve ((size_t) (N / stride + 4));
+        for (int i = 0; i < N; i += stride)
+        {
+            const float raw = samples.getUnchecked (i);
+            const float s = std::isfinite (raw) ? juce::jlimit (-1.0f, 1.0f, raw) : 0.0f;
+            const float norm = (float) i / (float) juce::jmax (1, N - 1);
+            xs.push_back ((float) inner.getX() + norm * (float) inner.getWidth());
+            ys.push_back (cy - s * halfH);
+        }
+        if ((N - 1) % stride != 0)
+        {
+            const float raw = samples.getUnchecked (N - 1);
+            const float s = std::isfinite (raw) ? juce::jlimit (-1.0f, 1.0f, raw) : 0.0f;
+            xs.push_back ((float) inner.getRight());
+            ys.push_back (cy - s * halfH);
+        }
+
+        const float gr = glowCol.getFloatRed(),   gg = glowCol.getFloatGreen(),
+                    gb = glowCol.getFloatBlue(),  ga = glowCol.getFloatAlpha();
+        const float mr = mainCol.getFloatRed(),   mg = mainCol.getFloatGreen(),
+                    mb = mainCol.getFloatBlue(),  ma = mainCol.getFloatAlpha();
+
+        // 每段生成一个 quad（沿线段法线偏移 ±halfW），glow 与 main 顺序叠加
+        const size_t ptCount = xs.size();
+        for (int layer = 0; layer < 2; ++layer)
+        {
+            const float hw = (layer == 0) ? glowHalfW : mainHalfW;
+            const float r  = (layer == 0) ? gr : mr;
+            const float gg2= (layer == 0) ? gg : mg;
+            const float b  = (layer == 0) ? gb : mb;
+            const float a  = (layer == 0) ? ga : ma;
+
+            for (size_t i = 0; i + 1 < ptCount; ++i)
+            {
+                const float dx = xs[i + 1] - xs[i];
+                const float dy = ys[i + 1] - ys[i];
+                const float len = std::sqrt (dx * dx + dy * dy);
+                if (len < 1.0e-6f) continue;
+                const float nx = -dy / len * hw;
+                const float ny =  dx / len * hw;
+
+                const float q[36] = {
+                    xs[i] + nx,     ys[i] + ny,     r, gg2, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, gg2, b, a,
+                    xs[i] - nx,     ys[i] - ny,     r, gg2, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, gg2, b, a,
+                    xs[i + 1] - nx, ys[i + 1] - ny, r, gg2, b, a,
+                    xs[i] - nx,     ys[i] - ny,     r, gg2, b, a,
+                };
+                snap->vertices.insert (snap->vertices.end(), q, q + 36);
+            }
+        }
+    };
+
+    // ---- XY / Lissajous：标尺环 + 点云 ----
+    if (displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous)
+    {
+        const bool rotate45 = (displayMode == DisplayMode::lissajous);
+        const int  nXY = juce::jmin (snapshotL.size(), snapshotR.size());
+        if (nXY > 1)
+        {
+            auto innerXY = canvas.reduced (6);
+            const float cx = (float) innerXY.getCentreX();
+            const float cy = (float) innerXY.getCentreY();
+            const float baseRadius = (float) juce::jmin (innerXY.getWidth(), innerXY.getHeight()) * 0.45f;
+            const float gain = autoGainFactor;
+            const float effectiveRadius = baseRadius * gain;
+
+            // 标尺环：4 个同心 1px 圆环 → 64 段细 quad（与 drawXY 的 drawEllipse 对应）
+            {
+                const auto ringCol = PinkXP::pink200.withAlpha (0.30f);
+                const float rr0 = ringCol.getFloatRed(), rg0 = ringCol.getFloatGreen(),
+                            rb0 = ringCol.getFloatBlue(), ra0 = ringCol.getFloatAlpha();
+                const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
+                constexpr int ringSegs = 64;
+                for (int ri = 0; ri < 4; ++ri)
+                {
+                    const float rr = baseRadius * gain * ringFrac[ri];
+                    if (rr < 2.0f) continue;
+                    for (int s = 0; s < ringSegs; ++s)
+                    {
+                        const float a0 = juce::MathConstants<float>::twoPi * (float) s       / (float) ringSegs;
+                        const float a1 = juce::MathConstants<float>::twoPi * (float) (s + 1) / (float) ringSegs;
+                        const float x0 = cx + rr * std::cos (a0), y0 = cy + rr * std::sin (a0);
+                        const float x1 = cx + rr * std::cos (a1), y1 = cy + rr * std::sin (a1);
+                        const float dx = x1 - x0, dy = y1 - y0;
+                        const float len = std::sqrt (dx * dx + dy * dy);
+                        if (len < 1.0e-6f) continue;
+                        const float nx = -dy / len * 0.5f;
+                        const float ny =  dx / len * 0.5f;
+                        const float q[36] = {
+                            x0 + nx, y0 + ny, rr0, rg0, rb0, ra0,
+                            x1 + nx, y1 + ny, rr0, rg0, rb0, ra0,
+                            x0 - nx, y0 - ny, rr0, rg0, rb0, ra0,
+                            x1 + nx, y1 + ny, rr0, rg0, rb0, ra0,
+                            x1 - nx, y1 - ny, rr0, rg0, rb0, ra0,
+                            x0 - nx, y0 - ny, rr0, rg0, rb0, ra0,
+                        };
+                        snap->vertices.insert (snap->vertices.end(), q, q + 36);
+                    }
+                }
+            }
+
+            // 点云：全点 2×2 quad（旧软件路径按 8 档 alpha 分桶；GPU 直画直接
+            //   每点带 alpha，无需分桶）。alpha = 0.25 + 0.6×(i/(N-1))，越新越亮。
+            {
+                const auto dotCol = PinkXP::chartRamp[5];
+                const float dr = dotCol.getFloatRed(), dg = dotCol.getFloatGreen(),
+                            db = dotCol.getFloatBlue();
+                const float denom = (float) juce::jmax (1, nXY - 1);
+                const juce::Rectangle<float> innerF = innerXY.toFloat().expanded (1.0f);
+
+                for (int i = 0; i < nXY; ++i)
+                {
+                    const float rawL = snapshotL.getUnchecked (i);
+                    const float rawR = snapshotR.getUnchecked (i);
+                    if (! std::isfinite (rawL) || ! std::isfinite (rawR))
+                        continue;
+
+                    const float lx = juce::jlimit (-1.0f, 1.0f, rawL);
+                    const float ry = juce::jlimit (-1.0f, 1.0f, rawR);
+
+                    float px, py;
+                    if (rotate45)
+                    {
+                        const float mid  = (lx + ry) * 0.7071067f;
+                        const float side = (lx - ry) * 0.7071067f;
+                        px = cx + side * effectiveRadius;
+                        py = cy - mid  * effectiveRadius;
+                    }
+                    else
+                    {
+                        px = cx + lx * effectiveRadius;
+                        py = cy - ry * effectiveRadius;
+                    }
+
+                    if (! innerF.contains (px, py))
+                        continue;
+
+                    const float a = 0.25f + 0.6f * ((float) i / denom);
+                    const float q[36] = {
+                        px - 1.0f, py - 1.0f, dr, dg, db, a,
+                        px + 1.0f, py - 1.0f, dr, dg, db, a,
+                        px - 1.0f, py + 1.0f, dr, dg, db, a,
+                        px + 1.0f, py - 1.0f, dr, dg, db, a,
+                        px + 1.0f, py + 1.0f, dr, dg, db, a,
+                        px - 1.0f, py + 1.0f, dr, dg, db, a,
+                    };
+                    snap->vertices.insert (snap->vertices.end(), q, q + 36);
+                }
+            }
+        }
+    }
+    else
+    {
+        // L 声道：glow 2.2px 半透明 → main 1.4px 实线；R 声道同理（与 drawWaveform 同序）
+        //   调色板重构（S4）：声道色改用 chartRamp 阶梯（预设下与旧 pinkXXX 完全一致）
+        pushWave (snapshotL, PinkXP::chartRamp[3].withAlpha (0.35f), 1.1f, PinkXP::chartRamp[4], 0.7f);
+        if (snapshotR.size() == N)
+            pushWave (snapshotR, PinkXP::chartRamp[5].withAlpha (0.35f), 1.1f, PinkXP::chartRamp[6], 0.7f);
+    }
+
+    // 单段：全部为 GL_TRIANGLES
+    snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+
+    publishGlSnapshot (std::move (snap));
 }
 
 // ----------------------------------------------------------
@@ -235,17 +490,86 @@ namespace
 #endif
 }
 
-void OscilloscopeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
+// ---- GlDirectModuleBase 钩子（v2.9.4 迁移自 v2.9.3 直渲染样板）----
+juce::Rectangle<int> OscilloscopeModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
+{
+    return getCanvasBounds (contentBounds);
+}
+
+void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    // 接管时只画图例/说明文字与 FROZEN 标记（GL 内容之上的 overlay）
+    g.setColour (PinkXP::ink.withAlpha (0.85f));
+    g.setFont   (PinkXP::getAxisFont (9.0f, juce::Font::plain));
+
+    if (displayMode == DisplayMode::waveform)
+    {
+        g.drawText ("L", canvas.getX() + 4, canvas.getBottom() - 14,
+                    24, 12, juce::Justification::centredLeft, false);
+        g.setColour (PinkXP::pink400);
+        g.fillRect  (canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
+        g.setColour (PinkXP::ink.withAlpha (0.85f));
+        g.drawText ("R", canvas.getX() + 32, canvas.getBottom() - 14,
+                    24, 12, juce::Justification::centredLeft, false);
+        g.setColour (PinkXP::pink600);
+        g.fillRect  (canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
+    }
+    else
+    {
+        const juce::String hint = (displayMode == DisplayMode::lissajous) ? "M/S" : "X=L  Y=R";
+        g.drawText (hint, canvas.getX() + 4, canvas.getBottom() - 14,
+                    80, 12, juce::Justification::centredLeft, false);
+        if (std::abs (autoGainFactor - 1.0f) > 0.05f)
+        {
+            const juce::String gainText = juce::String (autoGainFactor, 1) + "x";
+            g.drawText (gainText, canvas.getRight() - 46, canvas.getBottom() - 14,
+                        42, 12, juce::Justification::centredRight, false);
+        }
+
+        // 标尺环 dB 标签（与软件路径 drawXY 一致）
+        auto innerXY = canvas.reduced (6);
+        const float baseRadius = (float) juce::jmin (innerXY.getWidth(), innerXY.getHeight()) * 0.45f;
+        if (baseRadius * autoGainFactor >= 20.0f)
+        {
+            g.setColour (PinkXP::ink.withAlpha (0.55f));
+            g.setFont (PinkXP::getAxisFont (7.5f, juce::Font::plain));
+            const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
+            const char* labels[4] = { "-12", "-6", "-2.5", "0 dB" };
+            const float cx = (float) innerXY.getCentreX();
+            const float cy = (float) innerXY.getCentreY();
+            for (int ri = 0; ri < 4; ++ri)
+            {
+                const float rr = baseRadius * autoGainFactor * ringFrac[ri];
+                if (rr < 8.0f) continue;
+                g.drawText (labels[ri],
+                            juce::Rectangle<int> ((int) (cx + rr + 3), (int) (cy - 6), 26, 12),
+                            juce::Justification::centredLeft, false);
+            }
+        }
+    }
+
+    if (frozen)
+    {
+        auto dot = juce::Rectangle<int> (canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
+        g.setColour (PinkXP::sel);
+        g.fillEllipse (dot.toFloat());
+        g.setColour (PinkXP::ink);
+        g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+        g.drawText ("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
+                    42, 12, juce::Justification::centredRight, false);
+    }
+}
+
+void OscilloscopeModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     // 内容区底色（深色主题下也保持浅色，保证按钮文字可读）
     g.setColour(PinkXP::btnFace);
     g.fillRect(contentBounds);
 
+    auto canvas = getCanvasBounds(contentBounds);
     rebuildStaticLayerIfNeeded(contentBounds);
     drawStaticLayer(g, contentBounds);
 
-    // 画布区域（凹陷）
-    auto canvas = getCanvasBounds(contentBounds);
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
@@ -334,19 +658,20 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
     const float halfH = h * 0.45f;
 
     // L 声道：浅粉描边（先淡描 glow，再实线）
+    //   v2.9.2：glow 宽度 3.0 → 2.2（光栅化面积 ∝ 宽度，省 ~27%，视觉几乎无差）
     auto pathL = buildWaveformPath(snapshotL, inner, cy, halfH);
-    g.setColour(PinkXP::pink300.withAlpha(0.35f));
-    g.strokePath(pathL, juce::PathStrokeType(3.0f));
-    g.setColour(PinkXP::pink400);
+    g.setColour(PinkXP::chartRamp[3].withAlpha(0.35f));
+    g.strokePath(pathL, juce::PathStrokeType(2.2f));
+    g.setColour(PinkXP::chartRamp[4]);
     g.strokePath(pathL, juce::PathStrokeType(1.4f));
 
     // R 声道：深粉描边
     if (snapshotR.size() == N)
     {
         auto pathR = buildWaveformPath(snapshotR, inner, cy, halfH);
-        g.setColour(PinkXP::pink500.withAlpha(0.35f));
-        g.strokePath(pathR, juce::PathStrokeType(3.0f));
-        g.setColour(PinkXP::pink600);
+        g.setColour(PinkXP::chartRamp[5].withAlpha(0.35f));
+        g.strokePath(pathR, juce::PathStrokeType(2.2f));
+        g.setColour(PinkXP::chartRamp[6]);
         g.strokePath(pathR, juce::PathStrokeType(1.4f));
     }
 
@@ -355,13 +680,13 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
     g.drawText("L", canvas.getX() + 4, canvas.getBottom() - 14,
                24, 12, juce::Justification::centredLeft, false);
-    g.setColour(PinkXP::pink400);
+    g.setColour(PinkXP::chartRamp[4]);
     g.fillRect(canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
 
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.drawText("R", canvas.getX() + 32, canvas.getBottom() - 14,
                24, 12, juce::Justification::centredLeft, false);
-    g.setColour(PinkXP::pink600);
+    g.setColour(PinkXP::chartRamp[6]);
     g.fillRect(canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
 }
 
@@ -467,7 +792,7 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     {
         if (buckets[b].isEmpty()) continue;
         const float bucketAlpha = 0.25f + 0.6f * (((float) b + 0.5f) / (float) kAlphaBuckets);
-        g.setColour(PinkXP::pink500.withAlpha(bucketAlpha));
+        g.setColour(PinkXP::chartRamp[5].withAlpha(bucketAlpha));
         g.fillRectList(buckets[b]);
     }
 
@@ -496,7 +821,9 @@ juce::Path OscilloscopeModule::buildWaveformPath(const juce::Array<float>& sampl
     if (len <= 1 || inner.getWidth() <= 1)
         return path;
 
-    const int targetPoints = juce::jmax(64, inner.getWidth() * 2);
+    // v2.9.2：目标点数从 width×2 降到 width —— 1px 列 1 个采样点，
+    //   高频细节在 1px 宽度下不可见，光栅化段数直接减半。
+    const int targetPoints = juce::jmax(64, inner.getWidth());
     const int stride = juce::jmax(1, len / targetPoints);
 
     bool started = false;
