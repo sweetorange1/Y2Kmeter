@@ -666,6 +666,9 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty ("themeLib",
                       PinkXP::ThemeLibrary::instance().toXmlString(),  nullptr);
 
+    // Toybox 档位（-1 = 未保存）
+    root.setProperty ("toyLevel", savedToyLevel, nullptr);
+
     if (auto xml = root.createXml())
         juce::AudioProcessor::copyXmlToBinary(*xml, destData);
 }
@@ -703,6 +706,9 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
 
     // 布局锁定态（v1.8.3）：旧 state 无此属性时默认 false，保持向后兼容。
     savedLayoutLocked = (bool) root.getProperty ("layoutLocked", false);
+
+    // Toybox 档位（-1 = 未保存）
+    savedToyLevel = (int) root.getProperty ("toyLevel", -1);
 
     // 新手引导完成状态：旧存档中无此属性 → 视为老用户，默认已完成
     if (root.hasProperty ("tutorialCompleted"))

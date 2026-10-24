@@ -665,6 +665,11 @@ public:
                         .getIntValue ("ui.fpsLimit", 120);
                     y2kEditor->RestoreFpsLimit (savedFpsLimit);
 
+                    // 4.5) 恢复 Toybox 档位（默认 Normal=2；Standalone 默认 Normal，决策 1）
+                    const int savedToyLevel = getUserSettings()
+                        .getIntValue ("ui.toyLevel", 2);
+                    y2kEditor->setToyLevel (savedToyLevel);
+
                     // 4.5) 恢复 Milkdrop 预设索引。即使预设尚未加载
                     //     （GL 上下文异步初始化），也直接入队跳转请求；
                     //     newOpenGLContextCreated() 会在初始化时检查
@@ -1060,6 +1065,7 @@ private:
             "ui.chromeVisible",
             "ui.alwaysOnTop",
             "ui.fpsLimit",
+            "ui.toyLevel",
             "ui.themeId",
             "audio.sourceId",
             "milkdrop.currentPreset",
@@ -1297,6 +1303,9 @@ private:
 
         // 保存 FPS 限制档位（30/60/120/0=无上限）
         s.setValue ("ui.fpsLimit", (int) cachedEditor->GetUserRequestedFpsLimit());
+
+        // 保存 Toybox 档位（0/1/2/3）
+        s.setValue ("ui.toyLevel", (int) cachedEditor->getToyLevel());
 
         // 保存当前 Milkdrop 预设索引（-1 表示尚未加载）
         s.setValue ("milkdrop.currentPreset", cachedEditor->GetMilkdropCurrentPresetIndex());

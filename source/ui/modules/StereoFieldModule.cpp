@@ -1,5 +1,6 @@
 #include "source/ui/modules/StereoFieldModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
 #include <cstring>
@@ -293,6 +294,40 @@ StereoFieldModule::RadarGeometry
     const int maxRx = plot.getWidth() / 2 - sideMargin;
     g.radius = juce::jmax (8, juce::jmin (maxRx, plot.getHeight()));
     return g;
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：入侵者（§8.3）
+// ----------------------------------------------------------
+bool StereoFieldModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (4);
+    if (! area.contains (panelPos))
+        return false;
+    out.kind = 1;
+    out.rect = area.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void StereoFieldModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    ctx.addModuleActor (makeSonarRingActor (hit.pos));
+    ctx.addModuleActor (makeInvaderActor (hit.pos, hit.rect));
+
+    // 声像角反算（半圆雷达：角度由点击位置决定，E.4.3）
+    const float cx = hit.rect.getCentreX();
+    const float baseY = hit.rect.getBottom();
+    const float dx = hit.pos.x - cx;
+    const float dy = baseY - hit.pos.y;
+    const float angDeg = std::atan2 (dx, dy) * 180.0f / 3.14159f;
+    const int adeg = juce::roundToInt (std::abs (angDeg));
+
+    // 反馈 A1：文案合理化——接近正上方显示 CENTER，其余只写 "PAN L32"
+    juce::String text = (adeg < 2)
+        ? "PAN CENTER"
+        : "PAN " + juce::String ((angDeg < 0.0f) ? "L" : "R") + juce::String (adeg);
+    ctx.bubble (hit.pos.translated (0.0f, -22.0f), text, ToyRole::Reward);
 }
 
 // ----------------------------------------------------------

@@ -1,5 +1,6 @@
 #include "source/ui/modules/FineSplitModules.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 
 namespace
@@ -1095,6 +1096,260 @@ float VuMeterModule::vuToAngle(float valueDb) const noexcept
     const float t = juce::jlimit(0.0f, 1.0f,
                                  juce::jmap(valueDb, minDisplayDb, maxDisplayDb, 0.0f, 1.0f));
     return juce::jmap(t, 0.0f, 1.0f, leftRad, rightRad);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：玻璃裂 + 迪斯科灯（§8.2）
+// ----------------------------------------------------------
+bool VuMeterModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (6);
+    if (! area.contains (panelPos))
+        return false;
+
+    const int ledSz = juce::jlimit (10, 18, juce::jmin (area.getWidth(), area.getHeight()) / 12);
+    const juce::Rectangle<int> ledArea (area.getRight() - ledSz - 6, area.getY() + 6, ledSz, ledSz);
+
+    out.kind = ledArea.contains (panelPos) ? 1 : 2;   // 1=迪斯科灯 2=玻璃裂
+    out.rect = area.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void VuMeterModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    const int w = (int) hit.rect.getWidth();
+    const int h = (int) hit.rect.getHeight();
+    const int ledSz = juce::jlimit (10, 18, juce::jmin (w, h) / 12);
+
+    if (hit.kind == 1)
+    {
+        const juce::Rectangle<float> led (hit.rect.getRight() - ledSz - 6, hit.rect.getY() + 6,
+                                          (float) ledSz, (float) ledSz);
+        ctx.addModuleActor (makeDiscoLedActor (led));
+        // 阈值气泡（E.4.2）
+        const juce::String th = (ledLevelDb >= warnDbfs) ? "CLIP >= 0"
+                              : (ledLevelDb >= ledSignalDbfs) ? "SIGNAL > -25 dBFS" : "NO SIGNAL";
+        ctx.bubble (hit.pos.translated (0.0f, -18.0f), th, ToyRole::Reward);
+    }
+    else
+    {
+        // 反馈 A6：碎屏改为指针虚影（几何与 drawDial 同约定：圆心在底边、上半圆）
+        const float cx = hit.rect.getCentreX();
+        const float cy = hit.rect.getBottom() - 8.0f;
+        const float R  = juce::jmax (4.0f,
+            juce::jmin (hit.rect.getWidth() * 0.5f, hit.rect.getHeight()) - 14.0f);
+        const float th = vuToAngle (currentMonoDbfs()) + juce::MathConstants<float>::halfPi;
+        ctx.addModuleActor (makeGhostNeedleActor ({ cx, cy }, R, th));
+        ctx.bubble (hit.pos.translated (0.0f, -20.0f),
+                    "VU " + juce::String (currentMonoDbfs(), 1) + " dB", ToyRole::Reward);
+    }
+}
+
+// ==========================================================
+// Toybox（v3.0.0）：FineSplit 各模块专属玩法（§8.2）
+// ==========================================================
+bool LufsRealtimeModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (6);
+    if (! area.contains (panelPos)) return false;
+    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
+    return true;
+}
+
+void LufsRealtimeModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 点中的读数框（M/S/I 垂直堆叠），数字滚到真实值（E.4.2）
+    const float frac = (hit.pos.y - hit.rect.getY()) / juce::jmax (1.0f, hit.rect.getHeight());
+    const float val = (frac < 0.33f) ? lufsM : (frac < 0.66f ? lufsS : lufsI);
+
+    ctx.addModuleActor (makeSlotRollerActor (hit.pos, juce::String (val, 1)));
+    ctx.addModuleActor (makeFireflyActor (hit.pos.translated (16.0f, -8.0f)));
+    // 反馈 D3：删除气泡（滚轮数字即读数）
+}
+
+bool TruePeakModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (6);
+    if (! area.contains (panelPos)) return false;
+    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
+    return true;
+}
+
+void TruePeakModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 内容如实反映状态（E.4.2，娱乐性提示，非限幅判定）
+    juce::String text;
+    ToyRole role;
+    if (tpDisplay >= -1.0f)
+    {
+        text = "INTER-SAMPLE PEAK " + juce::String (tpDisplay, 1) + " dBTP";
+        role = ToyRole::Alert;
+    }
+    else if (tpDisplay >= -6.0f)
+    {
+        text = "CLOSE TO CEILING " + juce::String (tpDisplay, 1) + " dBTP";
+        role = ToyRole::Alert;
+    }
+    else
+    {
+        text = "ALL CLEAR " + juce::String (tpDisplay, 1) + " dBTP";
+        role = ToyRole::Clear;
+    }
+
+    // 反馈 D4：删除气泡；弹窗位置钳制在读数框区内（超出模块部分不显示）
+    const float px = (hit.rect.getWidth() >= 190)
+        ? juce::jlimit (hit.rect.getX() + 90.0f, hit.rect.getRight() - 90.0f, hit.pos.x)
+        : hit.rect.getCentreX();
+    const float py = (hit.rect.getHeight() >= 76)
+        ? juce::jlimit (hit.rect.getY() + 36.0f, hit.rect.getBottom() - 36.0f, hit.pos.y)
+        : hit.rect.getCentreY();
+    ctx.addModuleActor (makePopUpWindowActor ({ px, py }, text, ctx.role (role)));
+}
+
+bool PhaseCorrelationModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (6);
+    if (! area.contains (panelPos)) return false;
+    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
+    return true;
+}
+
+void PhaseCorrelationModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 反算点击处角度 → 相关度 + 判语（E.4.2）
+    const float cx = hit.rect.getCentreX();
+    const float cy = hit.rect.getBottom();
+    const float dx = hit.pos.x - cx;
+    const float dy = cy - hit.pos.y;                       // 向上为正
+    const float angle = std::atan2 (dy, dx);               // 0..π 上半圆
+    const float corrAtClick = juce::jlimit (-1.0f, 1.0f, angle / 3.14159f * 2.0f - 1.0f);
+
+    juce::String verdict;
+    ToyRole role = ToyRole::Reward;
+    if (corrAtClick >= 0.7f)       { verdict = "MONO SAFE";   role = ToyRole::Clear; }
+    else if (corrAtClick >= 0.2f)  verdict = "WIDE";
+    else                           { verdict = "OUT OF PHASE"; role = ToyRole::Alert; }
+
+    // 反馈 A3 + 问题 1：几何与 paintContent 完全一致
+    //   paintContent 里 inner = content.reduced(10)；而 toyHitTest 的 rect 已是
+    //   content.reduced(6)，所以这里只需再 reduced(4)，轴才能与真实表针重合。
+    const auto inner = hit.rect.toNearestInt().reduced (4);
+    const float px = (float) inner.getCentreX();
+    const float py = (float) inner.getBottom();
+    const float R  = juce::jmin ((float) inner.getWidth() * 0.44f,
+                                 (float) inner.getHeight() - 24.0f);
+    const float th = (juce::jlimit (-1.0f, 1.0f, corr) * 0.5f + 0.5f)
+                     * juce::MathConstants<float>::pi;
+    ctx.addModuleActor (makeGhostNeedleActor ({ px, py }, juce::jmax (4.0f, R), th));
+
+    ctx.bubble (hit.pos.translated (0.0f, -24.0f), juce::String (corrAtClick, 2) + " " + verdict, role);
+}
+
+bool PhaseBalanceModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    auto area = getContentBounds().reduced (8);
+    if (! area.contains (panelPos)) return false;
+    auto wBar = area.removeFromTop (area.getHeight() / 2 - 2);
+    if (wBar.contains (panelPos))
+    {
+        out.kind = 1; out.rect = wBar.toFloat();   // WIDTH → 橡皮筋
+    }
+    else
+    {
+        out.kind = 2; out.rect = area.toFloat();   // BAL → 弹珠
+    }
+    out.pos = panelPos.toFloat();
+    return true;
+}
+
+void PhaseBalanceModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    if (hit.kind == 1)
+    {
+        ctx.addModuleActor (makeRubberBandActor (hit.rect, hit.pos));
+        ctx.bubble (hit.pos.translated (0.0f, -22.0f),
+                    "WIDTH " + juce::String (juce::roundToInt (width * 100.0f)) + "%", ToyRole::Orb);
+    }
+    else
+    {
+        ctx.addModuleActor (makeBallActor (hit.rect, hit.pos));
+        juce::String txt;
+        if (std::abs (balance) < 0.02f)      txt = "BAL CENTER";
+        else if (balance < 0.0f)             txt = "BAL L" + juce::String (juce::roundToInt (-balance * 100.0f));
+        else                                 txt = "BAL R" + juce::String (juce::roundToInt (balance * 100.0f));
+        ctx.bubble (hit.pos.translated (0.0f, -22.0f), txt, ToyRole::Orb);
+    }
+}
+
+bool DynamicsMetersModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (6);
+    if (! area.contains (panelPos)) return false;
+    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
+    return true;
+}
+
+void DynamicsMetersModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 柱索引按 x 位置（4 柱水平排列）
+    const float w = juce::jmax (1.0f, hit.rect.getWidth());
+    const int i = juce::jlimit (0, 3, (int) ((hit.pos.x - hit.rect.getX()) / (w / 4.0f)));
+    static const char* names[] = { "PK L", "PK R", "RMS L", "RMS R" };
+
+    ctx.addModuleActor (makeCoinPopActor (hit.pos));
+    ctx.bubble (hit.pos.translated (0.0f, -26.0f),
+                juce::String (names[i]) + " " + juce::String (meterDb[(size_t) i], 1) + " dB",
+                ToyRole::Reward);
+}
+
+bool DynamicsDrModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (6);
+    if (! area.contains (panelPos)) return false;
+    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
+    return true;
+}
+
+void DynamicsDrModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 点中的读数框 → 对应 DR 值 + 白话判语（E.4.2）
+    const float frac = (hit.pos.y - hit.rect.getY()) / juce::jmax (1.0f, hit.rect.getHeight());
+    float dr = 0.0f;
+    juce::String label;
+    if (frac < 0.33f)          { dr = shortDR; label = "DR SHORT"; }
+    else if (frac < 0.66f)     { dr = integDR; label = "DR INTEG"; }
+    else                       { dr = crest;   label = "CREST"; }
+
+    juce::String verdict;
+    ToyRole role = ToyRole::Reward;
+    if (dr >= 14.0f)           { verdict = "DYNAMIC";    role = ToyRole::Cheer; }
+    else if (dr >= 10.0f)      verdict = "BALANCED";
+    else if (dr >= 6.0f)       verdict = "COMPRESSED";
+    else                       { verdict = "SQUASHED";   role = ToyRole::Burst; }
+
+    ctx.addModuleActor (makeSquashActor (hit.pos));
+    ctx.bubble (hit.pos.translated (0.0f, -28.0f),
+                label + " " + juce::String (dr, 1) + "dB " + verdict, role);
+}
+
+bool DynamicsCrestModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    auto area = getContentBounds().reduced (6);
+    area.removeFromRight (42 + 6);
+    if (! area.contains (panelPos)) return false;
+    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
+    return true;
+}
+
+void DynamicsCrestModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 反算点击处的 crest 值（与 paintContent 的 y 映射一致）
+    const float v = juce::jlimit (0.0f, 30.0f,
+        (hit.rect.getBottom() - hit.pos.y) / juce::jmax (1.0f, hit.rect.getHeight()) * 30.0f);
+
+    ctx.addModuleActor (makeCrestBallActor (hit.pos));
+    ctx.bubble (hit.pos.translated (0.0f, -20.0f), "CF " + juce::String (v, 1) + " dB", ToyRole::Orb);
 }
 
 void VuMeterModule::drawDial(juce::Graphics& g,

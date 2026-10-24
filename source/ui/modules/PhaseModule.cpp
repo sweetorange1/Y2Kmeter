@@ -1,5 +1,6 @@
 #include "source/ui/modules/PhaseModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 
@@ -76,6 +77,58 @@ void PhaseModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.4：同步生成 GL 直渲染快照
     buildGlSnapshot();
     repaint();
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：Gonio 声呐 + 幽灵指针（§8.3）
+// ----------------------------------------------------------
+bool PhaseModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    if (areaGonio.contains (panelPos))
+    {
+        out.kind = 2;                 // 声呐
+        out.rect = areaGonio.toFloat();
+        out.pos  = panelPos.toFloat();
+        return true;
+    }
+    if (areaDial.contains (panelPos))
+    {
+        out.kind = 3;                 // 幽灵指针
+        out.rect = areaDial.toFloat();
+        out.pos  = panelPos.toFloat();
+        return true;
+    }
+    return false;
+}
+
+void PhaseModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    if (hit.kind == 2)
+    {
+        ctx.addModuleActor (makeSonarRingActor (hit.pos));
+        // M/S 反算（与 drawGonio 的映射一致，E.4.3）
+        const float R = juce::jmin (hit.rect.getWidth(), hit.rect.getHeight()) * 0.5f;
+        const float cx = hit.rect.getCentreX();
+        const float cy = hit.rect.getCentreY();
+        const float m = (cy - hit.pos.y) / juce::jmax (1.0f, R);
+        const float s = (hit.pos.x - cx) / juce::jmax (1.0f, R);
+        ctx.bubble (hit.pos.translated (0.0f, -22.0f),
+                    "M " + juce::String (m, 2) + "  S " + juce::String (s, 2), ToyRole::Reward);
+    }
+    else if (hit.kind == 3)
+    {
+        // 反馈 A3：虚影围绕真实指针生成 —— 几何与角度完全复刻 drawCorrDial
+        const auto inner = hit.rect.toNearestInt().reduced (6);
+        const float cx = (float) inner.getCentreX();
+        const float cy = (float) inner.getBottom();
+        const float R  = juce::jmin ((float) inner.getWidth() * 0.46f,
+                                     (float) inner.getHeight() - 28.0f);
+        const float th = (juce::jlimit (-1.0f, 1.0f, smoothedCorr) * 0.5f + 0.5f)
+                         * juce::MathConstants<float>::pi;
+        ctx.addModuleActor (makeGhostNeedleActor ({ cx, cy }, juce::jmax (4.0f, R), th));
+        ctx.bubble (hit.pos.translated (0.0f, -22.0f),
+                    "CORR " + juce::String (smoothedCorr, 2), ToyRole::Reward);
+    }
 }
 
 // ----------------------------------------------------------

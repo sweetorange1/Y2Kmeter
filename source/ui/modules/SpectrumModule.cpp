@@ -1,5 +1,6 @@
 #include "source/ui/modules/SpectrumModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 #include <cmath>
@@ -109,6 +110,52 @@ float SpectrumModule::dbToY(float db, juce::Rectangle<int> canvas) const
     const float t = (db - minDb) / (maxDb - minDb);
     const float tc = juce::jlimit(0.0f, 1.0f, t);
     return (float) canvas.getBottom() - tc * (float) canvas.getHeight();
+}
+
+// ----------------------------------------------------------
+// Toybox：拨弦与音名 + dB 读数（E.4.1）
+// ----------------------------------------------------------
+float SpectrumModule::toyReadDbAtX (float x) const
+{
+    const auto canvas = getToyCanvasBounds();
+    const int N = (int) smoothedDb.size();
+    if (N <= 0 || canvas.getWidth() <= 0)
+        return -144.0f;
+
+    const int col = juce::jlimit (0, N - 1,
+        juce::roundToInt ((x - (float) canvas.getX()) / (float) canvas.getWidth() * (float) (N - 1)));
+    float db = smoothedDb[(size_t) col];
+    // Slope 打开时扣掉补偿才是真实 dBFS
+    if (slopeEnabled && col < (int) slopeOffsetDb.size())
+        db -= slopeOffsetDb[(size_t) col];
+    return db;
+}
+
+bool SpectrumModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto canvas = getToyCanvasBounds();
+    if (! canvas.contains (panelPos))
+        return false;
+    out.kind = 1;
+    out.rect = canvas.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void SpectrumModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    const float freq = toyXToFreq (hit.pos.x);
+    const float db   = toyReadDbAtX (hit.pos.x);
+    const juce::String note = toyFreqToNoteName (freq);
+
+    ctx.addModuleActor (makeSonarRingActor (hit.pos));
+    if (note.isNotEmpty())
+    {
+        juce::String text = note;
+        if (db > -144.0f)
+            text << " " << juce::String (db, 1) << "dB";
+        ctx.bubble (hit.pos.translated (0.0f, -24.0f), text, ToyRole::Reward);
+    }
 }
 
 // ----------------------------------------------------------

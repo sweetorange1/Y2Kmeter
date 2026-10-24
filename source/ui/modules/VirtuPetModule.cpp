@@ -333,6 +333,9 @@ VirtuPetModule::VirtuPetModule()
     setDefaultSize (128, 128);
     setMinSize (minW, minH);
 
+    // Toybox：整块排除（点击语义已被占用，§6.1）
+    getProperties().set ("toy.optOut", true);
+
     // ---- 拖影 / focus 残留 修复（最终版）----
     //
     // 本模块 paint() 有大量非完整覆盖的区域（playArea 空白、focus rect 外的
@@ -1099,6 +1102,12 @@ void VirtuPetModule::forceAnimation (int animId, bool restartFrame)
     const auto newFrame = getCurrentFrame();
     if (! newFrame.isNull())
         petPos.x = petGroundAnchorX - (float) newFrame.getWidth() * 0.5f;
+}
+
+void VirtuPetModule::playToyReaction (int animId)
+{
+    // 仅触发动画，不改饥饿/健康/运动状态（决策 6）。
+    forceAnimation (animId, true);
 }
 
 bool VirtuPetModule::shouldUseRightVariantForAnim (int animId) const

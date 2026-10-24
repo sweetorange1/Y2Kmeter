@@ -1,5 +1,6 @@
 #include "source/ui/modules/OscilloscopeWaveModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
 
@@ -277,6 +278,35 @@ juce::Rectangle<int> OscilloscopeWaveModule::getToolbarBounds(juce::Rectangle<in
 juce::Rectangle<int> OscilloscopeWaveModule::getCanvasBounds(juce::Rectangle<int> content) const
 {
     return content.withTrimmedTop(toolbarH + 4);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：拍立得（§8.3，不读回 GL）
+// ----------------------------------------------------------
+bool OscilloscopeWaveModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto canvas = getToyCanvasBounds();
+    if (! canvas.contains (panelPos))
+        return false;
+    out.kind = 1;
+    out.rect = canvas.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void OscilloscopeWaveModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 反馈 C5：纯波形快照（无图注），防连点（同屏冷却）
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    if (now - lastToyPokeTime_ < 1.5)
+        return;
+    lastToyPokeTime_ = now;
+
+    // 性能日志：快照烘焙耗时
+    const toyperf::ScopedTimer timer ("oscwave snapshot");
+
+    // 相纸真正掉出模块（浮动态降级为面板内裁剪）
+    ctx.promoteToFree (makePolaroidActor (hit.pos, snapshotL, snapshotR, {}));
 }
 
 void OscilloscopeWaveModule::layoutContent(juce::Rectangle<int> contentBounds)

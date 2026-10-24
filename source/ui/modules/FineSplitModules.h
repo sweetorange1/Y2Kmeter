@@ -15,6 +15,10 @@ public:
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- Toybox（v3.0.0）：老虎机 + 萤火虫（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
@@ -38,6 +42,10 @@ public:
     ~TruePeakModule() override;
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
+
+    // ---- Toybox（v3.0.0）：弹窗地狱（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
@@ -69,6 +77,10 @@ public:
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- Toybox（v3.0.0）：指针摆锤（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
@@ -85,6 +97,10 @@ public:
     ~PhaseBalanceModule() override;
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
+
+    // ---- Toybox（v3.0.0）：橡皮筋 / 弹珠（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
@@ -104,6 +120,10 @@ public:
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- Toybox（v3.0.0）：幸运方块（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
@@ -120,6 +140,10 @@ public:
     ~DynamicsDrModule() override;
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
+
+    // ---- Toybox（v3.0.0）：压缩器压扁（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
@@ -143,6 +167,10 @@ public:
     ~DynamicsCrestModule() override;
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
+
+    // ---- Toybox（v3.0.0）：Line Rider（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
     // 鼠标悬停标尺：Crest 历史带内十字线 + 时间/crest 读数
     void mouseMove (const juce::MouseEvent& e) override;
@@ -216,6 +244,10 @@ public:
     ~VuMeterModule() override;
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
+
+    // ---- Toybox（v3.0.0）：玻璃裂 + 迪斯科灯（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
 protected:
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

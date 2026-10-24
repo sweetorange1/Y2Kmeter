@@ -1,5 +1,6 @@
 #include "source/ui/modules/DynamicsModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -104,6 +105,38 @@ void DynamicsModule::layoutContent(juce::Rectangle<int> content)
     areaCrest  = content.withX(content.getRight() - crestW).withWidth(crestW);
     areaDr     = content.withTrimmedLeft(metersW + gap)
                         .withTrimmedRight(crestW + gap);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：综合路由（Meters/DR/Crest，§8.2）
+// ----------------------------------------------------------
+bool DynamicsModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    if (areaCrest.contains (panelPos))      { out.kind = 3; out.rect = areaCrest.toFloat(); }
+    else if (areaDr.contains (panelPos))    { out.kind = 2; out.rect = areaDr.toFloat(); }
+    else if (areaMeters.contains (panelPos)){ out.kind = 1; out.rect = areaMeters.toFloat(); }
+    else return false;
+    out.pos = panelPos.toFloat();
+    return true;
+}
+
+void DynamicsModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    switch (hit.kind)
+    {
+        case 1:
+            ctx.addModuleActor (makeCoinPopActor (hit.pos));
+            ctx.bubble (hit.pos.translated (0.0f, -24.0f), "PK / RMS", ToyRole::Reward);
+            break;
+        case 2:
+            ctx.addModuleActor (makeSquashActor (hit.pos));
+            ctx.bubble (hit.pos.translated (0.0f, -24.0f), "DYNAMIC RANGE", ToyRole::Reward);
+            break;
+        default:
+            ctx.addModuleActor (makeCrestBallActor (hit.pos));
+            ctx.bubble (hit.pos.translated (0.0f, -20.0f), "CREST", ToyRole::Orb);
+            break;
+    }
 }
 
 // ----------------------------------------------------------

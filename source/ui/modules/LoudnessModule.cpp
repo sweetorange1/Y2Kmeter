@@ -1,5 +1,6 @@
 #include "source/ui/modules/LoudnessModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
 
@@ -200,6 +201,45 @@ void LoudnessModule::drawScale(juce::Graphics& g,
 }
 
 // ==========================================================
+// ==========================================================
+// Toybox（v3.0.0）：打砖块（§8.2）
+// ==========================================================
+bool LoudnessModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const juce::Rectangle<int> bars[] = { areaM, areaS, areaI, areaL, areaR };
+    for (int i = 0; i < 5; ++i)
+    {
+        if (bars[i].contains (panelPos))
+        {
+            out.kind = i;
+            out.rect = bars[i].toFloat();
+            out.pos  = panelPos.toFloat();
+            return true;
+        }
+    }
+    return false;
+}
+
+void LoudnessModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    const int i = juce::jlimit (0, 4, hit.kind);
+    float val = 0.0f;
+    juce::String unit;
+    juce::Colour c;
+    switch (i)
+    {
+        case 0:  val = barM.smoothed; unit = "LUFS"; c = lufsToColour (val); break;
+        case 1:  val = barS.smoothed; unit = "LUFS"; c = lufsToColour (val); break;
+        case 2:  val = barI.smoothed; unit = "LUFS"; c = lufsToColour (val); break;
+        case 3:  val = barL.smoothed; unit = "dBFS"; c = dbToColour  (val); break;
+        default: val = barR.smoothed; unit = "dBFS"; c = dbToColour  (val); break;
+    }
+    ctx.addModuleActor (makeBrickShardsActor (hit.pos, c, 8));
+    // 真实读数气泡（E.4.2）
+    ctx.bubble (hit.pos.translated (0.0f, -24.0f),
+                juce::String (val, 1) + " " + unit, ToyRole::Burst);
+}
+
 // layoutContent
 // ==========================================================
 void LoudnessModule::layoutContent(juce::Rectangle<int> contentBounds)

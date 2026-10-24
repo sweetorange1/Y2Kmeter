@@ -50,6 +50,25 @@ public:
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
 
+    // ---- Toybox（v3.0.0）：人浪（§8.3 / 反馈 C3 加电平读数）----
+    juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
+    // 读点击处列的电平峰值（波形幅度 -1..1 的绝对最大值；无数据返回 0）
+    float toyReadColumnPeak (float x) const
+    {
+        const auto canvas = getCanvasBounds (getContentBounds());
+        if (canvas.getWidth() <= 0 || validCols <= 0 || columnHistory.empty())
+            return 0.0f;
+        const int N = (int) columnHistory.size();
+        const int colIdx = juce::jlimit (0, validCols - 1,
+            juce::roundToInt ((x - (float) canvas.getX()) / (float) canvas.getWidth() * (float) (validCols - 1)));
+        const int idx = ((writeCol - validCols + colIdx) % N + N) % N;
+        const auto& col = columnHistory[(size_t) idx];
+        return juce::jmax (std::abs (col.minV), std::abs (col.maxV));
+    }
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
 

@@ -1,5 +1,6 @@
 #include "source/ui/modules/OscilloscopeModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
 
@@ -56,6 +57,51 @@ OscilloscopeModule::~OscilloscopeModule()
 
     hub.removeFrameListener(this);
     hub.release(AnalyserHub::Kind::Oscilloscope);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：拍电视（§8.3）—— 仅屏幕区（按钮条排除）
+// ----------------------------------------------------------
+bool OscilloscopeModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto canvas = getToyCanvasBounds();
+    if (! canvas.contains (panelPos))
+        return false;
+
+    out.kind = 1;
+    out.rect = canvas.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void OscilloscopeModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 防连点：短时间冷却
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    if (now - lastToyPokeTime_ < 1.5)
+        return;
+    lastToyPokeTime_ = now;
+
+    // 性能日志：快照生成耗时（烘焙一次，paint 每帧只 blit）
+    const toyperf::ScopedTimer timer ("osc snapshot (" + juce::String (displayMode == DisplayMode::waveform ? "wave" : "xy") + ")");
+
+    // 反馈 C1：与 OscilloscopeWave 一致的"拍立得快照"——定格当前真实波形/散点。
+    juce::Array<float> l, r;
+    if (auto f = hub.getLatestFrame())
+    {
+        if (f->has (AnalyserHub::Kind::Oscilloscope))
+        {
+            const int n = (int) f->oscL.size();
+            l.ensureStorageAllocated (n);
+            r.ensureStorageAllocated (n);
+            for (size_t i = 0; i < f->oscL.size(); ++i) l.add (f->oscL[i]);
+            for (size_t i = 0; i < f->oscR.size(); ++i) r.add (f->oscR[i]);
+        }
+    }
+
+    // 反馈 A2：XY / Lissajous 模式画散点图，波形模式画折线
+    const bool scatter = (displayMode != DisplayMode::waveform);
+    ctx.promoteToFree (makePolaroidActor (hit.pos, l, r, {}, scatter));
 }
 
 juce::ValueTree OscilloscopeModule::saveModuleSpecificState() const

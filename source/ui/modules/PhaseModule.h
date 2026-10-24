@@ -34,6 +34,10 @@ public:
     // Phase F：Hub 分发器回调
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- Toybox（v3.0.0）：Gonio 声呐 + 幽灵指针（§8.3）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
 

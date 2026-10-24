@@ -46,6 +46,13 @@ public:
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
 
+    // ---- Toybox（v3.0.0）：拨弦与音名（§8.3 / E.4.1）----
+    juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
+    float toyXToFreq (float x) const { return xToFreq (x, getToyCanvasBounds()); }
+    float toyReadDbAtX (float x) const;
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
 

@@ -12,6 +12,12 @@
 
 class ModuleWorkspace; // 前向声明（给 ModulePanel 的回调使用）
 
+// Toybox（v3.0.0）前向声明：ModulePanel 只持 unique_ptr / 引用，不引入 ToyKit 完整头
+struct ToyHit;
+struct ToyContext;
+class ToyDirector;
+class ModuleToyState;
+
 enum class ModuleType
 {
     eq,
@@ -160,6 +166,20 @@ public:
     //   改变足够大时会触发右下角小字区域的局部 repaint。
     void setCpuLoad (float load01) noexcept;
 
+    // ---- Toybox（v3.0.0）模块内互动接口（§11.2）----
+    //   toyAccepts：命中点是否落在内容区（默认排除标题栏/边缘/关闭/弹出按钮）。
+    //   toyHitTest：命中元素（默认无 → 走通用兜底 §8.5）。
+    //   toyPoke   ：执行玩法（默认空实现，旧模块零改动可编译）。
+    virtual bool toyAccepts (juce::Point<int> panelPos) const;
+    virtual bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const;
+    virtual void toyPoke    (const ToyHit& hit, ToyContext& ctx);
+
+    // 模块内互动状态（懒创建 unique_ptr；仅被点击过的面板才分配，§7）
+    std::unique_ptr<ModuleToyState> toyState;
+
+    // 内容区（供 Toybox 裁剪 / 命中，公开只读）
+    juce::Rectangle<int> getContentBounds() const;
+
     // 统一拦截模块 repaint 请求（用于性能计数）
     void repaint();
     void repaint(juce::Rectangle<int> area);
@@ -227,7 +247,6 @@ protected:
     //   实现位于 ModulePanel.cpp（本头文件不包含 PinkXPStyle.h）。
     virtual juce::Colour getShellFillColour() const;
 
-    juce::Rectangle<int> getContentBounds() const;
     juce::Rectangle<int> getCloseButtonBounds() const;
     juce::Rectangle<int> getPopOutButtonBounds() const;  // 弹出/停靠按钮边界
     juce::Rectangle<int> getTitleBarBounds()   const;
@@ -735,6 +754,23 @@ public:
     juce::Rectangle<int> getCanvasArea()  const;
     juce::Rectangle<int> getToolbarArea() const;
 
+    // ======================================================
+    // Toybox（v3.0.0）画布 / 工具栏接入
+    // ======================================================
+    // 画布空白点判定：在 canvas 内、且不在任何模块 / 拼豆贴画 / hit-test 洞上。
+    bool isEmptyCanvasPoint (juce::Point<int> canvasPos) const;
+    // 命中组件是否为工具栏 FPS 标签（FPS 玩笑彩蛋用）。
+    bool isFpsLabel (juce::Component* c) const noexcept;
+    juce::Label* getFpsLabel() noexcept { return &fpsLabel; }
+
+    // Toybox 档位（int 承载 ToyLevel 枚举值，0/1/2/3），供 TOY 按钮显示。
+    void setToyLevel (int level);
+    int  getToyLevel() const noexcept { return toyLevel; }
+    // TOY 按钮循环切换后的回调（int = ToyLevel 枚举值），由 Editor 订阅。
+    std::function<void(int)> onToyLevelChanged;
+    // Editor 下发的 ToyDirector（供 hookPanel 在几何变化时取消 actor）。
+    void setToyDirector (ToyDirector* d) noexcept { toyDirector = d; }
+
 private:
     static constexpr int gridSize       = 8;
     static constexpr int margin         = 0;   // 0 = 模块可以紧贴窗口边框
@@ -836,6 +872,11 @@ private:
     juce::TextButton fpsBtn;
     juce::Label      fpsLabel;
     int              fpsLimit = 120; // 30 / 60 / 120 / 0（0=无上限）
+
+    // Toybox 档位循环按钮（Off/Chill/Normal/Party），与 fpsBtn 同构。
+    juce::TextButton toyBtn;
+    int              toyLevel = 2;   // ToyLevel::Normal
+    ToyDirector*     toyDirector = nullptr;
 
     // FPS 按钮专用的 mini LookAndFeel：仅重写 getTextButtonFont 把 "30FPS" / "60FPS"
     //   / "120FPS" / "∞FPS" 渲染得比全局按钮字号更小一点。
@@ -1005,6 +1046,8 @@ private:
     int toolbarDividerX0 = -1; // grid 与 fps 之间
     int toolbarDividerX1 = -1; // fps 与 source 之间
     int toolbarDividerX2 = -1; // source 与 hide 之间
+    int toolbarDividerXToy = -1;   // toy 与 stick 之间
+    int toolbarDividerXStick = -1; // stick 与 load 之间
     int toolbarDividerX3 = -1; // gain 与 hide 之间
 
     ModuleFactory factory;

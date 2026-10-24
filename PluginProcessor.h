@@ -195,6 +195,11 @@ public:
         savedEditorHeight = h;
     }
 
+    // ---- Toybox（v3.0.0）档位持久化 ----
+    //   · 序列化为 <PBEQ_State toyLevel="…" ...>；-1 = 未保存（Editor 按形态默认值兜底）。
+    int  getSavedToyLevel() const noexcept { return savedToyLevel; }
+    void setSavedToyLevel (int level) noexcept { savedToyLevel = level; }
+
     // P4：host 调用 getStateInformation 前，Processor 会先触发此钩子，
     //   让 Editor 端 flush 掉 ModuleWorkspace 里处于 debounce 合并中的
     //   布局变更通知，保证保存到 host 的布局 XML 永远是最新版本。
@@ -300,6 +305,9 @@ private:
     // 插件 Editor 最近一次窗口尺寸（0 = 未保存）
     int savedEditorWidth  = 0;
     int savedEditorHeight = 0;
+
+    // Toybox 档位（0=Off / 1=Chill / 2=Normal / 3=Party）；-1 = 未保存
+    int savedToyLevel = -1;
 
     // Milkdrop 整体染色 + 效果（全局状态，持久化到 host state）
     MilkdropVisualState savedMilkdropVisualState_;

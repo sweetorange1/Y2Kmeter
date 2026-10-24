@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 2.9.2 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.9.3 LANGUAGES C CXX)
 
 # ==========================================================
 # v2.9.2：帧耗时统计日志（仅开发者诊断构建，默认 OFF）
@@ -387,7 +387,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-VERSION 2.9.2
+VERSION 2.9.3
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -440,7 +440,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 2.9.2
+        VERSION 2.9.3
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -587,6 +587,15 @@ set(Y2KM_PLUGIN_SOURCES
   # v2.9.4：GL 直渲染统一框架（Spectrogram3D / Oscilloscope / OscilloscopeWave 基类）
   source/ui/GlDirectModule.h
   source/ui/GlDirectModule.cpp
+  # === Toybox 点击解压互动（v3.0.0）===
+  source/ui/toys/ToyPhysics.h
+  source/ui/toys/ToyKit.h
+  source/ui/toys/ToyKit.cpp
+  source/ui/toys/ToyEmoji.cpp
+  source/ui/toys/ToyCanvasFx.cpp
+  source/ui/toys/ToyModuleFx.cpp
+  source/ui/toys/ToyTheme.cpp
+  source/ui/toys/fx/ToyFx_Oscilloscope.cpp
   # === 调色板重构（Palette Redesign）：OKLCH 生成器 + 新面板 + 主题库 ===
   source/ui/palette/OkLchUtils.h
   source/ui/palette/ThemeSpec.h
@@ -1275,3 +1284,24 @@ if (MSVC)
   target_compile_options(Y2Kmeter_palette_test PRIVATE /utf-8)
 endif()
 add_test(NAME Y2Kmeter_palette_test COMMAND Y2Kmeter_palette_test)
+
+# ==========================================================
+# Toybox 物理单测（§11.1 / §13.4）—— 纯 C++，不链接 JUCE
+# ==========================================================
+add_executable(Y2Kmeter_toy_test
+  tests/toy_physics_test.cpp
+)
+target_compile_features(Y2Kmeter_toy_test PRIVATE cxx_std_17)
+target_include_directories(Y2Kmeter_toy_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if (MSVC)
+  target_compile_options(Y2Kmeter_toy_test PRIVATE /utf-8)
+endif()
+add_test(NAME Y2Kmeter_toy_test COMMAND Y2Kmeter_toy_test)
+
+# ==========================================================
+# emoji 渲染诊断（Windows only，仅本地排查用）
+# ==========================================================
+if (WIN32)
+  add_executable(Y2Kmeter_emoji_diag tests/emoji_diag.cpp)
+  target_compile_features(Y2Kmeter_emoji_diag PRIVATE cxx_std_17)
+endif()

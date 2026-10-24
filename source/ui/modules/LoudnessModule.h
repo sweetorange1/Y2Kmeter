@@ -34,6 +34,10 @@ public:
     // Phase F：由 Hub 的 30Hz 分发器在 UI 线程调用
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- Toybox（v3.0.0）：打砖块（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

@@ -46,6 +46,14 @@ public:
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
 
+    // ---- Toybox（v3.0.0）：拍立得（§8.3，不读回 GL）----
+    juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
+    const juce::Array<float>& getToyWaveformL() const { return snapshotL; }
+    const juce::Array<float>& getToyWaveformR() const { return snapshotR; }
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+    double lastToyPokeTime_ = 0.0;   // 防连点冷却（反馈 C5）
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
 

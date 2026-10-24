@@ -1,5 +1,6 @@
 #include "source/ui/modules/EqModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 #include <cmath>
@@ -525,6 +526,29 @@ void EqModule::mouseDown(const juce::MouseEvent& e)
         return;
     }
     ModulePanel::mouseDown(e);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：拼豆爆米花（§8.2）
+// ----------------------------------------------------------
+bool EqModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto area = getContentBounds().reduced (6);
+    if (! area.contains (panelPos)) return false;
+    out.kind = 1;
+    out.rect = area.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void EqModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    ctx.addModuleActor (makeBeadPopActor (hit.pos));
+    // 列 → 频率（specPos 平方映射近似，E.4.2）
+    const float t = (hit.pos.x - hit.rect.getX()) / juce::jmax (1.0f, hit.rect.getWidth());
+    const float freq = juce::jlimit (20.0f, 20000.0f, std::pow (t, 2.3f) * 20000.0f);
+    ctx.bubble (hit.pos.translated (0.0f, -22.0f),
+                juce::String (freq / 1000.0f, 1) + " kHz", ToyRole::Burst);
 }
 
 void EqModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)

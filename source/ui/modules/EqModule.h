@@ -29,6 +29,10 @@ public:
     //   需要在此显式处理右键，与 Milkdrop / VirtuPet 的做法一致）
     void mouseDown(const juce::MouseEvent& e) override;
 
+    // ---- Toybox（v3.0.0）：拼豆爆米花（§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

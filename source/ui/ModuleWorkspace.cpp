@@ -1,5 +1,6 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/perf/FramePerfLog.h"
@@ -410,6 +411,19 @@ ModuleWorkspace::ModuleWorkspace()
     fpsBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
     addAndMakeVisible (fpsBtn);
 
+    // Toybox 档位循环按钮（Off/Chill/Normal/Party，§10.2 首选入口）
+    toyBtn.setButtonText ("NORMAL");
+    toyBtn.setTooltip    ("Toybox click-toys level (Off / Chill / Normal / Party)");
+    toyBtn.onClick = [this]()
+    {
+        setToyLevel ((toyLevel + 1) % 4);
+        if (onToyLevelChanged)
+            onToyLevelChanged (toyLevel);
+    };
+    toyBtn.setColour (juce::TextButton::textColourOffId, PinkXP::ink);
+    toyBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
+    addAndMakeVisible (toyBtn);
+
     // gain：输入增益按钮（位于 hide 左侧）
     gainBtn.setButtonText ("gain");
     gainBtn.setTooltip ("Input gain (-4.0 dB ~ +18.0 dB)");
@@ -638,6 +652,10 @@ ModuleWorkspace::ModuleWorkspace()
     {
         fpsLabel.setColour (juce::Label::textColourId, PinkXP::ink);
         fpsLabel.repaint();
+
+        toyBtn.setColour (juce::TextButton::textColourOffId, PinkXP::ink);
+        toyBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
+        toyBtn.repaint();
 
         audioSourceLabel.setColour (juce::Label::textColourId, PinkXP::ink);
         audioSourceLabel.repaint();
@@ -875,6 +893,48 @@ juce::Rectangle<int> ModuleWorkspace::getToolbarArea() const
 }
 
 // ----------------------------------------------------------
+// Toybox（v3.0.0）
+// ----------------------------------------------------------
+bool ModuleWorkspace::isEmptyCanvasPoint (juce::Point<int> canvasPos) const
+{
+    if (! getCanvasArea().contains (canvasPos))
+        return false;
+
+    // 模块遮挡
+    for (auto* m : modules)
+        if (m->getBounds().contains (canvasPos))
+            return false;
+
+    // 拼豆贴画遮挡
+    if (hitTestPerlerImageAt (canvasPos) >= 0)
+        return false;
+
+    // hit-test 挖洞（chrome 隐藏态顶部交互）
+    for (const auto& hole : hitTestHoles)
+        if (hole.contains (canvasPos))
+            return false;
+
+    return true;
+}
+
+bool ModuleWorkspace::isFpsLabel (juce::Component* c) const noexcept
+{
+    return c == &fpsLabel;
+}
+
+void ModuleWorkspace::setToyLevel (int level)
+{
+    toyLevel = juce::jlimit (0, 3, level);
+    switch (toyLevel)
+    {
+        case 0:  toyBtn.setButtonText ("OFF");    break;
+        case 1:  toyBtn.setButtonText ("CHILL");  break;
+        case 2:  toyBtn.setButtonText ("NORMAL"); break;
+        default: toyBtn.setButtonText ("PARTY");  break;
+    }
+}
+
+// ----------------------------------------------------------
 // 网格吸附
 // ----------------------------------------------------------
 juce::Rectangle<int> ModuleWorkspace::snapRect(juce::Rectangle<int> r) const
@@ -1021,6 +1081,9 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     {
         snapToGrid(p);
         clearDragPreview();
+        // Toybox：模块几何变化（缩放/移动）后，取消该面板的 actor（§7.1 步骤 5）
+        if (toyDirector != nullptr)
+            toyDirector->clock->cancelPanel (p);
         notifyLayoutChanged();
     };
     panel.onBoundsDragging = [this](ModulePanel& p)
@@ -1919,6 +1982,10 @@ void ModuleWorkspace::mouseDoubleClick(const juce::MouseEvent& e)
     // 锁定态：禁止双击弹"添加模块"菜单。
     if (layoutLocked)
         return;
+    // Toybox（反馈 A5）：连续点击画布是互动节奏，双击弹"添加模块"菜单与
+    //   连击玩法冲突 —— 档位非 Off 时禁用双击弹菜单（右键菜单入口保留）。
+    if (toyDirector != nullptr && toyLevel != 0)
+        return;
     showAddMenu(e.getScreenPosition(), e.getPosition());
 }
 
@@ -2028,6 +2095,8 @@ void ModuleWorkspace::paintToolbarBackground (juce::Graphics& g, juce::Rectangle
     drawDivider (toolbarDividerX2);
     drawDivider (toolbarDividerX3);
     drawDivider (toolbarDividerXLayout);
+    drawDivider (toolbarDividerXStick);
+    drawDivider (toolbarDividerXToy);
 }
 
 void ModuleWorkspace::ToolbarOverlayBackdrop::paint (juce::Graphics& g)
@@ -2641,10 +2710,16 @@ void ModuleWorkspace::resized()
             stickBtn.setVisible       (false);
             stickExitBtn.setVisible   (false);
             stickToggleBtn.setVisible (false);
+            toolbarDividerXStick = -1;
+            toolbarDividerXToy   = -1;
         }
         else if (stickActive)
         {
+            // 分隔线：Stick 组 与 Load 之间
             tb.removeFromRight (4);
+            toolbarDividerXStick = tb.removeFromRight (1).getX();
+            tb.removeFromRight (4);
+
             auto toggleArea = tb.removeFromRight (btnW);
             stickToggleBtn.setBounds (toggleArea.withSizeKeepingCentre (btnW, btnH));
             stickToggleBtn.setVisible (true);
@@ -2658,7 +2733,11 @@ void ModuleWorkspace::resized()
         }
         else
         {
-            tb.removeFromRight (6);
+            // 分隔线：Stick 与 Load 之间
+            tb.removeFromRight (4);
+            toolbarDividerXStick = tb.removeFromRight (1).getX();
+            tb.removeFromRight (4);
+
             auto stickArea = tb.removeFromRight (btnW);
             stickBtn.setBounds (stickArea.withSizeKeepingCentre (btnW, btnH));
             stickBtn.setVisible (true);
@@ -2666,7 +2745,22 @@ void ModuleWorkspace::resized()
             stickExitBtn.setVisible   (false);
             stickToggleBtn.setVisible (false);
         }
+#else
+        toolbarDividerXStick = -1;
+        toolbarDividerXToy   = -1;
 #endif
+
+        // Toybox 档位按钮：贴 stick 组左侧（容纳 "NORMAL"），与 stick 之间画分隔线
+        if (stickUiVisible)
+        {
+            tb.removeFromRight (4);
+            toolbarDividerXToy = tb.removeFromRight (1).getX();
+            tb.removeFromRight (4);
+        }
+        const int toyBtnW = btnW + PinkXP::ui(20);
+        auto toyBtnArea = tb.removeFromRight (toyBtnW + 4);
+        toyBtn.setBounds (toyBtnArea.withSizeKeepingCentre (toyBtnW, btnH));
+        toyBtn.setVisible (true);
 
         fpsBtn.setVisible   (true);
         fpsLabel.setVisible (true);
@@ -2685,6 +2779,7 @@ void ModuleWorkspace::resized()
         audioSourceBox.setVisible (false);
         fpsBtn.setVisible   (false);
         fpsLabel.setVisible (false);
+        toyBtn.setVisible   (false);
         gainBtn.setVisible  (false);
         setGainPopupVisible (false);
         gridBtn.setVisible  (false);
@@ -2700,6 +2795,8 @@ void ModuleWorkspace::resized()
         toolbarDividerX2 = -1;
         toolbarDividerX3 = -1;
         toolbarDividerXLayout = -1;
+        toolbarDividerXStick = -1;
+        toolbarDividerXToy   = -1;
     }
 
     // Hide 浮层背景板：与工具栏同位置，位于模块之上

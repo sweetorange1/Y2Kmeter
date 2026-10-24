@@ -13,6 +13,7 @@ class ModuleWorkspace;
 class ModulePanel;
 enum class ModuleType;
 class MilkdropTintPass;  // 整体染色后处理着色器，完整定义在 MilkdropModule.h
+class ToyDirector;       // Toybox 点击互动主管（完整定义在 source/ui/toys/ToyKit.h）
 
 // ==========================================================
 // Y2KmeterAudioProcessorEditor —— 多模块框架版
@@ -187,6 +188,14 @@ public:
 
     // 返回用户选择的 FPS 限制档位（30/60/120/0，0=无上限）
     int  GetUserRequestedFpsLimit() const noexcept { return userRequestedFpsLimit; }
+
+    // ======================================================
+    // Toybox（v3.0.0）档位（0=Off / 1=Chill / 2=Normal / 3=Party）
+    //   · setToyLevel：同步 ToyDirector + workspace TOY 按钮 + Processor 持久化。
+    //   · getToyLevel：读取当前档位（供 Standalone 退出时保存 ui.toyLevel）。
+    // ======================================================
+    void setToyLevel (int level);
+    int  getToyLevel() const noexcept;
 
     // 是否插件宿主模式（VST3/AU 等，宿主提供 playhead）；Standalone 返回 false。
     //   · Milkdrop BPM 同步自动切换模式仅在此为 true 时显示入口。
@@ -647,6 +656,14 @@ private:
     //   · 插件宿主（VST3/AU）下也安全：JUCE 会为 Editor 的顶层 NSView/HWND 自动
     //     创建一个子 GL 子层，不会影响宿主窗口其余部分；DAW 卸载 Editor 时
     //     detach 会清理 GL 资源。
+    // ================================================================
+    // Toybox（v3.0.0）点击解压互动主管。
+    //   · 声明位置在 openGLContext 之前（§11.2）：反向析构时 toyDirector
+    //     在 openGLContext 之后、workspace 之前销毁。
+    //   · 完整类型只在 .cpp 中可见（pimpl，避免把 AnalyserHub 拖进本头）。
+    // ================================================================
+    std::unique_ptr<ToyDirector> toyDirector;
+
     //   · 本成员**必须**在类的末尾（所有子组件之后）声明，保证析构时最先执行
     //     （反向声明顺序），而我们在 ~Editor 起始处已显式 detach 一次兜底。
     juce::OpenGLContext openGLContext;
@@ -695,6 +712,7 @@ private:
                              juce::Rectangle<int> savedBounds,
                              std::function<void(ModulePanel&, juce::Rectangle<int>)> onDock,
                              Y2KmeterAudioProcessorEditor* editor);
+        ~FloatingModuleWindow() override;
         void closeButtonPressed() override;
         void resized() override;
         juce::BorderSize<int> getBorderThickness() const override;

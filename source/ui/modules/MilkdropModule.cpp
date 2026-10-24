@@ -1531,6 +1531,9 @@ MilkdropModule::MilkdropModule (AnalyserHub* hub_,
     // 和边框后）过小甚至为 0，GL FBO/纹理分配失败，模块进入纯黑不可用状态。
     setMinSize(160, 70);
 
+    // Toybox：整块排除（点击语义已被占用，§6.1）
+    getProperties().set ("toy.optOut", true);
+
     // 尝试激活 Hub 的 Oscilloscope 路径 —— 有 hub 才有 PCM 输入。
     if (hub != nullptr)
     {

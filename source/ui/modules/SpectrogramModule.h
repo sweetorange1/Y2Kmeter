@@ -54,6 +54,12 @@ public:
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
 
+    // ---- Toybox（v3.0.0）：贴纸炸弹（§8.3）----
+    juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
+    float getToyScrollPxPerSec() const { return pixelsPerSecond; }
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
     void resized() override;

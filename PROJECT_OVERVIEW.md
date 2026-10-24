@@ -4020,4 +4020,43 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 
 ---
 
+## v2.9.3：Toybox 点击解压互动系统（玩具盒）
+
+> 完整需求案与逐轮记录见 `docs/Toybox_Click_Toys_Requirements_v3.0.0.md`（含全量测试用例附录 F）。此处为交付摘要。
+
+### 1. 新子系统：Toybox（`source/ui/toys/`，约 30 文件）
+
+- **交互引擎**：`ToyDirector`（全局鼠标监听 + 路由 + 连击 + 彩蛋）→ `ToyClock`（FrameListener 驱动物理/渲染）→ `ToyOverlay`（全窗口透明叠加层，鼠标穿透）→ `ToyActor` 体系（自由 actor / 模块 actor，step/paint/onClick/isPoppable/impulse 统一接口）。
+- **档位**：OFF / CHILL / NORMAL / PARTY 四档，工具栏 TOY 按钮循环切换，档位持久化（Standalone `ui.toyLevel`、VST3 工程状态）。
+- **画布 2.0**：按下当帧喷（修复"松开才喷"）、按住持续喷（花洒随鼠标）、鼠标力场、点爆、连击 5/10/20 喷口形态升级、落地挤压回弹、左右墙反弹、模块平台上沿碰撞（带 x 范围，无空气墙）、FIFO 硬上限 400 粒子。
+- **emoji 图集**：Segoe UI Emoji 经 DirectWrite + D2D1.0 WIC 软件渲染目标烘焙（COLR 彩色）；编码链路最终以 `u"\U0001F496"` 硬编码 UTF-16 字面量终结（曾因 UTF-8 字节被当 Latin-1 渲染出乱码，历 5 轮定位）；主题 duotone 着色 + 描边；预烘焙消息线程分帧；旋转 12 桶预烘焙缓存。
+- **模块"数据玩具"化**：全部 19 个模块接入 `toyHitTest/toyPoke`，各有专属互动效果 + 真实读数气泡（拍电视、拍立得快照、拨弦音名、老虎机、Win95 弹窗、入侵者、橡皮筋、弹珠、幸运方块、压扁、Line Rider、爆米花等），读数内容如实取自分析数据。
+- **全局彩蛋**：连击字幕（NICE!/COOL!/WOW!/Y2K MODE）、40 连击彩带雨、Y2K BUG 全屏故障、FPS 玩笑、Clippo 回形针、VirtuPet 宠物联动（startled/yell/angry）。后续按用户反馈删除 Y2K BUG / FPS 玩笑 / Clippo。
+
+### 2. 测试与诊断
+
+- `tests/toy_physics_test.cpp`：物理纯函数单测（弹簧/阻尼/平台碰撞/emoji 变换中心映射），构建目标 `Y2Kmeter_toy_test`。
+- `tests/emoji_diag.cpp`：独立 DirectWrite 彩色 emoji 渲染诊断程序；`tests/gen_utf16.ps1`：kSpecs UTF-16 表生成脚本。
+- 性能日志：`source/ui/toys/ToyPerf.h`，写入 exe 目录 `toy_perf_log.txt`（每次启动追加 session 行，每秒记录 fps/粒子数/帧耗时），供多轮优化比对。
+
+### 3. 性能优化（第 9 轮内共 7 轮迭代）
+
+- 粒子渲染：旋转分桶预烘焙（12 桶，paint 零烘焙）、1:1 `drawImageAt` 快路径、堆积色点降级（>40 S 档 / >120 M 档）、半帧率动画降频（>40 粒子）。
+- 重绘策略：union 大 dirty → 128px tile 分块 repaint（>80 tile 回退 union）；平台几何 0.5s 缓存；预烘焙放缓（30Hz×3）。
+- 极限：350+ 粒子从 10.6fps 优化到 50+ fps；多模块布局空闲掉帧定位为应用层模块渲染成本（非 Toybox）。
+- 期间修复：paint 回调内烘焙死锁（黑屏）、vector 迭代器悬空崩溃（点爆 push_back 后 erase）、软上限"越点越少"改为 FIFO 淘汰。
+
+### 4. 集成点（对既有文件的修改）
+
+- `PluginEditor`：ToyDirector 生命周期、TOY 按钮（Stick 左侧 + 分隔线）、窗口缩放同步 overlay bounds、版本号 2.9.3。
+- `ModuleWorkspace`：双击添加模块菜单在 Toybox 非 OFF 档禁用；模块与 ToyDirector 桥接。
+- 各模块头/源：`toyHitTest/toyPoke` 实现 + 只读数据 getter（如 `SpectrumModule::toyReadDbAtX`、`WaveformModule::toyReadColumnPeak`）。
+- `CMakeLists.txt`：新增 `Y2Kmeter_toy_test` / `Y2Kmeter_emoji_diag` 测试目标。
+
+### 5. 版本
+
+- 版本号 2.9.3（JUCE 8、VS2026），更新位置：`CMakeLists.txt`、`Y2Kmeter_installer.iss`、`README.md`、`PluginEditor.cpp` 抬头水印。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

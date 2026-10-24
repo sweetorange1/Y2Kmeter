@@ -36,6 +36,10 @@ public:
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
 
+    // ---- Toybox（v3.0.0）：综合路由（Meters/DR/Crest，§8.2）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;

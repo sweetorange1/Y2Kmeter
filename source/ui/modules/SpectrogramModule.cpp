@@ -1,5 +1,6 @@
 #include "source/ui/modules/SpectrogramModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/palette/OkLchUtils.h"
 #include <cmath>
@@ -163,6 +164,33 @@ juce::Rectangle<int> SpectrogramModule::getCanvasBounds (juce::Rectangle<int> co
     //     —— Hz 刻度文字会直接浮绘在画布内部左侧（半透明在频谱上色块上），
     //        older/newer 提示同样浮绘在画布内部底部，无需抠占画布空间。
     return content.withTrimmedRight (sliderPanelW);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：贴纸炸弹（§8.3）
+// ----------------------------------------------------------
+bool SpectrogramModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto canvas = getToyCanvasBounds();
+    if (! canvas.contains (panelPos))
+        return false;
+    out.kind = 1;
+    out.rect = canvas.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void SpectrogramModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // Pin 角色贴纸（E.3.1，不再写死池）
+    ctx.addModuleActor (makeStickerActor (ctx.role (ToyRole::Pin), hit.pos, getToyScrollPxPerSec()));
+    // 行 → 频率 + dB（E.4.3）
+    const float freq = 20.0f * std::pow (0.95f * 20000.0f / 20.0f,
+                                         1.0f - (hit.pos.y - hit.rect.getY()) / juce::jmax (1.0f, hit.rect.getHeight()));
+    const float db = -90.0f + 60.0f * ((hit.pos.y - hit.rect.getY()) / juce::jmax (1.0f, hit.rect.getHeight()));
+    ctx.bubble (hit.pos.translated (0.0f, -20.0f),
+                juce::String (freq / 1000.0f, 1) + "kHz " + juce::String (db, 0) + "dB",
+                ToyRole::Pin);
 }
 
 void SpectrogramModule::layoutContent (juce::Rectangle<int> contentBounds)

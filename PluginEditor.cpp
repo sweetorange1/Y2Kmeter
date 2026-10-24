@@ -26,6 +26,7 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/MilkdropParamIds.h"
 #include "source/ui/GlDirectModule.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/perf/FramePerfLog.h"
 #include "source/Y2KLogging.h"
 
@@ -240,6 +241,16 @@ Y2KmeterAudioProcessorEditor::FloatingModuleWindow::FloatingModuleWindow(
     , onDock_(std::move(onDock))
     , editor_(editor)
 {
+    // Toybox：浮动态模块脱离 Editor 组件树，Editor 级全局监听器收不到它的
+    //   鼠标事件，需把 director 作为 MouseListener 直接挂到面板上（§11.2）。
+    if (editor_ != nullptr && editor_->toyDirector != nullptr)
+        module_.addMouseListener (editor_->toyDirector.get(), true);
+}
+
+Y2KmeterAudioProcessorEditor::FloatingModuleWindow::~FloatingModuleWindow()
+{
+    if (editor_ != nullptr && editor_->toyDirector != nullptr)
+        module_.removeMouseListener (editor_->toyDirector.get());
 }
 
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::closeButtonPressed()
@@ -499,7 +510,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.9.2");
+        const int versionW = versionFont.getStringWidth ("v2.9.3");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -540,7 +551,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.2";
+        const juce::String versionText = "v2.9.3";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -640,6 +651,8 @@ public:
     TutorialOverlay()
     {
         setOpaque (false);
+        // Toybox：新手引导期间整层静默（§6.1）
+        getProperties().set ("toy.optOut", true);
     }
 
     void showStep1 (const juce::Rectangle<int>& canvasAreaInEditor)
@@ -1610,6 +1623,22 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     fpsListener = std::make_unique<FpsFrameListener> (*this);
     processor.getAnalyserHub().addFrameListener (fpsListener.get());
     lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
+
+    // ------------------------------------------------------
+    // Toybox（v3.0.0）：点击解压互动主管（挂在 Editor 全局鼠标监听 + FrameListener）
+    //   · 初始档位：Standalone 默认 Normal，插件宿主默认 Chill（决策 1）。
+    // ------------------------------------------------------
+    Y2K_LOG ("[boot] ToyDirector create begin");
+    toyDirector = std::make_unique<ToyDirector> (*this, *workspace, processor.getAnalyserHub());
+    Y2K_LOG ("[boot] ToyDirector created");
+
+    const int savedToy = processor.getSavedToyLevel();
+    const int initialToy = (savedToy >= 0) ? juce::jlimit (0, 3, savedToy)
+                                           : (isPluginHost ? 1 : 2);   // 1=Chill 2=Normal
+    workspace->setToyDirector (toyDirector.get());
+    workspace->setToyLevel (initialToy);
+    toyDirector->setLevel ((ToyLevel) initialToy);
+    workspace->onToyLevelChanged = [this] (int level) { setToyLevel (level); };
 
     // v2.9：挂 vblank 帧时钟。首个 vblank 到来时才切换到外部时钟，
     //   在此之前（peer 尚未创建）仍由 Hub 内部 Timer 驱动，不会出现空窗。
@@ -3465,7 +3494,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.2";
+        const juce::String versionText = "v2.9.3";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3473,7 +3502,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v2.9.2");
+                const int versionW = versionFont.getStringWidth ("v2.9.3");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -3611,6 +3640,11 @@ void Y2KmeterAudioProcessorEditor::resized()
     // 教程覆盖层始终铺满整个 Editor
     if (tutorialOverlay != nullptr && tutorialOverlay->isVisible())
         tutorialOverlay->setBounds (getLocalBounds());
+
+    // Toybox 叠加层：缩放窗口后同步 bounds，否则新增区域内 emoji 不显示（FIX-4 / B-04）
+    if (toyDirector != nullptr && toyDirector->overlay != nullptr &&
+        toyDirector->overlay->getParentComponent() != nullptr)
+        toyDirector->overlay->setBounds (getLocalBounds());
 
     // 同步 workspace 的 hit-test 挖洞（按钮位置依赖 getWidth()，resize 后必须重新计算）
     updateWorkspaceHitTestHoles();
@@ -4823,6 +4857,22 @@ void Y2KmeterAudioProcessorEditor::RestoreFpsLimit (int hz)
         workspace->onFpsLimitChanged (workspace->getFpsLimit());
 }
 
+// ======================================================
+// Toybox（v3.0.0）档位
+// ======================================================
+void Y2KmeterAudioProcessorEditor::setToyLevel (int level)
+{
+    const int l = juce::jlimit (0, 3, level);
+    if (toyDirector) toyDirector->setLevel ((ToyLevel) l);
+    if (workspace)   workspace->setToyLevel (l);
+    processor.setSavedToyLevel (l);
+}
+
+int Y2KmeterAudioProcessorEditor::getToyLevel() const noexcept
+{
+    return toyDirector ? (int) toyDirector->getLevel() : 2;
+}
+
 
 // 同步 workspace 的 hit-test 挖洞。
 //   · chrome 可见时：无挖洞（workspace 占据 y=titleBarHeight 以下区域，顶部 26px 是
@@ -5516,7 +5566,7 @@ void Y2KmeterAudioProcessorEditor::relaxConstrainerForWindowSize (int w, int h)
 // ==========================================================
 void Y2KmeterAudioProcessorEditor::timerCallback()
 {
-    // v2.9.2：帧耗时统计周期性落盘（诊断构建；release 构建为空操作）
+    // v2.9.3：帧耗时统计周期性落盘（诊断构建；release 构建为空操作）
    #if Y2K_ENABLE_FRAME_PERF_LOG
     y2k::perflog::dumpIfDue();
    #endif
@@ -5955,7 +6005,7 @@ static juce::File FindMilkdropLikeDir()
 }
 
 void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
-  // v2.9.2：调大 GL 图片纹理缓存（JUCE 默认仅 8MB）。
+  // v2.9.3：调大 GL 图片纹理缓存（JUCE 默认仅 8MB）。
   //   workspace 画布背景（~5.8MB）+ 二十个模块的静态/动态图层纹理总量远超 8MB，
   //   默认缓存下每帧互相挤占 LRU —— workspace 背景纹理被逐出后整图重传
   //   （实测 10.9ms/帧，占全场景帧预算的三分之一以上）。96MB 足以容纳全部
@@ -6048,7 +6098,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   // v2.9：真实出帧计数（GL 线程每出一帧调用一次 renderOpenGL）
   glFrameCounter.fetch_add(1, std::memory_order_relaxed);
 
-  // v2.9.2：GL 帧耗时统计（诊断构建）
+  // v2.9.3：GL 帧耗时统计（诊断构建）
   Y2K_PERF_FRAME_SCOPE("glFrame");
 
   // 保存原始 viewport 和 DPI 缩放（Milkdrop 和 Spectrogram3D 共用）

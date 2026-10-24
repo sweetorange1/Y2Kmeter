@@ -70,6 +70,11 @@ public:
                                  float savedHunger,
                                  float savedHealth);
 
+    // ---- Toybox（v3.0.0）联动：仅触发动画，不改饥饿/健康/运动状态（决策 6）----
+    //   animId 使用 PetAnim 数值：startled=33 / yell=31 / angry=8。
+    //   动画不存在则静默忽略（内部先 hasAnimation 判断）。
+    void playToyReaction (int animId);
+
 private:
 
     enum class Edge { none, right, bottom, bottomRight };

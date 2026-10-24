@@ -1,5 +1,6 @@
 #include "source/ui/modules/WaveformModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
 
@@ -330,6 +331,40 @@ juce::Rectangle<int> WaveformModule::getCanvasBounds (juce::Rectangle<int> conte
     constexpr int kGainPanelW = 42;
     return content.withTrimmedTop (toolbarH + 4)
                   .withTrimmedRight (kGainPanelW);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：人浪（§8.3）
+// ----------------------------------------------------------
+bool WaveformModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto canvas = getToyCanvasBounds();
+    if (! canvas.contains (panelPos))
+        return false;
+    out.kind = 1;
+    out.rect = canvas.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void WaveformModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    ctx.addModuleActor (makeWaveBandActor (hit.pos, hit.rect));
+
+    // 时间 + 电平读数（反馈 C3：补上点击坐标的电平参数）
+    const float t = (hit.pos.x - hit.rect.getX()) / juce::jmax (1.0f, hit.rect.getWidth());
+    const float timeSec = -(1.0f - t) * displaySeconds;
+    const float pk = toyReadColumnPeak (hit.pos.x);
+
+    juce::String text;
+    if (pk < 0.003f)
+        text = "SILENCE";
+    else
+    {
+        const float db = 20.0f * std::log10 (pk + 1e-9f);
+        text = juce::String (timeSec, 1) + "s  " + juce::String (db, 1) + "dB";
+    }
+    ctx.bubble (hit.pos.translated (0.0f, -20.0f), text, ToyRole::Reward);
 }
 
 void WaveformModule::layoutContent (juce::Rectangle<int> contentBounds)

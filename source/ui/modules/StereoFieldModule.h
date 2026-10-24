@@ -39,6 +39,10 @@ public:
     // AnalyserHub::FrameListener
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- Toybox（v3.0.0）：入侵者（§8.3）----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     // ---- GlDirectModuleBase 钩子（v2.9.5 迁移，trail 累积通道）----
     void buildGlSnapshot() override;

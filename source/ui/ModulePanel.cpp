@@ -1,5 +1,6 @@
 #include "source/ui/ModulePanel.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/perf/FramePerfLog.h"
 
@@ -179,6 +180,30 @@ juce::Rectangle<int> ModulePanel::getContentBounds() const
         getHeight() - 4 - th - 1);
 }
 
+// ----------------------------------------------------------
+// Toybox（v3.0.0）默认实现（旧模块零改动可编译）
+// ----------------------------------------------------------
+bool ModulePanel::toyAccepts (juce::Point<int> panelPos) const
+{
+    // 仅内容区，且排除 8px 边缘缩放热区（§6.1）
+    if (! getContentBounds().contains (panelPos))
+        return false;
+    const int hot = PinkXP::ui (edgeHotSize);
+    if (panelPos.x < hot || panelPos.x >= getWidth()  - hot ||
+        panelPos.y < hot || panelPos.y >= getHeight() - hot)
+        return false;
+    return true;
+}
+
+bool ModulePanel::toyHitTest (juce::Point<int>, ToyHit&) const
+{
+    return false;
+}
+
+void ModulePanel::toyPoke (const ToyHit&, ToyContext&)
+{
+}
+
 // 右下角 CPU 小字区域：贴着内容区右下角，宽 74px × 高 12px（留内邊 3px）
 juce::Rectangle<int> ModulePanel::getCpuLabelBounds() const
 {
@@ -324,6 +349,10 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
     pendingFullRepaint = false;
     pendingAreaRepaint = false;
     pendingRepaintArea = {};
+
+    // Toybox：模块内 actor 绘制（插在标志清零之后、早退 return 之前，§R5）
+    if (toyState != nullptr)
+        toyState->paint (g);
 
     // 右下角 CPU 占用提示文字：暂时屏蔽（不再做视觉展示，但保留
     //   setCpuLoad / getCpuLabelBounds 等 API，方便后续测试时重新开启）

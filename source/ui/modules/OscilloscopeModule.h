@@ -56,6 +56,12 @@ public:
     void setFrozen(bool b);
     bool isFrozen() const noexcept { return frozen; }
 
+    // ---- Toybox：拍立得快照（反馈 C1，GL 代表 L1 效果）----
+    juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+    double lastToyPokeTime_ = 0.0;   // 防连点冷却
+
     // v1.8.4 持久化：保存/恢复 displayMode + frozen
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;

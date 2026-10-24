@@ -1,5 +1,6 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <juce_opengl/juce_opengl.h>
 #include <cmath>
@@ -117,6 +118,26 @@ void Spectrogram3DModule::restoreModuleSpecificState (const juce::ValueTree& sta
 juce::Rectangle<int> Spectrogram3DModule::getCanvasBounds (juce::Rectangle<int> content) const
 {
     return content.withTrimmedRight (sliderPanelW);
+}
+
+// ----------------------------------------------------------
+// Toybox（v3.0.0）：火山与旗帜（§8.3）
+// ----------------------------------------------------------
+bool Spectrogram3DModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
+{
+    const auto canvas = getToyCanvasBounds();
+    if (! canvas.contains (panelPos))
+        return false;
+    out.kind = 1;
+    out.rect = canvas.toFloat();
+    out.pos  = panelPos.toFloat();
+    return true;
+}
+
+void Spectrogram3DModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
+{
+    // 反馈 C7：不要气泡频率读数，只保留火山 + 余烬 + 旗帜
+    ctx.addModuleActor (makeVolcanoActor (hit.pos, { 6.0f, 10.0f }));
 }
 
 void Spectrogram3DModule::layoutContent (juce::Rectangle<int> contentBounds)
