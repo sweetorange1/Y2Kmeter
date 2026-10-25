@@ -427,6 +427,28 @@ ModuleWorkspace::ModuleWorkspace()
     fpsBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
     addAndMakeVisible (fpsBtn);
 
+    // FFT size 按钮（反馈 #7 第三轮）：FPS 区与 Grid 之间，循环切换主路 FFT 点数
+    //   · 复用 fpsMiniLnf：drawButtonText 在绘制时硬编码主题 ink ——
+    //     与 FPS 按钮同一套字体颜色逻辑，浅色/深色主题下文字都清晰
+    fftSizeBtn.setButtonText (juce::String (fftSize));
+    fftSizeBtn.setTooltip ("FFT size (spectrum resolution): 1024 / 2048 / 4096 / 8192 / 16384");
+    fftSizeBtn.setLookAndFeel (fpsMiniLnf.get());
+    fftSizeBtn.setColour (juce::TextButton::textColourOffId, PinkXP::ink);
+    fftSizeBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
+    fftSizeBtn.onClick = [this]()
+    {
+        cycleFftSize();
+        if (onFftSizeChanged) onFftSizeChanged (fftSize);
+    };
+    addAndMakeVisible (fftSizeBtn);
+
+    // FFT Size 前缀标签（按钮左侧，样式与 fpsLabel 一致）
+    fftSizeLabel.setText ("FFT Size:", juce::dontSendNotification);
+    fftSizeLabel.setJustificationType (juce::Justification::centredLeft);
+    fftSizeLabel.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
+    fftSizeLabel.setColour (juce::Label::textColourId, PinkXP::ink);
+    addAndMakeVisible (fftSizeLabel);
+
     // Toybox 档位循环按钮（Off/Chill/Normal/Party，§10.2 首选入口）
     toyBtn.setButtonText ("NORMAL");
     toyBtn.setTooltip    ("Toybox click-toys level (Off / Chill / Normal / Party)");
@@ -672,6 +694,9 @@ ModuleWorkspace::ModuleWorkspace()
         toyBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
         toyBtn.repaint();
 
+        fftSizeLabel.setColour (juce::Label::textColourId, PinkXP::ink);
+        fftSizeLabel.repaint();
+
         audioSourceLabel.setColour (juce::Label::textColourId, PinkXP::ink);
         audioSourceLabel.repaint();
 
@@ -724,9 +749,10 @@ ModuleWorkspace::~ModuleWorkspace()
     // layoutPresetBox 同 audioSourceBox 一样挂了 PinkXP LookAndFeel 单例，这里显式解绑
     layoutPresetBox.setLookAndFeel (nullptr);
 
-    // fpsBtn 绑定的是本对象持有的 fpsMiniLnf（unique_ptr）。
+    // fpsBtn / fftSizeBtn 绑定的是本对象持有的 fpsMiniLnf（unique_ptr）。
     // 必须先解绑，再让 unique_ptr 自行析构，否则 Button 在析构时会访问已销毁的 LnF。
     fpsBtn.setLookAndFeel (nullptr);
+    fftSizeBtn.setLookAndFeel (nullptr);
 
     // 解绑主题订阅，避免析构后 gThemeSubs 仍回调到已销毁的 this
     if (themeSubToken >= 0)
@@ -2106,6 +2132,7 @@ void ModuleWorkspace::paintToolbarBackground (juce::Graphics& g, juce::Rectangle
         g.fillRect (x + 1, y1, 1, y2 - y1);
     };
     drawDivider (toolbarDividerX0);
+    drawDivider (toolbarDividerXFft);
     drawDivider (toolbarDividerX1);
     drawDivider (toolbarDividerX2);
     drawDivider (toolbarDividerX3);
@@ -2642,12 +2669,28 @@ void ModuleWorkspace::resized()
         auto fpsBtnArea = tb.removeFromRight (fpsBtnW + 4);
         fpsBtn.setBounds (fpsBtnArea.withSizeKeepingCentre (fpsBtnW, btnH));
 
-        // 5a) 分隔线 #0（Grid 与 FPS 之间）：与其他区域分隔符同样的视觉
+        // 5a) FFT size 按钮 + "FFT Size:" 前缀标签（反馈 #7）：FPS 区与 Grid 之间，
+        //     左右各一条分割线；标签紧贴按钮左侧
+        tb.removeFromRight (4);
+        toolbarDividerXFft = tb.removeFromRight (1).getX();
+        tb.removeFromRight (4);
+
+        const int fftBtnW = PinkXP::ui(60);
+        auto fftBtnArea = tb.removeFromRight (fftBtnW + 4);
+        fftSizeBtn.setBounds (fftBtnArea.withSizeKeepingCentre (fftBtnW, btnH));
+        fftSizeBtn.setVisible (true);
+
+        const int fftLabelW = PinkXP::ui(86);
+        auto fftLblArea = tb.removeFromRight (fftLabelW);
+        fftSizeLabel.setBounds (fftLblArea.withSizeKeepingCentre (fftLabelW, btnH));
+        fftSizeLabel.setVisible (true);
+
+        // 5b) 分隔线 #0（Grid 与 FFT 之间）：与其他区域分隔符同样的视觉
         tb.removeFromRight (4);
         toolbarDividerX0 = tb.removeFromRight (1).getX();
         tb.removeFromRight (4);
 
-        // 5b) 分隔线 #0 的左侧：Grid 切换按钮（与 Hide/FPS 同大小）
+        // 5c) 分隔线 #0 的左侧：Grid 切换按钮（与 Hide/FPS 同大小）
         auto gridBtnArea = tb.removeFromRight (btnW + 4);
         gridBtn.setBounds (gridBtnArea.withSizeKeepingCentre (btnW, btnH));
         gridBtn.setVisible (true);
@@ -2805,7 +2848,10 @@ void ModuleWorkspace::resized()
         stickExitBtn.setVisible    (false);
         stickToggleBtn.setVisible  (false);
         hideBtn.setVisible         (false);
+        fftSizeBtn.setVisible      (false);
+        fftSizeLabel.setVisible    (false);
         toolbarDividerX0 = -1;
+        toolbarDividerXFft = -1;
         toolbarDividerX1 = -1;
         toolbarDividerX2 = -1;
         toolbarDividerX3 = -1;
@@ -3163,6 +3209,39 @@ void ModuleWorkspace::setFpsLimit (int hz)
         fpsBtn.setButtonText (juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x9e")) + "FPS");
     else
         fpsBtn.setButtonText (juce::String (fpsLimit) + "FPS");
+}
+
+// ==========================================================
+// FFT size 按钮（反馈 #7 第二轮）—— 控制台全局档位
+// ==========================================================
+void ModuleWorkspace::setFftSize (int size)
+{
+    // 仅接受 1024/2048/4096/8192/16384
+    static constexpr int kSizes[] = { 1024, 2048, 4096, 8192, 16384 };
+    int clamped = 2048;
+    for (int s : kSizes)
+    {
+        if (s == size) { clamped = size; break; }
+    }
+    fftSize = clamped;
+    fftSizeBtn.setButtonText (juce::String (fftSize));
+}
+
+void ModuleWorkspace::cycleFftSize()
+{
+    static constexpr int kSizes[] = { 1024, 2048, 4096, 8192, 16384 };
+
+    int next = kSizes[0];
+    for (int s : kSizes)
+    {
+        if (s > fftSize)
+        {
+            next = s;
+            break;
+        }
+    }
+
+    setFftSize (next);
 }
 
 void ModuleWorkspace::setMeasuredFps (float fps)

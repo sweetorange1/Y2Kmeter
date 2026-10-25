@@ -112,6 +112,10 @@ void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> 
     g.setFont (PinkXP::getAxisFont (juce::jmin (labelFontSize, 11.0f), juce::Font::bold));
     g.drawText ("L", plot.getX(), y, actualMargin, labelH, juce::Justification::centredRight, false);
     g.drawText ("R", plot.getRight() - actualMargin, y, actualMargin, labelH, juce::Justification::centredLeft, false);
+
+    // 悬停十字辅助线（反馈 #10）
+    if (hoverActive)
+        drawHoverRuler (g, canvas);
 }
 
 void StereoFieldModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
@@ -137,6 +141,73 @@ void StereoFieldModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<i
                      canvas.getX(), canvas.getY(), canvas.getWidth(), canvas.getHeight(),
                      0, 0, trailImage.getWidth(), trailImage.getHeight());
     }
+
+    // 悬停十字辅助线（反馈 #10）
+    if (hoverActive)
+        drawHoverRuler (g, canvas);
+}
+
+// ----------------------------------------------------------
+// 悬停处理（反馈 #10）：与 Spectrum/Waveform 一致的十字辅助线
+// ----------------------------------------------------------
+void StereoFieldModule::mouseMove (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseMove (e);
+
+    const auto canvas = getContentBounds().reduced (2);
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains (pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void StereoFieldModule::mouseExit (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseExit (e);
+    if (hoverActive)
+    {
+        hoverActive = false;
+        repaint();
+    }
+}
+
+void StereoFieldModule::drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> canvas)
+{
+    if (! hoverActive || ! canvas.contains (hoverPos))
+        return;
+
+    const auto plot = canvas.reduced (6);
+    if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
+        return;
+
+    const auto geo = computeRadarGeometry (plot);
+    const float cx = (float) geo.cx, baseY = (float) geo.baseY, R = (float) geo.radius;
+
+    const float dx = (float) hoverPos.x - cx;
+    const float dy = baseY - (float) hoverPos.y;
+
+    // 半径比例 → 电平：rho = peak×R（满幅 = R = 0 dB），按线性幅度换算 dB
+    const float rho  = juce::jlimit (0.0f, R, std::sqrt (dx * dx + dy * dy));
+    const float frac = rho / juce::jmax (1.0f, R);
+    const float db   = 20.0f * std::log10 (juce::jmax (1.0e-4f, frac));
+
+    // 角度 → 声像：-90° = 纯左，+90° = 纯右，顶部 0° = 居中
+    const float angDeg  = std::atan2 (dx, dy) * (180.0f / juce::MathConstants<float>::pi);
+    const float balance = juce::jlimit (-1.0f, 1.0f, angDeg / 90.0f);
+
+    juce::String readout;
+    if (std::abs (balance) < 0.02f)
+        readout = "PAN CENTER";
+    else
+        readout = "PAN " + juce::String (balance < 0.0f ? "L" : "R")
+                + juce::String (std::abs (juce::roundToInt (balance * 100.0f)));
+    readout << "  " << juce::String (db, 1) << "dB";
+
+    PinkXP::drawHoverRuler (g, canvas, hoverPos, readout);
 }
 
 // ----------------------------------------------------------

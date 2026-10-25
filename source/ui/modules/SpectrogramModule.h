@@ -21,7 +21,7 @@
 //   * 颜色：跟随当前主题，从 pink700 (深) → pink100 (浅) 线性渐变，
 //     对应 低电平 → 高电平。切换主题时全局调色板会自动刷新。
 //
-// 数据源：AnalyserHub::getSpectrumMagnitudesBlended（低频 8192FFT + 高频 2048FFT 双路合并）
+// 数据源：AnalyserHub::getSpectrumMagnitudesBlended（v2.9.6 单路 FFT，size 用户可选）
 // ==========================================================
 
 class SpectrogramModule : public GlDirectModuleBase,

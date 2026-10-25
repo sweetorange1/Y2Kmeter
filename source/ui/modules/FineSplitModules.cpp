@@ -17,6 +17,14 @@ namespace
         return PinkXP::pink200;                     // 基色浅阶：安全区
     }
 
+    // LUFS 值 → 颜色（与 LoudnessModule::lufsToColour 同分区，供点击互动碎片用）
+    juce::Colour lufsColour(float lufs)
+    {
+        if (lufs > -9.0f)  return PinkXP::sel;      // accent：过响警告
+        if (lufs > -14.0f) return PinkXP::pink500;  // 基色中阶：适中
+        return PinkXP::pink200;                      // 基色浅阶：正常
+    }
+
     // 画一条横向像素风进度条（Y2K XP 风）：sunken 槽 + 像素格填充 + 右端高亮像素
     //   · tNorm 已归一化到 [0,1]
     //   · 改用"像素格"填充 + 脱离格流动高光——让用户明显看到"数据在跑"
@@ -1035,14 +1043,18 @@ void VuMeterModule::advanceBallistics (float dt)
     //     按 fall 时间常数执行 —— 指针不会被锁死在顶端，会"踩着节拍"往上
     //     走，节拍停的瞬间也会继续按 fall 缓慢下行。
     //   · 静音（target -> -144）时：由下降项主导，指针平缓归位。
-    const float aUp   = 1.0f - std::exp(-dt / tauRiseMs);
-    const float aDown = 1.0f - std::exp(-dt / tauFallMs);
+    //   · 反馈修复（外网 #6）：完全静音回零使用更慢的 tauMuteFallMs，
+    //     表针不再"一瞬间打到底"。
+    const float aUp      = 1.0f - std::exp(-dt / tauRiseMs);
+    const float aDown    = 1.0f - std::exp(-dt / tauFallMs);
+    const float aMuteDown = 1.0f - std::exp(-dt / tauMuteFallMs);
 
     auto smoothOne = [&](float& disp, float tgt)
     {
         if (! std::isfinite(disp)) disp = -144.0f;
         if (! std::isfinite(tgt))  tgt  = -144.0f;
-        const float a = (tgt > disp) ? aUp : aDown;
+        const float a = (tgt > disp) ? aUp
+                      : (tgt <= -143.0f ? aMuteDown : aDown);
         disp += a * (tgt - disp);
     };
     smoothOne(displayedL, targetL);
@@ -1159,13 +1171,18 @@ bool LufsRealtimeModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) con
 
 void LufsRealtimeModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 {
-    // 点中的读数框（M/S/I 垂直堆叠），数字滚到真实值（E.4.2）
+    // 点中的读数框（M/S/I 垂直堆叠）→ 对应真实值
     const float frac = (hit.pos.y - hit.rect.getY()) / juce::jmax (1.0f, hit.rect.getHeight());
-    const float val = (frac < 0.33f) ? lufsM : (frac < 0.66f ? lufsS : lufsI);
+    const char* tag = "I";
+    float val = lufsI;
+    if (frac < 0.33f)      { tag = "M"; val = lufsM; }
+    else if (frac < 0.66f) { tag = "S"; val = lufsS; }
 
-    ctx.addModuleActor (makeSlotRollerActor (hit.pos, juce::String (val, 1)));
-    ctx.addModuleActor (makeFireflyActor (hit.pos.translated (16.0f, -8.0f)));
-    // 反馈 D3：删除气泡（滚轮数字即读数）
+    // 本轮反馈：与 Loudness 一致 —— 炸碎片 + 小 emoji 气泡文案
+    ctx.addModuleActor (makeBrickShardsActor (hit.pos, lufsColour (val), 8));
+    ctx.bubble (hit.pos.translated (0.0f, -24.0f),
+                juce::String (tag) + " " + juce::String (val, 1) + " LUFS",
+                ToyRole::Burst);
 }
 
 bool TruePeakModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
@@ -1197,14 +1214,9 @@ void TruePeakModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
         role = ToyRole::Clear;
     }
 
-    // 反馈 D4：删除气泡；弹窗位置钳制在读数框区内（超出模块部分不显示）
-    const float px = (hit.rect.getWidth() >= 190)
-        ? juce::jlimit (hit.rect.getX() + 90.0f, hit.rect.getRight() - 90.0f, hit.pos.x)
-        : hit.rect.getCentreX();
-    const float py = (hit.rect.getHeight() >= 76)
-        ? juce::jlimit (hit.rect.getY() + 36.0f, hit.rect.getBottom() - 36.0f, hit.pos.y)
-        : hit.rect.getCentreY();
-    ctx.addModuleActor (makePopUpWindowActor ({ px, py }, text, ctx.role (role)));
+    // 本轮反馈：与 Loudness 一致 —— 炸碎片 + 小 emoji 气泡文案
+    ctx.addModuleActor (makeBrickShardsActor (hit.pos, meterColour (tpDisplay), 8));
+    ctx.bubble (hit.pos.translated (0.0f, -24.0f), text, role);
 }
 
 bool PhaseCorrelationModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const

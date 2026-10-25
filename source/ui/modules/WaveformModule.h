@@ -86,6 +86,10 @@ private:
     // 幅度 [0,1] → Pink XP 主题色
     juce::Colour mapAmplitudeToColour (float amp01) const;
 
+    // 反馈（外网 #8）：齿音模式 —— 以高频能量占比驱动颜色：
+    //   齿音强 → 鲜艳高亮；齿音弱/无 → 灰暗低对比
+    juce::Colour mapSibilanceToColour (float sib01) const;
+
     // 从 oscilloscope 快照末尾追加 numSamples 个新样本到"采样累加器"；
     // 每当累加器里的样本数 >= samplesPerColumn 时，就产出一个新的像素列并
     // 追加到 columnHistory。核心目的：让屏幕滚动始终按"整数像素列"推进，
@@ -105,9 +109,10 @@ private:
     // 每个像素列的聚合数据（min/max 包络 + RMS，颜色由 RMS 决定）
     struct Column
     {
-        float minV = 0.0f;
-        float maxV = 0.0f;
-        float rms  = 0.0f;
+        float minV  = 0.0f;
+        float maxV  = 0.0f;
+        float rms   = 0.0f;
+        float hfRms = 0.0f;   // 齿音频段（高通 5kHz）RMS，供 Sibilance 模式
     };
 
     // 列环形缓冲：每个元素 = 1 个屏幕像素列的已聚合数据
@@ -122,7 +127,13 @@ private:
     float accMin  =  1.0f;
     float accMax  = -1.0f;
     float accSumSq = 0.0f;
+    float accHfSumSq = 0.0f;   // 齿音频段能量累加
     int   accCount = 0;
+
+    // 齿音检测：一阶高通滤波器（5kHz），状态跨列连续
+    float hfHpPrevIn  = 0.0f;
+    float hfHpPrevOut = 0.0f;
+    float hfHpAlpha   = 0.0f;
 
     // 每列应容纳的样本数（固定：displaySeconds × sampleRate / canvasWidth）
     float samplesPerColumn = 0.0f;
@@ -131,6 +142,7 @@ private:
     // 显示参数
     float displaySeconds = 3.0f;    // 默认显示最近 3 秒
     bool  frozen         = false;
+    bool  sibilanceEnabled = false; // 反馈（外网 #8）：齿音模式
 
     // 上次 onFrame 的系统时间（用于估算该 append 多少新样本）
     double lastFrameTimeMs = 0.0;
@@ -139,7 +151,11 @@ private:
     // 顶部按钮
     juce::TextButton btnRange3  { "3s"   };
     juce::TextButton btnRange6  { "6s"   };
+    juce::TextButton btnSibilance { "Sib" };   // 反馈（外网 #8）：齿音显示模式
     juce::TextButton btnFreeze  { "Freeze" };
+
+    void setSibilanceEnabled (bool b);
+    bool isSibilanceEnabled() const noexcept { return sibilanceEnabled; }
 
     // 右侧增益滑条（垂直，0 ~ +36 dB 显示放大；默认 0 dB 即无放大）
     //   · 只作用于 UI 绘制阶段的"柱高缩放系数"，绝对不碰任何后端音频数据

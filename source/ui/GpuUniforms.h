@@ -10,35 +10,34 @@
 //       Spectrum
 //       float spectrum_mag[1024];     // offset    0, size 4096
 //       float spectrum_data[160];      // offset 4096, size  640
-//       float spectrum_mag_lo[4096];   // offset 4736, size 16384
 //       // Oscilloscope
-//       float osc_l[2048];             // offset 21120, size 8192
-//       float osc_r[2048];             // offset 29312, size 8192
+//       float osc_l[2048];             // offset 4736, size 8192
+//       float osc_r[2048];             // offset 12928, size 8192
 //       // Loudness
-//       float lufs_m;                  // offset 37504
-//       float lufs_s;                  // offset 37508
-//       float lufs_i;                  // offset 37512
-//       float rms_l;                   // offset 37516
-//       float rms_r;                   // offset 37520
-//       float true_peak_l;             // offset 37524
-//       float true_peak_r;             // offset 37528
+//       float lufs_m;                  // offset 21120
+//       float lufs_s;                  // offset 21124
+//       float lufs_i;                  // offset 21128
+//       float rms_l;                   // offset 21132
+//       float rms_r;                   // offset 21136
+//       float true_peak_l;             // offset 21140
+//       float true_peak_r;             // offset 21144
 //       // Phase
-//       float phase_correlation;       // offset 37532
-//       float phase_width;             // offset 37536
-//       float phase_balance;           // offset 37540
+//       float phase_correlation;       // offset 21148
+//       float phase_width;             // offset 21152
+//       float phase_balance;           // offset 21156
 //       // Dynamics
-//       float dyn_peak_l;              // offset 37544
-//       float dyn_peak_r;              // offset 37548
-//       float dyn_rms_l;               // offset 37552
-//       float dyn_rms_r;               // offset 37556
-//       float dyn_crest;               // offset 37560
-//       float dyn_short_dr;            // offset 37564
-//       float dyn_integrated_dr;       // offset 37568
+//       float dyn_peak_l;              // offset 21160
+//       float dyn_peak_r;              // offset 21164
+//       float dyn_rms_l;               // offset 21168
+//       float dyn_rms_r;               // offset 21172
+//       float dyn_crest;               // offset 21176
+//       float dyn_short_dr;            // offset 21180
+//       float dyn_integrated_dr;       // offset 21184
 //       // Metadata
-//       uint  tick_count_lo;           // offset 37572
-//       uint  tick_count_hi;           // offset 37576
-//       uint  active_mask;             // offset 37580
-//   };  // total 37584 bytes
+//       uint  tick_count_lo;           // offset 21188
+//       uint  tick_count_hi;           // offset 21192
+//       uint  active_mask;             // offset 21196
+//   };  // total 21200 bytes（v2.9.6：移除 spectrum_mag_lo 后前移 16384 字节）
 //
 // All fields are tightly packed; SSBO std430 has no padding for arrays of
 // scalars.  The block is under 64 KB (UBO minimum guarantee) so it would also
@@ -58,7 +57,7 @@ struct GpuDataBlock {
   // ---- Spectrum (moduleTypeId = 3, 17) ----
   float spectrum_mag[AnalyserHub::spectrumMagSize];       // 1024
   float spectrum_data[AnalyserHub::spectrumBins];         //  160
-  float spectrum_mag_lo[AnalyserHub::spectrumMagSizeLo];  // 4096
+  // v2.9.6：spectrum_mag_lo（低频路 4096）已随单路 FFT 合并删除，无 shader 引用
 
   // ---- Oscilloscope (moduleTypeId = 2, 8, 14) ----
   float osc_l[AnalyserHub::oscilloscopeBufferSize];       // 2048
@@ -103,8 +102,6 @@ struct GpuDataBlock {
       spectrum_mag[i] = snapshot.spectrumMag[i];
     for (std::size_t i = 0; i < AnalyserHub::spectrumBins; ++i)
       spectrum_data[i] = snapshot.spectrumData[i];
-    for (std::size_t i = 0; i < AnalyserHub::spectrumMagSizeLo; ++i)
-      spectrum_mag_lo[i] = snapshot.spectrumMagLo[i];
 
     // Oscilloscope
     for (std::size_t i = 0; i < AnalyserHub::oscilloscopeBufferSize; ++i) {

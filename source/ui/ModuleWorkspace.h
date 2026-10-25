@@ -599,6 +599,15 @@ public:
     std::function<void(int hz)> onFpsLimitChanged;
 
     // ======================================================
+    // FFT size 档位（反馈 #7 第二轮）—— 底部控制台全局档位
+    //   · 点击循环 1024/2048/4096/8192/16384
+    //   · 回调由 Editor 订阅，真正修改 AnalyserHub 的主路 FFT
+    // ======================================================
+    int  getFftSize() const noexcept { return fftSize; }
+    void setFftSize (int size);                 // 外部可调用（例如恢复上次设置）
+    std::function<void(int size)> onFftSizeChanged;
+
+    // ======================================================
     // 输入增益（toolbar 的 gain 按钮 + 上方弹出控制条）
     //   · 范围：-10 dB ~ +36 dB，默认 0 dB
     //   · setInputGainDb 会同步刷新按钮提示与滑条位置
@@ -873,6 +882,15 @@ private:
     juce::Label      fpsLabel;
     int              fpsLimit = 120; // 30 / 60 / 120 / 0（0=无上限）
 
+    // FFT size 按钮（反馈 #7）：位于 FPS 区与 Grid 按钮之间，
+    //   左右各有一条竖直分割线，按钮左侧带 "FFT Size:" 前缀标签。
+    //   点击循环 1024/2048/4096/8192/16384，
+    //   回调由 Editor 订阅并真正作用到 AnalyserHub 的主路 FFT。
+    juce::TextButton fftSizeBtn;
+    juce::Label      fftSizeLabel;
+    int              fftSize = 2048;
+    void cycleFftSize();
+
     // Toybox 档位循环按钮（Off/Chill/Normal/Party），与 fpsBtn 同构。
     juce::TextButton toyBtn;
     int              toyLevel = 2;   // ToyLevel::Normal
@@ -1043,7 +1061,8 @@ private:
     // Toolbar 中"FPS 区 | Source 区 | Hide 区"之间的两条竖线分隔符 X 坐标
     //   · resized() 里根据控件实际位置写入；paint() 读取后绘制
     //   · 值为 -1 表示未初始化 / 不绘制（如 chrome 隐藏时）
-    int toolbarDividerX0 = -1; // grid 与 fps 之间
+    int toolbarDividerX0 = -1;   // grid 与 fft 之间
+    int toolbarDividerXFft = -1; // fft 与 fps 之间（反馈 #7）
     int toolbarDividerX1 = -1; // fps 与 source 之间
     int toolbarDividerX2 = -1; // source 与 hide 之间
     int toolbarDividerXToy = -1;   // toy 与 stick 之间

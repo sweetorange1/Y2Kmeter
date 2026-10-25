@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.7.6`）
+- **产品名**：`Y2Kmeter` （版本：`2.9.6`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -4079,6 +4079,55 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 
 - `Y2Kmeter_toy_test` 通过，RelWithDebInfo 共享代码构建通过，`git diff --check` 通过。
 - 版本号 2.9.4（JUCE 8、VS2026）；Standalone 实际交互 FPS 仍需在目标电脑上复测。更新位置：`CMakeLists.txt`、`Y2Kmeter_installer.iss`、`README.md`、`PluginEditor.cpp`。
+
+---
+
+## v2.9.6：外网反馈修复轮 + FFT 单路化 + Spectrum Sharper 模式
+
+> 版本号 2.9.4 → 2.9.5 → 2.9.6 全部发生在同一轮开发内；2.9.6 为最终固定版本。
+
+### 1. 外网反馈修复（10 条）
+
+- **#1 Mac 休眠后桌面采集失效（自愈）** `MacDesktopAudioCapture.mm`：
+  - 注册 `NSWorkspaceWillSleep/DidWake` 通知（selector 桥接对象，回调仅置原子标志）；
+  - 后台 watchdog dispatch timer（1s）：唤醒标志或「持续无 buffer > 5s」→ 在独立串行 `lifecycleQueue` 上执行 `stopCapture()+startCapture()` 重建 SCStream；
+  - start/stop 与自愈任务全部串行化防并发操作 SCStream；stop 时排空队列防悬挂回调。⚠ 本机为 Windows，`.mm` 未经编译验证，需在 Mac 上实测。
+- **#2 VirtuPet 细黑线** `VirtuPetModule.cpp`：paint 与脏区计算统一用 `floor` 取整（原来 round/floor 混用导致 1px 错位），脏区 `enqueuePetDirtyRepaint` 外扩 1px。
+- **#3 底纹不可见（重构）** `PinkXPStyle.cpp`：主题自带 `desktop2` 在极端明暗主题下与底色对比度不足，改为在 OKLab 空间重算纹理色（明度从底色反向推离 0.24，色相沿用 desktop2、近中性时借用 sel，gamutClamp 裁剪），10 种纹理全部切换；缓存加版本号强制重烘焙。
+- **#4**：文档已标注完成，未改动。
+- **#5 悬停读数字号** `PinkXPStyle.cpp`：硬编码 9px axis 字体 → `getFont(10)`（带 1.5x UI 放大），读数框高随字体自适应。
+- **#6 VU 表针瞬间打底** `FineSplitModules`：`tauFallMs` 350→1200ms，新增 `tauMuteFallMs=1800ms` 供完全静音回零独立使用。
+- **#7 FFT size 可调**：
+  - 后端 `AnalyserHub`：新增 `setMainFftSize()`，档位 1024/2048/4096/8192/16384，音频线程按请求真正重建 FFT/窗口/FIFO/magData；
+  - 控制台 `ModuleWorkspace`：FFT 按钮位于 FPS 区与 Grid 之间（左右各一条分割线 + "FFT Size:" 前缀标签），复用 FPS 按钮的 mini LookAndFeel（绘制时硬编码主题 ink，浅色主题下文字清晰）；
+  - `PluginEditor` 订阅 `onFftSizeChanged` → hub 生效；Standalone 持久化 `ui.fftSize`。
+- **#8 Waveform 齿音模式**：Column 增加 `hfRms`（5kHz 一阶高通累加）；新增 Sib 按钮：无齿音波形置灰（ink α0.22）、齿音区幂次曲线快速推向高饱和 sel（`pink500→sel`），GL 与 legacy 双路径生效。
+- **#9 Stereo Field 淡出发灰** `PluginEditor.cpp`：trail FBO 为预乘 alpha，合成改用 `(GL_ONE, 1-SRC_ALPHA)` 预乘混合，点保持原色只降 alpha。
+- **#10 Stereo Field 悬停辅助线**：`mouseMove/mouseExit` + `drawHoverRuler`，十字线 + PAN/电平读数（半圆几何反算），GL/legacy 双路径。
+
+### 2. FFT 架构重构：双路 → 单路自适应
+
+- **删除低频路**（8192 FFT 全部状态：`fftLo`/FIFO/`magDataLo`/复频谱帧对/`getSpectrumMagnitudesLo`/`FrameSnapshot::spectrumMagLo`/`GpuUniforms.spectrum_mag_lo` 等）。
+- **主路改为 75% overlap**（hop = size/4）：大尺寸档位下刷新保持较快（16384 档 341ms→85ms/帧），高低频刷新节奏天然一致；hop=size/4 保证重分配无折叠范围恒 ±2 bin（覆盖 Hann 主瓣）。
+- `getSpectrumMagnitudesBlended` 单路化（删除 500Hz 交叉淡化）；`getSpectrumReassignedBlended` 改读主路复频谱帧对（`expectedPhase` 等公式参数化为主路 size/hop）。
+- 一次 FFT 同时产出：幅度 + 复频谱帧对 + 160 bin（Eq）。FFT 总次数减半，冗余伴生计算（低频路 97% 无效 sqrt、死链路 spectrum_mag_lo）随删除一并消失。
+
+### 3. LUFS Real-time / True Peak 点击互动
+
+- 与 Loudness 一致的「炸碎片 + 小 emoji 气泡文案」：`makeBrickShardsActor` + `ctx.bubble`（真实读数）。
+- LUFS Real-time 按点击区段取 M/S/I 值（气泡 "M -14.2 LUFS"），碎片按 LUFS 分区着色（新增 `lufsColour`）；True Peak 保留状态文案（INTER-SAMPLE PEAK / CLOSE TO CEILING / ALL CLEAR + dBTP），角色 emoji 随状态。替换原老虎机滚轮/萤火虫/弹窗。
+
+### 4. Spectrum Sharper 模式（重分配谱线）
+
+- 后端 `AnalyserHub::getSpectrumReassignedPeaks()`：与 Spectrogram Sharp 同一套相位差重分配（Fitz-Haken），逐 bin 瞬时频率 → 绝对/相对门限 → **相干段聚合**为谱峰（频率取段内能量加权平均，亚 bin 精度）→ 按能量排序取 top。共享主路帧对，零新增 FFT。
+- 前端 `SpectrumModule`：Sharp 按钮（持久化）；谱线追踪（帧间频率最近邻匹配 + 位置/幅度 EMA + 淡入淡出）；**频谱曲线保持主体原样显示，重分配竖线作为叠加辅助**（sel 强调色，glow 3px + 主线 1.2px，线高 = dB 幅度）。
+- 门限参数（用户反馈迭代后）：相对门限 -24dB、孤立单 bin 过滤、绝对幅度下限 ≈-74dBFS、谱峰上限 28 根、建线门槛 -64dB、失配淡出 0.12s 时间常数（音停后半秒内消失）。
+
+### 5. 验证与版本
+
+- Windows Release Standalone 构建通过（`build/msvc`，MSVC 18）；仅既有 D9025/MSB8028 警告。
+- 版本号统一为 **2.9.6**：`CMakeLists.txt` 三处、`Y2Kmeter_installer.iss`、`README.md` 徽章、`PluginEditor.cpp` 抬头四处字面量（左上角显示 v2.9.6）、`PROJECT_OVERVIEW.md` 当前版本声明。
+- 待 Mac 环境验证：`MacDesktopAudioCapture.mm` 休眠自愈（未在本机编译）、Sharp 模式与各 FFT 档位的主观效果。
 
 ---
 

@@ -22,7 +22,7 @@
 //     深度方向叠加 fade-out：旧切片逐渐向背景色过渡。
 //   * 右侧 SPEED 滑条控制瀑布滚动速度（像素/秒），与 UI 帧率解耦。
 //
-// 数据源：AnalyserHub::getSpectrumMagnitudesBlended（低频 8192FFT + 高频 2048FFT）
+// 数据源：AnalyserHub::getSpectrumMagnitudesBlended（v2.9.6 单路 FFT，size 用户可选）
 // ==========================================================
 
 class Spectrogram3DModule : public GlDirectModuleBase,

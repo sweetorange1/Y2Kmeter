@@ -425,8 +425,11 @@ void VirtuPetModule::paint (juce::Graphics& g)
     }
     else
     {
-        const float x = std::round (petPos.x);
-        const float y = std::round (petPos.y);
+        // 反馈修复（外网 #2）：绘制坐标与脏区计算（getPetVisualBoundsFor）统一
+        // 使用 floor 取整，避免 round/floor 混用在动画帧切换时产生 1px 脏区错位，
+        // 旧帧边缘未被清干净而残留成细黑线。
+        const int x = (int) std::floor (petPos.x);
+        const int y = (int) std::floor (petPos.y);
 
         const bool shouldMirrorPatrol = (motionMode == MotionMode::patrol)
                                      && patrolMirrorX
@@ -435,13 +438,13 @@ void VirtuPetModule::paint (juce::Graphics& g)
 
         {
             const auto t = juce::AffineTransform::scale (-1.0f, 1.0f)
-                               .translated (x + (float) frame.getWidth(), y);
+                               .translated ((float) (x + frame.getWidth()), (float) y);
             g.drawImageTransformed (frame, t, false);
         }
 
         else
         {
-            g.drawImageAt (frame, (int) x, (int) y);
+            g.drawImageAt (frame, x, y);
         }
 
         if (motionMode == MotionMode::patrol && showSpeechBubble && currentSpeechText.isNotEmpty())
@@ -1691,8 +1694,8 @@ juce::Rectangle<int> VirtuPetModule::getPetVisualBoundsFor (const juce::Image& f
         const int bubbleW = juce::jlimit (bubbleMinW, bubbleMaxW, textW + bubblePaddingX * 2);
         const int bubbleH = juce::jmax (14, textH + bubblePaddingY * 2);
 
-        auto bubble = juce::Rectangle<int> ((int) std::round (pos.x) + frame.getWidth() / 2 - bubbleW / 2,
-                                            (int) std::round (pos.y) - bubbleH - 4,
+        auto bubble = juce::Rectangle<int> ((int) std::floor (pos.x) + frame.getWidth() / 2 - bubbleW / 2,
+                                            (int) std::floor (pos.y) - bubbleH - 4,
                                             bubbleW,
                                             bubbleH);
         bubble = bubble.withX (juce::jlimit (0, juce::jmax (0, getWidth() - bubble.getWidth()), bubble.getX()));
@@ -1741,6 +1744,10 @@ int VirtuPetModule::getTargetVisualHzForMode (MotionMode mode) const noexcept
 
 void VirtuPetModule::enqueuePetDirtyRepaint (juce::Rectangle<int> area)
 {
+    // 反馈修复（外网 #2）：脏区向外扩 1px —— 动画帧切换/镜像路径的最近邻采样
+    // 可能在计算边界的相邻像素上留下旧帧残影，扩张后 repaintSelfAndParent
+    // 会把旧帧边缘也彻底清底，杜绝细黑线残留。
+    area = area.expanded (1);
     area = area.getIntersection (getLocalBounds());
     if (area.isEmpty())
         return;

@@ -42,6 +42,10 @@ public:
     void setSlopeEnabled(bool b);
     bool isSlopeEnabled() const noexcept { return slopeEnabled; }
 
+    // ---- Sharper 模式（重分配谱线）：乐音收束成竖线 ----
+    void setSharpEnabled(bool b);
+    bool isSharpEnabled() const noexcept { return sharpEnabled; }
+
     // v1.8.4 持久化：保存/恢复 peakHoldEnabled + slopeEnabled
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
@@ -143,12 +147,34 @@ private:
     // ---- 顶部工具栏 ----
     juce::TextButton btnPeak  { "Peak"  };
     juce::TextButton btnSlope { "Slope" };
+    juce::TextButton btnSharp { "Sharp" };
     static constexpr int toolbarH = 26;
 
     // ---- 鼠标悬停标尺 ----
     void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);
     juce::Point<int> hoverPos;
     bool             hoverActive = false;
+
+    // ---- Sharper 模式（重分配谱线，反馈：参考 Spectrogram Sharp）----
+    //   谱线追踪：Hub 每帧给重分配谱峰（瞬时频率 + 凝聚能量），
+    //   这里做帧间匹配 + 位置/幅度 EMA 平滑 + 淡入淡出，
+    //   避免谱线在帧间跳闪 —— 与专业频谱仪的重分配线一致。
+    bool sharpEnabled = false;
+
+    struct SharpLine
+    {
+        double freqHz   = 0.0;      // 平滑后的瞬时频率
+        float  magDb    = -144.0f;  // 平滑后的幅度（dB，含 slope 补偿）
+        float  alpha    = 0.0f;     // 淡入淡出 [0,1]
+    };
+    std::vector<SharpLine> sharpLines;
+    std::vector<AnalyserHub::ReassignedPeak> sharpPeaksScratch;   // 每帧复用，避免分配
+
+    void updateSharpLines (const std::vector<AnalyserHub::ReassignedPeak>& peaks,
+                           float frameDtSec,
+                           double sampleRate);
+    // 谱线的 4.5dB/oct 斜率补偿（与曲线 slope 一致，按精确频率计算）
+    float sharpSlopeDb (float freqHz) const noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectrumModule)
 };

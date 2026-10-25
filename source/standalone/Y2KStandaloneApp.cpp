@@ -665,6 +665,11 @@ public:
                         .getIntValue ("ui.fpsLimit", 120);
                     y2kEditor->RestoreFpsLimit (savedFpsLimit);
 
+                    // 4.5) 恢复 FFT size 档位（默认 2048，反馈 #7）
+                    const int savedFftSize = getUserSettings()
+                        .getIntValue ("ui.fftSize", 2048);
+                    y2kEditor->RestoreFftSize (savedFftSize);
+
                     // 4.5) 恢复 Toybox 档位（默认 Normal=2；Standalone 默认 Normal，决策 1）
                     const int savedToyLevel = getUserSettings()
                         .getIntValue ("ui.toyLevel", 2);
@@ -1065,6 +1070,7 @@ private:
             "ui.chromeVisible",
             "ui.alwaysOnTop",
             "ui.fpsLimit",
+            "ui.fftSize",
             "ui.toyLevel",
             "ui.themeId",
             "audio.sourceId",
@@ -1303,6 +1309,9 @@ private:
 
         // 保存 FPS 限制档位（30/60/120/0=无上限）
         s.setValue ("ui.fpsLimit", (int) cachedEditor->GetUserRequestedFpsLimit());
+
+        // 保存 FFT size 档位（1024/2048/4096/8192/16384，反馈 #7）
+        s.setValue ("ui.fftSize", (int) cachedEditor->GetUserRequestedFftSize());
 
         // 保存 Toybox 档位（0/1/2/3）
         s.setValue ("ui.toyLevel", (int) cachedEditor->getToyLevel());

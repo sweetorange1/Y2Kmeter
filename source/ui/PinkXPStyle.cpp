@@ -164,11 +164,16 @@ namespace PinkXP
         g.drawVerticalLine(x, (float) canvas.getY(), (float) canvas.getBottom());
         g.drawHorizontalLine(y, (float) canvas.getX(), (float) canvas.getRight());
 
-        // 读数框：绘制在鼠标右上方，尺寸按文本估算
-        const int fontH = 9;
-        const int padX  = 5;
-        const int boxH  = 16;
-        const int textW = juce::jmax(40, (int) std::ceil(getAxisFont((float) fontH).getStringWidth(readout)) + padX * 2);
+        // 读数框：绘制在鼠标右上方，尺寸按文本估算。
+        //   反馈修复（外网 #5）：旧版硬编码 9px 太小；改为带 1.5x UI 放大的
+        //   getFont，框高随字体实际高度自适应（10 号再微调收敛）。
+        const int   fontH = 10;
+        const int   padX  = 6;
+        const int   padY  = 4;
+        const auto  readoutFont = getFont ((float) fontH, juce::Font::plain);
+        const int   textH = juce::jmax (16, (int) std::ceil (readoutFont.getHeight()));
+        const int   boxH  = textH + padY * 2;
+        const int   textW = juce::jmax(40, (int) std::ceil(readoutFont.getStringWidth(readout)) + padX * 2);
 
         int bx = x + 12;
         int by = y - boxH - 8;
@@ -183,7 +188,7 @@ namespace PinkXP
         g.setColour(ink.withAlpha(0.85f));
         g.fillRect(bx, by, textW, boxH);
         g.setColour(hl);
-        g.setFont(getAxisFont((float) fontH, juce::Font::plain));
+        g.setFont(readoutFont);
         g.drawText(readout, bx, by, textW, boxH, juce::Justification::centred, false);
     }
 
@@ -257,6 +262,59 @@ namespace PinkXP
         g.fillRect(r.getX() + offset, r.getBottom(), r.getWidth(), offset);
     }
 
+    // ==========================================================
+    // 反馈修复（外网 #3 第二轮）：主题自带的 desktop2 在极端明暗主题下
+    // 与 desktop 的明度差过小（voidGrey 黑对黑 / paperGrey 白对白 /
+    // crimsonNoir 近黑对近黑），纹理完全不可见。
+    //
+    // 这里不再直接使用 desktop2，而是在 OKLab 空间重算纹理色：
+    //   · 明度：从 desktop 的 L 向反方向推离 kMinDeltaL —— 深色桌面提亮、
+    //     浅色桌面压暗，保证感知对比；
+    //   · 色相：优先沿用 desktop2；desktop2 接近中性灰时借用强调色 sel，
+    //     让纹理始终带主题气质而非隐形灰。
+    // ==========================================================
+    juce::Colour makeDesktopTextureColour()
+    {
+        using namespace y2kpal;
+
+        const Rgb8 bg8 { desktop.getRed(),  desktop.getGreen(),  desktop.getBlue()  };
+        const Rgb8 tn8 { desktop2.getRed(), desktop2.getGreen(), desktop2.getBlue() };
+
+        const OkLab bgLab = linearToOkLab (rgbToLinear (fromRgb8 (bg8)));
+        const OkLab tnLab = linearToOkLab (rgbToLinear (fromRgb8 (tn8)));
+
+        // 1) 目标明度：远离背景明度（kMinDeltaL 的 OKLab 明度差肉眼可辨）
+        constexpr float kMinDeltaL = 0.24f;
+        const float targetL = clamp01 (bgLab.L >= 0.5f
+                                        ? bgLab.L - kMinDeltaL
+                                        : bgLab.L + kMinDeltaL);
+
+        // 2) 色相/色度：desktop2 有色相则沿用，近中性则借 sel
+        const float tnC = std::sqrt (tnLab.a * tnLab.a + tnLab.b * tnLab.b);
+        float C, H;
+        if (tnC >= 0.03f)
+        {
+            C = tnC;
+            H = wrapHue (std::atan2 (tnLab.b, tnLab.a) * (180.0f / 3.14159265358979323846f));
+        }
+        else
+        {
+            const OkLab acLab = linearToOkLab (rgbToLinear (fromRgb8 ({ sel.getRed(),
+                                                                       sel.getGreen(),
+                                                                       sel.getBlue() })));
+            C = std::sqrt (acLab.a * acLab.a + acLab.b * acLab.b);
+            H = wrapHue (std::atan2 (acLab.b, acLab.a) * (180.0f / 3.14159265358979323846f));
+        }
+
+        OkLch out { targetL, C, H };
+        out = gamutClamp (out);
+        const Rgb8 rgb = okLchToRgb8 (out);
+        return juce::Colour ((juce::uint32) 0xff000000u
+                           | ((juce::uint32) rgb.r << 16)
+                           | ((juce::uint32) rgb.g << 8)
+                           |  (juce::uint32) rgb.b);
+    }
+
     void drawDesktop(juce::Graphics& g, juce::Rectangle<int> r)
     {
         // y2k::perf::ScopedPerfTimer desktopTimer(y2k::perf::FunctionId::uiDrawDesktop,
@@ -267,7 +325,12 @@ namespace PinkXP
         g.setColour(desktop);
         g.fillRect(r);
 
-        // 2) 按主题纹理绘制
+        // 2) 纹理色（反馈 #3：按背景明度保证对比）+ 高光点缀色
+        const juce::Colour tex = makeDesktopTextureColour();
+        const bool bgIsDark = desktop.getBrightness() < 0.5f;
+        const juce::Colour texHi = bgIsDark ? juce::Colours::white : juce::Colours::black;
+
+        // 3) 按主题纹理绘制
         const auto& th = getCurrentTheme();
         switch (th.desktopPattern)
         {
@@ -275,7 +338,7 @@ namespace PinkXP
             default:
             {
                 // 棋盘格（经典 XP 风，v2.10 增大色块让纹理更醒目）
-                g.setColour(desktop2);
+                g.setColour(tex);
                 for (int y = r.getY(); y < r.getBottom(); y += 8)
                     for (int x = r.getX() + ((y / 8) % 2) * 8; x < r.getRight(); x += 16)
                         g.fillRect(x, y, 4, 4);
@@ -290,7 +353,7 @@ namespace PinkXP
                 {
                     for (int x = r.getX() + ((y / step) % 2) * (step / 2); x < r.getRight(); x += step)
                     {
-                        g.setColour(desktop2);
+                        g.setColour(tex);
                         g.fillRect(x,     y - 2, 1, 5);          // 竖臂
                         g.fillRect(x - 2, y,     5, 1);          // 横臂
                         g.fillRect(x - 1, y - 1, 1, 1);          // 对角
@@ -298,7 +361,7 @@ namespace PinkXP
                         g.fillRect(x + 1, y - 1, 1, 1);
                         g.fillRect(x - 1, y + 1, 1, 1);
                         // 次级小点
-                        g.setColour(desktop2.withAlpha(0.5f));
+                        g.setColour(tex.withAlpha(0.7f));
                         g.fillRect(x + step / 3, y + step / 3, 1, 1);
                         g.fillRect(x - step / 3, y + step / 3, 1, 1);
                     }
@@ -309,14 +372,14 @@ namespace PinkXP
             case DesktopPattern::scanGrid:
             {
                 // 网格扫描线：水平淡线 + 竖直淡线 + 每 N 行一条亮线
-                g.setColour(desktop2.withAlpha(0.4f));
+                g.setColour(tex.withAlpha(0.85f));
                 for (int y = r.getY(); y < r.getBottom(); y += 6)
                     g.fillRect(r.getX(), y, r.getWidth(), 1);
-                g.setColour(desktop2.withAlpha(0.25f));
+                g.setColour(tex.withAlpha(0.55f));
                 for (int x = r.getX(); x < r.getRight(); x += 6)
                     g.fillRect(x, r.getY(), 1, r.getHeight());
                 // 扫描高亮条（每 48px）
-                g.setColour(desktop2.withAlpha(0.6f));
+                g.setColour(texHi.withAlpha(0.9f));
                 for (int y = r.getY(); y < r.getBottom(); y += 48)
                     g.fillRect(r.getX(), y, r.getWidth(), 1);
                 break;
@@ -331,11 +394,11 @@ namespace PinkXP
                 {
                     for (int x = r.getX() + ((y / step) % 2) * (step / 2); x < r.getRight(); x += step)
                     {
-                        g.setColour(desktop2);
+                        g.setColour(tex);
                         g.fillEllipse((float)(x - radius), (float)(y - radius),
                                       (float)(radius * 2), (float)(radius * 2));
                         // 左上高光小点，增加立体感
-                        g.setColour(juce::Colours::white.withAlpha(0.35f));
+                        g.setColour(texHi.withAlpha(0.45f));
                         g.fillEllipse((float)(x - radius + 3), (float)(y - radius + 3),
                                       3.0f, 3.0f);
                     }
@@ -349,7 +412,7 @@ namespace PinkXP
                 const int stripeStep = 20;
                 for (int y = r.getY() + stripeStep / 2; y < r.getBottom(); y += stripeStep)
                 {
-                    g.setColour(desktop2.withAlpha(0.35f));
+                    g.setColour(tex.withAlpha(0.8f));
                     g.fillRect(r.getX(), y, r.getWidth(), 2);
 
                     // 同一横条上稀疏的珍珠泡泡
@@ -359,7 +422,7 @@ namespace PinkXP
                         if (h < 140)
                         {
                             const int rad = 2 + (h & 3);
-                            g.setColour(juce::Colours::white.withAlpha(0.55f));
+                            g.setColour(texHi.withAlpha(0.65f));
                             g.fillEllipse((float)(x - rad), (float)(y - rad),
                                           (float)(rad * 2), (float)(rad * 2));
                         }
@@ -377,12 +440,12 @@ namespace PinkXP
                     const juce::Line<float> line(
                         (float)(r.getX() + k),                (float) r.getY(),
                         (float)(r.getX() + k + r.getHeight()), (float) r.getBottom());
-                    g.setColour(desktop2.withAlpha(0.55f));
+                    g.setColour(tex);
                     g.drawLine(line, 4.0f);
                     const juce::Line<float> line2(
                         (float)(r.getX() + k + 2),                (float) r.getY(),
                         (float)(r.getX() + k + 2 + r.getHeight()), (float) r.getBottom());
-                    g.setColour(juce::Colours::white.withAlpha(0.18f));
+                    g.setColour(texHi.withAlpha(0.35f));
                     g.drawLine(line2, 1.0f);
                 }
                 break;
@@ -414,7 +477,7 @@ namespace PinkXP
                   // Row 5（bottom tip）
                   g.fillRect(cx, cy + 2, 1, 1);
                 };
-                g.setColour(desktop2);
+                g.setColour(tex);
                 const int offset = kStep / 2;
                 for (int y = r.getY() + 6; y < r.getBottom(); y += kStep) {
                   const int xPhase = ((y / kStep) % 2) * offset;
@@ -432,7 +495,7 @@ namespace PinkXP
                 const int amp = 8;
                 for (int y = r.getY() + 4; y < r.getBottom(); y += 26)
                 {
-                    g.setColour(desktop2.withAlpha(0.5f));
+                    g.setColour(tex.withAlpha(0.9f));
                     for (int x = r.getX(); x < r.getRight(); x += 1)
                     {
                         const int phase = (x / period) % 2;
@@ -452,7 +515,7 @@ namespace PinkXP
                 const int step = 22;
                 for (int k = -r.getHeight(); k < r.getWidth(); k += step)
                 {
-                    g.setColour(desktop2.withAlpha(0.4f));
+                    g.setColour(tex.withAlpha(0.75f));
                     const juce::Line<float> a(
                         (float)(r.getX() + k),                (float) r.getY(),
                         (float)(r.getX() + k + r.getHeight()), (float) r.getBottom());
@@ -473,12 +536,12 @@ namespace PinkXP
                 {
                     for (int x = r.getX() + 8 + ((y / step) % 2) * (step / 2); x < r.getRight(); x += step)
                     {
-                        g.setColour(desktop2);
+                        g.setColour(tex);
                         g.fillRect(x - 1, y - 3, 3, 2);      // 上花瓣
                         g.fillRect(x - 1, y + 2, 3, 2);      // 下花瓣
                         g.fillRect(x - 3, y - 1, 2, 3);      // 左花瓣
                         g.fillRect(x + 2, y - 1, 2, 3);      // 右花瓣
-                        g.setColour(juce::Colours::white.withAlpha(0.7f));
+                        g.setColour(texHi.withAlpha(0.8f));
                         g.fillRect(x, y, 1, 1);              // 花蕊
                     }
                 }
@@ -503,8 +566,13 @@ namespace PinkXP
             ThemeId       theme;
             int           width;
             int           height;
+            int           patternVersion;
             juce::Image   image;
         };
+
+        // 底纹绘制算法/参数版本：改动 drawDesktop 的视觉参数时 +1，
+        // 旧版本条目视为未命中，强制重新烘焙（避免升级后仍显示旧纹理）。
+        static constexpr int kDesktopPatternVersion = 3;
 
         // 采用普通 vector + 简单 LRU 淘汰；N 不会很大（通常 1~3 种尺寸）
         static std::vector<DesktopTextureEntry>& getDesktopTextureCache()
@@ -531,6 +599,7 @@ namespace PinkXP
             if (e.theme == currentTheme
                 && e.width == width
                 && e.height == height
+                && e.patternVersion == kDesktopPatternVersion
                 && e.image.isValid())
             {
                 // 命中：把条目移到末尾（简单 LRU）
@@ -558,7 +627,7 @@ namespace PinkXP
         if (cache.size() >= kMaxDesktopTextureEntries)
             cache.erase(cache.begin());
 
-        cache.push_back({ currentTheme, width, height, img });
+        cache.push_back({ currentTheme, width, height, kDesktopPatternVersion, img });
         return cache.back().image;
     }
 

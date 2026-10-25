@@ -3,18 +3,28 @@
 #if JUCE_MAC
 
 #import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>                       // NSWorkspace 休眠/唤醒通知
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <AVFoundation/AVFoundation.h>
 
 #include <CoreMedia/CoreMedia.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include <mach/mach_time.h>                     // 单调时钟（无数据兜底自愈）
 #include <vector>
 #include <cstring>
 #include <cmath>
 #include <cctype>
+#include <atomic>
 
 @interface Y2KSCStreamAudioOutput : NSObject <SCStreamOutput>
+@property (nonatomic, assign) void* impl;
+@end
+
+// NSWorkspace 休眠/唤醒通知桥接（外网 #1）：
+//   以 NSObject 作为 selector 观察者（dealloc 时通知中心自动反注册），
+//   回调只做原子标志置位，真正的重建由 watchdog 在后台串行队列执行。
+@interface Y2KDesktopCaptureLifeProxy : NSObject
 @property (nonatomic, assign) void* impl;
 @end
 
@@ -28,6 +38,174 @@ struct MacDesktopAudioCapture::Impl
     SCStream* stream = nil;
     Y2KSCStreamAudioOutput* output = nil;
     dispatch_queue_t queue = nullptr;
+
+    // ======================================================
+    // 休眠/唤醒自愈（外网 #1）
+    //   · NSWorkspace 通知 → 主线程回调设置原子标志
+    //   · watchdog dispatch timer（1s 间隔）检查「唤醒标志」与
+    //     「持续无数据 > 5s」，触发 stopCapture()+startCapture() 重建 SCStream
+    //   · 所有 stop/start 操作串行化到 lifecycleQueue，避免与 UI 线程竞争
+    // ======================================================
+    std::atomic<bool>     streamWanted { false };      // 是否希望采集（串行队列内维护）
+    std::atomic<bool>     wakeRequested { false };     // DidWake 置位，watchdog 消费
+    std::atomic<uint64_t> lastSampleMachTicks { 0 };   // 最近一次音频缓冲到达时间
+    dispatch_queue_t      lifecycleQueue = nullptr;    // stop/start 串行队列
+    dispatch_queue_t      watchdogQueue  = nullptr;    // watchdog 定时器队列
+    dispatch_source_t     watchdogTimer  = nullptr;
+    double                machTimebaseNsPerTick = 1.0;
+    id                    lifeProxy = nil;             // NSWorkspace 通知桥接对象（ARC）
+    bool                  observersRegistered = false;
+
+    static constexpr double kNoDataTimeoutSec = 5.0;   // 无任何 buffer 超时阈值
+
+    Impl()
+    {
+        lifecycleQueue = dispatch_queue_create ("cn.iisaacbeats.y2kmeter.desktopaudio.lifecycle",
+                                                DISPATCH_QUEUE_SERIAL);
+        watchdogQueue  = dispatch_queue_create ("cn.iisaacbeats.y2kmeter.desktopaudio.watchdog",
+                                                DISPATCH_QUEUE_SERIAL);
+        mach_timebase_info_data_t tb {};
+        mach_timebase_info (&tb);
+        machTimebaseNsPerTick = static_cast<double> (tb.numer) / static_cast<double> (tb.denom);
+    }
+
+    ~Impl()
+    {
+        // 正常流程 stop() 已取消 watchdog；此处兜底防泄漏
+        if (watchdogTimer != nullptr)
+        {
+            dispatch_source_cancel (watchdogTimer);
+            dispatch_release (watchdogTimer);
+            watchdogTimer = nullptr;
+        }
+        if (watchdogQueue != nullptr)
+        {
+            dispatch_release (watchdogQueue);
+            watchdogQueue = nullptr;
+        }
+        if (lifecycleQueue != nullptr)
+        {
+            dispatch_release (lifecycleQueue);
+            lifecycleQueue = nullptr;
+        }
+        lifeProxy = nil;
+    }
+
+    void markSleeping() noexcept
+    {
+        // 进入休眠：冻结"无数据超时"计时（避免休眠期间误判），唤醒后由 DidWake 主动重建
+        lastSampleMachTicks.store (0, std::memory_order_relaxed);
+    }
+
+    void markWoken() noexcept
+    {
+        wakeRequested.store (true, std::memory_order_relaxed);
+    }
+
+    void registerSleepWakeObservers()
+    {
+        if (observersRegistered)
+            return;
+
+        lifeProxy = [Y2KDesktopCaptureLifeProxy new];
+        [lifeProxy setImpl:this];
+
+        NSNotificationCenter* nc = [[NSWorkspace sharedWorkspace] notificationCenter];
+        [nc addObserver:lifeProxy
+               selector:@selector (onWorkspaceWillSleep:)
+                   name:NSWorkspaceWillSleepNotification
+                 object:nil];
+        [nc addObserver:lifeProxy
+               selector:@selector (onWorkspaceDidWake:)
+                   name:NSWorkspaceDidWakeNotification
+                 object:nil];
+        observersRegistered = true;
+    }
+
+    void unregisterSleepWakeObservers()
+    {
+        if (! observersRegistered)
+            return;
+
+        NSNotificationCenter* nc = [[NSWorkspace sharedWorkspace] notificationCenter];
+        if (lifeProxy != nil)
+        {
+            [nc removeObserver:lifeProxy];
+            [lifeProxy setImpl:nullptr];
+            lifeProxy = nil;
+        }
+        observersRegistered = false;
+    }
+
+    void armWatchdog()
+    {
+        wakeRequested.store (false, std::memory_order_relaxed);
+        lastSampleMachTicks.store (0, std::memory_order_relaxed);
+
+        if (watchdogTimer != nullptr)
+            return;
+
+        watchdogTimer = dispatch_source_create (DISPATCH_SOURCE_TYPE_TIMER, 0, 0, watchdogQueue);
+        dispatch_source_set_timer (watchdogTimer,
+                                   dispatch_time (DISPATCH_TIME_NOW, (int64_t) NSEC_PER_SEC),
+                                   (uint64_t) NSEC_PER_SEC,
+                                   (uint64_t) (200 * NSEC_PER_MSEC));
+        Impl* self = this;
+        dispatch_source_set_event_handler (watchdogTimer, ^{
+            self->watchdogTick();
+        });
+        dispatch_resume (watchdogTimer);
+    }
+
+    void disarmWatchdog()
+    {
+        if (watchdogTimer != nullptr)
+        {
+            dispatch_source_cancel (watchdogTimer);
+            dispatch_release (watchdogTimer);
+            watchdogTimer = nullptr;
+        }
+    }
+
+    // 运行在 watchdogQueue：检测唤醒标志 / 无数据超时，派发重建到生命周期队列
+    void watchdogTick()
+    {
+        if (owner == nullptr || ! streamWanted.load (std::memory_order_relaxed))
+            return;
+
+        const bool wake = wakeRequested.exchange (false, std::memory_order_relaxed);
+
+        bool timedOut = false;
+        const uint64_t last = lastSampleMachTicks.load (std::memory_order_relaxed);
+        if (last != 0)
+        {
+            const uint64_t now = mach_absolute_time();
+            const double elapsed = static_cast<double> (now - last) * machTimebaseNsPerTick * 1.0e-9;
+            timedOut = elapsed > kNoDataTimeoutSec;
+        }
+
+        if (! wake && ! timedOut)
+            return;
+
+        // 串行化重建：与 UI 线程的 start/stop 互斥，且不会嵌套重入
+        dispatch_async (lifecycleQueue, ^{
+            if (owner == nullptr || ! streamWanted.load (std::memory_order_relaxed))
+                return;
+
+            juce::String err;
+            stopCapture();               // 释放睡眠中失效的旧 SCStream
+            if (startCapture (err))      // 重建新流（权限仍有效时静默成功）
+            {
+                // 新流尚未产出数据：清空计时，等首包到达后再开始超时监控
+                lastSampleMachTicks.store (0, std::memory_order_relaxed);
+            }
+            else
+            {
+                // 重建失败（如权限被撤销）：把错误留给 UI 查询
+                owner->lastError = err;
+            }
+        });
+    }
 
     enum class DecodePath
     {
@@ -788,6 +966,9 @@ struct MacDesktopAudioCapture::Impl
 
     void handleAudioSampleBuffer (CMSampleBufferRef sampleBuffer)
     {
+        // 外网 #1：记录最近一次音频缓冲到达时间（watchdog 无数据兜底用）
+        lastSampleMachTicks.store (mach_absolute_time(), std::memory_order_relaxed);
+
         if (owner == nullptr || sampleBuffer == nullptr)
             return;
 
@@ -1166,6 +1347,12 @@ struct MacDesktopAudioCapture::Impl
     {
         if (@available(macOS 13.0, *))
         {
+            // 已在采集（例如刚由 watchdog 自愈重建成功、UI 又排队一次 start）→ 直接成功
+            if (streamWanted.load (std::memory_order_relaxed))
+                return true;
+
+            registerSleepWakeObservers();
+
             if (! hasScreenCapturePermission())
             {
                 (void) requestScreenCapturePermission();
@@ -1299,6 +1486,10 @@ struct MacDesktopAudioCapture::Impl
             pendingDispatchL.clear();
             pendingDispatchR.clear();
 
+            // 外网 #1：启动无数据兜底 watchdog（唤醒重建 / 静默失效自愈）
+            armWatchdog();
+            streamWanted.store (true, std::memory_order_relaxed);
+
             return true;
         }
 
@@ -1308,6 +1499,11 @@ struct MacDesktopAudioCapture::Impl
 
     void stopCapture()
     {
+        // 外网 #1：先摘掉 watchdog 与休眠通知，再释放 SCStream
+        streamWanted.store (false, std::memory_order_relaxed);
+        disarmWatchdog();
+        unregisterSleepWakeObservers();
+
         if (stream == nil)
         {
             output = nil;
@@ -1337,6 +1533,27 @@ struct MacDesktopAudioCapture::Impl
 };
 
 } // namespace y2k
+
+// ==========================================================
+// 休眠/唤醒通知桥接实现（外网 #1）
+// ==========================================================
+@implementation Y2KDesktopCaptureLifeProxy
+
+- (void)onWorkspaceWillSleep:(NSNotification*)note
+{
+    (void) note;
+    if (self.impl != nullptr)
+        static_cast<y2k::MacDesktopAudioCapture::Impl*> (self.impl)->markSleeping();
+}
+
+- (void)onWorkspaceDidWake:(NSNotification*)note
+{
+    (void) note;
+    if (self.impl != nullptr)
+        static_cast<y2k::MacDesktopAudioCapture::Impl*> (self.impl)->markWoken();
+}
+
+@end
 
 @implementation Y2KSCStreamAudioOutput
 
@@ -1377,10 +1594,23 @@ bool MacDesktopAudioCapture::start()
 
     impl->owner = this;
 
-    juce::String err;
-    if (! impl->startCapture (err))
+    // 外网 #1：start/stop 与 watchdog 自愈统一在 lifecycleQueue 上串行化，
+    // 避免 UI 线程与自愈重建并发操作 SCStream。
+    struct StartResult
     {
-        lastError = err;
+        bool         ok = false;
+        juce::String err;
+    } result;
+
+    Impl* p = impl.get();
+    StartResult* pr = &result;
+    dispatch_sync (p->lifecycleQueue, ^{
+        pr->ok = p->startCapture (pr->err);
+    });
+
+    if (! result.ok)
+    {
+        lastError = result.err;
         running.store (false, std::memory_order_release);
         return false;
     }
@@ -1392,7 +1622,24 @@ bool MacDesktopAudioCapture::start()
 void MacDesktopAudioCapture::stop()
 {
     if (impl != nullptr)
-        impl->stopCapture();
+    {
+        Impl* p = impl.get();
+
+        // 1) 在生命周期串行队列上停止采集（排队中的自愈恢复会先完成，
+        //    最终 streamWanted=false，恢复任务若排在后面会直接空操作）
+        dispatch_sync (p->lifecycleQueue, ^{
+            p->stopCapture();
+        });
+
+        // 2) 取消 watchdog 并排空其队列 —— 此后不再产生新的恢复任务
+        p->disarmWatchdog();
+        if (p->watchdogQueue != nullptr)
+            dispatch_sync (p->watchdogQueue, ^{});
+
+        // 3) 再次排空生命周期队列：步骤 1~2 之间 tick 已派发的恢复任务在此执行完
+        //    （此时 streamWanted=false，恢复任务内部直接返回）
+        dispatch_sync (p->lifecycleQueue, ^{});
+    }
 
     running.store (false, std::memory_order_release);
 }

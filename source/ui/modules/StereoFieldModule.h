@@ -39,6 +39,10 @@ public:
     // AnalyserHub::FrameListener
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- 鼠标悬停辅助线（反馈 #10）：十字线 + 声像/电平读数 ----
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
     // ---- Toybox（v3.0.0）：入侵者（§8.3）----
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
@@ -72,6 +76,11 @@ private:
     // 更新残影：1) 衰减旧点 alpha  2) 绘制当前快照的新点
     void updateTrail (juce::Rectangle<int> canvas);
     void invalidateTrail();
+
+    // 悬停十字辅助线 + 读数框（反馈 #10）
+    void drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> canvas);
+    juce::Point<int> hoverPos;
+    bool             hoverActive = false;
 
     AnalyserHub& hub;
 

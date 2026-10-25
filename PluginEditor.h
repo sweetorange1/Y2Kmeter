@@ -189,6 +189,11 @@ public:
     // 返回用户选择的 FPS 限制档位（30/60/120/0，0=无上限）
     int  GetUserRequestedFpsLimit() const noexcept { return userRequestedFpsLimit; }
 
+    // 从持久化恢复 FFT size 档位（反馈 #7，Standalone 启动时调用）
+    void RestoreFftSize (int size);
+    // 返回控制台当前的 FFT size 档位
+    int  GetUserRequestedFftSize() const noexcept;
+
     // ======================================================
     // Toybox（v3.0.0）档位（0=Off / 1=Chill / 2=Normal / 3=Party）
     //   · setToyLevel：同步 ToyDirector + workspace TOY 按钮 + Processor 持久化。

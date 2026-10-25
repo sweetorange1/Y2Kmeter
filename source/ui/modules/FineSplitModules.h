@@ -331,10 +331,13 @@ private:
 
     // 非对称弹道的时间常数（毫秒）
     //   · 上升慢一点避免单样本尖峰把指针推到极值；取 80ms
-    //   · 下降保留经典 VU 机械回落感，取 350ms —— 连续瞬态时由上升主导，
+    //   · 下降保留经典 VU 机械回落感，取 1200ms —— 连续瞬态时由上升主导，
     //     下降不会锁死指针；静音后也能缓慢落回
-    static constexpr float tauRiseMs = 80.0f;
-    static constexpr float tauFallMs = 350.0f;
+    //   · 反馈修复（外网 #6）：静音（target=-144）时用更慢的独立时间常数，
+    //     避免"没信号的一瞬间表针打到底"的观感
+    static constexpr float tauRiseMs     = 80.0f;
+    static constexpr float tauFallMs     = 1200.0f;
+    static constexpr float tauMuteFallMs = 1800.0f;
 
     // 刻度显示上下界（dBFS） —— 均匀等距从 -36 到 +3
     static constexpr float minDisplayDb = -36.0f;

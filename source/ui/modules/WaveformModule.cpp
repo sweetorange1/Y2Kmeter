@@ -46,6 +46,20 @@ WaveformModule::WaveformModule(AnalyserHub& h)
     btnFreeze.onClick = [this]() { setFrozen (btnFreeze.getToggleState()); };
     addAndMakeVisible (btnFreeze);
 
+    // 反馈（外网 #8）：齿音显示模式开关
+    btnSibilance.setClickingTogglesState (true);
+    btnSibilance.setTooltip ("Sibilance mode: highlight high-frequency content (5kHz+)");
+    btnSibilance.onClick = [this]() { setSibilanceEnabled (btnSibilance.getToggleState()); };
+    addAndMakeVisible (btnSibilance);
+
+    // 齿音高通滤波器系数：一阶 HP @ 5kHz（y[n] = a·(y[n-1] + x[n] - x[n-1])）
+    {
+        const double sr = (cachedSampleRate > 0.0) ? cachedSampleRate : 44100.0;
+        const double rc = 1.0 / (2.0 * juce::MathConstants<double>::pi * 5000.0);
+        const double dt = 1.0 / sr;
+        hfHpAlpha = (float) (rc / (rc + dt));
+    }
+
     // 右侧增益滑条：0 ~ +36 dB（纯UI绘制级别的放大，不改变后端数据）
     //   · 默认 0 dB（无放大，还原原有波形幅度）
     //   · 样式与 EqModule 的 SIZE 滑条一致（顶部 label + 垂直滑条 + 下方 TextBox）
@@ -104,6 +118,7 @@ juce::ValueTree WaveformModule::saveModuleSpecificState() const
     s.setProperty("displaySeconds", (double) displaySeconds, nullptr);
     s.setProperty("frozen", frozen, nullptr);
     s.setProperty("gainDb", (double) gainDb, nullptr);
+    s.setProperty("sibilance", sibilanceEnabled, nullptr);
     return s;
 }
 
@@ -118,6 +133,17 @@ void WaveformModule::restoreModuleSpecificState(const juce::ValueTree& state)
         gainDb = (float) (double) state.getProperty("gainDb");
         gainSlider.setValue(gainDb, juce::dontSendNotification);
     }
+    if (state.hasProperty("sibilance"))
+        setSibilanceEnabled((bool) state.getProperty("sibilance"));
+}
+
+void WaveformModule::setSibilanceEnabled (bool b)
+{
+    if (sibilanceEnabled == b) return;
+    sibilanceEnabled = b;
+    btnSibilance.setToggleState (sibilanceEnabled, juce::dontSendNotification);
+    buildGlSnapshot();   // v2.9.4：颜色映射切换，立即重建快照
+    repaint();
 }
 
 // ----------------------------------------------------------
@@ -139,7 +165,7 @@ void WaveformModule::setDisplaySeconds (float seconds)
                          / (float) cachedCanvasWidth;
 
     // 切换时长时，丢弃当前正在累加的半列，避免 samplesPerColumn 变化引起一次不连续跳变
-    accMin = 1.0f; accMax = -1.0f; accSumSq = 0.0f; accCount = 0;
+    accMin = 1.0f; accMax = -1.0f; accSumSq = 0.0f; accHfSumSq = 0.0f; accCount = 0;
 
     btnRange3.setToggleState (std::abs (displaySeconds - 3.0f) < 1.0e-3f, juce::dontSendNotification);
     btnRange6.setToggleState (std::abs (displaySeconds - 6.0f) < 1.0e-3f, juce::dontSendNotification);
@@ -181,7 +207,7 @@ void WaveformModule::rebuildColumnBuffer (int newCanvasWidth)
                          / (float) cachedCanvasWidth;
 
     // 重置列内累加器
-    accMin = 1.0f; accMax = -1.0f; accSumSq = 0.0f; accCount = 0;
+    accMin = 1.0f; accMax = -1.0f; accSumSq = 0.0f; accHfSumSq = 0.0f; accCount = 0;
 }
 
 void WaveformModule::setFrozen (bool b)
@@ -264,18 +290,29 @@ void WaveformModule::pushHistorySamples (const float* L, const float* R,
         if (! std::isfinite (m)) m = 0.0f;
         m = juce::jlimit (-1.0f, 1.0f, m);
 
+        // 齿音高频分量：一阶高通（5kHz），状态跨列连续
+        float hf = 0.0f;
+        if (hfHpAlpha > 0.0f)
+        {
+            hf = hfHpAlpha * (hfHpPrevOut + m - hfHpPrevIn);
+            hfHpPrevIn  = m;
+            hfHpPrevOut = hf;
+        }
+
         if (m < accMin) accMin = m;
         if (m > accMax) accMax = m;
         accSumSq += m * m;
+        accHfSumSq += hf * hf;
         ++accCount;
 
         // 凑够一列就产出
         if ((float) accCount >= samplesPerColumn)
         {
             Column col;
-            col.minV = accMin;
-            col.maxV = accMax;
-            col.rms  = std::sqrt (accSumSq / (float) accCount);
+            col.minV  = accMin;
+            col.maxV  = accMax;
+            col.rms   = std::sqrt (accSumSq / (float) accCount);
+            col.hfRms = std::sqrt (accHfSumSq / (float) accCount);
 
             columnHistory[(size_t) writeCol] = col;
             writeCol = (writeCol + 1) % colCap;
@@ -288,6 +325,7 @@ void WaveformModule::pushHistorySamples (const float* L, const float* R,
             const float overflow = (float) accCount - samplesPerColumn;
             accMin = 1.0f; accMax = -1.0f;
             accSumSq = 0.0f;
+            accHfSumSq = 0.0f;
             accCount = juce::jmax (0, (int) std::floor (overflow));
             // 注：丢失的累加不做精确回填——这点误差远小于 1 个样本
             // 对 48kHz × 3s × 600px 的尺度完全不可见
@@ -315,6 +353,25 @@ juce::Colour WaveformModule::mapAmplitudeToColour (float amp01) const
         return PinkXP::interpolateOkLab (PinkXP::chartRamp[7], PinkXP::sel, u);
     }
     return PinkXP::sampleChartRamp (amp01 / 0.9f);
+}
+
+// ----------------------------------------------------------
+// 反馈（外网 #8 第三轮）：齿音模式颜色映射
+//   sib01 = 该列高频能量占比（hfRms / rms，已钳制缩放）。
+//   · 齿音弱/无 → 整段波形压成更暗的灰（明显退后，衬托齿音）
+//   · 齿音强   → 非线性快速推向主题强调色 sel（高饱和、醒目）
+// ----------------------------------------------------------
+juce::Colour WaveformModule::mapSibilanceToColour (float sib01) const
+{
+    sib01 = juce::jlimit (0.0f, 1.0f, sib01);
+
+    // 未识别到齿音：波形压成更暗的灰，整体退后
+    if (sib01 < 0.03f)
+        return PinkXP::ink.withAlpha (0.22f);
+
+    // 齿音：幂次曲线让色彩尽快达到高饱和端（pink500 → sel）
+    const float t = std::pow ((sib01 - 0.03f) / 0.97f, 0.6f);
+    return PinkXP::interpolateOkLab (PinkXP::pink500, PinkXP::sel, t);
 }
 
 // ----------------------------------------------------------
@@ -377,9 +434,11 @@ void WaveformModule::layoutContent (juce::Rectangle<int> contentBounds)
     btnRange3.setBounds (tb.getX(),                    tb.getY(), btnW, tb.getHeight());
     btnRange6.setBounds (tb.getX() + (btnW + gap),     tb.getY(), btnW, tb.getHeight());
 
-    // 右侧：Freeze
+    // 右侧：Freeze + Sibilance（反馈 #8）
     const int freezeW = 64;
+    const int sibW    = 40;
     btnFreeze.setBounds (tb.getRight() - freezeW, tb.getY(), freezeW, tb.getHeight());
+    btnSibilance.setBounds (tb.getRight() - freezeW - (sibW + gap), tb.getY(), sibW, tb.getHeight());
 
     // 右侧 GAIN 滑条（叠在画布右侧，顶部留 14px 给 Label，后面 canvas 会去掉此区宽）
     constexpr int kGainPanelW = 42;
@@ -541,8 +600,23 @@ void WaveformModule::buildGlSnapshot()
                 const float maxV = (c0.maxV + c1.maxV + c2.maxV) * (1.0f / 3.0f);
                 const float rms  = (c0.rms  + c1.rms  + c2.rms ) * (1.0f / 3.0f);
                 const float peak = juce::jmax (std::abs (maxV), std::abs (minV));
-                const float ampForColour = juce::jlimit (0.0f, 1.0f,
-                                                         std::sqrt (rms * 1.4f + peak * 0.3f));
+
+                // 反馈（外网 #8）：齿音模式以"高频能量占比"驱动颜色
+                juce::Colour col;
+                if (sibilanceEnabled)
+                {
+                    const float hfRms = (c0.hfRms + c1.hfRms + c2.hfRms) * (1.0f / 3.0f);
+                    const float sib01 = (rms > 1.0e-5f)
+                        ? juce::jlimit (0.0f, 1.0f, (hfRms / rms) * 3.5f)
+                        : 0.0f;
+                    col = mapSibilanceToColour (sib01);
+                }
+                else
+                {
+                    const float ampForColour = juce::jlimit (0.0f, 1.0f,
+                                                             std::sqrt (rms * 1.4f + peak * 0.3f));
+                    col = mapAmplitudeToColour (ampForColour);
+                }
 
                 const int px = ix + xi;
                 const int yTopRaw = cy - (int) std::round (maxV * halfH);
@@ -552,8 +626,7 @@ void WaveformModule::buildGlSnapshot()
                 const int hLine = juce::jmax (1, yMax - yMin);
 
                 appendQuad (snap->vertices,
-                            { (float) px, (float) yMin, 1.0f, (float) hLine },
-                            mapAmplitudeToColour (ampForColour));
+                            { (float) px, (float) yMin, 1.0f, (float) hLine }, col);
             }
         }
     }
@@ -693,10 +766,22 @@ void WaveformModule::drawWaveform (juce::Graphics& g, juce::Rectangle<int> canva
     constexpr int kBuckets = 32;
     std::array<juce::RectangleList<int>, kBuckets> buckets;
     std::array<juce::Colour, kBuckets> bucketColours {};
-    for (int b = 0; b < kBuckets; ++b)
+    // 反馈（外网 #8）：齿音模式下桶色改为齿音映射（hfRms/rms 占比）
+    if (sibilanceEnabled)
     {
-        const float t = (float) b / (float) (kBuckets - 1);
-        bucketColours[(size_t) b] = mapAmplitudeToColour (t);
+        for (int b = 0; b < kBuckets; ++b)
+        {
+            const float t = (float) b / (float) (kBuckets - 1);
+            bucketColours[(size_t) b] = mapSibilanceToColour (t);
+        }
+    }
+    else
+    {
+        for (int b = 0; b < kBuckets; ++b)
+        {
+            const float t = (float) b / (float) (kBuckets - 1);
+            bucketColours[(size_t) b] = mapAmplitudeToColour (t);
+        }
     }
 
     for (int xi = 0; xi < w; ++xi)
@@ -715,10 +800,22 @@ void WaveformModule::drawWaveform (juce::Graphics& g, juce::Rectangle<int> canva
 
         const float peak = juce::jmax (std::abs (maxV), std::abs (minV));
 
-        // 颜色：用"感知幅度" = RMS × 1.4 + peak × 0.3（强调 RMS 但保留瞬态色彩）
-        //   映射到 [0,1] 时再做一次 sqrt，让低幅度也能看到颜色变化（避免全是 pink100）
-        const float ampForColour = juce::jlimit (0.0f, 1.0f,
-                                                 std::sqrt (rms * 1.4f + peak * 0.3f));
+        // 颜色：默认用"感知幅度" = RMS × 1.4 + peak × 0.3（强调 RMS 但保留瞬态色彩）
+        //   映射到 [0,1] 时再做一次 sqrt，让低幅度也能看到颜色变化（避免全是 pink100）。
+        //   齿音模式（反馈 #8）：改用高频能量占比驱动。
+        float colourDrive;
+        if (sibilanceEnabled)
+        {
+            const float hfRms = (c0.hfRms + c1.hfRms + c2.hfRms) * (1.0f / 3.0f);
+            colourDrive = (rms > 1.0e-5f)
+                ? juce::jlimit (0.0f, 1.0f, (hfRms / rms) * 3.5f)
+                : 0.0f;
+        }
+        else
+        {
+            colourDrive = juce::jlimit (0.0f, 1.0f,
+                                        std::sqrt (rms * 1.4f + peak * 0.3f));
+        }
 
         // 柱条：从 min 到 max 的垂直线段；全部用整数坐标 → 无亚像素抖动
         //   再用 inner.getY() / inner.getBottom() 收紧，避免放大后超出画布
@@ -730,7 +827,7 @@ void WaveformModule::drawWaveform (juce::Graphics& g, juce::Rectangle<int> canva
         const int hLine = juce::jmax (1, yMax - yMin); // 至少 1 像素
 
         const int bucketIdx = juce::jlimit (0, kBuckets - 1,
-                                            (int) std::round (ampForColour * (float) (kBuckets - 1)));
+                                            (int) std::round (colourDrive * (float) (kBuckets - 1)));
         buckets[(size_t) bucketIdx].addWithoutMerging ({ px, yMin, 1, hLine });
     }
 

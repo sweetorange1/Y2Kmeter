@@ -344,22 +344,25 @@ public:
     // ---- 常量（FrameSnapshot / 引用计数 / 快照接口都会用到，必须在它们之前可见）----
     static constexpr int oscilloscopeBufferSize = 2048;
     static constexpr int spectrumBins           = 160;
-    static constexpr int spectrumMagSize        = 1 << 10; // = fftSize / 2 = 1024
+    // 兼容快照尺寸（固定 1024）：FrameSnapshot.spectrumMag / GpuUniforms / getSpectrumMagnitudes
+    // 仍按此尺寸发布。主路 FFT 调大后（反馈 #7），该数组只取前 1024 bin（兼容层），
+    // 全分辨率数据由 getSpectrumMagnitudesBlended 直接读动态尺寸的 magData。
+    static constexpr int spectrumMagSize        = 1 << 10;
 
     // ======================================================
-    // 多分辨率 FFT（双路）：
-    //   · 主路（原有）：fftSize=2048，Δf≈23.4Hz @48k，低延迟、覆盖全频
-    //   · 低频路（新增）：fftSize=8192，Δf≈5.86Hz @48k，高分辨率、只取 0~500Hz 左右
-    // 供 UI 合并接口 getSpectrumMagnitudesBlended() / FrameSnapshot.spectrumMagLo 使用。
+    // 单路自适应 FFT（v2.9.6 合并低频路）：
+    //   · 唯一一路 FFT：尺寸用户可选（1024/2048/4096/8192/16384，setMainFftSize）
+    //   · 75% overlap（hop = size/4）：大尺寸下仍保持较快刷新，且高低频段
+    //     刷新节奏天然一致；同时 hop=size/4 保证重分配谱图的无折叠范围
+    //     恒为 ±2 bin（覆盖 Hann 主瓣，Sharp/Sharper 无折叠伪影）
+    //   · 一次 FFT 同时产出：幅度（blended）、复频谱帧对（重分配谱图）、
+    //     160 bin 粗粒度谱（EqModule）
     // ======================================================
-    static constexpr int spectrumMagSizeLo      = 1 << 12; // = fftSizeLo / 2 = 4096
-    // 切换点：低频路与主路交叉频率；UI 侧在此频率附近做一个八度的平滑交叉淡化
-    static constexpr float spectrumXoverHz      = 500.0f;
 
     enum class Kind : int
     {
         Oscilloscope = 0,  // 2×2048 样本环形缓冲
-        Spectrum     = 1,  // FFT + magData[1024] + specData[160]
+        Spectrum     = 1,  // FFT + magData + specData[160] + 复频谱帧对
         Loudness     = 2,  // LUFS-M/S/I + RMS L/R + TruePeak L/R
         Phase        = 3,  // correlation + width + balance
         Dynamics     = 4,  // peak/rms/crest/shortDR/integratedDR
@@ -421,8 +424,6 @@ public:
         // Spectrum：1024 个高精度 mag（线性）+ 160 个粗粒度归一化 specData
         std::array<float, spectrumMagSize>  spectrumMag  {};
         std::array<float, spectrumBins>     spectrumData {};
-        // 低频路高分辨率幅度（4096 bin；仅前 ~spectrumXoverHz 段有效）
-        std::array<float, spectrumMagSizeLo> spectrumMagLo {};
 
         // Loudness / Phase / Dynamics 的快照
         LoudnessMeter::Snapshot      loudness {};
@@ -488,21 +489,13 @@ public:
     // （未做对数/平滑，供 SpectrumModule 自行处理）
     void getSpectrumMagnitudes(juce::Array<float>& dest);
 
-    // 低频路高分辨率幅度快照：返回 fftSizeLo/2 = 4096 个原始幅度值
-    //   注意：虽然返回了全部 4096 bin，但由于低频 FFT 延迟较大、
-    //   且高频段主路的 23Hz 分辨率完全够用，UI 侧应只使用前 ~spectrumXoverHz 的 bin。
-    void getSpectrumMagnitudesLo(juce::Array<float>& dest);
-
     // ======================================================
-    // 合并（对数频率轴）幅度快照 —— 推荐 UI 频谱/瀑布图直接使用。
+    // 对数频率轴幅度快照 —— 推荐 UI 频谱/瀑布图直接使用。
+    //   v2.9.6 单路化：直接在主路 magData 上做对数采样，不再交叉合并双路。
     //
-    //   内部按 numPoints 个等对数间隔的频率中心 f_i，在 [fMin, fMax] 之间采样：
-    //     · f_i < spectrumXoverHz（八度内交叉淡化）         → 从 magDataLo 取
-    //     · f_i > spectrumXoverHz（八度内交叉淡化）         → 从 magData   取
-    //     · 在过渡带里：两路按能量域线性交叉，避免拼接断崖
+    //   内部按 numPoints 个等对数间隔的频率中心 f_i，在 [fMin, fMax] 之间采样；
     //   返回的 dest[i] 是"以 f_i 为中心的那一段频率"的最大线性幅度（保峰）。
-    //
-    //   该接口不改变现有 getSpectrumMagnitudes 的语义，老模块可逐步迁移。
+    //   分辨率完全由当前主路 FFT size 决定（分辨率 vs 刷新率由用户权衡）。
     // ======================================================
     void getSpectrumMagnitudesBlended (juce::Array<float>& dest,
                                        int   numPoints,
@@ -517,16 +510,37 @@ public:
     //   "瞬时频率"重定位（相位差法，phase-vocoder 风格）：
     //     ω̂_k = ω_k + Δφ_k / hopTime,  Δφ_k = arg(X_k · conj(X_prev,k))
     //   把每个 bin 的能量 |X_k|² 从"bin 中心频率"搬到"瞬时频率"，
-    //   落到对应对数行 —— 产生"能量凝聚成粒子"的效果（对比原始谱图
-    //   因频谱泄漏导致的"脏热点"）。
+    //   落到对应对数行 —— 产生"能量凝聚成粒子"的效果。
     //
-    //   注意：当前仅用主路（2048 FFT）复频谱，覆盖全频段；
-    //   低频段分辨率受主路 Δf≈23Hz 限制。低频路（8192）重分配可作为后续增强。
+    //   v2.9.6 单路化：改用主路复频谱帧对（主路 75% overlap，hop=size/4，
+    //   无折叠范围恒为 ±2 bin，覆盖 Hann 主瓣，无折叠伪影）。
     // ======================================================
     void getSpectrumReassignedBlended (juce::Array<float>& dest,
                                        int   numPoints,
                                        float fMin,
                                        float fMax);
+
+    // ======================================================
+    // 重分配谱峰（Spectrum 模块 Sharper 模式用）——
+    //   把当前帧的乐音成分收束成"谱线列表"。
+    //
+    //   与 getSpectrumReassignedBlended 同一套相位差重分配，但输出不是
+    //   对数行能量，而是逐根谱峰：
+    //     · freqHz：相干段内按能量加权的瞬时频率（亚 bin 精度）；
+    //     · mag：该谱峰凝聚的线性幅度（与 blended 同量纲，2/N 归一化）。
+    //   算法：逐 bin 瞬时频率 → 绝对/相对门限 → 相邻 bin 相干性聚合为段
+    //     → 按能量取前 maxPeaks 个。
+    //   共享主路复频谱帧对，零新增 FFT 计算。
+    // ======================================================
+    struct ReassignedPeak
+    {
+        double freqHz = 0.0;
+        float  mag    = 0.0f;
+    };
+    void getSpectrumReassignedPeaks (std::vector<ReassignedPeak>& out,
+                                     float fMinHz,
+                                     float fMaxHz,
+                                     int   maxPeaks);
 
     // 响度：返回当前 LoudnessMeter 快照
     LoudnessMeter::Snapshot getLoudnessSnapshot();
@@ -559,13 +573,22 @@ public:
     // ---- 参数查询 ----
     double getSampleRate() const noexcept { return cachedSampleRate.load (std::memory_order_relaxed); }
 
+    // ======================================================
+    // 单路 FFT size 选择（反馈 #7）
+    //   UI 线程调用 setMainFftSize：档位 1024/2048/4096/8192/16384（2 的幂）。
+    //   音频线程在下一轮 pushSamplesToSpectrum 开始时按新 size 重建
+    //   FFT / 窗口 / 环形 FIFO / magData / 复频谱帧对，真正作用到后端。
+    // ======================================================
+    void setMainFftSize (int size) noexcept;
+    int  getMainFftSize() const noexcept { return mainFftSizeRequest.load (std::memory_order_relaxed); }
+
 private:
-    // ---- 内部常量 ----
-    static constexpr int fftOrder = 11;
-    static constexpr int fftSize  = 1 << fftOrder;
-    // 低频路：8192 点 FFT
-    static constexpr int fftOrderLo = 13;
-    static constexpr int fftSizeLo  = 1 << fftOrderLo;
+    // ---- 单路 FFT 尺寸（运行时可变）----
+    static constexpr int mainFftSizeDefault = 2048;
+    std::atomic<int>     mainFftSizeRequest { mainFftSizeDefault };  // UI 线程写 / 音频线程读
+    int mainFftSize  = mainFftSizeDefault;   // 音频线程实际生效的尺寸
+    int mainFftOrder = 11;
+    int mainHop      = mainFftSizeDefault / 4;   // 75% overlap：hop = size/4
 
     // ---- 示波器（立体声环形缓冲）----
     void pushSamplesToOscilloscope(const float* left, const float* right, int numSamples);
@@ -580,43 +603,36 @@ private:
 
     // 只保护发布给 UI 的频谱快照数组；FFT/FIFO 工作状态由音频线程单写。
     juce::SpinLock specLock;
-    juce::dsp::FFT fft { fftOrder };
-    juce::dsp::WindowingFunction<float> window { fftSize,
-        juce::dsp::WindowingFunction<float>::hann };
-    std::array<float, fftSize>     fftFifo  {};
-    std::array<float, fftSize * 2> fftData  {};
+    // 单路 FFT：尺寸运行时可调（反馈 #7），故 FFT/窗口/缓冲全部动态分配
+    std::unique_ptr<juce::dsp::FFT> fft;
+    std::unique_ptr<juce::dsp::WindowingFunction<float>> window;
+    std::vector<float> fftFifo;     // mainFftSize（环形，75% overlap）
+    std::vector<float> fftData;     // mainFftSize * 2
     std::array<float, spectrumBins> specData {};
     std::array<float, spectrumBins> specDataWork {};
-    // 高精度 FFT 幅度缓冲（供 SpectrumModule）
-    std::array<float, spectrumMagSize> magData {};
-    std::array<float, spectrumMagSize> magDataWork {};
+    // 高精度 FFT 幅度缓冲（尺寸 = mainFftSize/2，随 FFT size 变化）
+    std::vector<float> magData;
+    std::vector<float> magDataWork;
     int fftFifoIndex = 0;
 
-    // ---- 低频路 FFT（8192 点，高频率分辨率）----
-    //   与主路同一循环里并行喂 FIFO；
-    //   为了降低 CPU，低频 FFT 用 75% overlap（hop = fftSizeLo/4 = 2048）。
-    juce::dsp::FFT fftLo { fftOrderLo };
-    juce::dsp::WindowingFunction<float> windowLo { fftSizeLo,
-        juce::dsp::WindowingFunction<float>::hann };
-    std::array<float, fftSizeLo>     fftFifoLo {};
-    std::array<float, fftSizeLo * 2> fftDataLo {};
-    std::array<float, spectrumMagSizeLo> magDataLo {};
-    std::array<float, spectrumMagSizeLo> magDataLoWork {};
-    // 低频路复频谱（供重分配谱图：8192 FFT、75% overlap、hop=2048）
-    //   低频路 hop 相对 binHz 是 ±2 bin 的无折叠范围，能覆盖 Hann 主瓣，
-    //   重分配才不会像主路（非重叠，±0.5 bin）那样产生大量折叠伪影。
-    std::array<float, spectrumMagSizeLo> specReLo     {};
-    std::array<float, spectrumMagSizeLo> specImLo     {};
-    std::array<float, spectrumMagSizeLo> prevSpecReLo {};
-    std::array<float, spectrumMagSizeLo> prevSpecImLo {};
-    std::array<float, spectrumMagSizeLo> specReLoWork {};
-    std::array<float, spectrumMagSizeLo> specImLoWork {};
-    // 音频线程私有的"帧对"：一个音频块可能触发 ≥2 次 FFT，发布时若只滚一次
-    // 会跳帧（帧对时间差 ≠ hop，瞬时频率系数就错了）。提取新帧时先把旧
-    // workCur 挪到 workPrev，保证发布出去的 prev/current 永远相邻。
-    std::array<float, spectrumMagSizeLo> specReLoWorkPrev {};
-    std::array<float, spectrumMagSizeLo> specImLoWorkPrev {};
-    int fftFifoIndexLo = 0;
+    // 主路复频谱帧对（供重分配谱图：hop = size/4 → 无折叠范围恒 ±2 bin，
+    // 覆盖 Hann 主瓣，无折叠伪影）。
+    //   音频线程私有的"帧对"：一个音频块可能触发 ≥2 次 FFT，发布时若只滚一次
+    //   会跳帧（帧对时间差 ≠ hop，瞬时频率系数就错了）。提取新帧时先把旧
+    //   workCur 挪到 workPrev，保证发布出去的 prev/current 永远相邻。
+    std::vector<float> specReWork;       // 工作区：当前帧 re（mainFftSize/2）
+    std::vector<float> specImWork;       // 工作区：当前帧 im
+    std::vector<float> specReWorkPrev;   // 工作区：上一帧 re
+    std::vector<float> specImWorkPrev;   // 工作区：上一帧 im
+    std::vector<float> specRe;           // 发布区（specLock 保护）
+    std::vector<float> specIm;
+    std::vector<float> prevSpecRe;
+    std::vector<float> prevSpecIm;
+
+    // 按指定 order 重建主路 FFT / 窗口 / 工作缓冲（音频线程）
+    void rebuildMainFft (int order);
+    // 检查 mainFftSizeRequest 是否变化，变化则重建（音频线程，push 开头调用）
+    void applyMainFftSizeChange();
 
     // ---- 响度计 ----
     LoudnessMeter loudnessMeter;

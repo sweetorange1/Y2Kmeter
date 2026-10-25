@@ -510,7 +510,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.9.4");
+        const int versionW = versionFont.getStringWidth ("v2.9.6");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -551,7 +551,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.4";
+        const juce::String versionText = "v2.9.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -1584,6 +1584,14 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         processor.setAnalysisInputGainDb (db);
     };
     workspace->setInputGainDb (processor.getAnalysisInputGainDb());
+
+    // 4.5) FFT size 按钮切换（反馈 #7 第二轮）→ 修改 AnalyserHub 主路 FFT 点数
+    workspace->onFftSizeChanged = [this](int size)
+    {
+        processor.getAnalyserHub().setMainFftSize (size);
+    };
+    // 初始同步：把控制台档位应用到后端（workspace 默认 2048 与 Hub 默认一致）
+    processor.getAnalyserHub().setMainFftSize (workspace->getFftSize());
 
     // 订阅主题变更 → 切主题后刷新全局重绘
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
@@ -3494,7 +3502,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.4";
+        const juce::String versionText = "v2.9.6";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3502,7 +3510,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v2.9.4");
+                const int versionW = versionFont.getStringWidth ("v2.9.6");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4855,6 +4863,23 @@ void Y2KmeterAudioProcessorEditor::RestoreFpsLimit (int hz)
     // 再触发完整的 FPS 调度链路（等同用户手动点击按钮）
     if (workspace->onFpsLimitChanged)
         workspace->onFpsLimitChanged (workspace->getFpsLimit());
+}
+
+void Y2KmeterAudioProcessorEditor::RestoreFftSize (int size)
+{
+    if (workspace == nullptr) return;
+
+    // 先同步控制台按钮文案
+    workspace->setFftSize (size);
+
+    // 再真正作用到后端 FFT（等同用户手动点击按钮）
+    if (workspace->onFftSizeChanged)
+        workspace->onFftSizeChanged (workspace->getFftSize());
+}
+
+int Y2KmeterAudioProcessorEditor::GetUserRequestedFftSize() const noexcept
+{
+    return (workspace != nullptr) ? workspace->getFftSize() : 2048;
 }
 
 // ======================================================
@@ -6899,8 +6924,14 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       }
 
       //   5) 合成：trail 纹理 alpha 混合到 texTargetRect
-      glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      //   反馈修复（外网 #9）：trail FBO 内部是预乘 alpha（点绘制用源 alpha
+      //   叠加 + 衰减 pass 连 RGB 一起缩放）。旧代码用直通混合
+      //   (SRC_ALPHA, 1-SRC_ALPHA) 合成，预乘色被二次压暗 → 浅色背景上
+      //   淡出前出现"灰/脏"中间态。改用预乘混合 (ONE, 1-SRC_ALPHA)，
+      //   点保持原色、只降 alpha 直到消失。
+      glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
       drawTexQuad (mod.glFboTex, snap->texTargetRect, 0.0f, 1.0f);
+      glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // 恢复直通混合，避免污染后续模块
     }
     else
     {

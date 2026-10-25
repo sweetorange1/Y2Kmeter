@@ -32,6 +32,13 @@ SpectrumModule::SpectrumModule(AnalyserHub& h)
     addAndMakeVisible(btnPeak);
     addAndMakeVisible(btnSlope);
 
+    // Sharper 模式（重分配谱线）：乐音收束成竖线
+    btnSharp.setClickingTogglesState(true);
+    btnSharp.setToggleState(sharpEnabled, juce::dontSendNotification);
+    btnSharp.setTooltip ("Sharper: reassign spectral energy to musical lines");
+    btnSharp.onClick = [this]() { setSharpEnabled(btnSharp.getToggleState()); };
+    addAndMakeVisible(btnSharp);
+
     rawMags.ensureStorageAllocated (256);
     smoothedDb .reserve (256);
     peakDb     .reserve (256);
@@ -54,6 +61,7 @@ juce::ValueTree SpectrumModule::saveModuleSpecificState() const
     juce::ValueTree s("state");
     s.setProperty("peakHold", peakHoldEnabled, nullptr);
     s.setProperty("slope", slopeEnabled, nullptr);
+    s.setProperty("sharp", sharpEnabled, nullptr);
     return s;
 }
 
@@ -63,6 +71,112 @@ void SpectrumModule::restoreModuleSpecificState(const juce::ValueTree& state)
         setPeakHoldEnabled((bool) state.getProperty("peakHold"));
     if (state.hasProperty("slope"))
         setSlopeEnabled((bool) state.getProperty("slope"));
+    if (state.hasProperty("sharp"))
+        setSharpEnabled((bool) state.getProperty("sharp"));
+}
+
+void SpectrumModule::setSharpEnabled(bool b)
+{
+    if (sharpEnabled == b) return;
+    sharpEnabled = b;
+    btnSharp.setToggleState(sharpEnabled, juce::dontSendNotification);
+
+    // 关闭时清空谱线；开启时从下一帧开始重新追踪（避免陈旧线残留）
+    if (! sharpEnabled)
+        sharpLines.clear();
+
+    buildGlSnapshot();
+    repaint();
+}
+
+// ----------------------------------------------------------
+// Sharper 模式（重分配谱线）
+// ----------------------------------------------------------
+float SpectrumModule::sharpSlopeDb (float freqHz) const noexcept
+{
+    // 与曲线 Slope 补偿同款：4.5dB/oct（基准 1kHz），按精确频率计算
+    return 4.5f * std::log2 (juce::jmax (20.0f, freqHz) / 1000.0f);
+}
+
+void SpectrumModule::updateSharpLines (const std::vector<AnalyserHub::ReassignedPeak>& peaks,
+                                       float frameDtSec,
+                                       double sampleRate)
+{
+    juce::ignoreUnused (sampleRate);
+    using namespace y2k::pacing;
+
+    // 平滑系数（按真实 dt 换算，帧率无关；120Hz 标定）
+    const float aPos   = alphaForDt (0.45f, frameDtSec);   // 位置 EMA（线频率本身极稳，跟踪要跟得上换音）
+    const float aMagUp = alphaForDt (0.60f, frameDtSec);   // 幅度上升快（攻击）
+    const float aMagDn = alphaForDt (0.14f, frameDtSec);   // 幅度回落慢（避免闪烁）
+    const float aAlpha = alphaForDt (0.40f, frameDtSec);   // 淡入
+
+    // 帧间匹配阈值：1/8 八度内视为同一根谱线（> 半音间距 0.083 八度，能区分相邻半音）
+    constexpr float kMatchOctaves = 0.125f;
+    // 反馈修订：新线创建门槛拉高 —— 弱峰（<-64dB）不进入显示，只参与已有线匹配
+    constexpr float kNewLineMinDb = -64.0f;
+
+    std::vector<bool> matched (sharpLines.size(), false);
+
+    for (const auto& pk : peaks)
+    {
+        const float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, pk.mag))
+                       + (slopeEnabled ? sharpSlopeDb ((float) pk.freqHz) : 0.0f);
+
+        // 在未匹配的旧线中找频率最近邻
+        int best = -1;
+        float bestDist = kMatchOctaves;
+        for (size_t i = 0; i < sharpLines.size(); ++i)
+        {
+            if (matched[i]) continue;
+            const float d = std::abs (std::log2 (
+                (float) (pk.freqHz / juce::jmax (1.0, sharpLines[i].freqHz))));
+            if (d < bestDist)
+            {
+                bestDist = d;
+                best = (int) i;
+            }
+        }
+
+        if (best >= 0)
+        {
+            SharpLine& l = sharpLines[(size_t) best];
+            matched[(size_t) best] = true;
+            l.freqHz += aPos * (pk.freqHz - l.freqHz);
+            const float aMag = (db > l.magDb) ? aMagUp : aMagDn;
+            l.magDb += aMag * (db - l.magDb);
+            l.alpha += aAlpha * (1.0f - l.alpha);
+        }
+        else if (sharpLines.size() < 64 && db >= kNewLineMinDb)
+        {
+            // 新谱线：淡入（alpha 从 0 爬升，避免"啪"地出现）
+            SharpLine l;
+            l.freqHz = pk.freqHz;
+            l.magDb  = db;
+            l.alpha  = 0.0f;
+            sharpLines.push_back (l);
+            matched.push_back (true);
+        }
+    }
+
+    // 未匹配的谱线快速渐隐（反馈修订：0.45s → 0.12s 时间常数，
+    //   音停止后竖线约 0.5s 内消失，不再残留大片幽灵细线）。
+    const float fade = std::exp (-juce::jmax (0.0f, frameDtSec) / 0.12f);
+    for (size_t i = 0; i < sharpLines.size();)
+    {
+        if (matched[i])
+        {
+            ++i;
+            continue;
+        }
+
+        SharpLine& l = sharpLines[i];
+        l.alpha *= fade;
+        if (l.alpha <= 0.015f)
+            sharpLines.erase (sharpLines.begin() + (std::ptrdiff_t) i);
+        else
+            ++i;
+    }
 }
 
 void SpectrumModule::setPeakHoldEnabled(bool b)
@@ -204,6 +318,7 @@ void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
     const int gap = 4;
     btnPeak .setBounds(tb.getX(),                 tb.getY(), btnW, tb.getHeight());
     btnSlope.setBounds(tb.getX() + btnW + gap,    tb.getY(), btnW, tb.getHeight());
+    btnSharp.setBounds(tb.getX() + (btnW + gap) * 2, tb.getY(), btnW, tb.getHeight());
 
     // v2.9.5：尺寸守卫（防 layoutContent 每帧触发导致的交互卡顿）
     if (glCanvasSizeChanged (getGlCanvasBounds (contentBounds)))
@@ -222,16 +337,30 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     //   本模块实际只有 ~30fps）。帧分发已与 vblank 同步并受 FPS 上限约束，
     //   每个分发帧都重绘才能跑满 120fps；曲线本身走离屏缓存，成本可控。
 
-    // 使用 Hub 的双路合并接口：低频走 8192 点（Δf≈5.9Hz），高频走 2048 点（Δf≈23Hz），
-    // 在 500Hz 附近做等功率交叉淡化。UI 侧零额外重采样，直接拿到"每列一个线性幅度"。
+    // v2.9.6 单路 FFT：直接读主路（用户所选 size，75% overlap）的对数采样结果，
+    // 分辨率与刷新率完全由 FFT size 档位决定。UI 侧零额外重采样，
+    // 直接拿到"每列一个线性幅度"。
     //
     // 关于 frame：
-    //   ·frame.spectrumMag / spectrumMagLo 仍然保留（其他模块可能用），本模块不再使用；
-    //   · blended 接口走 Hub 内部锁，成本极低（N 次查表 + 一次 cos 交叉）。
+    //   ·frame.spectrumMag 仍然保留（其他模块可能用），本模块不再使用；
+    //   · blended 接口走 Hub 内部锁，成本极低（N 次查表）。
     constexpr int N = 256;
     hub.getSpectrumMagnitudesBlended (rawMags, N,
                                       minFreqHz,
                                       juce::jmin (maxFreqHz, (float) (hub.getSampleRate() * 0.5)));
+
+    // Sharper：重分配谱峰 → 谱线追踪（乐音收束成竖线）
+    //   反馈修订：上限收敛到 28 根（基频 + 主要谐波 + 少数背景音足够），
+    //   避免弱成分把画面铺满细线。
+    if (sharpEnabled)
+    {
+        sharpPeaksScratch.clear();
+        hub.getSpectrumReassignedPeaks (sharpPeaksScratch,
+                                        minFreqHz,
+                                        juce::jmin (maxFreqHz, (float) (hub.getSampleRate() * 0.5)),
+                                        28);
+        updateSharpLines (sharpPeaksScratch, frame.dtSec, hub.getSampleRate());
+    }
 
     // v2.9：高精度帧间隔（旧实现 Time::getCurrentTime 整数毫秒，120Hz 下抖动）
     frameDtSec = frame.dtSec;
@@ -575,6 +704,7 @@ void SpectrumModule::buildGlSnapshot()
     const int M = (int) sx.size();
 
     // ---- 1) 曲线填充（梯形条到画布底）----
+    //   反馈修订：Sharper 模式下频谱曲线保持原样（主体），谱线仅叠加辅助
     if (M > 1)
     {
         const auto fillC = PinkXP::chartRamp[3].withAlpha (0.25f);
@@ -691,6 +821,32 @@ void SpectrumModule::buildGlSnapshot()
                     if (arcPos >= 3.0f - 1.0e-6f) { arcPos = 0.0f; drawing = !drawing; }
                 }
             }
+        }
+    }
+
+    // ---- 4) Sharper：重分配谱线（全高竖线；峰值强度映射颜色）----
+    if (sharpEnabled && ! sharpLines.empty())
+    {
+        const float yBotF = (float) inner.getBottom();
+        for (const auto& l : sharpLines)
+        {
+            const float x = freqToX ((float) l.freqHz, canvas);
+            if (x < (float) inner.getX() - 2.0f || x > (float) inner.getRight() + 2.0f)
+                continue;
+
+            const float a     = juce::jlimit (0.0f, 1.0f, l.alpha);
+            const float strength = juce::jlimit (0.0f, 1.0f,
+                                                  (l.magDb - minDb) / (maxDb - minDb));
+            const auto lineColour = PinkXP::pink200.interpolatedWith (PinkXP::sel, strength);
+            const float yTopF = (float) inner.getY();
+            const float h = yBotF - yTopF;
+
+            appendQuad (snap->vertices,
+                        { x - 1.5f, yTopF, 3.0f, h },
+                        lineColour.withAlpha (0.18f * a));
+            appendQuad (snap->vertices,
+                        { x - 0.6f, yTopF, 1.2f, h },
+                        lineColour.withAlpha (0.85f * a));
         }
     }
 
@@ -932,6 +1088,7 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
     };
 
     // 1) 填充区域（从底部到曲线的 lightly tinted area）
+    //   反馈修订：Sharper 模式下频谱曲线保持原样（主体），谱线仅叠加辅助
     fillPath.clear();
     buildSmoothPath (fillPath, curvePts, /*closeToBottom*/ true);
     g.setColour (PinkXP::chartRamp[3].withAlpha (0.25f));
@@ -963,6 +1120,32 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
         juce::PathStrokeType (1.2f).createDashedStroke (dashedPeakPath, peakPath, dashes, 2);
         g.setColour (PinkXP::ink.withAlpha (0.75f));
         g.fillPath (dashedPeakPath);
+    }
+
+    // 4) Sharper：重分配谱线（全高竖线；峰值强度映射颜色）
+    if (sharpEnabled && ! sharpLines.empty())
+    {
+        const float yBotF = (float) inner.getBottom();
+        for (const auto& l : sharpLines)
+        {
+            const float x = freqToX ((float) l.freqHz, canvas);
+            if (x < (float) inner.getX() - 2.0f || x > (float) inner.getRight() + 2.0f)
+                continue;
+
+            const float a     = juce::jlimit (0.0f, 1.0f, l.alpha);
+            const float strength = juce::jlimit (0.0f, 1.0f,
+                                                  (l.magDb - minDb) / (maxDb - minDb));
+            const auto lineColour = PinkXP::pink200.interpolatedWith (PinkXP::sel, strength);
+            const int yTop = inner.getY();
+            const int h = juce::jmax (1, inner.getHeight());
+
+            g.setColour (lineColour.withAlpha (0.18f * a));
+            g.fillRect (juce::Rectangle<int> ((int) std::floor (x - 1.5f), yTop,
+                                              3, (int) h));
+            g.setColour (lineColour.withAlpha (0.85f * a));
+            g.fillRect (juce::Rectangle<int> ((int) std::floor (x - 0.6f), yTop,
+                                              1, (int) h));
+        }
     }
 }
 
