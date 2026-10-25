@@ -16,6 +16,22 @@
 // ==========================================================
 namespace
 {
+    // 软件默认 settings 文件的实际磁盘路径（与 Y2KStandaloneApp 构造 PropertiesFile
+    //   时的存储参数完全一致）。Save/Load 预设弹窗默认定位到这里，避免默认打开"文档"目录。
+    juce::File getDefaultSettingsFile()
+    {
+        juce::PropertiesFile::Options opt;
+        opt.applicationName     = juce::CharPointer_UTF8 (JucePlugin_Name);
+        opt.filenameSuffix      = ".settings";
+        opt.osxLibrarySubFolder = "Application Support";
+       #if JUCE_LINUX || JUCE_BSD
+        opt.folderName          = "~/.config";
+       #else
+        opt.folderName          = "";
+       #endif
+        return opt.getDefaultFile();
+    }
+
     void clearVirtuPetFocusVisuals (juce::OwnedArray<ModulePanel>& modules)
     {
         for (auto* m : modules)
@@ -566,8 +582,7 @@ ModuleWorkspace::ModuleWorkspace()
     {
         auto chooser = std::make_shared<juce::FileChooser> (
             "Save current settings as preset",
-            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
-                .getChildFile (juce::String (JucePlugin_Name) + ".settings"),
+            getDefaultSettingsFile(),
             "*.settings");
 
         const auto flags = juce::FileBrowserComponent::saveMode
@@ -594,7 +609,7 @@ ModuleWorkspace::ModuleWorkspace()
     {
         auto chooser = std::make_shared<juce::FileChooser> (
             "Load preset",
-            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+            getDefaultSettingsFile().getParentDirectory(),
             "*.settings");
 
         const auto flags = juce::FileBrowserComponent::openMode
