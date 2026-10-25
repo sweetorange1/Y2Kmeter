@@ -109,11 +109,13 @@ struct EmojiParticle : public ToyActor
     float swayPhase = 0.0f;
     float quantize = 0.0f;
     float alphaFlicker = 0.0f;
+    juce::Rectangle<int> rainClipBounds;
     bool  fall     = true;
     bool  platformEnabled = true;
     int   maxBounces = 2;
     int   bounces = 0;
     bool  rainbow = false;
+    bool  performanceSimplified = false;
 
     EmojiId id = EmojiId::Sparkles;
     int     sizeTier = 1;
@@ -125,7 +127,14 @@ struct EmojiParticle : public ToyActor
     explicit EmojiParticle (EmojiId i) : id (i) { ttl = 8.0f; }
 
     bool isPoppable() const override { return true; }
-
+    bool isHighDetailForPerformance() const override { return ! performanceSimplified; }
+    bool simplifyForPerformance() override
+    {
+        if (performanceSimplified)
+            return false;
+        performanceSimplified = true;
+        return true;
+    }
     void impulse (juce::Point<float> from, float strength) override
     {
         auto d = pos - from;
@@ -211,6 +220,8 @@ struct EmojiParticle : public ToyActor
         }
         if (pos.y > h + margin)
             alive = false;
+        if (! rainClipBounds.isEmpty() && pos.y - margin >= (float) rainClipBounds.getBottom())
+            alive = false;
 
         // 透明闪烁（Twinkle）
         if (alphaFlicker > 0.0f)
@@ -219,20 +230,31 @@ struct EmojiParticle : public ToyActor
 
     void paint (juce::Graphics& g, ToyDirector& dir) override
     {
-        // 性能优化 P6v3：粒子堆积降级（阈值前移两档）——
-        //   >40 时 S 档粒子画成 4px 色点；>120 时 M 档也画成 5px 色点。
-        //   模块多的布局下 overlay 自身绘制也随粒子数增长，提前降级。
-        const size_t liveCount = dir.clock->freeActors.size();
-        if (sizeTier == 0 && liveCount > 40)
+        g.setOpacity (1.0f);
+        if (rainClipBounds.isEmpty())
         {
-            g.setColour (ToyPalette::accent().withAlpha (alpha * 0.8f));
-            g.fillRect (pos.x - 2.0f, pos.y - 2.0f, 4.0f, 4.0f);
+            paintContent (g, dir);
             return;
         }
-        if (sizeTier == 1 && liveCount > 120)
+
+        juce::Graphics::ScopedSaveState state (g);
+        g.reduceClipRegion (rainClipBounds);
+        paintContent (g, dir);
+    }
+
+    void paintContent (juce::Graphics& g, ToyDirector& dir)
+    {
+        if (performanceSimplified)
         {
-            g.setColour (ToyPalette::accent2().withAlpha (alpha * 0.8f));
-            g.fillRect (pos.x - 2.5f, pos.y - 2.5f, 5.0f, 5.0f);
+            const float dotSize = 4.0f + (float) juce::jmin (sizeTier, 2);
+            g.setColour ((rainbow ? juce::Colour::fromHSV (hue, 0.7f, 1.0f, 1.0f)
+                                  : (sizeTier == 0 ? ToyPalette::accent() : ToyPalette::accent2()))
+                         .withAlpha (alpha * 0.85f));
+            const int pixelSize = juce::roundToInt (dotSize);
+            g.fillRect (juce::roundToInt (pos.x - dotSize * 0.5f),
+                        juce::roundToInt (pos.y - dotSize * 0.5f),
+                        pixelSize, pixelSize);
+            g.setOpacity (1.0f);
             return;
         }
 
@@ -272,8 +294,21 @@ struct EmojiParticle : public ToyActor
         // 慢路径：落地挤压 / 无旋转 → 统一绘制入口（FIX-1）
         //   未烘焙完成时跳过本帧（绝不触发 bakeOne 的 D2D 渲染）
         if (dir.atlas->isBaked (id, (EmojiAtlas::Size) sizeTier))
-            drawEmoji (g, dir.atlas->themedImage (id, (EmojiAtlas::Size) sizeTier),
-                       pos, s, spin, alpha, scaleY);
+        {
+            const auto& image = dir.atlas->themedImage (id, (EmojiAtlas::Size) sizeTier);
+            if (std::abs (spin) <= 0.02f && scaleY > 0.99f
+                && juce::roundToInt (s) == image.getWidth()
+                && image.getWidth() == image.getHeight())
+            {
+                g.setOpacity (alpha);
+                g.drawImageAt (image, juce::roundToInt (pos.x - s * 0.5f),
+                               juce::roundToInt (pos.y - s * 0.5f), false);
+                g.setOpacity (1.0f);
+                return;
+            }
+
+            drawEmoji (g, image, pos, s, spin, alpha, scaleY);
+        }
     }
 
     juce::Rectangle<float> getBounds() const override
@@ -346,7 +381,7 @@ static void spawnFountain (ToyDirector& dir, juce::Point<float> at, float charge
         // 喷泉统一向下落（桌面纹理"上浮"人格仅用于桌面，不用于喷泉）
         p->fall     = true;
         p->rainbow  = rainbow;
-        p->spinVel  = juce::Random::getSystemRandom().nextFloat() * 6.0f - 3.0f;
+        p->spinVel  = 0.0f;
         p->sizeTier = juce::Random::getSystemRandom().nextInt (3);
         p->drawSize = dir.atlas->drawSize ((EmojiAtlas::Size) p->sizeTier);
 
@@ -440,6 +475,25 @@ std::unique_ptr<ToyActor> makeEmojiParticle (EmojiId id, juce::Point<float> at,
     p->ttl = ttl;
     p->gravity = gravity;
     p->sizeTier = juce::jlimit (0, 2, sizeTier);
+    p->drawSize = dir.atlas->drawSize ((EmojiAtlas::Size) p->sizeTier);
+    return p;
+}
+
+std::unique_ptr<ToyActor> makeConfettiRainParticle (juce::Point<float> at,
+                                                    juce::Point<float> velocity,
+                                                    ToyDirector& dir, bool rainbow,
+                                                    juce::Rectangle<int> clipBounds)
+{
+    auto p = std::make_unique<EmojiParticle> (EmojiId::PartyPopper);
+    p->pos = at;
+    p->vel = velocity;
+    p->ttl = 4.0f;
+    p->gravity = 1500.0f * dir.uiScale();
+    p->damping = 0.05f;
+    p->platformEnabled = false;
+    p->rainbow = rainbow;
+    p->rainClipBounds = clipBounds;
+    p->sizeTier = juce::Random::getSystemRandom().nextInt (2);
     p->drawSize = dir.atlas->drawSize ((EmojiAtlas::Size) p->sizeTier);
     return p;
 }

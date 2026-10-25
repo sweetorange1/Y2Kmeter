@@ -131,6 +131,25 @@ float SpectrumModule::toyReadDbAtX (float x) const
     return db;
 }
 
+std::vector<juce::Point<float>> SpectrumModule::toyCaptureSpectrumCurve() const
+{
+    const auto canvas = getToyCanvasBounds();
+    std::vector<juce::Point<float>> points;
+    if (smoothedDb.empty() || canvas.isEmpty())
+        return points;
+
+    const auto inner = canvas.reduced (2);
+    points.reserve (smoothedDb.size());
+    const float denominator = (float) juce::jmax (1, (int) smoothedDb.size() - 1);
+    for (size_t i = 0; i < smoothedDb.size(); ++i)
+    {
+        const float x = (float) inner.getX()
+                      + (float) i / denominator * (float) inner.getWidth();
+        points.emplace_back (x, dbToY (smoothedDb[i], canvas));
+    }
+    return points;
+}
+
 bool SpectrumModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
 {
     const auto canvas = getToyCanvasBounds();
@@ -148,6 +167,9 @@ void SpectrumModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
     const float db   = toyReadDbAtX (hit.pos.x);
     const juce::String note = toyFreqToNoteName (freq);
 
+    const auto frozenCurve = toyCaptureSpectrumCurve();
+    if (! frozenCurve.empty())
+        ctx.addModuleActor (makeSpectrumGhostActor (frozenCurve));
     ctx.addModuleActor (makeSonarRingActor (hit.pos));
     if (note.isNotEmpty())
     {

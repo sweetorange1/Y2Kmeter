@@ -123,8 +123,10 @@ void ModuleToyState::paint (juce::Graphics& g)
 
     juce::Graphics::ScopedSaveState ss (g);
     g.reduceClipRegion (content);
+    const auto clip = g.getClipBounds();
     for (auto& a : actors)
-        a->paint (g, *director);
+        if (a->getBounds().getSmallestIntegerContainer().intersects (clip))
+            a->paint (g, *director);
 }
 
 // ==========================================================
@@ -263,8 +265,21 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         toyperf::beginSession();
     }
 
+    const double elapsed = lastFrameTime_ > 0.0
+                         ? juce::jmax (0.0, frame.timeSec - lastFrameTime_)
+                         : (double) frame.dtSec;
+    lastFrameTime_ = frame.timeSec;
+    if (elapsed > 0.0001)
+    {
+        const double instantaneousFps = juce::jlimit (1.0, 240.0, 1.0 / elapsed);
+        const double response = instantaneousFps < smoothedFps_ ? 0.35 : 0.06;
+        smoothedFps_ += (instantaneousFps - smoothedFps_) * response;
+    }
+
     if (director.getLevel() == ToyLevel::Off)
+    {
         return;
+    }
 
     const float dt = frame.dtSec;
     bool any = false;
@@ -272,6 +287,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     // C-2：按住持续喷（花洒）
     director.sprayTick (frame.timeSec);
+    director.tickConfettiRain (frame.timeSec);
 
     // 刷新平台上沿（Editor 坐标，带 x 范围）。
     // FIX-4 / B-13：仅当存在活动自由 actor 时才遍历模块，空闲零开销。
@@ -304,19 +320,11 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         freeActors.erase (freeActors.begin() + kFreeActorLimit, freeActors.end());
     }
 
+    const auto visibleBounds = director.editor.getLocalBounds().toFloat();
     // 自由 actor
     if (! freeActors.empty())
     {
-        // 性能优化 P9v3：粒子数 > 40 时动画降频到一半帧率（每 2 帧 step 一次）。
-        //   模块多的布局下，粒子 repaint 会触发底下模块重绘（放大效应），
-        //   阈值前移让重绘频率尽早减半（日志实测 41 粒子 126→18fps 的元凶之一）。
-        const bool heavy = freeActors.size() > 40;
-        if (heavy)
-        {
-            skipCounter_ ^= 1;
-            if (skipCounter_ == 1)
-                goto perfLogOnly;   // 跳帧：本轮不更新粒子（保留日志打点）
-        }
+        const float actorDt = (float) elapsed;
 
         // 性能优化 P10：tile 分块 repaint（128px 块，只重绘粒子实际覆盖的块）。
         //   union 单次大 dirty 在粒子散布全屏时每帧重绘大半窗口的底层组件
@@ -328,7 +336,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
             auto& a = *it;
             a->prevBounds = a->getBounds();
             a->hasPrevBounds = true;
-            a->step (dt, director);
+            a->step (actorDt, director);
 
             const auto cur = a->getBounds().getSmallestIntegerContainer();
             if (! a->alive)
@@ -373,8 +381,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
-perfLogOnly:
-    // 跳帧路径（P9）：粒子仍活跃，保持 overlay 存活，跳过自由粒子的 step/repaint
+    // 粒子仍活跃时保持 overlay 存活。
     if (! freeActors.empty())
         any = true;
 
@@ -415,8 +422,64 @@ perfLogOnly:
         }
     }
 
+    visibleFreeActorCount_ = 0;
+    highDetailFreeActorCount_ = 0;
+    for (const auto& actor : freeActors)
+    {
+        if (actor != nullptr && actor->alive
+            && actor->getBounds().intersects (visibleBounds))
+        {
+            ++visibleFreeActorCount_;
+            if (actor->isHighDetailForPerformance())
+                ++highDetailFreeActorCount_;
+        }
+    }
+
+    const double fps = smoothedFps_;
+    if (fps >= 58.0)
+        targetFullEmojiCount_ = 220;
+    else if (fps >= 55.0)
+        targetFullEmojiCount_ = 24;
+    else if (fps >= 50.0)
+        targetFullEmojiCount_ = 12;
+    else if (fps >= 45.0)
+        targetFullEmojiCount_ = 6;
+    else
+        targetFullEmojiCount_ = 0;
+
+    // Reduce detail quickly under load. Simplification is permanent for the
+    // particle's lifetime, preventing visible emoji/dot toggling as FPS varies.
+    const int transitionBudget = fps < 30.0 ? 16
+                              : fps < 40.0 ? 10
+                              : fps < 50.0 ? 5
+                              : fps < 58.0 ? 2
+                                           : 1;
+    if (highDetailFreeActorCount_ > targetFullEmojiCount_)
+    {
+        std::vector<ToyActor*> oldestFirst;
+        oldestFirst.reserve ((size_t) highDetailFreeActorCount_);
+        for (auto& actor : freeActors)
+            if (actor != nullptr && actor->alive
+                && actor->getBounds().intersects (visibleBounds)
+                && actor->isHighDetailForPerformance())
+                oldestFirst.push_back (actor.get());
+
+        std::sort (oldestFirst.begin(), oldestFirst.end(), [] (const ToyActor* a, const ToyActor* b)
+        {
+            return a->age > b->age;
+        });
+
+        const int simplifyCount = juce::jmin (transitionBudget,
+            highDetailFreeActorCount_ - targetFullEmojiCount_);
+        for (int i = 0; i < simplifyCount && i < (int) oldestFirst.size(); ++i)
+            if (oldestFirst[(size_t) i]->simplifyForPerformance())
+                --highDetailFreeActorCount_;
+    }
+
     // ---- 性能日志：每秒一行（帧率 / actor 数 / 单帧处理耗时）----
     lastFrameMs_ = juce::Time::getMillisecondCounterHiRes() - t0;
+    frameTotalMs_ += lastFrameMs_;
+    frameMaxMs_ = juce::jmax (frameMaxMs_, lastFrameMs_);
     ++perfFrames_;
     if (frame.timeSec - perfLastLogTime_ >= 1.0)
     {
@@ -430,10 +493,23 @@ perfLogOnly:
             toyperf::log (juce::String ("frame: fps=")
                           + juce::String ((double) perfFrames_ / span, 1)
                           + " freeActors=" + juce::String ((int) freeActors.size())
+                          + " visibleFreeActors=" + juce::String (visibleFreeActorCount_)
+                          + " fullEmoji=" + juce::String (highDetailFreeActorCount_)
+                          + " emojiTarget=" + juce::String (targetFullEmojiCount_)
+                          + " smoothedFps=" + juce::String (smoothedFps_, 1)
                           + " moduleActors=" + juce::String (moduleActors)
-                          + " frameMs=" + juce::String (lastFrameMs_, 2));
+                          + " frameMsAvg=" + juce::String (frameTotalMs_ / (double) perfFrames_, 2)
+                          + " frameMsMax=" + juce::String (frameMaxMs_, 2)
+                          + " overlayPaints=" + juce::String (overlayPaintCalls_)
+                          + " overlayActors=" + juce::String (overlayActorsPainted_)
+                          + " overlayPaintMs=" + juce::String (overlayPaintTotalMs_, 2));
         }
         perfFrames_ = 0;
+        frameTotalMs_ = 0.0;
+        frameMaxMs_ = 0.0;
+        overlayPaintCalls_ = 0;
+        overlayActorsPainted_ = 0;
+        overlayPaintTotalMs_ = 0.0;
         perfLastLogTime_ = frame.timeSec;
     }
 }
@@ -450,8 +526,16 @@ ToyOverlay::ToyOverlay (ToyClock& c) : clock (c)
 
 void ToyOverlay::paint (juce::Graphics& g)
 {
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    const auto clip = g.getClipBounds();
     for (auto& a : clock.freeActors)
-        a->paint (g, clock.director);
+        if (a->getBounds().getSmallestIntegerContainer().intersects (clip))
+        {
+            a->paint (g, clock.director);
+            ++clock.overlayActorsPainted_;
+        }
+    ++clock.overlayPaintCalls_;
+    clock.overlayPaintTotalMs_ += juce::Time::getMillisecondCounterHiRes() - t0;
 }
 
 // ==========================================================
@@ -511,6 +595,8 @@ void ToyDirector::setLevel (ToyLevel l)
 
     if (level_ == ToyLevel::Off)
     {
+        confettiRainRemaining_ = 0;
+        nextConfettiRainTime_ = 0.0;
         clock->freeActors.clear();
         for (int i = 0; i < workspace.getNumModules(); ++i)
             if (auto* m = workspace.getModule (i))
@@ -736,6 +822,36 @@ void ToyDirector::sprayTick (double timeSec)
     }
 }
 
+void ToyDirector::tickConfettiRain (double timeSec)
+{
+    if (confettiRainRemaining_ <= 0 || level_ == ToyLevel::Off)
+        return;
+    if (nextConfettiRainTime_ > 0.0 && timeSec < nextConfettiRainTime_)
+        return;
+
+    const auto canvas = workspace.getCanvasArea();
+    if (canvas.isEmpty())
+    {
+        confettiRainRemaining_ = 0;
+        return;
+    }
+
+    constexpr double spawnInterval = 0.075;
+    const int x = canvas.getX() + juce::Random::getSystemRandom().nextInt (canvas.getWidth());
+    const float top = (float) (workspace.getY() + canvas.getY());
+    const auto rainBounds = canvas.translated (workspace.getX(), workspace.getY());
+    const float scale = uiScale();
+    const float vx = (float) juce::Random::getSystemRandom().nextInt (161) - 80.0f;
+    const float vy = 35.0f + juce::Random::getSystemRandom().nextFloat() * 55.0f;
+    clock->freeActors.push_back (makeConfettiRainParticle (
+        { (float) (workspace.getX() + x), top - 24.0f },
+        { vx * scale, vy * scale }, *this, level_ == ToyLevel::Party, rainBounds));
+
+    --confettiRainRemaining_;
+    nextConfettiRainTime_ = timeSec + spawnInterval;
+    ensureOverlay();
+}
+
 // C-3：鼠标力场 —— 只在存在自由 actor 时处理，冲量正比于鼠标速度
 void ToyDirector::mouseForceField (juce::Point<float> editorPos, float dtSec)
 {
@@ -865,18 +981,9 @@ void ToyDirector::onComboMilestone (int count, juce::Point<float> pos)
     if (count >= 40)
     {
         notifyPetReaction (8);    // angry
-        // 🎉 彩带雨（反馈：更夸张，PARTY 档加倍）+ 彩虹着色
-        const int w = editor.getWidth();
-        const int n = (level_ == ToyLevel::Party) ? 120 : 60;
-        for (int i = 0; i < n; ++i)
-        {
-            const int tier = juce::Random::getSystemRandom().nextInt (3);
-            auto p = makeEmojiParticle (EmojiId::PartyPopper,
-                                        { (float) (juce::Random::getSystemRandom().nextInt (w)), -20.0f },
-                                        { (float) (juce::Random::getSystemRandom().nextInt (200) - 100) * uiScale(),
-                                          120.0f * uiScale() }, tier, *this);
-            clock->freeActors.push_back (std::move (p));
-        }
+        // 分批从可见画布顶部喷出，避免同帧创建大量粒子和被底部 toolbar 截断。
+        confettiRainRemaining_ = (level_ == ToyLevel::Party) ? 48 : 36;
+        nextConfettiRainTime_ = 0.0;
         // 后续喷发走彩虹着色（通过 spawnCanvasFountain 的 Party 判断实现）
     }
     ensureOverlay();

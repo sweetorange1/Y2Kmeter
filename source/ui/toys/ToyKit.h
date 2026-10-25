@@ -154,6 +154,8 @@ struct ToyActor
     virtual void step (float dt, ToyDirector& dir) = 0;
     virtual void paint (juce::Graphics& g, ToyDirector& dir) = 0;
     virtual juce::Rectangle<float> getBounds() const = 0;
+    virtual bool isHighDetailForPerformance() const { return false; }
+    virtual bool simplifyForPerformance() { return false; }
 
     // 可点击元素（TruePeak 的 OK、Invader、Clippo 等，E.5）。
     //   返回 true 表示本次点击被消费（不再路由到模块玩法/画布喷发）。
@@ -178,6 +180,10 @@ std::unique_ptr<ToyActor> makeEmojiParticle (EmojiId id, juce::Point<float> at,
                                              ToyDirector& dir,
                                              float ttl = 8.0f,
                                              float gravity = 1100.0f);
+std::unique_ptr<ToyActor> makeConfettiRainParticle (juce::Point<float> at,
+                                                    juce::Point<float> velocity,
+                                                    ToyDirector& dir, bool rainbow,
+                                                    juce::Rectangle<int> clipBounds);
 // 连击字幕（上浮淡出）
 std::unique_ptr<ToyActor> makeComboTextActor (const juce::String& text, juce::Point<float> at);
 // Oscilloscope 拍电视（模块内 actor，§8.3 / E.4.3 带真实读数）
@@ -191,11 +197,13 @@ std::unique_ptr<ToyActor> makeTvStaticActor (juce::Point<float> at, juce::Rectan
 juce::String toyFreqToNoteName (float freq);
 // Spectrum：拨弦涟漪（同心环 + 竖向余振线）
 std::unique_ptr<ToyActor> makeSonarRingActor (juce::Point<float> at);
+// Spectrum：点击瞬间的频谱残影（模块局部坐标）
+std::unique_ptr<ToyActor> makeSpectrumGhostActor (const std::vector<juce::Point<float>>& points);
 // Spectrum：频率/音名气泡
 std::unique_ptr<ToyActor> makeNoteBubbleActor (juce::Point<float> at, const juce::String& note);
 // Waveform：人浪（以点击处向两侧传播的高亮带 + 🙌）
 std::unique_ptr<ToyActor> makeWaveBandActor (juce::Point<float> at, juce::Rectangle<float> canvas);
-// StereoField：入侵者（Foe 角色步进移动 + 逐行下降，可点击击落）
+// StereoField：入侵者（Foe 角色四向随机漫步，可点击击落）
 std::unique_ptr<ToyActor> makeInvaderActor (juce::Point<float> at, juce::Rectangle<float> area);
 // OscilloscopeWave：拍立得（📸 闪光 + 相纸掉出，不读回 GL，带图注）
 //   scatter=true：XY/Lissajous 模式 —— 画 (L→x, R→y) 李萨如散点图，而不是波形折线。
@@ -388,9 +396,19 @@ private:
     int    perfFrames_      = 0;
     double perfLastLogTime_ = 0.0;
     double lastFrameMs_     = 0.0;   // 上一帧 actor 处理耗时
+    double frameTotalMs_    = 0.0;
+    double frameMaxMs_      = 0.0;
+    double overlayPaintTotalMs_ = 0.0;
+    int    overlayPaintCalls_   = 0;
+    int    overlayActorsPainted_ = 0;
+    int    visibleFreeActorCount_ = 0;
+    int    highDetailFreeActorCount_ = 0;
+    double lastFrameTime_ = 0.0;
+    double smoothedFps_ = 60.0;
+    int    targetFullEmojiCount_ = 160;
     double platformCacheTime_ = -1.0;  // 平台几何缓存时间戳（0.5s 刷新，模块移动不改每帧遍历）
-    int    skipCounter_     = 0;     // P9：粒子堆积时动画降频（每 2 帧 step 一次）
 
+    friend class ToyOverlay;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ToyClock)
 };
 
@@ -437,6 +455,7 @@ public:
 
     // C-2/C-3/C-4：按住持续喷、鼠标力场、点爆（由 ToyClock::onFrame 驱动）
     void sprayTick  (double timeSec);
+    void tickConfettiRain (double timeSec);
     void mouseForceField (juce::Point<float> editorPos, float dtSec);
     bool tryPopEmoji (juce::Point<float> editorPos);
     void stopSpraying() { spraying_ = false; }
@@ -485,6 +504,8 @@ private:
     juce::Point<float> sprayPos_;
     double sprayStartTime_ = 0.0;
     double lastSprayTime_ = 0.0;
+    int    confettiRainRemaining_ = 0;
+    double nextConfettiRainTime_ = 0.0;
 
     // C-3 鼠标力场
     juce::Point<float> lastMousePos_;

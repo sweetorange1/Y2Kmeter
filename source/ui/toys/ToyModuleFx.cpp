@@ -52,6 +52,52 @@ namespace
         juce::Rectangle<float> getBounds() const override { return juce::Rectangle<float> (at.x - 60, at.y - 60, 120, 120); }
     };
 
+    struct SpectrumGhostActor : public ToyActor
+    {
+        juce::Path curve;
+        juce::Rectangle<float> bounds;
+
+        explicit SpectrumGhostActor (const std::vector<juce::Point<float>>& points)
+        {
+            ttl = 2.4f;
+            if (points.empty())
+                return;
+
+            curve.startNewSubPath (points.front());
+            for (size_t i = 1; i < points.size(); ++i)
+                curve.lineTo (points[i]);
+
+            float left = points.front().x, right = left;
+            float top = points.front().y, bottom = top;
+            for (const auto& point : points)
+            {
+                left = juce::jmin (left, point.x);
+                right = juce::jmax (right, point.x);
+                top = juce::jmin (top, point.y);
+                bottom = juce::jmax (bottom, point.y);
+            }
+            bounds = { left, top, right - left, bottom - top };
+        }
+
+        void step (float dt, ToyDirector&) override
+        {
+            age += dt;
+            if (age >= ttl)
+                alive = false;
+        }
+
+        void paint (juce::Graphics& g, ToyDirector&) override
+        {
+            const float fade = 1.0f - age / ttl;
+            g.setColour (PinkXP::sel.withAlpha (0.16f * fade));
+            g.strokePath (curve, juce::PathStrokeType (5.0f));
+            g.setColour (PinkXP::sel.withAlpha (0.72f * fade));
+            g.strokePath (curve, juce::PathStrokeType (1.5f));
+        }
+
+        juce::Rectangle<float> getBounds() const override { return bounds.expanded (3.0f); }
+    };
+
     // ---- Spectrum：频率/音名气泡 ----
     struct NoteBubbleActor : public ToyActor
     {
@@ -112,55 +158,50 @@ namespace
     {
         juce::Point<float> pos;
         juce::Rectangle<float> area;
-        float dirX = 1.0f;
         float stepT = 0.0f;
-        bool  landed = false;
+        static constexpr float stepInterval = 0.45f;
         InvaderActor (juce::Point<float> p, juce::Rectangle<float> a) : pos (p), area (a)
         {
             ttl = 12.0f;
-            // 反馈 C4：初始移动方向随机（不再永远向右）
-            dirX = (juce::Random::getSystemRandom().nextBool()) ? 1.0f : -1.0f;
         }
         void step (float dt, ToyDirector&) override
         {
-            age += dt; stepT += dt;
-            if (landed)
+            age += dt;
+            stepT += dt;
+            while (stepT >= stepInterval)
             {
-                if (age >= ttl) alive = false;
-                return;
+                stepT -= stepInterval;
+                switch (juce::Random::getSystemRandom().nextInt (4))
+                {
+                    case 0: pos.y -= 12.0f; break;
+                    case 1: pos.x += 12.0f; break;
+                    case 2: pos.y += 12.0f; break;
+                    default: pos.x -= 12.0f; break;
+                }
+                if (! area.contains (getBounds()))
+                {
+                    alive = false;
+                    return;
+                }
             }
-            if (stepT > 0.5f)
-            {
-                stepT = 0.0f;
-                pos.x += dirX * 22.0f;
-                if (pos.x > area.getRight() - 10.0f)  { dirX = -1.0f; pos.y += 22.0f; }
-                else if (pos.x < area.getX() + 10.0f) { dirX = 1.0f;  pos.y += 22.0f; }
-            }
-            if (pos.y > area.getBottom()) { landed = true; ttl = age + 1.5f; }
             if (age >= ttl) alive = false;
         }
         void paint (juce::Graphics& g, ToyDirector& dir) override
         {
             const auto& img = dir.atlas->themedImage (toyRoleEmoji (ToyRole::Foe), EmojiAtlas::Size::L);
-            if (! img.isValid()) return;
-            const float a = landed ? juce::jmax (0.0f, 1.0f - (age - (ttl - 1.5f)) / 1.5f) : 1.0f;
-            g.setOpacity (a);
-            g.drawImage (img, (int) pos.x - 17, (int) pos.y - 17, 34, 34, 0, 0, img.getWidth(), img.getHeight());
+            if (! img.isValid())
+                return;
+
+            juce::Graphics::ScopedSaveState state (g);
             g.setOpacity (1.0f);
-            if (landed)
-            {
-                g.setColour (ToyPalette::ink().withAlpha (a));
-                g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-                g.drawText ("LANDED", juce::Rectangle<int> ((int) pos.x - 24, (int) pos.y + 16, 48, 12),
-                            juce::Justification::centred, false);
-            }
+            g.drawImage (img, (int) pos.x - 17, (int) pos.y - 17, 34, 34, 0, 0, img.getWidth(), img.getHeight());
         }
-        juce::Rectangle<float> getBounds() const override { return juce::Rectangle<float> (pos.x - 20, pos.y - 20, 40, 40); }
+        juce::Rectangle<float> getBounds() const override { return juce::Rectangle<float> (pos.x - 17, pos.y - 17, 34, 34); }
 
         // 点击击落（B-12 / E.4.3）
         bool onClick (juce::Point<float> p) override
         {
-            if (landed || p.getDistanceFrom (pos) > 22.0f)
+            if (p.getDistanceFrom (pos) > 22.0f)
                 return false;
             alive = false;
             return true;
@@ -833,6 +874,8 @@ namespace
 juce::String toyFreqToNoteName (float freq) { return freqToNoteName (freq); }
 
 std::unique_ptr<ToyActor> makeSonarRingActor (juce::Point<float> at)    { return std::make_unique<SonarRingActor> (at); }
+std::unique_ptr<ToyActor> makeSpectrumGhostActor (const std::vector<juce::Point<float>>& points)
+                                                                        { return std::make_unique<SpectrumGhostActor> (points); }
 std::unique_ptr<ToyActor> makeNoteBubbleActor (juce::Point<float> at, const juce::String& note)
                                                                         { return std::make_unique<NoteBubbleActor> (at, note); }
 std::unique_ptr<ToyActor> makeWaveBandActor (juce::Point<float> at, juce::Rectangle<float> canvas)

@@ -50,6 +50,7 @@ public:
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
     float toyXToFreq (float x) const { return xToFreq (x, getToyCanvasBounds()); }
     float toyReadDbAtX (float x) const;
+    std::vector<juce::Point<float>> toyCaptureSpectrumCurve() const;
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
