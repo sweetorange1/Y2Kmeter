@@ -1975,13 +1975,24 @@ juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce
 {
     auto options = juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu (box, label);
 
-    if (! PinkXP::isStickDockActive())
+    // 需要放宽菜单允许区域的两种场景（默认区域 = display->userArea）：
+    //   1) stick 驻留态（Windows）：AppBar 把条带从 userArea 挖掉，下拉框位于
+    //      条带内（userArea 之外），默认 clamp 会把菜单整体推到条带上方；
+    //   2) macOS 原生全屏：窗口铺满 totalArea（覆盖菜单栏/Dock），但 JUCE 报告的
+    //      display->userArea 仍扣除了菜单栏/Dock —— 底部工具栏里的下拉框正好落在
+    //      这段被扣除的区域内，默认 clamp 会把菜单推到控件上方"隔一段距离"。
+    bool needsOverride = PinkXP::isStickDockActive();
+
+   #if JUCE_MAC
+    if (! needsOverride)
+        if (auto* top = box.getTopLevelComponent())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+                needsOverride = rw->isFullScreen();
+   #endif
+
+    if (! needsOverride)
         return options;
 
-    // stick 驻留态：JUCE 默认把菜单 clamp 到 display->userArea，而 AppBar 驻留
-    //   正好把条带从工作区里挖掉了 —— 下拉框位于条带内（userArea 之外）时，
-    //   菜单会被整体推到条带上方，离控件很远。这里把允许区域放宽到整个显示器，
-    //   让菜单按默认逻辑贴着下拉框展开（可以盖在条带上）。
     const auto boxScreen = box.getScreenBounds();
     const auto display = juce::Desktop::getInstance().getDisplays()
                              .getDisplayForPoint (boxScreen.getCentre());
@@ -1992,14 +2003,11 @@ juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce
     if (display->userArea.contains (boxScreen.getCentre()))
         return options;
 
-   #if JUCE_WINDOWS
-    // withParentAreaOverride 是本仓库 JUCE 的本地扩展（见 juce_PopupMenu.h）。
-    //   这里用平台宏包住，保证 macOS 端即使链接官方 JUCE 也能编译。
+    // 放宽允许区域到整个显示器，让菜单按默认逻辑贴着下拉框展开（可以盖在
+    //   条带 / 全屏底边上）。withParentAreaOverride 是本仓库 JUCE 的扩展
+    //   （见 juce_PopupMenu.h），全平台可用。
     return options.withParentAreaOverride (
         display->safeAreaInsets.subtractedFrom (display->totalArea));
-   #else
-    return options;
-   #endif
 }
 
 // ==========================================================

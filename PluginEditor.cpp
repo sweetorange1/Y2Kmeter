@@ -2476,7 +2476,14 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         //
         //   stick 驻留态：条贴哪一侧以 AppBar 的 T/B 为准（下拉里列的经典条 id
         //   本来就与当前侧一致，新变体则靠 stickBottomAligned 决定）。
-        const bool bottomAligned = stickActive ? stickBottomAligned : (presetId == 3);
+        //   stickBottomAligned 是 Windows 专属成员（PluginEditor.h 的 #if JUCE_WINDOWS
+        //   块内）；非 Windows 上 stickActive 恒 false，这里用条件编译避免 mac 引用
+        //   未声明的标识符。
+        bool bottomAligned = (presetId == 3);
+       #if JUCE_WINDOWS
+        if (stickActive)
+            bottomAligned = stickBottomAligned;
+       #endif
 
         auto* top = getTopLevelComponent();
         if (top == nullptr) top = this;

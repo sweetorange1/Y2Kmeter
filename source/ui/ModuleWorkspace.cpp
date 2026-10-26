@@ -1591,20 +1591,25 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
 
     options = options.withTargetScreenArea (targetArea);
 
-   #if JUCE_WINDOWS
-    // stick 驻留态：AppBar 把条带从系统工作区（userArea）里挖掉了，JUCE 默认会把
-    //   菜单整体 clamp 到 userArea，结果菜单被顶到条带上方、远离鼠标。这里把允许
-    //   区域放宽到整个显示器，让菜单贴着点击位置弹出（可以盖在条带上）。
-    //   withParentAreaOverride 是本仓库 JUCE 的本地扩展；用平台宏包住，保证
-    //   macOS 端即使链接官方 JUCE 也能编译。
-    if (PinkXP::isStickDockActive())
+    // stick 驻留态（Windows）或 macOS 原生全屏：点击位置/可用区域可能落在
+    //   display->userArea 之外（AppBar 条带 / 全屏覆盖的菜单栏-Dock 区域），
+    //   JUCE 默认把菜单 clamp 到 userArea 会把它推到远离点击处。这里把允许区域
+    //   放宽到整个显示器，让菜单贴着点击位置弹出。
+    //   withParentAreaOverride 是本仓库 JUCE 的扩展，全平台可用。
+    bool needsAreaOverride = PinkXP::isStickDockActive();
+   #if JUCE_MAC
+    if (! needsAreaOverride)
+        if (auto* top = getTopLevelComponent())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+                needsAreaOverride = rw->isFullScreen();
+   #endif
+    if (needsAreaOverride)
     {
         if (const auto* display = juce::Desktop::getInstance().getDisplays()
                                       .getDisplayForPoint (targetArea.getCentre()))
             options = options.withParentAreaOverride (
                 display->safeAreaInsets.subtractedFrom (display->totalArea));
     }
-   #endif
 
     const auto placePos = placeAtCanvasPos;
 

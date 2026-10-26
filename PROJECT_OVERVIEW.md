@@ -4228,6 +4228,14 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 
 - 版本号统一为 **2.9.8**：`CMakeLists.txt` 三处（`project()` + 两个 `juce_add_plugin`）、`README.md` 徽章、`Y2Kmeter_installer.iss`、`PluginEditor.cpp` 抬头四处字面量、`PROJECT_OVERVIEW.md` 当前版本声明。
 
+### 5. macOS 适配补充（本轮，版本号不变）
+
+- **macOS 编译错误**（`PluginEditor.cpp`）：v2.9.8 新增的 `applyLayoutPreset` 在横向条预设分支裸用了 `stickBottomAligned`，而该成员声明在 `PluginEditor.h` 的 `#if JUCE_WINDOWS` 块内 → Windows 编译通过、macOS 报 `use of undeclared identifier 'stickBottomAligned'`。修复：该处访问加 `#if JUCE_WINDOWS` 保护（mac 上 `stickActive` 恒 false，逻辑等价：`bottomAligned = presetId == 3`）。
+- **macOS 原生全屏下拉/右键菜单错位**（`PinkXPStyle.cpp` + `ModuleWorkspace.cpp`）：mac 原生全屏（`ResizableWindow::setFullScreen(true)`，独立 Space）时窗口铺满 `totalArea`（覆盖菜单栏/Dock），但 JUCE 报告的 `display->userArea` 仍扣除了菜单栏/Dock → 底部工具栏的下拉框（布局预设 / 音频源 Source）落在 `userArea` 之外，菜单默认 clamp 到 `userArea` 后被推到控件"上方隔一段距离"。
+  - 修复：`PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu` 原只在 Windows stick 驻留态放宽允许区域；现扩展为「stick 驻留 **或** `ResizableWindow::isFullScreen()` 且下拉框中心在 `userArea` 之外」，用 `options.withParentAreaOverride(totalArea)` 放宽到整块显示器，菜单重新贴着下拉框向上展开。
+  - `ModuleWorkspace::showAddMenu`（右键"添加模块"）同样加上 mac 全屏判断，避免全屏下同类偏移。
+  - `withParentAreaOverride` 是本仓库 JUCE 的扩展（`juce_PopupMenu.h`），平台无关；普通窗口/插件宿主下 `isFullScreen()` 为 false，逻辑不触发，行为与修复前完全一致。
+
 ---
 
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
