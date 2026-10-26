@@ -3978,6 +3978,7 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 
 - 2.8.1 → 2.8.5（`CMakeLists.txt` 三处 / `Y2Kmeter_installer.iss` / `README.md` / `PluginEditor.cpp` 四处字面量）。
 - `Y2Kmeter_installer.iss` 的 `Source` 路径由 `cmake-build-release-visual-studio\` 更新为当前预设的 `build\msvc\`。
+- （2026-10-26 起）`Source` 路径改回用户自己编译的目录：.iss 顶部新增 `#define MyBuildDir "cmake-build-release-visual-studio"`，5 处产物 Source 统一引用 `{#MyBuildDir}\`。
 - **踩坑**：只改 `CMakeLists.txt` 版本号后直接 `cmake --build --target ...` 不会重写 JUCE 生成的 `*_resources.rc`（EXE 版本信息仍是旧值）；必须先 `cmake --preset msvc` 重新 configure，必要时删除 `build/msvc/*/JuceLibraryCode/*_resources.rc` 触发重新生成。
 
 ---
