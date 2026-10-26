@@ -13,12 +13,13 @@
 #   dist/Y2Kmeter-<version>-macOS.dmg   （分发用磁盘镜像，内含上面的 pkg）
 #
 # 前置条件：
-#   在 IDE（CLion 等）里已经用 Release 配置把下面 5 个 target 构建出来：
-#     build/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.app
-#     build/Y2Kmeter_artefacts/Release/VST3/Y2Kmeter.vst3
-#     build/Y2Kmeter_artefacts/Release/AU/Y2Kmeter.component
-#     build/Y2Kmeter_milkdrop_artefacts/Release/VST3/Y2Kmeter_milkdrop.vst3
-#     build/Y2Kmeter_milkdrop_artefacts/Release/AU/Y2Kmeter_milkdrop.component
+#   在 IDE（CLion 等）里已经用 Release 配置把下面 5 个 target 构建出来。
+#   默认从 CLion 的构建目录 cmake-build-release/ 取产物（可用 --build-dir 覆盖）：
+#     cmake-build-release/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.app
+#     cmake-build-release/Y2Kmeter_artefacts/Release/VST3/Y2Kmeter.vst3
+#     cmake-build-release/Y2Kmeter_artefacts/Release/AU/Y2Kmeter.component
+#     cmake-build-release/Y2Kmeter_milkdrop_artefacts/Release/VST3/Y2Kmeter_milkdrop.vst3
+#     cmake-build-release/Y2Kmeter_milkdrop_artefacts/Release/AU/Y2Kmeter_milkdrop.component
 #   本脚本不负责触发 cmake 构建，只基于现有产物做签名 + 打包。
 #
 # 依赖：command line tools 自带的 ditto / pkgbuild / productbuild / hdiutil / codesign
@@ -36,7 +37,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
-BUILD_DIR="${PROJECT_ROOT}/build"
+# 默认从 CLion 的 Release 构建目录取产物（cmake-build-release）。
+#   可用 --build-dir 覆盖（例如命令行构建的 build/）。
+BUILD_DIR="${PROJECT_ROOT}/cmake-build-release"
 DIST_DIR="${PROJECT_ROOT}/dist"
 WORK_DIR="${DIST_DIR}/.mac_installer_work"
 STAGE_DIR="${WORK_DIR}/stage"
@@ -52,11 +55,12 @@ PLUGINS_PKG_ID="${PKG_ID_BASE}.plugins"
 MILKDROP_PKG_ID="${PKG_ID_BASE}.milkdrop"
 
 # ---- 构建产物路径 -------------------------------------------------------------
-STANDALONE_APP="${BUILD_DIR}/Y2Kmeter_artefacts/Release/Standalone/${PRODUCT_NAME}.app"
-VST3_BUNDLE="${BUILD_DIR}/Y2Kmeter_artefacts/Release/VST3/${PRODUCT_NAME}.vst3"
-AU_BUNDLE="${BUILD_DIR}/Y2Kmeter_artefacts/Release/AU/${PRODUCT_NAME}.component"
-MILKDROP_VST3_BUNDLE="${BUILD_DIR}/Y2Kmeter_milkdrop_artefacts/Release/VST3/${MILKDROP_NAME}.vst3"
-MILKDROP_AU_BUNDLE="${BUILD_DIR}/Y2Kmeter_milkdrop_artefacts/Release/AU/${MILKDROP_NAME}.component"
+#   注意：这里先留空，等参数解析完成（--build-dir 可能改写 BUILD_DIR）后再计算。
+STANDALONE_APP=""
+VST3_BUNDLE=""
+AU_BUNDLE=""
+MILKDROP_VST3_BUNDLE=""
+MILKDROP_AU_BUNDLE=""
 
 # ---- 暂存区副本（签名只作用于这些副本，构建目录里的原始产物保持不动）--------
 STAGED_APP="${STAGE_DIR}/standalone/${PRODUCT_NAME}.app"
@@ -111,6 +115,10 @@ Usage:
 
 Options:
   --version VER     Override version (default: parsed from CMakeLists.txt).
+  --build-dir DIR   Build directory to take artifacts from
+                    (default: ./cmake-build-release, the CLion Release dir).
+                    e.g. --build-dir build  (CLI cmake build)
+                         --build-dir cmake-build-relwithdebinfo
   --no-sign         Skip codesign before packaging.
   --identity NAME   Codesign identity (default: "-" ad-hoc).
                     e.g. --identity "Developer ID Application: Your Name (TEAMID)"
@@ -121,7 +129,11 @@ Options:
 
 Examples:
   # 本地自测：ad-hoc 签名，打完整包（Standalone + 完整版插件 + milkdrop 插件）
+  #   默认从 CLion 的 cmake-build-release 取产物
   ./build_macos_installer.sh
+
+  # 从命令行 cmake 的 build/ 目录取产物
+  ./build_macos_installer.sh --build-dir build
 
   # 正式发布：Developer ID 签名（之后仍需 notarize）
   ./build_macos_installer.sh --identity "Developer ID Application: iisaacbeats (XXXXXXXXXX)"
@@ -150,6 +162,14 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --build-dir)
+      BUILD_DIR="${2:-}"
+      if [[ -z "${BUILD_DIR}" ]]; then
+        echo "[ERROR] --build-dir requires a value" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -161,6 +181,20 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --build-dir 允许相对路径：统一解析为绝对路径（相对调用者当前目录）
+if [[ "${BUILD_DIR}" != /* ]]; then
+  BUILD_DIR="$(cd "${BUILD_DIR}" 2>/dev/null && pwd || echo "${BUILD_DIR}")"
+fi
+
+# ---- 计算构建产物路径（基于最终的 BUILD_DIR）----------------------------------
+STANDALONE_APP="${BUILD_DIR}/Y2Kmeter_artefacts/Release/Standalone/${PRODUCT_NAME}.app"
+VST3_BUNDLE="${BUILD_DIR}/Y2Kmeter_artefacts/Release/VST3/${PRODUCT_NAME}.vst3"
+AU_BUNDLE="${BUILD_DIR}/Y2Kmeter_artefacts/Release/AU/${PRODUCT_NAME}.component"
+MILKDROP_VST3_BUNDLE="${BUILD_DIR}/Y2Kmeter_milkdrop_artefacts/Release/VST3/${MILKDROP_NAME}.vst3"
+MILKDROP_AU_BUNDLE="${BUILD_DIR}/Y2Kmeter_milkdrop_artefacts/Release/AU/${MILKDROP_NAME}.component"
+
+log "  - Build dir: ${BUILD_DIR}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "[ERROR] This script must run on macOS." >&2
@@ -224,8 +258,9 @@ log "Step 2/7 Validate build artifacts"
 
 if [[ ! -d "${STANDALONE_APP}" ]]; then
   echo "[ERROR] Missing standalone app: ${STANDALONE_APP}" >&2
-  echo "[HINT] Build first:" >&2
-  echo "       cmake --build build --target Y2Kmeter_Standalone" >&2
+  echo "[HINT] Build the Release target in CLion first, or specify the build dir:" >&2
+  echo "       cmake --build ${BUILD_DIR} --target Y2Kmeter_Standalone" >&2
+  echo "       ./build_macos_installer.sh --build-dir build   # CLI build dir" >&2
   exit 1
 fi
 log "  - App : ${STANDALONE_APP} [$(bundle_archs "${STANDALONE_APP}")]"
