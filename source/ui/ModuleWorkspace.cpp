@@ -1555,7 +1555,12 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
 
     auto options = juce::PopupMenu::Options()
         .withMinimumWidth (menuMinWidth)
-        .withTargetComponent (getTopLevelComponent());  // 确保 PopupMenu 窗口有正确的 owner，在全屏主窗口上方可见
+        // 目标组件用 workspace 自身（而不是顶层窗口）：
+        //   · 与 workspace 同级/同屏，菜单的 DPI 缩放与锚点都更自然；
+        //   · 让 PinkXP::getInWindowMenuHost 能从它一路向上找到 Editor 的 GL 表面，
+        //     伪全屏铺满整屏时把菜单挂进窗口内绘制（避免被主窗口表面压住）。
+        //   targetArea 紧接着会被 withTargetScreenArea 覆盖，不受影响。
+        .withTargetComponent (*this);
 
     // Popup 左右边框（LookAndFeel 会把它加在菜单宽度两侧）
     const int popupBorder = lfRef.getPopupMenuBorderSizeWithOptions (options);
@@ -3097,18 +3102,22 @@ void ModuleWorkspace::rebuildLayoutPresetItems()
     layoutPresetBox.clear (juce::dontSendNotification);
 
     // 驻留态：窗口已经是「屏幕宽 × 条高」，其它预设会把窗口改成别的形状
-    //   并破坏 AppBar 占位，因此只保留当前这一侧的横向条。
-    //   · 用 placeholder 呈现形态文本（selectedId 保持 0）：ComboBox 对"重复
+    //   并破坏 AppBar 占位，因此只列出"条状"预设（全部共用同一套贴边/条高流程，
+    //   只换条内模块序列，不会把窗口搞大）。
+    //   · 用 placeholder 呈现分组名（selectedId 保持 0）：ComboBox 对"重复
     //     选中同一项"不会发 onChange，若预选中，用户点它就没有任何反应。
     if (stickActive)
     {
-        const int id = stickBottomAligned ? (int) LayoutPreset::horizontalBottom
-                                          : (int) LayoutPreset::horizontalFull;
-        const juce::String label = stickBottomAligned ? "HORIZONTAL BAR(B)"
-                                                      : "HORIZONTAL BAR(T)";
+        // 经典条的 id 必须跟当前驻留侧一致（2 = 贴顶 / 3 = 贴底），
+        //   其余变体的贴边方向由 Editor 按 stickBottomAligned 自动决定。
+        const int classicId = stickBottomAligned ? (int) LayoutPreset::horizontalBottom
+                                                 : (int) LayoutPreset::horizontalFull;
 
-        layoutPresetBox.setTextWhenNothingSelected (label);
-        layoutPresetBox.addItem (label, id);
+        layoutPresetBox.setTextWhenNothingSelected (stickPresetLabel);
+        layoutPresetBox.addItem ("BAR: CLASSIC",     classicId);
+        layoutPresetBox.addItem ("BAR: SPECTROGRAM", (int) LayoutPreset::stickBarSpectrogram);
+        layoutPresetBox.addItem ("BAR: MILKDROP",    (int) LayoutPreset::stickBarMilkdrop);
+        layoutPresetBox.addItem ("BAR: SPEC + MILK", (int) LayoutPreset::stickBarSpecMilk);
         layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
         return;
     }
@@ -3123,6 +3132,16 @@ void ModuleWorkspace::rebuildLayoutPresetItems()
     layoutPresetBox.addItem ("Broadcast Loudness",  (int) LayoutPreset::broadcastLoudness);
     layoutPresetBox.addItem ("Only Milkdrop",       (int) LayoutPreset::onlyMilkdrop);
     layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
+}
+
+void ModuleWorkspace::setStickPresetLabel (const juce::String& label)
+{
+    // 非驻留态不显示该 placeholder（下拉里是完整预设列表），无需重建
+    if (! stickActive || stickPresetLabel == label)
+        return;
+
+    stickPresetLabel = label;
+    rebuildLayoutPresetItems();
 }
 
 void ModuleWorkspace::setStickUiVisible (bool shouldBeVisible)

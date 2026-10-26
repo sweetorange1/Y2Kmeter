@@ -33,12 +33,18 @@
 
 #include <juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h>
 
-// JUCE 的 juce_IncludeModuleHeaders.h 在 macOS（JUCE_MAC）下会定义
-//   #define Point juce::Point
-// 且该宏在头文件包含链中未被 undef（Component 已被 juce_BasicNativeHeaders.h 清理，
-// Point 却漏网），会把后续自己头文件里的 juce::Point<int> 二次展开成
-// juce::juce::Point<int>。因此在包含项目自己的头文件之前还原该宏。
+// JUCE 的 juce_IncludeModuleHeaders.h 会向本 TU 泄漏"类型名宏"，且不会自己清理：
+//   #define Component juce::Component     （无平台条件，所有平台都定义）
+//   #if JUCE_MAC
+//    #define Point juce::Point
+//   #endif
+// 它们会把后续项目头文件里本来就写全限定名的 juce::Component / juce::Point
+// 二次展开成 juce::juce::Component / juce::juce::Point —— MSVC 报
+// C2039 "juce": 不是 "juce" 的成员（例：PinkXPStyle.h 的 juce::Component*）。
+// JUCE 里只有 plugin client 自己的实现依赖这两个宏，我们一律写全限定名，
+// 因此在包含项目自己的头文件之前把它们还原。
 #undef Point
+#undef Component
 
 // 我们需要直接访问 Y2KmeterAudioProcessorEditor（填音频源下拉 + 订阅回调）
 #include "../../PluginEditor.h"

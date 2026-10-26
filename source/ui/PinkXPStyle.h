@@ -209,6 +209,25 @@ namespace PinkXP
     bool isStickDockActive() noexcept;
     bool isStickDockBottom() noexcept;
 
+    // ==========================================================
+    // 全屏菜单宿主（Windows 专项）
+    //   "伪全屏"（双击标题栏 / MV / Only Milkdrop 预设）在任务栏隐藏时会让主窗口
+    //   正好铺满整块显示器。此时 Windows 把这类"无边框 + 置顶 + 铺满整屏 + 整个
+    //   UI 通过一张 GL 表面呈现"的窗口按全屏窗口处理，JUCE 为 PopupMenu 创建的
+    //   独立顶层弹窗虽然确实存在（Alt-Tab 能看到它在后面），却会被压在主窗口
+    //   表面之下 —— 表现就是"点了下拉框/右键菜单没反应"。
+    //
+    //   唯一可靠的做法：把菜单挂进窗口自己的 GL 表面内部（OpenGLContext 的挂载点，
+    //   也就是 Editor），让它成为窗口内容的一部分，彻底不依赖系统窗口 Z 序。
+    //
+    //   返回 nullptr 表示"不启用"，菜单继续走 JUCE 默认的独立顶层窗口，可以自由
+    //   伸出窗口外。以下情况一律返回 nullptr，保证普通窗口模式零行为变化：
+    //     · 非 Windows（macOS 走原生全屏，弹窗层级本来就是对的）
+    //     · 非 Standalone（VST3/AU 顶层窗口归宿主，不能往里塞子组件）
+    //     · 主窗口没有铺满整块显示器（任务栏可见 / 普通窗口 / stick 驻留条）
+    // ==========================================================
+    juce::Component* getInWindowMenuHost (juce::Component* targetComponent);
+
     // 格式化频率读数：<1kHz 显示 "xxx Hz"，>=1kHz 显示 "x.x kHz"
     juce::String formatFreqHz(float hz);
 
@@ -389,6 +408,13 @@ public:
     //   弹出菜单整体推到条带上方。这里放宽弹窗的允许区域（到整个显示器），
     //   让菜单按默认逻辑贴着下拉框展开，可以盖在条带上。
     juce::PopupMenu::Options getOptionsForComboBoxPopupMenu (juce::ComboBox&, juce::Label&) override;
+
+    // 全屏（主窗口铺满整块显示器）时把弹出菜单挂进窗口内的 GL 表面，
+    //   避免独立顶层弹窗被主窗口表面压住（详见 PinkXP::getInWindowMenuHost）。
+    //   JUCE 的 MenuWindow 对【每个】菜单都会调用本方法决定父组件，所以这一个
+    //   重写点即可覆盖 ComboBox 下拉、右键"添加模块"菜单以及所有其它 PopupMenu。
+    //   其余情况原样返回 options.getParentComponent()，行为与 JUCE 默认完全一致。
+    juce::Component* getParentComponentForMenuOptions (const juce::PopupMenu::Options&) override;
 };
 
 // 进程级单例 LookAndFeel

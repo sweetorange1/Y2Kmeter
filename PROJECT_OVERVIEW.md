@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.9.7`）
+- **产品名**：`Y2Kmeter` （版本：`2.9.8`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -56,9 +56,10 @@
 - **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
 - 拖入图片生成「拼豆像素画」贴到桌面背景
 
-**⑤ 布局预设**（8 个，编号 4 / 8 已废弃）
+**⑤ 布局预设**（8 个常规 + 3 个 stick 条状变体，编号 4 / 8 已废弃）
 
 - 默认网格 / 横向铺满（顶部 / 底部）/ MV（全屏 + 模块条 + Milkdrop）/ Studio Monitor 双行监听 / Focus + Sidecar 主视觉 + 仪表列 / Broadcast Loudness 广播响度合规 / Only Milkdrop 全屏单模块
+- **stick 条状变体**（仅 stick 模式下出现在下拉里，条高同为 250px，只是条内模块不同）：`BAR: CLASSIC` 经典条 / `BAR: SPECTROGRAM`（3D 瀑布 → 2D 瀑布）/ `BAR: MILKDROP`（Stereo Field → Milkdrop）/ `BAR: SPEC + MILK`（两者叠加）
 
 **⑥ 桌面集成（Standalone 专属）**
 
@@ -272,8 +273,9 @@
 ### 4.4 `ModuleWorkspace`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
 - **模块工厂**：`setModuleFactory(f)`，Editor 侧会按 `ModuleType` 构造具体 `ModulePanel` 派生类（见 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `createModule`）。
 - **底部 Toolbar 组件**（自左至右）：`ThemeSwatchBar` → 布局预设下拉 + Save/Load → Grid → FPS → GAIN → Source → Hide。
-- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / mv=5 / studioMonitor=6 / focusSidecar=7 / broadcastLoudness=9 / onlyMilkdrop=10`（编号 `4`、`8` 已废弃，保留空洞以兼容历史存档）。
+- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / mv=5 / studioMonitor=6 / focusSidecar=7 / broadcastLoudness=9 / onlyMilkdrop=10`（编号 `4`、`8` 已废弃，保留空洞以兼容历史存档）；另有三条 stick 条状变体 `stickBarSpectrogram=11 / stickBarMilkdrop=12 / stickBarSpecMilk=13`。
   - **Horizontal Bar T/B (2/3)**：横向铺满屏幕宽度，默认模块横向等分 canvas；Preset 2 贴屏幕顶部、Preset 3 贴屏幕底部。默认模块序列为 `Spectrogram3D / LUFS RT / VU / StereoField / Spectrum / OscWave / Waveform`（v2.7.3 起将 `Dynamics` 替换为 `LUFS RT` 并拉短，`VU`/`StereoField` 拉宽以适配低分辨率屏幕）。
+  - **stick 条状变体 (11/12/13)**：只在 stick 驻留态的下拉里出现（避免改窗口形状破坏 AppBar 占位）。三条与 2/3 共用**同一套**"屏幕宽 × 条高 250"几何 + 网格对齐 + redock 流程，仅条内模块序列/宽度权重不同：11 = `Spectrogram` 替换 `Spectrogram3D`；12 = `Milkdrop` 替换 `StereoField`（权重 2.2，窄条靠加宽才看得清）；13 = 两者同时替换。贴顶/贴底由当前 dock 侧（T/B）决定，`applyLayoutPreset` 用 `stickActive ? stickBottomAligned : (presetId==3)` 判定；应用后回写 `ModuleWorkspace::setStickPresetLabel()`，下拉 placeholder 显示当前条状预设名。
   - **MV (Preset 5)**：**Windows** 铺满当前显示器 userArea（视觉等同全屏）；**macOS** 铺满 totalArea 后调用 `rw->setFullScreen(true)` 进入系统原生全屏（隐藏菜单栏/Dock）。上方 180px 横向模块条（同 Preset 2 的 7 个默认模块），下方 Milkdrop 模块占满剩余 canvas 区域。代码位于 `applyLayoutPreset` case 5。
   - **Studio Monitor (6)**：双行监听——上排频谱行（`Spectrum / Spectrogram / Waveform`，拉宽 ≈1.5:1 保证频率信号可读）+ 下排仪表行（`VU / StereoField / LUFS RT / TruePeak`，半圆仪表保持 ≈2:1 避免空白）。
   - **Focus + Sidecar (7)**：左 65% `Spectrogram` 主视觉（普通瀑布，帧率友好）+ 右 35% `VU / StereoField / LUFS RT` 竖排。
@@ -4176,6 +4178,54 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 ### 7. 版本
 
 - 版本号统一为 **2.9.7**：`CMakeLists.txt` 三处、`README.md` 徽章、`Y2Kmeter_installer.iss`、`PluginEditor.cpp` 抬头水印、`PROJECT_OVERVIEW.md` 当前版本声明。
+
+---
+
+## v2.9.8：全屏弹窗遮挡修复（A 方案）+ stick 条状预设扩展
+
+> 本轮两件事：① 修掉"任务栏隐藏 + 双击全屏"后所有二级弹窗被主窗口盖住的老 bug（改成窗口内渲染，彻底不依赖系统 Z 序）；② stick 驻留态从 1 个条状预设扩到 4 个。
+
+### 1. 全屏下 PopupMenu 被主窗口遮挡（根因 + A 方案）
+
+**现象**：任务栏隐藏时双击抬头进入伪全屏（窗口 = 整块显示器）后，点底部"布局预设 / Source"下拉、右键"添加模块"，弹出的菜单不可见。
+
+**根因链**：
+
+1. 伪全屏 = `toggleFakeFullScreen()` → `top->setBounds(display->userArea)`；任务栏可见时窗口比整屏少一条，隐藏后 `userArea == totalArea`，窗口正好铺满整块显示器。
+2. 主窗口是 `WS_POPUP` + `WS_EX_APPWINDOW` + 置顶（`ui.alwaysOnTop` 默认 true），且整个 UI 通过 Editor 的 `OpenGLContext` 以**一张 GL 表面**呈现（Windows 上由 `createNonRepaintingEmbeddedWindowsPeer` 建一个覆盖客户区的 `WS_CHILD` 子 HWND 承载）。
+3. JUCE 的 `PopupMenu` 是**独立顶层窗口**（`MenuWindow`：`setAlwaysOnTop(true)` + `addToDesktop(windowIsTemporary|windowIgnoresKeyPresses)`），与主窗口是两个互不相干的 HWND。Windows 把"无边框 + 置顶 + 铺满整屏"的窗口按全屏窗口处理，独立弹窗虽然创建成功（Alt-Tab 能看到它在后面）却被压在主窗口表面之下。
+4. 也解释了 v2.5.8 的老 workaround 为什么曾经"有效"：它靠"铺到 `userArea`、留出任务栏那条边"避免窗口变成整屏；任务栏一隐藏，前提消失，bug 原样复现（MV / Only Milkdrop 预设同理）。
+
+**修复（A 方案：让菜单渲染进窗口自己的 GL 表面）**：
+
+- `PinkXPStyle.h/.cpp` 新增 `PinkXP::getInWindowMenuHost(target)`：从 target 向上找**最外层 GL 渲染表面宿主**（= Editor），并做几何闸门——只有 Standalone + 某个显示器的 `totalArea` 被窗口完全覆盖时才返回宿主。
+- `PinkXPLookAndFeel::getParentComponentForMenuOptions()` 重写：已有父组件（子菜单 / 显式 withParentComponent）原样返回；否则返回上面的宿主。JUCE 的 `MenuWindow` 对每个菜单都会调它，因此 ComboBox 下拉、右键"添加模块"菜单、其它所有 PopupMenu 一处全覆盖。
+- `ModuleWorkspace::showAddMenu()` 的 `withTargetComponent` 由顶层窗口改为 workspace 自身（host 查找能向上走到 Editor；`targetArea` 随后被 `withScreenArea` 覆盖，不受影响）。
+
+**为什么不会污染非全屏模式**：判定完全基于打开菜单那一刻的几何 + 组件结构，**没有全局开关、无需复位**。任务栏可见（窗口 = `userArea` < `totalArea`）、插件宿主（`isStandaloneApp()` 为假）、非 Windows、stick 驻留条、浮动模块窗口 → 一律返回 nullptr，菜单仍是独立顶层窗口，可自由伸出窗口外，行为与改动前逐字节一致。同时修掉一处历史误判：`menuWasHiddenBecauseOfAppChange` 类问题不再依赖窗口层级。
+
+**已知的视觉差异（仅"铺满整屏"时）**：菜单没有系统投影；`MenuWindow` 在父子模式下会多画一圈 1px 深色框（`LookAndFeel_V2::drawResizableFrame`），观感上等同菜单描边。
+
+### 2. `Component` 宏泄漏导致的编译错误
+
+- **报错**：`PinkXPStyle.h(229/417): error C2039 "juce": 不是 "juce" 的成员`（`juce_OpenGLAppComponent.h(35)` 只是 `namespace juce` 的声明位置）。
+- **根因**：`juce_audio_plugin_client/detail/juce_IncludeModuleHeaders.h` 无条件 `#define Component juce::Component`（macOS 下还有 `#define Point juce::Point`），泄漏到 `Y2KStandaloneApp.cpp`，把之后包含进来头文件里的 `juce::Component` 二次展开成 `juce::juce::Component`。该头文件此前从未出现 `juce::Component`，本次新增声明才踩到。
+- **修复**：`Y2KStandaloneApp.cpp` 在包含项目头文件之前 `#undef Point` **和** `#undef Component`（与既有 `#undef Point` 同一处，注释已补全）。全项目仅此一个 TU 包含该头，JUCE 需要这两个宏的部分都在 undef 之前完成展开。
+
+### 3. stick 条状预设扩展（1 → 4）
+
+- **新增 `LayoutPreset`（11~13，只在 stick 下拉里出现）**：
+  - `stickBarSpectrogram = 11`：`Spectrogram3D` → `Spectrogram`（2D 瀑布，条高有限时更易读、更省 GPU）；
+  - `stickBarMilkdrop = 12`：`StereoField` → `Milkdrop`（权重给到 2.2，窄条靠加宽才看得清画面）；
+  - `stickBarSpecMilk = 13`：两者同时替换。
+- **共用既有几何流程**：`applyLayoutPreset` 的分支条件抽成 `isHorizontalStripPreset()`（2/3/11/12/13 共用）；贴边方向 `stickActive ? stickBottomAligned : (presetId == 3)`；条高恒为 250、8px 网格对齐、resizeLimits 放宽/收紧、末尾 `redockStickAfterGeometryChange()` 全部沿用 → **窗口永远只是那一条，不会被撑大**，AppBar 占位也不会跑偏。
+- **模块序列/宽度权重按 id 选择**（`orderClassic / orderSpectrogram / orderMilkdrop / orderSpecMilk` + 对应 `ratios* / total*`）；Milkdrop 变体权重 `0.9/0.6/0.9/2.2/1.3/0.9/1.3`，SPEC+MILK `1.0/0.7/0.9/2.0/1.2/0.9/1.2`。
+- **下拉与提示**：stick 下拉列出 `BAR: CLASSIC / BAR: SPECTROGRAM / BAR: MILKDROP / BAR: SPEC + MILK`（经典条的 id 仍跟随驻留侧 2/3）；新增 `ModuleWorkspace::setStickPresetLabel()`，Editor 应用预设后回写，placeholder 显示当前条状预设名。
+- **已知边界**：`libprojectM` 进程内单实例，若用户先把 Milkdrop 模块脱离成浮动窗口再选 MILKDROP 条预设，嵌入式那块会因 Editor 侧 renderer 被挂起而显示不可用提示（不崩溃）；普通单条使用不受影响。
+
+### 4. 版本
+
+- 版本号统一为 **2.9.8**：`CMakeLists.txt` 三处（`project()` + 两个 `juce_add_plugin`）、`README.md` 徽章、`Y2Kmeter_installer.iss`、`PluginEditor.cpp` 抬头四处字面量、`PROJECT_OVERVIEW.md` 当前版本声明。
 
 ---
 

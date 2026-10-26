@@ -4,6 +4,10 @@
 #include "source/ui/palette/PaletteGenerator.h"
 #include "source/Y2KLogging.h"
 
+// 全屏菜单宿主判定需要识别"哪一层是 OpenGL 渲染表面宿主"
+//   （Editor 在构造末尾 openGLContext.attachTo(*this)）。
+#include <juce_opengl/juce_opengl.h>
+
 #include <unordered_map>
 
 // ==========================================================
@@ -63,6 +67,73 @@ namespace PinkXP
 
     bool isStickDockActive() noexcept { return gStickDockActive; }
     bool isStickDockBottom() noexcept { return gStickDockBottom; }
+
+    // ==========================================================
+    // 全屏菜单宿主（Windows 专项）—— 详见头文件说明
+    //
+    //   判定完全基于"打开菜单这一刻的真实几何/组件结构"，不维护任何全局状态，
+    //   因此不存在"进了全屏忘了复位"的残留风险：
+    //     · 窗口不铺满整块显示器 → 返回 nullptr → 菜单仍是独立顶层窗口；
+    //     · 退出伪全屏（setBounds 回原尺寸）后，几何条件自动失效，行为立刻复原。
+    // ==========================================================
+    juce::Component* getInWindowMenuHost (juce::Component* targetComponent)
+    {
+       #if JUCE_WINDOWS
+        if (targetComponent == nullptr)
+            return nullptr;
+
+        // VST3/AU 下顶层窗口归宿主所有：往宿主窗口里塞子组件会污染宿主界面
+        if (! juce::JUCEApplicationBase::isStandaloneApp())
+            return nullptr;
+
+        // 从起点一路向上，取【最外层】的 GL 渲染表面宿主。
+        // 命中项就是 Editor（openGLContext.attachTo(*this) 的挂载点）；
+        // 取最外层是为了跳过浮动 Milkdrop 等嵌套 GL 上下文。
+        auto findGlHost = [] (juce::Component* start) -> juce::Component*
+        {
+            juce::Component* host = nullptr;
+
+            for (auto* c = start; c != nullptr; c = c->getParentComponent())
+                if (juce::OpenGLContext::getContextAttachedTo (*c) != nullptr)
+                    host = c;
+
+            return host;
+        };
+
+        auto* host = findGlHost (targetComponent);
+
+        // 兜底：调用方若把 targetComponent 传成了顶层窗口本身
+        //（历史实现如此），就从窗口内容组件重新向下找一次。
+        if (host == nullptr)
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (targetComponent->getTopLevelComponent()))
+                host = findGlHost (rw->getContentComponent());
+
+        if (host == nullptr)
+            return nullptr;
+
+        auto* top = host->getTopLevelComponent();
+        if (top == nullptr || top == host)
+            return nullptr;
+
+        // 关键闸门：只有当主窗口铺满【整块显示器】时才启用。
+        //   · 任务栏可见时窗口 = userArea，比 totalArea 少一条 → 条件不成立，
+        //     菜单照旧走独立顶层窗口（可自由伸出窗口外），行为零变化；
+        //   · 任务栏隐藏后 userArea == totalArea，伪全屏窗口正好铺满整屏 →
+        //     这正是 Windows 把主窗口当全屏窗口、独立弹窗被压住的前提。
+        const auto windowBounds = top->getScreenBounds();
+        if (windowBounds.isEmpty())
+            return nullptr;
+
+        for (const auto& d : juce::Desktop::getInstance().getDisplays().displays)
+            if (d.totalArea.getIntersection (windowBounds) == d.totalArea)
+                return host;
+
+        return nullptr;
+       #else
+        juce::ignoreUnused (targetComponent);
+        return nullptr;
+       #endif
+    }
 
     float uiScale() noexcept { return gUiScale; }
 
@@ -1929,6 +2000,29 @@ juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce
    #else
     return options;
    #endif
+}
+
+// ==========================================================
+// 全屏菜单父组件
+//   背景：JUCE 的 PopupMenu 默认创建【独立顶层窗口】—— MenuWindow 内部执行
+//   setAlwaysOnTop(true) + addToDesktop(windowIsTemporary|windowIgnoresKeyPresses)，
+//   与主窗口是两个互不相干的 HWND。伪全屏在任务栏隐藏时让主窗口正好铺满整块
+//   显示器，Windows 会把这种"无边框 + 置顶 + 整屏 + 单张 GL 表面"的窗口按全屏
+//   窗口处理，独立弹窗会被压在主窗口表面之下（菜单确实创建了，只是看不见）。
+//
+//   这里把菜单挂到 GL 表面宿主（Editor）下面：菜单成为窗口内容的一部分，
+//   由 Editor 的 OpenGL 合成统一绘制，因此永远在主窗口表面之内、不可能被压住。
+//   普通窗口模式 / 插件宿主 / 非 Windows 下 getInWindowMenuHost 返回 nullptr，
+//   菜单仍是独立顶层窗口，可自由伸出窗口外，行为与改动前完全一致。
+// ==========================================================
+juce::Component* PinkXPLookAndFeel::getParentComponentForMenuOptions (const juce::PopupMenu::Options& options)
+{
+    // 已经有父组件（子菜单、或调用方显式 withParentComponent）时原样保留，
+    //   避免改写层级导致子菜单定位 / 关闭逻辑错乱。
+    if (auto* existing = options.getParentComponent())
+        return existing;
+
+    return PinkXP::getInWindowMenuHost (options.getTargetComponent());
 }
 
 PinkXPLookAndFeel& getPinkXPLookAndFeel()

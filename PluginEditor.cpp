@@ -206,6 +206,30 @@ juce::Rectangle<int> resolveDisplayArea (const juce::Rectangle<int>& realArea)
     return juce::Rectangle<int> (0, 0, w, h);
 }
 
+// ----------------------------------------------------------
+// 是否为"横向条"预设（Preset 2/3 经典条 + 11~13 的 stick 变体）
+//   · 这些预设共用同一套流程：窗口切成「屏幕宽 × 条高（250）」→ 贴顶/贴底
+//     → 条内模块横向等分 → stick 态下重新提交 AppBar 占位；
+//   · 彼此只在条内模块序列 / 宽度权重上不同，条高一律不变，避免把窗口搞大。
+// ----------------------------------------------------------
+bool isHorizontalStripPreset (int presetId)
+{
+    return presetId == (int) ModuleWorkspace::LayoutPreset::horizontalFull
+        || presetId == (int) ModuleWorkspace::LayoutPreset::horizontalBottom
+        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpectrogram
+        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMilkdrop
+        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpecMilk;
+}
+
+// 条状预设在 stick 下拉 placeholder 里显示的名字（与 ModuleWorkspace 的条目文案一致）
+juce::String stripPresetLabel (int presetId)
+{
+    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpectrogram) return "BAR: SPECTROGRAM";
+    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMilkdrop)    return "BAR: MILKDROP";
+    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpecMilk)    return "BAR: SPEC + MILK";
+    return "BAR: CLASSIC";
+}
+
 // UI 密度缩放的判据区域（跨平台差异）：
 //   · Windows：必须用 totalArea —— AppBar/stick 驻留会真实压缩 userArea，
 //     条高拉大时若用 userArea 会把"屏幕变矮了"的假象喂给分级表；
@@ -510,7 +534,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.9.7");
+        const int versionW = versionFont.getStringWidth ("v2.9.8");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -551,7 +575,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.7";
+        const juce::String versionText = "v2.9.8";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -2434,20 +2458,25 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         setSize (960, 640);
         seedDefaultModules();
     }
-    else if (presetId == 2 || presetId == 3)
+    else if (isHorizontalStripPreset (presetId))
     {
-        // Preset 2 / 3: 横向铺满屏幕宽度（高 250px）
-        //   · Preset 2 = 贴屏幕顶部 (Y = userArea.getY())
-        //   · Preset 3 = 贴屏幕底部 (Y = userArea.getBottom() - targetH)
+        // 横向条预设（Preset 2/3 经典 + 11~13 的 stick 变体）：铺满屏幕宽度、固定高 250px
+        //   · Preset 2      = 贴屏幕顶部 (Y = userArea.getY())
+        //   · Preset 3      = 贴屏幕底部 (Y = userArea.getBottom() - targetH)
+        //   · 11/12/13      = stick 条状变体：贴顶/贴底跟随当前 dock 侧（T/B），
+        //                     条高与下面所有尺寸推导和经典条完全一致（不会变大）
         //
-        //   其余逻辑（宽度取屏幕 userArea 宽、固定高 250、横向等分 7 个默认模块、
+        //   其余逻辑（宽度取屏幕 userArea 宽、固定高 250、横向等分 7 个模块、
         //   放开 resizeLimits）完全相同。之前 Preset 2 累积 *2/3 导致高度不断缩水
         //   的问题已在上一轮改成常量修复。
         //
         //   Y 必须基于 userArea 而不是 top->getY()：Editor 被用户拖到副屏后，
         //   top->getY() 是跨屏绝对坐标（可能是 1440 或负数），而要的是"当前屏的
         //   顶/底边在屏幕坐标中的 Y"——这正是 userArea.getY() / getBottom()。
-        const bool bottomAligned = (presetId == 3);
+        //
+        //   stick 驻留态：条贴哪一侧以 AppBar 的 T/B 为准（下拉里列的经典条 id
+        //   本来就与当前侧一致，新变体则靠 stickBottomAligned 决定）。
+        const bool bottomAligned = stickActive ? stickBottomAligned : (presetId == 3);
 
         auto* top = getTopLevelComponent();
         if (top == nullptr) top = this;
@@ -2553,8 +2582,11 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         }
 
         // setSize / setBounds 会触发 resized()，workspace 随之拿到新 canvas。
-        //   此时按横向等分的方式铺默认 7 个模块。
-        static const ModuleType horizOrder[] = {
+        //   此时按横向等分的方式铺当前预设的条内模块序列。
+        //
+        //   条状变体只换"模块序列 + 宽度权重"，条高/贴边/网格对齐全部共用，
+        //   所以无论选哪一个，窗口都还是那一条（250px），不会被撑大。
+        static const ModuleType orderClassic[] = {
             ModuleType::spectrogram3d,
             ModuleType::lufsRealtime,
             ModuleType::vuMeter,
@@ -2563,11 +2595,70 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
             ModuleType::oscilloscopeWave,
             ModuleType::waveform
         };
+        static constexpr float ratiosClassic[] = { 1.0f, 0.7f, 1.0f, 1.0f, 1.5f, 1.0f, 1.5f };
+        static constexpr float totalClassic     = 7.7f;
+
+        // 3D 瀑布 → 2D SPECTROGRAM（更省 GPU；条上高度有限时 2D 更易读）
+        static const ModuleType orderSpectrogram[] = {
+            ModuleType::spectrogram,
+            ModuleType::lufsRealtime,
+            ModuleType::vuMeter,
+            ModuleType::stereoField,
+            ModuleType::spectrum,
+            ModuleType::oscilloscopeWave,
+            ModuleType::waveform
+        };
+        static constexpr float ratiosSpectrogram[] = { 1.0f, 0.7f, 1.0f, 1.0f, 1.5f, 1.0f, 1.5f };
+        static constexpr float totalSpectrogram     = 7.7f;
+
+        // Stereo Field → Milkdrop。条高只有一百多像素，靠加宽槽位才看得清画面，
+        //   因此把 Milkdrop 的权重给到 2.2，其余模块略微收窄。
+        static const ModuleType orderMilkdrop[] = {
+            ModuleType::spectrogram3d,
+            ModuleType::lufsRealtime,
+            ModuleType::vuMeter,
+            ModuleType::milkdrop,
+            ModuleType::spectrum,
+            ModuleType::oscilloscopeWave,
+            ModuleType::waveform
+        };
+        static constexpr float ratiosMilkdrop[] = { 0.9f, 0.6f, 0.9f, 2.2f, 1.3f, 0.9f, 1.3f };
+        static constexpr float totalMilkdrop     = 8.1f;
+
+        // 两者叠加：2D 瀑布 + Milkdrop
+        static const ModuleType orderSpecMilk[] = {
+            ModuleType::spectrogram,
+            ModuleType::lufsRealtime,
+            ModuleType::vuMeter,
+            ModuleType::milkdrop,
+            ModuleType::spectrum,
+            ModuleType::oscilloscopeWave,
+            ModuleType::waveform
+        };
+        static constexpr float ratiosSpecMilk[] = { 1.0f, 0.7f, 0.9f, 2.0f, 1.2f, 0.9f, 1.2f };
+        static constexpr float totalSpecMilk     = 7.9f;
+
+        const ModuleType* order       = orderClassic;
+        const float*      widthRatios = ratiosClassic;
+        float             totalRatio  = totalClassic;
+
+        if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpectrogram)
+        {
+            order = orderSpectrogram; widthRatios = ratiosSpectrogram; totalRatio = totalSpectrogram;
+        }
+        else if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMilkdrop)
+        {
+            order = orderMilkdrop;    widthRatios = ratiosMilkdrop;    totalRatio = totalMilkdrop;
+        }
+        else if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpecMilk)
+        {
+            order = orderSpecMilk;    widthRatios = ratiosSpecMilk;    totalRatio = totalSpecMilk;
+        }
 
         // 使用 workspace->getCanvasArea() 而不是 getLocalBounds()，
         //   后者包含底部 toolbarHeight（36px）与 chrome 控件区。
         const auto canvas = workspace->getCanvasArea();
-        const int count    = (int) (sizeof (horizOrder) / sizeof (horizOrder[0]));
+        const int count    = (int) (sizeof (orderClassic) / sizeof (orderClassic[0]));
 
         // ============================================================
         // 网格对齐：必须与 ModuleWorkspace::gridSize 保持一致（8 像素）。
@@ -2599,19 +2690,12 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
         const int totalCells    = usableW / kGrid;              // 小格数量（8px/格）
 
-        // 加权宽度分配（非均分），按以下比例从左到右：
-        //   SPECTROGRAM3D:1.0 | LUFS RT:0.7 | VU:1.0 | STEREO FIELD:1.0
-        //   SPECTRUM:1.5 | OSC WAVE:1.0 | WAVEFORM:1.5
-        static const float kWidthRatios[] = {
-            1.0f, 0.7f, 1.0f, 1.0f, 1.5f, 1.0f, 1.5f
-        };
-        static constexpr float kTotalRatio = 7.7f;
-
+        // 加权宽度分配（非均分），权重表由上面按预设选出的 widthRatios / totalRatio 决定。
         int cellsForModule[7] = {};
         int cellsAllocated = 0;
         for (int i = 0; i < count; ++i)
         {
-            int cells = (int) std::round ((float) totalCells * kWidthRatios[i] / kTotalRatio);
+            int cells = (int) std::round ((float) totalCells * widthRatios[i] / totalRatio);
             cells = juce::jmax (1, cells);
             cellsForModule[i] = cells;
             cellsAllocated += cells;
@@ -2624,7 +2708,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         int curX = x0;
         for (int i = 0; i < count; ++i)
         {
-            auto panel = createModule (horizOrder[i]);
+            auto panel = createModule (order[i]);
             if (panel == nullptr) continue;
 
             const int cellsForThis = cellsForModule[i];
@@ -2637,6 +2721,11 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
             curX += slotW;
         }
+
+        // stick 驻留态：把"当前条状预设"的名字回写到下拉 placeholder，
+        //   让用户知道现在用的是哪一种（经典 / SPECTROGRAM / MILKDROP / 叠加）。
+        if (stickActive)
+            workspace->setStickPresetLabel (stripPresetLabel (presetId));
     }
     else if (presetId == 5)
     {
@@ -3516,7 +3605,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.7";
+        const juce::String versionText = "v2.9.8";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3524,7 +3613,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v2.9.7");
+                const int versionW = versionFont.getStringWidth ("v2.9.8");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间

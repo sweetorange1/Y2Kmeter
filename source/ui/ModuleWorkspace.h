@@ -630,6 +630,8 @@ public:
     //   · Preset 8  = 已废弃（原 Mastering Chain 已删除，编号保留以兼容历史存档）
     //   · Preset 9  = Broadcast Loudness：广播响度合规
     //   · Preset 10 = Only Milkdrop：全屏 + 单个最大化 Milkdrop
+    //   · Preset 11~13 = stick 条状变体（SPECTROGRAM / MILKDROP / 两者叠加），
+    //     只在 stick 模式下拉里出现，条高与贴边逻辑同 Preset 2/3
     //   · 选中某项时调用 onLayoutPresetChanged(index)，由 Editor
     //     负责真正的布局/窗口尺寸变更（ModuleWorkspace 本身不持有
     //     顶层窗口的引用，也不了解模块工厂细节，故把具体策略委托给 Editor）
@@ -645,9 +647,25 @@ public:
         focusSidecar      = 7,  // Focus + Sidecar：主视觉 + 右侧仪表列
         // 8 = 已废弃（原 masteringChain，已删除，保留编号空洞）
         broadcastLoudness = 9,  // Broadcast Loudness：广播响度合规
-        onlyMilkdrop      = 10  // Only Milkdrop：全屏 + 单个最大化 Milkdrop
+        onlyMilkdrop      = 10, // Only Milkdrop：全屏 + 单个最大化 Milkdrop
+
+        // ---- stick 驻留态专用"条状"变体（11~13）----
+        //   · 只在 stick 模式的下拉里出现：窗口必须保持「屏幕宽 × 条高」，
+        //     上面那些会改窗口形状的预设会破坏 AppBar 占位，故不列出；
+        //   · 与经典 Horizontal Bar 共用同一套条高（250）/ 贴边 / redock 流程，
+        //     区别只在条内的模块序列与宽度权重（条高不变，不会把窗口搞大）；
+        //   · 贴顶还是贴底由当前 dock 侧（T/B 按钮）决定，不写进 id。
+        stickBarSpectrogram = 11, // 3D 瀑布 → SPECTROGRAM（2D 瀑布，更省 GPU）
+        stickBarMilkdrop    = 12, // Stereo Field → Milkdrop（多一块可视化）
+        stickBarSpecMilk    = 13  // SPECTROGRAM + Milkdrop 同时替换
     };
     std::function<void(LayoutPreset)> onLayoutPresetChanged;
+
+    // stick 驻留态：把"当前条状预设"的名字回写到下拉 placeholder。
+    //   · 只在 stick 态生效（非驻留态下拉本来就显示完整预设列表）；
+    //   · Editor 在 applyLayoutPreset 成功后调用，用户下次打开下拉就能看到
+    //     现在用的是 BAR: CLASSIC / SPECTROGRAM / MILKDROP / SPEC + MILK 中的哪一个。
+    void setStickPresetLabel (const juce::String& label);
 
     // ======================================================
     // 预设导出 / 导入回调（Save/Load 按钮触发）
@@ -995,9 +1013,13 @@ private:
     // Grid 与 layoutPresetBox 之间的竖直分割线 x 坐标（-1 = chrome 隐藏态未布局）
     int              toolbarDividerXLayout = -1;
 
+    // stick 驻留态下拉的 placeholder 文本（= 当前条状预设名，由 Editor 回写）
+    juce::String     stickPresetLabel { "BAR: CLASSIC" };
+
     // 重建预设下拉条目：
     //   · 普通态 = 全部预设
-    //   · stick 驻留态 = 仅当前这一侧的一项（HORIZONTAL BAR(T) / (B)），作为形态指示
+    //   · stick 驻留态 = 全部"条状"预设（经典 + SPECTROGRAM / MILKDROP / 叠加），
+    //     条高与贴边逻辑一致，选任何一个窗口都还是那一条
     void rebuildLayoutPresetItems();
 
     // 预设 Save/Load 按钮（紧邻 layoutPresetBox 左侧）
