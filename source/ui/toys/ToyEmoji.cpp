@@ -496,9 +496,18 @@ void EmojiAtlas::bakeOne (EmojiId id, Size size)
     };
 
     juce::Image white = renderGlyph (juce::Colours::white);
-    juce::Image black = renderGlyph (juce::Colours::black);
 
+#if JUCE_MAC
+    // macOS：Apple Color Emoji 是彩色位图字形（sbix），CoreText 绘制时忽略
+    //   前景色，白/黑两次渲染结果相同 → 双色差分判据会误判失败，进而把大量
+    //   emoji 逼进 fallback 链 + 环，触发无限递归卡死。这里改用纯覆盖率判据：
+    //   有足够非透明像素即视为字形真实存在、烘焙成功。
+    entry.ok = imageHasContent (white, 0.12f);
+#else
+    juce::Image black = renderGlyph (juce::Colours::black);
     entry.ok = probe (white, black, 0.12f);
+#endif
+
     if (entry.ok)
         entry.img = std::move (white);
     else
@@ -574,9 +583,26 @@ const juce::Image& EmojiAtlas::image (EmojiId id, Size size)
     // 未就绪返回空图，调用方跳过绘制。
     Entry& entry = entries_[i][(int) size];
 
-    // 探测失败 → 走 Tier-1 备选（递归，最多一层）
-    if (! entry.ok && emojiFallback (id) != id)
-        return image (emojiFallback (id), size);
+    // 探测失败 → 走 Tier-1 备选。
+    //   BUGFIX（卡死）：fallback 表存在环（Star ↔ Sparkles）。macOS 上彩色
+    //   emoji 会被旧的双色差分探测误判失败，一旦两个互指 fallback 的 emoji
+    //   都 !ok，这里就会沿环无限递归 → 栈溢出 → 主线程卡死（beach ball）。
+    //   改为「最多回退一层」：备选也失败时直接返回空图，绝不二次递归。
+    if (! entry.ok)
+    {
+        const EmojiId fb = emojiFallback (id);
+        if (fb != id)
+        {
+            const int fi = (int) fb;
+            if (fi >= 0 && fi < (int) EmojiId::Count)
+            {
+                Entry& fbEntry = entries_[fi][(int) size];
+                if (fbEntry.ok)
+                    return fbEntry.img;
+            }
+        }
+        return entry.img;   // 空图
+    }
 
     return entry.img;
 }

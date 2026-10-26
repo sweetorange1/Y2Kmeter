@@ -313,12 +313,23 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         const int x = area.getX() + idx * (barW + gap);
         const int labelY = area.getBottom() - labelH - readoutH;
 
-        // 标签
-        g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-        g.setColour(PinkXP::ink);
-        g.drawText(bar.label,
-                   x, labelY, barW, labelH,
-                   juce::Justification::centred, false);
+        // 标签（静态文本 → 位图缓存，v2.9.6 性能）
+        const juce::Image labelImg = PinkXP::cachedStaticTextImage (
+            bar.label, 10.0f, juce::Font::bold, PinkXP::ink);
+        if (labelImg.isValid())
+        {
+            g.drawImageAt (labelImg,
+                           x + (barW - labelImg.getWidth()) / 2,
+                           labelY + (labelH - labelImg.getHeight()) / 2,
+                           false);
+        }
+        else
+        {
+            g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
+            g.setColour(PinkXP::ink);
+            g.drawText(bar.label, x, labelY, barW, labelH,
+                       juce::Justification::centred, false);
+        }
 
         // 数字读数（防御：NaN / Inf / 过小 → 显示 -∞；其余数值做 clamp）
         const float raw = bar.smoothed;
@@ -331,13 +342,33 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         else
             readout = juce::String(juce::jlimit(-60.0f, 60.0f, val), 1);
 
-        g.setFont(PinkXP::getFont(9.0f));
-        g.setColour(isLUFS ? lufsToColour(val) : dbToColour(val));
-        g.drawText(readout,
-                   x, labelY + labelH, barW, readoutH,
-                   juce::Justification::centred, false);
+        // 读数位图缓存：值变化且距上次 ≥ 100ms 才重光栅化（10Hz 刷新）
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        const juce::Colour rc = isLUFS ? lufsToColour(val) : dbToColour(val);
+        if (readout != readoutCacheText_[idx]
+            || nowMs - readoutCacheTimeMs_[idx] >= 100.0
+            || ! readoutCache_[idx].isValid())
+        {
+            readoutCacheText_[idx]   = readout;
+            readoutCacheTimeMs_[idx] = nowMs;
+            readoutCache_[idx] = PinkXP::cachedStaticTextImage (
+                readout, 9.0f, juce::Font::plain, rc);
+        }
 
-        juce::ignoreUnused(isLUFS);
+        if (readoutCache_[idx].isValid())
+        {
+            g.drawImageAt (readoutCache_[idx],
+                           x + (barW - readoutCache_[idx].getWidth()) / 2,
+                           labelY + labelH + (readoutH - readoutCache_[idx].getHeight()) / 2,
+                           false);
+        }
+        else
+        {
+            g.setFont(PinkXP::getFont(9.0f));
+            g.setColour(rc);
+            g.drawText(readout, x, labelY + labelH, barW, readoutH,
+                       juce::Justification::centred, false);
+        }
     };
 
     drawLabel(0, barM, true);

@@ -120,6 +120,12 @@ private:
     // 5 条柱：M / S / I / L / R
     MeterBar barM, barS, barI, barL, barR;
 
+    // 读数位图缓存（v2.9.6 性能）：数字读数每帧变化，mac GL 下逐帧 drawText
+    //   开销大；缓存位图 + 100ms 节流刷新（10Hz，人眼无感知）。
+    mutable juce::Image  readoutCache_[5];
+    mutable juce::String readoutCacheText_[5];
+    mutable double       readoutCacheTimeMs_[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
+
     // 上次 tick 时间（用于峰值保持计时）
     juce::Time lastTickTime;
 

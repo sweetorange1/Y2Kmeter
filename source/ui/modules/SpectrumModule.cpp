@@ -1154,16 +1154,31 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
 // ----------------------------------------------------------
 void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
-    g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-    g.setColour(PinkXP::ink.withAlpha(0.85f));
+    // 轴标签是静态文本，但组件每帧全量重绘；用位图缓存避免每帧塑形 + 逐
+    // glyph GL 调用（mac NSOpenGL 下开销是 Windows 约 10 倍）。
+    const juce::Colour labelColour = PinkXP::ink.withAlpha(0.85f);
 
     // 左侧 dB 标签
     for (int db = (int) minDb; db <= (int) maxDb; db += 20)
     {
         const int y = (int) std::round(dbToY((float) db, canvas));
         juce::String s = (db == 0) ? " 0" : juce::String(db);
-        g.drawText(s, canvas.getX() - 32, y - 6, 28, 12,
-                   juce::Justification::centredRight, false);
+        const juce::Image img = PinkXP::cachedStaticTextImage (
+            s, 9.0f, juce::Font::plain, labelColour,
+            juce::Colours::transparentBlack, true);
+        if (img.isValid())
+        {
+            g.drawImageAt (img,
+                           canvas.getX() - 32 + (28 - img.getWidth()),
+                           y - img.getHeight() / 2, false);
+        }
+        else
+        {
+            g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
+            g.setColour(labelColour);
+            g.drawText(s, canvas.getX() - 32, y - 6, 28, 12,
+                       juce::Justification::centredRight, false);
+        }
     }
 
     // 底部 Hz 标签
@@ -1176,7 +1191,19 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
     {
         const int x = (int) std::round(freqToX(l.hz, canvas));
         if (x < canvas.getX() - 4 || x > canvas.getRight() + 4) continue;
-        g.drawText(l.label, x - 18, canvas.getBottom() + 2, 36, 12,
-                   juce::Justification::centred, false);
+        const juce::Image img = PinkXP::cachedStaticTextImage (
+            l.label, 9.0f, juce::Font::plain, labelColour,
+            juce::Colours::transparentBlack, true);
+        if (img.isValid())
+        {
+            g.drawImageAt (img, x - img.getWidth() / 2, canvas.getBottom() + 2, false);
+        }
+        else
+        {
+            g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
+            g.setColour(labelColour);
+            g.drawText(l.label, x - 18, canvas.getBottom() + 2, 36, 12,
+                       juce::Justification::centred, false);
+        }
     }
 }

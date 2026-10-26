@@ -29,7 +29,9 @@ public:
     const juce::String& getLastError() const noexcept { return lastError; }
 
 private:
-    std::unique_ptr<Impl> impl;
+    // shared_ptr：ScreenCaptureKit 的异步 completion 会持有 Impl 的引用，
+    // 避免 stop()/析构后迟到的回调访问已销毁的 Impl（悬垂指针）。
+    std::shared_ptr<Impl> impl;
 
     std::atomic<bool> running { false };
     juce::String      lastError;

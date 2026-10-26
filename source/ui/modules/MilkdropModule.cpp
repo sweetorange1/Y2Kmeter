@@ -570,6 +570,22 @@ namespace
           return appDataDir;
         return srcDir;
       };
+
+      // v2.9.6：安装包将 milkdrop_presets 压缩为单文件 zip（约 1 万个 .milk → 1 个
+      //   zip）以大幅加速 pkg 安装。这里负责：bundle 内只有 zip（无目录）时，
+      //   首次启动解压 seed 到 AppData。zip 顶层直接是 .milk 文件，故解压目标
+      //   是 appDataDir 本身（而非其父目录）。
+      auto seedZipToAppDataIfNeeded = [&](const juce::File& zipFile) -> juce::File {
+        auto parent = appDataDir.getParentDirectory();
+        if (!parent.exists())
+          parent.createDirectory();
+        if (!appDataDir.exists())
+          appDataDir.createDirectory();
+        juce::ZipFile zf (zipFile);
+        if (zf.uncompressTo (appDataDir, true).wasOk() && isValidAssetsDir (appDataDir))
+          return appDataDir;
+        return appDataDir;
+      };
      #endif
 
      #if defined (__APPLE__)
@@ -590,6 +606,16 @@ namespace
             .getChildFile(subdir);
         if (isValidAssetsDir(bundleCandidate))
           return seedToAppDataIfNeeded(bundleCandidate);
+        // 安装包压缩形态：目录被压缩成 milkdrop_presets.zip
+        if (subdir == "milkdrop_presets")
+        {
+          auto zipCandidate = contentsDir
+              .getChildFile("Resources")
+              .getChildFile("assets")
+              .getChildFile("milkdrop_presets.zip");
+          if (zipCandidate.existsAsFile())
+            return seedZipToAppDataIfNeeded(zipCandidate);
+        }
       }
       // 3) VST3 / AU bundle 内置路径：
       //    Y2Kmeter.vst3/Contents/MacOS/Y2Kmeter.vst3（或 .component）
@@ -610,6 +636,16 @@ namespace
               .getChildFile(subdir);
           if (isValidAssetsDir(pluginCandidate))
             return seedToAppDataIfNeeded(pluginCandidate);
+          // 安装包压缩形态：目录被压缩成 milkdrop_presets.zip
+          if (subdir == "milkdrop_presets")
+          {
+            auto pluginZip = pluginContents
+                .getChildFile("Resources")
+                .getChildFile("assets")
+                .getChildFile("milkdrop_presets.zip");
+            if (pluginZip.existsAsFile())
+              return seedZipToAppDataIfNeeded(pluginZip);
+          }
         }
       }
      #endif
@@ -1312,8 +1348,10 @@ bool MilkdropTintPass::init()
             "}\n";
     }
 
-    if (!program_->addVertexShader (vertexSource)
-        || !program_->addFragmentShader (fragmentSource)
+    // v2.9.6：mac 上 Editor GL 为 Core Profile 3.2，GLSL 100 语法需经 JUCE
+    //   V3 转换（GL≥3.2 时翻译成 150，否则原样返回，Windows 不受影响）。
+    if (!program_->addVertexShader (juce::OpenGLHelpers::translateVertexShaderToV3 (vertexSource))
+        || !program_->addFragmentShader (juce::OpenGLHelpers::translateFragmentShaderToV3 (fragmentSource))
         || !program_->link())
     {
         lastError_ = program_->getLastError();
@@ -1604,15 +1642,13 @@ void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
     if (idx >= 0)
     {
       restored_preset_index_ = idx;
-#if !JUCE_MAC
-      // 嵌入态（Windows）由 Editor 全局 projectM 渲染：restore 时直接入队跳转
+      // 嵌入态由 Editor 全局 projectM 渲染：restore 时直接入队跳转
       // 请求，Editor 的 newOpenGLContextCreated 会在 GL 上下文就绪后消费该请求
-      // 加载对应预设（对齐 Standalone 4.5 的恢复路径）。macOS 嵌入态走 GLView
+      // 加载对应预设（对齐 Standalone 4.5 的恢复路径）。浮动态走 GLView
       // 本地渲染，由 GLView::newOpenGLContextCreated 读 restored_preset_index_ 恢复，
       // 无需此跳转。越界由消费端（Editor newOpenGLContextCreated）兜底为 0。
       if (editor_ != nullptr)
         editor_->RequestMilkdropPresetJump(idx);
-#endif
     }
   }
   if (state.hasProperty("autoMode"))
@@ -1654,20 +1690,16 @@ void MilkdropModule::paint(juce::Graphics& g) {
     const auto bounds = getLocalBounds();
 
   // 1. 像素凸起窗口边框（边框必须不透明，内容区必须透明以透出 projectM 帧）
-  //   · macOS：Editor GL 未启用，GLView 自己的 GL surface 高于 paint，用不透明 face。
-  //   · Windows 脱离态：GLView 自己的 native GL surface 高于 paint，同理用不透明 face。
-  //   · Windows 非脱离态：Editor GL 渲染到 FBO 0（CachedImage）位于组件树之下，
+  //   · 脱离态（浮动窗口）：GLView 自己的 native GL surface 高于 paint，用不透明 face。
+  //   · 嵌入态：Editor GL 渲染到 FBO 0（CachedImage）位于组件树之下，
   //     drawRaised 首行的 fillRect 会覆盖整个模块矩形；用不透明 face 会遮住
   //     projectM 帧，表现为"模块底色色块"。必须用 transparentBlack 让内容区
   //     透明透出帧（边框 hl/dark/shdw 仍为不透明正常显示）。
-#if JUCE_MAC
-  PinkXP::drawRaised(g, bounds, PinkXP::face);
-#else
+  // 嵌入态外壳透明（透出 Editor GL 在 FBO 0 上的 Milkdrop 内容）；浮动态不透明。
   if (isFloating())
     PinkXP::drawRaised(g, bounds, PinkXP::face);
   else
     PinkXP::drawRaised(g, bounds, juce::Colours::transparentBlack);
-#endif
 
   // 2. 玫瑰粉标题栏
   auto tb = getTitleBarBounds();
@@ -1923,15 +1955,11 @@ void MilkdropModule::GLView::paint(juce::Graphics& g) {
 }
 
 void MilkdropModule::GLView::UpdateOpenGLAttachment() {
-  // macOS：Editor GL 上下文在 macOS 下被关闭（#if !JUCE_MAC 宏），
-  //   嵌入态也必须使用 GLView 自己的 OpenGL 上下文来驱动 projectM 渲染。
-  //   因此 macOS 上无论嵌入态还是浮动态，只要组件可见且有尺寸就 attach。
-  // Windows：嵌入态由 Editor GL 上下文渲染，GLView 只在浮动态 attach。
-#if JUCE_MAC
-  const bool should_attach = isShowing() && getWidth() > 0 && getHeight() > 0;
-#else
+  // v2.9.6：macOS 已启用 Editor GL（GPU 化），嵌入态由 Editor GL 上下文渲染，
+  //   GLView 只在浮动态 attach 自己的上下文——与 Windows 完全一致。
+  //   嵌入态不再挂本地 NSOpenGLView，Milkdrop 内容由 Editor 按 z 序合成，
+  //   可被其他模块正常覆盖。
   const bool should_attach = owner_.isFloating() && isShowing() && getWidth() > 0 && getHeight() > 0;
-#endif
   if (should_attach == attached_)
     return;
 
@@ -1951,15 +1979,8 @@ void MilkdropModule::GLView::DetachOpenGL() {
 
   SyncOwnerPresetIndexFromRenderer();
 
-  // 只有 Windows 浮动态 detach 时才需要恢复 Editor renderer：
-  //   · Windows 嵌入态：Editor GL 负责渲染，浮动时挂起，dock 回来时恢复。
-  //   · macOS：Editor GL 未启用，GLView 自己的 GL 上下文负责渲染，
-  //     无论嵌入/浮动都不需要操作 Editor renderer。
-#if ! JUCE_MAC
+  // 浮动态 detach 时恢复 Editor renderer（dock 回嵌入态由 Editor GL 继续渲染）。
   const bool should_resume_editor_renderer = !owner_.isFloating();
-#else
-  const bool should_resume_editor_renderer = false;
-#endif
 
   open_gl_context_.detach();
   attached_ = false;
@@ -2505,12 +2526,9 @@ void MilkdropModule::GLView::renderOpenGL() {
 
 void MilkdropModule::GLView::PushPcm(const float* interleaved_lr,
                                       unsigned int frame_count) {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文，
-  //   不需要转发给 Editor renderer。
-#if ! JUCE_MAC
+  // 嵌入态转发给 Editor renderer（Editor GL 消费），浮动态留在本地队列。
   if (owner_.editor_ != nullptr && !owner_.isFloating())
     owner_.editor_->PushMilkdropPcm(interleaved_lr, frame_count);
-#endif
 
   std::lock_guard<std::mutex> lock(pcm_mutex_);
   pending_pcm_.assign(interleaved_lr, interleaved_lr + frame_count * 2);
@@ -2518,25 +2536,15 @@ void MilkdropModule::GLView::PushPcm(const float* interleaved_lr,
 }
 
 void MilkdropModule::GLView::RequestPresetDelta(int delta) {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  requested_preset_delta_.fetch_add(delta);
-#else
   if (owner_.isFloating()) {
     requested_preset_delta_.fetch_add(delta);
   } else if (owner_.editor_ != nullptr) {
     owner_.restored_preset_index_ = -1;
     owner_.editor_->RequestMilkdropPresetDelta(delta);
   }
-#endif
 }
 
 void MilkdropModule::GLView::RequestPresetRandom() {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  if (!local_preset_paths_.isEmpty())
-    requested_preset_jump_.store(juce::Random::getSystemRandom().nextInt(local_preset_paths_.size()));
-#else
   if (owner_.isFloating()) {
     if (!local_preset_paths_.isEmpty())
       requested_preset_jump_.store(juce::Random::getSystemRandom().nextInt(local_preset_paths_.size()));
@@ -2544,55 +2552,38 @@ void MilkdropModule::GLView::RequestPresetRandom() {
     owner_.restored_preset_index_ = -1;
     owner_.editor_->RequestMilkdropPresetRandom();
   }
-#endif
 }
 
 void MilkdropModule::GLView::RequestPresetJump(int index) {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  requested_preset_jump_.store(index);
-#else
   if (owner_.isFloating()) {
     requested_preset_jump_.store(index);
   } else if (owner_.editor_ != nullptr) {
     owner_.restored_preset_index_ = -1;
     owner_.editor_->RequestMilkdropPresetJump(index);
   }
-#endif
 }
 
 void MilkdropModule::GLView::RequestLibraryToggle() {
-  // 浮动态 / macOS 本地渲染路径：切换预设库。
-  // 1) 仅翻转 Editor 全局收藏库状态并持久化（不触发 Editor GL 消费，避免残留）；
-  // 2) 置本地重扫标志，由 ConsumePresetRequests 在 GL 线程消费（重扫 + 加载第一预设）。
-#if JUCE_MAC
-  if (owner_.editor_ != nullptr)
-    owner_.editor_->ToggleMilkdropLibraryState();
-  requested_library_toggle_.store(true);
-#else
+  // 浮动态：翻转 Editor 全局收藏库状态并置本地重扫标志，
+  //   由 ConsumePresetRequests 在本地 GL 线程消费。
+  // 嵌入态：由 Editor GL 线程消费切换请求，无需本地重扫。
   if (owner_.isFloating()) {
     if (owner_.editor_ != nullptr)
       owner_.editor_->ToggleMilkdropLibraryState();
     requested_library_toggle_.store(true);
   } else if (owner_.editor_ != nullptr) {
-    // 嵌入态由 Editor GL 线程消费切换请求，无需本地重扫。
     owner_.editor_->RequestMilkdropToggleLibrary();
   }
-#endif
 }
 
 void MilkdropModule::GLView::RequestUnlinkReload() {
   // 取消收藏后（当前浏览收藏库时），预设列表少一项，需重扫并切换到下一个预设。
-  // 嵌入态由 Editor GL 线程重扫；浮动态 / macOS 由本地 GL 线程重扫。
-#if JUCE_MAC
-  requested_rescan_.store(true);
-#else
+  // 嵌入态由 Editor GL 线程重扫；浮动态由本地 GL 线程重扫。
   if (owner_.isFloating()) {
     requested_rescan_.store(true);
   } else if (owner_.editor_ != nullptr) {
     owner_.editor_->RequestMilkdropUnlinkReload();
   }
-#endif
 }
 
 void MilkdropModule::GLView::RequestRenderScale() {
@@ -2611,38 +2602,24 @@ void MilkdropModule::GLView::RequestRenderScale() {
 }
 
 bool MilkdropModule::GLView::IsRenderReady() const {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  return local_render_ready_;
-#else
+  // 嵌入态由 Editor GL 渲染，浮动态由本地上下文渲染。
   if (owner_.isFloating())
     return local_render_ready_;
   if (owner_.editor_ != nullptr)
     return owner_.editor_->IsMilkdropRenderReady();
   return false;
-#endif
 }
 
 juce::String MilkdropModule::GLView::GetError() const {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  return local_error_;
-#else
   if (owner_.isFloating())
     return local_error_;
   if (owner_.editor_ != nullptr)
     return owner_.editor_->GetMilkdropError();
   return "Editor not found";
-#endif
 }
 
 int MilkdropModule::GLView::GetCurrentPresetIndex() const {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  const bool use_local = true;
-#else
   const bool use_local = owner_.isFloating() || attached_;
-#endif
   if (use_local) {
     std::lock_guard<std::mutex> lock(preset_paths_mutex_);
     const int total = local_preset_paths_.size();
@@ -2678,11 +2655,6 @@ void MilkdropModule::GLView::SyncOwnerPresetIndexFromRenderer() const {
 }
 
 int MilkdropModule::GLView::GetTotalPresetCount() const {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  std::lock_guard<std::mutex> lock(preset_paths_mutex_);
-  return local_preset_paths_.size();
-#else
   if (owner_.isFloating()) {
     std::lock_guard<std::mutex> lock(preset_paths_mutex_);
     return local_preset_paths_.size();
@@ -2690,16 +2662,10 @@ int MilkdropModule::GLView::GetTotalPresetCount() const {
   if (owner_.editor_ != nullptr)
     return owner_.editor_->GetMilkdropTotalPresets();
   return 0;
-#endif
 }
 
 juce::String MilkdropModule::GLView::GetCurrentPresetName() const {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  const bool use_local = true;
-#else
   const bool use_local = owner_.isFloating();
-#endif
   if (use_local) {
     std::lock_guard<std::mutex> lock(preset_paths_mutex_);
     const int current = local_current_preset_.load();
@@ -2717,12 +2683,7 @@ juce::String MilkdropModule::GLView::GetCurrentPresetName() const {
 }
 
 juce::String MilkdropModule::GLView::GetCurrentPresetFilePath() const {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  const bool use_local = true;
-#else
   const bool use_local = owner_.isFloating();
-#endif
   if (use_local) {
     std::lock_guard<std::mutex> lock(preset_paths_mutex_);
     const int current = local_current_preset_.load();
@@ -2736,16 +2697,11 @@ juce::String MilkdropModule::GLView::GetCurrentPresetFilePath() const {
 }
 
 int64_t MilkdropModule::GLView::GetLastPresetSwitchTimeMs() const {
-  // macOS：Editor GL 未启用，嵌入态也使用 GLView 本地 GL 上下文
-#if JUCE_MAC
-  return last_preset_switch_ms_;
-#else
   if (owner_.isFloating())
     return last_preset_switch_ms_;
   if (owner_.editor_ != nullptr)
     return owner_.editor_->GetMilkdropLastPresetSwitchTimeMs();
   return 0;
-#endif
 }
 
 void MilkdropModule::GLView::timerCallback() {

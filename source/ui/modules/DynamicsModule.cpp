@@ -295,10 +295,17 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
     {
         juce::Rectangle<int> row(inner.getX(), inner.getY() + rowIdx * rowH,
                                  inner.getWidth(), rowH);
-        // 标题
-        g.setColour(PinkXP::ink.withAlpha(0.85f));
-        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(title, row.withHeight(12), juce::Justification::topLeft, false);
+        // 标题（静态 → 位图缓存，v2.9.6 性能）
+        const juce::Image titleImg = PinkXP::cachedStaticTextImage (
+            title, 9.0f, juce::Font::bold, PinkXP::ink.withAlpha(0.85f));
+        if (titleImg.isValid())
+            g.drawImageAt (titleImg, row.getX(), row.getY(), false);
+        else
+        {
+            g.setColour(PinkXP::ink.withAlpha(0.85f));
+            g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+            g.drawText(title, row.withHeight(12), juce::Justification::topLeft, false);
+        }
 
         // 数值 / 单位：把数值区域收紧到"行内去掉右侧单位宽度"，
         //   避免大号数值与单位右侧 "dB" 在窄窗口下视觉重叠
@@ -306,19 +313,38 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
         constexpr int unitW = 28;
         auto unitArea = numArea.removeFromRight(unitW);
 
-        // 数值（大号，左对齐，数值右侧保留 unitW 给单位）
-        g.setColour(PinkXP::pink600);
-        g.setFont(PinkXP::getFont(big, juce::Font::bold));
-        g.drawText(juce::String(value, 1),
-                   numArea,
-                   juce::Justification::centredLeft, false);
+        // 数值（大号，左对齐）—— 100ms 节流缓存（v2.9.6 性能）
+        const juce::String numText = juce::String(value, 1);
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        if (numText != drValueText_[rowIdx]
+            || nowMs - drValueTime_[rowIdx] >= 100.0
+            || ! drValueCache_[rowIdx].isValid())
+        {
+            drValueText_[rowIdx] = numText;
+            drValueTime_[rowIdx] = nowMs;
+            drValueCache_[rowIdx] = PinkXP::cachedStaticTextImage (
+                numText, big, juce::Font::bold, PinkXP::pink600);
+        }
+        if (drValueCache_[rowIdx].isValid())
+            g.drawImageAt (drValueCache_[rowIdx], numArea.getX(), numArea.getY(), false);
+        else
+        {
+            g.setColour(PinkXP::pink600);
+            g.setFont(PinkXP::getFont(big, juce::Font::bold));
+            g.drawText(numText, numArea, juce::Justification::centredLeft, false);
+        }
 
-        // 单位（小号，左对齐贴在数值右侧 unitArea）
-        g.setColour(PinkXP::ink.withAlpha(0.75f));
-        g.setFont(PinkXP::getFont(10.0f, juce::Font::plain));
-        g.drawText(unit,
-                   unitArea,
-                   juce::Justification::centredLeft, false);
+        // 单位（静态 → 位图缓存）
+        const juce::Image unitImg = PinkXP::cachedStaticTextImage (
+            unit, 10.0f, juce::Font::plain, PinkXP::ink.withAlpha(0.75f));
+        if (unitImg.isValid())
+            g.drawImageAt (unitImg, unitArea.getX(), unitArea.getY(), false);
+        else
+        {
+            g.setColour(PinkXP::ink.withAlpha(0.75f));
+            g.setFont(PinkXP::getFont(10.0f, juce::Font::plain));
+            g.drawText(unit, unitArea, juce::Justification::centredLeft, false);
+        }
     };
 
     drawRow(0, "DR SHORT",    smoothedShortDR, "dB", 22.0f);

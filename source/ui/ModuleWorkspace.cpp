@@ -1180,23 +1180,10 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
                 m->toFront (false);
         }
 
-        // ---- macOS 专属：Milkdrop 模块整体强制置顶（仅非脱离态）----
-        //   原因：macOS 上 GLView 通过 attachTo 创建的原生 NSOpenGLView 是
-        //   顶层 NSView 的一个子视图，其合成层级永远高于同一窗口内的
-        //   CoreGraphics 绘制（其他模块）。用户无法通过 JUCE Component::toFront()
-        //   等 z-order 机制让其他模块盖住 Milkdrop 的视频区。
-        //   为保持"边框/抬头/视频"三者视觉一致，非脱离态下 Milkdrop 模块整体
-        //   强制置顶（含 CoreGraphics 绘制的边框和抬头）。
-        //   脱离态：每个模块有独立 NSWindow，窗口级 z-order 正常工作，无需处理。
-        //   Windows：Editor GL 上下文渲染，无独立原生视图，无此问题。
-        //   参考：VirtuPet 始终置顶采用相同思路。
-#if JUCE_MAC
-        for (auto* m : modules)
-        {
-            if (m->getModuleType() == ModuleType::milkdrop && ! m->isFloating())
-                m->toFront (false);
-        }
-#endif
+        // v2.9.6：已移除旧的"macOS Milkdrop 强制置顶"逻辑。
+        //   旧原因（NSOpenGLView 物理层级高于 CG 绘制）已不存在——Milkdrop
+        //   嵌入态现在由 Editor GL 按组件树 z 序合成（FBO blit），与 Windows
+        //   一致；保留强制置顶反而会把 Milkdrop 反复冒回顶层、覆盖其他模块。
 
         // 工具栏始终在模块之上：模块 mouseDown 会 toFront(true) 把自己冒到最顶。
         //   · 常驻态：canvas 不含工具栏条带，只需保证 hideBtn 在上；
@@ -1233,17 +1220,6 @@ ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool
 
     modules.add(panel.release());
     raw->toFront(false);
-
-    // macOS 专属：非脱离态 Milkdrop 模块整体强制置顶（含边框/抬头）。
-    //   因为 GLView 的原生 NSOpenGLView 合成层级永远高于 CoreGraphics 绘制，
-    //   无法被其他模块盖住；为视觉一致，模块整体（含 CG 绘制部分）也置顶。
-#if JUCE_MAC
-    for (auto* m : modules)
-    {
-        if (m->getModuleType() == ModuleType::milkdrop && ! m->isFloating())
-            m->toFront (false);
-    }
-#endif
 
     notifyLayoutChanged();
 
@@ -1365,16 +1341,7 @@ void ModuleWorkspace::dockModule(ModulePanel& panel, juce::Rectangle<int> savedB
     // ★ Bug3修复：从脱离态记录中移除
     floatingModuleStates_.erase(panel.getModuleId());
 
-    // macOS 专属：dock 完成后重新将所有非脱离 Milkdrop 模块整体置顶，
-    //   避免刚 dock 回来的其他模块（其 toFront 已把自己冒到最顶）盖住
-    //   Milkdrop 的边框/抬头（视频区无法被盖住是物理事实，这里只是保持一致）。
-#if JUCE_MAC
-    for (auto* m : modules)
-    {
-        if (m->getModuleType() == ModuleType::milkdrop && ! m->isFloating())
-            m->toFront (false);
-    }
-#endif
+    // v2.9.6：dock 后不再强制置顶 Milkdrop（Editor GL 按 z 序合成，旧 hack 已移除）。
 
     repaint();
     notifyLayoutChanged();
@@ -4205,10 +4172,12 @@ void HideChromeButton::paintButton(juce::Graphics& g, bool isMouseOver, bool isB
 
     // 按钮文字
     //   字号与 gridBtn / gainBtn / saveBtn 等普通 TextButton 保持一致：
-    //   复用 PinkXPLookAndFeel::getTextButtonFont 的公式
-    //     PinkXP::getFont (min(14, h*0.55), bold)
-    g.setFont(PinkXP::getFont(juce::jmin(14.0f, r.getHeight() * 0.55f),
-                              juce::Font::bold));
+    //   与 PinkXPLookAndFeel::drawButtonText 相同，直接固定 12pt（getFont 内部
+    //   会做 1.5x 放大 + uiScale）。历史实现用 r.getHeight()*0.55，但按钮高度
+    //   已是物理像素（PinkXP::ui(22) 乘过 uiScale），getFont 又乘一次 uiScale
+    //   → 双重缩放。低分辨率屏幕（uiScale<1）下字号被压小，高分屏被放大，
+    //   win/mac 两端同源，只是低分辨率设备上更明显。
+    g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
     g.setColour(PinkXP::ink);
     // 水平 padding 只留 1px —— "Show" 四个像素字母 + 字符间距比 "Hide" 宽，
     //   之前 reduced(4, 2) 会在 btnW=52 / font≈12pt 下把 "w" 切掉半像素。

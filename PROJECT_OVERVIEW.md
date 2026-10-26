@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.9.6`）
+- **产品名**：`Y2Kmeter` （版本：`2.9.7`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -4128,6 +4128,54 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 - Windows Release Standalone 构建通过（`build/msvc`，MSVC 18）；仅既有 D9025/MSB8028 警告。
 - 版本号统一为 **2.9.6**：`CMakeLists.txt` 三处、`Y2Kmeter_installer.iss`、`README.md` 徽章、`PluginEditor.cpp` 抬头四处字面量（左上角显示 v2.9.6）、`PROJECT_OVERVIEW.md` 当前版本声明。
 - 待 Mac 环境验证：`MacDesktopAudioCapture.mm` 休眠自愈（未在本机编译）、Sharp 模式与各 FFT 档位的主观效果。
+
+---
+
+## v2.9.7：macOS GPU 化 + 桌面音频采集修复 + 安装包提速
+
+> 本轮为 macOS 侧的大规模适配与性能优化，win 端仅享受通用修复（FPS 统计、字体、脱离态卡死）。
+
+### 1. macOS 桌面音频采集修复（`MacDesktopAudioCapture.mm`）
+
+- **内存泄漏**：主 target 无 ARC，ObjC/dispatch 对象此前只置 `nil` 不 `release`。补齐全部 MRC 配对（`SCStream`/`Y2KSCStreamAudioOutput`/`SCContentFilter`/`SCStreamConfiguration`/采样队列/`lifeProxy`），并在析构函数兜底清理。
+- **阻塞等待**：`SCShareableContent` 结果缓存为成员，第二次及以后 start（含 watchdog 自愈）走同步快路径，消除消息线程阻塞。
+- **数据竞争**：`pendingDispatchL/R` 的 clear 派发到采样队列（与 push 串行）；`stream/output/queue/cachedContent` 加 `streamMutex`。
+- **防复活/防悬垂**：新增启动世代号 `startGeneration`，迟到 completion 校验后放弃；`Impl` 改 `shared_ptr` 管理；信号量用 `SemBox` 共享包装防迟到 signal 访问已释放对象。
+- **SCK 串行队列死锁（"Timed out while starting ScreenCaptureKit stream."）**：`SCShareableContent` 与 `SCStream` 的 completion 由 SCK 同一串行队列回调，不能在 SCK 回调线程内同步等待 `startCaptureWithCompletionHandler` 的 completion。改为"提交 + 异步发起 start"后，等待统一移到 `lifecycleQueue` 上完成。
+- **ObjC block 捕获 C++ 引用参数悬垂崩溃**：`buildCommitAndStartStream` 的 `shared_ptr` 参数原为 `const&` 引用，block 捕获引用别名导致 completion 写野指针。改为按值传递 + block 内显式本地副本。
+
+### 2. macOS GPU 化（对齐 win 端架构）
+
+- **启用 Editor 级 OpenGL**：去掉构造/析构处的 `#if !JUCE_MAC`，mac 也 `attachTo` + `setComponentPaintingEnabled(true)`，组件树进入 GPU 合成管线；FPS 统计改以 GL 真实出帧数为准。
+- **GlDirectModule 直渲染在 mac 激活**：`renderOpenGL` 恢复执行后，频谱/示波器/瀑布图/3D 频谱/波形/相位等模块的 VBO 直画接管。
+- **Milkdrop 嵌入态走 Editor z 序合成**：重编 libprojectM（见下）补上 `projectm_opengl_render_frame_fbo` 符号后，mac 嵌入态 Milkdrop 由 Editor 按组件树 z 序 FBO blit（可被其他模块正常覆盖）；移除 `ModuleWorkspace` 里 3 处 v2.5.6 遗留的"mac Milkdrop 强制置顶" hack。
+- **Core Profile shader 适配**：mac 上 Editor GL 强制 `openGL3_2`（projectM 需要），项目 3 处自定义 shader 经 `OpenGLHelpers::translateVertexShaderToV3` 转换（GL≥3.2 才翻译，Windows 零影响）。
+- **性能优化**：projectM 渲染按 60fps 节流（blit 仍每帧）；`PinkXP::cachedStaticTextImage` 静态文本位图缓存（标题栏/轴标签/标签）；Loudness/DR 读数 10Hz 节流缓存。
+
+### 3. libprojectM dylib 重编译
+
+- 旧 `libprojectM-4.dylib` 实为 projectM v4.1.3 编译，缺 `projectm_opengl_render_frame_fbo`（4.2.0 才加入），导致 Milkdrop 无法走 Editor 侧 z 序合成。
+- 用官方 master（4.2.0）源码重编译为 Universal（x86_64+arm64）、macOS 12.3 部署目标，导出 FBO 符号；旧版备份在 `third_party/projectm/bin/macos/backup-4.1.3/`。
+
+### 4. Milkdrop 脱离态卡死 + 残影修复
+
+- **根因**：`SuspendMilkdropEditorRendererForFloating()` 调用 `openGLContextClosing()`，后者误删了仍在 Editor GL 渲染的直渲染模块 VBO/FBO/shader，且 `s3dShaderUseChecked` 未重置导致 shader 无法重建 → 模块外壳透明（`glDirectActive` 仍 true）但内容空白 = 残影。
+- **修复**：拆分出 `destroyMilkdropEditorResources()`（只销毁 Editor 侧 projectM handle + FBO + 染色后处理），Suspend 改用之；`openGLContextClosing()` 保留完整清理并补 `s3dShaderUseChecked = false`。
+
+### 5. 安装包预设压缩提速
+
+- 预设约 1 万个 `.milk` 小文件（132MB）分 3 份打入 pkg，是安装慢主因。打包脚本新增 Step 3.5：把 `milkdrop_presets/` 压缩为单文件 `milkdrop_presets.zip`（`ditto --norsrc --noextattr --noqtn`），payload 文件数从 ~3 万降到 3。
+- 运行时 `FindMilkdropAssetsDir`（`PluginEditor.cpp` + `MilkdropModule.cpp` 两份）新增 `seedZipToAppDataIfNeeded`：bundle 内只有 zip 时首次查找用 `juce::ZipFile` 解压 seed 到 AppData；已有有效预设则直接读、不解压。
+
+### 6. 其他修复
+
+- **ToyEmoji 卡死**：fallback 表存在环（Star↔Sparkles）+ mac 上彩色 emoji 被白/黑色差探测误判失败 → 无限递归。改为"最多回退一层" + mac 用纯覆盖率判据。
+- **hide 按钮字体偏小**：`HideChromeButton` 用 `r.getHeight()*0.55`（物理像素已含 uiScale）再经 `getFont` 二次乘 uiScale → 双重缩放；改为与其他 TextButton 统一 `getFont(12)`。
+- **FPS 统计偏低**：`min(分发帧率, GL出帧率)` 在 mac 上取到被 GL 持锁吞低的分发数，改为直接以 GL 出帧数为准。
+
+### 7. 版本
+
+- 版本号统一为 **2.9.7**：`CMakeLists.txt` 三处、`README.md` 徽章、`Y2Kmeter_installer.iss`、`PluginEditor.cpp` 抬头水印、`PROJECT_OVERVIEW.md` 当前版本声明。
 
 ---
 

@@ -951,8 +951,19 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
 
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.fillRect (x - 12, y, 24, 11);
-        g.setColour (PinkXP::hl);
-        g.drawText (l.label, x - 12, y, 24, 11, juce::Justification::centred, false);
+        // 静态标签位图缓存（v2.9.6 性能）
+        const juce::Image img = PinkXP::cachedStaticTextImage (
+            l.label, 9.0f, juce::Font::plain, PinkXP::hl,
+            juce::Colours::transparentBlack, true);
+        if (img.isValid())
+        {
+            g.drawImageAt (img, x - img.getWidth() / 2, y + (11 - img.getHeight()) / 2, false);
+        }
+        else
+        {
+            g.setColour (PinkXP::hl);
+            g.drawText (l.label, x - 12, y, 24, 11, juce::Justification::centred, false);
+        }
     }
 
     // older/newer 提示（浮绘在左上和右下）

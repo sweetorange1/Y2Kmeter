@@ -510,7 +510,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.9.6");
+        const int versionW = versionFont.getStringWidth ("v2.9.7");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -551,7 +551,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.6";
+        const juce::String versionText = "v2.9.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -1863,14 +1863,31 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //     (nvoglv64.dll) 下嵌套 GL 工作正常—v2.1.9 (d39397e) 已验证 30fps 无遮盖。
     //     AMD (atidxx64.dll) 可能有兼容问题，但当前用户为 NVIDIA 环境。
     //
-    //   macOS：CoreGraphics 已有 Metal 后端，Editor GL 反而降低性能，跳过 attach。
+    //   macOS（v2.9.7 GPU 化）：重新启用 Editor GL。
+    //     历史背景：2026-05 曾因"各模块每帧修改 juce::Image → NSOpenGLContext
+    //     整图纹理重传"的瓶颈主动关闭 mac Editor GL（见 git 历史）。但 v2.9.4
+    //     的 GlDirectModule 直渲染框架已不再走 Image 上传（直接 VBO 直画），
+    //     该瓶颈不复存在，因此恢复启用，让 mac 也享受：
+    //       ① GlDirectModuleBase 模块（Spectrum/Oscilloscope/Spectrogram/
+    //          Waveform/Phase/S3D 等）的 GPU 直渲染；
+    //       ② JUCE 组件树的 CPE 纹理合成（替代 CoreGraphics 软光栅）。
+    //     注意：macOS 上 Milkdrop 嵌入态仍由 GLView 自己的 OpenGL 上下文渲染
+    //     （见 MilkdropModule::UpdateOpenGLAttachment 的 JUCE_MAC 分支），
+    //     Editor 侧不创建第二个 projectM 实例（newOpenGLContextCreated 的
+    //     JUCE_MAC 分支提前返回），两者通过嵌套 NSView 共存。
     // ==================================================================
-#if ! JUCE_MAC
+#if JUCE_MAC
+    // projectM 4 的 GLSL shader 需要 OpenGL Core Profile 3.2+。
+    // 不设置时 macOS 默认给 Legacy Profile（NSOpenGLProfileVersionLegacy），
+    // projectM 在 Editor 上下文中 shader 编译失败、画面全黑（与 v2.5.3
+    // Milkdrop GLView 的根因四相同）。仅 macOS 强制：Windows 强制 Core
+    // Profile 会导致部分预设 shader 编译失败（历史实测），保持默认。
+    openGLContext.setOpenGLVersionRequired (juce::OpenGLContext::openGL3_2);
+#endif
     openGLContext.setRenderer(this);
     openGLContext.setContinuousRepainting(false);
     openGLContext.setComponentPaintingEnabled(true);
     openGLContext.attachTo(*this);
-#endif
 
     // ==================================================================
     // v1.9.x：新手引导覆盖层 —— 按需创建/销毁，不提前驻留在 child list 中
@@ -1946,10 +1963,7 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
 
     // -1) Editor 级 GL 上下文 detach：最先解除 GPU 绑定，确保 workspace 等子组件
     //      析构时 GL 资源（Texture/VBO/FBO）已经在上下文解除后安全释放。
-    //      macOS 下构造时未 attach，这里同样跳过。
-#if ! JUCE_MAC
     openGLContext.detach();
-#endif
 
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
@@ -3502,7 +3516,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.6";
+        const juce::String versionText = "v2.9.7";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3510,7 +3524,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v2.9.6");
+                const int versionW = versionFont.getStringWidth ("v2.9.7");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -5725,17 +5739,18 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
 
         // v2.9：以 GL 线程真实出帧数为准。GL 跟不上时多次 repaint 会被合并，
         //   分发数仍是 120 但屏幕实际帧更少 —— 旧逻辑只看分发数，会把掉帧"藏"起来。
-        //   取 min 是因为鼠标 hover 等非分发 repaint 也会额外出帧。
-        //   macOS（不挂 Editor GL）或 GL 尚未出过帧时回退到分发数。
+        //   v2.9.7：去掉 min()。mac 上 Editor GL 启用后，GL 线程持锁会吞掉消息
+        //   线程的 vblank 回调（分发掉帧），但 GL 侧仍持续真实出帧；此时
+        //   min(dispatch, gl) 会取到被低估的分发数，导致"显示帧率 < 实际帧率"。
+        //   每次 renderOpenGL = 一次真实屏幕出帧提交，因此 GL attached 时直接以
+        //   glFps 为准（GL 跟不上时 glFps 本身就是真实低值，无需再与分发数取小）。
         const juce::int64 glCur  = glFrameCounter.load (std::memory_order_relaxed);
         const juce::int64 glDiff = glCur - lastGlFrameCounterSample;
         lastGlFrameCounterSample = glCur;
 
         float fps = dispatchFps;
-       #if ! JUCE_MAC
         if (glDiff > 0 && openGLContext.isAttached())
-            fps = juce::jmin (dispatchFps, (float) (glDiff * 1000.0 / deltaMs));
-       #endif
+            fps = (float) (glDiff * 1000.0 / deltaMs);
 
         float displayedFps;
         if (userRequestedFpsLimit == 0)
@@ -5964,6 +5979,20 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
     return srcDir;
   };
 
+  // v2.9.7：安装包将 milkdrop_presets 压缩为单文件 zip，bundle 内只有 zip 时
+  //   首次查找即解压 seed 到 AppData（zip 顶层直接是 .milk 文件）。
+  auto seedZipToAppDataIfNeeded = [&](const juce::File& zipFile) -> juce::File {
+    auto parent = appDataDir.getParentDirectory();
+    if (!parent.exists())
+      parent.createDirectory();
+    if (!appDataDir.exists())
+      appDataDir.createDirectory();
+    juce::ZipFile zf (zipFile);
+    if (zf.uncompressTo (appDataDir, true).wasOk() && isValidAssetsDir (appDataDir))
+      return appDataDir;
+    return appDataDir;
+  };
+
   // macOS bundle 内置路径（优先级高于向上遍历）：
   //   可执行文件位于 Y2Kmeter.app/Contents/MacOS/Y2Kmeter，
   //   资源打包在    Y2Kmeter.app/Contents/Resources/assets/<subdir>
@@ -5981,6 +6010,15 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
         .getChildFile(subdir);
     if (isValidAssetsDir(bundleCandidate))
       return seedToAppDataIfNeeded(bundleCandidate);
+    if (subdir == "milkdrop_presets")
+    {
+      auto zipCandidate = contentsDir
+          .getChildFile("Resources")
+          .getChildFile("assets")
+          .getChildFile("milkdrop_presets.zip");
+      if (zipCandidate.existsAsFile())
+        return seedZipToAppDataIfNeeded(zipCandidate);
+    }
   }
   // VST3 / AU bundle 内置路径：
   //   currentApplicationFile 在插件场景下指向 .vst3/.component bundle 根，
@@ -5999,9 +6037,18 @@ juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
           .getChildFile(subdir);
       if (isValidAssetsDir(pluginCandidate))
         return seedToAppDataIfNeeded(pluginCandidate);
+      if (subdir == "milkdrop_presets")
+      {
+        auto pluginZip = pluginContents
+            .getChildFile("Resources")
+            .getChildFile("assets")
+            .getChildFile("milkdrop_presets.zip");
+        if (pluginZip.existsAsFile())
+          return seedZipToAppDataIfNeeded(pluginZip);
+      }
     }
   }
- #endif
+#endif
 
   juce::File exeDir = juce::File::getSpecialLocation(
       juce::File::currentExecutableFile).getParentDirectory();
@@ -6030,6 +6077,7 @@ static juce::File FindMilkdropLikeDir()
 }
 
 void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
+  Y2K_LOG("[EditorGL] newOpenGLContextCreated fired");
   // v2.9.3：调大 GL 图片纹理缓存（JUCE 默认仅 8MB）。
   //   workspace 画布背景（~5.8MB）+ 二十个模块的静态/动态图层纹理总量远超 8MB，
   //   默认缓存下每帧互相挤占 LRU —— workspace 背景纹理被逐出后整图重传
@@ -6039,6 +6087,8 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
   // 脱离态期间 Editor renderer 被挂起，跳过创建，避免与 GLView 的本地
   // projectM handle 共存（Windows libprojectM/GLEW 全局指针表冲突）。
+  // v2.9.7：mac 已启用 Editor GL + 重编 libprojectM（含 FBO API），嵌入态
+  //   Milkdrop 也走 Editor 渲染（z 序合成），与 Windows 统一。
   if (milkdrop_renderer_suspended_)
     return;
 
@@ -6063,6 +6113,9 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
   }
 
   milkdrop_pm_handle_ = api.create();
+  Y2K_LOG(juce::String("[EditorGL] projectm_create -> ")
+          + juce::String(milkdrop_pm_handle_ != nullptr ? "OK" : "NULL")
+          + " hasFboAPI=" + juce::String(api.hasOpenglRenderFrameFbo() ? 1 : 0));
   if (milkdrop_pm_handle_ == nullptr) {
     milkdrop_error_ = "projectm_create() returned NULL.";
     gEditorProjectMInstances.store(0);
@@ -6134,6 +6187,13 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   int   editor_h  = getHeight();
 
   if (milkdrop_render_ready_ && milkdrop_pm_handle_ != nullptr) {
+
+  static bool editorMilkdropRenderLogged = false;
+  if (! editorMilkdropRenderLogged)
+  {
+      editorMilkdropRenderLogged = true;
+      Y2K_LOG("[EditorGL] Milkdrop render path active (FBO blit)");
+  }
 
   auto& api = projectm_api::Api::instance();
 
@@ -6353,6 +6413,15 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
 
   // ================================================================
   // 渲染 projectM
+  // v2.9.7：projectM 渲染按目标帧率（60fps）节流。Editor GL 单线程承担
+  //   Milkdrop 渲染 + 直渲染模块 + CPE 组件合成，120Hz 下每帧重复渲染
+  //   projectM 是纯浪费（projectM 内部动画按 setFps(60) 计时），尤其 mac
+  //   上 NSOpenGL 驱动 draw call 成本高。节流后 blit 仍每帧执行，画面位置
+  //   实时跟随模块拖动；FBO 保留上一帧内容，视觉无跳变。
+  const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
+  const bool skipProjectMRender =
+      (nowSec - milkdrop_last_render_sec_ < (1.0 / (double) kMilkdropTargetFps));
+
   // ================================================================
   if (use_fbo_api) {
     // 主路径：projectM → offscreen FBO（openglRenderFrameFbo 接受 FBO ID）
@@ -6360,12 +6429,15 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     juce::gl::glViewport(0, 0, fbo_w, fbo_h);
     juce::gl::glScissor(0, 0, fbo_w, fbo_h);
     juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
-    juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
-    api.setWindowSize(milkdrop_pm_handle_,
-                      static_cast<std::size_t>(fbo_w),
-                      static_cast<std::size_t>(fbo_h));
-    api.openglRenderFrameFbo(milkdrop_pm_handle_, milkdrop_render_fbo_);
+    if (! skipProjectMRender) {
+      juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+      juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
+      api.setWindowSize(milkdrop_pm_handle_,
+                        static_cast<std::size_t>(fbo_w),
+                        static_cast<std::size_t>(fbo_h));
+      api.openglRenderFrameFbo(milkdrop_pm_handle_, milkdrop_render_fbo_);
+      milkdrop_last_render_sec_ = nowSec;
+    }
     juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
   } else {
     // 降级路径：projectM → FBO 0 (0,0)（openglRenderFrame 内部绑定 FBO 0）
@@ -6578,8 +6650,11 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       "void main() { gl_FragColor = vColour; }\n";
 
     s3dShader = std::make_unique<juce::OpenGLShaderProgram> (openGLContext);
-    if (s3dShader->addVertexShader (vs)
-        && s3dShader->addFragmentShader (fs)
+    // v2.9.7：mac 上 Editor GL 强制 Core Profile 3.2（projectM 需要），
+    //   GLSL 100 语法必须经 JUCE 的 V3 转换（GL≥3.2 时翻译成 150，
+    //   否则原样返回，Windows Legacy/低版本驱动不受影响）。
+    if (s3dShader->addVertexShader (juce::OpenGLHelpers::translateVertexShaderToV3 (vs))
+        && s3dShader->addFragmentShader (juce::OpenGLHelpers::translateFragmentShaderToV3 (fs))
         && s3dShader->link())
     {
       s3dShader->use();
@@ -6601,6 +6676,8 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
 
       s3dGlReady = true;
     }
+    Y2K_LOG (s3dGlReady ? juce::String ("[EditorGL] s3d vertex shader link OK")
+                        : juce::String ("[EditorGL] s3d vertex shader link FAILED"));
 
     // ---- v2.9.5：纹理 shader（纹理通道 + trail FBO 合成）----
     const char* tvs =
@@ -6626,8 +6703,8 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       "}\n";
 
     s3dTexShader = std::make_unique<juce::OpenGLShaderProgram> (openGLContext);
-    if (s3dTexShader->addVertexShader (tvs)
-        && s3dTexShader->addFragmentShader (tfs)
+    if (s3dTexShader->addVertexShader (juce::OpenGLHelpers::translateVertexShaderToV3 (tvs))
+        && s3dTexShader->addFragmentShader (juce::OpenGLHelpers::translateFragmentShaderToV3 (tfs))
         && s3dTexShader->link())
     {
       s3dTexShader->use();
@@ -7067,7 +7144,50 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
   }
 }
 
+void Y2KmeterAudioProcessorEditor::destroyMilkdropEditorResources() {
+  // 只销毁 Editor 侧 Milkdrop 渲染资源。**不要**在这里动 GlDirectModule 直渲染
+  // 模块的 VBO/FBO/shader——Milkdrop 脱离时 Editor GL 上下文仍然 attach、直渲染
+  // 模块仍在渲染，误删会导致它们 glDirectActive 外壳透明但 GL 内容空白（残影）。
+  if (milkdrop_pm_handle_ != nullptr) {
+    auto& api = projectm_api::Api::instance();
+    api.destroy(milkdrop_pm_handle_);
+    milkdrop_pm_handle_ = nullptr;
+    gEditorProjectMInstances.store(0);
+    api.resetGlewInitialization();
+  }
+  // 销毁整体染色后处理着色器与 post FBO
+  if (milkdrop_tint_pass_ != nullptr) {
+    milkdrop_tint_pass_->shutdown();
+    milkdrop_tint_pass_.reset();
+  }
+  if (milkdrop_post_fbo_ != 0) {
+    juce::gl::glDeleteFramebuffers(1, &milkdrop_post_fbo_);
+    milkdrop_post_fbo_ = 0;
+  }
+  if (milkdrop_post_tex_ != 0) {
+    juce::gl::glDeleteTextures(1, &milkdrop_post_tex_);
+    milkdrop_post_tex_ = 0;
+  }
+  milkdrop_post_w_ = 0;
+  milkdrop_post_h_ = 0;
+  if (milkdrop_render_fbo_ != 0) {
+    juce::gl::glDeleteFramebuffers(1, &milkdrop_render_fbo_);
+    milkdrop_render_fbo_ = 0;
+  }
+  if (milkdrop_render_tex_ != 0) {
+    juce::gl::glDeleteTextures(1, &milkdrop_render_tex_);
+    milkdrop_render_tex_ = 0;
+  }
+  milkdrop_preset_paths_.clear();
+  milkdrop_current_preset_ = 0;
+  milkdrop_current_preset_ui_.store(-1);
+  milkdrop_last_fbo_w_ = 0;
+  milkdrop_last_fbo_h_ = 0;
+  milkdrop_render_ready_ = false;
+}
+
 void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
+  // GL 上下文真正关闭（Editor 析构/重建）时才走这里：清理直渲染资源 + milkdrop。
   // v2.9.4：清理 GL 直渲染资源（VAO + 各 GlDirectModuleBase 模块专属 VBO）
   if (s3dVao != 0) { juce::gl::glDeleteVertexArrays (1, &s3dVao); s3dVao = 0; }
   if (s3dQuadVbo != 0) { juce::gl::glDeleteBuffers (1, &s3dQuadVbo); s3dQuadVbo = 0; }
@@ -7107,43 +7227,10 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
   s3dTexNdcUniform.reset();
   s3dTexWindowUniform.reset();
   s3dGlReady = false;
+  // 重置 shader 编译标志：上下文重建后 renderOpenGL 会重新懒编译 shader。
+  s3dShaderUseChecked = false;
 
-  if (milkdrop_pm_handle_ != nullptr) {
-    auto& api = projectm_api::Api::instance();
-    api.destroy(milkdrop_pm_handle_);
-    milkdrop_pm_handle_ = nullptr;
-    gEditorProjectMInstances.store(0);
-    api.resetGlewInitialization();
-  }
-  // 销毁整体染色后处理着色器与 post FBO
-  if (milkdrop_tint_pass_ != nullptr) {
-    milkdrop_tint_pass_->shutdown();
-    milkdrop_tint_pass_.reset();
-  }
-  if (milkdrop_post_fbo_ != 0) {
-    juce::gl::glDeleteFramebuffers(1, &milkdrop_post_fbo_);
-    milkdrop_post_fbo_ = 0;
-  }
-  if (milkdrop_post_tex_ != 0) {
-    juce::gl::glDeleteTextures(1, &milkdrop_post_tex_);
-    milkdrop_post_tex_ = 0;
-  }
-  milkdrop_post_w_ = 0;
-  milkdrop_post_h_ = 0;
-  if (milkdrop_render_fbo_ != 0) {
-    juce::gl::glDeleteFramebuffers(1, &milkdrop_render_fbo_);
-    milkdrop_render_fbo_ = 0;
-  }
-  if (milkdrop_render_tex_ != 0) {
-    juce::gl::glDeleteTextures(1, &milkdrop_render_tex_);
-    milkdrop_render_tex_ = 0;
-  }
-  milkdrop_preset_paths_.clear();
-  milkdrop_current_preset_ = 0;
-  milkdrop_current_preset_ui_.store(-1);
-  milkdrop_last_fbo_w_ = 0;
-  milkdrop_last_fbo_h_ = 0;
-  milkdrop_render_ready_ = false;
+  destroyMilkdropEditorResources();
 }
 
 void Y2KmeterAudioProcessorEditor::SuspendMilkdropEditorRendererForFloating() {
@@ -7154,7 +7241,9 @@ void Y2KmeterAudioProcessorEditor::SuspendMilkdropEditorRendererForFloating() {
 
   if (openGLContext.isAttached()) {
     openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
-      openGLContextClosing();
+      // 只销毁 Editor 侧 Milkdrop 资源；直渲染模块的 VBO/FBO/shader 必须保留
+      // （它们仍在 Editor GL 上下文里渲染，误删会导致残影/卡死）。
+      destroyMilkdropEditorResources();
     }, true);
   }
 
@@ -7187,6 +7276,9 @@ void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {
   auto presetsDir = milkdrop_use_like_library_.load()
                         ? FindMilkdropLikeDir()
                         : FindMilkdropAssetsDir("milkdrop_presets");
+  Y2K_LOG("[Rescan] useLike=" + juce::String(milkdrop_use_like_library_.load() ? 1 : 0)
+          + " dir=" + presetsDir.getFullPathName()
+          + " exists=" + juce::String(presetsDir.exists() ? 1 : 0));
   if (presetsDir.exists()) {
     auto files = presetsDir.findChildFiles(juce::File::findFiles,
                                            false, "*.milk");

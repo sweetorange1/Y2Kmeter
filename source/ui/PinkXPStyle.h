@@ -166,6 +166,20 @@ namespace PinkXP
     juce::Font getAxisFont(float height, int styleFlags = juce::Font::plain);
 
     // ==========================================================
+    // 静态文本位图缓存（v2.9.6 性能）
+    //   mac 上 Editor GL（CPE）下 drawText 每帧触发塑形 + 逐 glyph GL 调用，
+    //   静态文本（标题/轴标签/标签）应一次性 CPU 光栅化成 Image，此后每帧
+    //   仅一次 drawImageAt。shadowColour 非透明时额外叠一层 1px 偏移阴影。
+    //   key 含文本/字号/颜色/缩放，主题切换后自然失效；容量有上限保护。
+    // ==========================================================
+    juce::Image cachedStaticTextImage (const juce::String& text,
+                                       float fontHeight,
+                                       int styleFlags,
+                                       juce::Colour colour,
+                                       juce::Colour shadowColour = juce::Colours::transparentBlack,
+                                       bool axisFont = false);
+
+    // ==========================================================
     // UI 密度缩放（低分辨率适配）
     //   低分辨率屏幕上，标题栏 / 工具栏 / 模块面板 chrome 的固定像素
     //   尺寸会挤占过多仪表显示区。这里提供全局缩放因子，让所有 chrome

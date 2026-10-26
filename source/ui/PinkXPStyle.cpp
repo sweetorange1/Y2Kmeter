@@ -4,6 +4,8 @@
 #include "source/ui/palette/PaletteGenerator.h"
 #include "source/Y2KLogging.h"
 
+#include <unordered_map>
+
 // ==========================================================
 // PinkXPStyle.cpp —— 像素风配色/绘制/LookAndFeel 的实现
 // ==========================================================
@@ -135,6 +137,66 @@ namespace PinkXP
     {
         const float scaled = (height >= 8.0f) ? height * 1.5f : height;
         return makeFontRaw(scaled * uiScale(), styleFlags);
+    }
+
+    // ======================================================
+    // 静态文本位图缓存（v2.9.6 性能）
+    //   mac 上 Editor GL（CPE）渲染下，drawText 每帧触发 HarfBuzz 塑形 +
+    //   逐 glyph 的 GL 调用，NSOpenGL 驱动（Metal 转译层）下开销是
+    //   Windows 的约 10 倍。标题栏、轴标签等「内容不变但组件每帧全量
+    //   重绘」的静态文本是 GL 线程最大热点。
+    //   这里把静态文本一次性 CPU 光栅化成 ARGB Image，之后每帧只需
+    //   一次 drawImageAt（单纹理 quad），热点降一个数量级。
+    //   缓存 key 含文本/字号/颜色/缩放，主题切换后 key 变化自然失效；
+    //   容量上限保护避免极端主题组合下内存失控。
+    // ======================================================
+    juce::Image cachedStaticTextImage (const juce::String& text,
+                                       float fontHeight,
+                                       int styleFlags,
+                                       juce::Colour colour,
+                                       juce::Colour shadowColour,
+                                       bool axisFont)
+    {
+        if (text.isEmpty())
+            return {};
+
+        const juce::String key = text + "|" + juce::String (fontHeight) + "|"
+                               + juce::String (styleFlags) + "|"
+                               + colour.toString() + "|"
+                               + shadowColour.toString() + "|"
+                               + juce::String (uiScale()) + "|"
+                               + juce::String (axisFont ? 1 : 0);
+
+        static std::unordered_map<juce::String, juce::Image> cache;
+
+        const auto it = cache.find (key);
+        if (it != cache.end())
+            return it->second;
+
+        const juce::Font font = axisFont ? getAxisFont (fontHeight, styleFlags)
+                                         : getFont (fontHeight, styleFlags);
+        // +2 为阴影偏移与字模边界留白
+        const int w = juce::roundToInt (font.getStringWidthFloat (text)) + 2;
+        const int h = juce::roundToInt (font.getHeight()) + 2;
+        if (w <= 2 || h <= 2)
+            return {};
+
+        juce::Image img (juce::Image::ARGB, w, h, true, juce::SoftwareImageType());
+        juce::Graphics g2 (img);
+        g2.setFont (font);
+        if (! shadowColour.isTransparent())
+        {
+            g2.setColour (shadowColour);
+            g2.drawText (text, 1, 1, w - 2, h - 2, juce::Justification::left, false);
+        }
+        g2.setColour (colour);
+        g2.drawText (text, 0, 0, w - 2, h - 2, juce::Justification::left, false);
+
+        // 容量保护：超限整体清空（静态文本数量有限，正常远达不到）
+        if (cache.size() > 512)
+            cache.clear();
+        cache.emplace (key, img);
+        return img;
     }
 
     // 坐标轴/刻度专用字体：不放大，保持原始尺寸
@@ -716,19 +778,29 @@ namespace PinkXP
                                              16, 14);
         drawTitleIconText(g, iconRect, juce::String::fromUTF8(th.titleIconText), selInk, sel.darker(0.50f), fontHeight + 0.6f);
 
-        // 标题文字（跟随主题 selInk）
-        g.setFont(getFont(fontHeight, juce::Font::bold));
+        // 标题文字（跟随主题 selInk）—— 静态文本位图缓存（v2.9.6 性能：
+        //   组件每帧全量重绘时标题不再逐帧塑形/逐 glyph 上传，单次 quad 绘制）
         auto textRect = bounds.reduced(6, 0);
         textRect.removeFromLeft(19); // 给左侧图标留空间
 
-        // 阴影：始终比标题栏底色 (sel) 更暗 → 一致的"凸起 bevel"效果
-        //   旧实现用 selInk.contrasting()，当自定义主题 selInk 为深色时
-        //   阴影会变成亮色光晕，视觉上破坏文字垂直居中。
-        g.setColour(sel.darker(0.50f).withAlpha(0.55f));
-        g.drawText(title, textRect.translated(1, 1), juce::Justification::centredLeft, false);
-
-        g.setColour(selInk);
-        g.drawText(title, textRect, juce::Justification::centredLeft, false);
+        const juce::Image titleImg = cachedStaticTextImage (
+            title, fontHeight, juce::Font::bold, selInk, sel.darker(0.50f).withAlpha(0.55f));
+        if (titleImg.isValid())
+        {
+            g.drawImageAt (titleImg,
+                           textRect.getX(),
+                           textRect.getY() + (textRect.getHeight() - titleImg.getHeight()) / 2,
+                           false);
+        }
+        else
+        {
+            // 兜底（缓存失败）：保持旧绘制路径
+            g.setFont(getFont(fontHeight, juce::Font::bold));
+            g.setColour(sel.darker(0.50f).withAlpha(0.55f));
+            g.drawText(title, textRect.translated(1, 1), juce::Justification::centredLeft, false);
+            g.setColour(selInk);
+            g.drawText(title, textRect, juce::Justification::centredLeft, false);
+        }
 
         return bounds;
     }

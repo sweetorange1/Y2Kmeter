@@ -756,8 +756,20 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
         const int bh = 12;
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.fillRect (bx, by, bw, bh);
-        g.setColour (PinkXP::hl);
-        g.drawText (l.label, bx, by, bw, bh, juce::Justification::centred, false);
+        // 静态标签位图缓存（v2.9.6 性能，见 SpectrumModule::drawAxisLabels）
+        const juce::Image img = PinkXP::cachedStaticTextImage (
+            l.label, 9.0f, juce::Font::plain, PinkXP::hl,
+            juce::Colours::transparentBlack, true);
+        if (img.isValid())
+        {
+            g.drawImageAt (img, bx + (bw - img.getWidth()) / 2,
+                           by + (bh - img.getHeight()) / 2, false);
+        }
+        else
+        {
+            g.setColour (PinkXP::hl);
+            g.drawText (l.label, bx, by, bw, bh, juce::Justification::centred, false);
+        }
     }
 
     // 底部 older/newer 提示：同样浮绘在画布内部底边，带半透明暗背板

@@ -10,6 +10,8 @@ build
 # macOS 适配：build_macos_installer.sh 默认使用 build/ 与 build_*/ 作为构建输出目录
 /build/
 /build_*/
+# 诊断用 RelWithDebInfo 构建目录（带日志，本地调试用）
+/build-rwdi/
 
 # IDE configurations
 /.vs/

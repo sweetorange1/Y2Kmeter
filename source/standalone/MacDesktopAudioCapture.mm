@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cctype>
 #include <atomic>
+#include <mutex>
 
 @interface Y2KSCStreamAudioOutput : NSObject <SCStreamOutput>
 @property (nonatomic, assign) void* impl;
@@ -31,7 +32,26 @@
 namespace y2k
 {
 
-struct MacDesktopAudioCapture::Impl
+// ==========================================================
+// 信号量生命周期包装（MRC 防 UAF）
+//   · dispatch_semaphore 是 ObjC 对象，MRC 下需要显式 release。
+//   · 异步 completion 可能在等待方超时返回之后才执行 signal，
+//     若等待方提前 release 信号量，迟到的 signal 就会访问已销毁对象。
+//   · 这里把信号量放进 shared_ptr 包装：等待方与 completion 各持一份，
+//     引用计数归零（所有方都完成）后才真正 release，彻底消除该竞态。
+// ==========================================================
+struct SemBox
+{
+    dispatch_semaphore_t sem = nullptr;
+
+    SemBox()  { sem = dispatch_semaphore_create (0); }
+    ~SemBox() { if (sem != nullptr) dispatch_release (sem); }
+
+    SemBox (const SemBox&) = delete;
+    SemBox& operator= (const SemBox&) = delete;
+};
+
+struct MacDesktopAudioCapture::Impl : public std::enable_shared_from_this<Impl>
 {
     MacDesktopAudioCapture* owner = nullptr;
 
@@ -49,11 +69,23 @@ struct MacDesktopAudioCapture::Impl
     std::atomic<bool>     streamWanted { false };      // 是否希望采集（串行队列内维护）
     std::atomic<bool>     wakeRequested { false };     // DidWake 置位，watchdog 消费
     std::atomic<uint64_t> lastSampleMachTicks { 0 };   // 最近一次音频缓冲到达时间
+    // 启动世代号（防复活修复）：每次 start/stop 递增。异步 completion 在
+    //   写入成员前校验自己捕获的世代号是否仍等于当前值，不等说明本次启动
+    //   已被超时/停止/重建取代，必须放弃，从而杜绝「超时后流被复活」与
+    //   「对象已销毁仍被回调」两类问题。
+    std::atomic<uint64_t> startGeneration { 0 };
+    // SCShareableContent 缓存（Apple 官方建议缓存）：首次异步获取后保存，
+    //   之后的 start 直接同步建流，消除消息线程上的信号量阻塞等待。
+    SCShareableContent* cachedContent = nil;
+    // 保护 stream/output/queue/cachedContent：慢路径异步 completion 运行在
+    //   系统队列，stopCapture/startCapture 运行在 lifecycleQueue，两者并发
+    //   读写成员时靠这把锁串行化（修复「超时后流被复活」与数据竞争）。
+    std::mutex streamMutex;
     dispatch_queue_t      lifecycleQueue = nullptr;    // stop/start 串行队列
     dispatch_queue_t      watchdogQueue  = nullptr;    // watchdog 定时器队列
     dispatch_source_t     watchdogTimer  = nullptr;
     double                machTimebaseNsPerTick = 1.0;
-    id                    lifeProxy = nil;             // NSWorkspace 通知桥接对象（ARC）
+    id                    lifeProxy = nil;             // NSWorkspace 通知桥接对象（MRC：需显式 release）
     bool                  observersRegistered = false;
 
     static constexpr double kNoDataTimeoutSec = 5.0;   // 无任何 buffer 超时阈值
@@ -83,12 +115,34 @@ struct MacDesktopAudioCapture::Impl
             dispatch_release (watchdogQueue);
             watchdogQueue = nullptr;
         }
+
+        // MRC 兜底释放：正常流程 stopCapture() 已释放，这里防御异常路径。
+        if (stream != nil)
+            [stream release];
+        stream = nil;
+        if (output != nil)
+            [output release];
+        output = nil;
+        if (queue != nullptr)
+            dispatch_release (queue);
+        queue = nullptr;
+        if (cachedContent != nil)
+            [cachedContent release];
+        cachedContent = nil;
+
+        // 休眠/唤醒观察者兜底清理（正常由 unregisterSleepWakeObservers 处理）
+        if (lifeProxy != nil)
+        {
+            [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:lifeProxy];
+            [lifeProxy release];
+            lifeProxy = nil;
+        }
+
         if (lifecycleQueue != nullptr)
         {
             dispatch_release (lifecycleQueue);
             lifecycleQueue = nullptr;
         }
-        lifeProxy = nil;
     }
 
     void markSleeping() noexcept
@@ -132,6 +186,9 @@ struct MacDesktopAudioCapture::Impl
         {
             [nc removeObserver:lifeProxy];
             [lifeProxy setImpl:nullptr];
+            // MRC：selector-based addObserver 不会 retain observer，
+            // 因此 removeObserver 之后必须显式 release，否则每次 start/stop 泄漏。
+            [lifeProxy release];
             lifeProxy = nil;
         }
         observersRegistered = false;
@@ -150,9 +207,12 @@ struct MacDesktopAudioCapture::Impl
                                    dispatch_time (DISPATCH_TIME_NOW, (int64_t) NSEC_PER_SEC),
                                    (uint64_t) NSEC_PER_SEC,
                                    (uint64_t) (200 * NSEC_PER_MSEC));
-        Impl* self = this;
+        // weak_ptr 捕获：Impl 销毁后（dispatch_source_cancel 与 handler 执行的
+        //   竞态窗口内）不再触碰已销毁对象。
+        const std::weak_ptr<Impl> weakSelf = shared_from_this();
         dispatch_source_set_event_handler (watchdogTimer, ^{
-            self->watchdogTick();
+            if (const auto self = weakSelf.lock())
+                self->watchdogTick();
         });
         dispatch_resume (watchdogTimer);
     }
@@ -187,22 +247,24 @@ struct MacDesktopAudioCapture::Impl
         if (! wake && ! timedOut)
             return;
 
-        // 串行化重建：与 UI 线程的 start/stop 互斥，且不会嵌套重入
-        dispatch_async (lifecycleQueue, ^{
-            if (owner == nullptr || ! streamWanted.load (std::memory_order_relaxed))
+        // 串行化重建：与 UI 线程的 start/stop 互斥，且不会嵌套重入。
+        // shared_ptr 捕获：stop() 排空 lifecycleQueue 前 Impl 始终存活。
+        const std::shared_ptr<Impl> self = shared_from_this();
+        dispatch_async (lifecycleQueue, [self] {
+            if (self->owner == nullptr || ! self->streamWanted.load (std::memory_order_relaxed))
                 return;
 
             juce::String err;
-            stopCapture();               // 释放睡眠中失效的旧 SCStream
-            if (startCapture (err))      // 重建新流（权限仍有效时静默成功）
+            self->stopCapture();               // 释放睡眠中失效的旧 SCStream
+            if (self->startCapture (err))      // 重建新流（权限仍有效时静默成功）
             {
                 // 新流尚未产出数据：清空计时，等首包到达后再开始超时监控
-                lastSampleMachTicks.store (0, std::memory_order_relaxed);
+                self->lastSampleMachTicks.store (0, std::memory_order_relaxed);
             }
             else
             {
                 // 重建失败（如权限被撤销）：把错误留给 UI 查询
-                owner->lastError = err;
+                self->owner->lastError = err;
             }
         });
     }
@@ -1343,6 +1405,131 @@ struct MacDesktopAudioCapture::Impl
         return CGRequestScreenCaptureAccess();
     }
 
+    // 流启动结果的跨队列传递：completion 在 SCK 回调队列写入，startCapture
+    // 在 lifecycleQueue 上经信号量同步后读取（signal/wait 建立 happens-before）。
+    struct StreamStartResult
+    {
+        std::atomic<bool> started { false };
+        juce::String       errorText;   // 仅在 startBox signal 之后读取
+    };
+
+    // 从 SCShareableContent 创建 SCStream、提交到成员并**异步**发起
+    // startCaptureWithCompletionHandler（不等待启动结果）。
+    //   · 必须在持有 streamMutex 时调用。
+    //   · MRC：filter/config 由 SCStream 内部 copy/retain，创建后立即 release；
+    //     局部失败路径自行清理；提交后由调用方 stopCapture 回收。
+    //   · 返回 false 表示创建失败（成员未提交）；成功时成员已提交、start 在途。
+    //
+    //   【死锁修复（重要）】绝不能在 SCK 的 completion 回调线程上同步等待
+    //   startCaptureWithCompletionHandler 的 completion：SCK 内部用同一个串行
+    //   队列回调 SCShareableContent 与 SCStream 的 completion，同步等待会占用
+    //   队列使 completion 永不执行，表现为 2 秒超时 → "Timed out while
+    //   starting ScreenCaptureKit stream."。等待统一由 startCapture 在
+    //   lifecycleQueue 上完成（该队列不承载 SCK 回调）。
+    //   · result/startBox 按值传递（而非 const 引用）：ObjC block 捕获 C++ 引用
+    //     参数时持有的是调用者栈上变量的引用，函数返回后悬垂 → completion 里
+    //     写 result->started 崩溃（movb $0x1,(%rax)）。按值 + block 内再显式
+    //     拷贝一份，保证 block 持有独立的 shared_ptr 引用计数。
+    bool buildCommitAndStartStream (SCShareableContent* content,
+                                    std::shared_ptr<StreamStartResult> result,
+                                    std::shared_ptr<SemBox> startBox,
+                                    juce::String& buildErr) API_AVAILABLE(macos(13.0))
+    {
+        SCDisplay* display = content.displays.firstObject;
+        SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:display
+                                                      excludingApplications:@[]
+                                                          exceptingWindows:@[]];
+
+        SCStreamConfiguration* config = [SCStreamConfiguration new];
+        // 仅采集系统音频：优先显式关闭视频流，降低系统消息量与无效调度。
+        config.capturesAudio = YES;
+        config.excludesCurrentProcessAudio = NO;
+        config.sampleRate = 48000;
+        config.channelCount = 2;
+
+        bool needScreenOutputCompatibility = true;
+        if ([config respondsToSelector:@selector(setCapturesVideo:)])
+        {
+            [config setValue:@(NO) forKey:@"capturesVideo"];
+            needScreenOutputCompatibility = false;
+        }
+
+        SCStream* newStream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
+        Y2KSCStreamAudioOutput* newOutput = [Y2KSCStreamAudioOutput new];
+        newOutput.impl = this;
+        dispatch_queue_t newQueue = dispatch_queue_create ("cn.iisaacbeats.y2kmeter.desktopaudio", DISPATCH_QUEUE_SERIAL);
+
+        // SCStream 已 copy/retain filter 与 config，这里释放构建期引用
+        [filter release];
+        [config release];
+
+        NSError* addOutputError = nil;
+        const bool added = [newStream addStreamOutput:newOutput
+                                                 type:SCStreamOutputTypeAudio
+                                   sampleHandlerQueue:newQueue
+                                                error:&addOutputError];
+        if (! added)
+        {
+            buildErr = juce::String ("Failed to add SCStream audio output: ")
+                     + juce::String::fromUTF8 (addOutputError.localizedDescription.UTF8String);
+            [newStream release];
+            [newOutput release];
+            dispatch_release (newQueue);
+            return false;
+        }
+
+        if (needScreenOutputCompatibility)
+        {
+            // 旧系统/旧SDK缺少capturesVideo时，保留兼容分支，避免反复"stream output NOT found"日志。
+            NSError* addScreenOutputError = nil;
+            [newStream addStreamOutput:newOutput
+                                  type:SCStreamOutputTypeScreen
+                    sampleHandlerQueue:newQueue
+                                 error:&addScreenOutputError];
+        }
+
+        // 提交到成员（锁内，与 stopCapture 串行）
+        stream = newStream;
+        output = newOutput;
+        queue  = newQueue;
+
+        // 异步发起启动；completion 在 SCK 回调队列执行，只写结果 + signal，
+        // 不做任何可能占用 SCK 队列的操作。
+        //   显式本地副本：确保 block 捕获的是独立的 shared_ptr（引用计数 +1），
+        //   而非函数参数引用的别名（见上方死锁/悬垂注释）。
+        const auto resultCopy = result;
+        const auto startBoxCopy = startBox;
+        [newStream startCaptureWithCompletionHandler:^ (NSError* startError)
+        {
+            if (startError != nil)
+                resultCopy->errorText = juce::String ("Failed to start ScreenCaptureKit stream: ")
+                                      + juce::String::fromUTF8 (startError.localizedDescription.UTF8String);
+            else
+                resultCopy->started.store (true, std::memory_order_relaxed);
+            dispatch_semaphore_signal (startBoxCopy->sem);
+        }];
+        return true;
+    }
+
+    // 启动成功公共收尾（在 lifecycleQueue 上执行）
+    bool finishStart()
+    {
+        coldStartRemainSec = 2.0;
+        asbdLogElapsedSec = 0.0;
+        monitorLogElapsedSec = 0.0;
+        fullScanProbeElapsedSec = 0.0;
+        fallbackRetryCooldownSec = 0.0;
+        noPayloadElapsedSec = 0.0;
+        dispatchElapsedSec = 0.0;
+        // pendingDispatchL/R 的清理由 stopCapture 在采样队列上完成（防数据竞争），
+        // 这里不再触碰。
+
+        // 外网 #1：启动无数据兜底 watchdog（唤醒重建 / 静默失效自愈）
+        armWatchdog();
+        streamWanted.store (true, std::memory_order_relaxed);
+        return true;
+    }
+
     bool startCapture (juce::String& err)
     {
         if (@available(macOS 13.0, *))
@@ -1364,104 +1551,126 @@ struct MacDesktopAudioCapture::Impl
                 }
             }
 
-            __block bool ok = false;
-            __block juce::String localError;
+            // 本次启动的世代号：任何 stop/新的 start 都会使其失效。
+            // 迟到的异步 completion 在写入成员前校验世代号，不匹配即放弃，
+            // 防止「超时后流被复活」与「对象已销毁仍被回调」。
+            const uint64_t gen = startGeneration.fetch_add (1, std::memory_order_relaxed) + 1;
 
-            const dispatch_semaphore_t sem = dispatch_semaphore_create (0);
+            // ---- 快路径：已缓存 SCShareableContent（第二次及以后的 start、
+            //      watchdog 自愈等）同步建流，不再等待系统异步回调。 ----
+            {
+                std::shared_ptr<StreamStartResult> startResult;
+                std::shared_ptr<SemBox> startBox;
+                juce::String buildErr;
+                bool committed = false;
+                {
+                    std::lock_guard<std::mutex> lock (streamMutex);
+                    if (cachedContent != nil && cachedContent.displays.count > 0)
+                    {
+                        startResult = std::make_shared<StreamStartResult>();
+                        startBox = std::make_shared<SemBox>();
+                        committed = buildCommitAndStartStream (cachedContent, startResult, startBox, buildErr);
+                        if (! committed)
+                        {
+                            // 创建失败（如显示器拓扑变化）→ 清缓存，落到慢路径
+                            [cachedContent release];
+                            cachedContent = nil;
+                        }
+                    }
+                }
+
+                if (committed)
+                {
+                    // 在 lifecycleQueue 上等待启动结果（SCK 回调队列此刻空闲，
+                    // 不会死锁；completion 通常在 <100ms 内回调）。
+                    dispatch_semaphore_wait (startBox->sem, dispatch_time (DISPATCH_TIME_NOW, (int64_t) (5.0 * NSEC_PER_SEC)));
+
+                    if (startResult->started.load (std::memory_order_relaxed))
+                        return finishStart();
+
+                    // 启动失败/超时：回收半成品流，清缓存，落到慢路径重试
+                    err = startResult->errorText.isNotEmpty() ? startResult->errorText
+                                                              : juce::String ("Timed out while starting ScreenCaptureKit stream.");
+                    stopCapture();
+                    {
+                        std::lock_guard<std::mutex> lock (streamMutex);
+                        if (cachedContent != nil)
+                        {
+                            [cachedContent release];
+                            cachedContent = nil;
+                        }
+                    }
+                }
+            }
+
+            // ---- 慢路径：首次获取 SCShareableContent（异步，5 秒超时兜底）----
+            __block bool committedSlow = false;
+            __block bool aborted = false;
+            __block juce::String localError;
+            const auto outerBox = std::make_shared<SemBox>();
+            const auto startResult = std::make_shared<StreamStartResult>();
+            const auto startBox = std::make_shared<SemBox>();
+            const std::weak_ptr<Impl> weakSelf = shared_from_this();
 
             [SCShareableContent getShareableContentExcludingDesktopWindows:NO
                                                       onScreenWindowsOnly:NO
                                                          completionHandler:^ (SCShareableContent* content, NSError* error)
-
             {
+                auto self = weakSelf.lock();
+                if (self == nullptr)
+                {
+                    dispatch_semaphore_signal (outerBox->sem);
+                    return;
+                }
+
+                // 系统队列上先做「可取消」的错误转译（不触碰 Impl 成员）
+                juce::String contentError;
                 if (error != nil)
                 {
                     juce::String detail = juce::String::fromUTF8 (error.localizedDescription.UTF8String);
                     const juce::String detailLower = detail.toLowerCase();
-                    if (detailLower.contains ("tcc") || detailLower.contains ("denied") || detailLower.contains ("拒绝"))
-                        localError = buildPermissionHelpText();
-                    else
-                        localError = juce::String ("SCShareableContent failed: ") + detail;
-
-                    dispatch_semaphore_signal (sem);
-                    return;
+                    contentError = (detailLower.contains ("tcc") || detailLower.contains ("denied") || detailLower.contains ("拒绝"))
+                                 ? buildPermissionHelpText()
+                                 : juce::String ("SCShareableContent failed: ") + detail;
+                }
+                else if (content == nil || content.displays.count == 0)
+                {
+                    contentError = "No shareable display found for ScreenCaptureKit.";
                 }
 
-                if (content == nil || content.displays.count == 0)
                 {
-                    localError = "No shareable display found for ScreenCaptureKit.";
-                    dispatch_semaphore_signal (sem);
-                    return;
-                }
+                    std::lock_guard<std::mutex> lock (self->streamMutex);
 
-                SCDisplay* display = content.displays.firstObject;
-                SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:display
-                                                              excludingApplications:@[]
-                                                                 exceptingWindows:@[]];
-
-                SCStreamConfiguration* config = [SCStreamConfiguration new];
-                // 仅采集系统音频：优先显式关闭视频流，降低系统消息量与无效调度。
-                config.capturesAudio = YES;
-                config.excludesCurrentProcessAudio = NO;
-                config.sampleRate = 48000;
-                config.channelCount = 2;
-
-                bool needScreenOutputCompatibility = true;
-                if ([config respondsToSelector:@selector(setCapturesVideo:)])
-                {
-                    [config setValue:@(NO) forKey:@"capturesVideo"];
-                    needScreenOutputCompatibility = false;
-                }
-
-                stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
-                output = [Y2KSCStreamAudioOutput new];
-                output.impl = this;
-
-                queue = dispatch_queue_create ("cn.iisaacbeats.y2kmeter.desktopaudio", DISPATCH_QUEUE_SERIAL);
-
-                NSError* addOutputError = nil;
-                const bool added = [stream addStreamOutput:output
-                                                      type:SCStreamOutputTypeAudio
-                                        sampleHandlerQueue:queue
-                                                     error:&addOutputError];
-                if (! added)
-                {
-                    localError = juce::String ("Failed to add SCStream audio output: ")
-                               + juce::String::fromUTF8 (addOutputError.localizedDescription.UTF8String);
-                    stream = nil;
-                    output = nil;
-                    queue = nullptr;
-                    dispatch_semaphore_signal (sem);
-                    return;
-                }
-
-                if (needScreenOutputCompatibility)
-                {
-                    // 旧系统/旧SDK缺少capturesVideo时，保留兼容分支，避免反复"stream output NOT found"日志。
-                    NSError* addScreenOutputError = nil;
-                    [stream addStreamOutput:output
-                                       type:SCStreamOutputTypeScreen
-                         sampleHandlerQueue:queue
-                                      error:&addScreenOutputError];
-                }
-
-                [stream startCaptureWithCompletionHandler:^ (NSError* startError)
-                {
-                    if (startError != nil)
+                    // 世代号校验：本次启动已被超时/停止/新启动取代 → 放弃
+                    if (gen != self->startGeneration.load (std::memory_order_acquire))
                     {
-                        localError = juce::String ("Failed to start ScreenCaptureKit stream: ")
-                                   + juce::String::fromUTF8 (startError.localizedDescription.UTF8String);
-                        ok = false;
+                        aborted = true;
+                        dispatch_semaphore_signal (outerBox->sem);
+                        return;
                     }
-                    else
+
+                    if (contentError.isNotEmpty())
                     {
-                        ok = true;
+                        localError = contentError;
+                        dispatch_semaphore_signal (outerBox->sem);
+                        return;
                     }
-                    dispatch_semaphore_signal (sem);
-                }];
+
+                    // 缓存 content（Apple 官方建议；下次 start 走快路径）
+                    [self->cachedContent release];
+                    self->cachedContent = [content retain];
+
+                    // 仅创建 + 提交 + 发起 start（不等待！等待在 lifecycleQueue 上，
+                    // 避免占用 SCK 串行回调队列造成死锁）
+                    juce::String buildErr;
+                    committedSlow = self->buildCommitAndStartStream (content, startResult, startBox, buildErr);
+                    if (! committedSlow)
+                        localError = buildErr;
+                }
+                dispatch_semaphore_signal (outerBox->sem);
             }];
 
-            const auto timeoutResult = dispatch_semaphore_wait (sem, dispatch_time (DISPATCH_TIME_NOW, (int64_t) (5.0 * NSEC_PER_SEC)));
+            const auto timeoutResult = dispatch_semaphore_wait (outerBox->sem, dispatch_time (DISPATCH_TIME_NOW, (int64_t) (5.0 * NSEC_PER_SEC)));
             if (timeoutResult != 0)
             {
                 err = "Timed out while starting ScreenCaptureKit desktop audio capture.";
@@ -1469,28 +1678,34 @@ struct MacDesktopAudioCapture::Impl
                 return false;
             }
 
-            if (! ok)
+            if (aborted)
+                return false;   // 已被 stop/新 start 取代，静默放弃
+
+            if (! committedSlow)
             {
                 err = localError.isNotEmpty() ? localError : juce::String ("Unknown error while starting desktop audio capture.");
                 stopCapture();
                 return false;
             }
 
-            coldStartRemainSec = 2.0;
-            asbdLogElapsedSec = 0.0;
-            monitorLogElapsedSec = 0.0;
-            fullScanProbeElapsedSec = 0.0;
-            fallbackRetryCooldownSec = 0.0;
-            noPayloadElapsedSec = 0.0;
-            dispatchElapsedSec = 0.0;
-            pendingDispatchL.clear();
-            pendingDispatchR.clear();
+            // 等待启动结果（lifecycleQueue 上，安全）
+            const auto startTimeout = dispatch_semaphore_wait (startBox->sem, dispatch_time (DISPATCH_TIME_NOW, (int64_t) (5.0 * NSEC_PER_SEC)));
+            if (startTimeout != 0)
+            {
+                err = "Timed out while starting ScreenCaptureKit stream.";
+                stopCapture();
+                return false;
+            }
 
-            // 外网 #1：启动无数据兜底 watchdog（唤醒重建 / 静默失效自愈）
-            armWatchdog();
-            streamWanted.store (true, std::memory_order_relaxed);
+            if (! startResult->started.load (std::memory_order_relaxed))
+            {
+                err = startResult->errorText.isNotEmpty() ? startResult->errorText
+                                                          : juce::String ("Unknown error while starting desktop audio capture.");
+                stopCapture();
+                return false;
+            }
 
-            return true;
+            return finishStart();
         }
 
         err = "Desktop audio capture requires macOS 13.0 or newer.";
@@ -1499,36 +1714,64 @@ struct MacDesktopAudioCapture::Impl
 
     void stopCapture()
     {
-        // 外网 #1：先摘掉 watchdog 与休眠通知，再释放 SCStream
+        // 使所有在途的 start completion 失效（防复活）：它们醒来后会在
+        // streamMutex 内看到世代号已变，直接放弃。
+        startGeneration.fetch_add (1, std::memory_order_relaxed);
         streamWanted.store (false, std::memory_order_relaxed);
         disarmWatchdog();
         unregisterSleepWakeObservers();
 
-        if (stream == nil)
+        SCStream* s = nil;
+        Y2KSCStreamAudioOutput* o = nil;
+        dispatch_queue_t q = nullptr;
         {
+            std::lock_guard<std::mutex> lock (streamMutex);
+            s = stream;
+            o = output;
+            q = queue;
+            stream = nil;
             output = nil;
-            queue = nullptr;
+            queue  = nullptr;
+        }
+
+        if (s == nil)
             return;
-        }
 
-        const dispatch_semaphore_t sem = dispatch_semaphore_create (0);
-        [stream stopCaptureWithCompletionHandler:^ (NSError*)
+        const auto box = std::make_shared<SemBox>();
+        [s stopCaptureWithCompletionHandler:^ (NSError*)
         {
-            dispatch_semaphore_signal (sem);
+            dispatch_semaphore_signal (box->sem);
         }];
-        dispatch_semaphore_wait (sem, dispatch_time (DISPATCH_TIME_NOW, (int64_t) (2.0 * NSEC_PER_SEC)));
+        dispatch_semaphore_wait (box->sem, dispatch_time (DISPATCH_TIME_NOW, (int64_t) (2.0 * NSEC_PER_SEC)));
 
-        if (output != nil)
+        if (o != nil)
         {
-            NSError* removeErr = nil;
-            [stream removeStreamOutput:output type:SCStreamOutputTypeScreen error:&removeErr];
-            [stream removeStreamOutput:output type:SCStreamOutputTypeAudio error:&removeErr];
-            (void) removeErr;
+            if (@available(macOS 13.0, *))
+            {
+                NSError* removeErr = nil;
+                [s removeStreamOutput:o type:SCStreamOutputTypeScreen error:&removeErr];
+                [s removeStreamOutput:o type:SCStreamOutputTypeAudio error:&removeErr];
+                (void) removeErr;
+            }
+            o.impl = nullptr;
+            [o release];
         }
 
-        stream = nil;
-        output = nil;
-        queue = nullptr;
+        [s release];
+
+        // 清空残留采样数据：派发到采样队列，与采样回调的 push 串行执行，
+        // 消除「采样队列 push / 生命周期队列 clear」的跨队列数据竞争。
+        // 队列引用已随 block 转移，此处的 dispatch_release 不会让队列在
+        // block 执行前销毁（GCD 会持有到 block 结束）。
+        if (q != nullptr)
+        {
+            const std::shared_ptr<Impl> self = shared_from_this();
+            dispatch_async (q, [self] {
+                self->pendingDispatchL.clear();
+                self->pendingDispatchR.clear();
+            });
+            dispatch_release (q);
+        }
     }
 };
 
@@ -1572,7 +1815,7 @@ struct MacDesktopAudioCapture::Impl
 namespace y2k
 {
 
-MacDesktopAudioCapture::MacDesktopAudioCapture() : impl (std::make_unique<Impl>())
+MacDesktopAudioCapture::MacDesktopAudioCapture() : impl (std::make_shared<Impl>())
 {
     impl->owner = this;
 }
@@ -1590,7 +1833,7 @@ bool MacDesktopAudioCapture::start()
     lastError = {};
 
     if (impl == nullptr)
-        impl = std::make_unique<Impl>();
+        impl = std::make_shared<Impl>();
 
     impl->owner = this;
 

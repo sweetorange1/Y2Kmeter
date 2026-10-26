@@ -39,6 +39,12 @@ public:
     void renderOpenGL() override;
     void openGLContextClosing() override;
 
+    // 只销毁 Editor 侧 Milkdrop 渲染资源（projectM handle + FBO + 染色后处理），
+    // 不触碰 GlDirectModule 直渲染模块的 VBO/FBO/shader。供 Milkdrop 脱离
+    // （SuspendMilkdropEditorRendererForFloating）时挂起 Editor renderer 使用。
+    // 必须在 GL 线程上调用。
+    void destroyMilkdropEditorResources();
+
     // ---- projectM 桥接 API（供 MilkdropModule 调用）----
     // PCM 推送（UI 线程安全，内部加锁）
     void PushMilkdropPcm(const float* interleaved_lr, unsigned int frame_count);
@@ -798,6 +804,7 @@ private:
     int    milkdrop_render_scale_ = 1;  // 1=全分辨率, 2=半分辨率, 4=1/4分辨率
     int    milkdrop_last_fbo_w_   = 0;
     int    milkdrop_last_fbo_h_   = 0;
+    double milkdrop_last_render_sec_ = 0.0;  // 上次 projectM 渲染时刻（60fps 节流）
 
     // 整体染色后处理（master output colors）：projectM 渲染到 milkdrop_render_fbo_ 后，
     // 若染色增益非 (1,1,1)，先经着色器采样到 milkdrop_post_fbo_，再 blit 到各模块。

@@ -320,6 +320,34 @@ if [[ "${DO_MILKDROP}" -eq 1 ]]; then
 fi
 
 # ----------------------------------------------------------------------------
+# Step 3.5/7  压缩 milkdrop 预设目录为单文件 zip（加速 pkg 安装）
+#   预设约 1 万个 .milk 小文件（132MB），是 pkg 安装慢的主因——installer 要对
+#   每个文件解压 + 写盘 + 校验签名。压缩成单文件 zip（~33MB）后，payload 的
+#   文件数从 ~1 万降到 1，安装速度提升一个数量级。
+#   运行时由 MilkdropModule 首次启动时解压 seed 到
+#   ~/Library/Application Support/Y2Kmeter/milkdrop_presets/（已支持 zip）。
+# ----------------------------------------------------------------------------
+log "Step 3.5/7 Compact milkdrop presets into a single zip"
+
+compact_presets() {
+  local bundle="$1"
+  local assets_dir="${bundle}/Contents/Resources/assets"
+  local presets_dir="${assets_dir}/milkdrop_presets"
+  if [ -d "${presets_dir}" ]; then
+    # --norsrc --noextattr --noqtn：不给每个文件生成 ._* AppleDouble 元数据，
+    # 否则 zip 里会混入约 1 万个 ._* 垃圾条目（体积翻倍、解压变慢）。
+    ( cd "${assets_dir}" && /usr/bin/ditto -c -k --norsrc --noextattr --noqtn \
+        milkdrop_presets milkdrop_presets.zip ) \
+      && /bin/rm -rf "${presets_dir}"
+    log "  - compacted $(basename "${bundle}") -> milkdrop_presets.zip"
+  fi
+}
+
+compact_presets "${STAGED_APP}"
+if [[ "${HAVE_MILKDROP_VST3}" -eq 1 ]]; then compact_presets "${STAGED_MILKDROP_VST3}"; fi
+if [[ "${HAVE_MILKDROP_AU}"   -eq 1 ]]; then compact_presets "${STAGED_MILKDROP_AU}"; fi
+
+# ----------------------------------------------------------------------------
 # Step 4/7  签名（只签暂存区副本）
 #
 #   重要：**不要**加 `--options runtime`（hardened runtime）。
