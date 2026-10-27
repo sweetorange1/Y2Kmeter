@@ -313,23 +313,15 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         const int x = area.getX() + idx * (barW + gap);
         const int labelY = area.getBottom() - labelH - readoutH;
 
-        // 标签（静态文本 → 位图缓存，v2.9.6 性能）
-        const juce::Image labelImg = PinkXP::cachedStaticTextImage (
-            bar.label, 10.0f, juce::Font::bold, PinkXP::ink);
-        if (labelImg.isValid())
-        {
-            g.drawImageAt (labelImg,
-                           x + (barW - labelImg.getWidth()) / 2,
-                           labelY + (labelH - labelImg.getHeight()) / 2,
-                           false);
-        }
-        else
-        {
-            g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-            g.setColour(PinkXP::ink);
-            g.drawText(bar.label, x, labelY, barW, labelH,
-                       juce::Justification::centred, false);
-        }
+        // 标签（M / S / I / L / R）：直接居中 drawText，不走静态文本位图缓存。
+        //   · 位图缓存路径 getFont(10) 会把字号 1.5x 放大到 15px，字模高度
+        //     超出 14px 的标签带，容易被相邻读数压住甚至整块看不见；
+        //   · 只画 5 个单字符，逐帧 drawText 开销可忽略（与 DynamicsModule
+        //     的柱标签一致）。
+        g.setColour(PinkXP::ink);
+        g.setFont(PinkXP::getAxisFont(11.0f, juce::Font::bold));
+        g.drawText(bar.label, x, labelY, barW, labelH,
+                   juce::Justification::centred, false);
 
         // 数字读数（防御：NaN / Inf / 过小 → 显示 -∞；其余数值做 clamp）
         const float raw = bar.smoothed;
@@ -357,9 +349,13 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
 
         if (readoutCache_[idx].isValid())
         {
+            // 位图比 14px 读数带高时向上溢出的部分会被夹回带内，
+            //   避免压到上方的 M/S/I/L/R 标签。
+            const int readoutY = labelY + labelH
+                    + juce::jmax(0, (readoutH - readoutCache_[idx].getHeight()) / 2);
             g.drawImageAt (readoutCache_[idx],
                            x + (barW - readoutCache_[idx].getWidth()) / 2,
-                           labelY + labelH + (readoutH - readoutCache_[idx].getHeight()) / 2,
+                           readoutY,
                            false);
         }
         else
@@ -376,14 +372,6 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     drawLabel(2, barI, true);
     drawLabel(3, barL, false);
     drawLabel(4, barR, false);
-
-    // 分隔线：LUFS 组 / RMS 组
-    {
-        const int sepX = area.getX() + 3 * (barW + gap) - gap / 2;
-        g.setColour(PinkXP::shdw.withAlpha(0.4f));
-        g.drawVerticalLine(sepX, (float)contentBounds.getY() + 6,
-                           (float)contentBounds.getBottom() - 6);
-    }
 }
 
 void LoudnessModule::drawMeterBarStaticLayer(juce::Graphics& g,

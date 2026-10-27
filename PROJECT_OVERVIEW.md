@@ -4236,6 +4236,62 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
   - `ModuleWorkspace::showAddMenu`（右键"添加模块"）同样加上 mac 全屏判断，避免全屏下同类偏移。
   - `withParentAreaOverride` 是本仓库 JUCE 的扩展（`juce_PopupMenu.h`），平台无关；普通窗口/插件宿主下 `isFullScreen()` 为 false，逻辑不触发，行为与修复前完全一致。
 
+## v2.9.8 修复：Loudness 模块 M/S/I/L/R 标签丢失 + 分组细线移除（版本号不变）
+
+> 本轮只改 `source/ui/modules/LoudnessModule.cpp`，**不升版本号**（仍 2.9.8）。
+
+### 1. 回归定位（哪个版本开始坏的）
+
+| 版本 | 提交 | Loudness 标签绘制方式 |
+| --- | --- | --- |
+| ≤ v2.9.3 | `32d121de` 及更早 | `PinkXP::getFont(10.0f, bold)` + `g.drawText("M"…)`，五个标签正常 |
+| **v2.9.7 起（引入）** | **`5f3ed727`**（2026-10-26，"v2.9.7: macOS GPU 化 + …"） | 改为 `PinkXP::cachedStaticTextImage(...)` 位图缓存 + `drawImageAt` 贴图 |
+| v2.9.8 | `9a113c70` / `0c20197b` | 延续 v2.9.7 的位图路径，问题未修 |
+
+- 判定依据：`git log -S "cachedStaticTextImage" -- source/ui/modules/LoudnessModule.cpp source/ui/PinkXPStyle.cpp` 只命中 `5f3ed727` 一个提交；`git diff 32d121de 5f3ed727 -- source/ui/modules/LoudnessModule.cpp` 显示的正是"drawText → 位图缓存"这一处改动。
+- 代码注释里把该性能优化标为 "v2.9.6 性能"，那是当时的规划命名；**实际落地在 v2.9.7 的提交里**，所以按版本算是 v2.9.7 开始坏的。
+- 同一次提交也给数字读数加了同样的位图缓存，但读数位图尺寸更贴近读数带、且每帧重算 + 100ms 节流，所以只有标签肉眼可见地丢失。
+
+### 2. 现象
+
+- 5 条柱（M / S / I / L / R）下方的字母标签丢失，实测只剩 **S**、**R** 两列可见；数字读数正常。
+- 另外 I 与 L 之间（LUFS 组 / RMS 组之间）有一条 1px 深色竖分割线，观感上像把第三、第四列"切开"。
+
+### 3. 根因
+
+`cachedStaticTextImage(text, fontHeight, …)` 内部用的是 `PinkXP::getFont()`，而 `getFont()` 对 `height >= 8` 一律做 **1.5× 放大**：请求 10px 实际光栅化成 15px 字高，位图高度 `roundToInt(fontHeight) + 2 ≈ 17px`。
+
+而 LoudnessModule 的标签带只有 `labelH = 14px`，贴图又完全按位图自身尺寸定位：
+
+```cpp
+g.drawImageAt (labelImg,
+               x + (barW - labelImg.getWidth()) / 2,
+               labelY + (labelH - labelImg.getHeight()) / 2,   // 17 > 14 → 负偏移
+               false);
+```
+
+后果是标签位图整体越出标签带并与紧邻的读数位图区压叠；读数位图同样超出 14px 读数带、按负偏移往上溢，正好压在标签带下沿。这条路径**没有字形级兜底**（`labelImg.isValid()` 为真时永不走 `drawText` 分支），一旦位图落点越界，整块标签就不可见，而不是"被裁掉一点点"。
+
+### 4. 修复
+
+1. **标签回到直接 `drawText`**，并改用不做 1.5× 放大的 `PinkXP::getAxisFont(11.0f, bold)`，在 14px 标签带内垂直居中 → 字模高度（约 11px）恒在带内，不再依赖位图落点：
+
+```cpp
+g.setColour(PinkXP::ink);
+g.setFont(PinkXP::getAxisFont(11.0f, juce::Font::bold));
+g.drawText(bar.label, x, labelY, barW, labelH, juce::Justification::centred, false);
+```
+
+   只画 5 个单字符，逐帧 `drawText` 开销可忽略（`DynamicsModule` 的柱标签本来就是这么画的）。
+
+2. **读数位图上溢部分夹回读数带**：`labelY + labelH + jmax(0, (readoutH - h) / 2)`，保证数字不再压到上方标签。
+3. **删除 I / L 之间的分组竖线**（原 `PinkXP::shdw.withAlpha(0.4f)` 的 `drawVerticalLine`）。模块内现已无任何分隔竖线。
+
+### 5. 经验（以后加静态文本位图缓存时注意）
+
+- `cachedStaticTextImage` 的 `fontHeight` 参数走 `getFont()`，**会被 1.5× 放大**；窄标签带想走位图就必须按 1.5× 反推尺寸（如 10px 带用 6.7f），否则一定超带。
+- 位图贴图前要校验 **位图尺寸 ≤ 目标带尺寸**，负偏移会跨带压叠。标题栏（`drawPinkTitleBar`）那种带宽裕的场景不受影响，所以这个坑只在紧凑的柱状表上暴露。
+
 ---
 
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
