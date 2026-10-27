@@ -534,7 +534,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.9.8");
+        const int versionW = versionFont.getStringWidth ("v2.9.9");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -575,7 +575,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.8";
+        const juce::String versionText = "v2.9.9";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -3612,7 +3612,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.8";
+        const juce::String versionText = "v2.9.9";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -3620,7 +3620,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v2.9.8");
+                const int versionW = versionFont.getStringWidth ("v2.9.9");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -6258,9 +6258,19 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
   // 创建整体染色后处理着色器（master output colors）。
   // 编译失败不致命，仅关闭染色能力；post FBO 纹理在 renderOpenGL 里按需分配。
+  //   ⚠ 失败时所有 Milkdrop 自定义后处理（染色/亮度/效果/tweak 偏移）都会静默
+  //     失效，因此这里必须留日志（v2.9.7 的 #version 重复 bug 就是这样隐身的）。
   milkdrop_tint_pass_.reset(new MilkdropTintPass(openGLContext));
   if (!milkdrop_tint_pass_->init())
+  {
+    Y2K_LOG("[EditorGL] Milkdrop tint pass init FAILED: "
+            + milkdrop_tint_pass_->getLastError());
     milkdrop_tint_pass_.reset();
+  }
+  else
+  {
+    Y2K_LOG("[EditorGL] Milkdrop tint pass init OK");
+  }
 
   milkdrop_render_ready_ = true;
 
@@ -6564,6 +6574,15 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   const auto visual_state = GetMilkdropVisualState();
   const bool tint_active = !visual_state.isNeutral();
 
+  // v2.9.9：后处理与 projectM 渲染同节流。
+  //   · projectM 本帧被 60fps 节流跳过（skipProjectMRender）时，render FBO 内容
+  //     与上一帧逐像素相同，后处理结果也相同 → 直接复用上次的 post FBO，
+  //     省掉一次全屏采样 pass（120/144Hz 屏上相当于减半）。
+  //   · 视觉状态变化（拖滑块 / 切效果，版本号自增）必须立即重算，保证预览跟手。
+  //   · 降级路径（无 openglRenderFrameFbo，projectM 每帧都真渲染）不节流。
+  const bool projectMRenderedThisFrame = use_fbo_api ? (! skipProjectMRender) : true;
+  const uint32_t visualVersion = milkdrop_visual_version_.load (std::memory_order_relaxed);
+
   GLuint blit_source_fbo = milkdrop_render_fbo_;
   if (tint_active) {
     // 分配 / 重分配 post FBO（与 render FBO 同尺寸）
@@ -6591,16 +6610,32 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
       milkdrop_post_w_ = fbo_w;
       milkdrop_post_h_ = fbo_h;
+      milkdrop_post_valid_ = false;   // 新分配的 FBO 内容无效
     }
 
     // 后处理：采样 render FBO 纹理 → post FBO，统一 pass 应用完整视觉状态。
-    if (milkdrop_tint_pass_ != nullptr && milkdrop_tint_pass_->isReady()) {
+    const bool needTintPass =
+        milkdrop_tint_pass_ != nullptr && milkdrop_tint_pass_->isReady()
+        && (! milkdrop_post_valid_
+            || projectMRenderedThisFrame
+            || visualVersion != milkdrop_tint_applied_version_);
+
+    if (needTintPass) {
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
       juce::gl::glViewport(0, 0, fbo_w, fbo_h);
       milkdrop_tint_pass_->apply(milkdrop_render_tex_, visual_state);
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-      blit_source_fbo = milkdrop_post_fbo_;
+      milkdrop_post_valid_ = true;
+      milkdrop_tint_applied_version_ = visualVersion;
     }
+
+    if (milkdrop_post_valid_)
+      blit_source_fbo = milkdrop_post_fbo_;
+  }
+  else
+  {
+    // 回到中性：post FBO 内容不再代表当前画面，下次启用时必须重算。
+    milkdrop_post_valid_ = false;
   }
 
   // ================================================================
@@ -7510,6 +7545,8 @@ void Y2KmeterAudioProcessorEditor::SetMilkdropVisualState(const MilkdropVisualSt
     std::lock_guard<std::mutex> lock(milkdrop_visual_mutex_);
     milkdrop_visual_state_ = state;
   }
+  // 通知 GL 线程：状态变了，下一帧必须重算后处理（否则会被 60fps 节流跳过）。
+  milkdrop_visual_version_.fetch_add(1, std::memory_order_relaxed);
   // 同步写回 Processor，作为 host state 顶层属性持久化（关闭→重开复原）。
   processor.setSavedMilkdropVisualState(state);
   // UI 改了视觉状态 → 回写宿主参数，保持参数与渲染一致（Standalone 下空操作）。

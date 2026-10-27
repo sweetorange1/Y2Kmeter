@@ -1348,10 +1348,51 @@ bool MilkdropTintPass::init()
             "}\n";
     }
 
-    // v2.9.6：mac 上 Editor GL 为 Core Profile 3.2，GLSL 100 语法需经 JUCE
-    //   V3 转换（GL≥3.2 时翻译成 150，否则原样返回，Windows 不受影响）。
-    if (!program_->addVertexShader (juce::OpenGLHelpers::translateVertexShaderToV3 (vertexSource))
-        || !program_->addFragmentShader (juce::OpenGLHelpers::translateFragmentShaderToV3 (fragmentSource))
+    // ---- shader 版本适配（v2.9.9 fix）----
+    //   v2.9.7 起 Editor GL 强制请求 3.2（openGLContext.setOpenGLVersionRequired
+    //   (openGL3_2)），因此在 3.2 上下文里必须把 GLSL 120 语法换成 150。但
+    //   translate*ShaderToV3() 会**自己追加一行 #version 150**：源里本来就带
+    //   #version（core 分支 150 / legacy 分支 120）时，就变成两行 #version 的
+    //   非法 shader → link 失败 → pass 被静默 reset → Milkdrop 所有自定义后处理
+    //   （染色 / 亮度 / 效果开关 / tweak 偏移）全部不生效。
+    //   正确做法：源里已有的 #version 行先剥掉，只有 legacy 源在 GL>=3.2 时才翻译。
+    auto stripVersionDirective = [] (const juce::String& src) -> juce::String
+    {
+        auto s = src.trimStart();
+        if (! s.startsWith ("#version"))
+            return src;
+        const int nl = s.indexOfChar ('\n');
+        return nl >= 0 ? s.substring (nl + 1) : juce::String();
+    };
+
+    // 当前上下文的 GL 版本是否 >= 3.2（决定 JUCE 会不会真的做 V3 翻译；
+    //   translate*ShaderToV3 在 GL<3.2 时原样返回，剥掉 #version 后会导致
+    //   语法与声明不匹配，所以只在会翻译的前提下才剥）。
+    auto glVersionAtLeast32 = []() -> bool
+    {
+        const auto* raw = reinterpret_cast<const char*> (
+            juce::gl::glGetString (juce::gl::GL_VERSION));
+        if (raw == nullptr)
+            return false;
+
+        const juce::String v (raw);
+        const int major = v.upToFirstOccurrenceOf (".", false, false).getIntValue();
+        const int minor = v.fromFirstOccurrenceOf (".", false, false)
+                           .upToFirstOccurrenceOf (".", false, false).getIntValue();
+        return major > 3 || (major == 3 && minor >= 2);
+    };
+
+    juce::String vs = vertexSource;
+    juce::String fs = fragmentSource;
+
+    if (! coreProfile_ && glVersionAtLeast32())
+    {
+        vs = juce::OpenGLHelpers::translateVertexShaderToV3 (stripVersionDirective (vertexSource));
+        fs = juce::OpenGLHelpers::translateFragmentShaderToV3 (stripVersionDirective (fragmentSource));
+    }
+
+    if (!program_->addVertexShader (vs)
+        || !program_->addFragmentShader (fs)
         || !program_->link())
     {
         lastError_ = program_->getLastError();

@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.9.8`）
+- **产品名**：`Y2Kmeter` （版本：`2.9.9`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -4236,7 +4236,7 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
   - `ModuleWorkspace::showAddMenu`（右键"添加模块"）同样加上 mac 全屏判断，避免全屏下同类偏移。
   - `withParentAreaOverride` 是本仓库 JUCE 的扩展（`juce_PopupMenu.h`），平台无关；普通窗口/插件宿主下 `isFullScreen()` 为 false，逻辑不触发，行为与修复前完全一致。
 
-## v2.9.8 修复：Loudness 模块 M/S/I/L/R 标签丢失 + 分组细线移除（版本号不变）
+## v2.9.8 修复：静态文本位图砍字（Loudness 标签丢失 / Dynamics 读数只剩整数）+ 分组细线移除（版本号不变）
 
 > 本轮只改 `source/ui/modules/LoudnessModule.cpp`，**不升版本号**（仍 2.9.8）。
 
@@ -4250,47 +4250,103 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 
 - 判定依据：`git log -S "cachedStaticTextImage" -- source/ui/modules/LoudnessModule.cpp source/ui/PinkXPStyle.cpp` 只命中 `5f3ed727` 一个提交；`git diff 32d121de 5f3ed727 -- source/ui/modules/LoudnessModule.cpp` 显示的正是"drawText → 位图缓存"这一处改动。
 - 代码注释里把该性能优化标为 "v2.9.6 性能"，那是当时的规划命名；**实际落地在 v2.9.7 的提交里**，所以按版本算是 v2.9.7 开始坏的。
-- 同一次提交也给数字读数加了同样的位图缓存，但读数位图尺寸更贴近读数带、且每帧重算 + 100ms 节流，所以只有标签肉眼可见地丢失。
+- 同一次提交把几乎所有静态/半静态文本都改成了位图缓存（模块标题、坐标轴刻度、Loudness 标签与读数、Dynamics DR 面板等），因此砍字根因（见下节）在多个模块同时潜伏，只是 Loudness 的单字符标签最先、最明显地暴露出来。
 
 ### 2. 现象
 
 - 5 条柱（M / S / I / L / R）下方的字母标签丢失，实测只剩 **S**、**R** 两列可见；数字读数正常。
 - 另外 I 与 L 之间（LUFS 组 / RMS 组之间）有一条 1px 深色竖分割线，观感上像把第三、第四列"切开"。
 
-### 3. 根因
+### 3. 根因（二次定位，真正的根因）
 
-`cachedStaticTextImage(text, fontHeight, …)` 内部用的是 `PinkXP::getFont()`，而 `getFont()` 对 `height >= 8` 一律做 **1.5× 放大**：请求 10px 实际光栅化成 15px 字高，位图高度 `roundToInt(fontHeight) + 2 ≈ 17px`。
-
-而 LoudnessModule 的标签带只有 `labelH = 14px`，贴图又完全按位图自身尺寸定位：
+`PinkXP::cachedStaticTextImage()` 内部把位图宽度写成"测量宽度四舍五入 + 2"，绘制盒宽等于 `round(测量宽度)`：
 
 ```cpp
-g.drawImageAt (labelImg,
-               x + (barW - labelImg.getWidth()) / 2,
-               labelY + (labelH - labelImg.getHeight()) / 2,   // 17 > 14 → 负偏移
-               false);
+const int w = juce::roundToInt (font.getStringWidthFloat (text)) + 2;   // 旧
+g2.drawText (text, 0, 0, w - 2, h - 2, juce::Justification::left, false);  // 盒宽 = round(测量宽)
 ```
 
-后果是标签位图整体越出标签带并与紧邻的读数位图区压叠；读数位图同样超出 14px 读数带、按负偏移往上溢，正好压在标签带下沿。这条路径**没有字形级兜底**（`labelImg.isValid()` 为真时永不走 `drawText` 分支），一旦位图落点越界，整块标签就不可见，而不是"被裁掉一点点"。
+而 JUCE 的 `Graphics::drawText(text, 矩形, …)` 内部走 `GlyphArrangement::addCurtailedLineOfText`：**文本超出给定宽度时既不挤压、也不补省略号，直接把放不下的整颗 glyph 丢掉**。
+
+于是只要测量值被 `roundToInt` 抹掉零点几像素（或测量值与实际累计 advance 有细微出入），末尾字符就被整颗删除，且同一字符串**永远复现**：
+
+- 单字符标签：首字宽 > 盒宽 → 一个字都画不出来 → M / I / L 整块空白；"S"、"R" 因测量值恰好进位而保留 —— 这就是"只剩 S、R"的由来。
+- 多位读数：`"8.4"` → `"8"`、`"14.3"` → `"14"`，即"只显示整数位"（Dynamics 的 DR SHORT / DR INTEG / CREST 三行同样中招）。
+- 标题越界：`"DR SHORT"` 按 `getFont(9)` 放大后的字宽超出 DR 面板右边界，越界部分被绘制顺序更晚的 CREST 面板覆盖 → `"DR SHOR"`。
+
+原先记录的"位图比标签带高 1~3px"只是次要因素（会让字模贴着相邻读数），并不是整块消失的原因。
 
 ### 4. 修复
 
-1. **标签回到直接 `drawText`**，并改用不做 1.5× 放大的 `PinkXP::getAxisFont(11.0f, bold)`，在 14px 标签带内垂直居中 → 字模高度（约 11px）恒在带内，不再依赖位图落点：
+1. **根因修复（`PinkXPStyle.cpp::cachedStaticTextImage`）**：位图宽度改成"向上取整 + 余量"，绘制盒比测量宽再宽 2px，右侧另留 2px 给阴影：
 
 ```cpp
-g.setColour(PinkXP::ink);
-g.setFont(PinkXP::getAxisFont(11.0f, juce::Font::bold));
-g.drawText(bar.label, x, labelY, barW, labelH, juce::Justification::centred, false);
+const int w = (int) std::ceil (font.getStringWidthFloat (text)) + 4;  // 绘制盒 = w - 2 = ceil + 2
+const int h = (int) std::ceil (font.getHeight()) + 3;
 ```
 
-   只画 5 个单字符，逐帧 `drawText` 开销可忽略（`DynamicsModule` 的柱标签本来就是这么画的）。
+   一处修好，所有走位图缓存的静态文本（模块标题、坐标轴刻度、读数、单位等）都不会再被砍字。
 
-2. **读数位图上溢部分夹回读数带**：`labelY + labelH + jmax(0, (readoutH - h) / 2)`，保证数字不再压到上方标签。
-3. **删除 I / L 之间的分组竖线**（原 `PinkXP::shdw.withAlpha(0.4f)` 的 `drawVerticalLine`）。模块内现已无任何分隔竖线。
+2. **Loudness 标签**保留直接 `drawText` + 不做 1.5× 放大的 `getAxisFont(11.0f, bold)`，在 14px 标签带内垂直居中；读数位图上溢部分夹回读数带。
+3. **删除 I / L 之间的分组竖线**（原 `PinkXP::shdw.withAlpha(0.4f)` 的 `drawVerticalLine`），模块内现已无任何分隔竖线。
+4. **Dynamics 的 DR 面板**（同一轮）：三行读数统一 28px（`getAxisFont` 口径）、单位 `dB` 移到数值下方、数值按可用宽度自动收缩并裁在本行内、标题改 `drawFittedText` 收在本行内、`"CREST FACT."`（末尾那个点是缩写点，看起来像被截断）改为 `"CREST"`。
 
-### 5. 经验（以后加静态文本位图缓存时注意）
+### 5. 经验
 
-- `cachedStaticTextImage` 的 `fontHeight` 参数走 `getFont()`，**会被 1.5× 放大**；窄标签带想走位图就必须按 1.5× 反推尺寸（如 10px 带用 6.7f），否则一定超带。
-- 位图贴图前要校验 **位图尺寸 ≤ 目标带尺寸**，负偏移会跨带压叠。标题栏（`drawPinkTitleBar`）那种带宽裕的场景不受影响，所以这个坑只在紧凑的柱状表上暴露。
+- **JUCE 的 `drawText(text, 矩形, …)` 是"裁剪式"排版**：放不下就丢字形，不挤压、不加省略号。要挤压用 `drawFittedText`；要省略号给 `useEllipsesIfTooBig = true`。自己建文本位图缓存时，宽度必须 `ceil` 并留余量，不能用 `round`。
+- 单字符 / 短文本最容易踩：抹掉 0.5px 就足以让第一颗 glyph 完全消失，肉眼表现为"标签随机丢失"，且与主题、窗口宽度都无关。
+- `cachedStaticTextImage` 的 `fontHeight` 参数（`axisFont=false` 时）会被 `getFont()` **1.5× 放大**；窄标签带想走位图必须按 1.5× 反推尺寸，或直接传 `axisFont=true`。
+
+## v2.9.9：Milkdrop 自定义后处理全部失效（tint pass 编译失败）+ 后处理接入 60fps 节流
+
+> 本轮修 `MilkdropTintPass` 的着色器版本处理（`source/ui/modules/MilkdropModule.cpp` + `PluginEditor.cpp/h`），并把后处理接入 v2.9.7 的 60fps 节流。版本号升到 **2.9.9**。
+
+### 1. 现象
+
+Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/Bright、effects 面板的 38 个开关、tweak 面板的 uv 偏移与万花镜列数**）全部"点了没反应"；画面始终是裸 projectM 输出，功能在 v2.9.7 之前正常。wave 面板不受影响（它走"预设文本注入 + 重载"，不经过后处理 pass）。
+
+### 2. 回归定位
+
+| 版本 | 提交 | 变化 |
+| --- | --- | --- |
+| ≤ v2.9.3 | `32d121de` | Editor GL 用默认 legacy 上下文；`MilkdropTintPass` 把带 `#version 120` 的源直接 `addVertexShader` → 正常 |
+| **v2.9.7（引入）** | **`5f3ed727`** | ① `PluginEditor.cpp` 新增 `openGLContext.setOpenGLVersionRequired (juce::OpenGLContext::openGL3_2)`（**全平台生效**）；② `MilkdropTintPass::init()` 改成无条件套 `juce::OpenGLHelpers::translateVertexShaderToV3 / translateFragmentShaderToV3` |
+
+### 3. 根因
+
+着色器源本身已带版本声明（core 分支 `#version 150`，legacy 分支 `#version 120`），而 JUCE 的 `translate*ShaderToV3()` 在 GL ≥ 3.2 时会**自己再追加一行 `#version 150`**（见 `juce_OpenGLHelpers.cpp`），于是编译出两行 `#version` 的非法 shader：
+
+```glsl
+#version 150
+#version 120      // ← 第二条 #version 指令，非法
+```
+
+`#version` 必须是第一条有效指令 → link 失败 → `MilkdropTintPass::init()` 返回 false → `PluginEditor::newOpenGLContextCreated` 里 `milkdrop_tint_pass_.reset()`（**当时没有任何日志**）。此后 `renderOpenGL` 里 `tint_active` 虽为真，但 `isReady()` 为假 → 跳过 post FBO → `blit_source_fbo` 始终是未处理的 `milkdrop_render_tex_`。
+
+因为 4 类的全部自定义参数（tint_r/g/b、brightness、38 个 bool、offset 的 10 个值）都是这个 pass 的 uniform，pass 不存在 = **全部失效**。
+
+### 4. 修复
+
+1. **`MilkdropTintPass::init()`**：先剥掉源里自带的 `#version` 行，**只在"非 core profile 且当前 GL ≥ 3.2"** 时才调用 JUCE 翻译；core profile 直接用已有的 `#version 150` 源。GL 版本用 `glGetString(GL_VERSION)` 自己解析（JUCE 的 `getOpenGLVersion()` 不是公开 API）。
+2. **`PluginEditor::newOpenGLContextCreated`**：为 Editor 侧 tint pass 补 `[EditorGL] Milkdrop tint pass init OK / FAILED: <lastError>` 日志 —— 这类"静默降级"以后能在日志里直接看到（`Y2K_LOG` 仅在 RelWithDebInfo 构建生效，Release 无成本）。
+3. 同一处修复同时覆盖两条渲染路径：嵌入态（Editor GL 合成）与浮动态（`GLView` 自有上下文，mac 上也是 core 3.2）。
+
+### 5. 性能：与 v2.9.7/v2.9.8 优化互不影响，并顺带减半
+
+- **修复本身开销≈0**：版本判断只在 GL 上下文创建时执行一次；`SetMilkdropVisualState` 只多一条原子自增；日志在 Release 下被宏清空。
+- **中性状态仍然零成本**：`tint=1,1,1` + `brightness=1` + 所有效果关 + tweak 全 0 时 `isNeutral()` 为真，整段后处理分支不进入。
+- **新增：后处理与 projectM 同节流（v2.9.9）**：v2.9.7 只把 projectM 渲染节流到 60fps，但 `renderOpenGL` 仍按显示器刷新率跑，后处理会对同一份输入每帧重算。现在三条件决定是否重算：
+  1. `milkdrop_post_valid_` 为假（首次 / FBO 尺寸变化 / 从中性态切回）；
+  2. projectM 本帧真的渲染了新帧（`!skipProjectMRender`；降级路径恒为真）；
+  3. 视觉状态版本号变了（`SetMilkdropVisualState` 里 `milkdrop_visual_version_.fetch_add(1)`，保证拖滑块/切效果立即重算）。
+  否则直接复用上一帧的 post FBO。120Hz 屏上全屏 pass 从"每显示帧一次"降到"每次新帧一次"（≈60 次/秒）。
+- **未触碰**：projectM 60fps 节流本身、静态文本位图缓存、读数 10Hz 节流、S3D GL 直渲染、z 序合成、blit 结构（有后处理指向 post FBO，无后处理指向 render FBO）。
+
+### 6. 经验
+
+- **JUCE 的 `translate*ShaderToV3` 只做"文本追加 + 关键字替换"，不会替换已有的 `#version`**。给它喂已经带 `#version` 的源，必然出现双 `#version`。想复用翻译功能，必须先剥掉源里的版本行。
+- **GL 后处理/着色器类资源初始化失败必须留日志**：`init()` 返回 false 后代码只做 `reset()`，功能整体消失而 UI 毫无提示，这类 bug 会潜伏整个版本周期。
+- 版本号 2.9.9 同步点：`CMakeLists.txt` 三处（`project()` + 两个 `juce_add_plugin VERSION`）、`README.md` 徽章、`Y2Kmeter_installer.iss` 的 `MyAppVersion`、`PluginEditor.cpp` 抬头四处 `"v2.9.x"` 字面量、`PROJECT_OVERVIEW.md` 当前版本声明。
 
 ---
 

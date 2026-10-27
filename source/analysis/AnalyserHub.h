@@ -281,10 +281,18 @@ private:
     std::deque<float> shortPeakDb;   // 每块 peak（max(L,R)） dB
     std::deque<float> shortRmsDb;    // 每块 rms dB
 
-    // 全程累积：保存每块的 peak/rms dB，供 integratedDR 用与 shortDR 一致的
-    // top-20% 分位数法（percentileTop20）计算。块数随静音重置清空，可控。
-    std::deque<float> allPeakDb;   // 全程每块 peak（max(L,R)）dB
-    std::deque<float> allRmsDb;    // 全程每块 rms dB
+    // ---- 全程 DR 统计：固定分箱直方图 ----
+    //   旧实现把每块 peak/rms 塞进两个 std::deque，并在每个 100ms 块里拷进
+    //   std::vector 全量排序（percentileTop20）——音频线程上既分配又 O(N log N)，
+    //   且 deque 无上限（10 块/秒 → 每小时 3.6 万个元素），长时间运行会持续变慢。
+    //   改为 0.5 dB 一箱、覆盖 [-144, 0] dB 的定长直方图：恒定内存、零分配、
+    //   每块 O(箱数) 统计，结果与全量排序的 top-20% 均值一致（误差 ≤ 0.25 dB）。
+    static constexpr float drHistBinDb = 0.5f;
+    static constexpr float drHistMinDb = -144.0f;
+    static constexpr float drHistMaxDb = 0.0f;
+    static constexpr int   drHistBins  = 289;   // (0 - (-144)) / 0.5 + 1
+    std::array<int, drHistBins> allPeakHist {};
+    std::array<int, drHistBins> allRmsHist  {};
 
     // ---- Integrated DR 静音自动重置 ----
     //   连续 silenceResetSeconds 秒无音频信号（块合成 RMS 均方 < silenceMeanSqThreshold）
@@ -305,6 +313,10 @@ private:
 
     void finishBlock();
     static float percentileTop20(const std::deque<float>& v);
+
+    // 直方图写入 / 上尾 20% 均值（integrated DR 用，零分配）
+    static void  addToHist (std::array<int, drHistBins>& h, float db) noexcept;
+    static float percentileTop20FromHist (const std::array<int, drHistBins>& h) noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DynamicRangeMeter)
 };

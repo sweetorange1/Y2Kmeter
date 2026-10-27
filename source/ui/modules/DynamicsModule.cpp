@@ -295,61 +295,97 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
     {
         juce::Rectangle<int> row(inner.getX(), inner.getY() + rowIdx * rowH,
                                  inner.getWidth(), rowH);
-        // 标题（静态 → 位图缓存，v2.9.6 性能）
-        const juce::Image titleImg = PinkXP::cachedStaticTextImage (
-            title, 9.0f, juce::Font::bold, PinkXP::ink.withAlpha(0.85f));
-        if (titleImg.isValid())
-            g.drawImageAt (titleImg, row.getX(), row.getY(), false);
-        else
-        {
-            g.setColour(PinkXP::ink.withAlpha(0.85f));
-            g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-            g.drawText(title, row.withHeight(12), juce::Justification::topLeft, false);
-        }
 
-        // 数值 / 单位：把数值区域收紧到"行内去掉右侧单位宽度"，
-        //   避免大号数值与单位右侧 "dB" 在窄窗口下视觉重叠
-        auto numArea  = row.withTrimmedTop(12);
-        constexpr int unitW = 28;
-        auto unitArea = numArea.removeFromRight(unitW);
+        // ① 标题：DR 面板默认只有 ~92px 宽（layoutContent 的兜底分支），标题按
+        //    getFont(9) 放大后的字宽会越过本行右边界，越过部分随后被绘制顺序更晚
+        //    的 CREST 面板整段盖掉（表现为 "DR SHORT" 只看到 "DR SHOR"）。
+        //    改用 drawFittedText 自动横向压缩，标题永远收在本行宽度内。
+        const int titleH = juce::jlimit(8, 12, row.getHeight() / 4);
+        g.setColour(PinkXP::ink.withAlpha(0.85f));
+        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+        g.drawFittedText(title, row.removeFromTop(titleH),
+                         juce::Justification::topLeft, 1, 0.8f);
 
-        // 数值（大号，左对齐）—— 100ms 节流缓存（v2.9.6 性能）
+        // ② 单位 "dB" 移到数值下方（原实现占用右侧 28px，把大数字挤得只剩整数位）。
+        //    面板被拖得很矮时不再单独留单位行，优先保证数值本身还有高度可用。
+        const int unitH = (row.getHeight() >= 26) ? juce::jlimit(8, 12, row.getHeight() / 4)
+                                                  : 0;
+        auto unitRect = (unitH > 0) ? row.removeFromBottom(unitH)
+                                    : juce::Rectangle<int>();
+
+        // ③ 数值：整行宽度都可用来画大数字（1 位小数），字号按可用宽度收缩。
+        //    · 固定样本 "88.8" 推算字号，避免读数位数变化时字号/基线抖动；
+        //    · axisFont=true 走不放大路径，位图高度 ≈ px+2，可直接按行高约束。
         const juce::String numText = juce::String(value, 1);
+
+        float px = big;
+        {
+            const juce::Font probeFont = PinkXP::getAxisFont(px, juce::Font::bold);
+            // 以固定样本决定字号（稳定、不随位数抖动）；万一实际读数比样本更长，
+            // 再按实际宽度补一次收缩，保证末位小数不被裁掉。
+            const float needW = juce::jmax(probeFont.getStringWidthFloat("88.8"),
+                                           probeFont.getStringWidthFloat(numText));
+            if (needW > 1.0f && needW > (float) row.getWidth())
+                px *= (float) row.getWidth() / needW;
+        }
+        px = juce::jmin(px, (float) juce::jmax(6, row.getHeight() - 2));
+        px = juce::jmax(6.0f, px);
+
+        const juce::String cacheKey = numText + "|" + juce::String(px, 1);
         const double nowMs = juce::Time::getMillisecondCounterHiRes();
-        if (numText != drValueText_[rowIdx]
+        if (cacheKey != drValueText_[rowIdx]
             || nowMs - drValueTime_[rowIdx] >= 100.0
             || ! drValueCache_[rowIdx].isValid())
         {
-            drValueText_[rowIdx] = numText;
+            drValueText_[rowIdx] = cacheKey;
             drValueTime_[rowIdx] = nowMs;
             drValueCache_[rowIdx] = PinkXP::cachedStaticTextImage (
-                numText, big, juce::Font::bold, PinkXP::pink600);
-        }
-        if (drValueCache_[rowIdx].isValid())
-            g.drawImageAt (drValueCache_[rowIdx], numArea.getX(), numArea.getY(), false);
-        else
-        {
-            g.setColour(PinkXP::pink600);
-            g.setFont(PinkXP::getFont(big, juce::Font::bold));
-            g.drawText(numText, numArea, juce::Justification::centredLeft, false);
+                numText, px, juce::Font::bold, PinkXP::pink600,
+                juce::Colours::transparentBlack, true);
         }
 
-        // 单位（静态 → 位图缓存）
+        // 裁剪到数值区：即使字号推算有偏差，也绝不会溢出去压到单位/标题/别的面板
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            g.reduceClipRegion (row);
+
+            const auto& numImg = drValueCache_[rowIdx];
+            if (numImg.isValid())
+            {
+                g.drawImageAt (numImg,
+                               row.getX(),
+                               row.getY() + juce::jmax(0, (row.getHeight() - numImg.getHeight()) / 2),
+                               false);
+            }
+            else
+            {
+                g.setColour(PinkXP::pink600);
+                g.setFont(PinkXP::getAxisFont(px, juce::Font::bold));
+                g.drawText(numText, row, juce::Justification::centredLeft, false);
+            }
+        }
+
+        // ④ 单位（静态 → 位图缓存，紧贴数值下方的空余空间，左对齐）
+        if (unitRect.isEmpty())
+            return;
+
         const juce::Image unitImg = PinkXP::cachedStaticTextImage (
-            unit, 10.0f, juce::Font::plain, PinkXP::ink.withAlpha(0.75f));
+            unit, 9.0f, juce::Font::plain, PinkXP::ink.withAlpha(0.75f),
+            juce::Colours::transparentBlack, true);
         if (unitImg.isValid())
-            g.drawImageAt (unitImg, unitArea.getX(), unitArea.getY(), false);
+            g.drawImageAt (unitImg, unitRect.getX(), unitRect.getY(), false);
         else
         {
             g.setColour(PinkXP::ink.withAlpha(0.75f));
-            g.setFont(PinkXP::getFont(10.0f, juce::Font::plain));
-            g.drawText(unit, unitArea, juce::Justification::centredLeft, false);
+            g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
+            g.drawText(unit, unitRect, juce::Justification::topLeft, false);
         }
     };
 
-    drawRow(0, "DR SHORT",    smoothedShortDR, "dB", 22.0f);
-    drawRow(1, "DR INTEG",    smoothedIntegDR, "dB", 22.0f);
-    drawRow(2, "CREST FACT.", smoothedCrest,   "dB", 16.0f);
+    // 三行读数用同一字号（getAxisFont 口径，不再 1.5× 放大）
+    drawRow(0, "DR SHORT", smoothedShortDR, "dB", 28.0f);
+    drawRow(1, "DR INTEG", smoothedIntegDR, "dB", 28.0f);
+    drawRow(2, "CREST",    smoothedCrest,   "dB", 28.0f);
 }
 
 // ----------------------------------------------------------

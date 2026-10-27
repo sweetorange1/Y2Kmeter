@@ -246,10 +246,17 @@ namespace PinkXP
 
         const juce::Font font = axisFont ? getAxisFont (fontHeight, styleFlags)
                                          : getFont (fontHeight, styleFlags);
-        // +2 为阴影偏移与字模边界留白
-        const int w = juce::roundToInt (font.getStringWidthFloat (text)) + 2;
-        const int h = juce::roundToInt (font.getHeight()) + 2;
-        if (w <= 2 || h <= 2)
+
+        // 位图尺寸必须"向上取整 + 留余量"，不能四舍五入：
+        //   Graphics::drawText 内部走 GlyphArrangement::addCurtailedLineOfText，
+        //   文本一旦超出给定宽度，**放不下的整颗 glyph 会被直接丢弃**（既不挤压
+        //   也不补省略号）。旧实现 w - 2 == round(测量宽度)，只要测量宽度被抹掉
+        //   零点几像素，末位字符就会整颗消失（"8.4" 只剩 "8"、"M"/"I"/"L" 这种
+        //   单字符标签甚至会整块空白），而且同一字符串永远复现。
+        //   现在 w - 2 >= ceil(测量宽度) + 2，且右侧再留 2px 给阴影偏移。
+        const int w = (int) std::ceil (font.getStringWidthFloat (text)) + 4;
+        const int h = (int) std::ceil (font.getHeight()) + 3;
+        if (w <= 4 || h <= 3)
             return {};
 
         juce::Image img (juce::Image::ARGB, w, h, true, juce::SoftwareImageType());

@@ -813,6 +813,13 @@ private:
     GLuint milkdrop_post_tex_ = 0;   ///< 染色后处理输出纹理
     int    milkdrop_post_w_   = 0;   ///< 当前 post FBO 宽度
     int    milkdrop_post_h_   = 0;   ///< 当前 post FBO 高度
+    // v2.9.9：后处理与 projectM 同节流（projectM 被 60fps 节流跳过时，render FBO
+    //   内容与上一帧逐像素相同，后处理结果也相同 → 直接复用 post FBO）。
+    bool     milkdrop_post_valid_ = false;   ///< post FBO 内容是否与当前 render FBO 匹配
+    uint32_t milkdrop_tint_applied_version_ = 0xFFFFFFFFu;  ///< 上次后处理对应的视觉状态版本
+    // 视觉状态版本号：UI 每次 SetMilkdropVisualState 自增，GL 线程据此判断
+    //   "状态变了必须立即重算"，不依赖逐字段比较。
+    std::atomic<uint32_t> milkdrop_visual_version_ { 0 };
 
     // 全局视觉状态（UI 线程写，GL 线程读，mutex 保护）
     mutable std::mutex milkdrop_visual_mutex_;
