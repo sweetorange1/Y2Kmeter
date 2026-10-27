@@ -7231,10 +7231,21 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
           int lw = br.x - tl.x, lh = br.y - tl.y;
           if (lw > 0 && lh > 0)
           {
-            int gx = static_cast<int> (tl.x * dpiScale);
-            int gy = static_cast<int> ((editorLogicalH - (tl.y + lh)) * dpiScale);
-            int gw = static_cast<int> (lw * dpiScale);
-            int gh = static_cast<int> (lh * dpiScale);
+            // v2.9.9：目标矩形"向下取整起点 + 向上取整终点"，覆盖 content 矩形
+            //   的整个物理像素范围（旧实现全用截断，顶边最多少 1 像素）。
+            //   注意：**不要**向 content 之外多画 —— blit 源矩形按目标尺寸等比
+            //   取自 FBO，向再多覆盖 1~2px 会让源矩形越过 FBO 边界，采到未定义
+            //   内容（表现为视频顶边出现更宽的一条杂色带）。抬头与视频之间的
+            //   AA 缝隙由组件层解决（见 MilkdropModule::paint 的分割线加厚）。
+            const double fx0 = (double) tl.x * dpiScale;
+            const double fx1 = (double) br.x * dpiScale;
+            const double fy0 = (double) (editorLogicalH - br.y) * dpiScale;   // GL 下原点：content 顶边
+            const double fy1 = (double) (editorLogicalH - tl.y) * dpiScale;   // GL 下原点：content 底边
+
+            int gx = (int) std::floor (fx0);
+            int gy = (int) std::floor (fy0);
+            int gw = juce::jmax (1, (int) std::ceil (fx1) - gx);
+            int gh = juce::jmax (1, (int) std::ceil (fy1) - gy);
 
             int sw = gw / milkdrop_render_scale_;
             int sh = gh / milkdrop_render_scale_;

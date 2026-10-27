@@ -1746,9 +1746,16 @@ void MilkdropModule::paint(juce::Graphics& g) {
   auto tb = getTitleBarBounds();
   PinkXP::drawPinkTitleBar(g, tb, titleText, 12.0f);
 
-  // 标题栏下沿深色分割线
+  // 标题栏下沿深色分割线（v2.9.9：加厚到 2 行）
+  //   嵌入态下 content 区域在 CPU 组件层是透明的（透出 GL 视频帧），而 1 逻辑
+  //   像素的分割线在非整数 DPI（125%/150%）下会被 `Graphics::fillRect` 走 AA
+  //   路径填充 → 它最下面那个物理像素行只有部分覆盖率（如 25%），剩余 75%
+  //   会透出后缓冲里该行的内容，也就是先绘制好的下层 GL 模块（Spectrogram3D
+  //   等）→ "视频区与抬头之间一条极细的线能看到被覆盖的模块"。
+  //   多画一行，让这条线的实体部分完整盖住那个边界行；AA 残差落在视频的第二
+  //   行上（= 暗线 + 视频的柔和过渡），不会再透出别的模块。
   g.setColour(PinkXP::dark);
-  g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 1);
+  g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 2);
 
   // 3. 关闭按钮（×）—— 借用基类的 pressed/hover 标志，与 ModulePanel 风格一致
   auto cb = getCloseButtonBounds();

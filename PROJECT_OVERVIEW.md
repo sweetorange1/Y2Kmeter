@@ -4299,7 +4299,7 @@ const int h = (int) std::ceil (font.getHeight()) + 3;
 
 ## v2.9.9：Milkdrop 自定义后处理全部失效（tint pass 编译失败）+ 后处理接入 60fps 节流
 
-> 本轮修 `MilkdropTintPass` 的着色器版本处理（`source/ui/modules/MilkdropModule.cpp` + `PluginEditor.cpp/h`），并把后处理接入 v2.9.7 的 60fps 节流。版本号升到 **2.9.9**。
+> 本轮修 `MilkdropTintPass` 的着色器版本处理（`source/ui/modules/MilkdropModule.cpp` + `PluginEditor.cpp/h`），并把后处理接入 v2.9.7 的 60fps 节流。版本号升到 **2.9.9**。同版本内另含一处小补丁：Milkdrop 视频区顶部 1px 透底细线（见第 6 节，不另升版本号）。
 
 ### 1. 现象
 
@@ -4342,7 +4342,29 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
   否则直接复用上一帧的 post FBO。120Hz 屏上全屏 pass 从"每显示帧一次"降到"每次新帧一次"（≈60 次/秒）。
 - **未触碰**：projectM 60fps 节流本身、静态文本位图缓存、读数 10Hz 节流、S3D GL 直渲染、z 序合成、blit 结构（有后处理指向 post FBO，无后处理指向 render FBO）。
 
-### 6. 经验
+### 6. 补丁（同版本内）：Milkdrop 视频区顶部 1px"透底"细线
+
+**现象**：Milkdrop 模块与其它 GL 直渲染模块（如 Spectrogram 3D）重叠时，Milkdrop **视频区与抬头之间**会出现一条极细的线，能看到被它覆盖的下层模块。
+
+**根因**：
+1. `renderOpenGL()` 先画 GL 内容（S3D 先画、Milkdrop 视频后画），随后 JUCE 才把**组件层**（抬头 / 分割线 / 边框 / overlay）合成到上层。
+2. Milkdrop 的 content 区域在组件层是透明的（透出 GL 视频帧），而抬头下沿那条 1 逻辑像素的分割线（`MilkdropModule::paint()` 的 `fillRect(tb.x, tb.bottom, w, 1)`）在 125%/150% 这类非整数 DPI 下会被 `Graphics::fillRect` 走 **AA 路径**：1.25 物理像素 → 最后一行只有约 25% 覆盖率，剩余 75% 透明，透出后缓冲该行里先画好的 S3D。
+
+**两轮尝试（含一次改反的记录）**：
+- ❌ 第一轮只把 blit 目标矩形从"全截断"改成"floor 起点 + ceil 终点"（覆盖 content 的整物理像素）→ 缝隙在 content **上方**（属于组件层），不生效。
+- ❌ 第二轮在目标矩形上向四周多画 1~2 物理像素（overdraw）→ **线反而更宽**：`glBlitFramebuffer` 的源矩形按目标尺寸等比取自 FBO，目标变大后源矩形越过 FBO 上边界，采样结果未定义（杂色带）。
+- ✅ 最终：撤销 overdraw（保留 floor/ceil 取整），改组件层——**抬头下沿分割线加厚到 2 逻辑像素**：
+  ```cpp
+  g.setColour(PinkXP::dark);
+  g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 2);   // 原为 1
+  ```
+  线体完整盖住边界行，AA 残差落到视频第二行（"暗线 + 视频"的柔和过渡），任何 DPI 下都不再透出下层模块。若觉得线偏粗，可上移 1px（`tb.getBottom() - 1`）只往抬头侧加厚。
+
+**经验**：
+- 画面"透别人"不一定是 GL 覆盖不足——先判断缝隙属于 **GL 层**还是 **CPU 组件层**：组件层在上，它的 AA 边缘会把下层透出来。
+- `glBlitFramebuffer` 目标放大时**源矩形也会等比放大**，越出 FBO 边界即采样未定义；想扩边必须同时夹紧源矩形。
+
+### 7. 经验
 
 - **JUCE 的 `translate*ShaderToV3` 只做"文本追加 + 关键字替换"，不会替换已有的 `#version`**。给它喂已经带 `#version` 的源，必然出现双 `#version`。想复用翻译功能，必须先剥掉源里的版本行。
 - **GL 后处理/着色器类资源初始化失败必须留日志**：`init()` 返回 false 后代码只做 `reset()`，功能整体消失而 UI 毫无提示，这类 bug 会潜伏整个版本周期。
