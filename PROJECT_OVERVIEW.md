@@ -4299,7 +4299,7 @@ const int h = (int) std::ceil (font.getHeight()) + 3;
 
 ## v2.9.9：Milkdrop 自定义后处理全部失效（tint pass 编译失败）+ 后处理接入 60fps 节流
 
-> 本轮修 `MilkdropTintPass` 的着色器版本处理（`source/ui/modules/MilkdropModule.cpp` + `PluginEditor.cpp/h`），并把后处理接入 v2.9.7 的 60fps 节流。版本号升到 **2.9.9**。同版本内另含一处小补丁：Milkdrop 视频区顶部 1px 透底细线（见第 6 节，不另升版本号）。
+> 本轮修 `MilkdropTintPass` 的着色器版本处理（`source/ui/modules/MilkdropModule.cpp` + `PluginEditor.cpp/h`），并把后处理接入 v2.9.7 的 60fps 节流。版本号升到 **2.9.9**。同版本内另含两处补丁：Milkdrop 视频区顶部 1px 透底细线（第 6 节）、调色面板 Advanced 颜色输入框的配色/字体（第 7 节），均不另升版本号。
 
 ### 1. 现象
 
@@ -4364,7 +4364,34 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 - 画面"透别人"不一定是 GL 覆盖不足——先判断缝隙属于 **GL 层**还是 **CPU 组件层**：组件层在上，它的 AA 边缘会把下层透出来。
 - `glBlitFramebuffer` 目标放大时**源矩形也会等比放大**，越出 FBO 边界即采样未定义；想扩边必须同时夹紧源矩形。
 
-### 7. 经验
+### 7. 补丁（同版本内）：调色面板 Advanced 颜色输入框（`PalettePanel`）
+
+**现象（逐步暴露的四个问题）**：① hex 输入框底色不跟用户调的 Surface 走，看起来像 JUCE 默认色；② 改成跟随 Surface 后文字与底色撞色看不见；③ 切 Dark/Light 不刷新，其中"最后一行 ON ACCENT"始终停留在上一套主题的文字色；④ 输入框用项目像素字体时字形错乱（`FF00FF` 变成 `FFööPÎ`、`000000` 整串消失）。
+
+**根因（最终定位，全部落在 JUCE `TextEditor` 的文本存储模型上）**：
+
+1. `TextEditor` 的**颜色逐字符存在内部 `TextStorage`**。`juce_TextEditor.h` 原文：`textColourId` "won't change the colour of existing text - to do that, use the applyColourToAllText() method"。`ON ACCENT` 的值 `000000` 在明暗两套主题下都不变，于是"内容不同才 `setText`"的守卫跳过了它 → 存量字符保留上一套主题的颜色（Dark 白字带到 Light 里）。
+2. 同理，**字体也是逐段存的**：`setFont()` 只作用于之后新增的文本（"It won't change the font of any existing text - to do that, use applyFontToAllText()"）。绘制时 `TextEditor::drawContent()` 直接用缓存好的 `glyphIds` 调 `context.drawGlyphs()`，一旦存量 glyph 索引与当前字体不是同一套，就会画出完全无关的字形（数字→空白字形、字母→带音标怪字符）。Label / `Graphics::drawText` 走 `GlyphArrangement::addLineOfText`，每次都按当前字体取字形，所以**同一个字体在别处永远正常**。
+3. `PalettePanel::specChanged()` 旧顺序是"先 `regenerateAndRefresh()` 再 `applyCurrentSpec()`"，refresh 里读到的 `PinkXP::content/shdw/sel` 还是上一套主题 → 任何"按底色算文字色"的写法都会慢一拍。
+
+**修复**：
+
+1. **颜色单一写入口**：`RoleRow::applyRowColours(bool darkMode)`，只在构造和 `RoleRow::refresh()` 里调用（**绝不在 `paint()` 里改子组件属性**，否则 `colourChanged→repaint` 会造成同帧重绘、各行不同步）。文字色只由主题明暗决定（Light 纯黑 / Dark 纯白），底色 `PinkXP::content`，边框 `shdw`、聚焦 `sel`。
+2. **刷到存量文本**：`hexEditor_.applyColourToAllText(fg, true)` + `hexEditor_.applyFontToAllText(hexFieldFont(), true)`（每次 refresh 都执行，无论文本是否变化）；命名输入框 `nameEditor_` 同样处理。
+3. **修顺序**：`specChanged()` 改为 `applyCurrentSpec()` → `regenerateAndRefresh()`。
+4. **输入框高度**取满行内 20px（原 `reduced(0,2)` 只剩 16px，15px 字体会被挤偏/裁切）。
+5. `hexText` 内容不同才 `setText`（避免主题回调覆盖正在输入的内容）；主题变更订阅只做 `refreshRoleRows()` + `repaint()`，不承担 Dark/Light 切换（那条路已由顺序保证）。
+
+**走过的弯路（不要再犯）**：
+
+- 在 `paint()` 里写 `setColour` → 同帧重绘/重影、各行颜色不同步；
+- 用 `bg.getPerceivedBrightness()` / `Colour::contrasting()` 推导可读文字色 → 受"读到旧主题"影响会反向；`contrasting(target, n)` 的 YIQ 反解还会把饱和色推到别的色相（浅紫边框曾变成亮绿色）；
+- 只调 `setColour` 不动存量文本 → 颜色/字体都"只对之后新增的文本生效"；
+- 把字体换成系统等宽虽然能绕开字形错乱，但等于放弃项目像素字体，只是临时验证手段。
+
+**经验**：`TextEditor` 与 `Label` 是**两套文本管线**。凡是"改了颜色/字体却不生效、或字形错乱"的问题，先查是不是存量文本没有被 `applyColourToAllText` / `applyFontToAllText` 刷新，而不是怀疑主题色或重绘时序。
+
+### 8. 经验
 
 - **JUCE 的 `translate*ShaderToV3` 只做"文本追加 + 关键字替换"，不会替换已有的 `#version`**。给它喂已经带 `#version` 的源，必然出现双 `#version`。想复用翻译功能，必须先剥掉源里的版本行。
 - **GL 后处理/着色器类资源初始化失败必须留日志**：`init()` 返回 false 后代码只做 `reset()`，功能整体消失而 UI 毫无提示，这类 bug 会潜伏整个版本周期。

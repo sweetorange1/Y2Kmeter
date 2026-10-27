@@ -140,6 +140,11 @@ public:
     void refresh(const y2kpal::ThemeSpec& spec, const y2kpal::GeneratedTheme& gen);
 
 private:
+    // 输入框配色的**唯一写入口**：构造时一次 + 每次 refresh() 一次。
+    //   绝不能在 paint() 里调用（paint 期改子组件属性会触发 colourChanged→repaint，
+    //   导致同一帧内文本重绘/重影，且各行更新时机不一致）。
+    void applyRowColours(bool darkMode);
+
     int  role_ = 0;
     juce::Label nameLabel_;
     juce::TextButton swatchBtn_;      // 色块 + ▶（点击弹取色器）
@@ -268,6 +273,7 @@ private:
 
     // 主题库订阅
     int libToken_ = 0;
+    int themeSubToken_ = -1;   ///< PinkXP 主题变更订阅（外部套用主题时刷新行配色）
 
     // 外部点击关闭监听
     class DismissListener;

@@ -31,6 +31,12 @@ namespace
         return false;
     }
 
+    // hex / 命名输入框统一字体（项目像素字体，UI 主字号口径 15px）
+    juce::Font hexFieldFont()
+    {
+        return PinkXP::getFont(10.0f, juce::Font::bold);
+    }
+
     // 标题图标候选（UTF-8 转义字节 + fromUTF8，与 PinkXPStyle 主题图标同路径；
     //   直接字面量在本项目的像素字体渲染链下会乱码）
     const char* kTitleIcons[] = {
@@ -416,14 +422,17 @@ RoleRow::RoleRow()
     swatchBtn_.onClick = [this] { if (onPick_) onPick_(role_); };
     addAndMakeVisible(swatchBtn_);
 
-    hexEditor_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
+    // 输入框字体：项目像素字体。
+    //   注意 TextEditor 的坑：setFont() 只作用于**之后新增**的文本，
+    //   已存在的文本保留自己那份 font（内部 TextStorage 按字存 font/colour）。
+    //   因此每次写入文本后都必须 applyFontToAllText() 重新排版，否则存量的
+    //   glyph 索引会和新字体对不上 —— 表现就是字形错乱（数字变空白、字母变
+    //   带音标的怪字符）。这也解释了为什么 Label（走 Graphics::drawText，
+    //   不经过 TextStorage）用同一字体永远正常。
+    hexEditor_.setFont(hexFieldFont());
     hexEditor_.setInputRestrictions(7, "0123456789abcdefABCDEF# ");
-    // PinkXP 样式（与命名输入框一致：浅底深边 + 主题文字色）
-    hexEditor_.setColour(juce::TextEditor::backgroundColourId, PinkXP::content);
-    hexEditor_.setColour(juce::TextEditor::textColourId, PinkXP::ink);
-    hexEditor_.setColour(juce::TextEditor::outlineColourId, PinkXP::shdw);
-    hexEditor_.setColour(juce::TextEditor::focusedOutlineColourId, PinkXP::sel);
-    hexEditor_.setColour(juce::CaretComponent::caretColourId, PinkXP::ink);
+    // PinkXP 样式（浅底 + 深边）；文字黑白由 applyRowColours 按主题明暗决定
+    applyRowColours(false);
     hexEditor_.onTextChange = [this]
     {
         if (updating_ || !onManualSet_) return;
@@ -469,6 +478,29 @@ void RoleRow::setup(int role,
     onPick_ = std::move(onPick);
 }
 
+void RoleRow::applyRowColours(bool darkMode)
+{
+    // 文字色只跟主题明暗走：Light → 纯黑，Dark → 纯白。
+    //   不按底色算亮度（content 由生成器推导，refresh/applyTheme 时序一错就反），
+    //   也不用主题 ink（用户可能把 Surface 调得和 ink 很接近 → 撞色）。
+    const juce::Colour fg = darkMode ? juce::Colours::white : juce::Colours::black;
+
+    hexEditor_.setColour(juce::TextEditor::backgroundColourId, PinkXP::content);
+    hexEditor_.setColour(juce::TextEditor::textColourId, fg);
+    hexEditor_.setColour(juce::CaretComponent::caretColourId, fg);
+    hexEditor_.setColour(juce::TextEditor::outlineColourId, PinkXP::shdw);
+    hexEditor_.setColour(juce::TextEditor::focusedOutlineColourId, PinkXP::sel);
+    hexEditor_.setColour(juce::TextEditor::highlightColourId, PinkXP::sel);
+    hexEditor_.setColour(juce::TextEditor::highlightedTextColourId, fg);
+
+    // 关键：TextEditor 的文本颜色是**逐字符存在 TextStorage 里**的，
+    //   setColour(textColourId) 只影响"之后新增"的文本（JUCE 头文件明确写了
+    //   这一点）。不改写文本时（例如 On Accent 的 000000 在明暗两套主题下值
+    //   不变）存量字符会一直保留上一次的颜色 —— 就是"最后一行还是白字"的
+    //   直接原因。applyColourToAllText() 才是改存量文本颜色的正确接口。
+    hexEditor_.applyColourToAllText(fg, true);
+}
+
 void RoleRow::paint(juce::Graphics& g)
 {
     g.setColour(PinkXP::face);
@@ -492,7 +524,9 @@ void RoleRow::resized()
     nameLabel_.setBounds(a.removeFromLeft(86));
     swatchBtn_.setBounds(a.removeFromLeft(26).reduced(1));
     a.removeFromLeft(6);
-    hexEditor_.setBounds(a.removeFromLeft(82).reduced(0, 2));
+    // 输入框取满行内高度（20px）：原来再 reduced(0,2) 只剩 16px，
+    //   15px 字体加上 TextEditor 内部边距会被挤得偏下/被裁。
+    hexEditor_.setBounds(a.removeFromLeft(82));
     a.removeFromLeft(8);
     swatchViewRect_ = a.removeFromLeft(16).reduced(0, 2);   // 当前色展示块
     a.removeFromLeft(10);
@@ -522,8 +556,25 @@ void RoleRow::refresh(const y2kpal::ThemeSpec& spec, const y2kpal::GeneratedThem
     }();
 
     swatchBtn_.setColour(juce::TextButton::buttonColourId, toJuce(shown));
-    hexEditor_.setText(rgb8ToHex(shown), juce::dontSendNotification);
+
+    // 只在内容不同时才改写文本：refresh 会被主题回调反复触发，
+    //   无条件 setText 会覆盖用户正在输入的十六进制值。
+    const juce::String hexText = rgb8ToHex(shown);
+    if (! hexEditor_.getText().equalsIgnoreCase(hexText))
+        hexEditor_.setText(hexText, juce::dontSendNotification);
+
+    // 无论是否改写了文本，都把现有文本按项目字体重新排版一次：
+    //   TextEditor 会为每段文本保存 font + glyph 索引，只调用 setFont() 不会
+    //   重排存量文本；字体与存量 glyph 索引不一致时字形就会错乱（数字变空白、
+    //   字母变怪字符）。applyFontToAllText() 强制重排，这也是项目字体在此
+    //   唯一需要额外照顾的地方（Label 走 drawText 不经过 TextStorage）。
+    hexEditor_.applyFontToAllText(hexFieldFont(), true);
+
     autoToggle_.setToggleState(!ov.set, juce::dontSendNotification);
+
+    // 输入框配色：唯一的刷新点（构造 + 每次 refresh），不在 paint 里做
+    applyRowColours(spec.brightness == y2kpal::Brightness::Dark);
+
     lastShown_    = shown;
     displayColour_ = shown;
 
@@ -1023,14 +1074,22 @@ PalettePanel::PalettePanel()
     addChildComponent(importBtn_);
 
     // ---- 内嵌命名输入栏（PinkXP 样式：浅底 + 深边 + 主题文字色）----
-    nameEditor_.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
+    // 与 hex 输入框一致：项目像素字体（写入后同样要 applyFontToAllText 重排版）
+    nameEditor_.setFont(hexFieldFont());
     nameEditor_.setInputRestrictions(32, {});
     nameEditor_.setTextToShowWhenEmpty("theme name", juce::Colours::grey);
-    nameEditor_.setColour(juce::TextEditor::backgroundColourId, PinkXP::content);
-    nameEditor_.setColour(juce::TextEditor::textColourId, PinkXP::ink);
-    nameEditor_.setColour(juce::TextEditor::outlineColourId, PinkXP::shdw);
-    nameEditor_.setColour(juce::TextEditor::focusedOutlineColourId, PinkXP::sel);
-    nameEditor_.setColour(juce::CaretComponent::caretColourId, PinkXP::ink);
+    // 配色规则与 hex 输入框一致：底色 Surface，文字按主题明暗黑/白
+    //   （refreshRoleRows() 会在每次 spec/主题变更时再同步一次）
+    {
+        const juce::Colour fg = (spec_.brightness == y2kpal::Brightness::Dark)
+                                  ? juce::Colours::white
+                                  : juce::Colours::black;
+        nameEditor_.setColour(juce::TextEditor::backgroundColourId, PinkXP::content);
+        nameEditor_.setColour(juce::TextEditor::textColourId, fg);
+        nameEditor_.setColour(juce::TextEditor::outlineColourId, PinkXP::shdw);
+        nameEditor_.setColour(juce::TextEditor::focusedOutlineColourId, PinkXP::sel);
+        nameEditor_.setColour(juce::CaretComponent::caretColourId, fg);
+    }
     nameEditor_.onReturnKey = [this] { closeNamePrompt(true); };
     addChildComponent(nameEditor_);
 
@@ -1057,6 +1116,14 @@ PalettePanel::PalettePanel()
         myThemesList_.repaint();
     });
 
+    // ---- 外部主题变更订阅（主题库套用 / 还原 / 对比等不经过本面板的路径）----
+    //   只在全局色写完之后刷一次行配色；不做任何 paint 期写入。
+    themeSubToken_ = PinkXP::subscribeThemeChanged([this]
+    {
+        refreshRoleRows();
+        repaint();
+    });
+
     // ---- 16ms 节流（S6）----
     startTimerHz(60);
 
@@ -1067,6 +1134,10 @@ PalettePanel::PalettePanel()
 PalettePanel::~PalettePanel()
 {
     detachDismissListener();
+
+    if (themeSubToken_ >= 0)
+        PinkXP::unsubscribeThemeChanged(themeSubToken_);
+
     PinkXP::ThemeLibrary::instance().unsubscribe(libToken_);
 }
 
@@ -1096,8 +1167,12 @@ void PalettePanel::applySpecImmediately()
 
 void PalettePanel::specChanged()
 {
-    regenerateAndRefresh();
+    // 顺序：先把 spec 写进 PinkXP 全局色，再重新生成 + 刷新行。
+    //   旧顺序（先 regenerateAndRefresh 再 applyCurrentSpec）会让 RoleRow 在
+    //   refresh 时读到上一套主题的 content/shdw/sel，导致输入框配色永远慢一拍
+    //   —— 这正是"切 Dark/Light 颜色不跟"的根因。
     applyCurrentSpec();
+    regenerateAndRefresh();
 }
 
 void PalettePanel::regenerateAndRefresh()
@@ -1115,6 +1190,23 @@ void PalettePanel::refreshRoleRows()
     for (int i = 0; i < y2kpal::kRoleCount; ++i)
         if (roleRows_[(size_t) i] != nullptr)
             roleRows_[(size_t) i]->refresh(spec_, lastGen_);
+
+    // 命名输入栏同一条规则：底色跟随 Surface，文字按主题明暗黑/白
+    {
+        const juce::Colour fg = (spec_.brightness == y2kpal::Brightness::Dark)
+                                  ? juce::Colours::white
+                                  : juce::Colours::black;
+
+        nameEditor_.setColour(juce::TextEditor::backgroundColourId, PinkXP::content);
+        nameEditor_.setColour(juce::TextEditor::textColourId, fg);
+        nameEditor_.setColour(juce::CaretComponent::caretColourId, fg);
+        nameEditor_.setColour(juce::TextEditor::outlineColourId, PinkXP::shdw);
+        nameEditor_.setColour(juce::TextEditor::focusedOutlineColourId, PinkXP::sel);
+
+        // 同 hex 输入框：颜色/字体是逐字符存的，必须显式刷到存量文本
+        nameEditor_.applyColourToAllText(fg, true);
+        nameEditor_.applyFontToAllText(hexFieldFont(), true);
+    }
 }
 
 void PalettePanel::refreshBadge()
