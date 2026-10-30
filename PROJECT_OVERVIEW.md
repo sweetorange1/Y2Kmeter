@@ -4397,6 +4397,26 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 - **GL 后处理/着色器类资源初始化失败必须留日志**：`init()` 返回 false 后代码只做 `reset()`，功能整体消失而 UI 毫无提示，这类 bug 会潜伏整个版本周期。
 - 版本号 2.9.9 同步点：`CMakeLists.txt` 三处（`project()` + 两个 `juce_add_plugin VERSION`）、`README.md` 徽章、`Y2Kmeter_installer.iss` 的 `MyAppVersion`、`PluginEditor.cpp` 抬头四处 `"v2.9.x"` 字面量、`PROJECT_OVERVIEW.md` 当前版本声明。
 
+### 8.1 本轮修复与交互新增（2026-10）
+
+#### ① 修复：Standalone 重启后窗口高度被拉大（`horizontal bar (T)` 最明显）
+
+- **现象**：选择 `horizontal bar (T)`（低高度条形窗口）后关闭再打开，窗口下边界下移，模块位置不动；`studio monitor` 等较高窗口预设不复现。
+- **根因**：启动恢复 `window.{x,y,w,h}` 时，Editor constrainer 仍是默认 `minH=420`，低高度存档会在 `setBounds` 阶段被最小高度夹大。
+- **修复**：新增 `prepareConstrainerForWindowRestore(w,h)`，在 `restoreMainWindowBounds()` 的 `setBounds(target)` 之前同时放宽 constrainer 的 `min/max`，保证 compact 预设高度可按存档恢复。
+- **涉及文件**：`PluginEditor.h`、`PluginEditor.cpp`、`source/standalone/Y2KStandaloneApp.cpp`。
+
+#### ② 新增：底部工具栏溢出折叠 + 向上二级控制区
+
+- **目标**：窗口变窄时，右侧按钮不再挤压/覆盖左侧颜色控制区（`themeBar`）。
+- **行为**：当工具栏宽度不足时，右侧可选控件（布局预设/SaveLoad/Stick/Toy）自动折叠，主栏显示 `More` 按钮；点击后在工具栏上方展开二级控制区，再点 `Less` 收起。
+- **实现要点**：
+  - `ModuleWorkspace` 新增 `toolbarOverflowBtn`、`toolbarOverflowCollapsed/Expanded` 状态；
+  - 新增 `ToolbarOverflowBackdrop` 作为上浮二级区底板；
+  - 将可选控件布局抽成 `layoutOptionalToolbarControls(...)`，统一主栏/二级区两处复用；
+  - 在 `resized()` 内按 `themeBar` 最小保留宽度动态判定是否折叠。
+- **涉及文件**：`source/ui/ModuleWorkspace.h`、`source/ui/ModuleWorkspace.cpp`。
+
 ---
 
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

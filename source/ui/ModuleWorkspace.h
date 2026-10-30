@@ -268,11 +268,11 @@ private:
     ModuleType   moduleType;
     juce::String moduleId;
 
-    // 模块最小尺寸默认 64×64（= 1 个大格 / 8×8 个小方格，每小方格 8 像素）。
-    //   · 之前默认 160×120 会在 HorizontalStrip 预设下把窗口的可用 canvas
+    // 模块最小尺寸默认 6464（= 1 个大格 / 88 个小方格，每小方格 8 像素）。
+    //    之前默认 160120 会在 HorizontalStrip 预设下把窗口的可用 canvas
     //     撑得比实际给出的 slot 还大，导致模块越过底部 toolbar，把
     //     Hide / Source / FPS / ThemeBar 等控件盖住。
-    //   · 统一降到 64×64 后，任何子模块只要自己不再显式 setMinSize 到更大，
+    //    统一降到 6464 后，任何子模块只要自己不再显式 setMinSize 到更大，
     //     都能被缩到一个大格；牺牲是极小尺寸下文字会挤压甚至溢出，
     //     这是用户明确接受的代价（换取"永远不遮挡 toolbar"的确定性）。
     int minW = 64;
@@ -865,6 +865,7 @@ private:
 
     // 右下角的 Hide/Show 按钮（隐藏白色底框 + 控制区）
     HideChromeButton hideBtn;
+    juce::TextButton toolbarOverflowBtn; // 工具栏宽度不足时显示"More"，展开二级控制区
     bool             chromeVisible = true;
 
     // 布局锁定态（v1.8.3）：true = 一切拖动/resize 交互均早退。由 Editor 在
@@ -875,7 +876,10 @@ private:
 
     // v2.8.2：Hide 态悬停浮层（工具栏盖在模块之上，窗口几何不变）
     bool             toolbarOverlayRevealed = false;
+    bool             toolbarOverflowCollapsed = false;
+    bool             toolbarOverflowExpanded  = false;
     juce::Rectangle<int> overlayPassThroughRect;
+    juce::Rectangle<int> toolbarOverflowPanelBounds;
     bool isToolbarShown() const noexcept { return ! minimalMode_ && (chromeVisible || toolbarOverlayRevealed); }
 
     // 浮层工具栏的背景板：绘制凸起面板 + 分隔线，并吞掉落在工具栏条带上的鼠标事件，
@@ -887,7 +891,28 @@ private:
         ModuleWorkspace& owner;
     };
     std::unique_ptr<ToolbarOverlayBackdrop> toolbarBackdrop;
+
+    // 工具栏溢出展开区的背景板（位于主工具栏上方）
+    struct ToolbarOverflowBackdrop : public juce::Component
+    {
+        explicit ToolbarOverflowBackdrop (ModuleWorkspace& o) : owner (o) { setInterceptsMouseClicks (true, false); }
+        void paint (juce::Graphics& g) override;
+        ModuleWorkspace& owner;
+    };
+    std::unique_ptr<ToolbarOverflowBackdrop> toolbarOverflowBackdrop;
+
     void paintToolbarBackground (juce::Graphics& g, juce::Rectangle<int> tb);
+    void layoutOptionalToolbarControls (juce::Rectangle<int>& tb,
+                                       int btnW,
+                                       int btnH,
+                                       bool writeDividers,
+                                       bool showLayout,
+                                       bool showSaveLoad,
+                                       bool showStick,
+                                       bool showToy,
+                                       bool hideExcluded);
+    void setToolbarOverflowExpanded (bool expanded);
+    void raiseToolbarOverflowPanel();
 
     // Chrome 切换过渡期标志（由 beginChromeTransition/endChromeTransition 设置）
     //   · true 期间，resized() 末尾的"模块越界 clamp"会被跳过，
@@ -1012,6 +1037,7 @@ private:
     juce::ComboBox   layoutPresetBox;
     // Grid 与 layoutPresetBox 之间的竖直分割线 x 坐标（-1 = chrome 隐藏态未布局）
     int              toolbarDividerXLayout = -1;
+    int              overflowDividerXLayout = -1;
 
     // stick 驻留态下拉的 placeholder 文本（= 当前条状预设名，由 Editor 回写）
     juce::String     stickPresetLabel { "BAR: CLASSIC" };
@@ -1090,6 +1116,13 @@ private:
     int toolbarDividerXToy = -1;   // toy 与 stick 之间
     int toolbarDividerXStick = -1; // stick 与 load 之间
     int toolbarDividerX3 = -1; // gain 与 hide 之间
+    int overflowDividerX0 = -1;
+    int overflowDividerXFft = -1;
+    int overflowDividerX1 = -1;
+    int overflowDividerX2 = -1;
+    int overflowDividerXToy = -1;
+    int overflowDividerXStick = -1;
+    int overflowDividerX3 = -1;
 
     ModuleFactory factory;
     juce::Array<ModuleType> availableTypes {

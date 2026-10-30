@@ -4824,6 +4824,17 @@ void Y2KmeterAudioProcessorEditor::setAutoHideMode (bool shouldHide)
             anchorBottom = b.getCentreY() > userArea.getCentreY();
         }
 
+        // 记录进入 Hide 时的锚点，Show 时优先复用，避免中心点跨中线导致几何漂移。
+        if (shouldHide)
+        {
+            hideAnchorBottom = anchorBottom;
+            hideAnchorKnown = true;
+        }
+        else if (hideAnchorKnown)
+        {
+            anchorBottom = hideAnchorBottom;
+        }
+
         const int newH = shouldHide ? juce::jmax (1, b.getHeight() - chromeH)
                                     : b.getHeight() + chromeH;
         const juce::Rectangle<int> nb (b.getX(),
@@ -5693,6 +5704,26 @@ void Y2KmeterAudioProcessorEditor::relaxConstrainerForWindowSize (int w, int h)
     setResizeLimits (minW, minH,
                      juce::jmax (c->getMaximumWidth(),  needW),
                      juce::jmax (c->getMaximumHeight(), needH));
+}
+
+void Y2KmeterAudioProcessorEditor::prepareConstrainerForWindowRestore (int w, int h)
+{
+    if (isPluginHost)
+        return;
+
+    auto* c = getConstrainer();
+    if (c == nullptr)
+        return;
+
+    const int wantW = juce::jmax (1, w);
+    const int wantH = juce::jmax (1, h);
+
+    const int minW = juce::jmin (c->getMinimumWidth(),  wantW);
+    const int minH = juce::jmin (c->getMinimumHeight(), wantH);
+    const int maxW = juce::jmax (c->getMaximumWidth(),  wantW);
+    const int maxH = juce::jmax (c->getMaximumHeight(), wantH);
+
+    setResizeLimits (minW, minH, maxW, maxH);
 }
 
 // ==========================================================

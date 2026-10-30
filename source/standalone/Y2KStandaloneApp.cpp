@@ -974,6 +974,11 @@ private:
             }
         }
 
+        // 先放宽 Editor constrainer（含 min/max），避免 compact 存档在 setBounds
+        //   时被默认最小高度夹高（如 horizontal bar 的条状窗口）。
+        if (cachedEditor != nullptr)
+            cachedEditor->prepareConstrainerForWindowRestore (target.getWidth(), target.getHeight());
+
         mainWindow->setBounds (target);
 
         // v2.x 修复：若恢复出的窗口尺寸超过编辑器 constrainer 上限（1600×1100，
@@ -1017,13 +1022,21 @@ private:
             // 必须与 Editor::getChromeHeightPx() 一致（titleBarHeight 26 + toolbar 36）
             const int kChromeShrink = PinkXP::ui(26) /*titleBarHeight*/ + PinkXP::ui(36) /*toolbarHeight*/; // 随 UI 密度缩放
 
-            // 判断 hide 时窗口是"上半贴顶"还是"下半贴底"：与 Editor::setAutoHideMode
-            //   的锚点判定保持一致（窗口中心 Y vs 屏幕 userArea 中心 Y；stick 顶/底驻留时结果相同）
-            const auto& disp   = juce::Desktop::getInstance().getDisplays();
-            const auto* d      = disp.getDisplayForRect (b);
-            const auto userArea = (d != nullptr) ? d->userArea
-                                                  : juce::Rectangle<int> (1280, 720);
-            const bool bottomAligned = (b.getCentreY() > userArea.getCentreY());
+            // 关键：优先复用 Editor 在进入 Hide 时记录的锚点方向，保证 Hide↔Show
+            //   几何变换严格可逆。若拿不到（极少数早期路径），再回退到中心点启发式。
+            bool bottomAligned = false;
+            if (cachedEditor != nullptr && cachedEditor->hasAutoHideAnchorBottom())
+            {
+                bottomAligned = cachedEditor->isAutoHideAnchorBottom();
+            }
+            else
+            {
+                const auto& disp   = juce::Desktop::getInstance().getDisplays();
+                const auto* d      = disp.getDisplayForRect (b);
+                const auto userArea = (d != nullptr) ? d->userArea
+                                                      : juce::Rectangle<int> (1280, 720);
+                bottomAligned = (b.getCentreY() > userArea.getCentreY());
+            }
 
             // 反算：上半屏 → 顶边不变，h+=62（底边下移）
             //      下半屏 → 底边不变，y-=62、h+=62（顶边上移）

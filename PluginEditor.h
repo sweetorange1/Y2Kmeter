@@ -173,12 +173,18 @@ public:
     // ======================================================
     bool isChromeVisible() const;
     void setChromeVisible (bool shouldBeVisible);
+    bool hasAutoHideAnchorBottom() const noexcept { return hideAnchorKnown; }
+    bool isAutoHideAnchorBottom() const noexcept { return hideAnchorBottom; }
 
     // 当窗口被程序性设置成超过编辑器 constrainer 上限的尺寸（如启动时恢复历史
     //   bounds、双击伪全屏）时，把 constrainer 的 max 放宽到能容纳 w×h（min 不变）。
     //   否则后续任何 setResizeLimits 都会经 setBoundsConstrained 把编辑器夹回 1600，
     //   再经 ResizableWindow 的 resizeToFitContent 反噬把窗口一并压小。
     void relaxConstrainerForWindowSize (int w, int h);
+
+    // 启动恢复窗口 bounds 前调用：同时放宽 constrainer 的 min/max，确保
+    //   compact 预设（如 horizontal bar）的低高度不会被默认 minH=420 夹高。
+    void prepareConstrainerForWindowRestore (int w, int h);
 
     bool isAlwaysOnTopActive() const noexcept { return alwaysOnTopActive; }
     // 设置"固定置顶"状态。内部会：
@@ -567,6 +573,8 @@ private:
     bool chromeRevealed = false;       // Hide 下鼠标悬停 → chrome 浮层显示中
     bool revealArmed    = false;       // Hide 刚开启时需鼠标先离开窗口一次才允许浮现
     juce::uint32 revealLastInsideMs = 0;
+    bool hideAnchorKnown = false;      // 上次进入 Hide 时的锚点方向已记录
+    bool hideAnchorBottom = false;     // false=顶边锚定, true=底边锚定
 
     // Hide 期间放宽 Editor 的最小高度（否则窗口收缩 chrome 高度后会被 limits 拉回）
     bool hideLimitsSaved = false;
