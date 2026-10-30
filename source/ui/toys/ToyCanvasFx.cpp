@@ -377,7 +377,9 @@ static void spawnFountain (ToyDirector& dir, juce::Point<float> at, float charge
         p->swayX    = pers.swayX * dir.uiScale();
         p->swayFreq = pers.swayFreq;
         p->quantize = pers.quantize;
-        p->alphaFlicker = pers.alphaFlicker;
+        // Normal/Party 保持常亮，关闭呼吸式透明闪烁。
+        const auto level = dir.getLevel();
+        p->alphaFlicker = (level == ToyLevel::Normal || level == ToyLevel::Party) ? 0.0f : pers.alphaFlicker;
         // 喷泉统一向下落（桌面纹理"上浮"人格仅用于桌面，不用于喷泉）
         p->fall     = true;
         p->rainbow  = rainbow;

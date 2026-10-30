@@ -276,18 +276,16 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         smoothedFps_ += (instantaneousFps - smoothedFps_) * response;
     }
 
-    if (director.getLevel() == ToyLevel::Off)
-    {
-        return;
-    }
-
     const float dt = frame.dtSec;
     bool any = false;
     const double t0 = juce::Time::getMillisecondCounterHiRes();
 
     // C-2：按住持续喷（花洒）
-    director.sprayTick (frame.timeSec);
-    director.tickConfettiRain (frame.timeSec);
+    if (director.getLevel() != ToyLevel::Off)
+    {
+        director.sprayTick (frame.timeSec);
+        director.tickConfettiRain (frame.timeSec);
+    }
 
     // 刷新平台上沿（Editor 坐标，带 x 范围）。
     // FIX-4 / B-13：仅当存在活动自由 actor 时才遍历模块，空闲零开销。
@@ -595,12 +593,9 @@ void ToyDirector::setLevel (ToyLevel l)
 
     if (level_ == ToyLevel::Off)
     {
+        spraying_ = false;
         confettiRainRemaining_ = 0;
         nextConfettiRainTime_ = 0.0;
-        clock->freeActors.clear();
-        for (int i = 0; i < workspace.getNumModules(); ++i)
-            if (auto* m = workspace.getModule (i))
-                if (m->toyState) m->toyState->clear();
         comboCount_ = 0;
     }
 }
