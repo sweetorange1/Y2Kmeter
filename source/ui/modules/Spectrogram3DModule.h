@@ -145,6 +145,10 @@ private:
     //   大幅减少大窗口下 fillRect 的总像素写入量，维持帧率稳定。
     juce::Image cached3DImage;
     bool        imageCacheDirty = true;
+    // cached3DImage 是否为 GL 纹理 Image（OpenGLImageType）。
+    //   只有绘制目标是 GL 时才允许为 true —— OpenGL 纹理 Image 被
+    //   CoreGraphics（软件 Image 目标）消费会越界读崩溃，macOS 必现。
+    bool        cachedGlImage    = false;
     float       cachedRenderScale = 0.0f;
     int         cachedCanvasW = -1;
     int         cachedCanvasH = -1;

@@ -220,6 +220,21 @@ public:
     void setBareMode(bool bare) noexcept { if (bareMode_ == bare) return; bareMode_ = bare; repaint(); }
     bool isBareMode() const noexcept { return bareMode_; }
 
+    // ------------------------------------------------------------------
+    // 软件绘制目标标志（macOS 崩溃修复）
+    //   某些流程会把整个组件树渲染到一张"软件 Image"里 —— 典型场景是添加
+    //   模块菜单的 hover 预览（Component::createComponentSnapshot）。此时
+    //   paint() 依然运行在 GL 渲染线程上、OpenGLContext::getCurrentContext()
+    //   也非空，但真正的绘制目标是 CoreGraphics 软光栅上下文。
+    //   OpenGLImageType 的 Image 无法被这条路消费：juce_CoreGraphicsContext_mac.mm
+    //   会把 OpenGL 纹理 Image 的 BitmapData（负 lineStride + 末行指针）直接
+    //   交给 CFDataCreate 整块拷贝 → macOS 下必然越界读（_platform_memmove
+    //   崩溃）。Windows 的软件光栅器按行取值，所以没有这个现象。
+    //   调用方在进入这类离屏软件绘制前置位，模块据此回避 GL 纹理 Image。
+    // ------------------------------------------------------------------
+    void setSoftwarePaintTarget(bool isSoftware) noexcept { softwarePaintTarget_ = isSoftware; }
+    bool isSoftwarePaintTarget() const noexcept { return softwarePaintTarget_; }
+
     std::function<void(ModulePanel&)> onBoundsChangedByUser;
     std::function<void(ModulePanel&)> onBoundsDragging;   // 拖拽过程中持续回调（吸附预览用）
     std::function<void(ModulePanel&)> onCloseClicked;
@@ -294,6 +309,7 @@ private:
 
 private:
     bool bareMode_ = false;        // 裸模式：隐藏卡片外壳（milkdrop-only 变体）
+    bool softwarePaintTarget_ = false; // 当前绘制目标是软件 Image（快照/预览），禁用 GL 纹理 Image
     bool isFloating_ = false;      // 当前是否处于浮动窗口态
     bool floatingLayoutLocked_ = false; // 浮动窗口态下由 Editor 下发的全局布局锁定状态
     bool popOutEnabled_ = true;    // 弹出按钮是否可用（插件模式下由 workspace 关闭）

@@ -634,10 +634,19 @@ void Spectrogram3DModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle
     const int effLen = juce::jmax (1, frameCount);
     if (effLen <= 0) return;
 
-    // 离屏 Image 缓存：数据脏 / canvas 尺寸变化 / GL 上下文变化时重建。
+    // 离屏 Image 缓存：数据脏 / canvas 尺寸变化 / GL 上下文变化 / 目标类型
+    // 变化时重建。
     //   每层全量 strokePath（配 Path 复用）已消除 P6 降频的视觉回退。
+    //   ⚠ GL 纹理 Image 只能画进 GL 目标。软件目标（hover 预览快照等）必须
+    //     改用软件 Image，否则 macOS CoreGraphics 会越界读崩溃（详见
+    //     renderToImage 注释）。缓存类型不匹配时也必须重建，否则会残留
+    //     另一条路径的 Image。
+    auto* const currentGl = juce::OpenGLContext::getCurrentContext();
+    const bool  wantGlImage = ! isSoftwarePaintTarget() && currentGl != nullptr;
+
     if (imageCacheDirty || cached3DImage.isNull()
-        || glImageContext != static_cast<void*> (juce::OpenGLContext::getCurrentContext())
+        || cachedGlImage != wantGlImage
+        || (wantGlImage && glImageContext != static_cast<void*> (currentGl))
         || cachedCanvasW != canvas.getWidth()
         || cachedCanvasH != canvas.getHeight())
     {
@@ -801,25 +810,40 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     //   GPU 光栅化、drawImage 直接复用 FBO 纹理（零上传），绕开 CPU 软光栅
     //   与每帧整图纹理重传两大成本。上下文不可用（软光栅回退 / 浮动窗口
     //   过渡态）时回退软件 Image。
-    if (auto* ctx = juce::OpenGLContext::getCurrentContext())
+    //
+    //   ⚠ 仅在"绘制目标本身就是 GL 目标"时才允许创建 GL 纹理 Image：
+    //     OpenGL 纹理 Image 的 BitmapData 是"负 lineStride + 末行指针"，
+    //     juce_CoreGraphicsContext_mac.mm::createCGImage 会把整块内存直接交给
+    //     CFDataCreate（bytesPerRow 还会被当成巨大的 size_t），macOS 下必然
+    //     越界读 → _platform_memmove 崩溃闪退。
+    //     Windows 的软件光栅器按行寻址（lineStride 可为负），所以只在 mac 上炸。
+    //     典型触发：添加模块菜单 hover 预览走 createComponentSnapshot —— 虽然
+    //     GL 渲染线程上 getCurrentContext() 非空，但目标是软件 Image。
+    auto* ctx = isSoftwarePaintTarget() ? nullptr : juce::OpenGLContext::getCurrentContext();
+
+    if (ctx != nullptr)
     {
         if (cached3DImage.isNull()
+            || ! cachedGlImage
             || glImageContext != static_cast<void*> (ctx)
             || cached3DImage.getWidth()  != rw
             || cached3DImage.getHeight() != rh)
         {
             cached3DImage = juce::Image (juce::OpenGLImageType().create (juce::Image::ARGB, rw, rh, false));
             glImageContext = static_cast<void*> (ctx);
+            cachedGlImage  = true;
         }
     }
     else
     {
         glImageContext = nullptr;
         if (cached3DImage.isNull()
+            || cachedGlImage
             || cached3DImage.getWidth()  != rw
             || cached3DImage.getHeight() != rh)
         {
             cached3DImage = juce::Image (juce::Image::ARGB, rw, rh, true);
+            cachedGlImage = false;
         }
     }
 

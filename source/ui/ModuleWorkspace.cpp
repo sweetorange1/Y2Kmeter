@@ -1770,7 +1770,13 @@ const juce::Image& ModuleWorkspace::getHoverPreviewImage (ModuleType t)
     // 确保 resized/layoutContent 已跑；setBounds 会触发 resized()。
 
     // 用 createComponentSnapshot 递归绘制（含子组件）到 Image
+    //   ⚠ 快照目标是软件 Image：必须通知模块本次绘制不是 GL 目标。
+    //     否则 Spectrogram3D 等模块会凭"当前有 GL 上下文"创建 OpenGL 纹理
+    //     Image，再由 CoreGraphics 光栅器消费 —— macOS 下 CFDataCreate 越界
+    //     读（_platform_memmove）直接闪退。
+    panel->setSoftwarePaintTarget (true);
     auto snapshot = panel->createComponentSnapshot ({ 0, 0, w, h }, /*clipImageToSrc*/ true);
+    panel->setSoftwarePaintTarget (false);
 
     // 显式解绑 LookAndFeel，防止 panel 析构期间 LookAndFeel 单例被访问的潜在时序问题。
     panel->setLookAndFeel (nullptr);

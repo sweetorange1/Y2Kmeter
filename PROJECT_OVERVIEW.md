@@ -296,6 +296,7 @@
 - 派生类通过 `paintContent` / `layoutContent` 定制绘制与布局；基类负责标题栏/关闭按钮/拖拽缩放/CPU 小字。
 - 尺寸约束：`minSize`（默认 64×64）与 `defaultSize`（每个派生类通过 `setDefaultSize` 声明）。
 - `isVisuallyActiveInWorkspace()`：判断模块是否真的在 workspace 可见区，用于跳过重绘。
+- `setSoftwarePaintTarget(bool) / isSoftwarePaintTarget()`（v2.9.9 补充）：声明"本次绘制目标是软件 Image"（如 `createComponentSnapshot` 的 hover 预览）。绘制内部持有 GL 纹理 Image 缓存的模块（目前只有 `Spectrogram3DModule`）必须读这个标志并回退软件 Image，否则 macOS 必崩 —— 详见 §6.30。
 
 ### 4.6 `PinkXP`（[PinkXPStyle.h](/I:/Y2KMeter/source/ui/PinkXPStyle.h)）
 - **13 个主题槽**（`ThemeId` 只追加不重排，保护旧存档）：12 个手工调校预设（数据驱动原值）+ `custom`（=11，生成器主题）。默认主题 `blackPink`。
@@ -448,6 +449,7 @@ main
 - ★ **永远不 clear FBO 0**（CachedImage 合成面）——clear 会破坏 JUCE 已合成的所有组件 UI。
 - 插件宿主与 Standalone **共用**，宿主下 JUCE 会为 Editor 创建 GL 子层不影响宿主窗口其余部分。
 - 坐标系统：`getLocalPoint(milk, point)` 纯组件树遍历 + `openGLContext.getRenderingScale()` DPI 缩放 + Y-flip。
+- ★ **`OpenGLContext::getCurrentContext() != nullptr` 不等于"绘制目标是 GL 目标"**。GL 渲染线程上跑的任何离屏软件绘制（`createComponentSnapshot` 等）也同样满足这个判断。`OpenGLImageType` 的 Image 只能被 GL 上下文消费，画进软件 Image 在 macOS 会越界读崩溃（Windows 不炸）—— 见 §6.30。
 
 ### 6.6 性能优化点
 
@@ -4522,6 +4524,81 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 - **改了 `AnalyserHub.h` 的成员布局**（新增 6 个 vector），所有包含它的 TU 的 `AnalyserHub` 布局都变了。本地 `_clean_project_objs.ps1` 就是为"NMake 空 .d 依赖失效导致 obj 不重编 → ABI 错配"准备的。
 - 新环境若 `third_party/JUCE` 缺失：`.gitignore` 里 `!/third_party/JUCE/` 是显式放行的，正常 clone 就带着。
 - 编译命令参考 `README.md` / `CMakePresets.json`；Standalone 产物在 `cmake-build-<preset>/Y2Kmeter_artefacts/<Config>/Standalone/`。
+
+---
+
+## 6.30 v2.9.9 补充：右键添加菜单 hover `Spectrum 3D` 在 macOS 闪退（GL 纹理 Image 被 CoreGraphics 消费）
+
+> 平台：**仅 macOS 复现**，Windows 同路径无异常。版本号不变，仅修复 + 文档。
+
+### 1. 现象
+
+- 修复前：右键空白处 → 添加模块菜单 → 鼠标扫过 `SPECTRUM 3D`（瀑布图）菜单项，**必现卡死/闪退**，与是否正在播放音频、模块是否已有数据无关。
+- 其它模块项 hover 都正常，唯独 S3D 炸；Windows 端同样操作无异常。
+
+### 2. 崩溃堆栈（macOS）
+
+```
+_platform_memmove$VARIANT$Haswell            <- rep movsb
+juce::CoreGraphicsPixelData::createCGImage   juce_CoreGraphicsContext_mac.mm:215  (CFDataCreate)
+juce::CoreGraphicsPixelData::getCachedImageRef  juce_CoreGraphicsContext_mac.mm:148
+juce::CoreGraphicsContext::drawImage         juce_CoreGraphicsContext_mac.mm:831
+juce::Graphics::drawImage
+Spectrogram3DModule::paintLegacyContent      Spectrogram3DModule.cpp:649
+ModulePanel::paint
+juce::Component::createComponentSnapshot
+ModuleWorkspace::getHoverPreviewImage        ModuleWorkspace.cpp:1773
+ModuleWorkspace::paintOverChildren
+juce::OpenGLContext::CachedImage::RenderThread::renderAll
+```
+
+### 3. 根因（一条链，缺一不可）
+
+1. hover 预览走 `ModuleWorkspace::getHoverPreviewImage()` → `panel->createComponentSnapshot(...)`，目标是**软件 Image**（macOS 上 `NativeImageType` = CoreGraphics 位图）。
+2. 但这段快照是在 `OpenGLContext::CachedImage` 的 **GL 渲染线程**里执行的，所以 `juce::OpenGLContext::getCurrentContext()` **非空**。
+3. `Spectrogram3DModule::renderToImage()` 只凭"当前有 GL 上下文"就 `juce::OpenGLImageType().create(...)`，把 `cached3DImage` 建成了 **OpenGL FBO 纹理 Image**。
+4. `paintLegacyContent()` 里 `g.drawImage(cached3DImage, ...)`，目标是软件 Image → 走 `CoreGraphicsContext::drawImage`。
+5. `CoreGraphicsPixelData::getCachedImageRef()` 取 `Image::BitmapData` 后直接 `createCGImage()`；而 OpenGL Image 的 BitmapData（`juce_OpenGLImage.cpp:88-96`）是 **`lineStride` 为负、`data` 指向最后一行**：
+   - `CFDataCreate(nullptr, data, size)` 从"末行"起向后拷 `size` 字节 → 越界约 `(h-1)*lineStride` 字节，命中 `memmove` 崩溃；
+   - 同时负 `lineStride` 被强转 `size_t` 当 `CGImageCreate` 的 `bytesPerRow`，变成天文数字，即便不崩也会得到非法 CGImage。
+
+补充两点容易误判的细节：
+
+- **为什么"必现"且与音频无关**：预览面板是全新实例，`frameCount == 0` → `effRows == 0` → 3D 内容其实一列都没画，但 `cached3DImage` 照样被创建并 `drawImage`，所以只是"扫过菜单项"就炸。
+- **为什么只有 mac**：Windows 软件光栅器（`juce_RenderingHelpers.h`）用 `getPixelPointer(x,y)` 逐行寻址，负 stride 是合法输入；只有 CoreGraphics 后端会把整块内存当连续 buffer 直接丢给 `CFDataCreate`。
+
+### 4. 修复（不 patch JUCE，应用层定点修）
+
+思路：**只有"绘制目标本身就是 GL 目标"时才允许创建 GL 纹理 Image**；并让缓存类型可以随目标切换重建。
+
+| 文件 | 改动 |
+| --- | --- |
+| `source/ui/ModuleWorkspace.h` | `ModulePanel` 新增 `setSoftwarePaintTarget(bool) / isSoftwarePaintTarget()` + 成员 `softwarePaintTarget_` |
+| `source/ui/ModuleWorkspace.cpp` | `getHoverPreviewImage()` 在 `createComponentSnapshot` 前 `setSoftwarePaintTarget(true)`、后复位 `false` |
+| `source/ui/modules/Spectrogram3DModule.cpp` | `renderToImage()`：`ctx = isSoftwarePaintTarget() ? nullptr : getCurrentContext()`，软件目标强制 `juce::Image(ARGB, rw, rh, true)` |
+| `source/ui/modules/Spectrogram3DModule.cpp` | `paintLegacyContent()`：缓存有效性从"比较 `glImageContext`"改为"比较期望类型 `wantGlImage` 与 `cachedGlImage`" |
+| `source/ui/modules/Spectrogram3DModule.h` | 新增成员 `bool cachedGlImage`（`cached3DImage` 是否为 GL 纹理 Image） |
+
+要点：
+
+- **缓存类型必须参与失效判断**，否则"先正常画过一帧（GL Image），再被快照（软件目标）"时会把旧 GL Image 直接画进软件目标，照崩。
+- 不能再用 `glImageContext != getCurrentContext()` 做唯一判据：软件目标下 GL 上下文仍非空，这个条件恒为 true，会导致**每帧重建 Image**（又慢又抖动）。
+- GL 正常路径（Editor 合成时 `glDirectActive == false` 的过渡帧）行为**完全不变**，依旧复用 FBO 纹理零上传。
+- 备选方案（未采用）：在 `juce_CoreGraphicsContext_mac.mm::getCachedImageRef()` 里对 `lineStride < 0` 先拷成正向 stride 再建 CGImage。这是上游级通用修复，但 vendored JUCE 升级时容易丢补丁，故只作为将来兜底手段记录在此。
+
+### 5. 验证
+
+- `cmake-build-release`（Ninja / macOS）全量编译 + 链接通过（Standalone & VST3 产物已重建，exit 0）。
+- 交互验证待人工确认：Standalone 右键 → 添加菜单 → 划过 `SPECTRUM 3D`，应不再闪退且预览缩略图正常（预览走 CPU 软光栅，空态外观与之前一致）。
+
+### 6. 经验 / 踩坑清单
+
+1. **`getCurrentContext() != nullptr` 只说明"有 GL 上下文"，不说明"我要画进 GL"**。任何在 GL 线程上发起的离屏软件绘制都会满足它。判据要换成"绘制目标身份"，而不是"上下文存在性"。
+2. **`OpenGLImageType` 的 Image 只能喂给 GL 上下文**。跨后端消费（CG / Direct2D / 软件光栅器）里，只有 Windows 软件光栅器恰好容错。凡是模块内部缓存 `juce::Image`，先问一句"这张图会被谁消费"。
+3. **`Image::BitmapData` 的 `lineStride` 允许为负**（bottom-up 存储），`data` 也不一定指向首行。以"data 是连续 buffer"为假设的第三方 API（`CFDataCreate` + `CGImageCreate`）必炸。
+4. **平台差异要归因到后端实现，而不是"mac 上的玄学"**：本次在 `juce_OpenGLImage.cpp`（负 stride 由 BottomUp 映射产生）+ `juce_CoreGraphicsContext_mac.mm`（整块 memcpy）两处源码就闭合了解释。
+5. **`createComponentSnapshot` 是"软件绘制"的强信号**。新增这类调用点时必须考虑模块内部的离屏缓存类型，必要时沿用 `setSoftwarePaintTarget`（将来更多模块持 GL Image 时同样适用）。
+6. 定位顺序（可复用）：先看崩溃栈里**跨越 JUCE 与应用代码的分界点**（这里是 `Graphics::drawImage` → `Spectrogram3DModule::paintLegacyContent`），再往上游追"这张 Image 是谁建的、建成了什么类型"，比从 paint 逻辑本身找问题快得多。
 
 ---
 
