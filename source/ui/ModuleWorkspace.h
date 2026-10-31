@@ -52,6 +52,9 @@ enum class ModuleType
     // 声相指示（半圆雷达，复用 Oscilloscope 立体声样本，幅度驱动声像位置）
     stereoField,
 
+    // 立体声频谱声像图（按频率对比 L/R，纵轴显示声像偏向）
+    stereoMap,
+
     // VirtuPet 小宠物模块（独立模块，不走拖图逻辑）
     virtuPet,
 
@@ -1132,6 +1135,7 @@ private:
         ModuleType::waveform,
         ModuleType::spectrum, ModuleType::eq, ModuleType::spectrogram, ModuleType::spectrogram3d,
         ModuleType::stereoField,
+        ModuleType::stereoMap,
         ModuleType::virtuPet,
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 

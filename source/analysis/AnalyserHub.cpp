@@ -575,7 +575,13 @@ void AnalyserHub::rebuildMainFft (int order)
     const size_t magN = (size_t) (1 << order) / 2;
     fftFifo.assign ((size_t) (1 << order), 0.0f);
     fftData.assign ((size_t) (1 << order) * 2, 0.0f);
+    fftFifoL.assign ((size_t) (1 << order), 0.0f);
+    fftFifoR.assign ((size_t) (1 << order), 0.0f);
+    fftDataL.assign ((size_t) (1 << order) * 2, 0.0f);
+    fftDataR.assign ((size_t) (1 << order) * 2, 0.0f);
     magDataWork.assign (magN, 0.0f);
+    magDataWorkL.assign (magN, 0.0f);
+    magDataWorkR.assign (magN, 0.0f);
     specReWork.assign (magN, 0.0f);
     specImWork.assign (magN, 0.0f);
     specReWorkPrev.assign (magN, 0.0f);
@@ -607,6 +613,8 @@ void AnalyserHub::applyMainFftSizeChange()
         const juce::SpinLock::ScopedLockType sl (specLock);
         const size_t magN = (size_t) (mainFftSize / 2);
         magData.assign (magN, 0.0f);
+        magDataL.assign (magN, 0.0f);
+        magDataR.assign (magN, 0.0f);
         specRe.assign (magN, 0.0f);
         specIm.assign (magN, 0.0f);
         prevSpecRe.assign (magN, 0.0f);
@@ -654,15 +662,19 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
 
     for (int i = 0; i < numSamples; ++i)
     {
-        // 混合为 mid（L+R）/2
-        const float mid = (left[i] + right[i]) * 0.5f;
-        const float s   = juce::jlimit(-1.0f, 1.0f, mid);
+        // 混合为 mid（L+R）/2，同时保留 L/R 各自频谱供 StereoMap 使用。
+        const float l   = juce::jlimit (-1.0f, 1.0f, left[i]);
+        const float r   = juce::jlimit (-1.0f, 1.0f, right[i]);
+        const float mid = (l + r) * 0.5f;
+        const float s   = juce::jlimit (-1.0f, 1.0f, mid);
 
         // ---------- 单路 FFT：环形缓冲 + 75% overlap ----------
         //   存入当前写位置，再把"写位置"前进。当写位置每次跨过 hop 的整数倍时，
         //   就把"从 writePos 往回看的 mainFftSize 个样本"打包跑一次 FFT。
         //   数据从最老到最新的排列为：fftFifo[writePos..end] + fftFifo[0..writePos-1]
-        fftFifo[static_cast<size_t> (fftFifoIndex)] = s;
+        fftFifo [static_cast<size_t> (fftFifoIndex)] = s;
+        fftFifoL[static_cast<size_t> (fftFifoIndex)] = l;
+        fftFifoR[static_cast<size_t> (fftFifoIndex)] = r;
         fftFifoIndex = (fftFifoIndex + 1) % mainFftSize;
 
         // 每 hop 个样本触发一次
@@ -671,18 +683,35 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
         if ((fftFifoIndex % hop) != 0)
             continue;
 
-        // 将环形 FIFO 展平到 fftData（时序：oldest → newest）
+        // 将环形 FIFO 展平到 FFT 工作区（时序：oldest → newest）
         const int firstChunk = mainFftSize - fftFifoIndex;
         std::memcpy (fftData.data(),              fftFifo.data() + fftFifoIndex,
                      static_cast<size_t> (firstChunk) * sizeof (float));
         if (fftFifoIndex > 0)
             std::memcpy (fftData.data() + firstChunk, fftFifo.data(),
                          static_cast<size_t> (fftFifoIndex) * sizeof (float));
+        std::memcpy (fftDataL.data(),              fftFifoL.data() + fftFifoIndex,
+                     static_cast<size_t> (firstChunk) * sizeof (float));
+        std::memcpy (fftDataR.data(),              fftFifoR.data() + fftFifoIndex,
+                     static_cast<size_t> (firstChunk) * sizeof (float));
+        if (fftFifoIndex > 0)
+        {
+            std::memcpy (fftDataL.data() + firstChunk, fftFifoL.data(),
+                         static_cast<size_t> (fftFifoIndex) * sizeof (float));
+            std::memcpy (fftDataR.data() + firstChunk, fftFifoR.data(),
+                         static_cast<size_t> (fftFifoIndex) * sizeof (float));
+        }
         // fftData 后半段（mainFftSize .. mainFftSize*2）用作 FFT 内部缓冲，填 0
         std::fill (fftData.begin() + mainFftSize, fftData.end(), 0.0f);
+        std::fill (fftDataL.begin() + mainFftSize, fftDataL.end(), 0.0f);
+        std::fill (fftDataR.begin() + mainFftSize, fftDataR.end(), 0.0f);
 
         window->multiplyWithWindowingTable(fftData.data(), mainFftSize);
+        window->multiplyWithWindowingTable(fftDataL.data(), mainFftSize);
+        window->multiplyWithWindowingTable(fftDataR.data(), mainFftSize);
         fft->performRealOnlyForwardTransform(fftData.data(), true);
+        fft->performRealOnlyForwardTransform(fftDataL.data(), true);
+        fft->performRealOnlyForwardTransform(fftDataR.data(), true);
 
         const int maxBin = mainFftSize / 2;
         // RealOnly(onlyNonNegative=true) 输出 maxBin+1 个复数、re/im 交错：
@@ -699,9 +728,16 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
                          sizeof (float) * specImWork.size());
             for (int iBin = 0; iBin < maxBin; ++iBin)
             {
-                const float re = fftData[static_cast<size_t> (2 * iBin)];
-                const float im = fftData[static_cast<size_t> (2 * iBin + 1)];
+                const size_t bi = static_cast<size_t> (2 * iBin);
+                const float re = fftData[bi + 0];
+                const float im = fftData[bi + 1];
+                const float reL = fftDataL[bi + 0];
+                const float imL = fftDataL[bi + 1];
+                const float reR = fftDataR[bi + 0];
+                const float imR = fftDataR[bi + 1];
                 magDataWork[static_cast<size_t> (iBin)] = std::sqrt (re * re + im * im) * invMax;
+                magDataWorkL[static_cast<size_t> (iBin)] = std::sqrt (reL * reL + imL * imL) * invMax;
+                magDataWorkR[static_cast<size_t> (iBin)] = std::sqrt (reR * reR + imR * imR) * invMax;
                 specReWork[static_cast<size_t> (iBin)] = re * invMax;
                 specImWork[static_cast<size_t> (iBin)] = im * invMax;
             }
@@ -748,6 +784,10 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
         {
             std::memcpy (magData.data(), magDataWork.data(),
                          sizeof (float) * magData.size());
+            std::memcpy (magDataL.data(), magDataWorkL.data(),
+                         sizeof (float) * magDataL.size());
+            std::memcpy (magDataR.data(), magDataWorkR.data(),
+                         sizeof (float) * magDataR.size());
             std::memcpy (specData.data(), specDataWork.data(),
                          sizeof (float) * specData.size());
             // 复频谱发布：prev ← workPrev，cur ← workCur（相邻帧对）
@@ -890,6 +930,87 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         }
 
         outData[i] = mag;
+    }
+}
+
+void AnalyserHub::getSpectrumMagnitudesBlendedLR (juce::Array<float>& destL,
+                                                  juce::Array<float>& destR,
+                                                  int   numPoints,
+                                                  float fMin,
+                                                  float fMax)
+{
+    numPoints = juce::jmax (2, numPoints);
+    destL.resize (numPoints);
+    destR.resize (numPoints);
+
+    const double cachedSr = cachedSampleRate.load (std::memory_order_relaxed);
+    const double sr       = (cachedSr > 0.0) ? cachedSr : 48000.0;
+    const double nyquist  = sr * 0.5;
+
+    const double fLo2 = juce::jmax (1.0, static_cast<double> (fMin));
+    const double fHi2 = juce::jmin (nyquist, static_cast<double> (fMax));
+    auto* outL = destL.getRawDataPointer();
+    auto* outR = destR.getRawDataPointer();
+    if (fHi2 <= fLo2)
+    {
+        std::fill (outL, outL + numPoints, 0.0f);
+        std::fill (outR, outR + numPoints, 0.0f);
+        return;
+    }
+
+    thread_local std::vector<float> magSnapshotL;
+    thread_local std::vector<float> magSnapshotR;
+    {
+        const juce::SpinLock::ScopedLockType sl (specLock);
+        magSnapshotL.resize (magDataL.size());
+        magSnapshotR.resize (magDataR.size());
+        if (! magSnapshotL.empty())
+            std::memcpy (magSnapshotL.data(), magDataL.data(), sizeof (float) * magSnapshotL.size());
+        if (! magSnapshotR.empty())
+            std::memcpy (magSnapshotR.data(), magDataR.data(), sizeof (float) * magSnapshotR.size());
+    }
+
+    const double logMin = std::log10 (fLo2);
+    const double logMax = std::log10 (fHi2);
+    const double hzToBin = (magSnapshotL.size() > 1)
+        ? (static_cast<double> (magSnapshotL.size() - 1) / nyquist)
+        : 0.0;
+
+    auto peakInRange = [] (const float* buf, int bufN, int binLo, int binHi) noexcept
+    {
+        binLo = juce::jlimit (0, bufN - 1, binLo);
+        binHi = juce::jlimit (0, bufN - 1, binHi);
+        if (binHi < binLo) std::swap (binLo, binHi);
+        float m = 0.0f;
+        for (int b = binLo; b <= binHi; ++b)
+        {
+            const float v = std::abs (buf[b]);
+            if (std::isfinite (v) && v > m) m = v;
+        }
+        return m;
+    };
+
+    for (int i = 0; i < numPoints; ++i)
+    {
+        const double t     = static_cast<double> (i) / static_cast<double> (numPoints - 1);
+        const double f     = std::pow (10.0, logMin + t * (logMax - logMin));
+        const double tPrev = static_cast<double> (i - 1) / static_cast<double> (numPoints - 1);
+        const double tNext = static_cast<double> (i + 1) / static_cast<double> (numPoints - 1);
+        const double fPrev = (i == 0) ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
+        const double fNext = (i == numPoints - 1) ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
+        const double f0    = std::sqrt (fPrev * f);
+        const double f1    = std::sqrt (f * fNext);
+
+        float mL = 0.0f, mR = 0.0f;
+        if (hzToBin > 0.0 && ! magSnapshotL.empty() && ! magSnapshotR.empty())
+        {
+            const int binLo = static_cast<int> (std::floor (f0 * hzToBin));
+            const int binHi = static_cast<int> (std::ceil  (f1 * hzToBin));
+            mL = peakInRange (magSnapshotL.data(), (int) magSnapshotL.size(), binLo, binHi);
+            mR = peakInRange (magSnapshotR.data(), (int) magSnapshotR.size(), binLo, binHi);
+        }
+        outL[i] = mL;
+        outR[i] = mR;
     }
 }
 

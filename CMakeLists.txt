@@ -643,6 +643,8 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/ui/modules/Spectrogram3DModule.cpp
   source/ui/modules/StereoFieldModule.h
   source/ui/modules/StereoFieldModule.cpp
+  source/ui/modules/StereoMapModule.h
+  source/ui/modules/StereoMapModule.cpp
   source/ui/modules/VirtuPetModule.h
   source/ui/modules/VirtuPetModule.cpp
   source/ui/modules/MilkdropModule.h

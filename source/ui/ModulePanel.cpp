@@ -49,6 +49,7 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::spectrogram:       return "Spectrogram";
         case ModuleType::spectrogram3d:    return "Spectrogram 3D";
         case ModuleType::stereoField:       return "Stereo Field";
+        case ModuleType::stereoMap:         return "Stereo Map";
         case ModuleType::virtuPet:        return "VirtuPet";
         case ModuleType::milkdrop:         return "Milkdrop";
 

@@ -20,6 +20,8 @@ build
 # Temporary files
 /_filterstate.*
 /color.txt
+# 本地调试用临时 PowerShell 脚本（_ 前缀，一次性诊断，不入库）
+/_*.ps1
 
 # Test directories
 /pngtest/

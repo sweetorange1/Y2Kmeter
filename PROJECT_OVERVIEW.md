@@ -9,6 +9,7 @@
 
 ### 1.1 项目定位
 - **产品名**：`Y2Kmeter` （版本：`2.9.9`）
+  - 注意：当前工作区在 `v2.9.9` 之上还有**未发布的开发中改动**（`Stereo Map` 新模块，见文末「未发布：Stereo Map」章节），版本号尚未 bump。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -19,7 +20,7 @@
 
 ### 1.2 主要功能一览
 
-**① 音频分析与计量**（21 个可组合模块，由 `AnalyserHub` 的 5 路分析统一驱动、按引用计数按需启用）
+**① 音频分析与计量**（22 个可组合模块，由 `AnalyserHub` 的 5 路分析统一驱动、按引用计数按需启用）
 
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
@@ -31,6 +32,7 @@
 - **频谱瀑布图**（Spectrogram 像素方格风格 / Spectrogram 3D 三维曲面）
 - **模拟指针 VU 表**（半圆扇形表盘 + 单指针 + LED 信号灯，非对称弹道）
 - **声像雷达**（Stereo Field，半圆雷达，幅度驱动声像位置）
+- **频谱声像图**（Stereo Map，按频率逐段对比 L/R，纵轴 ±1 显示声像偏向：上=L / 中=居中 / 下=R；**开发中，未发布**）
 - **EQ 频谱可视化**（Y2K 主题，**仅可视化，不做实际 EQ 处理**）
 
 > 细粒度拆分模块（实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest）复用同一路分析结果，后端零新增计算。
@@ -205,6 +207,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
+| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：按频率对比 L/R 频谱，纵轴为声像偏向 ±1，上 L 下 R；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径） | `Spectrum`（新增 L/R 分路快照） |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
@@ -248,6 +251,7 @@
 - **FrameDispatcher**（pimpl）：`startFrameDispatcher(hz)` 设定目标频率（上限 120Hz）。v2.9 起支持**外部帧时钟**：Editor 挂 `juce::VBlankAttachment` 后调用 `setExternalFrameClock(true)`，内部 Timer 停转，改由 Editor 在每个 vblank（按 FPS 上限抽稀后）调用 `dispatchFrameNow(ts)` —— 分发与显示器刷新同相；vblank 停摆（显示器休眠/远程桌面）由 Editor 10Hz 看门狗切回 Timer。`FrameSnapshot` 新增 `timeSec/dtSec` 供模块做帧率无关动画，快照本身走 4 槽复用池（不再每帧 37KB make_shared）。
 - **模块订阅**：`addFrameListener(listener)` / `removeFrameListener`；每帧 UI 线程回调 `onFrame(const FrameSnapshot&)`。
 - **兼容旧接口**：`getOscilloscopeSnapshot / getSpectrumSnapshot / getSpectrumMagnitudes(Lo) / getSpectrumMagnitudesBlended`。
+- **L/R 分路频谱（未发布，为 Stereo Map 新增）**：`getSpectrumMagnitudesBlendedLR(destL, destR, numPoints, fMin, fMax)` —— 与 `getSpectrumMagnitudesBlended` 同一频率轴/带宽聚合逻辑，仅数据源改为 `magDataL` / `magDataR`。代价是主 FFT 由单路变三路（mid + L + R，共用同一个 `fft` 实例和窗函数，环形 FIFO 各一份）。
 - **常量**：`fftOrder=11 (2048)`，`fftOrderLo=13 (8192)`，`spectrumXoverHz=500Hz`，`oscilloscopeBufferSize=2048`，`spectrumBins=160`。
 
 ### 4.3 `Y2KmeterAudioProcessorEditor`（[PluginEditor.h](/I:/Y2KMeter/PluginEditor.h)）
@@ -4416,6 +4420,108 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
   - 将可选控件布局抽成 `layoutOptionalToolbarControls(...)`，统一主栏/二级区两处复用；
   - 在 `resized()` 内按 `themeBar` 最小保留宽度动态判定是否折叠。
 - **涉及文件**：`source/ui/ModuleWorkspace.h`、`source/ui/ModuleWorkspace.cpp`。
+
+---
+
+## 未发布：Stereo Map 立体声频谱声像图（v2.9.9 之后，开发中）
+
+> 本章记录一轮"新模块从零到七成"的完整现场，供换环境 / 换会话后无需重新考古即可续做。
+> 提交状态：已入库（`main` 直推，commit `feat(stereo-map)`），**版本号未 bump**，模块未进任何布局预设。
+
+### 1. 它解决什么问题
+
+已有的 `Stereo Field`（v2.7.0）只回答"整体偏向哪边"（宽频能量比，半圆雷达）。缺的是**按频率的声像分布**：低频铺底居中、pad 做宽、hi-hat 偏右这类信息在 Stereo Field 上完全看不见。`Stereo Map` 的定位是把"频谱 × 声像"压成一条曲线：
+
+- 横轴：对数频率 20Hz → 20kHz（与 Spectrum / EQ 同一映射函数）
+- 纵轴：声像位置 ±1，**上 = L 更强 / 中线 = 居中 / 下 = R 更强**
+- 亮度 / 不透明度：该频段能量，弱带自然淡出
+
+与 Spectrum Perlerbeads（能量热力）、Goniometer（相位图）互补，不与任何现有模块重叠。
+
+### 2. 后端改造：主 FFT 单路 → 三路
+
+**这是本轮唯一的架构性改动**，改动集中在 [`AnalyserHub.h`](/I:/Y2KMeter/source/analysis/AnalyserHub.h) / [`AnalyserHub.cpp`](/I:/Y2KMeter/source/analysis/AnalyserHub.cpp)。
+
+| 项目 | 改动前 | 改动后 |
+| --- | --- | --- |
+| FIFO | `fftFifo`（mid 一路） | `fftFifo` + `fftFifoL` + `fftFifoR` |
+| FFT 工作区 | `fftData` | `fftData` + `fftDataL` + `fftDataR` |
+| 幅度缓冲 | `magData` / `magDataWork` | 追加 `magDataL/R` / `magDataWorkL/R` |
+| 每帧 FFT 次数 | 1 | 3（mid / L / R，复用同一 `fft` 实例 + 同一窗函数） |
+| 对外接口 | `getSpectrumMagnitudesBlended` | 追加 `getSpectrumMagnitudesBlendedLR` |
+
+`rebuildMainFft()` 与 `applyMainFftSizeChange()` 两处**都要**同步 resize 新增的 6 个 vector —— 漏一处就是尺寸不匹配的越界读。`pushSamplesToSpectrum()` 里 `l`/`r` 先 `jlimit(-1,1)` 再算 mid，mid 与 L/R 三路共用同一个 `fftFifoIndex` 与 hop 判定，不新增分支开销。
+
+**为什么不做成"按需 L/R"**：三路 FFT 是 O(n log n) 的三倍，若按 `retain(Kind)` 动态开关会让 `fftFifoIndex` 与各缓冲写入状态错位；当前选择是**常开**，用 `getSpectrumMagnitudesBlendedLR` 的低频/高频分桶聚合（thread_local 快照 + peak-in-range）摊销成本。**这条是有代价的，见 §8 待办第 1 条。**
+
+### 3. 算法：从 L/R 幅度到一条曲线
+
+`StereoMapModule::computeStereoMap(dtSec)`，每帧对 `bandCount`（= plot 宽度，96–512，默认取 256）个对数等距频点算四件事：
+
+1. **声像比**：`lrDb = 20log10((L+1e-8)/(R+1e-8))`，`rawPan = clamp(lrDb / 6.0206, -1, 1)`。
+   **满幅定义是 2:1 幅度比（= 6.0206dB）**，不是 ±inf dB —— 保证任何单边信号都能贴到边界，而不是少数极端才贴边。
+2. **亮度**：沿用 Spectrum 的 4.5dB/oct slope 观感，`(dbVis + 90) / 90`。slope **只作用于亮度，不参与声像计算**，否则低频会被视觉补偿反向压制。
+3. **活动度门控**（三层，都在 `activityFinal` 里取 max）：
+   - `levelActivity`：低于 -25dB 才开始阻尼，-80dB 完全归零，指数按 `sqrt(t)` 从 1.05（低频）到 0.70（高频）；
+   - `relActivity`：相对当帧主峰的门限（`gate` 0.6%→0.2%），弱带降噪，强带不吃额外阻尼；
+   - `activityFloor`：**方向可信度下限** —— `|lrDb|/6.02` 越大、能量再低也要明显偏上/偏下，避免"明显偏右的频段因能量低被压在中间"；
+   - `dbRaw >= -25dB` 时直接 `activityFinal = 1.0`（强带永不阻尼）。
+4. **平滑**：`alpha = clamp(dtSec * 12, 0.10, 0.58)`，帧率无关（120Hz 下约 0.1，30Hz 下约 0.4），首次调用直接对齐目标值不做渐变。
+
+高频额外乘 `panBoost`（`sqrt(t)` 从 1.02 到 1.25）放大偏移响应，因为高频段能量天然低、视觉上读不出偏向。
+
+### 4. 渲染：双路径
+
+继承 `GlDirectModuleBase`（v2.9.4 框架），因此必须实现 `buildGlSnapshot` / `getGlCanvasBounds` / `paintGlOverlay` / `paintLegacyContent` 四个纯虚。两条路径绘制内容必须一致：
+
+| 路径 | 函数 | 内容 |
+| --- | --- | --- |
+| GL 直渲染（默认） | `buildGlSnapshot()` | `appendSunkenFrame` 凹陷外壳 + 上/中/下三条基准线（pink200 / ink / pink200）+ 100Hz/1k/10k 竖线 + 曲线（每段 `appendLineSegment`，alpha = `strength^0.95`，< 0.02 直接跳过）+ 每 3 段一个 `appendDisc` 圆点 |
+| GPU overlay | `paintGlOverlay()` | `L` / `C` / `R` 三枚左轴标签 + 20/100/1k/10k/20k 频率标签 |
+| CPU 回退 | `paintLegacyContent()` → `drawBackground` + `drawCurve` | 与 GL 路径同几何，`drawLine` 1.1px + 3px 圆点 |
+
+`getPlotBounds()` = `canvas.reduced(26, 12).withTrimmedBottom(14)`（左 26 留纵轴标签，底 14 留频率标签）。`cachedBandCount` 在 `buildGlSnapshot` 里按 plot 宽度刷新，下一帧 `computeStereoMap` 才吃到新值 —— 故意错开一帧，避免 resize 中途改 bandCount 触发 `panByBand` 重分配抖动。
+
+### 5. 注册点清单（新模块要改的 8 处，已全部完成）
+
+按 §6.15 清单执行，与 `stereoField`（v2.7.0）完全同构：
+
+| # | 文件 | 内容 |
+| --- | --- | --- |
+| ① | `ModuleWorkspace.h` | `ModuleType::stereoMap`，插在 `stereoField` 与 `virtuPet` **之间** |
+| ② | `ModuleWorkspace.h` | `availableTypes` 数组追加 |
+| ③ | `ModulePanel.cpp` | `getModuleDisplayName` → `"Stereo Map"` |
+| ④ | `ModuleWorkspace.cpp` | `moduleTypeToString` → `"stereo_map"` |
+| ⑤ | `ModuleWorkspace.cpp` | `stringToModuleType` → `"stereo_map"` |
+| ⑥ | `PluginEditor.cpp` | `#include` + 可用列表（顺序） + `createModule()` 工厂 case |
+| ⑦ | `PerformanceCounterSystem.cpp` | **未改**（见 §8 待办第 3 条，该表本就已滞后于 `stereoField`/`milkdrop`） |
+| ⑧ | `CMakeLists.txt` | 新增 `.h` + `.cpp` 源文件 |
+
+### 6. 持久化
+
+`moduleTypeToString / stringToModuleType` 已完成，布局存档写 `"stereo_map"`，跨机器/跨版本可正常恢复。`StereoMapModule` 自身**无模块级状态**（没有需要在 `saveModuleSpecificState` 里落盘的参数），当前所有观感参数都是编译期常量。
+
+### 7. 构建验证状态
+
+- **Windows Release 全量构建通过**：`cmake-build-release-visual-studio/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.exe`，2026-10-30 18:59，晚于最后一次源码改动（18:55）。
+- **未验证**：VST3 产物时间戳未复核；macOS 端未构建（本轮改动无平台相关代码，风险低但未实测）。
+
+### 8. 待办 / 已知缺口（换环境后从这里续）
+
+1. **三路 FFT 的 CPU 成本未测量**。理论上主 FFT 计算量 ×3，但 `rebuildMainFft` 只在 FFT size 变化时跑，稳定态下增加的是每 hop 两次 `performRealOnlyForwardTransform`。**需要用 `PerformanceCounterSystem`（RelWithDebInfo + `Y2K_ENABLE_PERF_COUNTERS=1`）在 6 模块满载布局下对比「有/无 Stereo Map」的 CPU 与帧率**；若超标，优先方案是改成"仅在 `stereoMap` 被 retain 时才跑 L/R 两路"（需处理 `fftFifoIndex` 相位对齐，见 §2）。
+2. **模块选择器 / 布局预设未排布**：目前只出现在右键添加与模块选择器，未进任何 `applyLayoutPreset` 预设，也未进 stick 条状变体。要不要给它一个预设位需要产品决定。
+3. **`PerformanceCounterSystem::moduleTypeNameById` 已滞后**：表里停在 `spectrogram3d`(17) / `virtuPet`(18)，`stereoField`(19) / `milkdrop`(20) / `stereoMap`(21) 全部缺失。只在 perf 调试构建里表现为 `unknown(N)`，不影响发布版。
+4. **频段数与 plot 宽度绑定**：`bandCount = plot.getWidth()`，窗口拉宽到 512 上限后不再增加细节；窄窗口（< 96）时下限钳到 96，会出现相邻频点重复取同一 bin。是否改成"固定 bandCount + 按像素插值"待定。
+5. **未做鼠标悬停标尺**（v2.7.0 给 Spectrum / Spectrogram / S3D / Waveform / Crest 六模块做过统一标尺）。Stereo Map 若要对齐这一交互，需接同一套 hover 十字线逻辑。
+6. **未做右键菜单自定义项**（如"锁定 ±3dB 量程"/"节能模式"），当前无任何模块级选项。
+7. **版本号待 bump**：真要发版时，按 §6.8 的同步点走（`CMakeLists.txt` 三处 + `README.md` 徽章 + `.iss` + `PluginEditor.cpp` 抬头字面量 + 本文档版本声明）。
+
+### 9. 换环境继续开发的注意事项
+
+- **必须全量构建，不要增量链接**。`ModuleType::stereoMap` 插在枚举中间，`virtuPet` / `milkdrop` 的枚举值一起 +1，命中 §6.16 的 `0x80000003`（`STATUS_BREAKPOINT`）崩溃条件。清掉 `cmake-build-*` 或至少强制全量重编 `.obj`。
+- **改了 `AnalyserHub.h` 的成员布局**（新增 6 个 vector），所有包含它的 TU 的 `AnalyserHub` 布局都变了。本地 `_clean_project_objs.ps1` 就是为"NMake 空 .d 依赖失效导致 obj 不重编 → ABI 错配"准备的。
+- 新环境若 `third_party/JUCE` 缺失：`.gitignore` 里 `!/third_party/JUCE/` 是显式放行的，正常 clone 就带着。
+- 编译命令参考 `README.md` / `CMakePresets.json`；Standalone 产物在 `cmake-build-<preset>/Y2Kmeter_artefacts/<Config>/Standalone/`。
 
 ---
 

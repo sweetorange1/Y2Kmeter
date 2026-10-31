@@ -20,6 +20,7 @@
 #include "source/ui/modules/SpectrogramModule.h"
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/modules/StereoFieldModule.h"
+#include "source/ui/modules/StereoMapModule.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/ui/modules/ProjectMApi.h"
@@ -1203,6 +1204,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
         // 声相指示（半圆雷达，复用 Oscilloscope 立体声样本）
         ModuleType::stereoField,
+
+        // 按频率显示左右声道声像偏向（上 L / 下 R）
+        ModuleType::stereoMap,
 
         // 独立小宠物模块（右键/双击空白区添加）
         ModuleType::virtuPet,
@@ -3276,6 +3280,9 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
 
         case ModuleType::stereoField:
             return std::make_unique<StereoFieldModule>(processor.getAnalyserHub());
+
+        case ModuleType::stereoMap:
+            return std::make_unique<StereoMapModule>(processor.getAnalyserHub());
 
         case ModuleType::virtuPet:
             return std::make_unique<VirtuPetModule>();

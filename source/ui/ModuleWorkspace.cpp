@@ -179,6 +179,7 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::spectrogram:       return "spectrogram";
         case ModuleType::spectrogram3d:    return "spectrogram3d";
         case ModuleType::stereoField:       return "stereo_field";
+        case ModuleType::stereoMap:         return "stereo_map";
         case ModuleType::virtuPet:        return "virtuPet";
         case ModuleType::milkdrop:         return "milkdrop";
     }
@@ -213,6 +214,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "spectrogram",        ModuleType::spectrogram },
         { "spectrogram3d",     ModuleType::spectrogram3d },
         { "stereo_field",      ModuleType::stereoField },
+        { "stereo_map",        ModuleType::stereoMap },
         { "virtuPet",         ModuleType::virtuPet },
         { "milkdrop",          ModuleType::milkdrop },
     };

@@ -514,6 +514,15 @@ public:
                                        float fMin,
                                        float fMax);
 
+    // 双通道对数频率轴幅度快照（L/R 分开）：
+    //   与 getSpectrumMagnitudesBlended 使用同一频率轴与带宽聚合逻辑，
+    //   仅数据源改为左/右声道各自的 magData。
+    void getSpectrumMagnitudesBlendedLR (juce::Array<float>& destL,
+                                         juce::Array<float>& destR,
+                                         int   numPoints,
+                                         float fMin,
+                                         float fMax);
+
     // ======================================================
     // 重分配谱图（频率重分配 / reassigned spectrogram）——
     //   推荐 Spectrogram 的 Sharp / Sharper 模式使用。
@@ -620,11 +629,19 @@ private:
     std::unique_ptr<juce::dsp::WindowingFunction<float>> window;
     std::vector<float> fftFifo;     // mainFftSize（环形，75% overlap）
     std::vector<float> fftData;     // mainFftSize * 2
+    std::vector<float> fftFifoL;    // 左声道环形 FIFO（mainFftSize）
+    std::vector<float> fftFifoR;    // 右声道环形 FIFO（mainFftSize）
+    std::vector<float> fftDataL;    // 左声道 FFT 工作区（mainFftSize * 2）
+    std::vector<float> fftDataR;    // 右声道 FFT 工作区（mainFftSize * 2）
     std::array<float, spectrumBins> specData {};
     std::array<float, spectrumBins> specDataWork {};
     // 高精度 FFT 幅度缓冲（尺寸 = mainFftSize/2，随 FFT size 变化）
     std::vector<float> magData;
     std::vector<float> magDataWork;
+    std::vector<float> magDataL;
+    std::vector<float> magDataR;
+    std::vector<float> magDataWorkL;
+    std::vector<float> magDataWorkR;
     int fftFifoIndex = 0;
 
     // 主路复频谱帧对（供重分配谱图：hop = size/4 → 无折叠范围恒 ±2 bin，
