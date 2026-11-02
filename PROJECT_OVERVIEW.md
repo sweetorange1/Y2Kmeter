@@ -207,7 +207,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
-| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：按频率对比 L/R 频谱，纵轴为声像偏向 ±1，上 L 下 R；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径） | `Spectrum`（新增 L/R 分路快照） |
+| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式由顶部按钮切换 —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的相位抵消量（越高越严重，面积图）；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡） | `Spectrum`（L/R 分路 + mid 单声道路） |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
@@ -4428,7 +4428,14 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 ## 未发布：Stereo Map 立体声频谱声像图（v2.9.9 之后，开发中）
 
 > 本章记录一轮"新模块从零到七成"的完整现场，供换环境 / 换会话后无需重新考古即可续做。
-> 提交状态：已入库（`main` 直推，commit `feat(stereo-map)`），**版本号未 bump**，模块未进任何布局预设。
+> 提交状态：已入库（`main` 直推，首次 commit `feat(stereo-map)`，本轮的视觉/交互/模式追加见下方"本轮追加"），**版本号未 bump**，模块未进任何布局预设。
+
+**本轮追加（v2.9.9 补充，不升版本号）**：
+
+1. **高频显示强度**：可见度在 4.5dB/oct slope 之上再叠 +7dB 高频补偿，黑场随频率抬到 -66dB，`strengthFloor` 0.32→0.74（§3 第 2 项）。
+2. **颜色梯度**：L 侧走 accent、R 侧走 accent2 的 3 锚点 OKLab 色阶，声像决定两侧混合比（§3b）。
+3. **悬停 + 点击读数**：`PinkXP::drawHoverRuler` 十字线读数（频率 + 纵轴坐标）、Toybox 点击气泡（频率 + 数据 + 电平）（§4 表末两行）。
+4. **MONO 模式**：画布上方模式按钮，显示切单声道后的逐频段相位抵消量；满幅标定 = 50% 抵消（§3c）。
 
 ### 1. 它解决什么问题
 
@@ -4437,6 +4444,11 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 - 横轴：对数频率 20Hz → 20kHz（与 Spectrum / EQ 同一映射函数）
 - 纵轴：声像位置 ±1，**上 = L 更强 / 中线 = 居中 / 下 = R 更强**
 - 亮度 / 不透明度：该频段能量，弱带自然淡出
+
+模块有**两个显示模式**，由画布上方的模式按钮切换（`PAN` / `MONO`，见 §3c）：
+
+- `PAN`：上面描述的单曲线（纵轴 ±1 声像）；
+- `MONO`：逐频段"切单声道后的相位抵消量"，越高越严重（面积图）。
 
 与 Spectrum Perlerbeads（能量热力）、Goniometer（相位图）互补，不与任何现有模块重叠。
 
@@ -4462,7 +4474,12 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 
 1. **声像比**：`lrDb = 20log10((L+1e-8)/(R+1e-8))`，`rawPan = clamp(lrDb / 6.0206, -1, 1)`。
    **满幅定义是 2:1 幅度比（= 6.0206dB）**，不是 ±inf dB —— 保证任何单边信号都能贴到边界，而不是少数极端才贴边。
-2. **亮度**：沿用 Spectrum 的 4.5dB/oct slope 观感，`(dbVis + 90) / 90`。slope **只作用于亮度，不参与声像计算**，否则低频会被视觉补偿反向压制。
+2. **亮度**：`dbVis = dB(signal) + 4.5dB/oct slope + 高频补偿`，再按随频率抬高的黑场归一化。
+   slope **只作用于亮度，不参与声像计算**，否则低频会被视觉补偿反向压制。
+   - 高频补偿（`visibilityDb`）：1kHz 起线性叠加，3.3 个八度（≈10kHz）到顶 +7dB。音乐素材 8~15kHz 通常比 1kHz 低 20dB 以上，只有 4.5dB/oct 时 HF 的 strength 会掉到 0.2 附近（曲线近乎不可见）。
+   - 黑场（`blackFloorDb`）：`jmap(sqrt(t), -90, -66)`，低频保持原黑场，高频抬到 -66dB —— 抵消上面的增益，避免把 FFT 噪声底点亮成雾状曲线。
+   - 归一化后再做一次频率相关提亮 `pow(strength, jmap(sqrt(t), 1.0, 0.78))`。
+   - 最终强度乘 `max(strengthFloor, activityFinal)`，`strengthFloor` 从 0.32（低频）升到 0.74（高频）：相对主峰门限对音乐素材天然惩罚 HF，这里保证可听的 HF 不被压成暗线。
 3. **活动度门控**（三层，都在 `activityFinal` 里取 max）：
    - `levelActivity`：低于 -25dB 才开始阻尼，-80dB 完全归零，指数按 `sqrt(t)` 从 1.05（低频）到 0.70（高频）；
    - `relActivity`：相对当帧主峰的门限（`gate` 0.6%→0.2%），弱带降噪，强带不吃额外阻尼；
@@ -4472,17 +4489,48 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 
 高频额外乘 `panBoost`（`sqrt(t)` 从 1.02 到 1.25）放大偏移响应，因为高频段能量天然低、视觉上读不出偏向。
 
+### 3b. 颜色梯度：L = accent / R = accent2
+
+亮度之外再加一层颜色维度，让"偏左/偏右"在灰阶打印或小尺寸窗口下也能读出来：
+
+- **每侧一条 3 锚点 OKLab 色阶**（`makeSideRamp`）：`lo = 混向画布底色 0.60`（弱带几乎融入背景）→ `mid = accent 本色` → `hi = 混向 ink / hl 0.45`。方向由画布明暗决定：亮画布往 `ink` 加深（提高对比），暗画布往 `hl` 提亮 —— 同一套代码覆盖 12 个预设主题与生成器主题。
+- **侧向锚色**：L 侧 = `PinkXP::sel`（= ThemeSpec `Role::Accent`），R 侧 = `PinkXP::accent2`（生成器主题由 Harmony 派生的次强调色；预设主题回退到 `swatch`）。
+- **混合**：`w = clamp(0.5 + pan * 1.4)`，在 OKLab 里把 R 侧色混向 L 侧色。声像满幅附近即为纯侧色，中线两侧各半 —— 曲线从上到下是 accent → 混合 → accent2 的连续渐变，明度则统一由 `strength` 驱动。
+- 曲线圆点取 `min(1, strength + 0.20)` 的色阶采样，比线段自身更亮，形成"珠链"观感。
+
+### 3c. 第二个模式：MONO（相位抵消）
+
+模式按钮 `btnMode` 在画布上方的工具条里（`getToolbarBounds` / `canvasFromContent`，内容区高度不足 `5 × 工具条高` 时自动隐藏），点击在 `Mode::pan` ↔ `Mode::cancel` 之间切换，按钮文字即当前模式，状态写进布局存档（`mode = "pan" / "cancel"`）。
+
+**数据来源不需要新的后端改动**：Hub 的主路 `magData` 就是 `mid = (L+R)/2` 的单声道 FFT（同一帧、同一窗、同一 hop），所以 `|L+R| = 2·|mid|`。模块在 MONO 模式下多取一路 `getSpectrumMagnitudesBlended`（PAN 模式不跑，省一次逐频段聚合）：
+
+```
+coh    = (2·|mid|_band) / sqrt(L² + R²)_band     // 完全同相 1.414 / 不相干 1 / 反相 0
+cancel = clamp(1 - coh, 0, 1)                    // 0 = mono 完全兼容，1 = 完全抵消
+```
+
+- 分母 `sqrt(L²+R²)` 是"两声道不相干时"的功率和，所以"单边信号"（只在一个声道里有内容）算出 `coh = 1 → cancel = 0`，不会被误判成抵消；
+- `ref ≈ 0`（该频段本来没内容）直接判为完全兼容，避免静音段整屏 100%；
+- 每帧只在该模式下计算，平滑用独立的 `alphaCancel = clamp(dtSec*8, 0.08, 0.40)`（比值比幅度更抖，比声像慢一档）；切模式时 `cancelByBand.clear()` 让第一帧直接对齐，不从旧值爬过来。
+- **满幅标定**：`kCancelFullScale = 0.5`（`cancelToDisplay` / `displayToCancel`）。真实抵消 50% 就顶到天花板 —— 一半抵消已经是"该处理了"，不需要等 100%。改这个常量即可调灵敏度（调小更敏感）。
+
+**显示**：面积图，高度 = `cancel / kCancelFullScale`（clamp 0..1），颜色走 `makeSeverityRamp()` 的三锚点色阶 `accent2 → warn → danger`（低端混向画布，高端按画布明暗混向 ink/hl，取样用的是换算后的显示值，所以满幅时一定是 danger 端），透明度仍由 `strengthByBand` 驱动（安静频段淡出）。纵轴标签按真实抵消量标注：`50% / 25% / 0`（随 `kCancelFullScale` 自动变）。悬停读数与气泡读数都给**真实抵消百分比**，与曲线高度是 `×2` 的关系。
+
 ### 4. 渲染：双路径
 
 继承 `GlDirectModuleBase`（v2.9.4 框架），因此必须实现 `buildGlSnapshot` / `getGlCanvasBounds` / `paintGlOverlay` / `paintLegacyContent` 四个纯虚。两条路径绘制内容必须一致：
 
 | 路径 | 函数 | 内容 |
 | --- | --- | --- |
-| GL 直渲染（默认） | `buildGlSnapshot()` | `appendSunkenFrame` 凹陷外壳 + 上/中/下三条基准线（pink200 / ink / pink200）+ 100Hz/1k/10k 竖线 + 曲线（每段 `appendLineSegment`，alpha = `strength^0.95`，< 0.02 直接跳过）+ 每 3 段一个 `appendDisc` 圆点 |
-| GPU overlay | `paintGlOverlay()` | `L` / `C` / `R` 三枚左轴标签 + 20/100/1k/10k/20k 频率标签 |
-| CPU 回退 | `paintLegacyContent()` → `drawBackground` + `drawCurve` | 与 GL 路径同几何，`drawLine` 1.1px + 3px 圆点 |
+| GL 直渲染（默认） | `buildGlSnapshot()` | `appendSunkenFrame` 凹陷外壳 + 上/中/下三条基准线 + 100Hz/1k/10k 竖线。PAN：曲线（每段 `appendLineSegment`，颜色走 §3b 颜色梯度，alpha = `strength^0.92`，< 0.02 跳过）+ 每 3 段一个 `appendDisc` 圆点；MONO：面积梯形（`appendFilledBand`，底边→顶点，颜色走 §3c 抵消色阶）+ 顶部折线 |
+| GPU overlay | `paintGlOverlay()` | PAN：`L` / `C` / `R` 左轴标签（`L`/`R` 用各自侧色阶着色）；MONO：`50%` / `25%` / `0` 左轴标签（随 `kCancelFullScale` 变）+ 20/100/1k/10k/20k 频率标签 |
+| CPU 回退 | `paintLegacyContent()` → `drawBackground` + `drawCurve` | 与 GL 路径同几何同配色（PAN 折线 1.1px + 3px 圆点；MONO 逐段 `Path` 填充 + 顶线） |
+| 悬停标尺 | `mouseMove` / `mouseExit` → `paintGlOverlay` 末尾 `drawHoverRuler` | 十字线 + 坐标读数：横轴 `formatFreqHz`（20Hz–20kHz 对数轴逆映射 `normForX`），纵轴按模式取 `panForY`（`L 0.42 / C / R 0.31`）或 `severityForY`（`42%`） |
+| 点击读数 | `toyHitTest` / `toyPoke` → `ToyContext::bubble` | 气泡显示该频率的真实数据：`频率 + 平滑声像（或 "xx% cancel"）+ 平滑电平 dBFS`（`levelDbByBand`，与声像同一 `alpha` 平滑） |
 
 `getPlotBounds()` = `canvas.reduced(26, 12).withTrimmedBottom(14)`（左 26 留纵轴标签，底 14 留频率标签）。`cachedBandCount` 在 `buildGlSnapshot` 里按 plot 宽度刷新，下一帧 `computeStereoMap` 才吃到新值 —— 故意错开一帧，避免 resize 中途改 bandCount 触发 `panByBand` 重分配抖动。
+
+canvas 的唯一定义点是 `canvasFromContent(content)`（= `content.reduced(2)`）：`getGlCanvasBounds`、`canvasBounds()`、`buildGlSnapshot`、`paintLegacyContent`、`mouseMove`、`toyHitTest` 全部走它，避免"挖洞矩形/快照坐标/命中区域"三者漂移（`toyHitTest` 是 const，不能调用非 const 的 `getGlCanvasBounds` 虚函数）。
 
 ### 5. 注册点清单（新模块要改的 8 处，已全部完成）
 
@@ -4501,11 +4549,14 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 
 ### 6. 持久化
 
-`moduleTypeToString / stringToModuleType` 已完成，布局存档写 `"stereo_map"`，跨机器/跨版本可正常恢复。`StereoMapModule` 自身**无模块级状态**（没有需要在 `saveModuleSpecificState` 里落盘的参数），当前所有观感参数都是编译期常量。
+`moduleTypeToString / stringToModuleType` 已完成，布局存档写 `"stereo_map"`，跨机器/跨版本可正常恢复。
+
+`StereoMapModule` 的模块级状态只有一条：`saveModuleSpecificState()` 写入 `mode = "pan" | "cancel"`，`restoreModuleSpecificState()` 读回（缺失/未知值一律回退 `pan`，兼容旧存档）。其余观感参数仍是编译期常量。
 
 ### 7. 构建验证状态
 
-- **Windows Release 全量构建通过**：`cmake-build-release-visual-studio/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.exe`，2026-10-30 18:59，晚于最后一次源码改动（18:55）。
+- **首版（`feat(stereo-map)`）Windows Release 全量构建通过**：`cmake-build-release-visual-studio/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.exe`，2026-10-30 18:59，晚于当时最后一次源码改动（18:55）。
+- **本轮追加（HF 强度 / 颜色梯度 / 悬停读数 / MONO 模式）尚未构建**：按用户要求，编译由用户自行完成。注意本轮改了 `StereoMapModule.h`（新增 `Mode` 枚举、`btnMode`、`cancelByBand`、若干成员函数），属于头文件变更，**建议清理 obj 后全量重编**，不要只做增量链接。
 - **未验证**：VST3 产物时间戳未复核；macOS 端未构建（本轮改动无平台相关代码，风险低但未实测）。
 
 ### 8. 待办 / 已知缺口（换环境后从这里续）
@@ -4514,9 +4565,11 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 2. **模块选择器 / 布局预设未排布**：目前只出现在右键添加与模块选择器，未进任何 `applyLayoutPreset` 预设，也未进 stick 条状变体。要不要给它一个预设位需要产品决定。
 3. **`PerformanceCounterSystem::moduleTypeNameById` 已滞后**：表里停在 `spectrogram3d`(17) / `virtuPet`(18)，`stereoField`(19) / `milkdrop`(20) / `stereoMap`(21) 全部缺失。只在 perf 调试构建里表现为 `unknown(N)`，不影响发布版。
 4. **频段数与 plot 宽度绑定**：`bandCount = plot.getWidth()`，窗口拉宽到 512 上限后不再增加细节；窄窗口（< 96）时下限钳到 96，会出现相邻频点重复取同一 bin。是否改成"固定 bandCount + 按像素插值"待定。
-5. **未做鼠标悬停标尺**（v2.7.0 给 Spectrum / Spectrogram / S3D / Waveform / Crest 六模块做过统一标尺）。Stereo Map 若要对齐这一交互，需接同一套 hover 十字线逻辑。
+5. ~~未做鼠标悬停标尺~~ **已完成**：与 Spectrum 同一套 `PinkXP::drawHoverRuler`（十字线 + 读数框），读数走"横轴频率 + 纵轴声像坐标"；点击绘图区由 Toybox 路由触发读数气泡（`ctx.bubble`，含平滑后的声像与 dBFS 电平）。
 6. **未做右键菜单自定义项**（如"锁定 ±3dB 量程"/"节能模式"），当前无任何模块级选项。
-7. **版本号待 bump**：真要发版时，按 §6.8 的同步点走（`CMakeLists.txt` 三处 + `README.md` 徽章 + `.iss` + `PluginEditor.cpp` 抬头字面量 + 本文档版本声明）。
+7. **MONO 抵消是逐频段峰值近似，不是逐 bin 复数比**：`2·|mid|` 与 `sqrt(L²+R²)` 各自的带内峰值可能来自不同 bin，强/弱带混在一起时抵消量会偏乐观。要更精确需在 Hub 侧新增"逐 bin 相干性"接口（`AnalyserHub` 已经有 `fftDataL/R` 复频谱，成本很低，但会动 ABI，见 §9）。
+8. **`kCancelFullScale = 0.5` 的听感标定待实机确认**：目前是"抵消一半即满"。若用户觉得太敏感/太迟钝，只改这一个常量（轴标与读数换算自动跟随）。
+9. **版本号待 bump**：真要发版时，按 §6.8 的同步点走（`CMakeLists.txt` 三处 + `README.md` 徽章 + `.iss` + `PluginEditor.cpp` 抬头字面量 + 本文档版本声明）。
 
 ### 9. 换环境继续开发的注意事项
 
