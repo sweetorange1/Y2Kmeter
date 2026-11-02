@@ -4655,4 +4655,91 @@ juce::OpenGLContext::CachedImage::RenderThread::renderAll
 
 ---
 
+## v2.9.9 补充：多屏（混合 DPI）窗口几何全面物理像素化 + vendored JUCE 显示器逻辑表修复
+
+> 版本号不变（仍 2.9.9）。本轮只修 Windows 多显示器几何，mac / Linux 路径保持原样。
+
+### 1. 复现桌面与现象
+
+用户桌面（**混合 DPI**，这是所有问题的前提）：
+
+| 屏 | 物理矩形（rcMonitor） | 缩放 | JUCE 逻辑尺寸 |
+| --- | --- | --- | --- |
+| DISPLAY1（主，左） | (0,0) 2560×1440 | 100% | 2560×1440 |
+| DISPLAY2（上） | (3840,−942) 2560×1440 | 150% | ≈1707×960 |
+| DISPLAY3（下） | (3840,498) 2560×1440 | 150% | ≈1707×960 |
+
+注意：DISPLAY2 底边 498 与 DISPLAY3 顶边 498 精确相接，但 DISPLAY1 右边 2560 与 DISPLAY2/3 左边 3840 之间**有 1280px 物理空洞** —— 混合 DPI 桌面的必然产物（DIP 布局相邻 ≠ 物理坐标相邻）。
+
+实际遇到的 4 个现象：
+
+1. **按住**抬头拖到 DISPLAY2/DISPLAY3 中缝附近，窗口直接瞬移到另一块屏（不是松手才跳）；左右排布 / 上下同缩放均不复现。
+2. 中缝附近**松手吸附错乱**：吸到不属于光标所在屏的边，或整块窗口被"拽"到中缝。
+3. 在下方屏（DISPLAY3）双击抬头伪全屏：**尺寸正确、位置整体上移**，顶部压到 DISPLAY2。
+4. 在下方屏切「horizontal bar (t)」：窗口跑到上方屏。
+
+### 2. 根因（三层，全是"逻辑坐标 vs 物理坐标"）
+
+1. **`Displays::updateToLogical()` 的图遍历在混合 DPI 下必然判错**
+   它靠"物理矩形是否精确相接"把子屏挂到父屏上。上面那张桌面里 DISPLAY2 与 DISPLAY1 物理上不相接（1280px 空洞），挂不上 → 该节点 `logicalArea` 保持默认 `(0,0,0,0)`，整块屏的逻辑坐标失效；且 on-top / on-bottom 分支用 `physical / parentScale` 求前导坐标，与子屏自身 scale 不一致 → 上下排布的两块屏在逻辑空间里横向错开 / 互相重叠。
+2. **`getCurrentDisplayFromScaleFactor()`（Windows peer 的逻辑↔物理换算入口）选中了错误的屏**
+   它先按 `d.scale` 筛候选 —— DISPLAY2 / DISPLAY3 同为 150%，两块都在候选里；再用「`d->totalArea`（逻辑）∩ 顶层窗口 `getBounds()`（逻辑）」消歧。而这两个矩形都来自第 1 步那张错表 → **选到上面那块屏**，于是 `setBounds(userArea)` 的 逻辑→物理 换算整体用错物理原点。这就是"伪全屏尺寸对、位置错"的直接原因（预设 2 走的是同一条 `setBounds(userArea)` 路径）。
+3. **`ComponentDragger::dragComponent()` 用逻辑鼠标坐标算目标点**
+   目标点 = `逻辑光标 − 按下偏移`。逻辑鼠标坐标在中缝两侧不连续（第 1 步造成），光标一过缝目标点瞬跳上千像素 → 窗口整体位移。这解释了"按住拖动就跳"而非"松手才跳"。
+
+### 3. 修复
+
+#### A. vendored JUCE 补丁（`third_party/JUCE`，源码直接入库，构建优先使用；两处均打了 `Y2K patch` 注释标记）
+
+| 文件 | 改动 |
+| --- | --- |
+| `modules/juce_gui_basics/desktop/juce_Displays.cpp` | `updateToLogical()` 在 `JUCE_WINDOWS` 下改为**逐屏 `physical / ownScale`**。Windows 的 `GetMonitorInfo` 物理矩形本身就是「该屏 DIP × 该屏 scale」，逐屏换算得到的正是系统显示设置里那份 DIP 布局：各屏严格相邻、`physical→logical` 在中缝两侧连续。`#else`（Linux）保留图形遍历，但修正为「父屏逻辑原点 + 物理偏移 / 父屏 scale」，并在找不到相接邻居时按**最近边缘**挂接，避免孤立屏塌成 `(0,0,0,0)`。 |
+| `modules/juce_gui_basics/native/juce_Windowing_windows.cpp` | `getCurrentDisplayFromScaleFactor()` 的候选屏消歧从「逻辑矩形交集」改为**物理矩形交集**：`(totalArea.withZeroOrigin() * scale) + topLeftPhysical`，与 `Displays::getDisplayForRect(..., isPhysical=true)` 同构，与逻辑表是否算错无关。 |
+
+#### B. 应用层：窗口几何一律物理像素（仅 Windows，`#if JUCE_WINDOWS`；mac/Linux 保留原逻辑路径）
+
+新增工具（`PluginEditor.cpp` 顶部匿名命名空间）：`Y2KMonitorPx`、`y2kGetCursorPosPx`、`y2kFillMonitorPx`、`y2kGetMonitorPxForPoint`、`y2kGetMonitorPxForWindow`、`y2kMoveWindowToPx`（只挪位置，`SWP_NOSIZE`）、`y2kMoveWindowToRectPx`（含尺寸）、`y2kIsRectOnAnyMonitorPx`、`y2kPxToLogical` / `y2kLogicalToPx`、`y2kScreenSimulationActive`（`Y2KM_SIMULATE_SCREEN` 开着时跳过物理路径）。
+
+| 场景 | 入口 | 做法 |
+| --- | --- | --- |
+| 拖窗 | `mouseDown` / `mouseDrag` / `mouseUp` | 按下记录 `GetWindowRect` + `GetCursorPos`；拖动用**绝对式** `SetWindowPos(SWP_NOSIZE)`（目标 = 按下时物理位置 + 光标物理位移），自带纠错，不与 `WM_DPICHANGED` 打架 |
+| 松手吸附 | `y2kSnapWindowToMonitorEdgesPx` | 基准屏 = **光标所在显示器** `rcWork`（点判定不翻转）；阈值 8 DIP × 该屏 scale；目标屏放不下时不做该轴吸附；"顶部回弹"只在标题栏在所有显示器上都不可见时触发 |
+| UI 密度缩放 | `updateUiScaleForCurrentDisplay` | 窗口中心点所在屏 `rcMonitor / scale` 当判据，避免 10Hz 轮询在两屏之间跳档 |
+| 伪全屏 | `toggleFakeFullScreen` | 进入：`MoveWindow(rcWork)` 并记录 `pseudoFullScreenRectPx`；退出：还原进入前**物理矩形**（该屏已被拔掉则回退到逻辑 bounds，再由兜底救回） |
+| 横条预设 2/3/11-13 | `applyLayoutPreset` | 目标屏 `rcWork`：宽 = 物理宽 / scale，贴顶/贴底按物理边算；探针也走物理落位 |
+| 全屏预设 5 / 只留 Milkdrop 10 | 同上 | 直接 `MoveWindow(rcWork)` |
+| stick 条几何 | `applyStickBarGeometry` | 物理宽高（与 `SHAppBarMessage` 的占位同一坐标系，消除两套单位混用） |
+| Hide/Show 切 chrome | `setAutoHideMode` | 锚点用物理中心比较；高度按 scale 换算后用 `MoveWindow` 落地 |
+
+#### C. 现场演出 / 副屏全屏场景的防护
+
+- **伪全屏禁止拖抬头**（`mouseDown` 早退）：避免误拖把全屏窗口拖走，也避免"进入前 bounds"与实际窗口脱节；双击仍可退出全屏。
+- **全屏中进 stick 先退出全屏**（`enterStickMode`）：否则备份的是全屏矩形，退出 stick 会得到"铺满整屏但不是全屏"的普通窗口。
+- **`ensureWindowOnScreen()`（10Hz，timerCallback）**：投影仪热拔 / 改分辨率 / 任务栏出现消失后 —— 窗口完全离开所有显示器则拉回最近工作区；伪全屏在目标 `rcWork` 变化时重新贴合。只在"工作区与自己提交的矩形不一致"时动手，不与 `WM_DPICHANGED` 抢。最小化态直接跳过（避免 `GetWindowRect` 的 −32000 哨兵值）。
+- **全屏态退出落盘**（`Y2KStandaloneApp::saveMainWindowBounds` + `isPseudoFullScreen()` / `getPreFullScreenBounds()`）：写"进入全屏前"的 bounds，并跳过 hide 反算；否则下次启动会得到一个铺满屏却不是全屏状态的普通窗口。
+
+### 4. 验证
+
+- Windows Release 全量编译 + 链接通过（Ninja / MSVC 14.51，Standalone & VST3 产物已重建）。修正了 `ensureWindowOnScreen()` 里变量名 `near` 与 MSVC 保留关键字冲突导致的 C2059 级联报错。
+- 实机确认（用户环境，即上表三屏）：拖窗不再瞬移；下方屏双击抬头伪全屏贴合 DISPLAY3 工作区；下方屏切 `horizontal bar (t)` 贴 DISPLAY3 顶部、宽度等于该屏宽。
+- 诊断开关（保留）：`Y2KM_SNAP_DEBUG=1` → `%TEMP%\Y2Kmeter_snap_debug.txt`，首次松手会 dump 一次「JUCE Displays 表 + Win32 监视器表」，之后逐次记录吸附决策。修复后 `[JUCE Displays]` 里两块 150% 屏的 `total` 应严格相邻（形如 `2560,−628,1707,960` 与 `2560,332,1707,960`）。
+
+### 5. 经验 / 踩坑清单
+
+1. **混合 DPI 桌面上"物理矩形精确相接"不是不变量**。DIP 相邻的两块不同缩放的屏，物理坐标必然差出上千像素；任何依赖"物理相接"来推导布局 / 邻接关系的代码都会失效。
+2. **"逻辑矩形 ∩ 逻辑矩形"选屏在错表下是自证循环**。选屏要么用**点**（光标 / 窗口中心，天然唯一），要么用**物理矩形**；只要参与比较的矩形本身来自同一张可能算错的表，结论就没有意义。
+3. **JUCE 的跨屏 `setBounds` 不可靠**：`Component::setBounds` → peer 会用"窗口当前所在显示器"的 scale 做换算，目标屏若不是当前屏，位置会整体用错原点。跨屏定位必须直接 `SetWindowPos` / `MoveWindow`（物理像素），再让 JUCE 从 `WM_WINDOWPOSCHANGED` 同步回来。
+4. **`near` / `far` 是 MSVC 保留关键字**（16 位时代遗留），不能作标识符；误用会在该行及其后几十行炸出一串 C2059/C2143/C2447，真正的错点只是第一个。
+5. **vendored JUCE 补丁必须就地打 `Y2K patch` 注释**（含原因与替代方案）；`third_party/JUCE` 升级时按注释逐条回贴，否则本轮的混合 DPI 问题会整包复发。
+6. 排查顺序（可复用）：先用 `Y2KM_SNAP_DEBUG` dump 表 → 确认是"表错"还是"用错" → 再决定打 JUCE 补丁还是改调用点。本轮两个 JUCE 缺陷叠加，只改应用层只能治症状（拖窗/吸附），伪全屏与预设仍会错位。
+
+### 6. 遗留 / 已知缺口
+
+1. `exitStickMode` 还原 stick 备份 bounds 仍用逻辑坐标 —— stick 与备份基本总在同一块屏，跨缩放跨屏概率极低，本轮未动。
+2. 浮动模块窗口（脱离的 Milkdrop 等）创建时的 `getTotalBounds` 钳制、以及其拖拽仍走 JUCE `ComponentDragger` —— 依赖已修好的显示器表，当前行为正常；若将来 JUCE 升级丢了补丁，这两处会重新出现跨缝瞬移。
+3. macOS 走原生 `setFullScreen`，本轮补丁与物理路径均不参与（`#if JUCE_MAC` 早退 / `#if JUCE_WINDOWS` 包裹），未做实机验证。
+4. `resizeToTargetCanvas()`（预设 6~9 的"固定尺寸居中"）仍用逻辑坐标 —— 它只在**当前所在屏**内居中，不跨 DPI 换算，风险低。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

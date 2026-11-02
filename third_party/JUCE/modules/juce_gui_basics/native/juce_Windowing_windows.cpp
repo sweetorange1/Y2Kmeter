@@ -5946,20 +5946,24 @@ static const Displays::Display* getCurrentDisplayFromScaleFactor (HWND hwnd)
         if (candidateDisplays.size() == 1)
             return candidateDisplays[0];
 
-        const auto bounds = [&]
-        {
-            if (auto* peer = HWNDComponentPeer::getOwnerOfWindow (hwnd))
-                return peer->getComponent().getTopLevelComponent()->getBounds();
-
-            return Desktop::getInstance().getDisplays().physicalToLogical (D2DUtilities::toRectangle (getWindowScreenRect (hwnd)));
-        }();
+        // Y2K patch：多块同缩放的屏之间改用【物理矩形交集】判定。
+        //   原实现用 d->totalArea（逻辑）与 getTopLevelComponent()->getBounds()（逻辑）
+        //   求交集，而这两者都来自同一张可能已被 updateToLogical() 算偏的逻辑表：
+        //   混合 DPI 桌面上（尤其上下排布 / 多块屏共用同一缩放时）会选中错误的屏，
+        //   于是后续 逻辑→物理 换算整体用错原点，表现为"窗口跳到另一块屏"。
+        //   物理矩形与 Displays::getDisplayForRect (..., isPhysical=true) 同构，
+        //   与逻辑表的原点是否算错无关。
+        const auto physicalBounds = D2DUtilities::toRectangle (getWindowScreenRect (hwnd));
 
         const Displays::Display* retVal = nullptr;
         int maxArea = -1;
 
         for (auto* d : candidateDisplays)
         {
-            auto intersection = d->totalArea.getIntersection (bounds);
+            auto physicalArea = d->totalArea;
+            physicalArea = (physicalArea.withZeroOrigin() * d->scale) + d->topLeftPhysical;
+
+            auto intersection = physicalArea.getIntersection (physicalBounds);
             auto area = intersection.getWidth() * intersection.getHeight();
 
             if (area > maxArea)

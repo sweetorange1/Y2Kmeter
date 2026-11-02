@@ -1016,8 +1016,24 @@ private:
 
         auto b = mainWindow->getBounds();
 
+        // 伪全屏中退出：落盘"进入伪全屏前"的 bounds。
+        //   否则下次启动会恢复成一个铺满整块屏、但不处于全屏态的普通窗口
+        //   （VJ 场景里"演出结束直接关软件"非常常见）。此时也跳过下面的 hide 反算：
+        //   全屏态下 setAutoHideMode 并不会真的收缩窗口，反算会多算出 chrome 高度。
+        bool leavingFromPseudoFullScreen = false;
+
+        if (cachedEditor != nullptr && cachedEditor->isPseudoFullScreen())
+        {
+            const auto pre = cachedEditor->getPreFullScreenBounds();
+            if (! pre.isEmpty())
+            {
+                b = pre;
+                leavingFromPseudoFullScreen = true;
+            }
+        }
+
         // 反算为 show 态等效尺寸：仅当当前处于 hide 态（Editor 的 chromeVisible=false）
-        if (cachedEditor != nullptr && ! cachedEditor->isChromeVisible())
+        if (! leavingFromPseudoFullScreen && cachedEditor != nullptr && ! cachedEditor->isChromeVisible())
         {
             // 必须与 Editor::getChromeHeightPx() 一致（titleBarHeight 26 + toolbar 36）
             const int kChromeShrink = PinkXP::ui(26) /*titleBarHeight*/ + PinkXP::ui(36) /*toolbarHeight*/; // 随 UI 密度缩放

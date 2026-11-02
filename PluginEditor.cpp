@@ -177,6 +177,282 @@ namespace {
         abd.hWnd   = hwnd;
         SHAppBarMessage (ABM_REMOVE, &abd);
     }
+
+    // ==========================================================
+    // 多屏几何 —— 一律用「物理像素」的地面真值（Win32）
+    //
+    // 为什么不能用 JUCE 的 Displays 逻辑表：
+    //   混合 DPI 桌面（上屏 150% / 下屏 100% 之类）里，物理矩形之间是有"空洞"的：
+    //   DIP 布局相邻的两块屏，物理坐标可能差出上千像素（详见桌面显示设置）。
+    //   juce_Displays.cpp 的 updateToLogical() 是靠「物理矩形是否相接」连图的，
+    //   且 on-bottom 分支用 `physicalX / 父屏 scale` 求子屏逻辑 x —— 于是
+    //   "上下排布 + 缩放不同"时下屏的逻辑矩形会被横向算偏（甚至与主屏重叠），
+    //   同一物理点在中缝两侧换算出的逻辑坐标不连续。
+    //   后果：
+    //     · ComponentDragger 用逻辑鼠标坐标算目标点 → 越过中缝窗口整体瞬移；
+    //     · getDisplayForRect 用逻辑交集面积判屏 → 吸附基准线在两屏间翻转。
+    //   MonitorFromPoint / GetMonitorInfo 的 rcMonitor / rcWork 是物理像素，
+    //   与 DPI 无关，是本场景下唯一稳定的基准。
+    // ==========================================================
+
+    struct Y2KMonitorPx
+    {
+        juce::Rectangle<int> total;   // rcMonitor（物理 px，含任务栏区域）
+        juce::Rectangle<int> work;    // rcWork（物理 px，扣任务栏 / AppBar）
+        double scale = 1.0;           // 该屏的 DPI 缩放（1.0 / 1.5 ...）
+    };
+
+    bool y2kGetCursorPosPx (juce::Point<int>& out) noexcept
+    {
+        POINT p = {};
+        if (GetCursorPos (&p) == FALSE)
+            return false;
+
+        out = { (int) p.x, (int) p.y };
+        return true;
+    }
+
+    // 逻辑表里 topLeftPhysical 始终是正确的物理原点（updateToLogical 覆写逻辑
+    // 矩形之前先记录了它），即使逻辑区被算错也能用它反查该屏的 scale。
+    const juce::Displays::Display* y2kFindDisplayByPhysicalTopLeft (juce::Point<int> topLeft) noexcept
+    {
+        const auto& all = juce::Desktop::getInstance().getDisplays().displays;
+
+        for (const auto& d : all)
+            if (d.topLeftPhysical == topLeft)
+                return &d;
+
+        return nullptr;
+    }
+
+    bool y2kFillMonitorPx (HMONITOR mon, Y2KMonitorPx& out) noexcept
+    {
+        if (mon == nullptr)
+            return false;
+
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof (mi);
+        if (GetMonitorInfo (mon, &mi) == FALSE)
+            return false;
+
+        out.total = { (int) mi.rcMonitor.left, (int) mi.rcMonitor.top,
+                      (int) (mi.rcMonitor.right  - mi.rcMonitor.left),
+                      (int) (mi.rcMonitor.bottom - mi.rcMonitor.top) };
+        out.work  = { (int) mi.rcWork.left, (int) mi.rcWork.top,
+                      (int) (mi.rcWork.right  - mi.rcWork.left),
+                      (int) (mi.rcWork.bottom - mi.rcWork.top) };
+
+        if (const auto* d = y2kFindDisplayByPhysicalTopLeft (out.total.getTopLeft()))
+            if (d->scale > 0.1)
+                out.scale = d->scale;
+
+        return true;
+    }
+
+    bool y2kGetMonitorPxForPoint (juce::Point<int> pt, Y2KMonitorPx& out) noexcept
+    {
+        POINT p { pt.x, pt.y };
+        return y2kFillMonitorPx (MonitorFromPoint (p, MONITOR_DEFAULTTONEAREST), out);
+    }
+
+    // 窗口当前所在显示器（MONITOR_DEFAULTTONEAREST：窗口跨屏时取交集更大的那块）。
+    //   "把窗口摆到某块屏的整块区域"一律以它为准 —— 与 Windows 自身对顶层窗口的
+    //   显示器归属判定一致，也和 AppBar（SHAppBarMessage）用的是同一块屏。
+    bool y2kGetMonitorPxForWindow (juce::Component* window, Y2KMonitorPx& out) noexcept
+    {
+        const HWND hwnd = y2kGetWindowHwnd (window);
+        if (hwnd == nullptr)
+            return false;
+
+        return y2kFillMonitorPx (MonitorFromWindow (hwnd, MONITOR_DEFAULTTONEAREST), out);
+    }
+
+    // 调试用屏幕尺寸模拟（Y2KM_SIMULATE_SCREEN）开着时，跳过所有物理像素定位，
+    //   保证该调试路径的既有行为不变。
+    bool y2kScreenSimulationActive() noexcept
+    {
+        static const bool on = juce::SystemStats::getEnvironmentVariable ("Y2KM_SIMULATE_SCREEN", {}).isNotEmpty();
+        return on;
+    }
+
+    // 物理 px → 逻辑 px（该屏 scale）。JUCE 的窗口边界换算就是"逻辑 × 屏 scale"，
+    //   所以反向换算不需要（也不能）经过已算错的 Displays 逻辑表。
+    inline int y2kPxToLogical (int px, double scale) noexcept
+    {
+        return juce::roundToInt ((double) px / (scale > 0.1 ? scale : 1.0));
+    }
+
+    inline int y2kLogicalToPx (int logical, double scale) noexcept
+    {
+        return juce::roundToInt ((double) logical * (scale > 0.1 ? scale : 1.0));
+    }
+
+    // 只搬位置、不动尺寸：跨 DPI 时 Windows 会按目标屏重新给尺寸
+    // （WM_DPICHANGED 的建议矩形），这里若强行写死尺寸会与之互相打架。
+    bool y2kMoveWindowToPx (juce::Component* window, juce::Point<int> topLeft) noexcept
+    {
+        const HWND hwnd = y2kGetWindowHwnd (window);
+        if (hwnd == nullptr)
+            return false;
+
+        SetWindowPos (hwnd, nullptr, topLeft.x, topLeft.y, 0, 0,
+                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        return true;
+    }
+
+    bool y2kIsRectOnAnyMonitorPx (juce::Rectangle<int> r) noexcept
+    {
+        RECT rc = { r.getX(), r.getY(), r.getRight(), r.getBottom() };
+        return MonitorFromRect (&rc, MONITOR_DEFAULTTONULL) != nullptr;
+    }
+
+    // ---- 诊断（默认零开销）：Y2KM_SNAP_DEBUG=1 → %TEMP%\Y2Kmeter_snap_debug.txt ----
+    bool y2kSnapDebugEnabled() noexcept
+    {
+        static const bool on = juce::SystemStats::getEnvironmentVariable ("Y2KM_SNAP_DEBUG", {}) == "1";
+        return on;
+    }
+
+    void y2kSnapDebug (const juce::String& line) noexcept
+    {
+        if (! y2kSnapDebugEnabled())
+            return;
+
+        static const juce::File f = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                        .getChildFile ("Y2Kmeter_snap_debug.txt");
+        f.appendText (line + "\r\n");
+    }
+
+    BOOL CALLBACK y2kEnumMonitorProc (HMONITOR hMon, HDC, LPRECT, LPARAM lp)
+    {
+        auto* out = reinterpret_cast<juce::String*> (lp);
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof (mi);
+
+        if (GetMonitorInfo (hMon, &mi) != FALSE)
+            *out << "  mon total=" << (int) mi.rcMonitor.left << "," << (int) mi.rcMonitor.top
+                 << " " << (int) (mi.rcMonitor.right - mi.rcMonitor.left)
+                 << "x" << (int) (mi.rcMonitor.bottom - mi.rcMonitor.top)
+                 << "  work=" << (int) mi.rcWork.left << "," << (int) mi.rcWork.top
+                 << " " << (int) (mi.rcWork.right - mi.rcWork.left)
+                 << "x" << (int) (mi.rcWork.bottom - mi.rcWork.top)
+                 << (mi.dwFlags & 1 ? "  PRIMARY" : "") << "\n";
+
+        return TRUE;
+    }
+
+    void y2kSnapDebugDumpDisplays (const char* reason) noexcept
+    {
+        if (! y2kSnapDebugEnabled())
+            return;
+
+        static bool dumped = false;
+        if (dumped)
+            return;
+
+        dumped = true;
+
+        juce::String s;
+        s << "\r\n=== " << reason << " ===\r\n[JUCE Displays]\r\n";
+
+        for (const auto& d : juce::Desktop::getInstance().getDisplays().displays)
+            s << "  scale=" << d.scale
+              << " dpi="   << d.dpi
+              << " total=" << d.totalArea.toString()
+              << " user="  << d.userArea.toString()
+              << " physTL=" << d.topLeftPhysical.toString()
+              << (d.isMain ? "  MAIN" : "") << "\n";
+
+        s << "[Win32 Monitors]\r\n";
+        ::EnumDisplayMonitors (nullptr, nullptr, &y2kEnumMonitorProc, (LPARAM) &s);
+
+        y2kSnapDebug (s);
+    }
+
+    // ==========================================================
+    // 松手吸附（四边软吸附 + 防止窗口丢失），全程物理像素
+    //
+    //   基准屏 = 光标所在显示器（Windows 自身的贴边行为也是这个规则）：
+    //     · 光标是一个点，永远只属于一块屏，不存在"交集最大"的翻转；
+    //     · 窗口跨中缝时，吸附目标线仍然取自用户眼睛所在的那块屏。
+    //   顶部回弹只在「标题栏在所有显示器上都不可见」时触发（真正防丢窗口），
+    //   不再因为窗口越过中缝就把整块窗口搬下来。
+    // ==========================================================
+    void y2kSnapWindowToMonitorEdgesPx (juce::Component* window, int titleBarHeightDips) noexcept
+    {
+        const HWND hwnd = y2kGetWindowHwnd (window);
+        if (hwnd == nullptr)
+            return;
+
+        RECT wr = {};
+        if (GetWindowRect (hwnd, &wr) == FALSE)
+            return;
+
+        const juce::Rectangle<int> winRect { (int) wr.left, (int) wr.top,
+                                             (int) (wr.right - wr.left),
+                                             (int) (wr.bottom - wr.top) };
+
+        juce::Point<int> cursorPx;
+        if (! y2kGetCursorPosPx (cursorPx))
+            cursorPx = winRect.getCentre();
+
+        Y2KMonitorPx mon;
+        if (! y2kGetMonitorPxForPoint (cursorPx, mon))
+            return;
+
+        // 8 DIP → 该屏物理像素
+        const int thresholdPx = juce::jmax (4, juce::roundToInt (8.0 * mon.scale));
+
+        const int stripH = juce::jmax (1, juce::roundToInt ((double) titleBarHeightDips * mon.scale));
+        const auto titleStrip = juce::Rectangle<int> (winRect.getX(), winRect.getY(),
+                                                      winRect.getWidth(), stripH);
+
+        juce::String dbg;
+        if (y2kSnapDebugEnabled())
+            dbg << "snap: win=" << winRect.toString()
+                << " cursor=" << cursorPx.toString()
+                << " work=" << mon.work.toString()
+                << " scale=" << mon.scale;
+
+        // 1) 防丢窗口：标题栏在所有显示器上都不存在时，搬回光标所在屏工作区顶部
+        if (! y2kIsRectOnAnyMonitorPx (titleStrip))
+        {
+            y2kMoveWindowToPx (window, { winRect.getX(), mon.work.getY() });
+
+            if (y2kSnapDebugEnabled())
+                y2kSnapDebug (dbg + " -> rebound y=" + juce::String (mon.work.getY()));
+
+            return;
+        }
+
+        int x = winRect.getX();
+        int y = winRect.getY();
+
+        // 左右：目标屏放得下才吸附（窗口比屏还宽时不把窗口推到屏外）
+        if (std::abs (winRect.getX() - mon.work.getX()) <= thresholdPx)
+            x = mon.work.getX();
+        else if (mon.work.getWidth() >= winRect.getWidth()
+                 && std::abs (winRect.getRight() - mon.work.getRight()) <= thresholdPx)
+            x = mon.work.getRight() - winRect.getWidth();
+
+        if (std::abs (winRect.getY() - mon.work.getY()) <= thresholdPx)
+            y = mon.work.getY();
+        else if (mon.work.getHeight() >= winRect.getHeight()
+                 && std::abs (winRect.getBottom() - mon.work.getBottom()) <= thresholdPx)
+            y = mon.work.getBottom() - winRect.getHeight();
+
+        if (x != winRect.getX() || y != winRect.getY())
+        {
+            y2kMoveWindowToPx (window, { x, y });
+
+            if (y2kSnapDebugEnabled())
+                y2kSnapDebug (dbg + " -> snap " + juce::String (x) + "," + juce::String (y));
+        }
+        else if (y2kSnapDebugEnabled())
+        {
+            y2kSnapDebug (dbg + " -> no snap");
+        }
+    }
 } // namespace
 #endif
 
@@ -2492,12 +2768,28 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         auto* top = getTopLevelComponent();
         if (top == nullptr) top = this;
 
+       #if JUCE_WINDOWS
+        // Windows：目标屏与目标矩形一律用物理像素（MonitorFromWindow + rcWork）。
+        //   混合 DPI 桌面上 JUCE 的 userArea 逻辑原点可能被算错，直接
+        //   setBounds(userArea) 会把横条摆到另一块屏上（"预设跑到上面那块屏"）。
+        Y2KMonitorPx monPx;
+        const bool usePxTarget = (top != this)
+                                 && ! y2kScreenSimulationActive()
+                                 && y2kGetMonitorPxForWindow (top, monPx)
+                                 && ! monPx.work.isEmpty();
+       #endif
+
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
                                  .getDisplayForPoint(top->getScreenBounds().getCentre());
         const auto userArea = resolveDisplayArea ((display != nullptr) ? display->userArea
                                                                        : juce::Rectangle<int> (1280, 720));
+       #if JUCE_WINDOWS
+        const int screenW = usePxTarget ? y2kPxToLogical (monPx.work.getWidth(), monPx.scale)
+                                        : userArea.getWidth();
+       #else
         const int screenW = userArea.getWidth();
+       #endif
 
         // ------------------------------------------------------------
         // 目标高度自动对齐到 8px 网格整数倍 canvas：
@@ -2548,6 +2840,13 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         }
         else
         {
+           #if JUCE_WINDOWS
+            if (usePxTarget)
+                y2kMoveWindowToRectPx (top, { monPx.work.getX(), monPx.work.getY(),
+                                              monPx.work.getWidth(),
+                                              y2kLogicalToPx (targetH, monPx.scale) });
+            else
+           #endif
             top->setBounds (userArea.getX(), userArea.getY(), screenW, targetH);
         }
 
@@ -2577,10 +2876,6 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
                              juce::jmax (cbc->getMaximumHeight(), targetH));
         }
 
-        // 目标 Y：按贴顶/贴底切换
-        const int targetY = bottomAligned ? (userArea.getBottom() - targetH)
-                                          :  userArea.getY();
-
         if (top == this)
         {
             // 插件模式（嵌在宿主里）：无法移动顶层窗口，只调整尺寸
@@ -2588,8 +2883,22 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         }
         else
         {
-            // Standalone 模式：连同外层窗口一起搬到目标位置
-            top->setBounds (userArea.getX(), targetY, screenW, targetH);
+            // Standalone 模式：连同外层窗口一起搬到目标位置（贴顶 / 贴底）
+           #if JUCE_WINDOWS
+            if (usePxTarget)
+            {
+                const int hPx = y2kLogicalToPx (targetH, monPx.scale);
+                const int yPx = bottomAligned ? (monPx.work.getBottom() - hPx)
+                                              :  monPx.work.getY();
+                y2kMoveWindowToRectPx (top, { monPx.work.getX(), yPx, monPx.work.getWidth(), hPx });
+            }
+            else
+           #endif
+            {
+                const int targetY = bottomAligned ? (userArea.getBottom() - targetH)
+                                                  :  userArea.getY();
+                top->setBounds (userArea.getX(), targetY, screenW, targetH);
+            }
         }
 
         // setSize / setBounds 会触发 resized()，workspace 随之拿到新 canvas。
@@ -2762,6 +3071,16 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         auto* top = getTopLevelComponent();
         if (top == nullptr) top = this;
 
+       #if JUCE_WINDOWS
+        // Windows：目标屏工作区一律用物理像素（rcWork），避免混合 DPI 下逻辑
+        //   userArea 原点算错导致全屏窗口落到另一块屏。
+        Y2KMonitorPx monPx;
+        const bool usePxTarget = (top != this)
+                                 && ! y2kScreenSimulationActive()
+                                 && y2kGetMonitorPxForWindow (top, monPx)
+                                 && ! monPx.work.isEmpty();
+       #endif
+
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
                                  .getDisplayForPoint(top->getScreenBounds().getCentre());
@@ -2782,8 +3101,15 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
                                                   : juce::Rectangle<int>(1280, 720);
 #endif
         const auto area = resolveDisplayArea (realArea);
+       #if JUCE_WINDOWS
+        const int screenW = usePxTarget ? y2kPxToLogical (monPx.work.getWidth(),  monPx.scale)
+                                        : area.getWidth();
+        const int screenH = usePxTarget ? y2kPxToLogical (monPx.work.getHeight(), monPx.scale)
+                                        : area.getHeight();
+       #else
         const int screenW = area.getWidth();
         const int screenH = area.getHeight();
+       #endif
 
         // -------- 第 1 步：全屏尺寸 ----------
         // 先放开 resizeLimits 到足够宽松，确保 setBounds 不会被 constriner 夹回
@@ -2800,6 +3126,11 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         }
         else
         {
+           #if JUCE_WINDOWS
+            if (usePxTarget)
+                y2kMoveWindowToRectPx (top, monPx.work);
+            else
+           #endif
             top->setBounds(area.getX(), area.getY(), screenW, screenH);
         }
 
@@ -2999,6 +3330,15 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         auto* top = getTopLevelComponent();
         if (top == nullptr) top = this;
 
+       #if JUCE_WINDOWS
+        // Windows：物理口径（rcWork + MoveWindow），理由同 Preset 5。
+        Y2KMonitorPx monPx;
+        const bool usePxTarget = (top != this)
+                                 && ! y2kScreenSimulationActive()
+                                 && y2kGetMonitorPxForWindow (top, monPx)
+                                 && ! monPx.work.isEmpty();
+       #endif
+
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
                                  .getDisplayForPoint (top->getScreenBounds().getCentre());
@@ -3010,8 +3350,15 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
                                                   : juce::Rectangle<int> (1280, 720);
 #endif
         const auto area = resolveDisplayArea (realArea);
+       #if JUCE_WINDOWS
+        const int screenW = usePxTarget ? y2kPxToLogical (monPx.work.getWidth(),  monPx.scale)
+                                        : area.getWidth();
+        const int screenH = usePxTarget ? y2kPxToLogical (monPx.work.getHeight(), monPx.scale)
+                                        : area.getHeight();
+       #else
         const int screenW = area.getWidth();
         const int screenH = area.getHeight();
+       #endif
 
         if (auto* cbc0 = getConstrainer())
         {
@@ -3023,7 +3370,14 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         if (top == this)
             setSize (screenW, screenH);
         else
+        {
+           #if JUCE_WINDOWS
+            if (usePxTarget)
+                y2kMoveWindowToRectPx (top, monPx.work);
+            else
+           #endif
             top->setBounds (area.getX(), area.getY(), screenW, screenH);
+        }
 
         if (auto* cbc = getConstrainer())
             setResizeLimits (screenW, screenH, screenW, screenH);
@@ -3968,14 +4322,47 @@ void Y2KmeterAudioProcessorEditor::updateUiScaleForCurrentDisplay()
 {
     juce::Rectangle<int> displayArea;
 
+   #if JUCE_WINDOWS
+    // 混合 DPI 多屏：用 Win32 的 rcMonitor 物理尺寸 ÷ 该屏 scale 得到"逻辑分辨率"，
+    //   作为档位判据。不用 Displays::getDisplayForRect：
+    //     · 该函数是"交集面积最大"，窗口中心越过中缝时判定会翻转；
+    //     · 上下排布 + 缩放不同时 JUCE 的逻辑矩形本身就被 updateToLogical()
+    //       重排过（可能互相重叠），面积判据在这里没有意义。
+    //   改为"窗口中心点所在显示器"，点判定是确定的，不会在两块屏之间来回跳。
     if (auto* top = getTopLevelComponent())
     {
-        const auto sb = (top == this) ? getScreenBounds() : top->getScreenBounds();
-        if (auto* display = juce::Desktop::getInstance()
-                                 .getDisplays()
-                                 .getDisplayForRect (sb))
+        if (const HWND hwnd = y2kGetWindowHwnd (top))
         {
-            displayArea = resolveUiScaleArea (*display);
+            RECT wr = {};
+            if (GetWindowRect (hwnd, &wr) != FALSE)
+            {
+                const juce::Point<int> centre { (int) (wr.left + wr.right) / 2,
+                                                (int) (wr.top + wr.bottom) / 2 };
+
+                Y2KMonitorPx mon;
+                if (y2kGetMonitorPxForPoint (centre, mon) && ! mon.total.isEmpty())
+                {
+                    const double s = mon.scale > 0.1 ? mon.scale : 1.0;
+                    displayArea = { 0, 0,
+                                    juce::roundToInt ((double) mon.total.getWidth()  / s),
+                                    juce::roundToInt ((double) mon.total.getHeight() / s) };
+                }
+            }
+        }
+    }
+   #endif
+
+    if (displayArea.isEmpty())
+    {
+        if (auto* top = getTopLevelComponent())
+        {
+            const auto sb = (top == this) ? getScreenBounds() : top->getScreenBounds();
+            if (auto* display = juce::Desktop::getInstance()
+                                     .getDisplays()
+                                     .getDisplayForRect (sb))
+            {
+                displayArea = resolveUiScaleArea (*display);
+            }
         }
     }
 
@@ -3998,6 +4385,65 @@ void Y2KmeterAudioProcessorEditor::moved()
 {
     juce::AudioProcessorEditor::moved();
     updateUiScaleForCurrentDisplay();
+}
+
+// ==========================================================
+// 显示器拓扑兜底（Windows）
+//   现场演出 / 副屏全屏场景常见：投影仪热拔、分辨率变化、任务栏自动隐藏、
+//   主副屏互换。JUCE 没有订阅 Displays::Listener，这里用 10Hz 轮询兜底：
+//     · 窗口已完全不在任何显示器上 → 拉回最近的显示器工作区（防丢窗）；
+//     · 伪全屏的目标工作区变了（rcWork 变化 / 换了显示器）→ 重新贴合。
+//   全部物理像素比较，不依赖 JUCE 的逻辑显示器表。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::ensureWindowOnScreen()
+{
+   #if JUCE_WINDOWS
+    if (isPluginHost || stickActive || ! isShowing())
+        return;
+
+    auto* top = getTopLevelComponent();
+    if (top == nullptr || top == this)
+        return;
+
+    // 最小化时 GetWindowRect 返回 -32000 之类的哨兵值，绝不能在此时搬窗口
+    if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+        if (rw->isMinimised())
+            return;
+
+    const auto winPx = y2kGetWindowRectPx (top);
+    if (winPx.isEmpty())
+        return;
+
+    // 1) 完全离开所有显示器（拔屏 / 改分辨率 / 最小化后恢复异常）
+    if (! y2kIsRectOnAnyMonitorPx (winPx))
+    {
+        // 注意：变量名不要用 near / far —— MSVC 保留这两个 16 位时代的关键字，
+        //   用作标识符会直接报 C2059 语法错误。
+        Y2KMonitorPx targetMon;
+        const juce::Point<int> probe = winPx.getCentre();
+
+        if (! y2kGetMonitorPxForPoint (probe, targetMon) || targetMon.work.isEmpty())
+            return;
+
+        y2kMoveWindowToRectPx (top, { targetMon.work.getX(), targetMon.work.getY(),
+                                      juce::jmin (winPx.getWidth(),  targetMon.work.getWidth()),
+                                      juce::jmin (winPx.getHeight(), targetMon.work.getHeight()) });
+        return;
+    }
+
+    // 2) 伪全屏：只在"目标屏工作区与自己提交的矩形不一致"时重新贴合，
+    //    避免与 WM_DPICHANGED 或用户手动调整互相拉扯。
+    if (pseudoFullScreen && ! pseudoFullScreenRectPx.isEmpty())
+    {
+        Y2KMonitorPx mon;
+        if (y2kGetMonitorPxForWindow (top, mon) && ! mon.work.isEmpty()
+            && mon.work != pseudoFullScreenRectPx)
+        {
+            pseudoFullScreenRectPx = mon.work;
+            y2kMoveWindowToRectPx (top, mon.work);
+        }
+    }
+   #endif
 }
 
 // chrome 可见时恒为 1.0；chrome 隐藏时本函数已废弃（整个标题栏直接不绘制，
@@ -4196,6 +4642,35 @@ void Y2KmeterAudioProcessorEditor::applyStickBarGeometry (bool bottom, int targe
     if (top != this)
         frameH = juce::jmax (0, top->getHeight() - getHeight());
 
+   #if JUCE_WINDOWS
+    // Windows：条宽 / 条位一律按物理工作区算（AppBar 占位本来就是物理 px），
+    //   避免混合 DPI 下逻辑 userArea 原点错位把条摆到另一块屏上。
+    if (top != this && ! y2kScreenSimulationActive())
+    {
+        Y2KMonitorPx monPx;
+        if (y2kGetMonitorPxForWindow (top, monPx) && ! monPx.work.isEmpty())
+        {
+            const double s = monPx.scale;
+            const int wPx  = monPx.work.getWidth();
+            const int wLog = y2kPxToLogical (wPx, s);
+
+            const int windowHLogical = juce::jmax (120, targetEditorHeight + frameH);
+            const int hPx            = y2kLogicalToPx (windowHLogical, s);
+
+            if (auto* cbc = getConstrainer())
+            {
+                setResizeLimits (juce::jmin (cbc->getMinimumWidth(),  wLog), 120,
+                                 juce::jmax (cbc->getMaximumWidth(),  wLog),
+                                 juce::jmax (cbc->getMaximumHeight(), windowHLogical));
+            }
+
+            const int yPx = bottom ? (monPx.work.getBottom() - hPx) : monPx.work.getY();
+            y2kMoveWindowToRectPx (top, { monPx.work.getX(), yPx, wPx, hPx });
+            return;
+        }
+    }
+   #endif
+
     const auto display = juce::Desktop::getInstance().getDisplays()
                              .getDisplayForPoint (top->getScreenBounds().getCentre());
     const auto userArea = resolveDisplayArea ((display != nullptr) ? display->userArea
@@ -4235,6 +4710,12 @@ void Y2KmeterAudioProcessorEditor::redockStickAfterGeometryChange()
 void Y2KmeterAudioProcessorEditor::enterStickMode()
 {
     if (stickActive || workspace == nullptr) return;
+
+    // 伪全屏中进入 stick：先退出伪全屏，还原成普通窗口再备份。
+    //   否则备份的窗口 bounds 是"全屏矩形"，退出 stick 后会得到一个铺满整块屏、
+    //   却不处于全屏态的窗口（VJ 现场切条状模式后经常遇到）。
+    if (pseudoFullScreen)
+        toggleFakeFullScreen();
 
     // Hide 态下进入：先展开 → 进入 stick → 再收起。
     //   保证备份的窗口 bounds / resizeLimits 都是 Show 态的值，Hide 的 limits 快照
@@ -4826,9 +5307,30 @@ void Y2KmeterAudioProcessorEditor::setAutoHideMode (bool shouldHide)
         else
        #endif
         {
-            const auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForRect (b);
-            const auto userArea = (d != nullptr) ? d->userArea : b;
-            anchorBottom = b.getCentreY() > userArea.getCentreY();
+           #if JUCE_WINDOWS
+            // Windows：用物理矩形与物理工作区比较。getDisplayForRect 在混合 DPI
+            //   的上下双屏上会选错屏（逻辑矩形被算偏），Hide 时会往错的方向收。
+            bool decided = false;
+            if (! y2kScreenSimulationActive())
+            {
+                const auto winPx = y2kGetWindowRectPx (top);
+                Y2KMonitorPx monPx;
+                if (! winPx.isEmpty()
+                    && y2kGetMonitorPxForPoint (winPx.getCentre(), monPx)
+                    && ! monPx.work.isEmpty())
+                {
+                    anchorBottom = winPx.getCentre().y > monPx.work.getCentre().y;
+                    decided = true;
+                }
+            }
+
+            if (! decided)
+           #endif
+            {
+                const auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForRect (b);
+                const auto userArea = (d != nullptr) ? d->userArea : b;
+                anchorBottom = b.getCentreY() > userArea.getCentreY();
+            }
         }
 
         // 记录进入 Hide 时的锚点，Show 时优先复用，避免中心点跨中线导致几何漂移。
@@ -4847,6 +5349,28 @@ void Y2KmeterAudioProcessorEditor::setAutoHideMode (bool shouldHide)
         const juce::Rectangle<int> nb (b.getX(),
                                        anchorBottom ? b.getBottom() - newH : b.getY(),
                                        b.getWidth(), newH);
+
+        // 应用几何：Windows 下按物理像素落地（宽度取窗口当前物理宽，高度按 scale 换算），
+        //   保证"逻辑高度 × scale"与窗口位置同源 —— 否则混合 DPI 下每次 Hide/Show
+        //   都会因为换算原点不同而漂移。
+        auto applyWindowRect = [&] (const juce::Rectangle<int>& logicalRect)
+        {
+           #if JUCE_WINDOWS
+            if (top != this && ! y2kScreenSimulationActive())
+            {
+                const auto winPx = y2kGetWindowRectPx (top);
+                Y2KMonitorPx monPx;
+                if (! winPx.isEmpty() && y2kGetMonitorPxForPoint (winPx.getCentre(), monPx))
+                {
+                    const int hPx = juce::jmax (1, y2kLogicalToPx (logicalRect.getHeight(), monPx.scale));
+                    const int yPx = anchorBottom ? (winPx.getBottom() - hPx) : winPx.getY();
+                    y2kMoveWindowToRectPx (top, { winPx.getX(), yPx, winPx.getWidth(), hPx });
+                    return;
+                }
+            }
+           #endif
+            top->setBounds (logicalRect);
+        };
 
         if (shouldHide)
         {
@@ -4867,12 +5391,12 @@ void Y2KmeterAudioProcessorEditor::setAutoHideMode (bool shouldHide)
             }
 
             chromeDim = true;
-            top->setBounds (nb);
+            applyWindowRect (nb);
         }
         else
         {
             chromeDim = false;
-            top->setBounds (nb);
+            applyWindowRect (nb);
             restoreEditorLimits();
         }
 
@@ -5308,14 +5832,29 @@ void Y2KmeterAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
 
     if (juce::JUCEApplicationBase::isStandaloneApp())
     {
-        // 锁定态 / stick 驻留态：不启动顶层窗口拖拽。
+        // 锁定态 / stick 驻留态 / 伪全屏态：不启动顶层窗口拖拽。
         //   stick 驻留态的几何由 AppBar 管理，拖动会与占位脱节；双击全屏也会
         //   破坏贴边矩形，因此 mouseDoubleClick 里同样对 stickActive 早退。
-        if (! layoutLocked && ! stickActive)
+        //   伪全屏态拖动会让"进入前的 bounds"与实际窗口脱节（退出还原时跳回去），
+        //   演出场景里也容易误拖把全屏窗口拖走，因此直接禁止；双击仍可退出全屏。
+        if (! layoutLocked && ! stickActive && ! pseudoFullScreen)
         {
             if (auto* top = getTopLevelComponent())
             {
-                windowDragger.startDraggingComponent(top, e.getEventRelativeTo(top));
+               #if JUCE_WINDOWS
+                // 混合 DPI 多屏：窗口拖动必须在物理像素上做（见 y2kSnapWindowToMonitorEdgesPx
+                // 上方的说明）。ComponentDragger 的目标点 = 逻辑光标 - 按下偏移，而
+                // "上下排布 + 缩放不同" 的桌面上逻辑光标坐标在中缝两侧不连续
+                // （juce_Displays.cpp updateToLogical 的 on-bottom 分支用
+                // physicalX / 父屏 scale 求逻辑 x），光标一过中缝窗口就整体瞬移。
+                winDragStartRectPx = y2kGetWindowRectPx (top);
+                winDragPxActive    = ! winDragStartRectPx.isEmpty()
+                                     && y2kGetCursorPosPx (winDragStartCursorPx);
+               #endif
+
+                if (! winDragPxActive)
+                    windowDragger.startDraggingComponent(top, e.getEventRelativeTo(top));
+
                 draggingWindow = true;
             }
         }
@@ -5330,7 +5869,24 @@ void Y2KmeterAudioProcessorEditor::mouseDrag(const juce::MouseEvent& e)
     if (draggingWindow)
     {
         if (auto* top = getTopLevelComponent())
+        {
+           #if JUCE_WINDOWS
+            // 绝对式物理拖动：目标 = 按下时窗口物理位置 + 光标物理位移。
+            //   绝对式本身自带纠错 —— 跨 DPI 时 Windows 给的建议矩形（尺寸变化）
+            //   不会累积漂移；只写位置不写尺寸，避免与 WM_DPICHANGED 互相覆盖。
+            if (winDragPxActive)
+            {
+                juce::Point<int> cursorPx;
+                if (y2kGetCursorPosPx (cursorPx))
+                    y2kMoveWindowToPx (top, winDragStartRectPx.getTopLeft()
+                                              + (cursorPx - winDragStartCursorPx));
+
+                return;   // 物理路径失败也不回退：windowDragger 本次未启动
+            }
+           #endif
+
             windowDragger.dragComponent(top, e.getEventRelativeTo(top), nullptr);
+        }
     }
 }
 
@@ -5339,58 +5895,76 @@ void Y2KmeterAudioProcessorEditor::mouseUp(const juce::MouseEvent& e)
     // 插件宿主模式：无 chrome 按钮点击处理
     if (isPluginHost) return;
 
-    // 拖窗松手时再做顶部边界判断：若抬头（标题栏）已被拖出当前显示器
-    // 可用区顶部，则把窗口整体弹回可用区顶部。这样拖动过程中不会因实时
-    // 钳制而闪现，多屏场景下用户也能把窗口拖到上方屏幕（松手时窗口已在
-    // 上方屏幕，display 判定切换到上方屏幕，自然不会弹回）。
+    // 拖窗松手时做四边软吸附 + 防丢窗口：
+    //   · Windows：全程物理像素，基准屏 = 光标所在显示器（详见
+    //     y2kSnapWindowToMonitorEdgesPx 上方说明）。不再用
+    //     getDisplayForRect（交集面积最大）判屏 —— 混合 DPI 的上下双屏上该判据
+    //     会在窗口中心越过中缝时整体翻转，吸附基准线跳到另一块屏。
+    //   · 其它平台：沿用 JUCE 逻辑坐标路径。
     if (draggingWindow)
     {
         if (auto* top = getTopLevelComponent())
         {
-            auto& displays = juce::Desktop::getInstance().getDisplays();
-            auto  disp     = displays.getDisplayForRect (top->getScreenBounds());
-            juce::Rectangle<int> area;
-            if (disp != nullptr && ! disp->userArea.isEmpty())
-                area = disp->userArea;
-            else if (auto primary = displays.getPrimaryDisplay())
-                area = primary->userArea;
-
-            if (! area.isEmpty())
+           #if JUCE_WINDOWS
+            if (winDragPxActive)
             {
-                const auto b = top->getScreenBounds();
+                winDragPxActive = false;
 
-                // 顶部拖出回弹（原有）：标题栏拖出工作区顶部 → 强制弹回，
-                //   防止窗口"丢失"在屏幕上方（找不到标题栏拖回）。
-                if (b.getY() < area.getY())
+                if (! stickActive && top != static_cast<juce::Component*> (this))
                 {
-                    top->setTopLeftPosition (b.getX(), area.getY());
+                    y2kSnapDebugDumpDisplays ("snap (first window drag release)");
+                    y2kSnapWindowToMonitorEdgesPx (top, PinkXP::ui (titleBarHeight));
                 }
-                else
+            }
+            else
+           #endif
+            {
+                auto& displays = juce::Desktop::getInstance().getDisplays();
+                auto  disp     = displays.getDisplayForRect (top->getScreenBounds());
+                juce::Rectangle<int> area;
+                if (disp != nullptr && ! disp->userArea.isEmpty())
+                    area = disp->userArea;
+                else if (auto primary = displays.getPrimaryDisplay())
+                    area = primary->userArea;
+
+                if (! area.isEmpty())
                 {
-                    // 四边边缘吸附（软 stick）：松手时任一边距工作区边缘
-                    //   ≤ 阈值即贴到该边，方便把窗口精确调到屏幕边缘；
-                    //   再次拖动窗口会自动脱离吸附（无"锁定"语义）。
-                    constexpr int kStickThresholdPx = 8;
-                    int x = b.getX();
-                    int y = b.getY();
+                    const auto b = top->getScreenBounds();
 
-                    if (std::abs (b.getX() - area.getX()) <= kStickThresholdPx)
-                        x = area.getX();
-                    else if (std::abs (b.getRight() - area.getRight()) <= kStickThresholdPx)
-                        x = area.getRight() - b.getWidth();
+                    // 顶部拖出回弹：标题栏拖出工作区顶部 → 强制弹回，
+                    //   防止窗口"丢失"在屏幕上方（找不到标题栏拖回）。
+                    if (b.getY() < area.getY())
+                    {
+                        top->setTopLeftPosition (b.getX(), area.getY());
+                    }
+                    else
+                    {
+                        // 四边边缘吸附（软 stick）：松手时任一边距工作区边缘
+                        //   ≤ 阈值即贴到该边，方便把窗口精确调到屏幕边缘；
+                        //   再次拖动窗口会自动脱离吸附（无"锁定"语义）。
+                        constexpr int kStickThresholdPx = 8;
+                        int x = b.getX();
+                        int y = b.getY();
 
-                    if (std::abs (b.getY() - area.getY()) <= kStickThresholdPx)
-                        y = area.getY();
-                    else if (std::abs (b.getBottom() - area.getBottom()) <= kStickThresholdPx)
-                        y = area.getBottom() - b.getHeight();
+                        if (std::abs (b.getX() - area.getX()) <= kStickThresholdPx)
+                            x = area.getX();
+                        else if (std::abs (b.getRight() - area.getRight()) <= kStickThresholdPx)
+                            x = area.getRight() - b.getWidth();
 
-                    if (x != b.getX() || y != b.getY())
-                        top->setTopLeftPosition (x, y);
+                        if (std::abs (b.getY() - area.getY()) <= kStickThresholdPx)
+                            y = area.getY();
+                        else if (std::abs (b.getBottom() - area.getBottom()) <= kStickThresholdPx)
+                            y = area.getBottom() - b.getHeight();
+
+                        if (x != b.getX() || y != b.getY())
+                            top->setTopLeftPosition (x, y);
+                    }
                 }
             }
         }
     }
 
+    winDragPxActive = false;
     draggingWindow = false;
 
     // 按下与抬起都落在同一按钮内才触发 click —— XP 风按钮的标准行为
@@ -5573,8 +6147,11 @@ void Y2KmeterAudioProcessorEditor::toggleFakeFullScreen()
     if (! pseudoFullScreen)
     {
         // -------- 进入伪全屏 --------
-        // 1) 保存当前 bounds
+        // 1) 保存当前 bounds（逻辑；Windows 另存物理矩形，退出时优先用物理矩形还原）
         preFullScreenBounds = top->getBounds();
+       #if JUCE_WINDOWS
+        preFullScreenRectPx = y2kGetWindowRectPx (top);
+       #endif
 
         // 2) 保存并放宽 constrainer 的 resize limits（避免被夹回）
         if (auto* cbc = rw->getConstrainer())
@@ -5607,6 +6184,23 @@ void Y2KmeterAudioProcessorEditor::toggleFakeFullScreen()
         }
 
         // 3) 计算目标 bounds：当前显示器的 userArea（已扣除任务栏）
+       #if JUCE_WINDOWS
+        // Windows：全程物理像素（MonitorFromWindow + rcWork + MoveWindow）。
+        //   不能用 setBounds(userArea)：混合 DPI 桌面上 JUCE 的
+        //   逻辑→物理 换算会用错显示器原点，窗口会"大小对了但位置窜到另一块屏"。
+        if (! y2kScreenSimulationActive())
+        {
+            Y2KMonitorPx mon;
+            if (y2kGetMonitorPxForWindow (top, mon) && ! mon.work.isEmpty())
+            {
+                y2kMoveWindowToRectPx (top, mon.work);
+                pseudoFullScreenRectPx = mon.work;
+                pseudoFullScreen = true;
+                return;
+            }
+        }
+       #endif
+
         auto& displays = juce::Desktop::getInstance().getDisplays();
         auto  disp     = displays.getDisplayForRect (top->getScreenBounds());
         juce::Rectangle<int> target;
@@ -5628,6 +6222,18 @@ void Y2KmeterAudioProcessorEditor::toggleFakeFullScreen()
         // 1) 先把 limits 放宽，防止 setBounds 被夹住
         rw->setResizeLimits (1, 1, 32768, 32768);
 
+       #if JUCE_WINDOWS
+        pseudoFullScreenRectPx = {};
+        // 只恢复到"仍存在的显示器上"的原位置：全屏期间拔掉的那块屏不能再作为落点
+        //   （否则窗口会跑到不存在的区域，虽然 ensureWindowOnScreen 会兜底，
+        //     但那一帧是可见的跳动）。
+        if (! preFullScreenRectPx.isEmpty() && y2kIsRectOnAnyMonitorPx (preFullScreenRectPx))
+        {
+            y2kMoveWindowToRectPx (top, preFullScreenRectPx);
+            preFullScreenRectPx = {};
+        }
+        else
+       #endif
         if (! preFullScreenBounds.isEmpty())
             top->setBounds (preFullScreenBounds);
 
@@ -5759,6 +6365,9 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
     // stick 驻留态：窗口高度被改动 / 窗口被挪走时，重新对齐 AppBar 占位。
     if (stickActive)
         updateStickDockGeometry();
+
+    // 显示器拓扑兜底：窗口跑出所有显示器 / 伪全屏目标工作区变了（拔投影仪等）。
+    ensureWindowOnScreen();
 #endif
 
     // 10Hz 拉取宿主自动化参数 → 应用到 Milkdrop 渲染（仅插件宿主形态）。

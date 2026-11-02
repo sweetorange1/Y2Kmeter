@@ -252,8 +252,33 @@ struct DisplayNode
     Rectangle<double> logicalArea;
 };
 
-/** Recursive - will calculate and set the logicalArea member of current. */
-static void processDisplay (DisplayNode* currentNode, Array<DisplayNode>& allNodes)
+/** Y2K patch：两块物理矩形之间的边缘距离平方（重叠时为 0）。
+    Windows 走 updateToLogical 的逐屏换算分支后本函数不再被引用，故标记 maybe_unused。 */
+[[maybe_unused]] static double displayEdgeDistanceSquared (const Rectangle<double>& a, const Rectangle<double>& b) noexcept
+{
+    const auto dx = jmax (0.0, jmax (a.getX() - b.getRight(), b.getX() - a.getRight()));
+    const auto dy = jmax (0.0, jmax (a.getY() - b.getBottom(), b.getY() - a.getBottom()));
+    return dx * dx + dy * dy;
+}
+
+/** Recursive - will calculate and set the logicalArea member of current.
+
+    Y2K patch（混合 DPI 多屏）：
+      原实现只在"物理矩形精确相接"时才把子屏挂到父屏上，并且 on top / on bottom
+      分支的前导坐标用 `physical / parentScale`（假设整张桌面共享父屏的缩放）。
+      两个后果：
+        · 混合 DPI 桌面里，DIP 相邻的两块屏在物理坐标中必然出现空洞（Windows 按
+          各屏自己的缩放换算物理矩形），精确相接判定失败 → 子屏永远挂不上父屏，
+          其 logicalArea 保持 (0,0,0,0) → 该屏的逻辑坐标整体失效（窗口 setBounds、
+          getDisplayForRect、弹窗/菜单/提示全部错位）；
+        · 子屏与父屏缩放不同时，逻辑 x 会被 parentScale 拉偏，上下排布的两块屏在
+          逻辑空间里横向错开。
+      改为：
+        1) 精确相接优先（非混合 DPI 桌面与原实现完全等效）；
+        2) 找不到相接邻居时按"最近边缘"挂接，保证不留下孤立屏；
+        3) 前导轴坐标改为「父屏逻辑原点 + 物理偏移 / 父屏 scale」，物理上同 x 的
+           上下两块屏在逻辑空间里也保持同 x。 */
+[[maybe_unused]] static void processDisplay (DisplayNode* currentNode, Array<DisplayNode>& allNodes)
 {
     const auto physicalArea = currentNode->display->totalArea.toDouble();
     const auto scale = currentNode->display->scale;
@@ -267,13 +292,37 @@ static void processDisplay (DisplayNode* currentNode, Array<DisplayNode>& allNod
         const auto logicalParentArea  = currentNode->parent->logicalArea; // logical area of parent has already been calculated
         const auto parentScale        = currentNode->parent->display->scale;
 
+        const auto offsetX = (physicalArea.getX() - physicalParentArea.getX()) / parentScale;
+        const auto offsetY = (physicalArea.getY() - physicalParentArea.getY()) / parentScale;
+
         Rectangle<double> logicalArea (0.0, 0.0, logicalWidth, logicalHeight);
 
-        if      (approximatelyEqual (physicalArea.getRight(), physicalParentArea.getX()))     logicalArea.setPosition ({ logicalParentArea.getX() - logicalWidth, physicalArea.getY() / parentScale });  // on left
-        else if (approximatelyEqual (physicalArea.getX(), physicalParentArea.getRight()))     logicalArea.setPosition ({ logicalParentArea.getRight(),  physicalArea.getY() / parentScale });            // on right
-        else if (approximatelyEqual (physicalArea.getBottom(), physicalParentArea.getY()))    logicalArea.setPosition ({ physicalArea.getX() / parentScale, logicalParentArea.getY() - logicalHeight }); // on top
-        else if (approximatelyEqual (physicalArea.getY(), physicalParentArea.getBottom()))    logicalArea.setPosition ({ physicalArea.getX() / parentScale, logicalParentArea.getBottom() });            // on bottom
-        else                                                               jassertfalse;
+        if      (approximatelyEqual (physicalArea.getRight(), physicalParentArea.getX()))     logicalArea.setPosition ({ logicalParentArea.getX() - logicalWidth, logicalParentArea.getY() + offsetY });  // on left
+        else if (approximatelyEqual (physicalArea.getX(), physicalParentArea.getRight()))     logicalArea.setPosition ({ logicalParentArea.getRight(),  logicalParentArea.getY() + offsetY });            // on right
+        else if (approximatelyEqual (physicalArea.getBottom(), physicalParentArea.getY()))    logicalArea.setPosition ({ logicalParentArea.getX() + offsetX, logicalParentArea.getY() - logicalHeight }); // on top
+        else if (approximatelyEqual (physicalArea.getY(), physicalParentArea.getBottom()))    logicalArea.setPosition ({ logicalParentArea.getX() + offsetX, logicalParentArea.getBottom() });            // on bottom
+        else
+        {
+            // 兜底：物理矩形之间有空洞。按中心相对方向贴到父屏对应边（保证逻辑空间
+            // 不重叠），另一轴保留真实物理偏移。绝不能让 logicalArea 停在 (0,0,0,0)。
+            const auto myCentre     = physicalArea.getCentre();
+            const auto parentCentre = physicalParentArea.getCentre();
+
+            if (std::abs (myCentre.y - parentCentre.y) >= std::abs (myCentre.x - parentCentre.x))
+            {
+                if (myCentre.y < parentCentre.y)
+                    logicalArea.setPosition ({ logicalParentArea.getX() + offsetX, logicalParentArea.getY() - logicalHeight });
+                else
+                    logicalArea.setPosition ({ logicalParentArea.getX() + offsetX, logicalParentArea.getBottom() });
+            }
+            else
+            {
+                if (myCentre.x < parentCentre.x)
+                    logicalArea.setPosition ({ logicalParentArea.getX() - logicalWidth, logicalParentArea.getY() + offsetY });
+                else
+                    logicalArea.setPosition ({ logicalParentArea.getRight(), logicalParentArea.getY() + offsetY });
+            }
+        }
 
         currentNode->logicalArea = logicalArea;
     }
@@ -303,6 +352,35 @@ static void processDisplay (DisplayNode* currentNode, Array<DisplayNode>& allNod
         }
     }
 
+    // Y2K patch：混合 DPI 桌面里物理矩形可能互不相接（DIP 相邻、物理有空洞）。
+    //   此时若一个子屏都找不到，就把"最近的未分配屏"接上，否则它会成为孤立节点，
+    //   logicalArea 恒为 (0,0,0,0)（调用方随后 jassert + 整张逻辑表失效）。
+    if (children.isEmpty())
+    {
+        DisplayNode* nearest = nullptr;
+        auto bestDistance = std::numeric_limits<double>::max();
+
+        for (auto& node : allNodes)
+        {
+            if (node.parent != nullptr)
+                continue;
+
+            const auto distance = displayEdgeDistanceSquared (physicalArea, node.display->totalArea.toDouble());
+
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                nearest = &node;
+            }
+        }
+
+        if (nearest != nullptr)
+        {
+            nearest->parent = currentNode;
+            children.add (nearest);
+        }
+    }
+
     // Recursively process all child nodes
     for (auto child : children)
         processDisplay (child, allNodes);
@@ -322,6 +400,29 @@ void Displays::updateToLogical()
 
         return;
     }
+
+   #if JUCE_WINDOWS
+    // Y2K patch（Windows 混合 DPI 多屏）：
+    //   Windows 的 GetMonitorInfo 返回的物理矩形本身就是"该屏 DIP 矩形 × 该屏 scale"，
+    //   所以逐屏 `physical / ownScale` 得到的就是与系统显示设置完全一致、且各屏
+    //   严格相邻的 DIP 布局（这也正是"物理桌面有空洞"的来源：DIP 相邻的两块不同
+    //   缩放的屏，物理坐标必然不连续）。
+    //   原来的"图遍历 + 物理矩形是否精确相接"在混合 DPI 桌面里必然判错：
+    //     · 物理矩形有空洞 → 子屏挂不上父屏 → logicalArea 保持 (0,0,0,0)，该屏
+    //       逻辑坐标整体失效（窗口/弹窗/菜单错位）；
+    //     · 前导轴用 `physical / parentScale` → 与子屏自身 scale 不一致，上下排布
+    //       的两块屏在逻辑空间里横向错开。
+    //   逐屏换算同时保证 physical→logical 在中缝两侧连续（对滚动/拖动至关重要）。
+    for (auto& display : displays)
+    {
+        const auto relativeUserArea = (display.userArea.toDouble()
+                                       - display.totalArea.toDouble().getTopLeft()) / display.scale;
+
+        display.topLeftPhysical = display.totalArea.getTopLeft();
+        display.totalArea       = (display.totalArea.toDouble() / display.scale).toNearestInt();
+        display.userArea        = (relativeUserArea + display.totalArea.toDouble().getTopLeft()).toNearestInt();
+    }
+   #else
 
     Array<DisplayNode> displayNodes;
 
@@ -381,6 +482,7 @@ void Displays::updateToLogical()
         node.display->totalArea       = node.logicalArea.toNearestInt();
         node.display->userArea        = (relativeUserArea + node.logicalArea.getTopLeft()).toNearestInt();
     }
+   #endif
 }
 
 /** @cond */

@@ -176,6 +176,12 @@ public:
     bool hasAutoHideAnchorBottom() const noexcept { return hideAnchorKnown; }
     bool isAutoHideAnchorBottom() const noexcept { return hideAnchorBottom; }
 
+    // 伪全屏（双击抬头 / 全屏预设）状态与"进入前"的窗口 bounds。
+    //   退出时若正处于伪全屏，App 侧应当落盘进入全屏前的 bounds，
+    //   否则下次启动会得到一个"铺满整屏但不是全屏"的普通窗口。
+    bool isPseudoFullScreen() const noexcept { return pseudoFullScreen; }
+    const juce::Rectangle<int>& getPreFullScreenBounds() const noexcept { return preFullScreenBounds; }
+
     // 当窗口被程序性设置成超过编辑器 constrainer 上限的尺寸（如启动时恢复历史
     //   bounds、双击伪全屏）时，把 constrainer 的 max 放宽到能容纳 w×h（min 不变）。
     //   否则后续任何 setResizeLimits 都会经 setBoundsConstrained 把编辑器夹回 1600，
@@ -328,6 +334,12 @@ private:
     //   为音频仪表显示区让出更多空间。缩放因子变化时触发一次 resized() 重新布局。
     void updateUiScaleForCurrentDisplay();
     void moved() override;
+
+    // 显示器拓扑兜底（Windows）：拔屏 / 改分辨率 / 任务栏出现消失之后，
+    //   · 窗口若已完全离开所有显示器 → 拉回最近的显示器工作区；
+    //   · 伪全屏若目标屏工作区变了 → 按新工作区重新贴合。
+    //   由 timerCallback 以 10Hz 调用（纯 Win32 矩形比较，开销可忽略）。
+    void ensureWindowOnScreen();
 
     // ---- 宿主自动化参数双向同步（pull：宿主 → 渲染）----
     //   在 timerCallback 里以 10Hz 轮询，检测参数变化并应用到 Milkdrop 状态。
@@ -520,6 +532,8 @@ private:
     //     （与 layoutLocked 的 savedLock*字段独立，避免互相污染）
     bool                 pseudoFullScreen = false;
     juce::Rectangle<int> preFullScreenBounds;
+    juce::Rectangle<int> preFullScreenRectPx;   // Windows：进入前的物理矩形（退出时优先用它还原）
+    juce::Rectangle<int> pseudoFullScreenRectPx; // Windows：本次伪全屏提交的物理矩形（拓扑变化时用来判断是否需要重新贴合）
     int                  preFullScreenMinW = 0, preFullScreenMinH = 0;
     int                  preFullScreenMaxW = 0, preFullScreenMaxH = 0;
     bool                 preFullScreenLimitsValid = false;
@@ -604,6 +618,13 @@ private:
     //   拖拽只允许从标题栏发起（而不是任意空白区）
     juce::ComponentDragger  windowDragger;
     bool                    draggingWindow = false;
+
+    // Windows 专用：物理像素拖拽 / 吸附（见 PluginEditor.cpp 里的 y2k*Px 工具）
+    //   混合 DPI 多屏下 JUCE 的逻辑坐标在中缝两侧不连续，拖窗与吸附一律改走
+    //   GetCursorPos / GetWindowRect / MonitorFromPoint 的物理像素。
+    bool                 winDragPxActive = false;
+    juce::Rectangle<int> winDragStartRectPx;    // 按下时窗口物理矩形
+    juce::Point<int>     winDragStartCursorPx;  // 按下时光标物理位置
 
     // —— FPS 统计（通过内部 FrameListener 辅助类订阅 AnalyserHub）——
     //   为绕开 MSVC include guard 串扰问题，把 AnalyserHub 完整头封装在 .cpp
