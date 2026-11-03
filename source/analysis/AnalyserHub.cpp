@@ -157,6 +157,9 @@ public:
         if (frame->has (Kind::Dynamics))
             frame->dynamics = owner.dynamicsMeter.getSnapshot();
 
+        if (frame->has (Kind::MusicAnalysis))
+            frame->musicAnalysis = owner.musicEngine.getResult();
+
         // 3) 原子发布到 latestFrame
         {
 #if Y2K_ENABLE_PERF_COUNTERS
@@ -380,6 +383,10 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
 
     // 动态范围计初始化
     dynamicsMeter.prepare(sampleRate);
+
+    // 节拍 / 调性分析：采样率变化时重建 FFT 尺寸与频带映射，
+    //   并清空环形缓冲（旧采样率的数据不能和新采样率混在一起）。
+    musicEngine.prepare (sampleRate, samplesPerBlock);
 }
 
 // ==========================================================
@@ -408,6 +415,7 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
     const bool wantLoud     = refCounts[static_cast<size_t> (Kind::Loudness    )].load (std::memory_order_relaxed) > 0;
     const bool wantPhase    = refCounts[static_cast<size_t> (Kind::Phase       )].load (std::memory_order_relaxed) > 0;
     const bool wantDynamics = refCounts[static_cast<size_t> (Kind::Dynamics    )].load (std::memory_order_relaxed) > 0;
+    const bool wantMusic    = refCounts[static_cast<size_t> (Kind::MusicAnalysis)].load (std::memory_order_relaxed) > 0;
 
     if (wantOsc)      pushSamplesToOscilloscope(left, right, numSamples);
     if (wantSpec)     pushSamplesToSpectrum    (left, right, numSamples);
@@ -442,6 +450,15 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
         dynamicsMeter.pushStereo (left, right, numSamples);
     }
 
+    if (wantMusic)
+    {
+        // 只做降混 + 写入无锁环形缓冲；FFT / 自相关 / chroma 都在后台线程。
+        //   用户点了 STOP 时引擎内部 enabled == false，这里会立即返回。
+        //   不单独埋 perf 计时：这一路只是逐样本写环形缓冲，开销远小于
+        //   一次 ScopedPerfTimer 本身。
+        musicEngine.pushStereo (left, right, numSamples);
+    }
+
 #if Y2K_ENABLE_PERF_COUNTERS
     const auto t1 = juce::Time::getHighResolutionTicks();
     const auto us = static_cast<juce::int64> (juce::Time::highResolutionTicksToSeconds(t1 - t0) * 1.0e6);
@@ -464,7 +481,12 @@ void AnalyserHub::retain(Kind kind) noexcept
 {
     const auto idx = static_cast<size_t> (kind);
     jassert (idx < static_cast<size_t> (Kind::NumKinds));
-    refCounts[idx].fetch_add (1, std::memory_order_relaxed);
+    const int prev = refCounts[idx].fetch_add (1, std::memory_order_relaxed);
+
+    // 节拍/调性：第一个订阅者出现时才分配缓冲并启动后台线程。
+    //   没有 Tempo/Key 模块时，这一路完全不运行（不占线程、不占 FFT 缓冲）。
+    if (kind == Kind::MusicAnalysis && prev == 0)
+        musicEngine.setActive (true);
 }
 
 void AnalyserHub::release(Kind kind) noexcept
@@ -473,7 +495,10 @@ void AnalyserHub::release(Kind kind) noexcept
     jassert (idx < static_cast<size_t> (Kind::NumKinds));
     const auto prev = refCounts[idx].fetch_sub (1, std::memory_order_relaxed);
     jassert (prev >= 1); // 每次 release 前都必须有对应的 retain
-    (void) prev;
+
+    // 最后一个订阅者消失 → 停线程、丢弃已有缓冲内容（下次订阅重新开始）。
+    if (kind == Kind::MusicAnalysis && prev == 1)
+        musicEngine.setActive (false);
 }
 
 bool AnalyserHub::isActive(Kind kind) const noexcept
@@ -1372,6 +1397,19 @@ PhaseCorrelator::Snapshot AnalyserHub::getPhaseSnapshot()
 DynamicRangeMeter::Snapshot AnalyserHub::getDynamicsSnapshot()
 {
     return dynamicsMeter.getSnapshot();
+}
+
+// ==========================================================
+// 节拍 / 调性（v3.1）
+// ==========================================================
+y2k::music::Result AnalyserHub::getMusicAnalysisResult() const
+{
+    return musicEngine.getResult();
+}
+
+void AnalyserHub::resetMusicAnalysis() noexcept
+{
+    musicEngine.reset();
 }
 
 // ==========================================================

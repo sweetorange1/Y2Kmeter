@@ -52,6 +52,7 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::stereoMap:         return "Stereo Map";
         case ModuleType::virtuPet:        return "VirtuPet";
         case ModuleType::milkdrop:         return "Milkdrop";
+        case ModuleType::tempoKey:         return "Tempo / Key";
 
         default:                            return "Module";
 

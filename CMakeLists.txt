@@ -569,6 +569,19 @@ set(Y2KM_PLUGIN_SOURCES
   source/analysis/PhaseCorrelator.cpp
   source/analysis/DynamicRangeMeter.cpp
 
+  # === 实时 BPM / 调性分析（v3.1）===
+  #   music/ 下除 MusicAnalysisEngine 外全部是纯 C++（不依赖 JUCE），
+  #   供 tests/music_analysis_test.cpp 直接链接。
+  source/analysis/music/MusicAnalysisTypes.h
+  source/analysis/music/RealFft.h
+  source/analysis/music/RealFft.cpp
+  source/analysis/music/TempoEstimator.h
+  source/analysis/music/TempoEstimator.cpp
+  source/analysis/music/KeyEstimator.h
+  source/analysis/music/KeyEstimator.cpp
+  source/analysis/music/MusicAnalysisEngine.h
+  source/analysis/music/MusicAnalysisEngine.cpp
+
   # === 性能计数系统 ===
   source/perf/PerformanceCounterSystem.h
   source/perf/PerformanceCounterSystem.cpp
@@ -645,6 +658,8 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/ui/modules/StereoFieldModule.cpp
   source/ui/modules/StereoMapModule.h
   source/ui/modules/StereoMapModule.cpp
+  source/ui/modules/TempoKeyModule.h
+  source/ui/modules/TempoKeyModule.cpp
   source/ui/modules/VirtuPetModule.h
   source/ui/modules/VirtuPetModule.cpp
   source/ui/modules/MilkdropModule.h
@@ -1299,6 +1314,27 @@ if (MSVC)
   target_compile_options(Y2Kmeter_toy_test PRIVATE /utf-8)
 endif()
 add_test(NAME Y2Kmeter_toy_test COMMAND Y2Kmeter_toy_test)
+
+# ==========================================================
+# 节拍 / 调性 DSP 单测 —— 纯 C++，不链接 JUCE
+#   · 已知速度点击音轨（多采样率 / 多输入块长）
+#   · 静音、启动延迟、中途变速
+#   · 已知调性和弦进行、中途转调
+#   · 4 分钟长跑：滑动窗口帧数有界
+#   · reset / resetAccumulation 语义
+# ==========================================================
+add_executable(Y2Kmeter_music_test
+  tests/music_analysis_test.cpp
+  source/analysis/music/RealFft.cpp
+  source/analysis/music/TempoEstimator.cpp
+  source/analysis/music/KeyEstimator.cpp
+)
+target_compile_features(Y2Kmeter_music_test PRIVATE cxx_std_17)
+target_include_directories(Y2Kmeter_music_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if (MSVC)
+  target_compile_options(Y2Kmeter_music_test PRIVATE /utf-8)
+endif()
+add_test(NAME Y2Kmeter_music_test COMMAND Y2Kmeter_music_test)
 
 # ==========================================================
 # emoji 渲染诊断（Windows only，仅本地排查用）

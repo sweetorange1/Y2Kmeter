@@ -9,7 +9,7 @@
 
 ### 1.1 项目定位
 - **产品名**：`Y2Kmeter` （版本：`2.9.9`）
-  - 注意：当前工作区在 `v2.9.9` 之上还有**未发布的开发中改动**（`Stereo Map` 新模块，见文末「未发布：Stereo Map」章节），版本号尚未 bump。
+  - 注意：`v2.9.9` 之后的功能都以「v2.9.9 补充」形式入库、**不 bump 版本号**：`Stereo Map`（见文末「未发布：Stereo Map」）、多屏混合 DPI 修复、以及本轮的**实时 BPM / 调性模块**（见文末「v2.9.9 补充：实时 BPM / 音乐调性分析模块」）。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -20,7 +20,7 @@
 
 ### 1.2 主要功能一览
 
-**① 音频分析与计量**（22 个可组合模块，由 `AnalyserHub` 的 5 路分析统一驱动、按引用计数按需启用）
+**① 音频分析与计量**（23 个可组合模块，由 `AnalyserHub` 的 6 路分析统一驱动、按引用计数按需启用）
 
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
@@ -32,7 +32,8 @@
 - **频谱瀑布图**（Spectrogram 像素方格风格 / Spectrogram 3D 三维曲面）
 - **模拟指针 VU 表**（半圆扇形表盘 + 单指针 + LED 信号灯，非对称弹道）
 - **声像雷达**（Stereo Field，半圆雷达，幅度驱动声像位置）
-- **频谱声像图**（Stereo Map，按频率逐段对比 L/R，纵轴 ±1 显示声像偏向：上=L / 中=居中 / 下=R；**开发中，未发布**）
+- **频谱声像图**（Stereo Map，按频率逐段对比 L/R，纵轴 ±1 显示声像偏向：上=L / 中=居中 / 下=R；**未发布**）
+- **实时节拍 / 音乐调性**（Tempo / Key：BPM + 大调 / 自然小调 / 和声小调 / 旋律小调 + 关系调 + 可解释置信度；后台线程分析，未加载模块时完全不运行）
 - **EQ 频谱可视化**（Y2K 主题，**仅可视化，不做实际 EQ 处理**）
 
 > 细粒度拆分模块（实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest）复用同一路分析结果，后端零新增计算。
@@ -150,7 +151,7 @@
 ```
 
 ### 2.1 关键调用关系
-1. **音频入口 → 分析**：`Y2KmeterAudioProcessor::processBlock` → `AnalyserHub::pushStereo` → 分发到 5 路：`Oscilloscope / Spectrum / Loudness / Phase / Dynamics`。
+1. **音频入口 → 分析**：`Y2KmeterAudioProcessor::processBlock` → `AnalyserHub::pushStereo` → 分发到 6 路：`Oscilloscope / Spectrum / Loudness / Phase / Dynamics / MusicAnalysis`。前 5 路在音频线程内联计算；`MusicAnalysis` 只做降混 + 写入有界环形缓冲，真正的 FFT / 自相关 / chroma 在独立后台线程。
 2. **UI 拉分析结果**：`AnalyserHub` 内部 `FrameDispatcher` 在 UI 线程按目标频率（FPS 按钮 30/60/120/无上限）组装 `FrameSnapshot`，通过 `FrameListener::onFrame(frame)` 派发给所有订阅的模块。v2.9 起由 Editor 的 vblank 同步时钟驱动（§4.2），与显示器刷新同相。
 3. **模块的 UI 生命周期**：模块继承 `ModulePanel + AnalyserHub::FrameListener`，构造时 `hub.retain(Kind::xxx)` + `hub.addFrameListener(this)`，析构时对称 release + remove。**未加载的模块 → 引用计数为 0 → `pushStereo` 自动跳过对应计算路径**。
 4. **Standalone 音频源**：`Y2KStandaloneApp` 通过 `WasapiLoopbackCapture`（Win）或 `MacDesktopAudioCapture`（macOS 使用 ScreenCaptureKit）获取"系统外放音频"，直接 push 到 `AnalyserHub`（不走 `processBlock`）。DAW 场景则由宿主经 `processBlock` 送入。
@@ -178,6 +179,11 @@
 | [LoudnessMeter.cpp](/I:/Y2KMeter/source/analysis/LoudnessMeter.cpp) | K-weighting 双级 IIR + 400ms 动量 LUFS、3s 短期、全程积分（含相对门限）、100ms RMS、4× 过采样 True Peak |
 | [PhaseCorrelator.cpp](/I:/Y2KMeter/source/analysis/PhaseCorrelator.cpp) | EMA 滑动窗计算 correlation / width / balance |
 | [DynamicRangeMeter.cpp](/I:/Y2KMeter/source/analysis/DynamicRangeMeter.cpp) | 100ms 块统计 + top-20% 分位 short-DR / integrated-DR |
+| [music/RealFft.h/.cpp](/I:/Y2KMeter/source/analysis/music/RealFft.cpp) | `RealFft`：极简 radix-2 FFT（纯 C++，不依赖 JUCE，供测试目标直接链接） |
+| [music/TempoEstimator.h/.cpp](/I:/Y2KMeter/source/analysis/music/TempoEstimator.cpp) | `TempoEstimator`：46ms/25% hop 分帧 → 24 对数带谱通量 → 8s 包络归一化自相关 + 谐波梳状 + 对数正态速度先验 → 三候选中值 + 八度迟滞 + 置信度 |
+| [music/KeyEstimator.h/.cpp](/I:/Y2KMeter/source/analysis/music/KeyEstimator.cpp) | `KeyEstimator`：186ms/25% hop 分帧 → 55Hz–5kHz bin 折 12 音级 chroma → 20s 滑动窗口 → KK 轮廓 Pearson 相关（大调 / 自然 / 和声 / 旋律小调共 48 候选）+ 关系调迟滞 + 置信度 |
+| [music/MusicAnalysisEngine.h/.cpp](/I:/Y2KMeter/source/analysis/music/MusicAnalysisEngine.cpp) | 音频线程降混 + 无锁 SPSC 环形缓冲（131072 采样）；后台 `juce::Thread` 消费并发布 `Result`；**首次订阅才分配缓冲/建线程**，无模块时零资源 |
+| [music/MusicAnalysisTypes.h](/I:/Y2KMeter/source/analysis/music/MusicAnalysisTypes.h) | `Result` / `Status` / `Mode` / `KeySpelling`（按调式选常用拼写）/ `RelativeKey`（关系调）—— 纯 C++，供 UI 与测试共用 |
 
 ### 3.3 `source/ui`（UI 框架）
 | 文件 | 关键内容 |
@@ -208,6 +214,7 @@
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
 | [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式由顶部按钮切换 —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的相位抵消量（越高越严重，面积图）；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡） | `Spectrum`（L/R 分路 + mid 单声道路） |
+| [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
@@ -245,7 +252,8 @@
 - **P4 flush 钩子**：`flushPendingUiStateBeforeSave`（Editor 注册；`getStateInformation` 前 flush 掉 workspace 的 debounce 布局变更）。
 
 ### 4.2 `AnalyserHub`（[AnalyserHub.h](/I:/Y2KMeter/source/analysis/AnalyserHub.h)）
-- **枚举** `AnalyserHub::Kind`：`Oscilloscope=0 / Spectrum=1 / Loudness=2 / Phase=3 / Dynamics=4 / NumKinds=5`。
+- **枚举** `AnalyserHub::Kind`：`Oscilloscope=0 / Spectrum=1 / Loudness=2 / Phase=3 / Dynamics=4 / MusicAnalysis=5 / NumKinds=6`。
+- **MusicAnalysis 生命周期（v2.9.9 补充）**：`retain(Kind::MusicAnalysis)` 的 0→1 会调用 `musicEngine.setActive(true)`（分配环形缓冲 + 启动后台线程），`release` 到 0 时 `setActive(false)` 停线程；未加载 Tempo/Key 模块的实例不建线程、不分配缓冲、音频线程零开销。`pushStereo` 只做 `(L+R)/2` 入队，FFT/自相关/chroma 全部在工作线程。
 - **引用计数** `retain(Kind)` / `release(Kind)` / `isActive(Kind)` —— UI 线程调用；`pushStereo` 里读原子决定是否跳过某路计算。
 - **FrameSnapshot**：一帧一份聚合数据（`activeMask`、`tickCount`、示波器 L/R 2048 样本、频谱 mag 1024/4096、Loudness/Phase/Dynamics 快照）。
 - **FrameDispatcher**（pimpl）：`startFrameDispatcher(hz)` 设定目标频率（上限 120Hz）。v2.9 起支持**外部帧时钟**：Editor 挂 `juce::VBlankAttachment` 后调用 `setExternalFrameClock(true)`，内部 Timer 停转，改由 Editor 在每个 vblank（按 FPS 上限抽稀后）调用 `dispatchFrameNow(ts)` —— 分发与显示器刷新同相；vblank 停摆（显示器休眠/远程桌面）由 Editor 10Hz 看门狗切回 Timer。`FrameSnapshot` 新增 `timeSec/dtSec` 供模块做帧率无关动画，快照本身走 4 槽复用池（不再每帧 37KB make_shared）。
@@ -4739,6 +4747,93 @@ juce::OpenGLContext::CachedImage::RenderThread::renderAll
 2. 浮动模块窗口（脱离的 Milkdrop 等）创建时的 `getTotalBounds` 钳制、以及其拖拽仍走 JUCE `ComponentDragger` —— 依赖已修好的显示器表，当前行为正常；若将来 JUCE 升级丢了补丁，这两处会重新出现跨缝瞬移。
 3. macOS 走原生 `setFullScreen`，本轮补丁与物理路径均不参与（`#if JUCE_MAC` 早退 / `#if JUCE_WINDOWS` 包裹），未做实机验证。
 4. `resizeToTargetCanvas()`（预设 6~9 的"固定尺寸居中"）仍用逻辑坐标 —— 它只在**当前所在屏**内居中，不跨 DPI 换算，风险低。
+
+---
+
+## v2.9.9 补充：实时 BPM / 音乐调性分析模块（Tempo / Key）
+
+> 版本号保持 `2.9.9` 不变（按项目约定，v2.9.9 之后的功能以「补充」形式入库）。
+
+### 1. 目标与边界
+
+- 在现有 `AnalyserHub` 的 PCM 流上增加一路「节拍 + 调性」分析，**不改变任何播放 / 透传行为**；
+- 「调性」是音乐 Key（C major / A minor），不是单音 pitch；
+- 只消费软件内部已有 PCM 流（插件 `processBlock` 与 Standalone Loopback 共用 `pushStereo`），不新增麦克风 / 系统声音采集路径；
+- **未引入 aubio / libKeyFinder**：两者均为 GPL-3.0-or-later，与本工程 GPL-3.0 兼容，但 aubio 主构建是 waf（README 未承诺原生 MSVC 工具链）、libKeyFinder 强依赖 FFTW3（Windows 需 vcpkg），接入会破坏现有 Ninja + MSVC 构建。改为自研纯 C++ DSP，`TempoEstimator` / `KeyEstimator` 可整体替换。
+
+### 2. 数据流与线程模型
+
+```
+processBlock / Loopback 回调（音频线程）
+  └─ AnalyserHub::pushStereo
+       └─ MusicAnalysisEngine::pushStereo   降混 mono + 写无锁 SPSC 环形缓冲
+MusicAnalysisEngine::run（后台 juce::Thread，低优先级）
+  ├─ TempoEstimator::pushAudio
+  ├─ KeyEstimator::pushAudio
+  └─ publishResult（5 Hz 节流，SpinLock 发布 Result 拷贝）
+UI：FrameDispatcher 把 Result 拷进 FrameSnapshot → TempoKeyModule::onFrame（5 Hz 重绘）
+```
+
+- 环形缓冲 131072 采样（48k ≈ 2.7 s，512 KB），固定不增长；溢出时丢弃「新来的溢出段」并递增 `gapEpoch`，工作线程据此丢弃未凑满 hop 的残余样本；
+- 音频回调内只有降混 + 两次原子操作，无锁 / 无分配 / 无 I/O / 无日志；
+- `prepare()` 只写原子量（可从 Loopback 采集线程调用），FFT 重建由工作线程完成；仅块长变化不重置历史；
+- **非持续激活**：`retain(Kind::MusicAnalysis)` 0→1 → `setActive(true)`（分配缓冲 + 建线程），`release` 到 0 → `setActive(false)` 停线程；用户按 STOP 也会停线程而不是空转轮询。未加载模块的实例：无线程、无环形缓冲、`pushStereo` 在 Hub 侧就被引用计数跳过。
+
+### 3. BPM
+
+- 46 ms Hann / hop = 窗长/4（44.1k → 2048/512，≈86 帧/秒）；
+- 40 Hz–16 kHz 均分 24 个对数带，谱通量 = `Σ max(0, Δlog(1+60·E_band))`；
+- 8 s 包络上做归一化自相关（lag 覆盖 45–220 BPM），梳状权重 `[1, 0.5, 0.33, 0.25]`，再乘对数正态速度先验（120 BPM 中心，σ=0.85 oct，仅 0.55–1.0 的轻微偏置）；
+- 局部极大 + 抛物线插值细化周期；最近 3 个候选相对中值偏差 <4% 且连续 2 轮才发布；
+- 八度迟滞：新值与已发布值正好 2× / 0.5× 时不翻转；
+- 首次结果 ≈ 6–7 s。
+
+### 4. 调性
+
+- 186 ms Hann / hop = 窗长/4（≈21.5 帧/秒），分析频段 55 Hz–5 kHz；
+- bin → MIDI → 音级，按小数部分线性分给相邻两个音级，权重 `1/√(f/220)`；
+- 帧内 chroma 归一化 + 电平加权（−50 dB 以上满权重），写入 **20 s 滑动窗口**（按时间淘汰，转调后旧调性会滑出，不做全曲累积）；
+- 48 候选 = 12 主音 × {major, naturalMinor, harmonicMinor, melodicMinor}，与轮廓做 Pearson 相关：
+  - major / natural minor 用 Krumhansl-Kessler 实测轮廓；
+  - harmonic / melodic minor 由自然小调**构造**（把权重从 b7 / b6 转移到升高的 7 / 6 级），因此判定更保守：需比同主音自然小调高 0.03 才改标签；
+- 关系大小调切换需要 0.12 的相关性优势（其它调 0.05）且连续 2 次确认；
+- 关系调（同音阶、不同主音）按 `(major+9)%12` / `(minor+3)%12` 计算，拼写跟随主调调号侧（Eb minor → Gb major，而不是 F# major）；和声/旋律小调没有关系调；
+- 首次结果 ≈ 10–12 s。
+
+### 5. 置信度
+
+- 明确定义为**可解释的稳定性指标**，不是概率，也不是准确率；
+- BPM：`(0.35·周期性 + 0.40·候选稳定度 + 0.25·最佳/次佳峰间隔) × (0.20 + 0.80·min(1, 已分析秒/20))`；
+- 调性：`(0.60·轮廓相关度 + 0.40·与"不同主音"次佳的差距) × (0.20 + 0.80·min(1, 窗口覆盖/20))`；
+- 因为乘了「数据充分度」，刚开始听时天然偏低（≈40%）；UI 在 <50% 时标注 `(provisional)` 并半透明，信号失效时标 `(stale)` 并变暗，且不显示置信度。
+
+### 6. UI（TempoKeyModule）
+
+- 默认 352×200，最小 160×96；
+- 两列（BPM | KEY）共用几何：`computeLayout()` 同时供 `paintContent` 与 `toyHitTest` 使用，绘制与命中不可能错位；
+- 所有字号按**实测字宽**收缩（`GlyphArrangement::getStringWidth` + 迭代），窄尺寸不会裁掉 `minor` / `major` 末尾字母；标签（`KEY (provisional)`）同样收缩；
+- 关系调副行约为主数值的 0.62 倍字号，居中显示在大字下方；自然小调不写 `natural`（默认值），仅和声/旋律小调标注限定词；
+- 点击 BPM 列 → `x2 …  /2 …` 气泡；点击 KEY 列 → 当前调式 7 个音名（按调号拼写，如 `Eb F Gb Ab Bb Cb Db`）；两列都拦截点击，不再触发通用 ✨ 兜底粒子。
+
+### 7. 构建与测试
+
+- CMake：`source/analysis/music/*` 加入 `Y2KM_PLUGIN_SOURCES`；新增纯 C++ 测试目标 `Y2Kmeter_music_test`（不链接 JUCE，`add_test` 已注册）；
+- 测试覆盖：已知 BPM 点击轨（44.1 / 48 / 96 kHz，块长 37–4096）、静音、启动延迟、中途变速 90→140、已知调性（C / F# / Am）、中途转调、4 分钟长跑窗口有界、reset 语义、置信度随听音时长上升、关系调表；
+- 纯点击轨**不用于**验证调性（点击没有调性内容）。
+
+### 8. 已知限制
+
+1. chroma 的 8192 点 FFT 在 44.1k 下 bin 宽 5.38 Hz，**低于约 91 Hz 时相邻半音小于 1 个 bin**，贝斯重的素材调性容易糊；采样率越高窗越长，问题不自动缓解；
+2. 无调音（tuning）估计、无谐波抑制 / 谱白化、无打击乐分离；
+3. 和声 / 旋律小调轮廓是构造值，不是实测数据；
+4. BPM 半速 / 倍速靠弱先验 + 八度迟滞，真实素材仍可能报半速；
+5. 静音判定用 −58 dBFS，极安静段落会被当作无信号；
+6. 关系大小调在纯音频下不可完全消歧，只能靠迟滞保持稳定。
+
+### 9. 验证状态
+
+- 功能已在实机验证：模块增删、非持续激活、气泡、窄尺寸不裁字、置信度/调式显示均可用；
+- **未做识别准确率的量化评估**（无标注数据集），文档与代码中不宣称任何准确率数字。
 
 ---
 

@@ -1417,6 +1417,12 @@ private:
 
         if (pluginHolder == nullptr) return;
 
+        // 节拍 / 调性：输入源切换（麦克风 ↔ 系统 Loopback）后，
+        //   旧的 onset / chroma 窗口和 BPM 候选都来自另一个信号源，
+        //   必须整体作废，否则新源开头会沿用旧结果。
+        if (auto* proc = dynamic_cast<Y2KmeterAudioProcessor*> (pluginHolder->processor.get()))
+            proc->getAnalyserHub().resetMusicAnalysis();
+
         if (isLoopback)
         {
            #if JUCE_WINDOWS

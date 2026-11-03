@@ -21,6 +21,7 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/ui/modules/StereoFieldModule.h"
 #include "source/ui/modules/StereoMapModule.h"
+#include "source/ui/modules/TempoKeyModule.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/ui/modules/ProjectMApi.h"
@@ -1488,7 +1489,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::virtuPet,
 
         // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
-        ModuleType::milkdrop
+        ModuleType::milkdrop,
+
+        // 实时 BPM + 音乐调性（后台线程分析同一路 PCM）
+        ModuleType::tempoKey
     });
 
 #if JUCE_WINDOWS
@@ -3643,6 +3647,9 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
 
         case ModuleType::milkdrop:
             return std::make_unique<MilkdropModule>(&processor.getAnalyserHub(), this);
+
+        case ModuleType::tempoKey:
+            return std::make_unique<TempoKeyModule>(processor.getAnalyserHub());
 
         default:
             jassertfalse; // 暂未实现

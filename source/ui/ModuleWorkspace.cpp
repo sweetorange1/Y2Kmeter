@@ -182,6 +182,7 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::stereoMap:         return "stereo_map";
         case ModuleType::virtuPet:        return "virtuPet";
         case ModuleType::milkdrop:         return "milkdrop";
+        case ModuleType::tempoKey:         return "tempo_key";
     }
 
     return "eq";
@@ -217,6 +218,7 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "stereo_map",        ModuleType::stereoMap },
         { "virtuPet",         ModuleType::virtuPet },
         { "milkdrop",          ModuleType::milkdrop },
+        { "tempo_key",         ModuleType::tempoKey },
     };
     for (auto& p : kv)
         if (s == p.k)

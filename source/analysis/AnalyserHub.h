@@ -6,6 +6,8 @@
 #include <array>
 #include <deque>
 
+#include "source/analysis/music/MusicAnalysisEngine.h"
+
 // ============================================================
 // 为规避 MSVC 多文件同进程编译时 include guard 跨 TU 串扰，
 // 将 LoudnessMeter 与 AnalyserHub 合并到同一个头文件。
@@ -378,7 +380,10 @@ public:
         Loudness     = 2,  // LUFS-M/S/I + RMS L/R + TruePeak L/R
         Phase        = 3,  // correlation + width + balance
         Dynamics     = 4,  // peak/rms/crest/shortDR/integratedDR
-        NumKinds     = 5
+        // 节拍 / 调性（v3.1）：音频线程只做单声道降混 + 写有界环形缓冲，
+        // FFT / 自相关 / chroma 全部在后台分析线程执行。
+        MusicAnalysis = 5,
+        NumKinds     = 6
     };
 
     // 引用计数 +1。UI 线程调用；多次 retain 同一 Kind 也合法（相当于多个模块共享一路）。
@@ -441,6 +446,9 @@ public:
         LoudnessMeter::Snapshot      loudness {};
         PhaseCorrelator::Snapshot    phase    {};
         DynamicRangeMeter::Snapshot  dynamics {};
+
+        // 节拍 / 调性结果（含状态、更新时间；无置信度百分比）
+        y2k::music::Result musicAnalysis {};
 
         bool has (Kind kind) const noexcept
         {
@@ -575,6 +583,19 @@ public:
     // 动态范围快照
     DynamicRangeMeter::Snapshot getDynamicsSnapshot();
 
+    // ---- 节拍 / 调性分析（v3.1）----
+    //   · 引擎内部自带后台线程与有界环形缓冲，pushStereo 只做降混 + 入队；
+    //   · UI 线程通过 getMusicAnalysisResult() 或 FrameSnapshot.musicAnalysis 读取；
+    //   · resetMusicAnalysis() 等价于 UI 上的 RESET 按钮（清空窗口并重新计时）。
+    y2k::music::Result getMusicAnalysisResult() const;
+
+    void resetMusicAnalysis() noexcept;
+
+    y2k::music::MusicAnalysisEngine& getMusicAnalysisEngine() noexcept
+    {
+        return musicEngine;
+    }
+
     // ======================================================
     // Phase E —— 性能 profile（原子计数，UI 线程可随时读取）
     // ======================================================
@@ -671,6 +692,11 @@ private:
 
     // ---- 动态范围计 ----
     DynamicRangeMeter dynamicsMeter;
+
+    // ---- 节拍 / 调性分析引擎（自带后台线程 + 有界环形缓冲）----
+    //   注意：它只知道"PCM 样本"，不知道音频从哪来 —— 插件宿主与
+    //   Standalone Loopback 共用同一条 pushStereo 路径。
+    y2k::music::MusicAnalysisEngine musicEngine;
 
     // ---- 采样率缓存 ----
     //   prepare() 在音频线程准备阶段写入，getSampleRate()/频谱混合在 UI 线程读取，

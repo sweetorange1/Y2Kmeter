@@ -59,7 +59,10 @@ enum class ModuleType
     virtuPet,
 
     // Milkdrop WebGL 可视化模块（WebView 嵌入 Butterchurn 引擎）
-    milkdrop
+    milkdrop,
+
+    // 实时 BPM + 调性（v3.1）：后台线程分析 AnalyserHub 同一路 PCM
+    tempoKey
 };
 
 juce::String getModuleDisplayName(ModuleType t);
@@ -1156,7 +1159,8 @@ private:
         ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
 
         ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest,
-        ModuleType::milkdrop
+        ModuleType::milkdrop,
+        ModuleType::tempoKey
     };
 
     int nextIdCounter = 1;
