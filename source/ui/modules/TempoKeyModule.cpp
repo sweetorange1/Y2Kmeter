@@ -63,7 +63,9 @@ TempoKeyModule::TempoKeyModule (AnalyserHub& h)
     btnStartStop.onClick = [this]() { onStartStopClicked(); };
     addAndMakeVisible (btnStartStop);
 
-    btnReset.setTooltip ("Clear the analysis window and start over (BPM and key).");
+    // 若分析尚未启动，RESET 会顺手按下 START（见 onResetClicked）。
+    btnReset.setTooltip ("Clear the analysis window and start over (BPM and key). "
+                         "Starts the analysis if it is not running.");
     btnReset.onClick = [this]() { onResetClicked(); };
     addAndMakeVisible (btnReset);
 
@@ -122,7 +124,14 @@ void TempoKeyModule::onStartStopClicked()
 
 void TempoKeyModule::onResetClicked()
 {
+    auto& engine = hub.getMusicAnalysisEngine();
+
     hub.resetMusicAnalysis();
+
+    // RESET 的语义是"清空并重新开始"：如果分析还没启动（按钮仍是 START），
+    //   顺手替用户按下 START，否则重置完只会停在那里，还得再点一次才开始。
+    if (! engine.isEnabled())
+        engine.setEnabled (true);
 
     lastRepaintMs = 0.0;
     refreshButtons();

@@ -14,9 +14,12 @@
 //
 //   v2.9.x 新增第二个显示模式（顶部按钮切换）：
 //   * PAN  ：纵轴 ±1 声像位置（上面描述的语义）
-//   * MONO ：切单声道后的相位抵消量，0 = 完全兼容（贴底），
-//            1 = 完全抵消（贴顶）。数据取 Hub 的 mid 路（L+R）/2 频谱
-//            与 L/R 两路做比值，抵消越严重值越高。
+//   * MONO ：单声道保留量（**上下颠倒**）：顶边 = 100%（没有抵消），
+//            底边 = 50%（抵消达到满幅标定 kCancelFullScale）。
+//            曲线 / 填充从顶部基线向下生长 —— 抵消越严重，图形越低。
+//            数据取 Hub 的 mid 路（L+R）/2 频谱与 L/R 两路做比值。
+//   工具条右侧有一行随模式切换的说明文字（PAN：上=左 / 下=右；
+//   MONO：上=干净 / 下=单声道相位损失）。
 // ==========================================================
 class StereoMapModule : public GlDirectModuleBase,
                         public AnalyserHub::FrameListener
@@ -26,7 +29,7 @@ public:
     enum class Mode
     {
         pan = 0,      // 逐频段 L/R 声像（上 L / 中 C / 下 R）
-        cancel = 1    // 逐频段 mono 相位抵消量（越高越严重）
+        cancel = 1    // 逐频段 mono 兼容度（上 = 干净 / 下 = 严重抵消）
     };
 
     explicit StereoMapModule (AnalyserHub& hub);
@@ -63,6 +66,8 @@ private:
     void applyModeToButton();
     void drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawCurve (juce::Graphics& g, juce::Rectangle<int> plot) const;
+    // 工具条右侧的一行模式说明（字号按可用宽度收缩，窄模块不裁字）
+    void drawToolbarHint (juce::Graphics& g) const;
 
     // 悬停标尺 / 点击读数
     void drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> canvas);
@@ -75,11 +80,12 @@ private:
     static float xForNorm (float norm01, juce::Rectangle<int> plot) noexcept;
     static float normForX (float x, juce::Rectangle<int> plot) noexcept;
     static float panForY (float y, juce::Rectangle<int> plot) noexcept;
-    static float severityForY (float y, juce::Rectangle<int> plot) noexcept;
-    // 真实抵消量 → 显示值（0..1）：满幅只需 kCancelFullScale 的真实抵消
+    // MONO 纵轴（显示值 = 单声道保留量 = 1 - 真实抵消量）：
+    //   顶边 1（无抵消）/ 底边 1 - kCancelFullScale（满幅抵消）
+    static float compatForY (float y, juce::Rectangle<int> plot) noexcept;
+    // 真实抵消量 → 显示值（0..1）：满幅只需 kCancelFullScale 的真实抵消。
+    //   倒置后曲线 y = 顶边 + 显示值 × 高（显示值越大越往下 = 越糟）。
     static float cancelToDisplay (float cancel) noexcept;
-    // 显示值 → 真实抵消量（读数用）
-    static float displayToCancel (float display) noexcept;
     static juce::String formatPan (float pan);
     static juce::String formatPercent (float v);
 

@@ -32,7 +32,7 @@
 - **频谱瀑布图**（Spectrogram 像素方格风格 / Spectrogram 3D 三维曲面）
 - **模拟指针 VU 表**（半圆扇形表盘 + 单指针 + LED 信号灯，非对称弹道）
 - **声像雷达**（Stereo Field，半圆雷达，幅度驱动声像位置）
-- **频谱声像图**（Stereo Map，按频率逐段对比 L/R，纵轴 ±1 显示声像偏向：上=L / 中=居中 / 下=R；**未发布**）
+- **频谱声像图**（Stereo Map，按频率逐段对比 L/R：PAN 轴 ±1 声像偏向（上=L / 中=居中 / 下=R），MONO 轴为**倒置的单声道保留量**（上=100% 干净 / 下=50% 满幅抵消）；**未发布**）
 - **实时节拍 / 音乐调性**（Tempo / Key：BPM + 大调 / 自然小调 / 和声小调 / 旋律小调 + 关系调 + 可解释置信度；后台线程分析，未加载模块时完全不运行）
 - **EQ 频谱可视化**（Y2K 主题，**仅可视化，不做实际 EQ 处理**）
 
@@ -213,8 +213,8 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
 | [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
-| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式由顶部按钮切换 —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的相位抵消量（越高越严重，面积图）；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡） | `Spectrum`（L/R 分路 + mid 单声道路） |
-| [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
+| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式由顶部按钮切换 —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；工具条右侧一行模式说明；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡） | `Spectrum`（L/R 分路 + mid 单声道路） |
+| [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET（未启动时 RESET 会自动 START，连续 3 s 无信号自动 reset）；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
@@ -4520,9 +4520,10 @@ cancel = clamp(1 - coh, 0, 1)                    // 0 = mono 完全兼容，1 = 
 - 分母 `sqrt(L²+R²)` 是"两声道不相干时"的功率和，所以"单边信号"（只在一个声道里有内容）算出 `coh = 1 → cancel = 0`，不会被误判成抵消；
 - `ref ≈ 0`（该频段本来没内容）直接判为完全兼容，避免静音段整屏 100%；
 - 每帧只在该模式下计算，平滑用独立的 `alphaCancel = clamp(dtSec*8, 0.08, 0.40)`（比值比幅度更抖，比声像慢一档）；切模式时 `cancelByBand.clear()` 让第一帧直接对齐，不从旧值爬过来。
-- **满幅标定**：`kCancelFullScale = 0.5`（`cancelToDisplay` / `displayToCancel`）。真实抵消 50% 就顶到天花板 —— 一半抵消已经是"该处理了"，不需要等 100%。改这个常量即可调灵敏度（调小更敏感）。
+- **满幅标定**：`kCancelFullScale = 0.5`（`cancelToDisplay`）。真实抵消 50% 就触底 —— 一半抵消已经是"该处理了"，不需要等 100%。改这个常量即可调灵敏度（调小更敏感）。
 
-**显示**：面积图，高度 = `cancel / kCancelFullScale`（clamp 0..1），颜色走 `makeSeverityRamp()` 的三锚点色阶 `accent2 → warn → danger`（低端混向画布，高端按画布明暗混向 ink/hl，取样用的是换算后的显示值，所以满幅时一定是 danger 端），透明度仍由 `strengthByBand` 驱动（安静频段淡出）。纵轴标签按真实抵消量标注：`50% / 25% / 0`（随 `kCancelFullScale` 自动变）。悬停读数与气泡读数都给**真实抵消百分比**，与曲线高度是 `×2` 的关系。
+**显示（上下倒置）**：面积图的基线在**顶部**，曲线 `y = 顶边 + cancelToDisplay(cancel) × 高`，所以顶边贴住 = 完全兼容、沉到底边 = 满幅抵消；颜色仍走 `makeSeverityRamp()` 的三锚点色阶 `accent2 → warn → danger`（红 = 严重），透明度由 `strengthByBand` 驱动（安静频段淡出）。纵轴标签标的是**单声道保留量**（= 1 − 真实抵消量）：`100% / 75% / 50%`（顶 = 没有抵消，底 = 抵消达到 `kCancelFullScale`，越往下越糟）。悬停读数走 `compatForY`（顶 100% / 中 75% / 底 50%），气泡读数给该频段的 `xx% mono`（同一定义），都与曲线高度同向。
+工具条右侧有一行随模式切换的说明（`drawToolbarHint`，字号按可用宽度收缩）：PAN `L/R PER BAND   UP=L  DOWN=R`，MONO `MONO SUM   UP=CLEAN  DOWN=LOSS`。
 
 ### 4. 渲染：双路径
 
@@ -4530,11 +4531,11 @@ cancel = clamp(1 - coh, 0, 1)                    // 0 = mono 完全兼容，1 = 
 
 | 路径 | 函数 | 内容 |
 | --- | --- | --- |
-| GL 直渲染（默认） | `buildGlSnapshot()` | `appendSunkenFrame` 凹陷外壳 + 上/中/下三条基准线 + 100Hz/1k/10k 竖线。PAN：曲线（每段 `appendLineSegment`，颜色走 §3b 颜色梯度，alpha = `strength^0.92`，< 0.02 跳过）+ 每 3 段一个 `appendDisc` 圆点；MONO：面积梯形（`appendFilledBand`，底边→顶点，颜色走 §3c 抵消色阶）+ 顶部折线 |
-| GPU overlay | `paintGlOverlay()` | PAN：`L` / `C` / `R` 左轴标签（`L`/`R` 用各自侧色阶着色）；MONO：`50%` / `25%` / `0` 左轴标签（随 `kCancelFullScale` 变）+ 20/100/1k/10k/20k 频率标签 |
-| CPU 回退 | `paintLegacyContent()` → `drawBackground` + `drawCurve` | 与 GL 路径同几何同配色（PAN 折线 1.1px + 3px 圆点；MONO 逐段 `Path` 填充 + 顶线） |
-| 悬停标尺 | `mouseMove` / `mouseExit` → `paintGlOverlay` 末尾 `drawHoverRuler` | 十字线 + 坐标读数：横轴 `formatFreqHz`（20Hz–20kHz 对数轴逆映射 `normForX`），纵轴按模式取 `panForY`（`L 0.42 / C / R 0.31`）或 `severityForY`（`42%`） |
-| 点击读数 | `toyHitTest` / `toyPoke` → `ToyContext::bubble` | 气泡显示该频率的真实数据：`频率 + 平滑声像（或 "xx% cancel"）+ 平滑电平 dBFS`（`levelDbByBand`，与声像同一 `alpha` 平滑） |
+| GL 直渲染（默认） | `buildGlSnapshot()` | `appendSunkenFrame` 凹陷外壳 + 上/中/下三条基准线 + 100Hz/1k/10k 竖线。PAN：曲线（每段 `appendLineSegment`，颜色走 §3b 颜色梯度，alpha = `strength^0.92`，< 0.02 跳过）+ 每 3 段一个 `appendDisc` 圆点；MONO：面积梯形（`appendFilledBand`，**顶部基线 → 向下顶点**，颜色走 §3c 抵消色阶）+ 折线 |
+| GPU overlay | `paintGlOverlay()` | PAN：`L` / `C` / `R` 左轴标签（`L`/`R` 用各自侧色阶着色）；MONO：`100%` / `75%` / `50%` 左轴标签（保留量，顶=干净）+ 20/100/1k/10k/20k 频率标签；两条路径都会画工具条右侧的模式说明 |
+| CPU 回退 | `paintLegacyContent()` → `drawBackground` + `drawCurve` | 与 GL 路径同几何同配色（PAN 折线 1.1px + 3px 圆点；MONO 逐段 `Path` 填充 + 折线，基线同样在顶部） |
+| 悬停标尺 | `mouseMove` / `mouseExit` → `paintGlOverlay` 末尾 `drawHoverRuler` | 十字线 + 坐标读数：横轴 `formatFreqHz`（20Hz–20kHz 对数轴逆映射 `normForX`），纵轴按模式取 `panForY`（`L 0.42 / C / R 0.31`）或 `compatForY`（`88%`） |
+| 点击读数 | `toyHitTest` / `toyPoke` → `ToyContext::bubble` | 气泡显示该频率的真实数据：`频率 + 平滑声像（或 "xx% mono"）+ 平滑电平 dBFS`（`levelDbByBand`，与声像同一 `alpha` 平滑） |
 
 `getPlotBounds()` = `canvas.reduced(26, 12).withTrimmedBottom(14)`（左 26 留纵轴标签，底 14 留频率标签）。`cachedBandCount` 在 `buildGlSnapshot` 里按 plot 宽度刷新，下一帧 `computeStereoMap` 才吃到新值 —— 故意错开一帧，避免 resize 中途改 bandCount 触发 `panByBand` 重分配抖动。
 
@@ -4856,7 +4857,13 @@ UI：FrameDispatcher 把 Result 拷进 FrameSnapshot → TempoKeyModule::onFrame
 - 关系调副行约为主数值的 0.62 倍字号，居中显示在大字下方；自然小调不写 `natural`（默认值），
   仅和声/旋律小调标注限定词；
 - 点击 BPM 列 → `x2 …  /2 …` 气泡；点击 KEY 列 → 当前调式 7 个音名（按调号拼写，如 `Eb F Gb Ab Bb Cb Db`）；
-  两列都拦截点击，不再触发通用 ✨ 兜底粒子。
+  两列都拦截点击，不再触发通用 ✨ 兜底粒子；
+- **RESET 联动 START**：分析未启动时按 RESET，会顺手按下 START（RESET 的语义是"清空并重新开始"），
+  不用再点一次 START 才能开始分析；
+- **静音自动重置**：连续 3.0 s 完全没有信号（< −58 dBFS）→ 引擎自动执行一次 reset（与按 RESET 等效），
+  BPM / KEY 回到 `--`、状态停在 `NO SIGNAL`；1.2–3.0 s 之间仍是原逻辑（保留旧读数并标注 `(stale)`）。
+  同一静音周期只触发一次 —— `silentSamples` 继续累加、`silenceResetDone` 置位，恢复有声后才重新武装，
+  因此不会每隔 3 秒反复重置。
 
 ### 7. 构建与测试
 
@@ -4876,7 +4883,7 @@ UI：FrameDispatcher 把 Result 拷进 FrameSnapshot → TempoKeyModule::onFrame
    或踩镲形成 3:2 网格），纯周期性判据会选错层级；直方图投票只能让输出**稳定**，不能凭空造出证据；
    实测有一首 trap 伴奏稳定报 92（真值 138），换特征（低频 onset）才有可能修好；
 4. 调性在真实混音（含鼓 / 808 / 密集编曲）上仍偏弱：4 首商用伴奏里 3 首调性判错，仅有 1 首正确；
-5. 静音判定用 −58 dBFS，极安静段落会被当作无信号；
+5. 静音判定用 −58 dBFS，极安静段落会被当作无信号（连续 3 s 还会自动 reset，读数被清成 `--`）；
 6. 关系大小调在纯音频下不可完全消歧，只能靠迟滞保持稳定。
 
 ### 9. 验证状态
@@ -5039,6 +5046,75 @@ UI：RecorderModule 10 Hz Timer 轮询 isTaking / getTakeSeconds / getStatusText
 
 - 浮动模式最小尺寸与嵌入态完全一致（对所有模块生效，不只 Recorder）；
 - 切换主题时浮动模块的背景、文字、图表配色立即跟随。
+
+---
+
+## v2.9.9 补充：Tempo / Key 交互优化 + Stereo Map MONO 倒置
+
+> 本轮只改交互与显示层：不新增模块、不改分析算法，`JucePlugin_VersionString` 仍为 `2.9.9`。
+
+### 1. Tempo / Key：RESET 联动 START
+
+`TempoKeyModule::onResetClicked()` 先 `hub.resetMusicAnalysis()`，若引擎 `! isEnabled()`
+（按钮仍是 START）再 `setEnabled(true)`：
+
+- 顺序是"先 reset 请求、后启动" —— 线程还没起来时请求留在 `resetRequested` 里，由工作线程
+  第一轮消费，不会出现"先启动、再去清一半数据"的空窗；
+- `refreshButtons()` 随后把按钮文案刷成 `STOP`，用户不需要再点一次 START；
+- tooltip 同步说明（"Starts the analysis if it is not running."）。
+
+### 2. Tempo / Key：无信号 3 秒自动 reset
+
+`MusicAnalysisEngine` 原本是两级静音处理：1.2 s → `NO SIGNAL`（保留旧读数、UI 标 `(stale)`），
+3.0 s → 只清 onset/chroma 窗口。本轮把第二级升级为**完整 reset**（与按 RESET 等效）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `kClearAfterSilence` | 更名 `kAutoResetSeconds = 3.0`（语义从"清窗口"变成"自动 reset"） |
+| `autoResetForSilence()` | 新增：`tempo.reset()` + `key.reset()` + `fedSamples = 0`；锁内把 `published` 置空并写 `Status::noSignal`（`enabled == false` 时写 `idle`），`lastPublishMs = 0` 让下一轮立刻发布 |
+| `silenceCleared` | 更名 `silenceResetDone`：同一个静音周期只触发一次 |
+| `run()` 静音分支 | 超时 → `autoResetForSilence()` + 置位；恢复有声才重新武装 |
+
+**为什么不复用 `clearAccumulation()`**：它会把 `silentSamples` 清零，于是"静音 3 秒"的判定
+每 3 秒重新触发一次（无限循环 reset）。自动 reset 必须保留静音计时，只清分析状态。
+
+结果：静音满 3 s 后读数变 `--`、状态停在 `NO SIGNAL`；恢复播放从零重新分析（BPM 约数秒、
+调性约 10–12 s）。
+
+### 3. Stereo Map：MONO 模式上下倒置
+
+- 面积图基线从底部移到**顶部**（`baseY = plot.getY() + 1`，
+  `y = baseY + cancelToDisplay(cancel) × 高`）：完全兼容时曲线贴顶，抵消越严重越沉底；
+- 纵轴改为**单声道保留量 = 1 − 真实抵消量**：顶 `100%` / 中 `75%` / 底 `50%`
+  （底 = 抵消达到 `kCancelFullScale`）；上下边界线颜色对调（顶 = 色阶低端"兼容"，
+  底 = `danger` 端"严重"）；
+- 悬停读数走 `compatForY(y)`（同一套换算：顶部 100%、中线 75%、底部 50%）；
+  点击气泡给该频段的 `xx% mono`（= `1 − cancelByBand`）；
+- GL 直渲染与 CPU 回退两条路径同几何（`appendFilledBand` 基线在顶部 / `Path` 填充同理）；
+  `Mode` 枚举与布局存档格式不变（仍是 `pan` / `cancel`）。
+
+**换算易错点**：曲线高度用 `cancel / kCancelFullScale`（0..1 的显示值），读数用 `1 − cancel`
+（0.5..1.0 的保留量）。两者不是同一个量 —— 不要把 `cancelToDisplay()` 的结果直接当读数用
+（这是本轮返工一次的原因）。
+
+### 4. Stereo Map：工具条模式说明
+
+新增 `StereoMapModule::drawToolbarHint()`：与模式按钮同一行、靠右对齐，随模式切换：
+
+| 模式 | 文字 |
+| --- | --- |
+| PAN | `L/R PER BAND   UP=L  DOWN=R` |
+| MONO | `MONO SUM   UP=CLEAN  DOWN=LOSS` |
+
+- 字号先按行高取（6.5–9.0），再按 `GlyphArrangement::getStringWidth` 迭代收缩到可用宽度；
+- 在 `paintGlOverlay()` 开头调用 —— `paintLegacyContent()` 末尾也会调它，两条渲染路径都覆盖；
+- 可用宽度 < 36 px 或工具条隐藏（内容区高度 < 5 × 工具条）时不画。
+
+### 5. 验证状态
+
+- 用户实测：MONO 倒置后的曲线方向、左侧刻度（100/75/50）与悬停读数均正确；
+- 本轮改了 `.h`（`MusicAnalysisEngine.h` / `StereoMapModule.h` / `TempoKeyModule.h`），
+  按项目约定需要全量构建，建议清理 obj 后重编，不要只做增量链接。
 
 ---
 

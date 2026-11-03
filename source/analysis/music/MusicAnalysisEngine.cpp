@@ -11,7 +11,7 @@ namespace
 {
     constexpr float  kSilenceDb        = -58.0f;   // 低于此电平视为静音
     constexpr double kNoSignalSeconds  = 1.2;      // 超过此时长 → NO SIGNAL
-    constexpr double kClearAfterSilence = 3.0;     // 超过此时长 → 清空分析窗口
+    constexpr double kAutoResetSeconds = 3.0;      // 超过此时长 → 自动 reset（清空读数）
     constexpr double kPublishIntervalMs = 200.0;
 }
 
@@ -171,9 +171,33 @@ void MusicAnalysisEngine::clearAccumulation()
     tempo.resetAccumulation();
     key.resetAccumulation();
 
-    fedSamples     = 0.0;
-    silentSamples  = 0.0;
-    silenceCleared = false;
+    fedSamples       = 0.0;
+    silentSamples    = 0.0;
+    silenceResetDone = false;
+}
+
+void MusicAnalysisEngine::autoResetForSilence()
+{
+    // 与用户按 RESET 等效（但不重新启动线程）：
+    //   清空已发布的 BPM / 调性与全部累积窗口，界面回到 "--"。
+    // 注意：这里刻意不调用 clearAccumulation() —— 它会把 silentSamples 清零，
+    //   导致"静音 3 秒"的判定每 3 秒重新触发一次；静音计时必须继续累加。
+    tempo.reset();
+    key.reset();
+
+    fedSamples = 0.0;
+
+    const bool running = enabled.load (std::memory_order_relaxed);
+
+    {
+        const juce::SpinLock::ScopedLockType sl (resultLock);
+        published = Result {};
+        published.status = running ? Status::noSignal : Status::idle;
+        published.publishedMs = juce::Time::currentTimeMillis();
+        lastPublished = published;
+    }
+
+    lastPublishMs = 0.0;
 }
 
 void MusicAnalysisEngine::applyPendingFormat()
@@ -404,21 +428,20 @@ void MusicAnalysisEngine::run()
         {
             silentSamples += (double) take;
 
-            if (! silenceCleared
+            if (! silenceResetDone
                 && appliedSampleRate > 0.0
-                && silentSamples > appliedSampleRate * kClearAfterSilence)
+                && silentSamples > appliedSampleRate * kAutoResetSeconds)
             {
-                // 长时间静音：清空 onset / chroma 窗口，防止恢复播放后沿用旧片段。
-                tempo.resetAccumulation();
-                key.resetAccumulation();
-                fedSamples = 0.0;
-                silenceCleared = true;
+                // 连续 3 秒没有任何信号：自动 reset（等价于用户按 RESET 按钮），
+                // 同时清掉 onset / chroma 窗口，防止恢复播放后沿用旧片段。
+                autoResetForSilence();
+                silenceResetDone = true;
             }
         }
         else
         {
-            silentSamples  = 0.0;
-            silenceCleared = false;
+            silentSamples    = 0.0;
+            silenceResetDone = false;
         }
 
         tempo.pushAudio (scratch.data(), take);

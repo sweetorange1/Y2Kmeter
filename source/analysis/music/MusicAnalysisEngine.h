@@ -34,6 +34,11 @@
 //   · 空闲不足时丢弃"新来的溢出部分"，并递增 gapEpoch；工作线程发现 epoch
 //     变化会丢弃未凑满 hop 的残余样本，避免把拼接波形送进 FFT。
 //   · 丢样只会让某一帧的 onset/chroma 略有偏差，不会累积、不会阻塞。
+//
+// 静音策略（两级）：
+//   · 连续 1.2 秒静音 → 状态切 NO SIGNAL，保留旧读数但标记 stale（UI 变暗）；
+//   · 连续 3.0 秒静音 → 自动执行一次完整 reset（等价于用户按 RESET），
+//     读数清成 "--"，并且同一个静音周期内只触发一次。
 // ==========================================================
 
 namespace y2k::music
@@ -87,6 +92,11 @@ private:
     void publishResult (bool force);
     void discardQueuedAudio() noexcept;
 
+    // 连续无信号超时后的自动重置（等价于用户按 RESET 按钮）：
+    //   清空 BPM / 调性的已发布结果与累积窗口，但**保留** silentSamples 与
+    //   silenceResetDone，使得同一个静音周期内只触发一次（恢复有声后才重新武装）。
+    void autoResetForSilence();
+
     // 首次订阅时才分配缓冲 / 创建线程（未加载模块时零资源占用）
     bool ensureBuffers() noexcept;
     void startWorker() noexcept;
@@ -119,10 +129,10 @@ private:
 
     std::vector<float> scratch;
 
-    double fedSamples    = 0.0;
-    double silentSamples = 0.0;
-    bool   silenceCleared = false;
-    int    emptyPolls    = 0;
+    double fedSamples       = 0.0;
+    double silentSamples    = 0.0;
+    bool   silenceResetDone = false;   // 本轮静音周期是否已自动 reset（避免反复重置）
+    int    emptyPolls       = 0;
 
     mutable juce::SpinLock resultLock;
     Result published;

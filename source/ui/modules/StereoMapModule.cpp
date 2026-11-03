@@ -164,9 +164,51 @@ void StereoMapModule::applyModeToButton()
     btnMode.setButtonText (mode == Mode::pan ? "PAN" : "MONO");
     btnMode.setTooltip (mode == Mode::pan
         ? juce::String ("Mode: Pan - per-band L/R position (up = left, down = right). Click for Mono.")
-        : juce::String ("Mode: Mono - phase cancellation after summing to mono. "
-                        "Full scale = " + formatPercent (kCancelFullScale)
-                        + " cancellation (higher = worse). Click for Pan."));
+        : juce::String ("Mode: Mono - level retained after summing to mono. Top = 100%, bottom = "
+                        + formatPercent (1.0f - kCancelFullScale)
+                        + " (full-scale cancellation). Lower = worse. Click for Pan."));
+}
+
+// ==========================================================
+// 工具条右侧的模式说明
+//   与模式按钮同一行、靠右对齐；字号先按行高取，再按实测字宽收缩，
+//   模块被拉窄时不裁字（窄到放不下就整体不画）。
+// ==========================================================
+void StereoMapModule::drawToolbarHint (juce::Graphics& g) const
+{
+    const auto tb = getToolbarBounds (getContentBounds());
+
+    if (tb.isEmpty() || tb.getHeight() < 8)
+        return;
+
+    const int btnW = juce::jmin (tb.getWidth(), PinkXP::ui (58));
+    auto area = tb.withTrimmedLeft (btnW + PinkXP::ui (6)).reduced (PinkXP::ui (2), 0);
+
+    if (area.getWidth() < 36 || area.getHeight() < 6)
+        return;
+
+    // 纯 ASCII：Silkscreen 只保证拉丁字形，中文/箭头会落到缺字方框
+    const juce::String text = (mode == Mode::pan)
+        ? juce::String ("L/R PER BAND   UP=L  DOWN=R")
+        : juce::String ("MONO SUM   UP=CLEAN  DOWN=LOSS");
+
+    float h = juce::jlimit (6.5f, 9.0f, (float) area.getHeight() * 0.58f);
+    const float avail = (float) area.getWidth() - 2.0f;
+
+    for (int pass = 0; pass < 4; ++pass)
+    {
+        const juce::Font f = PinkXP::getAxisFont (h, juce::Font::plain);
+        const float w = juce::GlyphArrangement::getStringWidth (f, text);
+
+        if (w <= avail || h <= 6.0f)
+            break;
+
+        h = juce::jmax (6.0f, h * avail / w);
+    }
+
+    g.setFont (PinkXP::getAxisFont (h, juce::Font::plain));
+    g.setColour (PinkXP::ink.withAlpha (0.62f));
+    g.drawText (text, area, juce::Justification::centredRight, false);
 }
 
 juce::ValueTree StereoMapModule::saveModuleSpecificState() const
@@ -413,7 +455,7 @@ void StereoMapModule::buildGlSnapshot()
         const float yBot = (float) plot.getBottom();
 
         // 上下边界线：PAN 模式用对应侧色相（上 = L / 下 = R）；
-        //   MONO 模式用抵消色阶的两端（上 = 100% 严重 / 下 = 0 兼容）。
+        //   MONO 模式已倒置：上 = 兼容（100%）/ 下 = 满幅抵消，所以顶部用色阶低端。
         if (mode == Mode::pan)
         {
             const SideRamp edgeL = makeSideRamp (PinkXP::sel);
@@ -430,10 +472,10 @@ void StereoMapModule::buildGlSnapshot()
             const SideRamp sev = makeSeverityRamp();
 
             appendLineSegment (snap->vertices, x0, yTop, x1, yTop, 0.5f,
-                               sampleRamp (sev, 0.98f).withAlpha (0.42f));
+                               sampleRamp (sev, 0.10f).withAlpha (0.42f));
             appendLineSegment (snap->vertices, x0, yMid, x1, yMid, 0.6f, PinkXP::ink.withAlpha (0.35f));
             appendLineSegment (snap->vertices, x0, yBot, x1, yBot, 0.5f,
-                               sampleRamp (sev, 0.10f).withAlpha (0.35f));
+                               sampleRamp (sev, 0.98f).withAlpha (0.35f));
         }
 
         for (const float f : { 100.0f, 1000.0f, 10000.0f })
@@ -497,13 +539,14 @@ void StereoMapModule::buildGlSnapshot()
         }
         else
         {
-            // MONO 模式：面积图。高度 = 抵消量（底 0 / 顶 100%），颜色走抵消色阶。
+            // MONO 模式：面积图（倒置）。基线在**顶部**，曲线越往下 = 抵消越严重，
+            //   顶部贴边 = 完全兼容。颜色仍走抵消色阶（红 = 严重）。
             const int n = (int) cancelByBand.size();
             if (n > 1)
             {
                 const int start = (int) snap->vertices.size() / 6;
                 const SideRamp sev = makeSeverityRamp();
-                const float baseY = (float) plot.getBottom() - 1.0f;
+                const float baseY = (float) plot.getY() + 1.0f;
                 const float spanH = (float) juce::jmax (1, plot.getHeight() - 1);
 
                 for (int i = 0; i < n - 1; ++i)
@@ -516,8 +559,8 @@ void StereoMapModule::buildGlSnapshot()
                     // cancelByBand 存真实值，绘制前换算成显示值（满幅 = 50% 抵消）
                     const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
                     const float cB = cancelToDisplay (cancelByBand[(size_t) (i + 1)]);
-                    const float yA = baseY - cA * spanH;
-                    const float yB = baseY - cB * spanH;
+                    const float yA = baseY + cA * spanH;
+                    const float yB = baseY + cB * spanH;
 
                     const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
                     const float a = std::pow (s, 0.88f);
@@ -546,6 +589,9 @@ void StereoMapModule::buildGlSnapshot()
 
 void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
 {
+    // 工具条右侧的模式说明（两条绘制路径共用：paintLegacyContent 末尾也会调本函数）
+    drawToolbarHint (g);
+
     const auto plot = getPlotBounds (canvas);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
         return;
@@ -567,22 +613,20 @@ void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> ca
     }
     else
     {
-        // MONO 模式纵轴（真实抵消量）：满幅标定 = kCancelFullScale（默认 50%）
-        //   顶 = 50%（满幅）/ 中 = 25% / 底 = 0（完全兼容）
+        // MONO 模式纵轴已倒置：刻度是"单声道保留量"（= 1 - 真实抵消量），
+        //   顶 = 100%（没有抵消）/ 中 = 75% / 底 = 50%（抵消达到满幅标定）。
         const SideRamp sev = makeSeverityRamp();
-        const juce::String topLabel = formatPercent (kCancelFullScale);
-        const juce::String midLabel = formatPercent (kCancelFullScale * 0.5f);
 
         g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
 
-        g.setColour (sampleRamp (sev, 0.90f).withAlpha (0.85f));
-        g.drawText (topLabel, plot.getX() - 25, plot.getY() - 5, 24, 11,
+        g.setColour (sampleRamp (sev, 0.10f).withAlpha (0.80f));
+        g.drawText ("100%", plot.getX() - 25, plot.getY() - 5, 24, 11,
                     juce::Justification::centredRight, false);
         g.setColour (PinkXP::ink.withAlpha (0.62f));
-        g.drawText (midLabel, plot.getX() - 25, plot.getCentreY() - 5, 24, 11,
+        g.drawText ("75%", plot.getX() - 25, plot.getCentreY() - 5, 24, 11,
                     juce::Justification::centredRight, false);
-        g.setColour (PinkXP::ink.withAlpha (0.48f));
-        g.drawText ("0", plot.getX() - 25, plot.getBottom() - 6, 24, 11,
+        g.setColour (sampleRamp (sev, 0.90f).withAlpha (0.85f));
+        g.drawText ("50%", plot.getX() - 25, plot.getBottom() - 6, 24, 11,
                     juce::Justification::centredRight, false);
     }
 
@@ -661,11 +705,11 @@ juce::String StereoMapModule::makeCoordReadout (juce::Point<int> pos, juce::Rect
 
     const float freq = freqAt (normForX ((float) pos.x, plot));
 
-    // 纵轴读数一律给"真实量"：PAN = 声像 ±1，MONO = 真实抵消百分比
-    //   （曲线高度是显示值，满幅对应 kCancelFullScale，读数要换算回去）
+    // 纵轴读数：PAN = 声像 ±1；MONO = 单声道兼容度（顶 100% / 底 0%，
+    //   与倒置后的曲线高度同向 —— 越往下越糟）
     const juce::String yText = (mode == Mode::pan)
         ? formatPan (panForY ((float) pos.y, plot))
-        : formatPercent (displayToCancel (severityForY ((float) pos.y, plot)));
+        : formatPercent (compatForY ((float) pos.y, plot));
 
     return PinkXP::formatFreqHz (freq) + "  " + yText;
 }
@@ -686,8 +730,9 @@ juce::String StereoMapModule::makeDataReadout (float x, juce::Rectangle<int> plo
     }
     else if ((int) cancelByBand.size() > idx)
     {
-        text << "  " << formatPercent (juce::jlimit (0.0f, 1.0f, cancelByBand[(size_t) idx]))
-             << " cancel";
+        // 与纵轴同一套刻度：mono 保留量 = 1 - 真实抵消量（100% = 完全兼容）
+        const float keep = 1.0f - juce::jlimit (0.0f, 1.0f, cancelByBand[(size_t) idx]);
+        text << "  " << formatPercent (keep) << " mono";
     }
 
     if ((int) levelDbByBand.size() > idx)
@@ -753,9 +798,10 @@ void StereoMapModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> ca
     {
         const SideRamp sev = makeSeverityRamp();
 
-        g.setColour (sampleRamp (sev, 0.98f).withAlpha (0.42f));
+        // 倒置后：顶 = 兼容（色阶低端）/ 底 = 满幅抵消（色阶高端）
+        g.setColour (sampleRamp (sev, 0.10f).withAlpha (0.42f));
         g.drawHorizontalLine (plot.getY(), (float) plot.getX(), (float) plot.getRight());
-        g.setColour (sampleRamp (sev, 0.10f).withAlpha (0.35f));
+        g.setColour (sampleRamp (sev, 0.98f).withAlpha (0.35f));
         g.drawHorizontalLine (plot.getBottom(), (float) plot.getX(), (float) plot.getRight());
     }
 
@@ -774,13 +820,14 @@ void StereoMapModule::drawCurve (juce::Graphics& g, juce::Rectangle<int> plot) c
 {
     if (mode == Mode::cancel)
     {
-        // MONO 模式（CPU 回退）：与 GL 路径一致的面积图
+        // MONO 模式（CPU 回退）：与 GL 路径一致的倒置面积图（基线在顶部，
+        //   曲线越往下 = 抵消越严重）
         const int n = (int) cancelByBand.size();
         if (n <= 1)
             return;
 
         const SideRamp sev = makeSeverityRamp();
-        const float baseY = (float) plot.getBottom() - 1.0f;
+        const float baseY = (float) plot.getY() + 1.0f;
         const float spanH = (float) juce::jmax (1, plot.getHeight() - 1);
 
         for (int i = 0; i < n - 1; ++i)
@@ -792,8 +839,8 @@ void StereoMapModule::drawCurve (juce::Graphics& g, juce::Rectangle<int> plot) c
 
             const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
             const float cB = cancelToDisplay (cancelByBand[(size_t) (i + 1)]);
-            const float yA = baseY - cA * spanH;
-            const float yB = baseY - cB * spanH;
+            const float yA = baseY + cA * spanH;
+            const float yB = baseY + cB * spanH;
 
             const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
             const float a = std::pow (s, 0.88f);
@@ -914,22 +961,23 @@ float StereoMapModule::panForY (float y, juce::Rectangle<int> plot) noexcept
     return juce::jlimit (-1.0f, 1.0f, ((float) plot.getCentreY() - y) / halfH);
 }
 
-// MONO 模式纵轴（显示值）：底边 = 0（完全兼容），顶边 = 1（满幅 = kCancelFullScale 的真实抵消）
-float StereoMapModule::severityForY (float y, juce::Rectangle<int> plot) noexcept
+// MONO 模式纵轴（倒置后基线在顶部）：
+//   轴值 = 单声道保留量 = 1 - 真实抵消量
+//   顶边 = 1.00（没有抵消），底边 = 1 - kCancelFullScale（抵消达到满幅标定）
+//   所以从上到下读数是 100% → 75% → 50%，与曲线高度一致。
+float StereoMapModule::compatForY (float y, juce::Rectangle<int> plot) noexcept
 {
     const float h = (float) juce::jmax (1, plot.getHeight() - 1);
-    return juce::jlimit (0.0f, 1.0f, ((float) plot.getBottom() - 1.0f - y) / h);
+    const float display = juce::jlimit (0.0f, 1.0f,
+                                        ((float) y - (float) plot.getY() - 1.0f) / h);
+
+    return 1.0f - display * kCancelFullScale;
 }
 
 // 真实抵消量 → 显示值：抵消一半（kCancelFullScale）即顶到天花板。
 float StereoMapModule::cancelToDisplay (float cancel) noexcept
 {
     return juce::jlimit (0.0f, 1.0f, cancel / kCancelFullScale);
-}
-
-float StereoMapModule::displayToCancel (float display) noexcept
-{
-    return juce::jlimit (0.0f, 1.0f, display) * kCancelFullScale;
 }
 
 juce::String StereoMapModule::formatPan (float pan)
