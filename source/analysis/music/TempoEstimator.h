@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <vector>
 
 #include "source/analysis/music/RealFft.h"
@@ -95,7 +96,27 @@ private:
 
     // onset 包络环形缓冲
     std::vector<float> onsetEnv;
+    // ---- onset 第二路：音级分布变化率 ----
+    //   bin → 音级（12 类）；两个相邻帧的 chroma 向量 L1 距离 = "和声变了多少"。
+    //   这是给"没有鼓、只有织体"的素材用的：那类音频每个频带的能量此起彼伏，
+    //   正增量之和几乎恒定（谱通量失效），但音高/和弦在变。
+    std::vector<int>  binPc;
+    std::array<float, 12> chromaNow {};
+    std::array<float, 12> chromaPrev {};
+    bool  chromaPrevValid = false;
+    float onsetBaseline   = 0.0f;   // 起音强度的慢速均值（去基线用）
+    float fluxMean        = 0.0f;   // 谱通量的慢速均值（判断"是否能量突增"）
+    int   chromaRefractory = 0;     // 鼓击后的不应期（帧）：期间不用 chroma 路
+
+    // 纯谱通量（不含 chroma 路）的并行包络：用于判断"该用哪一路"
+    std::vector<float> envFlux;
+    std::vector<float> envFluxLinear;
+    std::vector<float> envFluxZero;
+    float pendingFlux = 0.0f;
+
     std::vector<float> envLinear;
+    // 去直流后的包络副本（T1：只给自相关 / 梳状评分用，拍峰挑选仍用 envLinear）
+    std::vector<float> envZeroMean;
     std::vector<float> acf;
     std::vector<float> comb;
     int       envCapacity  = 0;
@@ -107,8 +128,12 @@ private:
     int minEstimateFrames   = 344;
 
     std::vector<float> recentBpm;
+    std::vector<float> voteWeight;   // 与 recentBpm 一一对应的票重（梳状得分）
     int stableRounds  = 0;
     int unstableCount = 0;
+
+    // T3：连续"八度不同意"的轮数（逃生口用，防止迟滞把错误八度永久锁死）
+    int octaveHoldRounds = 0;
 
     bool          published    = false;
     float         publishedBpm = 0.0f;

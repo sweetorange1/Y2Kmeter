@@ -61,6 +61,19 @@ namespace
     constexpr float kChromaFMinHz = 55.0f;    // A1
     constexpr float kChromaFMaxHz = 5000.0f;
 
+    // ---- K1 调音基准 ----
+    constexpr int   kOctaveSlots      = 120;    // 每八度 120 格 = 每格 10 音分
+    constexpr float kOctAccDecay      = 0.95f;  // 每帧衰减，约 2 秒记忆
+    constexpr float kTuningResetCents = 15.0f;  // 偏移变化超过此值 → 整窗作废
+
+    // ---- K3 谐波感知 chroma ----
+    constexpr int   kHarmonics        = 6;
+    constexpr int   kNoteLo           = 28;     // E1 ≈ 41 Hz（施工单默认；K3 从低到高抵消）
+    constexpr int   kNoteHi           = 96;     // C7 ≈ 2093 Hz
+    constexpr float kSubCoeff         = 0.30f;  // 残差抵消系数（§可调）
+    constexpr float kHarmWeight[kHarmonics] =
+        { 1.0f, 0.5f, 1.0f / 3.0f, 0.25f, 0.20f, 1.0f / 6.0f };
+
     // 关系大小调判定（三种小调都算"小调"一侧）
     bool isRelativePair (int rootA, Mode modeA, int rootB, Mode modeB) noexcept
     {
@@ -103,6 +116,10 @@ void KeyEstimator::prepare (double newSampleRate)
 
     frameBuf.assign ((size_t) windowSize, 0.0f);
     mag.assign ((size_t) fft.numBins(), 0.0f);
+    magWhite.assign ((size_t) fft.numBins(), 0.0f);
+    whitPrefix.assign ((size_t) fft.numBins() + 1, 0.0f);
+    residual.assign ((size_t) fft.numBins(), 0.0f);
+    octAcc.fill (0.0f);
     hist.assign ((size_t) windowSize, 0.0f);
 
     // 上限固定按最大窗口（30s）分配，运行期按 windowSec 淘汰 → 内存有界。
@@ -134,6 +151,14 @@ void KeyEstimator::resetAccumulation()
     pendingVotes = 0;
 
     keyConfidence = 0.0f;
+
+    // K1：调音基准相关的累积也一起清空（换源 / 静音后重新估计）
+    octAcc.fill (0.0f);
+    tuningCentsValue = 0.0f;
+    chromaTuning     = 0.0f;
+    chromaTuningInit = false;
+    tuningInit       = false;
+    tuningDriftRounds = 0;
 
     // 保留 publishedRoot / publishedMode（UI 可以继续显示"旧结果"并标注时效），
     // 但当前窗口不再支持它 → 不能算作有效结果。
@@ -186,6 +211,266 @@ void KeyEstimator::pushAudio (const float* mono, int numSamples)
     }
 }
 
+// ==========================================================
+// K2：谱白化
+//   用 1/3 倍频程（约 ±26%）滑动平均作为"局部基准"，原始幅度除以它。
+//   效果：任何平滑的频谱倾斜（音色、低通、响度）被压平，谐波峰相对放大。
+//   复杂度：前缀和实现，O(numBins)，每帧一次。
+// ==========================================================
+void KeyEstimator::applyWhitening (const float* magIn, int numBins, float* magOut)
+{
+    if ((int) whitPrefix.size() < numBins + 1)
+        whitPrefix.assign ((size_t) numBins + 1, 0.0f);
+
+    whitPrefix[0] = 0.0f;
+
+    for (int b = 0; b < numBins; ++b)
+        whitPrefix[(size_t) b + 1] = whitPrefix[(size_t) b] + magIn[b];
+
+    magOut[0] = 0.0f;
+
+    for (int b = 1; b < numBins; ++b)
+    {
+        const int lo = std::max (1, (int) std::floor ((double) b / 1.26));
+        const int hi = std::min (numBins - 1, (int) std::ceil ((double) b * 1.26));
+
+        const float sum = whitPrefix[(size_t) hi + 1] - whitPrefix[(size_t) lo];
+        const float avg = sum / (float) (hi - lo + 1);
+
+        // 部分白化（指数 0.5）：完全白化连低音一起压平，chroma 会退化成
+        //   "音高出现次数"，I–IV–V–I 这类进行被稳定判成属调（实测 C→G）。
+        //   取平方根 = 压平一半频谱倾斜：既剥离音色，又保留低音（调性最强的
+        //   线索）的权重。轮廓相关分类器本身没有概率模型来补偿频谱倾斜，
+        //   所以白化只能是部分的。
+        magOut[b] = magIn[b] / (std::sqrt (avg) + 1.0e-9f);
+    }
+}
+
+// ==========================================================
+// K1：八度直方图累积
+//   把白化谱按 10 音分一格归到 120 格里，带一阶衰减（约 2 秒记忆）。
+//   分 120 格而不是直接折 12 个音级：只有保留亚半音分辨率，才能测出
+//   "A4 其实是 447 Hz"这种整体偏移。
+//   白化后的噪声底约为 1，先减去它，只累积"超出局部平均"的音调峰，
+//   否则 120 格会被平坦底噪填满，集中度对比度变差。
+// ==========================================================
+void KeyEstimator::accumulateOctaveHistogram (const float* mag, const float* white,
+                                              int numBins, double binHz)
+{
+    for (auto& v : octAcc)
+        v *= kOctAccDecay;
+
+    //   调音估计只用低频段（55–700 Hz）：这一段里绝大多数谱峰就是**基频**，
+    //   而高次谐波（3 次 = +702 音分、5 次 = +386 音分）会把 12 格折叠的
+    //   集中度目标拉偏几十音分。实测把范围放到 5 kHz 时，"标准音高"素材
+    //   会被系统性估成 -12…-20 音分。
+    const double fMax = std::min ((double) kChromaFMaxHz, sampleRate * 0.45);
+    const double fMin = (double) kChromaFMinHz;
+
+    // 门限按"本帧带内白化谱均值"自适应，而不是写死绝对值：
+    //   部分白化（sqrt）之后幅度量纲会随信号变化，绝对值门限在真实素材上
+    //   会把全部基频拒掉（实测 accepted=0）。
+    double meanWhite = 0.0;
+    int    meanCount = 0;
+
+    for (int b = 1; b + 1 < numBins; ++b)
+    {
+        const double f = (double) b * binHz;
+
+        if (f < fMin || f > fMax)
+            continue;
+
+        meanWhite += (double) white[(size_t) b];
+        ++meanCount;
+    }
+
+    if (meanCount <= 0)
+        return;
+
+    meanWhite /= (double) meanCount;
+
+    for (int b = 1; b + 1 < numBins; ++b)
+    {
+        const double y0 = (double) mag[(size_t) (b - 1)];
+        const double y1 = (double) mag[(size_t) b];
+        const double y2 = (double) mag[(size_t) (b + 1)];
+
+        // 只累积"明显的音调峰"：白化值高于带内均值 2 倍，且是原始幅度局部峰
+        if ((double) white[(size_t) b] <= meanWhite * 2.0 || y1 < y0 || y1 < y2)
+            continue;
+
+        // 抛物线插值求 sub-bin 频率。
+        //   不做这一步，单 bin 量化误差（±2.7 Hz）在 55 Hz 处就是 ±80 音分，
+        //   足以把调音估计本身拉偏几十音分。
+        const double denom = y0 - 2.0 * y1 + y2;
+        const double delta = (std::abs (denom) > 1.0e-12)
+                                 ? std::clamp (0.5 * (y0 - y2) / denom, -0.5, 0.5)
+                                 : 0.0;
+
+        const double f = ((double) b + delta) * binHz;
+
+        if (f < fMin || f > fMax)
+            continue;
+
+        const double m = y1;
+
+        if (m <= 0.0)
+            continue;
+
+        const double midi  = 69.0 + 12.0 * std::log2 (f / 440.0);
+        double       cents = std::fmod (midi * 100.0, 1200.0);
+
+        if (cents < 0.0)
+            cents += 1200.0;
+
+        const int    slot = std::clamp ((int) (cents / 10.0), 0, kOctaveSlots - 2);
+        const double frac = cents / 10.0 - (double) slot;
+
+        octAcc[(size_t) slot]       += (float) (m * (1.0 - frac));
+        octAcc[(size_t) (slot + 1)] += (float) (m * frac);
+    }
+}
+
+// ==========================================================
+// K1：从八度直方图估计调音偏移
+//
+//   原方案（对每个候选偏移折成 12 个音级、取 Σfold² 最大）在实现上有一个
+//   死角：fold 的索引是 `(s - off) / 10`，也就是先把偏移量化到 100 音分的
+//   音级格再统计。于是 ±50 音分范围内目标函数是**平台**，argmax 只能在
+//   格边界上跳 —— 实测表现就是"估计永远卡在 -10 / -20，加 30 音分的素材
+//   也读不出来"。
+//
+//   这里改用直方图的一阶相位：把每个 10 音分格看作单位圆上的相位
+//   （一圈 = 100 音分 = 一个半音），对所有格做矢量平均：
+//       θ = atan2(Σ aₛ sin(2π·cₛ/100), Σ aₛ cos(2π·cₛ/100))
+//   θ 换算回音分就是"整体偏离十二平均律多少音分"。这个估计对 ±50 音分
+//   连续可导，没有量化平台，也不需要 argmax。
+//
+//   谐波污染：3 次谐波（+702 音分）mod 100 ≈ 2 音分，几乎不影响；5 次
+//   （+386 音分）mod 100 = 86 音分（等效 -14），权重 h=5 只有 0.2，且
+//   55–700 Hz 频段里基频占主导，实测偏差 < 5 音分。
+// ==========================================================
+void KeyEstimator::refreshTuning()
+{
+    double total = 0.0;
+
+    for (float v : octAcc)
+        total += (double) v;
+
+    if (total < 1.0e-6)
+        return;   // 还没有足够数据，保留上次估计
+
+    double sumCos = 0.0;
+    double sumSin = 0.0;
+
+    for (int s = 0; s < kOctaveSlots; ++s)
+    {
+        const double ang = 2.0 * kPi * ((double) s * 10.0 / 100.0);
+
+        sumCos += (double) octAcc[(size_t) s] * std::cos (ang);
+        sumSin += (double) octAcc[(size_t) s] * std::sin (ang);
+    }
+
+    double cents = std::atan2 (sumSin, sumCos) * 100.0 / (2.0 * kPi);
+
+    // 折到 (-50, +50]
+    if (cents > 50.0)  cents -= 100.0;
+    if (cents < -50.0) cents += 100.0;
+
+    if (! tuningInit)
+    {
+        tuningCentsValue = (float) cents;
+        tuningInit       = true;
+        return;
+    }
+
+    // EMA 平滑：单帧估计有 ±几音分噪声，避免它带动整窗重置
+    tuningCentsValue += (float) (0.15 * (cents - (double) tuningCentsValue));
+}
+
+// ==========================================================
+// K3：谐波感知 chroma（IterativeHSS 的简化版）
+//
+//   问题：按 bin 直接折叠时，一个 C2 贝斯音的第 3 谐波落在 G、第 5 谐波
+//         落在 E，于是这个 C 会自动往 G / E 灌能量 —— 任何 C 和弦的 chroma
+//         都天然偏向 C/E/G，这正是 C major 与 A minor 相关度接近、
+//         关系调混淆的根因。
+//
+//   做法：遍历候选基频（从低到高），把整条谐波列的加权幅度求和作为该音级
+//         的显著性；算完立刻把这条谐波列已解释的能量从频谱副本里扣掉，
+//         再处理下一个基频（匹配追踪 / 贪心残差抵消）。低音先处理，保证
+//         它的谐波只被计入一次，不会重复灌给五度/大三度。
+//
+//   代价：64 个音 × 6 次谐波 ≈ 每帧 400 次查表，21.5 帧/秒 → 可忽略。
+// ==========================================================
+void KeyEstimator::computeChromaHarmonic (const float* white, int numBins, double binHz,
+                                          float out[12])
+{
+    for (int i = 0; i < 12; ++i)
+        out[i] = 0.0f;
+
+    if ((int) residual.size() < numBins)
+        residual.assign ((size_t) numBins, 0.0f);
+
+    // 工作副本：残差抵消会改写它，不能污染 magWhite
+    std::copy (white, white + numBins, residual.begin());
+
+    const double fMax = std::min ((double) kChromaFMaxHz, sampleRate * 0.45);
+
+    for (int note = kNoteLo; note <= kNoteHi; ++note)
+    {
+        const double f0 = 440.0 * std::pow (2.0,
+            ((double) note - 69.0 + (double) tuningCentsValue / 100.0) / 12.0);
+
+        if (f0 > fMax)
+            break;
+
+        float salience = 0.0f;
+
+        for (int h = 1; h <= kHarmonics; ++h)
+        {
+            const double fh = f0 * (double) h;
+
+            if (fh > fMax)
+                break;
+
+            const int bin = (int) std::lround (fh / binHz);
+
+            if (bin <= 0 || bin >= numBins)
+                break;
+
+            // 取 ±1 bin 最大值，容忍基频估计与 bin 量化误差
+            float v = residual[(size_t) bin];
+
+            if (bin > 1)
+                v = std::max (v, residual[(size_t) bin - 1]);
+
+            if (bin + 1 < numBins)
+                v = std::max (v, residual[(size_t) bin + 1]);
+
+            salience += kHarmWeight[h - 1] * v;
+        }
+
+        if (salience <= 0.0f)
+            continue;
+
+        const int pc = ((note % 12) + 12) % 12;
+        out[pc] += salience;
+
+        // 残差抵消：把这条谐波列已解释的能量从副本里扣掉（保守系数）
+        for (int h = 1; h <= kHarmonics; ++h)
+        {
+            const int bin = (int) std::lround (f0 * (double) h / binHz);
+
+            if (bin <= 0 || bin >= numBins)
+                break;
+
+            residual[(size_t) bin] =
+                std::max (0.0f, residual[(size_t) bin] - kHarmWeight[h - 1] * salience * kSubCoeff);
+        }
+    }
+}
+
 void KeyEstimator::processFrame()
 {
     for (int i = 0; i < windowSize; ++i)
@@ -219,37 +504,22 @@ void KeyEstimator::processFrame()
 
     fft.magnitude (frameBuf.data(), mag.data());
 
+    const int    numBins = fft.numBins();
+    const double binHz   = sampleRate / (double) windowSize;
+
+    // ---- K2：谱白化 ----
+    //   把"音色 / 频谱倾斜 / 响度包络"从 chroma 里剥掉，只留音高结构。
+    //   （原来的 1/√(f/220) 高频压制已删除：白化 + 1/h 谐波权重已经把
+    //    频谱倾斜处理掉了，再压一次会双重惩罚高频、把 chroma 拉向低频根音。）
+    applyWhitening (mag.data(), numBins, magWhite.data());
+
+    // ---- K1：先更新调音基准，再用它折叠 chroma ----
+    accumulateOctaveHistogram (mag.data(), magWhite.data(), numBins, binHz);
+    refreshTuning();
+
+    // ---- K3：谐波感知 chroma ----
     float chroma[12] = {};
-
-    const double binHz = sampleRate / (double) windowSize;
-    const double fMax  = std::min ((double) kChromaFMaxHz, sampleRate * 0.45);
-    const int    binLo = std::max (1, (int) std::ceil ((double) kChromaFMinHz / binHz));
-    const int    binHi = std::min (fft.numBins() - 1, (int) std::floor (fMax / binHz));
-
-    if (binHi > binLo)
-    {
-        for (int b = binLo; b <= binHi; ++b)
-        {
-            const float m = mag[(size_t) b];
-
-            if (m <= 0.0f)
-                continue;
-
-            const double f = (double) b * binHz;
-
-            // MIDI 音高 → 音级；在相邻两个音级之间线性分配，减小 bin 量化误差。
-            const double midi = 69.0 + 12.0 * std::log2 (f / 440.0);
-            const double pcF  = midi - 12.0 * std::floor (midi / 12.0);
-            const int    p0   = ((int) std::floor (pcF)) % 12;
-            const float  frac = (float) (pcF - std::floor (pcF));
-
-            // 轻微压低高频，避免高次谐波（五度/大三度）主导 chroma。
-            const float weight = (float) (1.0 / std::sqrt (std::max (0.5, f / 220.0)));
-
-            chroma[p0]             += m * (1.0f - frac) * weight;
-            chroma[(p0 + 1) % 12]  += m * frac * weight;
-        }
-    }
+    computeChromaHarmonic (magWhite.data(), numBins, binHz, chroma);
 
     double chromaSum = 0.0;
 
@@ -289,6 +559,39 @@ void KeyEstimator::processFrame()
 
 void KeyEstimator::updateKey()
 {
+    // ---- K1：调音基准一致性 ----
+    //   chroma 是在"折叠当时的 tuningCentsValue"下算出来的。如果这个偏移在
+    //   窗口生命周期内显著变化，窗口里就混着两种折叠结果 → 相关性必然错乱。
+    //   此时整窗作废、重新累积（收敛后不会再触发）。
+    refreshTuning();
+
+    if (! chromaTuningInit)
+    {
+        chromaTuning     = tuningCentsValue;
+        chromaTuningInit = true;
+    }
+    else if (std::abs (tuningCentsValue - chromaTuning) > kTuningResetCents)
+    {
+        // 连续 3 轮都显著偏离才作废整窗（单轮跳变可能只是数据不足）
+        if (++tuningDriftRounds < 3)
+            return;
+
+        tuningDriftRounds = 0;
+        chromaTuning      = tuningCentsValue;
+
+        frameHead     = 0;
+        frameCount    = 0;
+        pendingRoot   = -1;
+        pendingVotes  = 0;
+        confident     = false;
+        keyConfidence = 0.0f;
+        return;
+    }
+    else
+    {
+        tuningDriftRounds = 0;
+    }
+
     if (frameCount <= 0)
         return;
 

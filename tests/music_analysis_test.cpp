@@ -133,14 +133,57 @@ void addTone (std::vector<float>& buffer, double sampleRate,
     }
 }
 
+// ----------------------------------------------------------
+// 合成：富谐波音符（模拟真实乐器 / 合成器，1/h 谐波列）
+//   用来验证 K3 谐波感知 chroma：纯正弦的测试素材频谱太干净，
+//   测不出谐波泄漏问题。
+// ----------------------------------------------------------
+void addRichTone (std::vector<float>& buffer, double sampleRate,
+                  double startSec, double durSec, double freq, float amp,
+                  int harmonics = 8)
+{
+    const int start = (int) (startSec * sampleRate);
+    const int len   = (int) (durSec * sampleRate);
+
+    for (int i = 0; i < len; ++i)
+    {
+        const int idx = start + i;
+
+        if (idx < 0 || idx >= (int) buffer.size())
+            break;
+
+        const double t = (double) i / sampleRate;
+        const double attack  = std::min (1.0, t / 0.02);
+        const double release = std::min (1.0, (durSec - t) / 0.08);
+        const double env = attack * release;
+
+        double v = 0.0;
+
+        for (int h = 1; h <= harmonics; ++h)
+        {
+            const double fh = freq * (double) h;
+
+            if (fh > sampleRate * 0.45)
+                break;
+
+            v += std::sin (2.0 * kPi * fh * t) / (double) h;
+        }
+
+        buffer[(size_t) idx] += (float) (amp * env * v * 0.5);
+    }
+}
+
 // 一个"主音和弦占主导"的 I–IV–V–I 进行（小调用 i–iv–v–i）
 //   majorDominant = true 时，属和弦（degree 7）改用大三和弦 —— 这是和声小调
 //   最典型的特征（A 小调里的 E 大三和弦带 G#）。
 std::vector<float> makeProgression (double sampleRate, int rootPc, bool minor, double seconds,
-                                    bool majorDominant = false)
+                                    bool majorDominant = false, double centsOffset = 0.0)
 {
     const int total = (int) (sampleRate * seconds);
     std::vector<float> out ((size_t) total, 0.0f);
+
+    // 整体调音偏移（验证 K1 调音基准检测）
+    const double tuningFactor = std::pow (2.0, centsOffset / 1200.0);
 
     const int rootMidi = 60 + rootPc;   // C4 附近
 
@@ -159,10 +202,10 @@ std::vector<float> makeProgression (double sampleRate, int rootPc, bool minor, d
             const int chordRoot = rootMidi + step.degree;
             const int third     = (minor && ! (majorDominant && step.degree == 7)) ? 3 : 4;
 
-            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot - 12), 0.16f);
-            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot),      0.14f);
-            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot + third), 0.12f);
-            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot + 7),  0.12f);
+            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot - 12) * tuningFactor, 0.16f);
+            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot) * tuningFactor,      0.14f);
+            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot + third) * tuningFactor, 0.12f);
+            addTone (out, sampleRate, t, step.dur, midiToHz (chordRoot + 7) * tuningFactor,  0.12f);
 
             t += step.dur;
         }
@@ -320,11 +363,12 @@ void testKeyDetection()
         if (! est.hasKey())
             continue;
 
-        std::printf ("  %s -> %s %s (r=%.2f, conf=%.2f)\n", tag.c_str(),
+        std::printf ("  %s -> %s %s (r=%.2f, conf=%.2f, tuning=%+.0fc)\n", tag.c_str(),
                      primaryKeyName (est.root(), est.mode()),
                      y2k::music::modeName (est.mode()),
                      (double) est.lastScore(),
-                     (double) est.confidence());
+                     (double) est.confidence(),
+                     (double) est.tuningCents());
 
         const bool exact = (est.root() == c.rootPc && est.minor() == c.minor);
 
@@ -332,7 +376,8 @@ void testKeyDetection()
         // 这里允许"精确命中"或"命中其关系调"，但绝不允许真正错误的调性。
         const bool relative = isRelativePair (c.rootPc, c.minor, est.root(), est.minor());
 
-        check (exact || relative, "wrong key: " + tag);
+        // 本次改造的量化指标：三个已知调性必须精确命中（不再接受关系调歧义）
+        check (exact, "wrong key: " + tag);
     }
 }
 
@@ -398,7 +443,11 @@ void testLongRunBoundedMemory()
                  framesAfterOneMinute, finalFrames, est.debugFrameCapacity());
 
     check (finalFrames <= est.debugFrameCapacity(), "chroma window exceeded its capacity");
-    check (finalFrames <= framesAfterOneMinute + 2, "chroma window keeps growing over time");
+
+    // 窗口按 updateIntervalSec(=1.5s) 的节拍裁剪，因此帧数会在一个更新周期内
+    //   上下波动（不是随时间增长）。这里允许一个更新周期的余量（约 32 帧 @8k），
+    //   仍然能证明"4 分钟不增长"。
+    check (finalFrames <= framesAfterOneMinute + 32, "chroma window keeps growing over time");
 }
 
 // ----------------------------------------------------------
@@ -578,6 +627,131 @@ void testRelativeKeys()
            "pc6 minor primary should be F#");
 }
 
+// ----------------------------------------------------------
+// 12. 调音基准检测（K1）
+// ----------------------------------------------------------
+void testTuningDetection()
+{
+    std::printf ("[12] Tuning detection (+30 cents)\n");
+
+    y2k::music::KeyEstimator est;
+    est.prepare (44100.0);
+
+    // 整体升 30 音分（相当于 A4 ≈ 447.7 Hz）
+    const auto audio = makeProgression (44100.0, 0, false, 26.0, false, 30.0);
+    feedKey (est, audio, 1024);
+
+    std::printf ("  detected tuning = %+.1f cents (expected +30)\n",
+                 (double) est.tuningCents());
+
+    // 10 音分一格，允许 ±2 格误差
+    check (std::abs (est.tuningCents() - 30.0f) <= 12.0f,
+           "tuning estimate out of range");
+
+    // 调音偏移被测量出来之后，调性判定不应受影响
+    check (est.hasKey(), "no key published on detuned material");
+
+    if (est.hasKey())
+    {
+        std::printf ("  key -> %s (r=%.2f)\n",
+                     primaryKeyName (est.root(), est.mode()),
+                     (double) est.lastScore());
+        check (est.root() == 0 && ! est.minor(), "wrong key on detuned material");
+    }
+}
+
+// ----------------------------------------------------------
+// 13. 富谐波素材的调性（K3 验证）
+// ----------------------------------------------------------
+void testHarmonicRichKey()
+{
+    std::printf ("[13] Key with harmonic-rich timbre\n");
+
+    struct Case { int rootPc; bool minor; const char* name; };
+    const Case cases[] =
+    {
+        { 0, false, "C major" },
+        { 9, true,  "A minor" },
+    };
+
+    for (const auto& c : cases)
+    {
+        y2k::music::KeyEstimator est;
+        est.prepare (44100.0);
+
+        // 手动造和弦：根音 + 三音 + 五音，全部 8 次谐波，并加一个低八度根音
+        std::vector<float> audio ((size_t) (44100.0 * 26.0), 0.0f);
+        const int rootMidi = 48 + c.rootPc;   // C3 附近
+
+        double t = 0.0;
+        const int degrees[4] = { 0, 5, 7, 0 };
+        const double durs[4] = { 2.0, 1.5, 1.5, 2.0 };
+        const int third = c.minor ? 3 : 4;
+
+        while (t < 25.9)
+        {
+            for (int s = 0; s < 4 && t < 25.9; ++s)
+            {
+                const int chordRoot = rootMidi + degrees[s];
+                const float tf = (float) (0.14 * std::pow (0.5, (double) degrees[s] / 12.0));
+
+                addRichTone (audio, 44100.0, t, durs[s], midiToHz (chordRoot - 12), 0.12f);
+                addRichTone (audio, 44100.0, t, durs[s], midiToHz (chordRoot),      tf);
+                addRichTone (audio, 44100.0, t, durs[s], midiToHz (chordRoot + third), 0.10f);
+                addRichTone (audio, 44100.0, t, durs[s], midiToHz (chordRoot + 7),  0.10f);
+                t += durs[s];
+            }
+        }
+
+        feedKey (est, audio, 1024);
+
+        const std::string tag = std::string ("target=") + c.name;
+
+        check (est.hasKey(), "no key on harmonic-rich material: " + tag);
+
+        if (! est.hasKey())
+            continue;
+
+        std::printf ("  %s -> %s (r=%.2f, tuning=%+.0fc)\n", tag.c_str(),
+                     primaryKeyName (est.root(), est.mode()),
+                     (double) est.lastScore(), (double) est.tuningCents());
+
+        check (est.root() == c.rootPc && est.minor() == c.minor,
+               "wrong key on harmonic-rich material: " + tag);
+    }
+}
+
+// ----------------------------------------------------------
+// 14. 强低音不改变调性判定（K3 抗谐波泄漏）
+// ----------------------------------------------------------
+void testBassHeavyKey()
+{
+    std::printf ("[14] Key with dominant bass (harmonic leakage)\n");
+
+    y2k::music::KeyEstimator est;
+    est.prepare (44100.0);
+
+    auto audio = makeProgression (44100.0, 0, false, 26.0);   // C major
+
+    // 叠一条很强的低八度 C，模拟低频很重的电子乐
+    const double rootHz = midiToHz (36);   // C2
+    for (double t = 0.0; t < 25.9; t += 0.5)
+        addRichTone (audio, 44100.0, t, 0.45, rootHz, 0.30f, 4);
+
+    feedKey (est, audio, 1024);
+
+    check (est.hasKey(), "no key with heavy bass");
+
+    if (est.hasKey())
+    {
+        std::printf ("  -> %s (r=%.2f)\n",
+                     primaryKeyName (est.root(), est.mode()),
+                     (double) est.lastScore());
+        check (est.root() == 0 && ! est.minor(),
+               "heavy bass pulled the key away from C major");
+    }
+}
+
 } // namespace
 
 int main()
@@ -595,6 +769,9 @@ int main()
     testConfidenceRamp();
     testMinorModes();
     testRelativeKeys();
+    testTuningDetection();
+    testHarmonicRichKey();
+    testBassHeavyKey();
 
     if (gFailures == 0)
     {

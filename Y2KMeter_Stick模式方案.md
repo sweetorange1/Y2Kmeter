@@ -134,10 +134,9 @@ SHAppBarMessage(ABM_SETPOS, &abd);            // 停靠 + 收缩工作区
 
 ---
 
-## 附：MiniMeters stick 逆向结论（证据）
+## 附：stick 模式的实现依据
 
-- 导入 `SHAppBarMessage`（shell32）；配置键 `window/use_app_bar`（开关）+
-  `window/bar_behavior`（停靠边枚举）+ `window/rect/w/h`（矩形）。
-- 菜单构建器 `FUN_1801804c0` 生成 "Position at Top / Position at Bottom / Stick /
-  Move To Display..."，Stick 回调 `FUN_180180a30` 切换 `use_app_bar`。
-- 即：MiniMeters 的 stick 就是"开关 AppBar 驻留"，停靠边由 `bar_behavior` 决定。
+- 采用 Windows AppBar（`SHAppBarMessage`，shell32）实现"贴边驻留"；
+- 需要持久化的状态：是否启用（开关）+ 停靠边（枚举）+ 窗口矩形；
+- 菜单项：Position at Top / Position at Bottom / Stick / Move To Display…；
+- 结论：stick = "开关 AppBar 驻留"，停靠边由独立枚举决定。

@@ -285,9 +285,10 @@ void MusicAnalysisEngine::publishResult (bool force)
     r.bpm      = tempo.bpm();
     r.bpmValid = running && ! silent && tempo.hasTempo();
 
-    r.keyRoot  = key.root();
-    r.keyMode  = key.mode();
-    r.keyValid = running && ! silent && key.hasKey();
+    r.keyRoot     = key.root();
+    r.keyMode     = key.mode();
+    r.keyValid    = running && ! silent && key.hasKey();
+    r.tuningCents = key.tuningCents();
 
     // 置信度只在结果"当前有效"时对外呈现；stale 的旧读数不附带置信度，
     // 避免把"很久以前的 80%"当成现在的 80%。
