@@ -6,6 +6,7 @@
 #include <array>
 #include <deque>
 
+#include "source/analysis/AudioRecorder.h"
 #include "source/analysis/music/MusicAnalysisEngine.h"
 
 // ============================================================
@@ -596,6 +597,13 @@ public:
         return musicEngine;
     }
 
+    // ---- 录音机（Recorder 模块）----
+    //   · 数据由 PluginProcessor::processBlock 与 Standalone Loopback 采集线程在
+    //     "应用输入增益之前"直接 pushRaw() 进来（采集忽略用户 gain）；
+    //   · 后端在构造时就开始滚动保留最近 60 s（软件打开即采集，与模块是否存在无关），
+    //     UI 模块通过 startTake/stopTake 手动录制、exportLastSeconds() 导出最近 N 秒。
+    AudioRecorder& getRecorder() noexcept { return recorder; }
+
     // ======================================================
     // Phase E —— 性能 profile（原子计数，UI 线程可随时读取）
     // ======================================================
@@ -697,6 +705,10 @@ private:
     //   注意：它只知道"PCM 样本"，不知道音频从哪来 —— 插件宿主与
     //   Standalone Loopback 共用同一条 pushStereo 路径。
     y2k::music::MusicAnalysisEngine musicEngine;
+
+    // ---- 录音机（Recorder 模块后端）----
+    //   与 pushStereo 完全解耦：录音走 pre-gain 原始输入，不受分析链路开关影响。
+    AudioRecorder recorder;
 
     // ---- 采样率缓存 ----
     //   prepare() 在音频线程准备阶段写入，getSampleRate()/频谱混合在 UI 线程读取，

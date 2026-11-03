@@ -53,6 +53,7 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::virtuPet:        return "VirtuPet";
         case ModuleType::milkdrop:         return "Milkdrop";
         case ModuleType::tempoKey:         return "Tempo / Key";
+        case ModuleType::recorder:          return "Recorder";
 
         default:                            return "Module";
 

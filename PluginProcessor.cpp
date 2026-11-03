@@ -235,6 +235,28 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     }
 #endif
 
+    // ------------------------------------------------------------------
+    // 0.5) 录音机：推送 **pre-gain 原始输入**
+    //   · 用户调整的 analysisInputGain 不参与录音 → 文件与输入软件的声音完全一致；
+    //   · 必须放在 analysisActive 判断之外：界面不可见时录音仍要继续；
+    //   · 未在录音时 pushRaw() 内部只做一次原子读后立即返回。
+    // ------------------------------------------------------------------
+    {
+        auto& recorder = analyserHub->getRecorder();
+        const int numSamples = buffer.getNumSamples();
+
+        if (totalIn >= 2)
+            recorder.pushRaw (buffer.getReadPointer (0),
+                              buffer.getReadPointer (1),
+                              numSamples,
+                              getSampleRate());
+        else if (totalIn == 1)
+            recorder.pushRaw (buffer.getReadPointer (0),
+                              buffer.getReadPointer (0),
+                              numSamples,
+                              getSampleRate());
+    }
+
     // 1) 先采分析：UI 不可见时跳过
     if (analysisActive.load(std::memory_order_relaxed))
     {

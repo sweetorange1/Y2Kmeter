@@ -4889,4 +4889,157 @@ UI：FrameDispatcher 把 Result 拷进 FrameSnapshot → TempoKeyModule::onFrame
 
 ---
 
+## v2.9.9 补充：录音机模块（Recorder）
+
+> 版本号保持 `2.9.9` 不变（按项目约定，v2.9.9 之后的功能以「补充」形式入库）。
+
+### 1. 目标与边界
+
+- 新增一个独立的 `Recorder` 模块：后端**在软件启动时就开始常驻采集输入信号**（与模块是否加载无关），
+  内存里滚动保留最近 60 s；模块上的拖动条选择 1–60 s，按按钮导出「按下按钮前 N 秒」为 WAV；
+- 同时保留**手动录制**：点红点开始一段独立录音（右上角状态灯亮红闪烁 + `HH:MM:SS` 计时），
+  再点一下停止并保存，时长不受 60 s 限制（采集线程流式写盘）；
+- **导出内容必须与送进软件的输入完全一致**：用户用工具栏 gain 调过的分析增益**不参与采集**；
+- 不改变现有分析 / 透传行为：`pushStereo` 的调用点、增益链路、插件透传语义全部不动；
+- 插件态（VST3/AU）与 Standalone（含 WASAPI Loopback / ScreenCaptureKit）共用同一套后端。
+
+### 2. 数据流与线程模型
+
+```
+PluginProcessor::processBlock（音频线程，pre-gain）
+  └─ AnalyserHub::getRecorder().pushRaw (L, R, n, sampleRate)
+Standalone Loopback 采集线程（pre-gain）
+  └─ AnalyserHub::getRecorder().pushRaw (L, R, n, sr)
+AudioRecorder::pushRaw       · 未采集时一次原子读立即返回
+                             · 采集时：无锁 SPSC 环形缓冲（AbstractFifo，每声道 65536 ≈ 1.36 s @48k）
+AudioRecorder::run           juce::Thread：排空 FIFO → 60 s 滚动历史（historyLock）
+                             └─ 手动录制进行中：同一批样本同时流式写进 take WAV
+消息线程 exportLastSeconds() 加锁快照最近 N 秒 → 32-bit float WAV → 打开目录
+消息线程 startTake / stopTake 只发请求；打开/写入/收尾全部在采集线程
+UI：RecorderModule 10 Hz Timer 轮询 isTaking / getTakeSeconds / getStatusText
+```
+
+- 三层解耦，**音频线程永不阻塞**：音频线程不碰历史缓冲、不加锁、不分配、不做 I/O；
+- 采集线程（`juce::Thread`）10 ms 轮询搬运（4096 样本/次），加锁时间只有微秒级；
+- 导出在消息线程完成：先在锁内把最近 N 秒**拷贝**到 `AudioBuffer`（≤ 60 s，几十 ms），
+  再在锁外写盘 —— 采集线程最多被挡住几十 ms，1.36 s 的 FIFO 足以吸收；
+- 采集**与模块无关**：`AudioRecorder` 构造时（软件打开 / 插件实例创建）就启动采集线程，析构时才停止；
+  Recorder 模块只负责展示状态、手动录制与导出，模块被移除也不影响滚动采集；
+- 滚动缓冲**懒分配**：第一次真正收到音频数据时按当前采样率分配 `60 s × 2ch × 4B`（48k ≈ 23 MB，96k ≈ 46 MB），
+  没有音频输入时不占内存。
+
+### 3. 音频格式与文件位置
+
+- 格式：**32-bit float WAV**（`AudioFormatWriterOptions` + `SampleFormat::floatingPoint`）。
+  `AudioFormatWriter::writeFromFloatArrays` 在 `isFloatingPoint()` 时按位直写，因此文件与输入浮点样本 **bit-exact**，
+  不存在 16/24-bit 的量化误差；
+- 目录：`<用户音乐目录>/Y2Kmeter Recordings`（不存在时自动创建）；
+- 文件名：
+  - 滚动导出（SAVE LAST N）：`Y2Kmeter_clip_<N秒>_<yyyy-MM-dd_HH-mm-ss>.wav`（N = 拖动条选择的秒数）；
+  - 手动录制（红点）：`Y2Kmeter_recording_<yyyy-MM-dd_HH-mm-ss>.wav`；
+  - 同一秒重复保存时回退为 `... (1).wav`；
+- 采样率随 `pushRaw` 传入：采集线程检测到采样率变化时按新采样率重建滚动缓冲（旧数据属于旧采样率，直接丢弃）。
+
+### 4. 自动打开保存目录（不重复打开）
+
+- 导出在消息线程同步完成，落盘后立即打开目录；
+- **Windows**：先用 `CoCreateInstance(CLSID_ShellWindows)` 枚举已打开的资源管理器窗口，
+  用 `IWebBrowserApp::get_LocationURL` 拿到的 `file:` URL 与目标目录做**大小写不敏感**比较：
+  - 已打开 → 只 `ShowWindow(SW_RESTORE)` + `SetForegroundWindow` 把原窗口前置，**不开新窗口**；
+  - 未打开 → `juce::Process::openDocument(path)`（ShellExecute）打开；
+- COM 初始化使用独立的 `ScopedComForCaller`（`COINIT_APARTMENTTHREADED`，`RPC_E_CHANGED_MODE` 视为成功）；
+  COM 指针用文件内的极简 `ScopedComPtr`，不依赖 `juce::ComSmartPtr`（该类型由 `juce_core.cpp` 的模块级宏开启，
+  普通 TU 不可见）；
+- **macOS**：跨进程查询 Finder 状态不可靠，退化为「本次会话内同一目录只打开一次」（`revealToUser`）。
+
+### 5. UI（RecorderModule）
+
+- 默认 300×228，最小 160×170；`ModulePanel` 直接派生（纯 CPU 绘制，不走 GL 直渲染）；
+- 布局（自上而下）：`RECORDER` 状态行（右上角状态灯 + `REC` / `IDLE`）→ 像素红点 →
+  `HH:MM:SS` 本次录制时长 → 拖动条（1–60 s，右侧自绘 `N s`）→ `SAVE LAST N s` 按钮 → 最近保存文件名；
+- **字号跟随行高**：状态行 / 计时 / 底部文件名 / `N s` 的字号都由所在行高按比例算（各有上下限），
+  模块越小时文字一起变小，而不是被裁掉；`SAVE LAST N s` 按钮文字由 LNF 按按钮高度缩放；
+- 状态灯/计时与红点联动：录制中灯为亮红 500 ms 闪烁、计时从 0 递增；空闲时灯为暗灰、计时 `00:00:00`；
+- **红点是纯像素绘制、没有底座**：11 格网格按 `d ≤ r` 逐格 `fillRect` 拼出圆盘（外圈深色描边 + 内部纯色），
+  外面叠 3 层同心圆盘做像素阶梯光晕（硬边、无模糊、无渐变）；光晕刻意做得很弱
+  （alpha 0.02 / 0.035 / 0.06，近圆点累积约 11%），只是给圆点一圈极淡的红边；
+- **尺寸随模块缩放，且有下限**：按「红点 11 格 + 光晕 = 14 格」适配可用短边，单格上限 `ui(16)`
+  （红点 176 px / 光晕 224 px）、下限 2 格（红点 22 px）；布局先给红点区保底 `ui(48)`
+  高度，空间不足时按比例压缩拖动条/按钮/计时行，**红点在任何尺寸下都不会消失**；
+- **红点贴近计时器**：布局把红点区收紧到「红点 + 光晕」的实际高度（多出的余量留在上方），
+  所以红点下方只有约 1 格余量，不再悬在中间留出大片空白；
+- **三种状态（按压优先于录制）**：
+
+  | 状态 | 光晕 | 亮度 | 下沉 |
+  | --- | --- | --- | --- |
+  | 未录制 | 完整发光 | 正常 | 0 |
+  | 按钮按下 | 无 | 变暗 45% | 一整格 |
+  | 录制中 | 30% 轻微发光 | 变暗 18% | 半格 |
+
+- **切换时机**：`mouseDown` 就切换录制状态，`mouseUp` 只负责回到常态外观 ——
+  「按下（开始录制，按下态外观）→ 松手（录制中外观）」，「再次按下（结束录制，按下态外观）→ 松手（未录制外观）」；
+- 点击红点（含光晕范围）= **开始 / 停止手动录制**（不是 SAVE LAST N 的快捷键）；采集本身由模块是否存在决定，
+  常驻滚动缓冲始终在跑，手动录制只是额外的一条流式写盘通道；
+- 拖动条是标准 `juce::Slider`（`LinearHorizontal` + `NoTextBox`），按钮为 `juce::TextButton`；
+  **颜色不在模块里写死**：由 `PinkXPLookAndFeel::syncPinkXPColours()` 随主题下发、`findColour` 绘制时实时取，
+  切主题自动跟随。拖动条右侧的 `N s` 由 `paintContent` 自绘（字号跟着行高缩放，也跟随主题墨色）；
+- 录制时长来自后端 `getTakeSeconds()`（有效样本数 / 采样率），与文件内容严格一致；
+- 10 Hz 轮询，仅在录制时长（>0.05 s 变化）/ 状态 / 录制开关变化时 `repaint()`；面板不可见时直接跳过；
+- 模块不再控制采集：构造/析构不影响滚动采集（采集归 `AudioRecorder` 自己管），hover 预览的临时面板也完全无副作用。
+
+### 6. 注册链路（按 §6.15 检查清单）
+
+| 位置 | 改动 |
+| --- | --- |
+| `source/ui/ModuleWorkspace.h` | `ModuleType::recorder`（枚举末尾）+ 默认 `availableTypes` |
+| `source/ui/ModulePanel.cpp` | `getModuleDisplayName` → `"Recorder"` |
+| `source/ui/ModuleWorkspace.cpp` | `moduleTypeToString` / `stringToModuleType` → `"recorder"` |
+| `PluginEditor.cpp` | include + `createModule` 工厂 + `setAvailableModuleTypes` |
+| `source/perf/PerformanceCounterSystem.cpp` | `moduleTypeNameById` 补齐 18–23（修正历史漏项并追加 `recorder`） |
+| `CMakeLists.txt` | `source/analysis/AudioRecorder.*`、`source/ui/modules/RecorderModule.*` |
+| `PluginProcessor.cpp` | `processBlock` 在 **analysisActive 判断之前、增益之前**调用 `pushRaw` |
+| `source/standalone/Y2KStandaloneApp.cpp` | 两处 Loopback `onAudio`（WASAPI / ScreenCaptureKit）在增益之前调用 `pushRaw` |
+
+### 7. 已知限制
+
+1. 采集期间切换音频设备 / 采样率 → 滚动缓冲按新采样率重建，之前的 N 秒被丢弃（不同采样率不能混在一个文件里）；
+2. 环形缓冲满（采集线程被系统挂起 >1.3 s）会丢样本，目前不做提示；
+3. 导出在消息线程同步落盘：60 s 约 23 MB（48 kHz），慢盘上最多几百 ms 的界面停顿；
+4. 滚动历史固定在内存里（60 s × 2ch × 4B ≈ 23 MB @48k，96k 约 46 MB）；采集常驻，
+   因此只要有音频输入就常驻占用（无输入时不分配）；
+5. 手动录制不设时长上限，文件大小随时间线性增长（48 kHz / 32-bit float / 立体声 ≈ 22 MB/分钟）；
+   录制中移除模块或关闭界面会立即收尾并保存，不会留下半截文件。
+
+---
+
+## v2.9.9 补充：浮动模块窗口的缩放限制与主题刷新
+
+> 与 Recorder 无关的通用修复，影响所有可脱离（pop-out）的模块。
+
+### 1. 问题
+
+1. **缩放下限不统一**：嵌入态由 `ModulePanel::getMinWidth()/getMinHeight()` 限制；脱离后的
+   `FloatingModuleWindow`（`juce::DocumentWindow`）用的是 JUCE 默认 constrainer（最小 0），
+   能拖得比嵌入态更小（Recorder 甚至可以把红点压到看不见）。
+2. **主题切换不刷新**：浮动窗口是独立 top-level，不在 Editor 的组件子树里；Editor 的主题订阅回调
+   只 `repaint()` 自己，于是浮动模块内部只有"自己会重绘的控件"（如按钮）跟着变，其余保持旧配色；
+   窗口背景色也仍是构造时的 `PinkXP::face` 快照。
+
+### 2. 修复（`PluginEditor.h` / `PluginEditor.cpp`）
+
+| 改动 | 说明 |
+| --- | --- |
+| 新增 `FloatingModuleWindow::applyModuleResizeLimits()` | `setResizeLimits (module.getMinWidth(), module.getMinHeight(), 0x3fffffff, 0x3fffffff)` |
+| 创建路径 | 在 `setBounds(screenBounds)` 之后、`setLayoutLocked(...)` 之前调用（`setResizeLimits` 内部会 `setBoundsConstrained`，把已存在的过小尺寸拉回下限） |
+| `setLayoutLocked(false)` | 解锁时改为重新 `applyModuleResizeLimits()`，不再恢复可能为 0 的默认限制 |
+| 新增 `FloatingModuleWindow::refreshThemeColours()` | 更新 `ResizableWindow::backgroundColourId = PinkXP::face` → `sendLookAndFeelChange()` → `repaint()` |
+| Editor 主题订阅回调 | 遍历 `floatingWindows_` 调用 `refreshThemeColours()` |
+
+### 3. 效果
+
+- 浮动模式最小尺寸与嵌入态完全一致（对所有模块生效，不只 Recorder）；
+- 切换主题时浮动模块的背景、文字、图表配色立即跟随。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

@@ -1753,6 +1753,9 @@ private:
                 loopbackLastSampleRate.store (sr, std::memory_order_release);
             }
 
+            // 录音机：pre-gain 原始采集数据（忽略用户 gain、不受界面可见性影响）
+            y2kProc->getAnalyserHub().getRecorder().pushRaw (L, R, n, sr);
+
             if (! y2kProc->isAnalysisActive()) return;
 
             // 前置增益变更后需要重算 LUFS-I；loopback 采集期间 processBlock 不运行
@@ -1958,6 +1961,9 @@ private:
             auto& dump = AudioDumpRecorder::instance();
             if (dump.isEnabled())
                 dump.push (AudioDumpRecorder::Route::output, L, R, n, sr);
+
+            // 录音机：pre-gain 原始采集数据（忽略用户 gain、不受界面可见性影响）
+            y2kProc->getAnalyserHub().getRecorder().pushRaw (L, R, n, sr);
 
             if (! y2kProc->isAnalysisActive()) return;
 

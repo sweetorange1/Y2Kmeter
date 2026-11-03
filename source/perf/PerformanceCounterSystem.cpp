@@ -56,18 +56,19 @@ juce::String percentStr(double x)
 
 juce::String moduleTypeNameById(int id)
 {
+    // ID = ModuleType 枚举序数（顺序必须与 ModuleWorkspace.h 的 enum 完全一致）
     switch (id)
     {
-        case 0: return "eq";
-        case 1: return "loudness";
-        case 2: return "oscilloscope";
-        case 3: return "spectrum";
-        case 4: return "phase";
-        case 5: return "dynamics";
-        case 6: return "lufsRealtime";
-        case 7: return "truePeak";
-        case 8: return "oscilloscopeWave";
-        case 9: return "phaseCorrelation";
+        case 0:  return "eq";
+        case 1:  return "loudness";
+        case 2:  return "oscilloscope";
+        case 3:  return "spectrum";
+        case 4:  return "phase";
+        case 5:  return "dynamics";
+        case 6:  return "lufsRealtime";
+        case 7:  return "truePeak";
+        case 8:  return "oscilloscopeWave";
+        case 9:  return "phaseCorrelation";
         case 10: return "phaseBalance";
         case 11: return "dynamicsMeters";
         case 12: return "dynamicsDr";
@@ -76,7 +77,12 @@ juce::String moduleTypeNameById(int id)
         case 15: return "vuMeter";
         case 16: return "spectrogram";
         case 17: return "spectrogram3d";
-        case 18: return "virtuPet";
+        case 18: return "stereoField";
+        case 19: return "stereoMap";
+        case 20: return "virtuPet";
+        case 21: return "milkdrop";
+        case 22: return "tempoKey";
+        case 23: return "recorder";
         default: return juce::String("unknown(") + juce::String(id) + ")";
     }
 }

@@ -758,6 +758,15 @@ private:
         juce::BorderSize<int> getBorderThickness() const override;
         juce::Rectangle<int> getSavedBounds() const noexcept { return savedBounds_; }
         void setLayoutLocked(bool locked);
+
+        // 浮动窗口的缩放限制 = 模块自身的最小尺寸（与嵌入态完全一致）。
+        //   之前浮动窗口直接用 JUCE 默认 constrainer（最小 0），用户可以把它拖得比
+        //   嵌入态更小；这里统一成 ModulePanel::getMinWidth()/getMinHeight()。
+        void applyModuleResizeLimits();
+
+        // 主题切换后刷新浮动窗口：窗口背景色是构造时的快照，且它不在 Editor 的
+        //   组件子树里，收不到 Editor 的 repaint，需要显式更新 + 重绘。
+        void refreshThemeColours();
         juce::ValueTree saveModuleSpecificState() const;
 
         // 键盘事件：浮动 Milkdrop 窗口需要将 ← → 空格转发给 Editor，

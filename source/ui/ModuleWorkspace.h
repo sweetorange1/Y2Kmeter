@@ -62,7 +62,10 @@ enum class ModuleType
     milkdrop,
 
     // 实时 BPM + 调性（v3.1）：后台线程分析 AnalyserHub 同一路 PCM
-    tempoKey
+    tempoKey,
+
+    // v2.9.9 补充：录音机（红点按钮录制 pre-gain 原始输入，32-bit float WAV）
+    recorder
 };
 
 juce::String getModuleDisplayName(ModuleType t);
@@ -1160,7 +1163,8 @@ private:
 
         ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest,
         ModuleType::milkdrop,
-        ModuleType::tempoKey
+        ModuleType::tempoKey,
+        ModuleType::recorder
     };
 
     int nextIdCounter = 1;

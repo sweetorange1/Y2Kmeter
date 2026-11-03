@@ -568,6 +568,9 @@ set(Y2KM_PLUGIN_SOURCES
   source/analysis/AnalyserHub.cpp
   source/analysis/PhaseCorrelator.cpp
   source/analysis/DynamicRangeMeter.cpp
+  # v2.9.9 补充：录音机后端（pre-gain 原始输入 → 32-bit float WAV）
+  source/analysis/AudioRecorder.h
+  source/analysis/AudioRecorder.cpp
 
   # === 实时 BPM / 调性分析（v3.1）===
   #   music/ 下除 MusicAnalysisEngine 外全部是纯 C++（不依赖 JUCE），
@@ -660,6 +663,9 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/ui/modules/StereoMapModule.cpp
   source/ui/modules/TempoKeyModule.h
   source/ui/modules/TempoKeyModule.cpp
+  # v2.9.9 补充：录音机模块（红点按钮 + 录制计时）
+  source/ui/modules/RecorderModule.h
+  source/ui/modules/RecorderModule.cpp
   source/ui/modules/VirtuPetModule.h
   source/ui/modules/VirtuPetModule.cpp
   source/ui/modules/MilkdropModule.h

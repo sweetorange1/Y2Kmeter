@@ -23,6 +23,7 @@
 #include "source/ui/modules/StereoMapModule.h"
 #include "source/ui/modules/TempoKeyModule.h"
 #include "source/ui/modules/VirtuPetModule.h"
+#include "source/ui/modules/RecorderModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
@@ -607,6 +608,23 @@ juce::BorderSize<int> Y2KmeterAudioProcessorEditor::FloatingModuleWindow::getBor
     return {};
 }
 
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::applyModuleResizeLimits()
+{
+    // 与嵌入态完全一致：不能比模块自身的最小尺寸更小
+    setResizeLimits (juce::jmax (1, module_.getMinWidth()),
+                     juce::jmax (1, module_.getMinHeight()),
+                     0x3fffffff, 0x3fffffff);
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::refreshThemeColours()
+{
+    setColour (juce::ResizableWindow::backgroundColourId, PinkXP::face);
+
+    // 让子控件重新读取主题色（ComboBox / Label / TextButton 等），再整体重绘
+    sendLookAndFeelChange();
+    repaint();
+}
+
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setLayoutLocked(bool locked)
 {
     module_.setFloatingLayoutLocked(locked);
@@ -630,9 +648,10 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setLayoutLocked(bool lo
         const int h = juce::jmax(1, getHeight());
         setResizeLimits(w, h, w, h);
     }
-    else if (floatingLockLimitsValid_)
+    else
     {
-        setResizeLimits(floatingLockMinW_, floatingLockMinH_, floatingLockMaxW_, floatingLockMaxH_);
+        // 解锁后统一回到「模块自身最小尺寸」，而不是恢复可能为 0 的默认限制
+        applyModuleResizeLimits();
         floatingLockLimitsValid_ = false;
     }
 }
@@ -1492,7 +1511,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::milkdrop,
 
         // 实时 BPM + 音乐调性（后台线程分析同一路 PCM）
-        ModuleType::tempoKey
+        ModuleType::tempoKey,
+
+        // 录音机（红点录制 pre-gain 原始输入，保存 32-bit float WAV）
+        ModuleType::recorder
     });
 
 #if JUCE_WINDOWS
@@ -1720,6 +1742,8 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         // 模块脱离 tree 后 bounds 可能被清零，显式恢复到脱离前尺寸
         panel->setBounds(savedBounds.withPosition(0, 0));
         window->setBounds(screenBounds);
+        // 缩放下限统一成模块自身的最小尺寸（必须在 setBounds 之后、锁定之前）
+        window->applyModuleResizeLimits();
         window->setLayoutLocked(layoutLocked);
 
         window->addToDesktop();               // 创建 native peer → 触发 resized() → 模块填满窗口
@@ -1909,6 +1933,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             juce::ignoreUnused(lnf);
         invalidateDesktopCache();
         repaint();
+
+        // 浮动模块是独立的 top-level 窗口，不在 Editor 的组件子树里，
+        //   上面的 repaint() 覆盖不到：这里逐个刷新窗口背景色、通知子控件重读
+        //   主题色并重绘，否则脱离态下只有自己会重绘的控件（如按钮）跟着变。
+        for (auto& wnd : floatingWindows_)
+            if (wnd != nullptr)
+                wnd->refreshThemeColours();
     });
 
     // 应用默认主题（会把全局配色重写一次，确保状态一致）
@@ -3650,6 +3681,9 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
 
         case ModuleType::tempoKey:
             return std::make_unique<TempoKeyModule>(processor.getAnalyserHub());
+
+        case ModuleType::recorder:
+            return std::make_unique<RecorderModule>(processor.getAnalyserHub());
 
         default:
             jassertfalse; // 暂未实现
