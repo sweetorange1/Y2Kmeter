@@ -104,3 +104,7 @@ tools/MilkDrop 3.33
 /build_temp.bat
 /incr_build.bat
 
+# 本地文档目录：只在本地保留，不再入库
+#   （已跟踪的历史 docs 文件已用 git rm -r --cached docs 移出版本控制）
+/docs/
+

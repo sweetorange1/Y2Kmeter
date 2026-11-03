@@ -27,10 +27,17 @@ enum class Status
     noSignal    // 输入为静音 / 电平过低，当前没有可用信号
 };
 
-// 调式：大调 / 自然小调 / 和声小调 / 旋律小调（上行）
+// 调式：大调 / 混合利底亚 / 自然小调 / 和声小调 / 旋律小调（上行）
+//
+// mixolydian（混合利底亚）是"大调降低第 7 音"，音级集合与大调只差一个音。
+// 电子乐 / trap / 摇滚里极为常见（C7 → Bb7 → Ab7 这类 bVII/bVI 进行）。
+// 关键：它必须和大调并列成为候选，否则"F 大调 vs C 混合利底亚"这种
+//   同音级集合的歧义会把主音判到属调上（实测：bpm176 CMajor.wav 判成 F major）。
+// 显示上按大调处理（isMinorMode 返回 false），UI 显示 "C major"。
 enum class Mode
 {
     major = 0,
+    mixolydian,
     naturalMinor,
     harmonicMinor,
     melodicMinor
@@ -38,7 +45,10 @@ enum class Mode
 
 inline bool isMinorMode (Mode m) noexcept
 {
-    return m != Mode::major;
+    // 注意：不能写成 m != Mode::major —— mixolydian 是大调侧，不是小调。
+    return m == Mode::naturalMinor
+        || m == Mode::harmonicMinor
+        || m == Mode::melodicMinor;
 }
 
 inline const char* modeName (Mode m) noexcept
@@ -46,6 +56,7 @@ inline const char* modeName (Mode m) noexcept
     switch (m)
     {
         case Mode::major:         return "major";
+        case Mode::mixolydian:    return "mixolydian";
         case Mode::naturalMinor:  return "natural minor";
         case Mode::harmonicMinor: return "harmonic minor";
         case Mode::melodicMinor:  return "melodic minor";
@@ -60,6 +71,7 @@ inline const char* modeQualifier (Mode m) noexcept
     switch (m)
     {
         case Mode::major:         return "";
+        case Mode::mixolydian:    return "mixolydian";
         case Mode::naturalMinor:  return "natural";
         case Mode::harmonicMinor: return "harmonic";
         case Mode::melodicMinor:  return "melodic";
@@ -196,7 +208,9 @@ inline RelativeKey relativeKeyOf (int root, Mode mode) noexcept
     }
     else
     {
-        return out;                    // 和声/旋律小调：无关系调
+        // 和声/旋律小调、混合利底亚：无关系调
+        //   （混合利底亚与大调同音级集合关系，但主音不同，不属于"关系调"）
+        return out;
     }
 
     const bool flatSide = keySpelling (root, mode).flatSide;

@@ -46,6 +46,19 @@ namespace
 
     constexpr float kLowLevelDb = -55.0f;
 
+    // ---- v3.0 混合利底亚（mixolydian）轮廓 ----
+    //   以 KK 大调为基底，把"大七度"降权、"小七度"升权：
+    //     大调  : [... ]  index 10 (b7) = 2.29, index 11 (7)  = 2.88
+    //     mixo  : index 10 (b7) = 3.60, index 11 (7)  = 2.00
+    //   为什么必须加：mixolydian 与大调同属"大调侧"，音级集合只差第 7 音。
+    //   电子乐/摇滚里 bVII、bVI 和弦极其常见（C7→Bb7→Ab7），只有大调轮廓时
+    //   算法会把 bVII 解释成"属调的 4 音"，把主音判到属调上。
+    constexpr float kMixolydianProfile[12] =
+    {
+        6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f,
+        2.52f, 5.19f, 2.39f, 3.66f, 3.60f, 2.00f
+    };
+
     // 判定"当前窗口是否支持一个明确的调性"的相关性下限。
     // 这个数字只用于内部判定，不代表准确率。
     constexpr float kMinKeyCorrelation = 0.30f;
@@ -54,17 +67,44 @@ namespace
     constexpr float kRelativeSwitchMargin = 0.12f;
     constexpr float kOtherSwitchMargin    = 0.05f;
 
-    // 和声/旋律小调必须先明显胜过同主音的自然小调，才允许改标签。
-    //   （三种小调的轮廓只差两三个音级，不加这道门限会来回跳。）
+    // 和声/旋律小调、混合利底亚必须先明显胜过同主音的基础调式，才允许改标签。
+    //   （几种调式的轮廓只差两三个音级，不加这道门限会来回跳。）
     constexpr float kModeSwitchMargin = 0.03f;
+
+    // ---- v3.0 和弦根音定主音 ----
+    //   为什么需要：F major 与 C mixolydian 是**同一组 7 个音级**
+    //   （F G A Bb C D E == C D E F G A Bb），纯 chroma↔轮廓相关只能靠
+    //   相对强弱猜主音，原理上分不出来。实测 bpm176 CMajor.wav 判成 F major
+    //   就是这个原因（Bb 是全场最强音级，在 F 调里是合法的 4 音）。
+    //   和弦根音则携带"和声往哪解决"的信息：该曲 C 占 75.2% 的和弦时长，
+    //   第二名 G 只有 9.9%，一判就准。
+    constexpr float  kChordFitGate      = 0.50f;  // 拟合度低于此值不计票
+    constexpr double kTonicOverrideRatio = 2.0;   // 根音票需达轮廓胜者根音的几倍才改判
 
     constexpr float kChromaFMinHz = 55.0f;    // A1
     constexpr float kChromaFMaxHz = 5000.0f;
 
+    // 调音基准估计的频带上限。
+    //   只取低频段：这一段里绝大多数谱峰就是**基频**。
+    //   放到 5 kHz 时，3 次/5 次谐波会把 12 格折叠的集中度拉偏，
+    //   "标准音高"素材会被系统性估成 -12…-20 音分（实测）。
+    constexpr float kTuningFMaxHz = 700.0f;
+
     // ---- K1 调音基准 ----
     constexpr int   kOctaveSlots      = 120;    // 每八度 120 格 = 每格 10 音分
     constexpr float kOctAccDecay      = 0.95f;  // 每帧衰减，约 2 秒记忆
-    constexpr float kTuningResetCents = 15.0f;  // 偏移变化超过此值 → 整窗作废
+    // 偏移变化超过此值 → 整窗作废。必须明显大于估计噪声，
+    // 否则估计在阈值附近抖动会导致窗口被反复清空、结果永远攒不满。
+    constexpr float kTuningResetCents = 25.0f;
+
+    // ---- 和弦模板 ----
+    //   大三和弦 / 小三和弦 / 属七和弦。刻意不含 m7：
+    //   m7 模板自带 b7，而这类素材的 b7 往往极强，会让 m7 抢走本该属于
+    //   大三/属七的票（实测会导致 major/minor 判反）。
+    constexpr int kChordIvMajor[3] = { 0, 4, 7 };
+    constexpr int kChordIvMinor[3] = { 0, 3, 7 };
+    constexpr int kChordIvDom7[4]  = { 0, 4, 7, 10 };
+
 
     // ---- K3 谐波感知 chroma ----
     constexpr int   kHarmonics        = 6;
@@ -91,6 +131,55 @@ namespace
         const int minorRoot = minorA ? rootA : rootB;
 
         return ((majorRoot + 9) % 12) == minorRoot;
+    }
+
+    // ---- 和弦模板拟合度（余弦相似度）----
+    //   chroma 是绝对音级，模板是相对主音的音级集合，所以要按 root 旋转比较。
+    static float chordFit (const float chroma[12], int root,
+                           const int* ivs, int nIvs) noexcept
+    {
+        double tpl[12] = {};
+
+        tpl[ivs[0]] = 1.0;
+        for (int k = 1; k < nIvs; ++k)
+            tpl[ivs[k]] = 0.85 - 0.10 * (double) (k - 1);
+
+        double dot = 0.0, nc = 0.0, nt = 0.0;
+
+        for (int i = 0; i < 12; ++i)
+        {
+            const double c = (double) chroma[(root + i) % 12];
+            dot += c * tpl[i];
+            nc  += c * c;
+            nt  += tpl[i] * tpl[i];
+        }
+
+        return (float) (dot / (std::sqrt (nc * nt) + 1.0e-12));
+    }
+
+    // 返回最佳和弦根音（0..11），拟合度写入 fitOut。
+    static int bestChordRoot (const float chroma[12], float& fitOut) noexcept
+    {
+        int   bestRoot = 0;
+        float bestFit  = -1.0f;
+
+        for (int r = 0; r < 12; ++r)
+        {
+            const float f1 = chordFit (chroma, r, kChordIvMajor, 3);
+            const float f2 = chordFit (chroma, r, kChordIvMinor, 3);
+            const float f3 = chordFit (chroma, r, kChordIvDom7,  4);
+
+            const float f = std::max ({ f1, f2, f3 });
+
+            if (f > bestFit)
+            {
+                bestFit  = f;
+                bestRoot = r;
+            }
+        }
+
+        fitOut = bestFit;
+        return bestRoot;
     }
 }
 
@@ -264,7 +353,11 @@ void KeyEstimator::accumulateOctaveHistogram (const float* mag, const float* whi
     //   而高次谐波（3 次 = +702 音分、5 次 = +386 音分）会把 12 格折叠的
     //   集中度目标拉偏几十音分。实测把范围放到 5 kHz 时，"标准音高"素材
     //   会被系统性估成 -12…-20 音分。
-    const double fMax = std::min ((double) kChromaFMaxHz, sampleRate * 0.45);
+    //
+    //   [v3.0 修正] 之前这里误用了 kChromaFMaxHz（5 kHz），注释承诺的限带
+    //   从未生效 —— 表现为 440 Hz 素材上估计值在 -4 ~ +19 音分之间乱跳，
+    //   还会因为超过 kTuningResetCents 反复清空 20 秒调性窗口。
+    const double fMax = std::min ((double) kTuningFMaxHz, sampleRate * 0.45);
     const double fMin = (double) kChromaFMinHz;
 
     // 门限按"本帧带内白化谱均值"自适应，而不是写死绝对值：
@@ -642,7 +735,8 @@ void KeyEstimator::updateKey()
     for (int pc = 0; pc < 12; ++pc)
         chroma[pc] = (float) ((double) chroma[pc] / chromaSum);
 
-    // ---- 24 个候选：12 主音 × {大调, 自然小调, 和声小调, 旋律小调} ----
+    // ---- 24 个候选：12 主音 × {大调侧, 小调侧} ----
+    //   大调侧在 major / mixolydian 之间取优；小调侧在 自然/和声/旋律 之间取优。
     struct Cand
     {
         float score = -2.0f;
@@ -655,7 +749,22 @@ void KeyEstimator::updateKey()
 
     for (int root = 0; root < 12; ++root)
     {
-        const float maj  = profileScore (chroma, root, Mode::major);
+        // ---- 大调侧：major vs mixolydian ----
+        //   mixolydian 必须明显胜过 major 才改标签，否则同样的音级集合
+        //   会在两个标签之间来回抢票（它们只差第 7 音）。
+        float majorScore = profileScore (chroma, root, Mode::major);
+        Mode  majorMode  = Mode::major;
+
+        {
+            const float mix = profileScore (chroma, root, Mode::mixolydian);
+
+            if (mix > majorScore + kModeSwitchMargin)
+            {
+                majorScore = mix;
+                majorMode  = Mode::mixolydian;
+            }
+        }
+
         const float nat  = profileScore (chroma, root, Mode::naturalMinor);
         const float harm = profileScore (chroma, root, Mode::harmonicMinor);
         const float mel  = profileScore (chroma, root, Mode::melodicMinor);
@@ -677,7 +786,7 @@ void KeyEstimator::updateKey()
             minorMode  = Mode::melodicMinor;
         }
 
-        cands[candCount++] = { maj,        root, Mode::major };
+        cands[candCount++] = { majorScore, root, majorMode };
         cands[candCount++] = { minorScore, root, minorMode };
     }
 
@@ -687,7 +796,67 @@ void KeyEstimator::updateKey()
         if (cands[i].score > best.score)
             best = cands[i];
 
-    // 第二名只统计"不同主音"的候选：同主音的小调变体属于"调式不确定"，
+    // ---- v3.0 主音仲裁：和弦根音时长投票 ----
+    //   动机：F major 与 C mixolydian 是同一组 7 个音级
+    //   （F G A Bb C D E == C D E F G A Bb）。纯 chroma↔轮廓相关只能靠
+    //   相对强弱猜主音，遇到"bVII/bVI 借用多、主音不突出"的素材必然跑到属调。
+    //   和弦根音携带"和声往哪解决"的信息，正好补上这个盲区。
+    //
+    //   实现：逐帧（窗口内实际帧，保证与 chroma 聚合同一时间范围）求最佳和弦
+    //   根音，拟合度达标的帧给该根音投 1 票（帧等距 → 票数正比于时长）。
+    //   只有当某个根音的票数显著超过"轮廓胜者的根音"时才改判，避免过度干预。
+    {
+        double rootVotes[12] = {};
+
+        for (int i = 0; i < frameCount; ++i)
+        {
+            const ChromaFrame& f = frames[(size_t) ((frameHead + i) % frameCapacity)];
+
+            float     fit  = 0.0f;
+            const int r    = bestChordRoot (f.c, fit);
+
+            if (fit >= kChordFitGate)
+                rootVotes[r] += 1.0;
+        }
+
+        int    tonicRoot = -1;
+        double tonicVote = 0.0;
+
+        for (int r = 0; r < 12; ++r)
+        {
+            if (rootVotes[r] > tonicVote)
+            {
+                tonicVote = rootVotes[r];
+                tonicRoot = r;
+            }
+        }
+
+        if (tonicRoot >= 0 && tonicRoot != best.root
+            && tonicVote > rootVotes[best.root] * kTonicOverrideRatio)
+        {
+            // 在"主音 = tonicRoot"的候选里取最高分（大调侧 / 小调侧各一个）。
+            Cand alt;
+            bool found = false;
+
+            for (int i = 0; i < candCount; ++i)
+            {
+                if (cands[i].root != tonicRoot)
+                    continue;
+
+                if (! found || cands[i].score > alt.score)
+                {
+                    alt   = cands[i];
+                    found = true;
+                }
+            }
+
+            // 主音候选本身也必须站得住（相关度过门限）才改判。
+            if (found && alt.score >= kMinKeyCorrelation)
+                best = alt;
+        }
+    }
+
+    // 第二名只统计"不同主音"的候选：同主音的调式变体属于"调式不确定"，
     //   已经由 kModeSwitchMargin 处理，不应该再压低调性置信度。
     float secondDistinct = -2.0f;
 
@@ -812,6 +981,7 @@ float KeyEstimator::profileScore (const float chroma[12], int root, Mode mode)
     switch (mode)
     {
         case Mode::major:         profile = kMajorProfile;         break;
+        case Mode::mixolydian:    profile = kMixolydianProfile;    break;
         case Mode::naturalMinor:  profile = kMinorProfile;         break;
         case Mode::harmonicMinor: profile = kHarmonicMinorProfile; break;
         case Mode::melodicMinor:  profile = kMelodicMinorProfile;  break;

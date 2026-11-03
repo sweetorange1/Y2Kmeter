@@ -43,6 +43,8 @@ namespace
 
     // 起音强度的慢速均值（去基线）。时间常数约 3 秒（约 260 帧 @86fps）：
     //   比一拍长得多，所以不会把拍点本身减掉；只吃掉"恒定起伏"这个直流。
+    //   alpha 与 hopSize 绑定：若改 hopSize，这里必须按帧率同步缩放，
+    //   否则时间常数会跟着变（曾经把 hop 改成 1/8 时同步减半过）。
     constexpr float kOnsetBaselineAlpha = 0.004f;
 
     // 谱通量的慢速均值（用于判断"本帧是不是一次能量突增"）
@@ -77,6 +79,11 @@ void TempoEstimator::prepare (double newSampleRate)
     sampleRate = std::clamp (newSampleRate, 8000.0, 384000.0);
 
     // 46 ms 分析窗（44.1k → 2048），hop = 1/4 窗（约 11.6 ms）
+    //
+    // [v3.0 结论] 曾试过把 hop 改成 1/8 窗（包络帧率翻倍，理论 lag 分辨率
+    //   从 5.5 BPM/步 提到 1.4 BPM/步）。实测无改进且更差：48k 上早段从
+    //   176 BPM 掉到 85.88（半速），说明瓶颈不在 lag 分辨率，而在包络本身
+    //   的周期性判别力。已回退，保留 1/4 窗。
     windowSize = nearestPowerOfTwo ((int) std::lround (sampleRate * 0.046));
     windowSize = std::clamp (windowSize, 256, 16384);
     hopSize    = std::max (64, windowSize / 4);
