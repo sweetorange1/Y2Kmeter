@@ -237,6 +237,7 @@ void AudioRecorder::startCapture()
     historyReady.store (0, std::memory_order_relaxed);
     takeRequested.store (false, std::memory_order_release);
     takeActive.store (false, std::memory_order_release);
+    takeHitLimit.store (false, std::memory_order_release);
     takeSamples.store (0, std::memory_order_relaxed);
     setStatus ("CAPTURING");
 
@@ -487,6 +488,7 @@ bool AudioRecorder::startTake()
     }
 
     takeSamples.store (0, std::memory_order_relaxed);
+    takeHitLimit.store (false, std::memory_order_release);
     takeRequested.store (true, std::memory_order_release);
     setStatus ("RECORDING");
     notify();
@@ -582,7 +584,13 @@ void AudioRecorder::closeTakeWriter()
 
     {
         const juce::SpinLock::ScopedLockType sl (metaLock);
-        statusText = saved == juce::File() ? juce::String() : juce::String ("SAVED");
+        const bool hitLimit = takeHitLimit.load (std::memory_order_acquire);
+
+        if (saved == juce::File())
+            statusText = {};
+        else
+            statusText = hitLimit ? juce::String ("SAVED (1 H LIMIT)") : juce::String ("SAVED");
+
         if (saved != juce::File())
             lastSavedFile = saved;
     }
@@ -600,10 +608,36 @@ void AudioRecorder::writeTake (const float* left, const float* right, int numSam
     if (takeWriter == nullptr || numSamples <= 0)
         return;
 
-    const float* chans[2] = { left, right };
-    takeWriter->writeFromFloatArrays (chans, 2, numSamples);
+    // ---- 单段最长 1 小时 ----
+    //   只写到上限为止；到达上限时把 takeActive 置 false ——
+    //   run() 会在 FIFO 排空后调用 closeTakeWriter() 收尾（flush + 关闭 + 打开目录），
+    //   与用户手动点停止走完全同一条收尾路径，不会留下半截 WAV 头。
+    const double sr = takeSampleRate.load (std::memory_order_relaxed);
+    const auto limit = (juce::int64) std::llround (maxTakeSeconds
+                                                   * (sr > 0.0 ? sr : kFallbackSampleRate));
+    const auto written = takeSamples.load (std::memory_order_relaxed);
+    const auto remain  = limit - written;
 
-    takeSamples.fetch_add (numSamples, std::memory_order_relaxed);
+    int allowed = numSamples;
+    if (remain <= 0)
+        allowed = 0;
+    else if ((juce::int64) numSamples > remain)
+        allowed = (int) remain;
+
+    if (allowed > 0)
+    {
+        const float* chans[2] = { left, right };
+        takeWriter->writeFromFloatArrays (chans, 2, allowed);
+
+        takeSamples.fetch_add (allowed, std::memory_order_relaxed);
+    }
+
+    if (allowed < numSamples)
+    {
+        takeHitLimit.store (true, std::memory_order_release);
+        takeActive.store (false, std::memory_order_release);
+        setStatus ("SAVING (1 H LIMIT)");
+    }
 }
 
 // ==========================================================

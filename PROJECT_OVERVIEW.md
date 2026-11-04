@@ -8,8 +8,10 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`2.9.9`）
-  - 注意：`v2.9.9` 之后的功能都以「v2.9.9 补充」形式入库、**不 bump 版本号**：`Stereo Map`（见文末「未发布：Stereo Map」）、多屏混合 DPI 修复、以及本轮的**实时 BPM / 调性模块**（见文末「v2.9.9 补充：实时 BPM / 音乐调性分析模块」）。
+- **产品名**：`Y2Kmeter` （版本：`3.0.0`）
+  - 历史：`v2.9.9` 之后的功能曾以「v2.9.9 补充」形式入库、不 bump 版本号（`Stereo Map`、多屏混合 DPI 修复、
+    实时 BPM / 调性模块），随后 `v2.9.10` 归拢了 Waveform 模块重构；**v3.0.0** 起恢复常规语义化版本号
+    （见文末「v3.0.0：...」章节）。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -208,11 +210,11 @@
 | [SpectrumModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrumModule.h) | `SpectrumModule`（对数频谱 + peak hold + slope） | `Spectrum` |
 | [PhaseModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/PhaseModule.h) | `PhaseModule`（Goniometer + Correlation Dial + Width/Balance Bar） | `Phase` + `Oscilloscope` |
 | [DynamicsModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | `DynamicsModule`（Peak/RMS 四柱 + DR + Crest 历史） | `Dynamics` |
-| [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列） | `Oscilloscope` |
+| [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列；左上角**单个按钮循环** PITCH → LOUD → SIB，按钮文字即当前模式） | `Oscilloscope` |
 | [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成） | `Spectrum` |
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
-| [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向，固定比例尺 + 渐隐残影） | `Oscilloscope` |
+| [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向；**自动缩放**：1 s 周期峰值归一 + 10% 死区，雷达轮廓固定、dB 标签按增益换算 + 渐隐残影） | `Oscilloscope` |
 | [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式由顶部按钮切换 —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；工具条右侧一行模式说明；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡） | `Spectrum`（L/R 分路 + mid 单声道路） |
 | [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET（未启动时 RESET 会自动 START，连续 3 s 无信号自动 reset）；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
@@ -4913,6 +4915,8 @@ UI：FrameDispatcher 把 Result 拷进 FrameSnapshot → TempoKeyModule::onFrame
   内存里滚动保留最近 60 s；模块上的拖动条选择 1–60 s，按按钮导出「按下按钮前 N 秒」为 WAV；
 - 同时保留**手动录制**：点红点开始一段独立录音（右上角状态灯亮红闪烁 + `HH:MM:SS` 计时），
   再点一下停止并保存，时长不受 60 s 限制（采集线程流式写盘）；
+  **单段最长 1 小时**（`AudioRecorder::maxTakeSeconds`）：到点自动停止写入、flush 收尾、关闭文件并保存，
+  状态灯显示 `SAVED 1H`（与手动点停止走同一条收尾路径）；
 - **导出内容必须与送进软件的输入完全一致**：用户用工具栏 gain 调过的分析增益**不参与采集**；
 - 不改变现有分析 / 透传行为：`pushStereo` 的调用点、增益链路、插件透传语义全部不动；
 - 插件态（VST3/AU）与 Standalone（含 WASAPI Loopback / ScreenCaptureKit）共用同一套后端。
@@ -4974,6 +4978,8 @@ UI：RecorderModule 10 Hz Timer 轮询 isTaking / getTakeSeconds / getStatusText
 - **字号跟随行高**：状态行 / 计时 / 底部文件名 / `N s` 的字号都由所在行高按比例算（各有上下限），
   模块越小时文字一起变小，而不是被裁掉；`SAVE LAST N s` 按钮文字由 LNF 按按钮高度缩放；
 - 状态灯/计时与红点联动：录制中灯为亮红 500 ms 闪烁、计时从 0 递增；空闲时灯为暗灰、计时 `00:00:00`；
+  录制中计时行右侧另有一行淡色 `MAX 01:00:00` 提示单段上限；因到达上限自动收尾后，状态灯显示绿色 `SAVED 1H`
+  （`AudioRecorder::didHitTakeLimit()`，下一次 `startTake` 时复位）；
 - **红点是纯像素绘制、没有底座**：11 格网格按 `d ≤ r` 逐格 `fillRect` 拼出圆盘（外圈深色描边 + 内部纯色），
   外面叠 3 层同心圆盘做像素阶梯光晕（硬边、无模糊、无渐变）；光晕刻意做得很弱
   （alpha 0.02 / 0.035 / 0.06，近圆点累积约 11%），只是给圆点一圈极淡的红边；
@@ -5363,7 +5369,7 @@ GL 与 CPU 两条路径、峰值虚线、次曲线、悬停读数全部同步。
 | 旧控件 | 新控件 |
 | --- | --- |
 | 右侧 GAIN 滑条（0…+36 dB，纯 UI 放大） | 右侧 **SPEED** 滑条：滚动速度 10…800 px/s（默认 120，skew 中点 80） |
-| 顶部 3s / 6s 时长按钮 | 顶部 **[PITCH] [LOUD] [SIB]** 三选一颜色来源（默认 PITCH） |
+| 顶部 3s / 6s 时长按钮 | 顶部单个 **[PITCH]** 按钮：单击循环 PITCH → LOUD → SIB 颜色来源（默认 PITCH，按钮文字即当前模式） |
 
 SPEED 的口径与 `SpectrogramModule` 一致，且**与模块宽度解耦**：
 
@@ -5462,6 +5468,72 @@ L/R 独立 → HP 5 kHz（两级 Butterworth 级联 = LR4，24 dB/oct）
   或复用 pitch 置信度做门控；
 - 门限 `-35 dBFS`、上下界 5 k / 12 k、attack / release 都是 `SibilanceDetector.cpp` 顶部常量，
   可按素材调整。
+
+---
+
+## v3.0.0：Recorder 单段 1 小时上限 + Waveform 颜色来源单按钮 + Stereo Field 自动缩放
+
+> 版本号升到 **3.0.0**：`CMakeLists.txt` 的 `project(Y2Kmeter VERSION 3.0.0)`、两处
+> `juce_add_plugin(... VERSION 3.0.0)`、`Y2Kmeter_installer.iss` 的 `MyAppVersion`、
+> `README.md` 版本徽章、`PluginEditor.cpp` 抬头水印（两处 `versionText` + 两处宽度测算字面量）已核对一致。
+> 本轮**无新增源文件**，CMake 源文件列表不变。
+
+### 1. Recorder：手动录制单段上限 1 小时（到点自动保存并停止）
+
+| 位置 | 改动 |
+| --- | --- |
+| `source/analysis/AudioRecorder.h` | 新增 `maxTakeSeconds = 3600.0`、`takeHitLimit` 原子标志、`didHitTakeLimit()` |
+| `source/analysis/AudioRecorder.cpp` | `writeTake()` 按采样率算样本上限，只写到上限；到点置 `takeActive = false` |
+| `source/ui/modules/RecorderModule.h/.cpp` | 计时行右侧 `MAX 01:00:00` 提示；自动收尾后状态灯绿色 `SAVED 1H` |
+
+- **上限判定在采集线程**（`writeTake` 内），不在 UI 线程：到点只把 `takeActive` 置 false，
+  由 `run()` 在 FIFO 排空后调用 `closeTakeWriter()` 收尾 —— 与用户点红点停止**完全同一条路径**
+  （flush → 关闭 writer → WAV 头补写 → 记录 `lastSavedFile` → 打开保存目录），不会留半截文件头；
+- 上限按**实际写入样本数** `takeSamples` 与 `takeSampleRate` 计算（不是墙钟时间），
+  与文件内容严格一致：`getTakeSeconds()` 最大正好 3600.0；
+- 状态文本 `SAVED (1 H LIMIT)`（与普通 `SAVED` 区分）；UI 通过 `didHitTakeLimit()` 显示 `SAVED 1H`，
+  下一次 `startTake()` 复位该标志；
+- `exportLastSeconds()`（SAVE LAST N，60 s 滚动导出）与滚动采集逻辑完全不受影响。
+
+### 2. Waveform：三个颜色按钮合并为单个循环按钮
+
+- 删除 `btnPitch` / `btnLoud` / `btnSib`（原 `0x5746434c` 单选组），改为单个 `btnColourMode`：
+  单击循环 **PITCH → LOUD → SIB → PITCH**，**按钮文字即当前模式**，tooltip 写明三档含义；
+- `nextColorSource()` / `colorSourceName()` 为静态纯函数（switch + 兜底 return），
+  `refreshColourButton()` 只做一次 `setButtonText`，不再有原来的三次 `setToggleState`；
+- 布局：Freeze 先算，颜色按钮宽度 `jlimit(24, 64, 工具栏宽 - Freeze - gap)` —— 窄模块下两按钮不互压
+  （最小 64 px 宽时正好 28 + 4 + 24）；
+- **持久化不变**：仍只写 `colorSource`（int 0/1/2）+ `pixelsPerSecond` + `frozen`；
+  旧存档的 `sibilance` 布尔值照旧映射到 SIB，v2.9.10 存档无障碍。
+
+### 3. Stereo Field：自动缩放（对齐 Oscilloscope XY / Lissajous）
+
+- 逐帧统计径向驱动量 `max(|L|,|R|)` 的峰值 → 累积到 1 s 周期 → `gain = 0.90 / 周期峰值`，
+  限幅 `[0.1, 10]`，与当前增益差 < 10% 不更新（死区）—— 与 `OscilloscopeModule::onFrame` 同一套参数；
+- **静音周期不重算**（`periodicMaxAccum <= 1e-3` 时保持当前增益），避免静音期增益顶到 10×、
+  下一段声音进来时"炸开"；
+- 散点半径改为 `peak × R × gain`（GL trail 顶点流与 legacy CPU trail 两条路径同步改）；
+  瞬时超峰 `jmin(..., R)` 压到圆弧上，方向仍由 `balance` 决定；
+- **雷达轮廓 / 能量环几何保持固定**（若照搬示波器把环也乘 gain，外环会跑出半圆外），
+  改为把 4 个环的 dB 标签按 `20·log10(frac / gain)` 换算成真实电平：gain = 1 时仍是
+  `-12 / -6 / -2.5 / 0 dB`；
+- 悬停标尺 dB 读数同步改为 `rho / (R × gain)`；增益 ≠ 1 时右上角显示 `N.Nx`（与示波器一致）。
+
+### 4. 内存 / 磁盘行为（本轮问答结论，已按代码核实）
+
+- **长时间不点停止不会让内存持续增长**：FIFO 固定 512 KB（`2 × 65536 × 4B`）；60 s 滚动历史
+  一次性分配 `60 × sr × 2ch × 4B`（48 kHz ≈ 23 MB / 96 kHz ≈ 46 MB / 192 kHz ≈ 92 MB），
+  只有采样率变化才重建；手动录制经 `AudioFormatWriter` 逐块直写 `OutputStream`
+  （`tempBlock` 只持一块、`FileOutputStream` 32 KB 文件缓冲），**不缓存整个文件**；
+- 真正增长的是**磁盘**：32-bit float 立体声 48 kHz = 384 KB/s ≈ 1.38 GB/小时
+  （96 kHz ≈ 2.7 GB/小时）；本轮 1 h 上限把单段文件封顶在约 1.4 GB（48 kHz）；
+- 多开插件实例时每个实例各有一份 `AudioRecorder`（各一份滚动缓冲），是**常数叠加**，不随时间增长。
+
+### 5. 验证状态与已知限制
+
+- 本轮未改 `ModuleType` / `Kind` 枚举、未改存档字段、未改 CMake 源文件列表 → 增量编译即可，无需全量重建；
+- 待实机确认项：红点在 1 小时处自动收尾（可临时把 `maxTakeSeconds` 改小验证）、
+  颜色按钮循环后 GL / legacy 双路径配色一致、Stereo Field 在 -40 LUFS 级弱信号下散点是否铺满雷达。
 
 ---
 

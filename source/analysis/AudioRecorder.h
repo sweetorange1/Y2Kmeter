@@ -17,7 +17,8 @@
 //     不会进入导出文件，导出内容与送进软件的信号完全一致；
 //   · 内存里保留最近 60 s（maxHistorySeconds）的滚动历史，导出时取最近 N 秒；
 //   · 另有一条独立的手动录制通道（startTake / stopTake，红点按钮）：采集线程把
-//     数据**同时**流式写进一个 WAV 文件，时长不受 60 s 限制；
+//     数据**同时**流式写进一个 WAV 文件，时长不受 60 s 限制，但单段最长
+//     maxTakeSeconds（1 小时）：到点自动停止写入、收尾保存并打开目录；
 //   · 文件格式 32-bit float WAV：AudioFormatWriter 在浮点模式下按位直写，
 //     与输入浮点样本 bit-exact；
 //   · 保存目录 <用户音乐目录>/Y2Kmeter Recordings，
@@ -38,6 +39,9 @@ public:
 
     // ---- 常量 ----
     static constexpr double maxHistorySeconds = 60.0;
+    // 手动录制（红点）单段最长时长：超过后自动收尾保存并停止继续写入
+    //   （1 h @48k 32-bit float 立体声 ≈ 1.38 GB，避免无限增长的文件占用磁盘）
+    static constexpr double maxTakeSeconds = 3600.0;
     static constexpr const char* folderName = "Y2Kmeter Recordings";
     // 导出文件名：Y2Kmeter_clip_<N秒>_<yyyy-MM-dd_HH-mm-ss>.wav
     static constexpr const char* clipPrefix = "Y2Kmeter_clip_";
@@ -69,11 +73,15 @@ public:
     // ---- 手动录制（红点按钮）：一段独立录音，直接流式写盘 ----
     //   startTake：立即开始，文件名 Y2Kmeter_recording_<yyyy-MM-dd_HH-mm-ss>.wav
     //   stopTake ：停止，采集线程把 FIFO 残余写完并关闭文件、打开目录
+    //   达到 maxTakeSeconds 时：采集线程自动停止写入并保存（效果等同用户点了停止）
     bool   startTake();
     void   stopTake();
     bool   isTaking() const noexcept { return takeActive.load (std::memory_order_acquire); }
     double getTakeSeconds() const noexcept;
     juce::File getTakeFile() const;
+
+    // 上一段录制是否因达到 maxTakeSeconds 而自动结束（下一次 startTake 时复位）
+    bool didHitTakeLimit() const noexcept { return takeHitLimit.load (std::memory_order_acquire); }
 
     // ---- 音频线程 ----
     // 推送 pre-gain 原始立体声样本 + 当前采样率；未在采集时立即返回（一次原子读）。
@@ -123,6 +131,7 @@ private:
     // 手动录制（红点）
     std::atomic<bool> takeRequested { false };
     std::atomic<bool> takeActive    { false };
+    std::atomic<bool> takeHitLimit  { false };   // 本段录制因 1 h 上限自动结束
     std::atomic<juce::int64> takeSamples { 0 };
     std::atomic<double> takeSampleRate   { 44100.0 };
     std::atomic<bool> shuttingDown { false };

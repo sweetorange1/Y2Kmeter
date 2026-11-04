@@ -15,7 +15,7 @@
 //       每列聚合 sampleRate / pxPerSec 个样本，与模块宽度无关
 //       —— 拉宽模块只是看到更长的历史，画面推进速度不变
 //   · 每个屏幕像素列 = 一根 1px 竖柱（该列覆盖样本的 min/max 包络）
-//   · 颜色来源（工具栏 PITCH / LOUD / SIB 三选一，默认 PITCH）：
+//   · 颜色来源（工具栏单个按钮循环 PITCH → LOUD → SIB，默认 PITCH）：
 //       PITCH —— 真正的音高染色：chroma 折叠 → 12 音级 → 色相
 //       LOUD  —— 响度（dBFS）映射到主题 chartRamp 渐变
 //       SIB   —— 齿音（5 kHz 以上能量占比）
@@ -27,10 +27,11 @@
 //
 // 顶部工具栏：
 //   ┌──────────────────────────────────────────────┐
-//   │ [PITCH][LOUD][SIB]                [Freeze]   │  [SPEED]
+//   │ [PITCH]                           [Freeze]   │  [SPEED]
 //   ├──────────────────────────────────────────────┤  滑条
 //   │                瀑布画布（凹陷）               │  (1024…
 //   └──────────────────────────────────────────────┘   16384)
+//     ↑ 左上角按钮单击循环 PITCH → LOUD → SIB，文字即当前模式
 // ==========================================================
 
 class WaveformModule : public GlDirectModuleBase,
@@ -159,7 +160,10 @@ private:
     void updateSamplesPerColumn();
     void resetAccumulator();
 
-    void refreshColourButtons();
+    // 颜色来源循环：PITCH → LOUD → SIB → PITCH（单一按钮，单击切换）
+    static ColorSource  nextColorSource (ColorSource s) noexcept;
+    static const char*  colorSourceName (ColorSource s) noexcept;
+    void refreshColourButton();
 
     void drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawWaveform  (juce::Graphics& g, juce::Rectangle<int> canvas) const;
@@ -211,10 +215,10 @@ private:
     double cachedSampleRate = 48000.0;   // 缓存 hub 的采样率（避免每帧查询）
 
     // 顶部按钮
-    juce::TextButton btnPitch  { "PITCH" };
-    juce::TextButton btnLoud   { "LOUD"  };
-    juce::TextButton btnSib    { "SIB"   };
-    juce::TextButton btnFreeze { "Freeze" };
+    //   颜色来源合并为一个按钮：单击循环 PITCH → LOUD → SIB，
+    //   按钮文字始终显示当前模式（省出工具栏宽度）
+    juce::TextButton btnColourMode { "PITCH" };
+    juce::TextButton btnFreeze     { "Freeze" };
 
     // 右侧 SPEED 滑条（垂直）：单位 px/s（像素列/秒），顶 = 快，底 = 慢
     juce::Slider speedSlider;

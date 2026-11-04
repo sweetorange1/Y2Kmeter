@@ -9,6 +9,27 @@
 // StereoFieldModule —— Pink XP 像素风"声相指示"（半圆雷达）
 // ==========================================================
 
+namespace
+{
+// 能量环标签：环半径占 R 的比例 frac 在当前自动增益下的**真实电平**
+//   level = frac / gain → dB = 20·log10(level)
+//   gain = 1 时正好回落到原来的 -12 / -6 / -2.5 / 0 dB。
+juce::String ringDbLabel (float frac, float gain)
+{
+    if (frac <= 0.0f || gain <= 0.0f)
+        return {};
+
+    const float db = 20.0f * std::log10 (frac / gain);
+
+    if (std::abs (db) < 0.05f)
+        return "0 dB";
+
+    return (std::abs (db - std::round (db)) < 0.05f)
+        ? juce::String (juce::roundToInt (db)) + " dB"
+        : juce::String (db, 1) + " dB";
+}
+} // namespace
+
 StereoFieldModule::StereoFieldModule (AnalyserHub& h)
     : GlDirectModuleBase (ModuleType::stereoField), hub (h)
 {
@@ -18,6 +39,9 @@ StereoFieldModule::StereoFieldModule (AnalyserHub& h)
     setMinSize     (64, 64);
     setDefaultSize (320, 220);
     setTitleText   ("Stereo Field");
+
+    // 自动缩放：首个结算周期从"现在"起算，用满 1 s 的真实数据再定增益
+    lastPeriodicGainUpdateMs = juce::Time::getMillisecondCounterHiRes();
 
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
@@ -54,6 +78,10 @@ void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     std::memcpy (snapshotL.getRawDataPointer(), frame.oscL.data(), (size_t) n * sizeof (float));
     std::memcpy (snapshotR.getRawDataPointer(), frame.oscR.data(), (size_t) n * sizeof (float));
 
+    // 自动缩放：累积本帧峰值，每 1 s 结算一次增益（与 XY / Lissajous 同策略）
+    updateAutoGain (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(),
+                    juce::jmin (snapshotL.size(), snapshotR.size()));
+
     // v2.9.5：GPU trail 累积 —— 衰减在 GPU 每帧执行（decay 按累计 dt 换算，
     //   残影时长与帧率无关）；点云每帧画进 trail FBO（GPU 光栅化，不再需要
     //   旧版"隔帧 + CPU 全图 multiplyAlpha"）。
@@ -70,6 +98,51 @@ void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     // v2.9：去掉 15ms×DPI 硬编码节流，每个分发帧重绘
     repaint();
+}
+
+// ----------------------------------------------------------
+// updateAutoGain —— 自动缩放（参考 OscilloscopeModule::onFrame）
+//   · 峰值驱动：统计 max(|L|,|R|)（散点半径的驱动量），累积到 1 s 周期
+//   · gain = kAutoGainTarget / 周期峰值 → 峰值落在半径的 90%
+//   · 与当前 gain 差 < 10% 不更新（死区），避免画面持续缩放抖动
+//   · 静音周期不重算：否则 gain 会顶到上限，下一段声音进来时突然炸开
+// ----------------------------------------------------------
+void StereoFieldModule::updateAutoGain (const float* left, const float* right, int numSamples)
+{
+    if (left == nullptr || right == nullptr || numSamples <= 0)
+        return;
+
+    float frameMax = 0.0f;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const float l = std::abs (left[i]);
+        const float r = std::abs (right[i]);
+        const float peak = juce::jmax (l, r);
+
+        if (std::isfinite (peak) && peak > frameMax)
+            frameMax = peak;
+    }
+
+    if (frameMax > periodicMaxAccum)
+        periodicMaxAccum = frameMax;
+
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    constexpr double kPeriodMs = 1000.0;
+
+    if (nowMs - lastPeriodicGainUpdateMs < kPeriodMs)
+        return;
+
+    lastPeriodicGainUpdateMs = nowMs;
+
+    if (periodicMaxAccum > 1.0e-3f)
+    {
+        const float targetGain = juce::jlimit (0.1f, 10.0f, kAutoGainTarget / periodicMaxAccum);
+
+        if (std::abs (targetGain - autoGainFactor) > autoGainFactor * kAutoGainDeadZone)
+            autoGainFactor = targetGain;
+    }
+
+    periodicMaxAccum = 0.0f;
 }
 
 // ----------------------------------------------------------
@@ -93,13 +166,13 @@ void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> 
 
     g.setColour (PinkXP::ink.withAlpha (0.55f));
     g.setFont (PinkXP::getAxisFont (juce::jmax (6.0f, labelFontSize - 1.5f), juce::Font::plain));
-    const float frac[4]   = { 0.25f, 0.50f, 0.75f, 1.00f };
-    const char* labels[4] = { "-12", "-6", "-2.5", "0 dB" };
+    const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
     for (int ri = 0; ri < 4; ++ri)
     {
+        // 环的几何固定；标签按当前自动增益换算成真实电平
         const float rr = (float) R * frac[ri];
         if (rr < 8.0f || rr > (float) R) continue;
-        g.drawText (labels[ri], cx + 4, baseY - (int) rr - 6, 26, 12,
+        g.drawText (ringDbLabel (frac[ri], autoGainFactor), cx + 4, baseY - (int) rr - 6, 34, 12,
                     juce::Justification::centredLeft, false);
     }
 
@@ -112,6 +185,16 @@ void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> 
     g.setFont (PinkXP::getAxisFont (juce::jmin (labelFontSize, 11.0f), juce::Font::bold));
     g.drawText ("L", plot.getX(), y, actualMargin, labelH, juce::Justification::centredRight, false);
     g.drawText ("R", plot.getRight() - actualMargin, y, actualMargin, labelH, juce::Justification::centredLeft, false);
+
+    // 当前自动增益（1.0x 是默认比例尺，不显示，避免多余文字）
+    if (std::abs (autoGainFactor - 1.0f) > 0.05f)
+    {
+        g.setColour (PinkXP::ink.withAlpha (0.6f));
+        g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
+        g.drawText (juce::String (autoGainFactor, 1) + "x",
+                    canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
+                    juce::Justification::centredRight, false);
+    }
 
     // 悬停十字辅助线（反馈 #10）
     if (hoverActive)
@@ -190,9 +273,10 @@ void StereoFieldModule::drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> 
     const float dx = (float) hoverPos.x - cx;
     const float dy = baseY - (float) hoverPos.y;
 
-    // 半径比例 → 电平：rho = peak×R（满幅 = R = 0 dB），按线性幅度换算 dB
+    // 半径比例 → 电平：rho = peak × R × gain → peak = rho / (R × gain)
+    //   （自动缩放下"满半径"不再是 0 dB，必须除掉当前增益才是真实电平）
     const float rho  = juce::jlimit (0.0f, R, std::sqrt (dx * dx + dy * dy));
-    const float frac = rho / juce::jmax (1.0f, R);
+    const float frac = rho / (juce::jmax (1.0f, R) * juce::jmax (0.01f, autoGainFactor));
     const float db   = 20.0f * std::log10 (juce::jmax (1.0e-4f, frac));
 
     // 角度 → 声像：-90° = 纯左，+90° = 纯右，顶部 0° = 居中
@@ -299,6 +383,8 @@ void StereoFieldModule::buildGlSnapshot()
         {
             const auto geo = computeRadarGeometry (plot);
             const float cx = (float) geo.cx, baseY = (float) geo.baseY, R = (float) geo.radius;
+            // 自动缩放：半径乘当前增益，瞬时超峰压到圆弧上（方向仍由 balance 决定）
+            const float effR = R * autoGainFactor;
 
             constexpr int kMaxPoints = 512;
             const int stride = juce::jmax (1, N / kMaxPoints);
@@ -319,7 +405,7 @@ void StereoFieldModule::buildGlSnapshot()
                 if (sum < 1.0e-4f) continue;
                 const float balance = (r - l) / sum;
                 const float peak = juce::jmax (l, r);
-                const float rho = peak * R;
+                const float rho = juce::jmin (peak * effR, R);
                 const float ang = balance * (kPi * 0.5f);
                 const float px = cx + rho * std::sin (ang);
                 const float py = baseY - rho * std::cos (ang);
@@ -441,18 +527,16 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
         g.drawLine ((float) cx, (float) baseY, (float) cx,        (float) baseY - R,   1.0f);
     }
 
-    // ---- 能量刻度（固定比例尺）----
-    //   effR = R 即满幅 0 dB 对应的半径；能量环 + dB 标签固定在外轮廓内，
-    //   不随信号强度做实时缩放。
+    // ---- 能量刻度 ----
+    //   环的几何固定（雷达轮廓不跳动）；dB 标签按当前自动增益换算成真实电平：
+    //   gain = 1 时即 -12 / -6 / -2.5 / 0 dB。
     {
-        const float effR      = (float) R;
-        const float frac[4]   = { 0.25f, 0.50f, 0.75f, 1.00f };
-        const char* labels[4] = { "-12", "-6", "-2.5", "0 dB" };
+        const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
 
         g.setColour (PinkXP::pink200.withAlpha (0.30f));
         for (int ri = 0; ri < 4; ++ri)
         {
-            const float rr = effR * frac[ri];
+            const float rr = (float) R * frac[ri];
             if (rr < 2.0f || rr > (float) R) continue;
             juce::Path arc;
             // JUCE 角度：0 = 顶部中心，顺时针为正；
@@ -468,10 +552,10 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
                                         juce::Font::plain));
         for (int ri = 0; ri < 4; ++ri)
         {
-            const float rr = effR * frac[ri];
+            const float rr = (float) R * frac[ri];
             if (rr < 8.0f || rr > (float) R) continue;
             const int ly = baseY - (int) rr - 6;
-            g.drawText (labels[ri], cx + 4, ly, 26, 12,
+            g.drawText (ringDbLabel (frac[ri], autoGainFactor), cx + 4, ly, 34, 12,
                         juce::Justification::centredLeft, false);
         }
     }
@@ -494,6 +578,16 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
                     juce::Justification::centredRight, false);
         g.drawText ("R", plot.getRight() - actualMargin, y, actualMargin, labelH,
                     juce::Justification::centredLeft, false);
+    }
+
+    // 当前自动增益（1.0x 为默认比例尺，不显示）
+    if (std::abs (autoGainFactor - 1.0f) > 0.05f)
+    {
+        g.setColour (PinkXP::ink.withAlpha (0.6f));
+        g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
+        g.drawText (juce::String (autoGainFactor, 1) + "x",
+                    canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
+                    juce::Justification::centredRight, false);
     }
 }
 
@@ -556,7 +650,8 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
     const int  cx    = geo.cx;
     const int  baseY = geo.baseY;
     const int  R     = geo.radius;
-    const float effR = (float) R;
+    // 自动缩放：散点半径乘当前增益（背景半圆/能量环保持固定）
+    const float effR = (float) R * autoGainFactor;
 
     const int N = juce::jmin (snapshotL.size(), snapshotR.size());
     if (N <= 1) return;
@@ -587,13 +682,12 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
         if (sum < 1.0e-4f) continue;  // 静音点不画，避免在圆心堆积
 
         const float balance = (r - l) / sum;   // [-1,1]：-1 纯左，+1 纯右
-        // 半径由"主导声道幅度"驱动（max(|L|,|R|)），使散点最大包络
-        // 正好落在背景半圆（半径 R）上：
-        //   · 纯左/纯右满幅 → rho=R，落在左右直径端点
-        //   · 居中满幅       → rho=R，落在顶部
-        //   · 任意声像满幅   → rho=R，落在半圆弧上（不再收缩成三角形）
+        // 半径由"主导声道幅度"驱动（max(|L|,|R|)），再乘自动增益：
+        //   · 增益归一化后，本周期峰值正好落在半径 90% 处
+        //   · 瞬时超峰（增益还没跟上）压到圆弧上，方向仍由 balance 决定
+        //     —— 纯左/纯右落在左右直径端点，居中落在顶部
         const float peak = juce::jmax (l, r);
-        const float rho  = peak * effR;
+        const float rho  = juce::jmin (peak * effR, (float) R);
         // 角度范围 ±90°：balance=-1 纯左 → 左水平线（直径线左端）；
         // balance=+1 纯右 → 右水平线（直径线右端）；0 = 顶部。覆盖完整上半圆。
         const float ang  = balance * (kPi * 0.5f);

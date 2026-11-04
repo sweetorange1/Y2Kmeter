@@ -217,6 +217,12 @@ void RecorderModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
         stateLabel  = "EMPTY";
         stateColour = PinkXP::danger;
     }
+    else if (! taking && recorder.didHitTakeLimit())
+    {
+        // 到达 1 小时上限：采集线程已自动收尾保存，状态灯给出明确反馈
+        stateLabel  = "SAVED 1H";
+        stateColour = PinkXP::ok;
+    }
 
     const int stateWanted = juce::jmax (PinkXP::ui (30),
                                         (int) (headerFont * 1.3f * (float) stateLabel.length()));
@@ -243,6 +249,16 @@ void RecorderModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     g.setColour (taking ? kRecRed : PinkXP::ink.withAlpha (0.4f));
     g.drawText (formatElapsed (taking ? recorder.getTakeSeconds() : 0.0),
                 r.time, juce::Justification::centred, false);
+
+    // 录制中在计时右侧提示单段上限（到点自动保存并停止）
+    if (taking)
+    {
+        g.setFont (PinkXP::getFont (juce::jlimit (5.0f, 8.0f,
+                                                  (float) r.time.getHeight() * 0.45f)));
+        g.setColour (PinkXP::ink.withAlpha (0.35f));
+        g.drawText ("MAX " + formatElapsed (AudioRecorder::maxTakeSeconds),
+                    r.time, juce::Justification::centredRight, false);
+    }
 
     // ---- 拖动条数值（自己画，字号随行高缩放）----
     g.setFont (PinkXP::getFont (valueFont, juce::Font::bold));

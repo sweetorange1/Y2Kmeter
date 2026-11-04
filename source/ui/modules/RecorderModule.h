@@ -26,7 +26,8 @@
 //
 //   两条互相独立的保存路径：
 //     1) 红点手动录制：点一下开始（亮红 + 计时），再点一下停止并保存为
-//        Y2Kmeter_recording_<yyyy-MM-dd_HH-mm-ss>.wav（采集线程流式写盘，时长不限）；
+//        Y2Kmeter_recording_<yyyy-MM-dd_HH-mm-ss>.wav（采集线程流式写盘；
+//        单段最长 1 小时，到点自动停止写入并保存，状态灯显示 SAVED 1H）；
 //     2) SAVE LAST N：从常驻的 60 s 滚动缓冲里抓最近 N 秒，保存为
 //        Y2Kmeter_clip_<N秒>_<yyyy-MM-dd_HH-mm-ss>.wav。
 //

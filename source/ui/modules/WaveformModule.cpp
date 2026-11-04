@@ -71,21 +71,17 @@ WaveformModule::WaveformModule (AnalyserHub& h)
     // 齿音检测器（带通 + 包络 + 迟滞门限）
     sibDetector.prepare (cachedSampleRate);
 
-    // ---- 颜色来源三选一（替换原来的 3s / 6s 时长按钮）----
-    auto setupColourBtn = [this] (juce::TextButton& b, ColorSource s, const juce::String& tip)
+    // ---- 颜色来源：单个按钮循环 PITCH → LOUD → SIB ----
+    //   旧的三个互斥按钮占掉了大半个工具栏；合成一个后按钮文字就是当前模式，
+    //   单击即切到下一档（默认 PITCH），tooltip 里写明完整循环顺序。
+    btnColourMode.setClickingTogglesState (false);
+    btnColourMode.setTooltip ("Colour source: PITCH (chroma hue) / LOUD (dBFS ramp) / "
+                              "SIB (5-12 kHz sibilance) - click to cycle");
+    btnColourMode.onClick = [this]()
     {
-        b.setClickingTogglesState (true);
-        b.setRadioGroupId (0x5746434c);   // "WFCL"
-        b.setTooltip (tip);
-        b.onClick = [this, s]() { setColorSource (s); };
-        addAndMakeVisible (b);
+        setColorSource (nextColorSource (colorSource));
     };
-    setupColourBtn (btnPitch, ColorSource::pitch,
-                    "Pitch colour: hue = pitch class from a 12-tone chroma tracker");
-    setupColourBtn (btnLoud,  ColorSource::loudness,
-                    "Loudness colour: dBFS mapped to the theme ramp");
-    setupColourBtn (btnSib,   ColorSource::sibilance,
-                    "Sibilance: 5-12 kHz band detection - red = sibilant, grey = clean");
+    addAndMakeVisible (btnColourMode);
 
     btnFreeze.setClickingTogglesState (true);
     btnFreeze.onClick = [this]() { setFrozen (btnFreeze.getToggleState()); };
@@ -123,7 +119,7 @@ WaveformModule::WaveformModule (AnalyserHub& h)
         speedSlider.repaint();
     });
 
-    refreshColourButtons();
+    refreshColourButton();
 
     // 默认 PITCH：需要频谱一路来驱动 chroma 跟踪
     hub.retain (AnalyserHub::Kind::Spectrum);
@@ -209,14 +205,36 @@ void WaveformModule::setColorSource (ColorSource s)
         repaint();
     }
 
-    refreshColourButtons();
+    refreshColourButton();
 }
 
-void WaveformModule::refreshColourButtons()
+WaveformModule::ColorSource WaveformModule::nextColorSource (ColorSource s) noexcept
 {
-    btnPitch.setToggleState (colorSource == ColorSource::pitch,      juce::dontSendNotification);
-    btnLoud .setToggleState (colorSource == ColorSource::loudness,   juce::dontSendNotification);
-    btnSib  .setToggleState (colorSource == ColorSource::sibilance,  juce::dontSendNotification);
+    switch (s)
+    {
+        case ColorSource::pitch:      return ColorSource::loudness;
+        case ColorSource::loudness:   return ColorSource::sibilance;
+        case ColorSource::sibilance:  return ColorSource::pitch;
+    }
+
+    return ColorSource::pitch;
+}
+
+const char* WaveformModule::colorSourceName (ColorSource s) noexcept
+{
+    switch (s)
+    {
+        case ColorSource::pitch:      return "PITCH";
+        case ColorSource::loudness:   return "LOUD";
+        case ColorSource::sibilance:  return "SIB";
+    }
+
+    return "PITCH";
+}
+
+void WaveformModule::refreshColourButton()
+{
+    btnColourMode.setButtonText (colorSourceName (colorSource));
 }
 
 // ----------------------------------------------------------
@@ -640,15 +658,13 @@ void WaveformModule::layoutContent(juce::Rectangle<int> contentBounds)
     auto tb = getToolbarBounds (contentBounds).reduced (2);
     const int gap = 4;
 
-    // 左侧：颜色来源三选一
-    const int bwPitch = 46, bwLoud = 42, bwSib = 34;
-    btnPitch.setBounds (tb.getX(), tb.getY(), bwPitch, tb.getHeight());
-    btnLoud .setBounds (btnPitch.getRight() + gap, tb.getY(), bwLoud, tb.getHeight());
-    btnSib  .setBounds (btnLoud.getRight()  + gap, tb.getY(), bwSib,  tb.getHeight());
-
-    // 右侧：Freeze
-    const int freezeW = 60;
+    // 右侧：Freeze（先算，左侧按钮按剩余宽度自适应，窄模块下不会互相压住）
+    const int freezeW = juce::jmin (60, juce::jmax (0, tb.getWidth() / 2 - gap));
     btnFreeze.setBounds (tb.getRight() - freezeW, tb.getY(), freezeW, tb.getHeight());
+
+    // 左侧：颜色来源循环按钮（文字在 PITCH / LOUD / SIB 之间切换）
+    const int colourW = juce::jlimit (24, 64, tb.getWidth() - freezeW - gap);
+    btnColourMode.setBounds (tb.getX(), tb.getY(), colourW, tb.getHeight());
 
     // 右侧 SPEED 面板（垂直滑条 + 顶部 Label）
     auto contentInner = contentBounds;

@@ -23,8 +23,13 @@
 //     半周左右摆动，符合声像指示（stereo position）的语义。
 //   * 渐隐残影：新样本点累积到离屏 trail 图像，每帧按固定系数衰减 alpha，
 //     旧点逐渐变淡直至趋向模块底色（而非瞬时消失）。
-//   * 固定比例尺：样本能量 [0,1] 直接线性映射到半圆半径 R，
-//     不做随信号强度的实时自动缩放，整个图表比例尺恒定。
+//   * 自动缩放（对齐 OscilloscopeModule 的 X-Y / Lissajous 做法）：
+//     · 每帧统计径向驱动量 max(|L|,|R|) 的峰值，累积到 1 s 周期
+//     · 每秒结算一次：gain = 0.90 / 周期峰值 → 峰值落在半径的 90%
+//     · 与上一周期差 < 10% 不更新（死区），gain 限幅 [0.1, 10]
+//     · **背景半圆 / 能量环几何保持固定**（雷达轮廓不跳动），
+//       只让散点半径乘 gain，并把能量环的 dB 标签按当前 gain 换算成
+//       真实电平（gain=1 时即原来的 -12 / -6 / -2.5 / 0 dB）
 //
 // 数据源：AnalyserHub::getLatestFrame() → frame.oscL / frame.oscR
 // ==========================================================
@@ -76,6 +81,18 @@ private:
     // 更新残影：1) 衰减旧点 alpha  2) 绘制当前快照的新点
     void updateTrail (juce::Rectangle<int> canvas);
     void invalidateTrail();
+
+    // ---- 自动缩放（参考 OscilloscopeModule 的 X-Y / Lissajous）----
+    //   · 逐帧累积 max(|L|,|R|) 的峰值，每 1 s 结算一次增益
+    //   · gain = kAutoGainTarget / 周期峰值，限幅 [0.1, 10]，10% 死区防抖
+    void updateAutoGain (const float* left, const float* right, int numSamples);
+
+    static constexpr float kAutoGainTarget   = 0.90f;   // 峰值落点（占半径比例）
+    static constexpr float kAutoGainDeadZone = 0.10f;   // 波动小于 10% 不重算
+
+    float  autoGainFactor           = 1.0f;   // 当前增益 [0.1, 10]
+    float  periodicMaxAccum         = 0.0f;   // 本周期内累积的峰值
+    double lastPeriodicGainUpdateMs = 0.0;    // 上次周期性结算时间戳（ms）
 
     // 悬停十字辅助线 + 读数框（反馈 #10）
     void drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> canvas);
