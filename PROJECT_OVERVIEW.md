@@ -750,7 +750,7 @@ virtual void restoreModuleSpecificState(const juce::ValueTree& state) { ignoreUn
 | `OscilloscopeModule` | `displayMode` (int), `frozen` (bool) | 枚举+布尔 |
 | `OscilloscopeWaveModule` | `channelMode` (int) | 枚举 |
 | `SpectrumModule` | `peakHold` (bool), `slope` (bool) | 双布尔 |
-| `WaveformModule` | `displaySeconds` (double), `frozen` (bool), `gainDb` (double) | 浮点+布尔 |
+| `WaveformModule` | `pixelsPerSecond` (double), `colorSource` (int), `frozen` (bool) | 浮点+枚举+布尔（旧存档的 `displaySeconds` 按名义宽度换算成 px/s） |
 | `EqModule` | `cellSize` (int) | 整数 |
 
 `saveLayoutTree` 中在 VirtuPet 分支后统一调用 `m->saveModuleSpecificState()`，若有数据则 `appendChild`。
@@ -5349,6 +5349,119 @@ GL 与 CPU 两条路径、峰值虚线、次曲线、悬停读数全部同步。
   与私有成员（`libraryFile_ / libraryLoaded_`）→ **类布局变化 = ABI 变化**，必须清理 `ThemeLibrary` 相关 obj 后重编，
   不要只做增量链接（参见 6.x"MSVC 增量漏编 → ABI 错配启动崩溃"的既有踩坑记录）；
 - 未构建/未实测：macOS 端本轮改动（`restorePseudoFullScreen()` 在 mac 上直接 return，悬浮面板走 `addToDesktop` 的 mac 分支）需在 mac 上回归一次。
+
+---
+
+## v2.9.10：Waveform 模块重构（滚动速度 / 音高染色 / 齿音高亮）
+
+> 版本号升到 **2.9.10**：`CMakeLists.txt` 的 `project(Y2Kmeter VERSION 2.9.10)`、
+> 两处 `juce_add_plugin(... VERSION 2.9.10)`、`Y2Kmeter_installer.iss` 的 `MyAppVersion`、
+> `README.md` 版本徽章、`PluginEditor.cpp` 抬头水印（两处，含宽度测算用字面量）已核对一致。
+
+### 1. 交互重做：GAIN → SPEED，时长按钮 → 颜色来源
+
+| 旧控件 | 新控件 |
+| --- | --- |
+| 右侧 GAIN 滑条（0…+36 dB，纯 UI 放大） | 右侧 **SPEED** 滑条：滚动速度 10…800 px/s（默认 120，skew 中点 80） |
+| 顶部 3s / 6s 时长按钮 | 顶部 **[PITCH] [LOUD] [SIB]** 三选一颜色来源（默认 PITCH） |
+
+SPEED 的口径与 `SpectrogramModule` 一致，且**与模块宽度解耦**：
+
+```
+samplesPerColumn = sampleRate / pixelsPerSecond      // 每像素列聚合的样本数
+可见窗口时长      = canvasWidth / pixelsPerSecond    // 只影响"看到多少历史"
+```
+
+拉宽模块只是让窗口装下更长的历史，画面推进速度（像素/秒）不变。
+
+### 2. 数据管线：按真实新增样本推进
+
+- `AnalyserHub` 新增 `std::atomic<juce::uint64> oscTotalSamples`：音频线程每写一块就累加，
+  UI 侧在同一把 `oscLock` 内取快照值 → `FrameSnapshot::oscTotalSamples`。
+- `WaveformModule::onFrame` 改为 `available = total - lastOscTotal`，只消费真实新增的样本。
+
+  这修复了一个隐蔽的显示缺陷：此前用 `dt × sampleRate` 估算新增样本数，与音频线程实际产出
+  对不齐时会**周期性重复消费同一段样本**，同一像素列里混进两个相位的波形，画面上表现为曲线
+  **局部突然变粗**。计数回退（`prepare()` 重置）时重新对齐游标。
+- 列推进由"累加后扣余数"改为**倒计时**（`samplesUntilNextColumn` 递减到 0 产出列，随后
+  `+= samplesPerColumn`）：长期平均列率严格等于 SPEED，每个样本只统计一次，不再有缓慢漂移。
+- 绘制层：`alpha = clamp((dB + 80) / 21)`（静音列整列不画）、1 px 最小柱高、保留 min/max
+  3-tap 包络平滑、去掉右侧高光渐变。
+
+### 3. PITCH：音高染色
+
+新增 `source/analysis/PitchTracker.h/.cpp`（纯 C++，可单测）：
+
+```
+spectrumMag（1024 bin）→ 30 Hz…5 kHz 带内 m²·(f/440)^0.35 加权
+   → 按 MIDI 音高折 12 音级（跨桶线性插值，半音边界不跳变）
+   → 12 桶一阶平滑（τ ≈ 100 ms）→ 平方锐化取主音级
+   → 主音级 ±1 桶圆周重心 = 连续色相；confidence = 主音级占比 × 电平门
+```
+
+- 每 bin 的频率 / 音级 / 倾斜权重在 `(binHz, numBins)` 变化时预计算成 LUT，稳态只做乘加。
+- `FrameSnapshot::pitch` 由 `AnalyserHub` 帧分发时填充（**在 `specLock` 之外**计算，避免音频
+  线程在 `publishUnderSpecLock` 上空转）。
+- 染色：`t = (音高 - C0) / (C7 - C0)` → 主题 `chartRamp`，与 LOUD 同一套色阶；置信度低时向
+  中性灰靠，避免满屏乱跳。
+- 模块只在 PITCH 模式 `retain(Kind::Spectrum)`，切到 LOUD / SIB 立即 `release`。
+
+### 4. LOUD：dBFS → 主题色阶
+
+`t = clamp((dB + 60) / 60)`，`pow(t, 0.75)` 后取 `sampleChartRamp`，`t ≥ 0.9` 向 `sel` 过渡
+（接近 clip 更醒目）。
+
+### 5. SIB：齿音检测与"红 / 灰"显示
+
+新增 `source/analysis/SibilanceDetector.h/.cpp`（纯 C++，可单测），替代原来的一阶高通 +
+`hfRms/rms × 3.5` 占比：
+
+```
+L/R 独立 → HP 5 kHz（两级 Butterworth 级联 = LR4，24 dB/oct）
+        → LP 12 kHz（同样 LR4）
+        → peak 包络（attack 1 ms / release 50 ms）
+        → env = max(envL, envR)              // 立体声联动，不做 (L+R)/2 降混
+        → 迟滞门限：> -35 dBFS 开、< -39 dBFS 关
+        → drive = clamp((bandDb + 35) / 12, 0, 1) + 15 ms 平滑
+```
+
+- 每列存该列内的 `max(drive)`（齿音峰值），检测时间常数固定，不随 SPEED / 列宽变化。
+- 显示：无齿音的列压成**低存在感灰**（透明度上限 0.13，能看出波形走向但不抢注意力）；
+  有齿音的列用 `PinkXP::danger` **红色**，`drive^0.7` 从暗红到亮红、透明度 0.30 → 1.0。
+- 旧实现的问题（记录在案，避免回退）：一阶高通只有 6 dB/oct，2 kHz 仅衰减约 8.6 dB，
+  纯 2 kHz 音就能把指标打满；没有低通 → 踩镲/空气声等同齿音；用"占比"→ 与电平无关，
+  安静嘶声也是满色；mono 降混会抵消侧声道齿音。
+
+### 6. 存档兼容
+
+| 情况 | 行为 |
+| --- | --- |
+| 旧存档只有 `displaySeconds`（3s / 6s） | 按名义 384 px 宽换算成 px/s：3 s → 128、6 s → 64 |
+| 旧存档的 `gainDb` / `sibilance` | `gainDb` 忽略；`sibilance = true` 映射到 SIB 模式 |
+| 新字段 `pixelsPerSecond` / `colorSource` / `frozen` | 旧版本读到未知属性直接忽略（ValueTree 无 schema） |
+| 模块对外 API | 删除的 `setDisplaySeconds / setHistorySamples / setSibilanceEnabled` 等全仓无外部引用 |
+| `Kind` 枚举 / `NumKinds` | 未变，引用计数与帧分发语义不受影响 |
+| `FrameSnapshot` | 只新增字段（内部池化，不落盘） |
+
+### 7. 涉及文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `source/ui/modules/WaveformModule.h/.cpp` | 交互重做、SPEED / 颜色来源、采样精确推进、三套配色、`ColumnStyle` 统一解算 |
+| `source/analysis/PitchTracker.h/.cpp` | **新增**：chroma 音高跟踪（LUT 预计算） |
+| `source/analysis/SibilanceDetector.h/.cpp` | **新增**：LR4 带通 + 包络 + 迟滞门限齿音检测 |
+| `source/analysis/AnalyserHub.h/.cpp` | `oscTotalSamples` 计数、`FrameSnapshot::pitch`、帧分发里折 chroma |
+| `CMakeLists.txt` | 注册两个新源文件；版本号 2.9.10 |
+| `Y2Kmeter_installer.iss` / `README.md` / `PluginEditor.cpp` | 版本号 2.9.10 |
+
+### 8. 验证状态与已知限制
+
+- 用户实测通过：正弦测试音可见完整波形、PITCH / LOUD / SIB 三模式切换、SPEED 10…800 px/s 全量程可用；
+- 齿音检测目前等价于"频段 + 绝对门限"（不含发声/非发声判别），**持续的宽带高频（踩镲、镲片、
+  空气声）仍会被判为齿音**；进一步收敛可加"爆发性判别"（带内电平持续 400~600 ms 后降权）
+  或复用 pitch 置信度做门控；
+- 门限 `-35 dBFS`、上下界 5 k / 12 k、attack / release 都是 `SibilanceDetector.cpp` 顶部常量，
+  可按素材调整。
 
 ---
 

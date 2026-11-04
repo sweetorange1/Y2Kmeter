@@ -7,6 +7,7 @@
 #include <deque>
 
 #include "source/analysis/AudioRecorder.h"
+#include "source/analysis/PitchTracker.h"
 #include "source/analysis/music/MusicAnalysisEngine.h"
 
 // ============================================================
@@ -439,6 +440,11 @@ public:
         std::array<float, oscilloscopeBufferSize> oscL {};
         std::array<float, oscilloscopeBufferSize> oscR {};
 
+        // 音频线程累计写入示波器环的样本总数（单调递增；prepare() 重置时可能回退）。
+        //   Waveform 用它算"本帧新增了多少样本"，比用帧时钟估算精确 —— 估算会
+        //   周期性重复消费同一段样本，让同一像素列混进两个相位的波形（线变粗）。
+        juce::uint64 oscTotalSamples = 0;
+
         // Spectrum：1024 个高精度 mag（线性）+ 160 个粗粒度归一化 specData
         std::array<float, spectrumMagSize>  spectrumMag  {};
         std::array<float, spectrumBins>     spectrumData {};
@@ -450,6 +456,12 @@ public:
 
         // 节拍 / 调性结果（含状态、更新时间；无置信度百分比）
         y2k::music::Result musicAnalysis {};
+
+        // 音高（Waveform 的 PITCH 染色用）：由本帧 spectrumMag 折叠出 12 音级
+        //   chroma 后估计。仅在 activeMask 含 Spectrum 时更新（否则为上一帧残留，
+        //   消费方必须先 has(Kind::Spectrum) 判定）。
+        //   hue01 = 音级色相 [0,1)，0 = C；confidence = 0..1。
+        y2k::pitch::Info pitch {};
 
         bool has (Kind kind) const noexcept
         {
@@ -675,6 +687,9 @@ private:
     std::array<float, oscilloscopeBufferSize> oscBufL {};
     std::array<float, oscilloscopeBufferSize> oscBufR {};
     int oscWritePos = 0;
+    // 累计写入样本数（音频线程写 / UI 线程读），仅用于让消费方按"真实新增样本数"
+    //   推进，避免用帧时钟估算带来的重复/丢样本。
+    std::atomic<juce::uint64> oscTotalSamples { 0 };
 
     // ---- 频谱（单声道混合，FFT）----
     void pushSamplesToSpectrum(const float* left, const float* right, int numSamples);
@@ -736,6 +751,11 @@ private:
     //   注意：它只知道"PCM 样本"，不知道音频从哪来 —— 插件宿主与
     //   Standalone Loopback 共用同一条 pushStereo 路径。
     y2k::music::MusicAnalysisEngine musicEngine;
+
+    // ---- 音高（chroma）跟踪 ----
+    //   在 FrameDispatcher（UI 线程）里用本帧 spectrumMag 更新，零音频线程开销。
+    //   只在有模块 retain(Kind::Spectrum) 时才会被喂数据。
+    y2k::pitch::Tracker pitchTracker;
 
     // ---- 录音机（Recorder 模块后端）----
     //   与 pushStereo 完全解耦：录音走 pre-gain 原始输入，不受分析链路开关影响。

@@ -114,28 +114,33 @@ public:
                 std::memcpy (frame->oscR.data() + firstChunk, owner.oscBufR.data(),
                              static_cast<size_t> (owner.oscWritePos) * sizeof (float));
             }
+
+            // 累计写入数（读锁内取，保证与上面拷出的样本来自同一写入进度）
+            frame->oscTotalSamples = owner.oscTotalSamples.load (std::memory_order_relaxed);
         }
 
         if (frame->has (Kind::Spectrum))
         {
-            // Phase F 优化：直接 memcpy（尺寸 + 类型都与 std::array 内部缓冲一致）
-#if Y2K_ENABLE_PERF_COUNTERS
-            const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
-#endif
-            const juce::SpinLock::ScopedLockType sl (owner.specLock);
-#if Y2K_ENABLE_PERF_COUNTERS
-            const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
-            y2k::perf::PerformanceCounterSystem::instance().recordDuration(
-                y2k::perf::FunctionId::lockSpec,
-                y2k::perf::Partition::dataCommunication,
-                y2k::perf::ThreadRole::ui,
-                0,
-                lockNs - waitStart);
-#endif
-            // 反馈 #7：magData 尺寸随主路 FFT size 变化（1024..8192 bin）。
-            //   spectrumMag 为固定 1024 的兼容数组：取前 min(1024, size) bin，
-            //   不足部分清零（快照池复用，避免残留旧值）。
+            // 锁只包住 memcpy —— chroma 折叠（1024 bin 的循环）放在锁外，
+            //   否则音频线程的 publishUnderSpecLock 会在 SpinLock 上空转几十微秒。
             {
+                // Phase F 优化：直接 memcpy（尺寸 + 类型都与 std::array 内部缓冲一致）
+#if Y2K_ENABLE_PERF_COUNTERS
+                const auto waitStart = y2k::perf::PerformanceCounterSystem::nowNs();
+#endif
+                const juce::SpinLock::ScopedLockType sl (owner.specLock);
+#if Y2K_ENABLE_PERF_COUNTERS
+                const auto lockNs = y2k::perf::PerformanceCounterSystem::nowNs();
+                y2k::perf::PerformanceCounterSystem::instance().recordDuration(
+                    y2k::perf::FunctionId::lockSpec,
+                    y2k::perf::Partition::dataCommunication,
+                    y2k::perf::ThreadRole::ui,
+                    0,
+                    lockNs - waitStart);
+#endif
+                // 反馈 #7：magData 尺寸随主路 FFT size 变化（1024..8192 bin）。
+                //   spectrumMag 为固定 1024 的兼容数组：取前 min(1024, size) bin，
+                //   不足部分清零（快照池复用，避免残留旧值）。
                 const size_t n = juce::jmin ((size_t) frame->spectrumMag.size(), owner.magData.size());
                 if (n > 0)
                     std::memcpy (frame->spectrumMag.data(), owner.magData.data(),
@@ -143,9 +148,26 @@ public:
                 if (n < frame->spectrumMag.size())
                     std::fill (frame->spectrumMag.begin() + (std::ptrdiff_t) n,
                                frame->spectrumMag.end(), 0.0f);
+
+                std::memcpy (frame->spectrumData.data(), owner.specData.data(),
+                             sizeof (float) * frame->spectrumData.size());
             }
-            std::memcpy (frame->spectrumData.data(), owner.specData.data(),
-                         sizeof (float) * frame->spectrumData.size());
+
+            // 音高：复用本帧已拷出的幅度谱折 12 音级 chroma。
+            //   spectrumMag 只保留前 min(1024, fftSize/2) 个 bin，所以 bin 宽必须
+            //   按**完整** FFT 尺寸计算（sr / mainFftSize），否则音级会整体错位。
+            //   放在 Hub 而不是各模块里：一张谱只折一次，多个消费者共享。
+            //   用原子的 getMainFftSize()（音频线程写入实际生效值）而不是裸成员，
+            //   避免 UI 线程读 mainFftSize 的数据竞争。
+            const int    fftSize = owner.getMainFftSize();
+            const double srNow   = owner.cachedSampleRate.load (std::memory_order_relaxed);
+            const double binHz   = (fftSize > 0 && srNow > 0.0)
+                                     ? srNow / (double) fftSize : 0.0;
+
+            frame->pitch = owner.pitchTracker.pushSpectrum (frame->spectrumMag.data(),
+                                                            (int) frame->spectrumMag.size(),
+                                                            binHz,
+                                                            frame->dtSec);
         }
 
         if (frame->has (Kind::Loudness))
@@ -360,6 +382,7 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
         oscBufL.fill(0.0f);
         oscBufR.fill(0.0f);
         oscWritePos = 0;
+        oscTotalSamples.store (0, std::memory_order_relaxed);
     }
 
     // 频谱工作缓冲清零（prepare 与音频 push 串行调用）
@@ -562,6 +585,11 @@ void AnalyserHub::pushSamplesToOscilloscope(const float* left, const float* righ
         srcPos            += chunk;
         samplesRemaining  -= chunk;
     }
+
+    // 单调累计写入样本数：消费方（Waveform）用它精确算出"本帧新增了多少样本"，
+    //   不再用帧时钟估算 —— 估算会周期性重复消费同一段样本，导致同一像素列里
+    //   混入两个相位的波形（画面上表现为线突然变粗）。
+    oscTotalSamples.fetch_add ((juce::uint64) numSamples, std::memory_order_relaxed);
 }
 
 void AnalyserHub::getOscilloscopeSnapshot(juce::Array<float>& destL,
@@ -1231,7 +1259,7 @@ void AnalyserHub::copySpectrumBins (juce::Array<float>& dest,
 //     镜像位置。真实单频成分主瓣内相邻 bin 的瞬时频率"一致"（都指向
 //     同一频率），折叠 bin 的瞬时频率与邻居"跳变" —— 这正是重分配谱图
 //     标准的相干性过滤（coherence test）。再配合帧内相对门限压掉
-//     旁瓣折叠组，正弦波才能像 MiniMeters 一样收束成一根线。
+//     旁瓣折叠组，正弦波才能收束成一根线。
 // ==========================================================
 void AnalyserHub::getSpectrumReassignedBlended (juce::Array<float>& dest,
                                                 int   numPoints,

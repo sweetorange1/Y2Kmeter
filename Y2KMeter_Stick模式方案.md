@@ -1,6 +1,6 @@
 # Y2KMeter stick 模式 —— 方案设计
 
-> 背景：MiniMeters 的 reposition → stick，用的是 **Windows AppBar API
+> 背景：同类仪表软件的 reposition → stick，用的是 **Windows AppBar API
 > （`SHAppBarMessage`）**——任务栏贴边、保留屏幕工作区的同一套机制。
 > 用户顾虑：Y2KMeter 窗口/模块"可随意调整的范围较大"，stick 该以什么形态落地。
 
@@ -28,7 +28,7 @@
 | 适合 | 随意大小/位置 | 固定窄条（像任务栏） |
 | 风险 | 低 | 中（影响全局桌面布局，需谨慎） |
 
-MiniMeters 的 stick 是**硬 stick**（它那些 meter 就是窄条，贴边后别的窗口让开）。
+同类软件里的 stick 一般是**硬 stick**（它们的 meter 就是窄条，贴边后别的窗口让开）。
 但 Y2KMeter 是"可随意缩放的面板"，硬 stick 会在窗口变大时占掉大片工作区，
 体验反而差——这是"随意调整范围较大"和 AppBar 的天然冲突点。
 
@@ -70,14 +70,14 @@ WM_MOVING / 拖动结束（mouseUp）时：
 **与现有代码的关系**：`restoreMainWindowBounds()` 的"归属显示器 + 夹回 userArea"
 逻辑可直接复用，抽成 `stickWindowToEdge()`。
 
-**可选增强——置顶**：stick 后常伴随"置顶"需求（参考 MiniMeters 的 Pin To Top）。
+**可选增强——置顶**：stick 后常伴随"置顶"需求（同类软件的 Pin To Top）。
 用 `SetWindowPos(HWND_TOPMOST)` / `HWND_NOTOPMOST` 切换，配一个 UI 开关。
 
 ### 4.2 层 B：窗口级"硬 stick"（AppBar，可选）
 
 仅当用户想要"Y2KMeter 像任务栏一样固定占一条边、别的窗口自动让开"时才启用。
 
-**技术要点**（复刻 MiniMeters）：
+**技术要点**：
 ```
 APPBARDATA abd = { sizeof(abd), hwnd, ... };
 SHAppBarMessage(ABM_NEW,    &abd);           // 注册

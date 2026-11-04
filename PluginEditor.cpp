@@ -44,7 +44,7 @@
 namespace {
     // Windows AppBar（SHAppBarMessage）封装：把顶层窗口注册为 AppBar，
     // 停靠到屏幕顶/底边并让系统缩小工作区（其他窗口自动让开这条边）。
-    // 这是 MiniMeters "stick" 的同一套机制（任务栏式驻留）。
+    // 任务栏式驻留（stick）就是靠这套机制实现的。
     HWND y2kGetWindowHwnd (juce::Component* c) noexcept
     {
         if (c == nullptr) return nullptr;
@@ -832,7 +832,7 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v2.9.9");
+        const int versionW = versionFont.getStringWidth ("v2.9.10");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -873,7 +873,7 @@ public:
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.9";
+        const juce::String versionText = "v2.9.10";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
@@ -4033,7 +4033,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
         // 主标题 "Y2Kmeter"
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v2.9.9";
+        const juce::String versionText = "v2.9.10";
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
@@ -4041,7 +4041,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
         const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v2.9.9");
+                const int versionW = versionFont.getStringWidth ("v2.9.10");
         const int urlW     = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
@@ -4123,7 +4123,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
 
             // 3a) 最小化按钮 + 3b) 固定（置顶）按钮
             //   stick 模式（AppBar 驻留）下隐藏：驻留态宽度被系统锁死、
-            //   高度可调，置顶/最小化语义不再适用（对齐 MiniMeters 的 stick）。
+            //   高度可调，置顶/最小化语义不再适用。
             if (! stickActive)
             {
                 drawTitleBtn (getMinimiseButtonBounds(),

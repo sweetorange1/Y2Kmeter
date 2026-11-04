@@ -166,7 +166,7 @@ private:
     juce::Slider speedSlider;
     juce::Label  speedLabel;
     juce::TextButton modeBtn { "+" };   // 右下角显示模式切换（样式对齐 3D 模块的 TINT）
-    static constexpr int sliderPanelW = 42;  // 右侧滑条面板宽度（与 WaveformModule 的 GAIN 面板一致）
+    static constexpr int sliderPanelW = 42;  // 右侧滑条面板宽度（各模块独立，不要求与 WaveformModule 的 SPEED 面板同宽）
 
     // ---- 显示模式状态 ----
     //   Classic : 原始幅度谱（getSpectrumMagnitudesBlended）

@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 2.9.9 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 2.9.10 LANGUAGES C CXX)
 
 # ==========================================================
 # v2.9.2：帧耗时统计日志（仅开发者诊断构建，默认 OFF）
@@ -387,7 +387,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 2.9.9
+        VERSION 2.9.10
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -440,7 +440,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 2.9.9
+        VERSION 2.9.10
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -568,6 +568,12 @@ set(Y2KM_PLUGIN_SOURCES
   source/analysis/AnalyserHub.cpp
   source/analysis/PhaseCorrelator.cpp
   source/analysis/DynamicRangeMeter.cpp
+  # 音高（chroma）跟踪：Waveform 的 PITCH 染色（纯 C++，不依赖 JUCE）
+  source/analysis/PitchTracker.h
+  source/analysis/PitchTracker.cpp
+  # 齿音检测：带通 + 包络 + 迟滞门限
+  source/analysis/SibilanceDetector.h
+  source/analysis/SibilanceDetector.cpp
   # v2.9.9 补充：录音机后端（pre-gain 原始输入 → 32-bit float WAV）
   source/analysis/AudioRecorder.h
   source/analysis/AudioRecorder.cpp
