@@ -847,6 +847,9 @@ private:
 
     void notifyLayoutChanged();
 
+    // 调色面板定位（调色板超出窗口时提升为独立桌面窗口，允许延展到软件外）
+    void updatePalettePanelPlacement();
+
     juce::Rectangle<int> findNextSlot(int w, int h) const;
 
     void hookPanel(ModulePanel& panel);

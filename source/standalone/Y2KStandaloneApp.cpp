@@ -530,8 +530,17 @@ public:
         //         旧存档回退双色迁移（R20）。
         {
             Y2K_LOG ("[boot] 1.15 theme restore begin");
-            PinkXP::ThemeLibrary::instance().loadFromSettings(&getUserSettings());
-            Y2K_LOG ("[boot] themeLib loaded");
+
+            // 颜色存档独立（v2.9.9 补充）：
+            //   ① 先读用户级的独立主题库文件（Y2Kmeter.themeLibrary.xml）——
+            //      这是用户自己创建的颜色主题的家，与任何 .settings 存档无关；
+            //   ② 再把当前 settings 里的 ui.themeLibrary **合并**进来 ——
+            //      Load 进来的存档若带额外主题，一并加入；若不带，则用户已有
+            //      主题原样保留（旧版本用户第一次升级也靠这一步完成迁移）。
+            auto& themeLib = PinkXP::ThemeLibrary::instance();
+            themeLib.ensureLoadedFromLibraryFile();
+            themeLib.mergeFromSettings (&getUserSettings());
+            Y2K_LOG ("[boot] themeLib loaded (" + juce::String (themeLib.size()) + " themes)");
 
             const int savedThemeRaw = getUserSettings()
                 .getIntValue ("ui.themeId", (int) PinkXP::ThemeId::blackPink);
@@ -695,12 +704,15 @@ public:
             }
         }
 
-        // 5) 恢复窗口 bounds（若 settings 里有合法记录且落在当前桌面范围内）
+        // 5) 恢复窗口 bounds（v2.9.9 补充：只要存档存在就尽量恢复，不再因
+        //    "屏幕拓扑变了 / 交集不足 50%" 直接丢弃几何 —— 拔屏后夹回最近屏）
         //    注意：此时持久化的 bounds 始终是"show 态等效尺寸"——
         //    saveMainWindowBounds 在退出时如果窗口处于 hide 态，会先把尺寸
         //    反算成 show 态（h+=62, 贴底时 y-=62）再写入，保证重启恢复
         //    的窗口永远对应"show 态"。随后 setChromeVisible(false) 会用
         //    标准 Hide 路径在该 show 态尺寸上收缩一次，得到正确的 hide 态。
+        //    伪全屏（window.fullscreen）不在这里恢复：需要 peer 就绪后按
+        //    物理像素贴合，见下方 callAsync 里的 restorePseudoFullScreen()。
         //    若不存在历史 bounds（首次启动），默认贴到当前屏幕 userArea 顶部，
         //    与默认 horizontal bar(t) 预设的定位语义保持一致（不再居中）。
         if (! restoreMainWindowBounds())
@@ -737,8 +749,18 @@ public:
         {
             juce::MessageManager::callAsync([this]() {
                 if (cachedEditor == nullptr) return;
-                const bool savedChrome = getUserSettings()
-                    .getBoolValue("ui.chromeVisible", true);
+
+                // ★ v2.9.9 补充：先恢复伪全屏，再恢复 chrome 可见性。
+                //   顺序不能反：setChromeVisible(false) 会按 Hide 路径把窗口
+                //   高度收缩 chromeH；若先收缩再进全屏，preFullScreenBounds
+                //   记下的就是"hide 态"尺寸，下次落盘/恢复会逐次少一个
+                //   chrome 高度（窗口越开越矮）。先全屏时 canResizeWindow 为
+                //   false，Hide 不会动几何，与运行时"全屏下点 Hide"完全一致。
+                const auto& s = getUserSettings();
+                if (s.getBoolValue ("window.fullscreen", false))
+                    cachedEditor->restorePseudoFullScreen();
+
+                const bool savedChrome = s.getBoolValue("ui.chromeVisible", true);
                 cachedEditor->setChromeVisible(savedChrome);
             });
         }
@@ -885,10 +907,12 @@ private:
 
     // ----------------------------------------------------
     // 恢复主窗口 bounds：
-    //   读 settings 里的 window.{x,y,w,h}，若四项都存在且落在某个屏幕显示区内，
-    //   则直接 setBounds 恢复；否则返回 false 让调用方走 centreWithSize 兜底。
-    //   · 不保存 maximized / fullscreen 状态（按用户设计此软件不会最大化）。
-    //   · 对多屏拔掉 / 分辨率变化的情况做越界修正：整窗至少 80% 面积在主屏内。
+    //   读 settings 里的 window.{x,y,w,h}，若四项存在则尽量恢复；
+    //   只有"四项缺失 / 数值明显损坏 / 显示器表为空"才返回 false 让调用方兜底。
+    //   · 窗口几何永不因"屏幕变了"而丢弃：拔屏 / 改分辨率 / 主副屏互换时
+    //     夹到离窗口最近的显示器工作区（v2.9.9 补充）。
+    //   · 伪全屏状态由 window.fullscreen 单独承载，不在这里处理 —— 需要在
+    //     窗口上屏（peer 就绪）后由 Editor::restorePseudoFullScreen() 恢复。
     // ----------------------------------------------------
     bool restoreMainWindowBounds()
     {
@@ -904,74 +928,80 @@ private:
         const int w = s.getIntValue ("window.w", -1);
         const int h = s.getIntValue ("window.h", -1);
 
-        // 基础合法性检查：必须大于 Editor 最小尺寸下限
-        if (w < 320 || h < 240) return false;
+        // 基础合法性检查：只拒绝"明显损坏"的值（0 / 负数 / 极端值）。
+        //   v2.9.9 补充：下限从 320×240 放宽到 64×32 —— stick 条、compact 预设
+        //   可能低于旧阈值，旧逻辑会把完全合法的存档当损坏直接丢弃。
+        if (w < 64 || h < 32 || w > 32768 || h > 32768) return false;
 
         juce::Rectangle<int> target (x, y, w, h);
 
-        // 检查目标矩形是否与任一屏幕显示区有足够交集（>50%），否则判定为"屏幕已不在"
         const auto& disp = juce::Desktop::getInstance().getDisplays();
-        bool onScreen = false;
+
+        // ---------------------------------------------------------------
+        // 选"落点显示器"：
+        //   1) 优先取与 target 交集最大者（正常情况就是窗口所在屏）；
+        //   2) 与所有屏都没有交集（拔掉副屏 / 改分辨率 / 主副屏互换）时，
+        //      取"离窗口中心最近"的屏。
+        //
+        //   ★ v2.9.9 补充：旧实现是"交集不足 50% 直接 return false"，这是
+        //     "无法还原上次窗口"的第二大来源 —— 一份完全合法的存档被判定
+        //     为无效，回落到默认位置，且下次退出会把默认位置写回存档，
+        //     原几何永久丢失。现在改为"只夹取、不放弃"。
+        // ---------------------------------------------------------------
+        const juce::Displays::Display* best = nullptr;
+        int bestArea = 0;
         for (const auto& d : disp.displays)
         {
             const auto inter = d.userArea.getIntersection (target);
-            if (inter.getWidth() * inter.getHeight()
-                >= (target.getWidth() * target.getHeight()) / 2)
-            {
-                onScreen = true;
-                break;
-            }
+            const int  a     = inter.getWidth() * inter.getHeight();
+            if (a > bestArea) { bestArea = a; best = &d; }
         }
-        if (! onScreen) return false;
 
-        // ---------------------------------------------------------------
-        // v2.5.8：兼容老存档 —— 若之前是"伪最大化覆盖任务栏"的窗口尺寸
-        //   （无边框窗口 setFullScreen 走 SW_SHOWMAXIMIZED 会撑到 monitor
-        //   物理边界，任务栏被盖），启动时直接恢复会重现原来的 bug：
-        //   任务栏被盖 + PopupMenu / ComboBox 不可见。
-        //
-        //   这里在 setBounds 之前做一次"防御性收缩"：找到 target 主要
-        //   落在哪个显示器，如果 target 的任一边超出该显示器的 userArea
-        //   （工作区，Windows 已扣除任务栏），就把 target 夹到 userArea
-        //   内。这样：
-        //     · 正常窗口（早已在 userArea 内）不会被改动；
-        //     · 老存档里的"全屏覆盖任务栏"窗口自动缩回工作区；
-        //     · 不会触发 juce::ResizableWindow::setFullScreen / Windows
-        //       SW_SHOWMAXIMIZED，纯 setBounds，行为可控。
-        // ---------------------------------------------------------------
+        if (best == nullptr)
         {
-            // 选一个"主要归属"的显示器：与 target 交集最大的那个
-            const juce::Displays::Display* best = nullptr;
-            int bestArea = -1;
+            // 完全不在任何显示器上：按"窗口中心到工作区最近点"的平方距离取最近屏。
+            //   注意不能用 getDisplayForRect —— 无交集时它的回退不是"最近屏"。
+            const auto centre = target.getCentre();
+            juce::int64 bestDist = (juce::int64) 1 << 62;
+
             for (const auto& d : disp.displays)
             {
-                const auto inter = d.userArea.getIntersection (target);
-                const int  a     = inter.getWidth() * inter.getHeight();
-                if (a > bestArea) { bestArea = a; best = &d; }
-            }
+                const auto ua = d.userArea;
+                if (ua.isEmpty())
+                    continue;
 
-            if (best != nullptr)
-            {
-                const auto ua = best->userArea;
+                const juce::Point<int> nearest (juce::jlimit (ua.getX(), ua.getRight(),  centre.x),
+                                                juce::jlimit (ua.getY(), ua.getBottom(), centre.y));
+                const juce::int64 dx = (juce::int64) nearest.x - (juce::int64) centre.x;
+                const juce::int64 dy = (juce::int64) nearest.y - (juce::int64) centre.y;
+                const juce::int64 dist = dx * dx + dy * dy;
 
-                // 触发"收缩"的条件：target 至少有一条边超出了 userArea
-                //   （典型情况：target == monitor 物理矩形，会覆盖任务栏；
-                //    也覆盖了 target 完全包住 userArea 的情形。）
-                const bool overflows = target.getX()      < ua.getX()
-                                    || target.getY()      < ua.getY()
-                                    || target.getRight()  > ua.getRight()
-                                    || target.getBottom() > ua.getBottom();
-
-                if (overflows)
+                if (dist < bestDist)
                 {
-                    // 夹到 userArea 内：优先保尺寸不超出，其次尽量保持左上角
-                    const int w2 = juce::jmin (target.getWidth(),  ua.getWidth());
-                    const int h2 = juce::jmin (target.getHeight(), ua.getHeight());
-                    int x2 = juce::jlimit (ua.getX(), ua.getRight()  - w2, target.getX());
-                    int y2 = juce::jlimit (ua.getY(), ua.getBottom() - h2, target.getY());
-                    target = { x2, y2, w2, h2 };
+                    bestDist = dist;
+                    best     = &d;
                 }
             }
+        }
+
+        if (best == nullptr) return false;   // 显示器表为空（理论上到不了）
+
+        // ---------------------------------------------------------------
+        // 防御性收缩 / 越界夹取：
+        //   · 正常窗口（完全在 userArea 内）逐轴夹取后坐标不变；
+        //   · 老存档里"伪最大化覆盖任务栏"的窗口自动缩回工作区
+        //     （否则任务栏被盖 + PopupMenu / ComboBox 不可见）；
+        //   · 拔屏后残留的窗口被拉回最近的屏，而不是回落到默认位置；
+        //   · 全程只用 setBounds，不会触发 juce::ResizableWindow::setFullScreen
+        //     / Windows SW_SHOWMAXIMIZED。
+        // ---------------------------------------------------------------
+        {
+            const auto ua = best->userArea;
+            const int w2 = juce::jmin (target.getWidth(),  ua.getWidth());
+            const int h2 = juce::jmin (target.getHeight(), ua.getHeight());
+            const int x2 = juce::jlimit (ua.getX(), ua.getRight()  - w2, target.getX());
+            const int y2 = juce::jlimit (ua.getY(), ua.getBottom() - h2, target.getY());
+            target = { x2, y2, w2, h2 };
         }
 
         // 先放宽 Editor constrainer（含 min/max），避免 compact 存档在 setBounds
@@ -1006,15 +1036,30 @@ private:
     {
         if (mainWindow == nullptr) return;
 
-        // 只有当窗口当前不是最小化状态时才记录（避免记到最小化的怪异 bounds）
-        if (mainWindow->isMinimised()) return;
+        // ★ v2.9.9 补充：删除"最小化就不保存"的早退。
+        //   JUCE 的 ComponentPeer::handleMovedOrResized() 在窗口最小化时
+        //   （isMinimised() 为真）不会把原生窗口矩形同步回 Component，因此
+        //   mainWindow->getBounds() 此时仍然是"最小化前的正常 bounds" ——
+        //   正是要落盘的值。旧早退会让"最小化后从任务栏关闭"跳过写入，
+        //   叠加当时 sanitize 先删 key 的行为，直接丢光整份窗口存档。
+       #if JUCE_MAC
+        // macOS 原生全屏：getBounds() 返回的是全屏矩形，落盘会得到
+        //   "铺满整屏但不是全屏"的坏存档，且是幂等覆盖（一旦写入就回不去）。
+        //   这里直接跳过窗口几何写入，保留进入全屏前的合法存档；
+        //   Windows 的伪全屏有自己的 preFullScreenBounds 路径，不受影响。
+        if (mainWindow->isFullScreen()) return;
+       #endif
 
-        // 若窗口已经被 hide（shutdown 阶段的二次调用），跳过 —— 此时 getBounds
-        // 在某些 Windows 版本上会返回错误值，而真正的 save 已经在
-        // systemRequestedQuit() 里做过了
+        // 若窗口已经被 hide（shutdown 阶段的二次调用），跳过 —— 真正的 save
+        //   已经在 systemRequestedQuit() 里做过了。注意：window.* 现在不再被
+        //   sanitizeLegacySettings 删除，跳过写入 = 保留上一次的合法几何。
         if (! mainWindow->isVisible()) return;
 
         auto b = mainWindow->getBounds();
+
+        // 兜底有效性检查：极小 / 负数尺寸（存档损坏或平台异常）不写入，
+        //   避免把一份坏几何覆盖到原本正确的存档上。
+        if (b.getWidth() < 64 || b.getHeight() < 32) return;
 
         // 伪全屏中退出：落盘"进入伪全屏前"的 bounds。
         //   否则下次启动会恢复成一个铺满整块屏、但不处于全屏态的普通窗口
@@ -1073,6 +1118,15 @@ private:
         s.setValue ("window.y", b.getY());
         s.setValue ("window.w", b.getWidth());
         s.setValue ("window.h", b.getHeight());
+
+        // ★ v2.9.9 补充：伪全屏状态一并落盘。
+        //   旧版本只写"进入全屏前"的 bounds、不写状态位，导致"全屏中直接关
+        //   软件"后下次启动永远回不到全屏（用户感知为"全屏没进存档"）。
+        //   恢复动作由 initialise() 在窗口上屏后的 callAsync 里调用
+        //   Editor::restorePseudoFullScreen() —— 必须等 peer 就绪，
+        //   Windows 伪全屏要按物理像素贴合当前显示器工作区。
+        const bool wasPseudoFull = (cachedEditor != nullptr && cachedEditor->isPseudoFullScreen());
+        s.setValue ("window.fullscreen", wasPseudoFull ? 1 : 0);
     }
 
     // ----------------------------------------------------
@@ -1099,9 +1153,16 @@ private:
         // （本版本暂无需要淘汰的老 key）
 
         // ---- 2) 清除本版本管理的 key —— 随后会由保存函数写入最新值 ----
+        //   ★ v2.9.9 补充：window.* / window.fullscreen 已从本名单移出。
+        //     原因：本函数先删、saveMainWindowBounds 后写，而后者在
+        //     "窗口不可见"时会早退。一旦早退，窗口几何就被永久删除，
+        //     下次启动只能回落到默认位置 —— 这正是"偶发无法还原上次
+        //     窗口"的根因（最小化后从任务栏关闭是最常见触发路径）。
+        //     现在改为：这里不碰窗口几何；saveMainWindowBounds 成功时
+        //     按"先 remove 再 set"逐键覆盖（等价于清空重写），失败时
+        //     自然保留上一次的合法存档。
         const char* const managedKeys[] = {
             "settings.schemaVersion",
-            "window.x", "window.y", "window.w", "window.h",
             "ui.chromeVisible",
             "ui.alwaysOnTop",
             "ui.fpsLimit",

@@ -55,7 +55,7 @@
 
 - **12 个手工调校预设主题**（数据驱动、外观零回归）：糖果粉 / 星空深蓝 / 赛博紫 / 橘色波普 / 水蓝珠光 / 苏打绿 / 丛林绿 / Windows XP 经典 / 红黑暗夜 / 纯黑灰（OLED 友好）/ 纯白灰 / 黑粉（默认主题）
 - **调色板重构（v2.10）**：左下角「Palette Studio」面板 —— 色相环 + 明暗（Dark/Light/Auto）+ 氛围 + 和谐方式 + 随机；`OKLCH` 感知均匀色彩空间 + Recipe 配方 + WCAG 对比度护栏（自动修复可读性）；支持 7 个语义角色微调（自动/手动锁定）、撤销/重做（40 步）、A/B 对比、迷你预览卡、质量徽章
-- **我的主题**（自定义 = 一等公民）：可命名保存 ≤12 套、重命名/删除/排序、分享码（`Y2KT1-xxxx` ≤80 字符）复制/粘贴、`.y2kpalette` 文件导入导出、桌面纹理（7 种）+ 标题图标（8 候选）自选、恢复默认（Reset）
+- **我的主题**（自定义 = 一等公民）：可命名保存 ≤24 套（独立存档到 `%APPDATA%\Y2Kmeter.themeLibrary.xml`，Load 存档只合并、不覆盖）、重命名/删除/排序、分享码（`Y2KT1-xxxx` ≤80 字符）复制/粘贴、`.y2kpalette` 文件导入导出、桌面纹理（7 种）+ 标题图标（8 候选）自选、恢复默认（Reset）
 - **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
 - 拖入图片生成「拼豆像素画」贴到桌面背景
 
@@ -397,15 +397,22 @@ main
   → 撤销/重做 40 步；A/B 按住临时回到快照；Revert 回打开前主题
   → 关闭面板保留当前效果（未命名 Custom）；「Apply & Save」命名存入 ThemeLibrary
 
-自定义主题持久化：
-  Standalone 退出 → saveUiAndAudioState()
-    → ui.themeId / ui.customPrimary+Secondary（旧键兼容）/ ui.customSpec（分享码）
-      / ui.customThemeName / ui.themeLibrary（我的主题 XML）—— 均已纳入 managedKeys 保护式重写
-  重启 → ThemeLibrary::loadFromSettings() → ui.customSpec 完整恢复（旧存档回退双色迁移 R20）
+自定义主题持久化（颜色存档独立）：
+  主题库有独立的用户级文件：<userAppData>/Y2Kmeter.themeLibrary.xml
+    → ThemeLibrary 的每次增删改（save/rename/remove/move）都立即落盘，
+      与任何 .settings 存档 / 宿主工程无关 —— Load 新存档不会清空用户自己的颜色主题。
+  启动/加载存档时只做合并（ThemeLibrary::mergeFromXmlString）：
+    → 存档里的 themeLib 与内存库取并集（同名同色去重，同名不同色自动改名追加）
 
-  VST3（随宿主工程保存，R19）：
+  Standalone 启动 → ThemeLibrary::ensureLoadedFromLibraryFile()
+                   → mergeFromSettings(ui.themeLibrary)   ← 旧用户首次升级即完成迁移
+  Standalone 退出 → saveUiAndAudioState() 仍把库写回 ui.themeLibrary（让导出的存档带上主题）
+  Standalone Load 预设 → 覆盖 .settings 并重启 → 新进程按上面两条"合并"，用户主题不丢
+
+  VST3（R19）：
     getStateInformation → themeId / themeName / themeSpec / themeLib 写入 <PBEQ_State>
-    setStateInformation → 插件态恢复（Standalone 跳过，避免与 ui.* 双写冲突）
+    setStateInformation → 主题库走 mergeFromXmlString（不再 loadFromXmlString 清空），
+                          插件态恢复（Standalone 跳过，避免与 ui.* 双写冲突）
 ```
 
 ---
@@ -4006,7 +4013,7 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 - `OkLchUtils.h` —— sRGB↔OKLCH、色域裁剪（保 L/H 降 C）、OKLab 插值、WCAG 对比度。
 - `ThemeSpec.h/.cpp` —— 意图参数（色相/明暗/氛围/染色/和谐/纹理/图标）+ 7 角色手动覆盖 + 随机锁定；28 字节定长二进制 + 分享码 `Y2KT1-xxxx`（≤80 字符）。
 - `PaletteGenerator.h/.cpp` —— Dark/Light/AutoMid 三套 OKLCH 配方 + Q1–Q7 护栏（文字/OnAccent 对比度自动修复、强调色可见度、背景饱和度上限、渐变单调、边框明度顺序；手动覆盖只提示不强改）+ 20 组精选随机库。
-- `ThemeLibrary.h/.cpp` —— 我的主题库（≤12）：命名/重命名/删除/排序、XML 持久化、`.y2kpalette` 导入导出。
+- `ThemeLibrary.h/.cpp` —— 我的主题库（≤24）：命名/重命名/删除/排序、XML 持久化（独立用户级文件 + 存档合并）、`.y2kpalette` 导入导出。
 - `tests/palette_test.cpp` + CMake target `Y2Kmeter_palette_test` —— 1080 组合全遍历护栏断言（ALL_OK）、`--overview` 总览图、`--golden` 黄金色板。护栏测试真实暴露并修复了 AutoMid Control 面对比度物理无解、Light accent 中间亮度带 OnAccent 无解两个配方 bug。
 
 ### 2. 映射层与 UI
@@ -5232,6 +5239,116 @@ GL 与 CPU 两条路径、峰值虚线、次曲线、悬停读数全部同步。
 - 本轮改了 `AnalyserHub.h`（新增枚举 + 成员，**成员布局变化 = ABI 变化**）与
   `SpectrumModule.h`，必须清理 obj 全量重编，不要只做增量链接；
 - 未构建/未实测：macOS 端（本轮无平台相关代码，风险低）。
+
+---
+
+## v2.9.9 补充：启动恢复伪全屏 + 窗口几何存档健壮性 + Palette Studio 悬浮展开 + 颜色主题库独立存档
+
+> 本轮**版本号固定为 2.9.9（不 bump）**：`CMakeLists.txt` 的 `project(Y2Kmeter VERSION 2.9.9)`、
+> 两个 `juce_add_plugin(... VERSION 2.9.9)`、`Y2Kmeter_installer.iss` 的 `MyAppVersion`、
+> `README.md` 版本徽章、`PluginEditor.cpp` 抬头水印（两处）已核对一致；代码注释里原写作
+> "v2.9.10" 的本轮改动统一标注为"v2.9.9 补充"，全仓不再出现未发布的版本号。
+
+### 1. 启动恢复伪全屏（`window.fullscreen`）
+
+**现象**：演出时双击抬头进入伪全屏（窗口贴满整块显示器），演出结束直接点 × 关软件；下次启动回到普通窗口 —— 用户感知为"全屏状态没进存档"。
+
+**根因**：`saveMainWindowBounds()` 在伪全屏态落盘的是 `preFullScreenBounds`（进全屏前的普通几何，这是对的），但从没写过"当前处于伪全屏"这个状态位；启动侧也没有任何恢复动作。
+
+**修复**：
+
+- `saveMainWindowBounds()` 追加 `window.fullscreen = editor->isPseudoFullScreen() ? 1 : 0`；
+- `initialise()` 在 `mainWindow->addToDesktop(); setVisible(true);` 之后的 `callAsync` 里，先
+  `if (settings.getBoolValue("window.fullscreen", false)) editor->restorePseudoFullScreen();`
+  再 `setChromeVisible(savedChrome)`。**顺序不能反**：Hide 路径会按 chromeH 收缩窗口，若先收缩再进全屏，
+  `preFullScreenBounds` 记下的就是 hide 态尺寸，落盘/恢复会逐次少一个 chrome 高度（窗口越开越矮）；
+- 新增 `Y2KmeterAudioProcessorEditor::restorePseudoFullScreen()`（`PluginEditor.h/.cpp`）：
+  插件宿主态 / 已处于全屏 / 窗口未上屏 / `stickActive || pendingStickRestore` 一律 no-op；
+  **macOS 直接返回**（原生全屏的 Space 切换会打断启动期布局与首帧恢复，且 mac 全屏态本就不写窗口几何）；
+  **Windows** 复用 `toggleFakeFullScreen()` 的进入分支 —— 因此 resize limits / Editor constrainer 放宽 /
+  `preFullScreenBounds` 与"双击进入"完全同源，退出写盘严格幂等。进入失败（拿不到显示器信息）时
+  `pseudoFullScreen` 保持 false，下次退出写 0，不会反复尝试。
+
+### 2. 伪全屏中切布局预设 → 先退出全屏
+
+**现象**：伪全屏时从下拉切任意布局预设，同时出现三个问题：① 关软件后下次启动尺寸不对；② Hide 按钮点了没反应；③ 双击抬头跳回很早以前的尺寸。
+
+**根因**：预设改写了顶层窗口几何，但 `pseudoFullScreen` / `preFullScreenBounds` 仍是旧值；
+全屏态 `canResizeWindow == false`，所以 Hide 不收缩窗口。
+
+**修复**：`applyLayoutPreset()` 开头加 `if (pseudoFullScreen) toggleFakeFullScreen();`，
+与 `enterStickMode()`"先退全屏再备份几何"的处理保持一致。
+
+### 3. 窗口几何存档健壮性（最小化退出 / 拔屏 / 存档清洗）
+
+三条独立原因都指向同一个用户感知——"偶发无法还原上次窗口"：
+
+| # | 根因 | 修复 |
+| --- | --- | --- |
+| ① | `sanitizeLegacySettings()` 先 `removeValue("window.x/y/w/h")`、`saveMainWindowBounds()` 后写；后者在"窗口不可见"时早退 → 几何被永久删除 | `window.*`、`window.fullscreen` 从 managedKeys 移出；写入前逐键 `removeValue + setValue`（等价清空重写），写入失败时保留上一次合法存档 |
+| ② | `saveMainWindowBounds()` 里"最小化就不保存"的早退（"最小化后从任务栏关闭"是最常见触发路径） | 删除早退：最小化时 `ComponentPeer` 不再同步原生矩形，`getBounds()` 仍是"最小化前的正常 bounds"，正是要落盘的值；macOS 原生全屏仍单独跳过 |
+| ③ | 恢复侧两道过严校验：尺寸下限 320×240（stick 条 / compact 预设可能更小）；"与显示器交集不足 50% 就直接 return false"（拔屏 / 改分辨率 / 主副屏互换） | 下限放宽到 64×32；改为取"与 target 交集最大"的显示器，全部无交集时取"离窗口中心最近"的屏，**只夹取、不放弃**；另加 `w/h < 64×32` 兜底，避免坏值覆盖好存档 |
+
+效果：拔屏 / 改分辨率 / 最小化后退出 / 伪全屏中退出，都能还原到最近似的合法几何。
+
+### 4. 调色面板在窗口过小时被裁切（用户反馈 bug）
+
+**现象**：把软件窗口拉小后，点击左下角主题预览块展开 Palette Studio，面板顶部/右侧被窗口边界裁掉，看不全。
+
+**根因**：`PalettePanel` 是 `ModuleWorkspace` 的子组件，永远被父组件（= 窗口内容区）裁切；面板固定 660×300（展开高级区/我的主题后最高 664），定位公式 `y = 窗口高 - 工具栏 - 面板高 - 6` 在窗口过矮时直接变成负数。
+
+**修复**（`ModuleWorkspace::updatePalettePanelPlacement` + `PalettePanel::setFloating`）：
+
+1. 窗口内完整放得下 → 维持原行为（内嵌左下角、工具栏正上方）；
+2. 放不下 → 面板 `addToDesktop(windowIsTemporary)` 提升为**独立桌面窗口**，可延展到软件窗口之外；
+   - 关闭时 `removeFromDesktop()` + 归还原父组件，内部状态（主题订阅/计时器/子控件）全程不变；
+   - 脱离父链后 LookAndFeel 会回退系统默认 → 悬浮期间显式 `setLookAndFeel(&getLookAndFeel())` 钉住像素风；
+   - 面板自身绘制覆盖整个矩形 → 悬浮时 `setOpaque(true)`，避免 Windows 走分层窗口（拖动卡顿）；
+3. 展开方向看屏幕空间：上方够 → 底边贴住工具栏上沿向上展开；否则**向下挂在软件窗口下沿之外**
+   （对应"软件放在屏幕上半部时向下展开"的诉求），最后再夹进显示器 `userArea` 保证尽量完整可见；
+4. 外部点击关闭：悬浮态挂 `Desktop::addGlobalMouseListener`（内嵌态仍是主窗口 MouseListener）；
+5. 主窗口移动/缩放 → 面板 60Hz Timer 检测到主窗口屏幕矩形变化即关闭，不会吊在半空与软件脱节。
+
+### 5. 颜色主题库被存档覆盖（用户反馈 bug）
+
+**现象**：`Save` 出来的新颜色主题，在 `Load` 另一份存档后消失。
+
+**根因**：主题库只存在于存档里（Standalone 的 `.settings` 的 `ui.themeLibrary`、VST3 的 `<PBEQ_State>` 的 `themeLib`）。Load 预设的流程是"物理覆盖 settings 文件 + 重启"，VST3 的 `setStateInformation` 又走 `loadFromXmlString`（**先 `themes_.clear()`**），两处都会把用户自己创建的主题整体抹掉。
+
+**修复**：
+
+- `ThemeLibrary` 增加**独立用户级存档文件** `<userAppData>/Y2Kmeter.themeLibrary.xml`
+  （`getDefaultLibraryFile / ensureLoadedFromLibraryFile / saveToLibraryFile`），
+  `saveTheme / renameTheme / removeTheme / moveTheme` 全部立即落盘；
+- 新增 `mergeFromXmlString`：保留内存中已有主题，只追加 XML 里缺失的；
+  同名同色视为同一条跳过，同名不同色自动改名 `Name (2)` 后追加；容量上限 12 → 24；
+- Standalone 启动：先读独立文件，再 `mergeFromSettings(ui.themeLibrary)`（旧用户升级即自动迁移，
+  被 Load 进来的存档里的额外主题也在这里并入）；退出时仍写回 `ui.themeLibrary`，
+  让导出的存档继续携带主题；
+- VST3：`setStateInformation` 改走 `mergeFromXmlString`；编辑器构造里补 `ensureLoadedFromLibraryFile`
+  （插件没有 Standalone 的启动阶段）；
+- 无效 XML 不再做破坏性清空（`loadFromXmlString` 先校验根节点）。
+
+### 6. 涉及文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `PluginEditor.h/.cpp` | `restorePseudoFullScreen()` 声明与实现；`applyLayoutPreset()` 先退全屏；构造里 `ThemeLibrary::ensureLoadedFromLibraryFile()` |
+| `source/standalone/Y2KStandaloneApp.cpp` | 伪全屏状态落盘与启动恢复（含恢复顺序）；窗口几何存档三处健壮性修复；主题库改为"独立文件 + 合并 settings" |
+| `source/ui/palette/ThemeLibrary.h/.cpp` | 独立用户级存档文件、`mergeFromXmlString / mergeFromSettings`、容量上限 24、写入即落盘 |
+| `source/ui/palette/PalettePanel.h/.cpp` | `setFloating`（独立桌面窗口）、悬浮态 LnF 钉住 / 不透明 / Desktop 全局关闭监听 / 主窗口跟随；容量提示改用常量 |
+| `source/ui/ModuleWorkspace.h/.cpp` | `updatePalettePanelPlacement()`：内嵌优先、放不下则悬浮、按屏幕空间选上下展开方向 |
+| `PROJECT_OVERVIEW.md` | 本节 |
+
+### 7. 验证状态与注意事项
+
+- 用户实测通过：小窗口下 Palette Studio 完整可见并可超出窗口、软件置于屏幕上沿时向下展开；Save 主题后 Load 另一份存档主题不丢失；
+- 新增用户级文件 `%APPDATA%\Y2Kmeter.themeLibrary.xml`（macOS：`~/Library/Application Support/`）。
+  首次启动新版本时，旧存档里的 `ui.themeLibrary` 会被合并进该文件完成迁移；此后的增删改都直接写这里；
+- `ThemeLibrary` 的公开接口新增了成员函数（`mergeFromXmlString / ensureLoadedFromLibraryFile / setLibraryFile / saveToLibraryFile / mergeFromSettings`）
+  与私有成员（`libraryFile_ / libraryLoaded_`）→ **类布局变化 = ABI 变化**，必须清理 `ThemeLibrary` 相关 obj 后重编，
+  不要只做增量链接（参见 6.x"MSVC 增量漏编 → ABI 错配启动崩溃"的既有踩坑记录）；
+- 未构建/未实测：macOS 端本轮改动（`restorePseudoFullScreen()` 在 mac 上直接 return，悬浮面板走 `addToDesktop` 的 mac 分支）需在 mac 上回归一次。
 
 ---
 

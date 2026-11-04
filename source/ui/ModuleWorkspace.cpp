@@ -333,14 +333,7 @@ ModuleWorkspace::ModuleWorkspace()
     Y2K_LOG ("[boot] palettePanel created");
     addChildComponent(*palettePanel);
 
-    auto positionPalettePanel = [this]()
-    {
-        if (palettePanel != nullptr)
-            palettePanel->setTopLeftPosition(
-                8, getHeight() - PinkXP::ui(toolbarHeight) - palettePanel->getHeight() - 6);
-    };
-
-    themeBar.onPreviewClicked = [this, positionPalettePanel]()
+    themeBar.onPreviewClicked = [this]()
     {
         if (palettePanel == nullptr)
             return;
@@ -350,10 +343,10 @@ ModuleWorkspace::ModuleWorkspace()
             return;
         }
         palettePanel->show();
-        positionPalettePanel();
+        updatePalettePanelPlacement();
     };
 
-    palettePanel->onHeightChanged = positionPalettePanel;
+    palettePanel->onHeightChanged = [this]() { updatePalettePanelPlacement(); };
     palettePanel->onClosed = [this]()
     {
         if (palettePanel != nullptr)
@@ -947,6 +940,81 @@ juce::Rectangle<int> ModuleWorkspace::getToolbarArea() const
         return {};
     auto r = getLocalBounds();
     return r.removeFromBottom(PinkXP::ui(toolbarHeight));
+}
+
+// ----------------------------------------------------------
+// 调色面板定位（调色板重构 · 小窗口适配）
+//
+//   用户把软件窗口拉小后，Palette Studio 面板（宽 660 × 高 300~664）会超出
+//   窗口可用区域被裁掉。这里的策略：
+//     ① 窗口内放得下 → 维持老行为：内嵌在左下角、工具栏正上方；
+//     ② 放不下 → 把面板提升为**独立桌面窗口**（PalettePanel::setFloating），
+//        使其可以延展到软件窗口之外完整显示；
+//     ③ 展开方向按屏幕空间决定：上方空间够就向上（底边贴住工具栏上沿），
+//        否则向下挂在软件窗口下沿之外 —— 软件放在屏幕上半部时也能完整打开。
+// ----------------------------------------------------------
+void ModuleWorkspace::updatePalettePanelPlacement()
+{
+    if (palettePanel == nullptr)
+        return;
+
+    const int panelW = palettePanel->getWidth();
+    const int panelH = palettePanel->getHeight();
+    const int edgeX  = 8;    // 与工具栏左侧留白一致
+    const int gap    = 6;
+
+    // 锚点：工具栏上沿再往上 gap（老行为下面板底边所在的那条线）
+    const int anchorBottom = getHeight() - PinkXP::ui(toolbarHeight) - gap;
+    const int insideY      = anchorBottom - panelH;
+
+    // ---- ① 窗口内完整放得下：保持内嵌 ----
+    if (insideY >= 0 && edgeX + panelW <= getWidth())
+    {
+        if (palettePanel->isFloating())
+            palettePanel->setFloating(false);
+
+        palettePanel->setTopLeftPosition(edgeX, insideY);
+        return;
+    }
+
+    // ---- ② 独立桌面窗口（坐标全部换成屏幕坐标）----
+    auto* mainWindow    = getTopLevelComponent();
+    const auto wsScreen = getScreenBounds();
+
+    const int anchorXScreen      = wsScreen.getX() + edgeX;
+    const int anchorBottomScreen = wsScreen.getY() + anchorBottom;
+
+    // 屏幕可用区域（userArea 已扣除任务栏等系统区域）
+    juce::Rectangle<int> screenArea = wsScreen;
+    if (auto* display = juce::Desktop::getInstance().getDisplays()
+                            .getDisplayForPoint(juce::Point<int>(anchorXScreen,
+                                                                 anchorBottomScreen)))
+        screenArea = display->userArea;
+
+    const int spaceAbove = anchorBottomScreen - screenArea.getY() - 4;
+    const int spaceBelow = screenArea.getBottom() - anchorBottomScreen - 4;
+
+    // 向下展开时挂在软件窗口下沿之外，避免遮住底部工具栏的按钮
+    const int belowY = juce::jmax(anchorBottomScreen + gap, wsScreen.getBottom() + 2);
+
+    int y = 0;
+    if (spaceAbove >= panelH)       y = anchorBottomScreen - panelH;  // 向上
+    else if (spaceBelow >= panelH)  y = belowY;                       // 向下
+    else if (spaceBelow > spaceAbove) y = belowY;                     // 都不够：选空间大的一侧
+    else                            y = anchorBottomScreen - panelH;
+
+    // 夹进屏幕可用区域，保证尽量完整可见
+    int x = anchorXScreen;
+    x = (screenArea.getWidth() >= panelW)
+            ? juce::jlimit(screenArea.getX(), screenArea.getRight() - panelW, x)
+            : screenArea.getX();
+
+    y = (screenArea.getHeight() >= panelH)
+            ? juce::jlimit(screenArea.getY(), screenArea.getBottom() - panelH, y)
+            : screenArea.getY();
+
+    palettePanel->setFloating(true, mainWindow);
+    palettePanel->setBounds(x, y, panelW, panelH);
 }
 
 // ----------------------------------------------------------

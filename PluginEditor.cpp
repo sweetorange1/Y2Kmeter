@@ -8,6 +8,7 @@
 #include "BinaryData.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/ModuleWorkspace.h"
+#include "source/ui/palette/ThemeLibrary.h"
 #include "source/ui/modules/EqModule.h"
 #include "source/ui/modules/LoudnessModule.h"
 #include "source/ui/modules/OscilloscopeModule.h"
@@ -1925,6 +1926,12 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // 初始同步：把控制台档位应用到后端（workspace 默认 2048 与 Hub 默认一致）
     processor.getAnalyserHub().setMainFftSize (workspace->getFftSize());
 
+    // 颜色存档独立：把用户级的独立主题库文件（Y2Kmeter.themeLibrary.xml）读入内存。
+    //   · Standalone 在 initialise 1.15 已经读过（本函数幂等，直接返回）；
+    //   · VST3/AU 没有那个启动阶段，靠这里保证"我的主题"在编辑器首次绘制前就位，
+    //     且它是用户级的、不会随宿主工程切换而丢失。
+    PinkXP::ThemeLibrary::instance().ensureLoadedFromLibraryFile();
+
     // 订阅主题变更 → 切主题后刷新全局重绘
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
@@ -2745,6 +2752,18 @@ void Y2KmeterAudioProcessorEditor::seedDefaultModules()
 void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 {
     if (workspace == nullptr) return;
+
+    // ★ v2.9.9 补充：伪全屏中切布局预设 → 先退出全屏。
+    //   否则下面预设会改写顶层窗口几何，但 pseudoFullScreen / preFullScreenBounds
+    //   仍是旧值，带来三个可见问题：
+    //     1) 退出程序时 saveMainWindowBounds 落盘的是"上次进全屏前"的尺寸，
+    //        用户最后看到的窗口几何被丢弃（重开尺寸不对）；
+    //     2) Hide 按钮在 pseudoFullScreen 下不收缩窗口（canResizeWindow=false），
+    //        表现为"点了 Hide 没反应"；
+    //     3) 双击抬头会跳回很早以前的 pre 尺寸。
+    //   与 enterStickMode 的处理保持一致（那里也是先退全屏再备份几何）。
+    if (pseudoFullScreen)
+        toggleFakeFullScreen();
 
     // 保存所有 VirtuPet 模块的状态（切换预设时保留，不被清除）
     struct VirtuPetState { juce::String roleName; float hunger; float health; };
@@ -6303,6 +6322,41 @@ void Y2KmeterAudioProcessorEditor::toggleFakeFullScreen()
             preFullScreenEditorLimitsValid = false;
         }
     }
+}
+
+// ==========================================================
+// 启动恢复伪全屏（v2.9.9 补充）
+//   Standalone 读到 window.fullscreen=1 后，在窗口上屏后的 callAsync 里调用。
+//   必须晚于 restoreMainWindowBounds()（普通几何先就位）与 peer 创建：
+//   Windows 伪全屏按物理像素贴合当前显示器工作区（MonitorFromWindow）。
+//
+//   直接复用 toggleFakeFullScreen() 的"进入"分支，因此：
+//     · preFullScreenBounds 记录的是刚恢复出来的普通窗口尺寸，落盘严格幂等；
+//     · resize limits / 编辑器 constrainer 的放宽与双击进入完全同源；
+//     · 若进入失败（拿不到显示器信息），pseudoFullScreen 保持 false，
+//       下次退出写回 window.fullscreen=0，不会反复尝试。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::restorePseudoFullScreen()
+{
+    if (isPluginHost) return;
+    if (pseudoFullScreen) return;
+    if (! isShowing()) return;
+
+    // stick 驻留态与全屏互斥：启动时若有待恢复的 stick 会话，
+    //   restoreSavedStickSession() 会接管窗口几何，这里不能抢先搬窗口。
+    if (stickActive || pendingStickRestore) return;
+
+    auto* top = getTopLevelComponent();
+    if (top == nullptr || top == this) return;
+
+   #if JUCE_MAC
+    // macOS 原生全屏的 Space 切换会打断启动期的布局 / 首帧恢复；且
+    //   saveMainWindowBounds 在原生全屏态下已经跳过窗口几何写入
+    //   （见该函数说明），因此本版本不在 mac 上自动恢复全屏。
+    return;
+   #else
+    toggleFakeFullScreen();
+   #endif
 }
 
 // ==========================================================

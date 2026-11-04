@@ -1146,6 +1146,18 @@ PalettePanel::~PalettePanel()
 // ==================================================
 void PalettePanel::timerCallback()
 {
+    // 悬浮态跟随主窗口：主窗口一旦移动/缩放，独立窗口会与软件脱节，
+    //   直接关闭面板（用户下次点击会按新位置重新计算展开方向）。
+    if (floating_)
+    {
+        auto* main = floatingMainWindow_.getComponent();
+        if (main == nullptr || main->getScreenBounds() != floatingMainWindowBounds_)
+        {
+            dismiss();
+            return;
+        }
+    }
+
     // 仅处理 toast 超时。主题应用已改为同步（生成器重算 <1ms，AC9），
     //   旧 16ms Timer 节流链路存在断链风险（specDirty_ 置位后未消费）。
     if (toastLabel_.isVisible()
@@ -1350,8 +1362,9 @@ void PalettePanel::saveCurrentAsUserTheme()
 
     if (lib.saveTheme(name, spec_))
     {
-        // 应用为命名主题；落盘由 Standalone 退出时统一 persistToSettings，
-        // VST3 在 getStateInformation 时序列化 themeLib 随宿主工程保存。
+        // 应用为命名主题。颜色存档已独立：ThemeLibrary 内部会立即把主题库
+        //   写进用户级文件（Y2Kmeter.themeLibrary.xml），不再依赖
+        //   Standalone 退出时的 persistToSettings / 宿主工程状态。
         PinkXP::applyUserTheme(spec_, name);
         myThemesList_.refreshLayout();
         myThemesList_.repaint();
@@ -1359,7 +1372,9 @@ void PalettePanel::saveCurrentAsUserTheme()
     }
     else
     {
-        showToast("Library full (max 12). Delete a theme first.");
+        showToast("Library full (max "
+                  + juce::String(PinkXP::ThemeLibrary::kMaxUserThemes)
+                  + "). Delete a theme first.");
     }
 }
 
@@ -1419,7 +1434,9 @@ void PalettePanel::pasteShareCode()
     const juce::String name = nextAutoThemeName();
     if (!lib.saveTheme(name, spec))
     {
-        showToast("Library full (max 12). Delete a theme first.");
+        showToast("Library full (max "
+                  + juce::String(PinkXP::ThemeLibrary::kMaxUserThemes)
+                  + "). Delete a theme first.");
         return;
     }
 
@@ -1533,11 +1550,93 @@ void PalettePanel::dismiss()
 {
     // R3：关闭面板默认保留当前效果（spec 已实时应用），仅标记为未命名
     visible_ = false;
-    setVisible(false);
     detachDismissListener();
+
+    // 悬浮态关闭：先销毁独立桌面窗口并归位到原父组件，再隐藏
+    if (floating_)
+        setFloating (false);
+
+    setVisible(false);
     pickingRole_ = -1;
     svPicker_.setVisible(false);
     if (onClosed) onClosed();
+}
+
+// ==================================================
+// 悬浮（独立桌面窗口）
+// ==================================================
+void PalettePanel::setFloating (bool shouldFloat, juce::Component* mainWindow)
+{
+    if (shouldFloat)
+    {
+        floatingMainWindow_ = mainWindow;
+
+        if (floating_)
+            return;
+
+        detachDismissListener();
+
+        const bool wasVisible = isVisible();
+
+        // 1) 记下原父组件（关闭悬浮时归位）
+        floatingParent_ = getParentComponent();
+
+        // 2) 钉住像素风 LookAndFeel：addToDesktop 会把组件从父链摘下，
+        //    之后 getLookAndFeel() 会回退到 Desktop 默认 LnF（系统默认外观）。
+        setLookAndFeel (&getLookAndFeel());
+        floatingLookAndFeelPinned_ = true;
+
+        // 3) 记住主窗口当前屏幕矩形：之后它一旦移动/缩放就关闭面板
+        floatingMainWindowBounds_ = (mainWindow != nullptr ? mainWindow->getScreenBounds()
+                                                           : juce::Rectangle<int>{});
+
+        floating_ = true;
+
+        // 面板自身绘制覆盖整个矩形（drawSunken + inner 填充），标成不透明可
+        //   避免 Windows 走分层窗口（半透明窗口）——那是拖动时明显的性能坑。
+        setOpaque (true);
+
+        // setAlwaysOnTop 必须早于 addToDesktop —— Windows 在创建 peer 时读取该标志
+        setAlwaysOnTop (true);
+        addToDesktop (juce::ComponentPeer::windowIsTemporary);
+
+        if (wasVisible)
+            setVisible (true);
+
+        return;
+    }
+
+    if (! floating_)
+    {
+        floatingMainWindow_ = nullptr;
+        return;
+    }
+
+    detachDismissListener();
+
+    const bool wasVisible = isVisible();
+
+    floating_ = false;
+    removeFromDesktop();
+    setAlwaysOnTop (false);
+    setOpaque (false);
+
+    if (floatingLookAndFeelPinned_)
+    {
+        setLookAndFeel (nullptr);
+        floatingLookAndFeelPinned_ = false;
+    }
+
+    if (auto* parent = floatingParent_.getComponent())
+    {
+        parent->addChildComponent (this);
+        if (wasVisible)
+            setVisible (true);
+    }
+
+    floatingParent_ = nullptr;
+    floatingMainWindow_ = nullptr;
+    floatingMainWindowBounds_ = {};
 }
 
 bool PalettePanel::keyPressed(const juce::KeyPress& key)
@@ -1557,15 +1656,46 @@ bool PalettePanel::keyPressed(const juce::KeyPress& key)
 
 void PalettePanel::attachDismissListener()
 {
+    detachDismissListener();
+
+    if (floating_)
+    {
+        // 悬浮态：本组件已是独立顶层窗口，主窗口的鼠标事件不会传到这里，
+        //   改挂 Desktop 全局监听（覆盖本进程所有窗口，点击面板内的事件由
+        //   DismissListener 的"屏幕矩形包含"判断过滤掉）。
+        juce::Desktop::getInstance().addGlobalMouseListener (dismissListener_.get());
+        dismissOnDesktop_ = true;
+        dismissAttached_  = true;
+        return;
+    }
+
     if (auto* top = getTopLevelComponent())
-        top->addMouseListener(dismissListener_.get(),
-                              /*wantsEventsForAllNestedChildComponents=*/true);
+    {
+        top->addMouseListener (dismissListener_.get(),
+                               /*wantsEventsForAllNestedChildComponents=*/true);
+        dismissTargetComponent_ = top;
+        dismissOnDesktop_       = false;
+        dismissAttached_        = true;
+    }
 }
 
 void PalettePanel::detachDismissListener()
 {
-    if (auto* top = getTopLevelComponent())
-        top->removeMouseListener(dismissListener_.get());
+    if (! dismissAttached_)
+        return;
+
+    if (dismissOnDesktop_)
+    {
+        juce::Desktop::getInstance().removeGlobalMouseListener (dismissListener_.get());
+    }
+    else if (auto* top = dismissTargetComponent_.getComponent())
+    {
+        top->removeMouseListener (dismissListener_.get());
+    }
+
+    dismissAttached_        = false;
+    dismissOnDesktop_       = false;
+    dismissTargetComponent_ = nullptr;
 }
 
 // ==================================================

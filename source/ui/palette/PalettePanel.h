@@ -215,6 +215,17 @@ public:
     void dismiss();
     bool isShowing() const noexcept { return visible_; }
 
+    // ---- 悬浮（独立桌面窗口）----
+    //   主窗口被用户拉小后，面板高度可能超过窗口可用高度。此时由
+    //   ModuleWorkspace 把面板提升为独立的临时桌面窗口（addToDesktop），
+    //   使其可以延展到软件窗口之外，从而完整显示，并可按屏幕空间向上或
+    //   向下展开。
+    //   · mainWindow：主窗口顶层组件（用于外部点击关闭 + 检测主窗口移动）
+    //   · 悬浮期间 LookAndFeel 会显式钉住当前像素风 LnF（脱离父链后否则会
+    //     回退成系统默认外观）
+    void setFloating(bool shouldFloat, juce::Component* mainWindow = nullptr);
+    bool isFloating() const noexcept { return floating_; }
+
     std::function<void()> onClosed;         // 关闭时通知父组件
     std::function<void()> onHeightChanged;  // 面板高度变化（折叠展开）时通知父组件重定位
 
@@ -280,6 +291,19 @@ private:
     std::unique_ptr<DismissListener> dismissListener_;
     void attachDismissListener();
     void detachDismissListener();
+
+    // 监听当前挂在哪里：内嵌态挂主窗口顶层组件，悬浮态挂 Desktop 全局监听
+    //   （悬浮后本组件自成一个顶层窗口，收不到主窗口的鼠标事件）
+    bool  dismissAttached_      = false;
+    bool  dismissOnDesktop_     = false;
+    juce::Component::SafePointer<juce::Component> dismissTargetComponent_;
+
+    // ---- 悬浮态状态 ----
+    bool floating_ = false;
+    bool floatingLookAndFeelPinned_ = false;   // 悬浮期间显式钉住 LookAndFeel
+    juce::Component::SafePointer<juce::Component> floatingParent_;      // 归位用
+    juce::Component::SafePointer<juce::Component> floatingMainWindow_;  // 主窗口（跟随检测）
+    juce::Rectangle<int> floatingMainWindowBounds_;                     // 悬浮时的主窗口屏幕矩形
 
     // ---- 内部逻辑 ----
     void loadSpecIntoUi(const y2kpal::ThemeSpec& s);

@@ -182,6 +182,13 @@ public:
     bool isPseudoFullScreen() const noexcept { return pseudoFullScreen; }
     const juce::Rectangle<int>& getPreFullScreenBounds() const noexcept { return preFullScreenBounds; }
 
+    // 启动恢复伪全屏（v2.9.9 补充）：Standalone 读到 window.fullscreen=1 后，
+    //   在窗口上屏（peer 就绪）后的 callAsync 里调用。已处于伪全屏 / 插件模式
+    //   / stick 会话恢复中时直接 no-op；几何走 toggleFakeFullScreen 的进入
+    //   分支，因此 preFullScreenBounds 记录的是"刚恢复出来的普通窗口"尺寸，
+    //   退出全屏 / 退出程序时落盘严格幂等。
+    void restorePseudoFullScreen();
+
     // 当窗口被程序性设置成超过编辑器 constrainer 上限的尺寸（如启动时恢复历史
     //   bounds、双击伪全屏）时，把 constrainer 的 max 放宽到能容纳 w×h（min 不变）。
     //   否则后续任何 setResizeLimits 都会经 setBoundsConstrained 把编辑器夹回 1600，

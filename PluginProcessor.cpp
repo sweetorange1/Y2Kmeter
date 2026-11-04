@@ -685,6 +685,9 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty ("themeName", PinkXP::getCustomThemeName(),        nullptr);
     root.setProperty ("themeSpec",
                       juce::String(PinkXP::getCurrentThemeSpec().shareCode()), nullptr);
+
+    // 颜色存档独立：工程里仍写一份主题库（分享/迁移用），但读取端只做"合并"，
+    //   真正的长期存储是用户级的 Y2Kmeter.themeLibrary.xml（见 ThemeLibrary）。
     root.setProperty ("themeLib",
                       PinkXP::ThemeLibrary::instance().toXmlString(),  nullptr);
 
@@ -744,8 +747,11 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
     //   Standalone，避免 state 里的旧值覆盖 settings 里的最新值。
     if (wrapperType != wrapperType_Standalone)
     {
+        // 颜色存档独立：宿主工程里的主题库只做"合并"，不清空用户自己的主题。
+        //   Load 一个不带主题（或只带少量主题）的工程不会丢掉用户已保存的颜色；
+        //   工程里额外的主题会被追加进主题库（同名同色自动去重）。
         if (root.hasProperty ("themeLib"))
-            PinkXP::ThemeLibrary::instance().loadFromXmlString(
+            PinkXP::ThemeLibrary::instance().mergeFromXmlString(
                 root.getProperty ("themeLib").toString());
 
         const int themeId = (int) root.getProperty ("themeId", -1);
