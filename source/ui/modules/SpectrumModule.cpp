@@ -4,6 +4,7 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 #include <cmath>
+#include <limits>
 
 // ==========================================================
 // SpectrumModule
@@ -21,16 +22,10 @@ SpectrumModule::SpectrumModule(AnalyserHub& h)
     setDefaultSize(384, 256); // spectrum 6×4 大格
     setTitleText("Spectrum");
 
-    btnPeak .setClickingTogglesState(true);
-    btnSlope.setClickingTogglesState(true);
-    btnPeak .setToggleState(peakHoldEnabled, juce::dontSendNotification);
-    btnSlope.setToggleState(slopeEnabled,    juce::dontSendNotification);
-
-    btnPeak .onClick = [this]() { setPeakHoldEnabled(btnPeak.getToggleState()); };
-    btnSlope.onClick = [this]() { setSlopeEnabled   (btnSlope.getToggleState()); };
-
+    btnPeak.setClickingTogglesState(true);
+    btnPeak.setToggleState(peakHoldEnabled, juce::dontSendNotification);
+    btnPeak.onClick = [this]() { setPeakHoldEnabled(btnPeak.getToggleState()); };
     addAndMakeVisible(btnPeak);
-    addAndMakeVisible(btnSlope);
 
     // Sharper 模式（重分配谱线）：乐音收束成竖线
     btnSharp.setClickingTogglesState(true);
@@ -39,12 +34,40 @@ SpectrumModule::SpectrumModule(AnalyserHub& h)
     btnSharp.onClick = [this]() { setSharpEnabled(btnSharp.getToggleState()); };
     addAndMakeVisible(btnSharp);
 
+    // 曲线模式（三档循环）：Smooth → Semi → Raw
+    btnSmooth.setClickingTogglesState(false);
+    btnSmooth.onClick = [this]()
+    {
+        const auto next = (curveMode == CurveMode::smooth) ? CurveMode::semi
+                        : (curveMode == CurveMode::semi)   ? CurveMode::raw
+                                                           : CurveMode::smooth;
+        setCurveMode (next);
+    };
+    updateCurveButton();
+    addAndMakeVisible(btnSmooth);
+
+    // 通道轮换：MID → MID+SIDE → LEFT+RIGHT → MID（点击切换，不做 toggle 外观）
+    btnChannel.setClickingTogglesState(false);
+    btnChannel.onClick = [this]()
+    {
+        const auto next = (channelMode == ChannelMode::mid)       ? ChannelMode::midSide
+                        : (channelMode == ChannelMode::midSide)   ? ChannelMode::leftRight
+                                                                  : ChannelMode::mid;
+        setChannelMode (next);
+    };
+    updateChannelButton();
+    addAndMakeVisible(btnChannel);
+
     rawMags.ensureStorageAllocated (256);
+    rawMagsSide.ensureStorageAllocated (256);
     smoothedDb .reserve (256);
+    secondaryDb.reserve (256);
     peakDb     .reserve (256);
     blurredDb  .reserve (256);
+    secondaryBlurDb.reserve (256);
     slopeOffsetDb.reserve (256);
     curvePts     .reserve (256);
+    secondaryPts .reserve (256);
     peakCurvePts .reserve (256);
 
     lastTickTime = juce::Time::getCurrentTime();
@@ -60,8 +83,14 @@ juce::ValueTree SpectrumModule::saveModuleSpecificState() const
 {
     juce::ValueTree s("state");
     s.setProperty("peakHold", peakHoldEnabled, nullptr);
-    s.setProperty("slope", slopeEnabled, nullptr);
     s.setProperty("sharp", sharpEnabled, nullptr);
+    s.setProperty("curve", juce::String (curveMode == CurveMode::smooth ? "smooth"
+                                        : curveMode == CurveMode::semi   ? "semi"
+                                                                         : "raw"), nullptr);
+    s.setProperty("channel", juce::String (channelMode == ChannelMode::mid       ? "mid"
+                                         : channelMode == ChannelMode::midSide   ? "midside"
+                                                                                 : "lr"), nullptr);
+    // 不写 "slope"：Slope 已固定常开，旧存档里的值不再有意义
     return s;
 }
 
@@ -69,10 +98,75 @@ void SpectrumModule::restoreModuleSpecificState(const juce::ValueTree& state)
 {
     if (state.hasProperty("peakHold"))
         setPeakHoldEnabled((bool) state.getProperty("peakHold"));
-    if (state.hasProperty("slope"))
-        setSlopeEnabled((bool) state.getProperty("slope"));
     if (state.hasProperty("sharp"))
         setSharpEnabled((bool) state.getProperty("sharp"));
+
+    // 曲线模式：优先读新的 "curve"；旧存档里的布尔 "smooth" 做一次性迁移
+    const juce::String cm = state.getProperty("curve").toString();
+    if (cm == "smooth" || cm == "semi" || cm == "raw")
+        setCurveMode (cm == "semi" ? CurveMode::semi
+                    : cm == "raw"  ? CurveMode::raw
+                                   : CurveMode::smooth);
+    else if (state.hasProperty("smooth"))
+        setCurveMode ((bool) state.getProperty("smooth") ? CurveMode::smooth : CurveMode::raw);
+
+    const juce::String ch = state.getProperty("channel", "mid").toString();
+    setChannelMode (ch == "midside" ? ChannelMode::midSide
+                  : ch == "lr"      ? ChannelMode::leftRight
+                                    : ChannelMode::mid);
+
+    // 旧存档兼容：即使记录了 "slope"=false 也忽略 —— Slope 恒开（强制适应新版本）
+}
+
+void SpectrumModule::setCurveMode (CurveMode m)
+{
+    if (curveMode == m) return;
+    curveMode = m;
+
+    // 切换列数会重置平滑/峰值状态（尺寸变化），立刻重建一次快照
+    updateCurveButton();
+    buildGlSnapshot();
+    repaint();
+}
+
+void SpectrumModule::updateCurveButton()
+{
+    const char* text = (curveMode == CurveMode::smooth) ? "Smooth"
+                     : (curveMode == CurveMode::semi)   ? "Semi"
+                                                        : "Raw";
+    btnSmooth.setButtonText (text);
+    btnSmooth.setTooltip (curveMode == CurveMode::smooth
+        ? juce::String ("Curve: Smooth (256 cols, spline + column blur). Click for Semi.")
+        : curveMode == CurveMode::semi
+        ? juce::String ("Curve: Semi (512 cols, spline, no blur - keeps more spikes). Click for Raw.")
+        : juce::String ("Curve: Raw (per-bin columns, polyline - maximum spike detail). Click for Smooth."));
+}
+
+void SpectrumModule::setChannelMode (ChannelMode m)
+{
+    if (channelMode == m) return;
+    channelMode = m;
+
+    // 切换模式时清空次曲线状态，避免上一模式（如 side）的旧值淡入新曲线
+    secondaryDb.clear();
+    secondaryBlurDb.clear();
+
+    updateChannelButton();
+    buildGlSnapshot();
+    repaint();
+}
+
+void SpectrumModule::updateChannelButton()
+{
+    const char* text = (channelMode == ChannelMode::mid)      ? "MID"
+                     : (channelMode == ChannelMode::midSide)  ? "M+S"
+                                                              : "L/R";
+    btnChannel.setButtonText (text);
+    btnChannel.setTooltip (channelMode == ChannelMode::mid
+        ? juce::String ("Channel: MID ((L+R)/2). Click for MID+SIDE.")
+        : channelMode == ChannelMode::midSide
+        ? juce::String ("Channel: MID + SIDE ((L-R)/2 drawn as the faint line). Click for LEFT+RIGHT.")
+        : juce::String ("Channel: LEFT (solid) + RIGHT (faint). Click for MID."));
 }
 
 void SpectrumModule::setSharpEnabled(bool b)
@@ -108,7 +202,10 @@ void SpectrumModule::updateSharpLines (const std::vector<AnalyserHub::Reassigned
     // 平滑系数（按真实 dt 换算，帧率无关；120Hz 标定）
     const float aPos   = alphaForDt (0.45f, frameDtSec);   // 位置 EMA（线频率本身极稳，跟踪要跟得上换音）
     const float aMagUp = alphaForDt (0.60f, frameDtSec);   // 幅度上升快（攻击）
-    const float aMagDn = alphaForDt (0.14f, frameDtSec);   // 幅度回落慢（避免闪烁）
+    // 子弹时间：幅度回落（release）做 1/50 时间膨胀，与主曲线行为一致
+    const float aMagDn = alphaForDt (0.14f, bulletTimeActive
+                                            ? frameDtSec / bulletTimeSlowdown
+                                            : frameDtSec);   // 幅度回落慢（避免闪烁）
     const float aAlpha = alphaForDt (0.40f, frameDtSec);   // 淡入
 
     // 帧间匹配阈值：1/8 八度内视为同一根谱线（> 半音间距 0.083 八度，能区分相邻半音）
@@ -120,8 +217,9 @@ void SpectrumModule::updateSharpLines (const std::vector<AnalyserHub::Reassigned
 
     for (const auto& pk : peaks)
     {
+        // Slope 恒开：重分配谱线与主曲线用同一套 4.5dB/oct 补偿
         const float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, pk.mag))
-                       + (slopeEnabled ? sharpSlopeDb ((float) pk.freqHz) : 0.0f);
+                       + sharpSlopeDb ((float) pk.freqHz);
 
         // 在未匹配的旧线中找频率最近邻
         int best = -1;
@@ -191,15 +289,6 @@ void SpectrumModule::setPeakHoldEnabled(bool b)
     repaint();
 }
 
-void SpectrumModule::setSlopeEnabled(bool b)
-{
-    if (slopeEnabled == b) return;
-    slopeEnabled = b;
-    btnSlope.setToggleState(slopeEnabled, juce::dontSendNotification);
-    buildGlSnapshot();
-    repaint();
-}
-
 // ----------------------------------------------------------
 // 频率/dB 坐标换算
 // ----------------------------------------------------------
@@ -236,32 +325,43 @@ float SpectrumModule::toyReadDbAtX (float x) const
     if (N <= 0 || canvas.getWidth() <= 0)
         return -144.0f;
 
-    const int col = juce::jlimit (0, N - 1,
-        juce::roundToInt ((x - (float) canvas.getX()) / (float) canvas.getWidth() * (float) (N - 1)));
-    float db = smoothedDb[(size_t) col];
-    // Slope 打开时扣掉补偿才是真实 dBFS
-    if (slopeEnabled && col < (int) slopeOffsetDb.size())
-        db -= slopeOffsetDb[(size_t) col];
-    return db;
+    // 逐 bin 模式（Semi/Raw）：按频率找最近的点；smooth 模式：等距列
+    const bool freqAxis = ((int) smoothedHz.size() == N);
+    int col = 0;
+    float slopeDb = 0.0f;
+
+    if (freqAxis)
+    {
+        const float freq = xToFreq (x, canvas);
+        float best = std::numeric_limits<float>::max();
+        for (int i = 0; i < N; ++i)
+        {
+            const float d = std::abs (smoothedHz[(size_t) i] - freq);
+            if (d < best) { best = d; col = i; }
+        }
+        slopeDb = 4.5f * std::log2 (juce::jmax (20.0f, smoothedHz[(size_t) col]) / 1000.0f);
+    }
+    else
+    {
+        col = juce::jlimit (0, N - 1,
+            juce::roundToInt ((x - (float) canvas.getX())
+                              / (float) canvas.getWidth() * (float) (N - 1)));
+        if (col < (int) slopeOffsetDb.size())
+            slopeDb = slopeOffsetDb[(size_t) col];
+    }
+
+    // 读数要扣掉 slope 补偿才是真实 dBFS
+    return smoothedDb[(size_t) col] - slopeDb;
 }
 
-std::vector<juce::Point<float>> SpectrumModule::toyCaptureSpectrumCurve() const
+// ----------------------------------------------------------
+// 残影着色：基础色 → 残影色的交叉混合（GL / CPU 两条路径共用）
+// ----------------------------------------------------------
+juce::Colour SpectrumModule::ghostTint (juce::Colour base, juce::Colour ghost) const
 {
-    const auto canvas = getToyCanvasBounds();
-    std::vector<juce::Point<float>> points;
-    if (smoothedDb.empty() || canvas.isEmpty())
-        return points;
-
-    const auto inner = canvas.reduced (2);
-    points.reserve (smoothedDb.size());
-    const float denominator = (float) juce::jmax (1, (int) smoothedDb.size() - 1);
-    for (size_t i = 0; i < smoothedDb.size(); ++i)
-    {
-        const float x = (float) inner.getX()
-                      + (float) i / denominator * (float) inner.getWidth();
-        points.emplace_back (x, dbToY (smoothedDb[i], canvas));
-    }
-    return points;
+    if (ghostMix <= 0.0f)
+        return base;
+    return base.interpolatedWith (ghost, juce::jlimit (0.0f, 1.0f, ghostMix));
 }
 
 bool SpectrumModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
@@ -281,9 +381,8 @@ void SpectrumModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
     const float db   = toyReadDbAtX (hit.pos.x);
     const juce::String note = toyFreqToNoteName (freq);
 
-    const auto frozenCurve = toyCaptureSpectrumCurve();
-    if (! frozenCurve.empty())
-        ctx.addModuleActor (makeSpectrumGhostActor (frozenCurve));
+    // 残影不再以"冻结曲线副本"的形式打印：按下时曲线本体直接切换为残影色
+    //   （见 mouseDown / ghostMix），松手后渐隐恢复原配色。
     ctx.addModuleActor (makeSonarRingActor (hit.pos));
     if (note.isNotEmpty())
     {
@@ -314,11 +413,43 @@ juce::Rectangle<int> SpectrumModule::getCanvasBounds(juce::Rectangle<int> conten
 void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
 {
     auto tb = getToolbarBounds(contentBounds).reduced(2);
-    const int btnW = 60;
-    const int gap = 4;
-    btnPeak .setBounds(tb.getX(),                 tb.getY(), btnW, tb.getHeight());
-    btnSlope.setBounds(tb.getX() + btnW + gap,    tb.getY(), btnW, tb.getHeight());
-    btnSharp.setBounds(tb.getX() + (btnW + gap) * 2, tb.getY(), btnW, tb.getHeight());
+
+    // 4 个按钮：Peak / Sharp / 曲线模式 / 通道。
+    //   宽度按**最宽可能的文字**实测（与 PinkXP LookAndFeel 的按钮字体一致），
+    //   这样 "Smooth"（6 字符）不会再被裁掉最后一个字母；曲线/通道按钮文字
+    //   会随模式变化，这里统一按各自最长文案（Smooth / M+S）预留，切换后不跳动。
+    const auto btnFont = PinkXP::getFont (12.0f, juce::Font::bold);
+    auto textW = [&] (const char* s)
+    {
+        return (int) std::ceil (juce::GlyphArrangement::getStringWidth (btnFont, juce::String (s)));
+    };
+
+    constexpr int gap = 4;
+    int w[4] = { textW ("Peak")   + 12,
+                 textW ("Sharp")  + 12,
+                 textW ("Smooth") + 12,
+                 textW ("M+S")    + 12 };
+
+    // 模块太窄时按比例收缩（下限 26px，再窄就只能允许轻微裁字）
+    const int avail = juce::jmax (1, tb.getWidth() - gap * 3);
+    const int need  = w[0] + w[1] + w[2] + w[3];
+    if (need > avail)
+    {
+        const float k = (float) avail / (float) need;
+        for (auto& v : w)
+            v = juce::jmax (26, juce::roundToInt ((float) v * k));
+    }
+
+    int x = tb.getX();
+    auto place = [&] (juce::Component& c, int i)
+    {
+        c.setBounds (x, tb.getY(), w[i], tb.getHeight());
+        x += w[i] + gap;
+    };
+    place (btnPeak,    0);
+    place (btnSharp,   1);
+    place (btnSmooth,  2);
+    place (btnChannel, 3);
 
     // v2.9.5：尺寸守卫（防 layoutContent 每帧触发导致的交互卡顿）
     if (glCanvasSizeChanged (getGlCanvasBounds (contentBounds)))
@@ -344,10 +475,63 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // 关于 frame：
     //   ·frame.spectrumMag 仍然保留（其他模块可能用），本模块不再使用；
     //   · blended 接口走 Hub 内部锁，成本极低（N 次查表）。
-    constexpr int N = 256;
-    hub.getSpectrumMagnitudesBlended (rawMags, N,
-                                      minFreqHz,
-                                      juce::jmin (maxFreqHz, (float) (hub.getSampleRate() * 0.5)));
+    const float fHi = juce::jmin (maxFreqHz, (float) (hub.getSampleRate() * 0.5));
+
+    // 列数与采样方式（三档）：
+    //   smooth：256 列 + 频段保峰聚合（最平滑、成本最低）
+    //   semi  ：512 列 + 频段保峰聚合（更多窄峰，仍走样条）
+    //   semi / raw：逐 FFT bin 取数（bins 模式）
+    //   低频列宽（~2.7%×f，20Hz 处 ≈0.54Hz）远小于 bin 宽（48k/2048 ≈23.4Hz），
+    //   若仍按"列→bin"映射，几十列会重复同一个 bin 的值 → 正是那些水平小台阶。
+    //   bins 模式下每个 bin 只出一个点（放在该 bin 的中心频率上）再连线，
+    //   低频因此自然稀疏、接近 smoot 的观感；高频 bin 密集 → 针状纹理。
+    const bool binMode = (curveMode != CurveMode::smooth);
+
+    if (binMode)
+    {
+        // 通道模式取数（主/次两路同一帧抓取，轴与分辨率完全一致）：
+        //   MID       —— 主 = mid；MID+SIDE —— 主 = mid，次 = side
+        //   LEFT+RIGHT—— 主 = L，次 = R
+        double hz = 0.0;
+        switch (channelMode)
+        {
+            case ChannelMode::mid:
+                hub.copySpectrumBins (rawBins, AnalyserHub::SpectrumSource::mid, hz);
+                break;
+
+            case ChannelMode::midSide:
+                hub.copySpectrumBins (rawBins,     AnalyserHub::SpectrumSource::mid,  hz);
+                hub.copySpectrumBins (rawBinsSide, AnalyserHub::SpectrumSource::side, hz);
+                break;
+
+            case ChannelMode::leftRight:
+                hub.copySpectrumBins (rawBins,     AnalyserHub::SpectrumSource::left,  hz);
+                hub.copySpectrumBins (rawBinsSide, AnalyserHub::SpectrumSource::right, hz);
+                break;
+        }
+        binHz = hz;
+    }
+    else
+    {
+        // 平滑模式：256 列对数轴 + 频段保峰聚合（现状）
+        constexpr int N = 256;
+        switch (channelMode)
+        {
+            case ChannelMode::mid:
+                hub.getSpectrumMagnitudesBlended (rawMags, N, minFreqHz, fHi);
+                break;
+
+            case ChannelMode::midSide:
+                hub.getSpectrumMagnitudesBlended (rawMags, N, minFreqHz, fHi);
+                hub.getSpectrumMagnitudesBlendedSide (rawMagsSide, N, minFreqHz, fHi);
+                break;
+
+            case ChannelMode::leftRight:
+                hub.getSpectrumMagnitudesBlendedLR (rawMags, rawMagsSide, N, minFreqHz, fHi);
+                break;
+        }
+        binHz = 0.0;
+    }
 
     // Sharper：重分配谱峰 → 谱线追踪（乐音收束成竖线）
     //   反馈修订：上限收敛到 28 根（基频 + 主要谐波 + 少数背景音足够），
@@ -357,7 +541,7 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         sharpPeaksScratch.clear();
         hub.getSpectrumReassignedPeaks (sharpPeaksScratch,
                                         minFreqHz,
-                                        juce::jmin (maxFreqHz, (float) (hub.getSampleRate() * 0.5)),
+                                        fHi,
                                         28);
         updateSharpLines (sharpPeaksScratch, frame.dtSec, hub.getSampleRate());
     }
@@ -376,7 +560,11 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     //   动态——信号顶上来才抬升，否则一直回落，形成贴着信号、带下落惯性的虚线。
     if (peakHoldEnabled && ! peakDb.empty())
     {
-        const float fallDelta = peakFallRatePerSec * (deltaMs / 1000.0f);
+        // 子弹时间：峰值下落速率同步放慢 50 倍（顶上去不受影响，只慢回落）
+        const float fallRatePerSec = bulletTimeActive
+                                       ? peakFallRatePerSec / bulletTimeSlowdown
+                                       : peakFallRatePerSec;
+        const float fallDelta = fallRatePerSec * (deltaMs / 1000.0f);
 
         for (size_t i = 0; i < peakDb.size(); ++i)
         {
@@ -387,6 +575,12 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
+    // 残影色消散：按住时保持满值（ghostMix=1），松手后按 ghostFadeSec 线性降到 0，
+    //   曲线随之从残影色渐变回正常配色。放在 buildGlSnapshot 之前，
+    //   本帧快照即用新的混合比例。
+    if (! bulletTimeActive && ghostMix > 0.0f)
+        ghostMix = juce::jmax (0.0f, ghostMix - frame.dtSec / ghostFadeSec);
+
     curve_cache_dirty_ = true;
     // v2.9.4：同步生成 GL 直渲染快照
     buildGlSnapshot();
@@ -394,73 +588,256 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 }
 
 // ----------------------------------------------------------
-// rebuildDisplay —— 已合并的 N 列线性幅度 → N 列 dBFS 值（Slope 可选）
-//
-//   变更说明：
-//     旧实现里本函数把 1024 bin 的 FFT 幅度**在 UI 侧**按对数频率轴重采样到 N=256 列，
-//     并且费大力气处理"低频一个 bin 覆盖多列 → 阶梯/平滑"。
-//     现在 Hub 已直接返回 N 列对数频率轴上的合并线性幅度（低频路 8192FFT + 高频路 2048FFT），
-//     本函数只需：
-//       1) 线性 → dB；
-//       2) 可选 Slope 补偿；
-//       3) 上升快 / 下降慢平滑；
-//       4) 末端轻量 3 列模糊磨圆拐点。
+// processSeries —— 一路 N 列线性幅度 → N 列 dBFS 显示值
+//   1) 线性 → dB；
+//   2) Slope 补偿（4.5dB/oct，v3.1 起恒开）；
+//   3) 上升快 / 下降慢 EMA（子弹时间只拖慢下降沿）；
+//   4) 圆滑模式：末端轻量 3 列模糊磨圆拐点；
+//      Semi / Raw 模式跳过这一步 —— 该卷积会把孤立尖峰
+//      按 [1,2,1]/4 削掉一半以上，是"高频尖刺被磨没"的来源之一。
 // ----------------------------------------------------------
-void SpectrumModule::rebuildDisplay()
+void SpectrumModule::processSeries (const juce::Array<float>& mags,
+                                    std::vector<float>& state,
+                                    std::vector<float>& scratch)
 {
-    const int N = rawMags.size();
-    if (N <= 1) return;
+    const int N = mags.size();
+    if (N <= 1)
+        return;
 
-    if ((int) smoothedDb.size() != N)
-    {
-        smoothedDb  .assign(N, minDb);
-        peakDb      .assign(N, minDb);
-        blurredDb   .assign(N, minDb);
-    }
-
-    ensureDisplayCache (N);
+    if ((int) state.size() != N)
+        state.assign (N, minDb);
+    if ((int) scratch.size() != N)
+        scratch.assign (N, minDb);
 
     // v2.9：平滑系数按 dt 换算（120Hz 标定 = 旧版每 tick 系数）
+    //   子弹时间：下降沿（release）的 dt 做 1/50 时间膨胀 → 回落慢 50 倍；
+    //   上升沿（attack）保持原速，频谱仍能实时跟上信号。
+    const float releaseDtSec = bulletTimeActive
+                                   ? frameDtSec / bulletTimeSlowdown
+                                   : frameDtSec;
     const float alphaUp   = y2k::pacing::alphaForDt (0.55f, frameDtSec);
-    const float alphaDown = y2k::pacing::alphaForDt (0.12f, frameDtSec);
+    const float alphaDown = y2k::pacing::alphaForDt (0.12f, releaseDtSec);
 
     for (int col = 0; col < N; ++col)
     {
-        const float mag = std::abs (rawMags.getUnchecked (col));
+        const float mag = std::abs (mags.getUnchecked (col));
         float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
 
         // Slope 补偿：4.5 dB/oct 高频提升（基准 1kHz）
-        if (slopeEnabled && (int) slopeOffsetDb.size() == N)
+        if ((int) slopeOffsetDb.size() == N)
             db += slopeOffsetDb[(size_t) col];
 
         // 平滑：上升快，下降慢
-        const float prev  = smoothedDb[(size_t) col];
+        const float prev  = state[(size_t) col];
         const float alpha = (db > prev) ? alphaUp : alphaDown;
         float sm = prev + alpha * (db - prev);
         sm = juce::jlimit (minDb, maxDb + 12.0f, sm);
-        smoothedDb[(size_t) col] = sm;
+        state[(size_t) col] = sm;
     }
 
-    // ----------------------------------------------------------
-    //  额外的列间平滑（一维小核卷积）：磨圆列间拐点
-    //   · 仅对已经求好的 smoothedDb 做轻量 [1,2,1]/4 低通，核宽 3 列
-    //   · 纯视觉磨平，完全不影响频率/幅度精度
-    // ----------------------------------------------------------
-    if (N >= 3)
+    // 列间低通：只在 smooth 模式做（semi / raw 跳过，保住窄峰高度）
+    if (! useColumnBlur() || N < 3)
+        return;
+
+    scratch[0]     = state[0];
+    scratch[N - 1] = state[(size_t) (N - 1)];
+    for (int i = 1; i < N - 1; ++i)
     {
-        if ((int) blurredDb.size() != N)
-            blurredDb.assign (N, minDb);
-
-        blurredDb[0]     = smoothedDb[0];
-        blurredDb[N - 1] = smoothedDb[(size_t)(N - 1)];
-        for (int i = 1; i < N - 1; ++i)
-        {
-            blurredDb[(size_t) i] = 0.25f * smoothedDb[(size_t)(i - 1)]
-                                   + 0.50f * smoothedDb[(size_t) i]
-                                   + 0.25f * smoothedDb[(size_t)(i + 1)];
-        }
-        smoothedDb.swap(blurredDb);
+        scratch[(size_t) i] = 0.25f * state[(size_t)(i - 1)]
+                            + 0.50f * state[(size_t) i]
+                            + 0.25f * state[(size_t)(i + 1)];
     }
+    state.swap (scratch);
+}
+
+// ----------------------------------------------------------
+// processBinSeries —— 逐 bin 幅度 → 显示点（Semi / Raw）
+//   · 只取 [20Hz, min(20k, sr/2)] 内的 bin；
+//   · 合并规则按**实际像素间距**动态决定：从当前 bin 开始向后吃进邻居，
+//     直到它的 x 距本组起点 ≥ minGapPx（= 线宽 + 一点余量）为止。
+//     于是：
+//       - 模块越宽 → 每 bin 占的像素越多 → 合并越少、细节越多；
+//       - 高频 bin 天然密集 → 自动合并成 1 点/线宽，消除"点距 < 线宽"
+//         造成的噪点/锯齿；
+//       - 低频 bin 天然稀疏 → 基本不合并，每个 bin 独立成点。
+//     组内取**最大**幅度（保峰），频率取组中心，尖峰不会被平均掉。
+//   · 每个点带自己的中心频率（freqs），绘制时按对数轴定位 —— 不再出现
+//     "多列共用同一个 bin 值"的水平台阶。
+// ----------------------------------------------------------
+void SpectrumModule::processBinSeries (const juce::Array<float>& mags, double hzPerBin,
+                                       std::vector<float>& state,
+                                       std::vector<float>& scratch,
+                                       std::vector<float>& freqs)
+{
+    juce::ignoreUnused (scratch);
+    freqs.clear();
+
+    const int total = mags.size();
+    if (total < 2 || hzPerBin <= 0.0)
+    {
+        state.clear();
+        return;
+    }
+
+    const double nyq  = hub.getSampleRate() * 0.5;
+    const double fLoD = (double) minFreqHz;
+    const double fHiD = juce::jmin ((double) maxFreqHz, nyq);
+    if (fHiD <= fLoD)
+    {
+        state.clear();
+        return;
+    }
+
+    const int firstBin = juce::jmax (1, (int) std::ceil  (fLoD / hzPerBin));
+    const int lastBin  = juce::jmin (total - 1, (int) std::floor (fHiD / hzPerBin));
+    if (lastBin <= firstBin)
+    {
+        state.clear();
+        return;
+    }
+
+    // ---- 画布像素映射（与绘制时 inner = canvas.reduced(2) 一致）----
+    const auto  canvas  = getCanvasBounds (getContentBounds());
+    const float innerX0 = (float) canvas.getX() + 2.0f;
+    const float innerW  = (float) juce::jmax (1, canvas.getWidth() - 4);
+    const float logMinF = std::log10 (minFreqHz);
+    const float logSpanF = juce::jmax (1.0e-6f, std::log10 (maxFreqHz) - logMinF);
+
+    auto xOfHz = [&] (double f) noexcept
+    {
+        const float t = juce::jlimit (0.0f, 1.0f,
+            ((float) std::log10 (juce::jmax (20.0, f)) - logMinF) / logSpanF);
+        return innerX0 + t * innerW;
+    };
+
+    // 相邻输出点的最小像素间距：线带全宽 + 0.15px 余量。
+    //   线宽是固定值（不随模块宽度变化），所以这个阈值也只随"曲线模式 × 是否
+    //   有填充"变化 —— 无填充时线更粗（见绘制分支），阈值同步放大。
+    const bool  noFill      = (channelMode != ChannelMode::mid);
+    const float lineWidthPx = (curveMode == CurveMode::raw)
+                                ? (noFill ? 1.4f : 1.1f)
+                                : (noFill ? 1.9f : 1.4f);
+    const float minGapPx    = lineWidthPx + 0.15f;
+
+    // 每个 bin 的 x 位置只算一次（两次遍历共用；16k FFT 时也避免重复 log10）
+    const int count = lastBin - firstBin + 1;
+    binXScratch.resize ((size_t) count);
+    for (int i = 0; i < count; ++i)
+        binXScratch[(size_t) i] = xOfHz ((double) (firstBin + i) * hzPerBin);
+    const std::vector<float>& binX = binXScratch;
+
+    // 从组起点 i 向后吃到"与起点间距 ≥ minGapPx"为止，返回组末下标
+    auto groupEnd = [&] (int i) noexcept
+    {
+        const float xStart = binX[(size_t) i];
+        int j = i;
+        while (j + 1 < count && (binX[(size_t) (j + 1)] - xStart) < minGapPx)
+            ++j;
+        return j;
+    };
+
+    // 第一遍：数出合并后的点数（组边界只依赖宽度/FFT，不依赖音频）
+    int pts = 0;
+    for (int i = 0; i < count; i = groupEnd (i) + 1)
+        ++pts;
+
+    // 最低可用 bin 的频率通常 > 20Hz（例如 1024FFT/48k 时是 46.9Hz）：
+    //   在最左侧补一个"延伸到 20Hz"的点（值取第一个分组），避免左下角空白。
+    const bool extendLeft = (firstBin > 1);
+    const int  off        = extendLeft ? 1 : 0;
+    const int  totalPts   = pts + off;
+
+    if ((int) state.size() != totalPts)
+        state.assign ((size_t) totalPts, minDb);
+    freqs.resize ((size_t) totalPts);
+
+    // 与 processSeries 完全相同的攻/放时间常数（子弹时间只拖慢释放）
+    const float releaseDt = bulletTimeActive ? frameDtSec / bulletTimeSlowdown : frameDtSec;
+    const float alphaUp   = y2k::pacing::alphaForDt (0.55f, frameDtSec);
+    const float alphaDown = y2k::pacing::alphaForDt (0.12f, releaseDt);
+
+    auto feedPoint = [&] (int idx, float mag, float fCenter)
+    {
+        freqs[(size_t) idx] = fCenter;
+
+        float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
+        db += 4.5f * std::log2 (juce::jmax (20.0f, fCenter) / 1000.0f);   // slope
+
+        const float prev  = state[(size_t) idx];
+        const float alpha = (db > prev) ? alphaUp : alphaDown;
+        state[(size_t) idx] = juce::jlimit (minDb, maxDb + 12.0f,
+                                            prev + alpha * (db - prev));
+    };
+
+    // 第二遍：按同样的分组规则填值
+    int idx = 0;
+    for (int i = 0; i < count; )
+    {
+        const int j = groupEnd (i);
+        const int b0 = firstBin + i;
+        const int b1 = firstBin + j;
+
+        float mag = 0.0f;
+        for (int k = b0; k <= b1; ++k)
+            mag = juce::jmax (mag, std::abs (mags.getUnchecked (k)));
+
+        // 绘制频率取**组起点**的 bin 频率：
+        //   若取组中心，相邻输出点的中心间距可能只有 minGap 的一半（组本身
+        //   有宽度），又会掉回"点距 < 线宽"的重叠噪声；取起点则保证任意两个
+        //   输出点的 x 间距 ≥ minGapPx。偏移不超过一个组宽（<1px，肉眼不可见）。
+        const float fAnchor = (float) ((double) b0 * hzPerBin);
+
+        // 左侧延伸点：与第一组同值，频率放到 20Hz
+        if (extendLeft && idx == 0)
+            feedPoint (idx++, mag, (float) minFreqHz);
+
+        feedPoint (idx++, mag, fAnchor);
+        i = j + 1;
+    }
+}
+
+// ----------------------------------------------------------
+// rebuildDisplay —— 主曲线 + 次曲线（side / R）一起刷新
+// ----------------------------------------------------------
+void SpectrumModule::rebuildDisplay()
+{
+    if (curveMode == CurveMode::smooth)
+    {
+        const int N = rawMags.size();
+        if (N <= 1)
+            return;
+
+        ensureDisplayCache (N);
+        smoothedHz.clear();
+        secondaryHz.clear();
+
+        processSeries (rawMags, smoothedDb, blurredDb);
+
+        // 次曲线：midSide → side；leftRight → R；mid → 不画
+        if (channelMode != ChannelMode::mid && (int) rawMagsSide.size() == N)
+            processSeries (rawMagsSide, secondaryDb, secondaryBlurDb);
+        else
+            secondaryDb.clear();
+    }
+    else
+    {
+        if (rawBins.size() < 2)
+            return;
+
+        processBinSeries (rawBins, binHz, smoothedDb, blurredDb, smoothedHz);
+
+        if (channelMode != ChannelMode::mid && rawBinsSide.size() >= 2)
+            processBinSeries (rawBinsSide, binHz, secondaryDb, secondaryBlurDb, secondaryHz);
+        else
+        {
+            secondaryDb.clear();
+            secondaryHz.clear();
+        }
+    }
+
+    // 峰值数组跟随主曲线尺寸（尺寸变化时重置，避免旧尺度残留）
+    if ((int) peakDb.size() != (int) smoothedDb.size())
+        peakDb.assign (smoothedDb.size(), minDb);
 }
 
 void SpectrumModule::ensureDisplayCache (int numPoints)
@@ -631,24 +1008,49 @@ void SpectrumModule::buildGlSnapshot()
     const float invMax = 1.0f / (float) juce::jmax (1, N - 1);
     const float yTop = (float) inner.getY();
     const float yBot = (float) inner.getBottom();
+    const float logMinF = std::log10 (minFreqHz);
+    const float logSpanF = std::log10 (maxFreqHz) - logMinF;
+
+    // 频率 → 画布内 x（对数轴）。Semi/Raw 的采样点在频率上**不等距**
+    // （每个 FFT bin 一个点，低频稀疏、高频密集），必须按频率定位。
+    auto xForFreq = [&] (float f) noexcept
+    {
+        const float lf = std::log10 (juce::jmax (minFreqHz, f));
+        const float t  = juce::jlimit (0.0f, 1.0f, (lf - logMinF) / juce::jmax (1.0e-6f, logSpanF));
+        return (float) inner.getX() + t * (float) inner.getWidth();
+    };
 
     auto samplePts = [&] (const std::vector<float>& dbVals,
-                          std::vector<float>& outX, std::vector<float>& outY)
+                          const std::vector<float>& freqs,
+                          std::vector<float>& outX, std::vector<float>& outY,
+                          bool smooth, int subdiv)
     {
         const int n = (int) dbVals.size();
         outX.clear();
         outY.clear();
         if (n < 2) return;
 
+        const bool useFreqAxis = ((int) freqs.size() == n);
+
         std::vector<float> px ((size_t) n), py ((size_t) n);
         for (int i = 0; i < n; ++i)
         {
-            px[(size_t) i] = x0 + (float) i * invMax * xLen;
+            px[(size_t) i] = useFreqAxis ? xForFreq (freqs[(size_t) i])
+                                         : x0 + (float) i * invMax * xLen;
             py[(size_t) i] = dbToY (dbVals[(size_t) i], canvas);
         }
 
+        // 折线模式（Smooth 关闭）：直接连采样点，不做任何插值/贴底夹取 ——
+        //   高频窄峰与尖刺按原始 dB 值出角，便于精确读谱。
+        if (! smooth)
+        {
+            outX = px;
+            outY = py;
+            return;
+        }
+
         constexpr float floorPixelTol = 0.75f;
-        constexpr int kSubdiv = 4;   // 每段贝塞尔细分 4 段
+        const int kSubdiv = juce::jlimit (1, 8, subdiv);   // 每段贝塞尔细分段数
 
         auto atFloor = [&] (float y) noexcept { return (yBot - y) <= floorPixelTol; };
 
@@ -685,9 +1087,13 @@ void SpectrumModule::buildGlSnapshot()
             c1y = juce::jlimit (yTop, yBot, c1y);
             c2y = juce::jlimit (yTop, yBot, c2y);
 
-            for (int s = 1; s <= kSubdiv; ++s)
+            // 自适应细分：段的横向跨度不足 1px 时（高频 bin 极密）细分没有视觉
+            //   收益，只增加顶点数 —— 直接取一段，省 2~4 倍顶点。
+            const int segSubdiv = (std::abs (p2x - p1x) < 1.0f)
+                                    ? 1 : kSubdiv;
+            for (int s = 1; s <= segSubdiv; ++s)
             {
-                const float t = (float) s / (float) kSubdiv;
+                const float t = (float) s / (float) segSubdiv;
                 const float u = 1.0f - t;
                 const float w0 = u * u * u;
                 const float w1 = 3.0f * u * u * t;
@@ -699,15 +1105,109 @@ void SpectrumModule::buildGlSnapshot()
         }
     };
 
-    std::vector<float> sx, sy, px, py;
-    samplePts (smoothedDb, sx, sy);
+    std::vector<float> sx, sy, px, py, sx2, sy2;
+    samplePts (smoothedDb, smoothedHz, sx, sy, useSpline(), splineSubdiv());
     const int M = (int) sx.size();
+
+    // 折线模式（raw）专用：逐段独立法线，避免尖刺处"平均法线"把线带压成 0 宽
+    //   （平均法线在 180° 折角处互相抵消 → 线在尖峰顶部断掉/忽然变细）。
+    const bool rawMode = (curveMode == CurveMode::raw);
+
+    // ---- 曲线折线带（可复用：主线 / 次曲线）----
+    //   v2.9.4 修正：改用"连续折线带"（内部点法线取相邻两段法线的平均），
+    //   相邻段共享端点顶点、无重叠无缝隙 —— 之前的逐段独立 quad 在端点
+    //   重叠，端点亮度翻倍（"很多小亮点、亮度不一致"的根因）。
+    auto appendCurveStrip = [&] (const std::vector<float>& xs,
+                                 const std::vector<float>& ys,
+                                 float halfW, juce::Colour c, bool perSegment)
+    {
+        const int n = (int) xs.size();
+        if (n < 2)
+            return;
+
+        const float r = c.getFloatRed(), g = c.getFloatGreen(),
+                    b = c.getFloatBlue(), a = c.getFloatAlpha();
+
+        // ---- 逐段独立法线（折线模式）----
+        //   每段用自己的垂直方向、宽度恒定；相邻段在端点重叠，但主线是
+        //   不透明纯色，重叠不会出现亮度翻倍，反而保证尖峰处不掉线。
+        if (perSegment)
+        {
+            snap->vertices.reserve (snap->vertices.size() + (size_t) (n - 1) * 36);
+            for (int i = 0; i + 1 < n; ++i)
+            {
+                const float dx = xs[i + 1] - xs[i];
+                const float dy = ys[i + 1] - ys[i];
+                const float l  = std::sqrt (dx * dx + dy * dy);
+                if (l < 1.0e-6f)
+                    continue;
+                const float nx = -dy / l * halfW;
+                const float ny =  dx / l * halfW;
+                const float q[36] = {
+                    xs[i]     + nx, ys[i]     + ny, r, g, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, g, b, a,
+                    xs[i]     - nx, ys[i]     - ny, r, g, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, g, b, a,
+                    xs[i + 1] - nx, ys[i + 1] - ny, r, g, b, a,
+                    xs[i]     - nx, ys[i]     - ny, r, g, b, a,
+                };
+                snap->vertices.insert (snap->vertices.end(), q, q + 36);
+            }
+            return;
+        }
+
+        // 预计算每个点的平均法线（单位向量）
+        std::vector<float> nx ((size_t) n), ny ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            float ax = 0.0f, ay = 0.0f;
+            if (i > 0)
+            {
+                const float dx = xs[i] - xs[i - 1];
+                const float dy = ys[i] - ys[i - 1];
+                const float l = std::sqrt (dx * dx + dy * dy);
+                if (l > 1.0e-6f) { ax += -dy / l; ay += dx / l; }
+            }
+            if (i + 1 < n)
+            {
+                const float dx = xs[i + 1] - xs[i];
+                const float dy = ys[i + 1] - ys[i];
+                const float l = std::sqrt (dx * dx + dy * dy);
+                if (l > 1.0e-6f) { ax += -dy / l; ay += dx / l; }
+            }
+            const float l = std::sqrt (ax * ax + ay * ay);
+            nx[(size_t) i] = (l > 1.0e-6f) ? ax / l : 0.0f;
+            ny[(size_t) i] = (l > 1.0e-6f) ? ay / l : 0.0f;
+        }
+
+        snap->vertices.reserve (snap->vertices.size() + (size_t) (n - 1) * 36);
+        for (int i = 0; i + 1 < n; ++i)
+        {
+            const float x0 = xs[i]     + nx[(size_t) i] * halfW;
+            const float y0 = ys[i]     + ny[(size_t) i] * halfW;
+            const float x1 = xs[i + 1] + nx[(size_t) i + 1] * halfW;
+            const float y1 = ys[i + 1] + ny[(size_t) i + 1] * halfW;
+            const float x2 = xs[i]     - nx[(size_t) i] * halfW;
+            const float y2 = ys[i]     - ny[(size_t) i] * halfW;
+            const float x3 = xs[i + 1] - nx[(size_t) i + 1] * halfW;
+            const float y3 = ys[i + 1] - ny[(size_t) i + 1] * halfW;
+            const float q[36] = {
+                x0, y0, r, g, b, a,  x1, y1, r, g, b, a,  x2, y2, r, g, b, a,
+                x1, y1, r, g, b, a,  x3, y3, r, g, b, a,  x2, y2, r, g, b, a,
+            };
+            snap->vertices.insert (snap->vertices.end(), q, q + 36);
+        }
+    };
 
     // ---- 1) 曲线填充（梯形条到画布底）----
     //   反馈修订：Sharper 模式下频谱曲线保持原样（主体），谱线仅叠加辅助
-    if (M > 1)
+    //   残影态：填充 / 光晕 / 主线三层一起混向 PinkXP::sel（原残影 actor 同色）
+    //   是否着色**只看通道模式**：mid 一律着色；MID+SIDE / LEFT+RIGHT 不着色
+    //   （底色会盖住下方更细的次曲线）。与 Smooth/Semi/Raw 无关。
+    if (channelMode == ChannelMode::mid && M > 1)
     {
-        const auto fillC = PinkXP::chartRamp[3].withAlpha (0.25f);
+        const auto fillC = ghostTint (PinkXP::chartRamp[3].withAlpha (0.25f),
+                                      PinkXP::sel.withAlpha (0.22f));
         const float fr = fillC.getFloatRed(), fg = fillC.getFloatGreen(),
                     fb = fillC.getFloatBlue(), fa = fillC.getFloatAlpha();
         snap->vertices.reserve (snap->vertices.size() + (size_t) (M - 1) * 36);
@@ -725,60 +1225,51 @@ void SpectrumModule::buildGlSnapshot()
         }
     }
 
-    // ---- 2) 主曲线（glow 1.5px 半透明 + 主线 0.7px）----
-    //   v2.9.4 修正：改用"连续折线带"（内部点法线取相邻两段法线的平均），
-    //   相邻段共享端点顶点、无重叠无缝隙 —— 之前的逐段独立 quad 在端点
-    //   重叠，端点亮度翻倍（"很多小亮点、亮度不一致"的根因）。
+    // ---- 1.5) 次曲线（MID+SIDE 的 side / LEFT+RIGHT 的 R）----
+    //   只画线不填充。没有主曲线的填充托底时，细/浅的线在浅色画布上几乎
+    //   看不见 —— 这里改用更饱和的 chartRamp[5] 作核心色、提高不透明度并
+    //   加宽线带，同时保留一条光晕把它从背景里"抬"出来。
+    if (hasSecondaryCurve() && (int) secondaryDb.size() >= 2)
+    {
+        samplePts (secondaryDb, secondaryHz, sx2, sy2, useSpline(), splineSubdiv());
+        if ((int) sx2.size() > 1)
+        {
+            // raw 模式点距小，光晕会连成宽带：只保留加粗主线
+            if (! rawMode)
+                appendCurveStrip (sx2, sy2, 1.4f,
+                                  ghostTint (PinkXP::chartRamp[4].withAlpha (0.34f),
+                                             PinkXP::sel.withAlpha (0.34f)), false);
+            // 核心色朝 ink 混 22%：自定义浅色主题下 chartRamp 可能很淡，
+            //   混到前景色方向可保证在明/暗画布上都有对比度（色相仍保留）。
+            const auto secondaryCore =
+                PinkXP::interpolateOkLab (PinkXP::chartRamp[5], PinkXP::ink, 0.22f).withAlpha (0.88f);
+            appendCurveStrip (sx2, sy2, rawMode ? 0.7f : 0.85f,
+                              ghostTint (secondaryCore,
+                                         PinkXP::sel.withAlpha (0.85f)), rawMode);
+        }
+    }
+
+    // ---- 2) 主曲线（glow + 主线）----
+    //   光晕加粗放亮 + 主线换成残影纯色，按住时整条曲线明显"发光"
+    //   无填充模式（M+S / L+R）：主线与光晕一并加粗提亮，避免"线太细没存在感"；
+    //   raw 模式：点距极小，光晕会把相邻针连成一片 —— 只加粗主线。
     if (M > 1)
     {
-        // 预计算每个点的平均法线（单位向量）
-        std::vector<float> nx ((size_t) M), ny ((size_t) M);
-        for (int i = 0; i < M; ++i)
+        const bool noFill = (channelMode != ChannelMode::mid);
+        if (! rawMode)
         {
-            float ax = 0.0f, ay = 0.0f;
-            if (i > 0)
-            {
-                const float dx = sx[i] - sx[i - 1];
-                const float dy = sy[i] - sy[i - 1];
-                const float l = std::sqrt (dx * dx + dy * dy);
-                if (l > 1.0e-6f) { ax += -dy / l; ay += dx / l; }
-            }
-            if (i + 1 < M)
-            {
-                const float dx = sx[i + 1] - sx[i];
-                const float dy = sy[i + 1] - sy[i];
-                const float l = std::sqrt (dx * dx + dy * dy);
-                if (l > 1.0e-6f) { ax += -dy / l; ay += dx / l; }
-            }
-            const float l = std::sqrt (ax * ax + ay * ay);
-            nx[(size_t) i] = (l > 1.0e-6f) ? ax / l : 0.0f;
-            ny[(size_t) i] = (l > 1.0e-6f) ? ay / l : 0.0f;
+            const float glowHalf  = noFill ? 1.8f
+                                           : (curveMode == CurveMode::semi ? 1.05f : 1.5f);
+            const float glowAlpha = noFill ? 0.42f
+                                           : (curveMode == CurveMode::semi ? 0.26f : 0.35f);
+            appendCurveStrip (sx, sy, glowHalf,
+                              ghostTint (PinkXP::chartRamp[5].withAlpha (glowAlpha),
+                                         PinkXP::sel.withAlpha (0.60f)), false);
         }
-
-        auto appendStrip = [&] (float halfW, juce::Colour c)
-        {
-            const float r = c.getFloatRed(), g = c.getFloatGreen(),
-                        b = c.getFloatBlue(), a = c.getFloatAlpha();
-            for (int i = 0; i + 1 < M; ++i)
-            {
-                const float x0 = sx[i]     + nx[(size_t) i] * halfW;
-                const float y0 = sy[i]     + ny[(size_t) i] * halfW;
-                const float x1 = sx[i + 1] + nx[(size_t) i + 1] * halfW;
-                const float y1 = sy[i + 1] + ny[(size_t) i + 1] * halfW;
-                const float x2 = sx[i]     - nx[(size_t) i] * halfW;
-                const float y2 = sy[i]     - ny[(size_t) i] * halfW;
-                const float x3 = sx[i + 1] - nx[(size_t) i + 1] * halfW;
-                const float y3 = sy[i + 1] - ny[(size_t) i + 1] * halfW;
-                const float q[36] = {
-                    x0, y0, r, g, b, a,  x1, y1, r, g, b, a,  x2, y2, r, g, b, a,
-                    x1, y1, r, g, b, a,  x3, y3, r, g, b, a,  x2, y2, r, g, b, a,
-                };
-                snap->vertices.insert (snap->vertices.end(), q, q + 36);
-            }
-        };
-
-        appendStrip (1.5f, PinkXP::chartRamp[5].withAlpha (0.35f));
-        appendStrip (0.7f, PinkXP::chartRamp[6]);
+        const float coreHalf = rawMode ? (noFill ? 0.7f : 0.55f)
+                                       : (noFill ? 0.95f : 0.7f);
+        appendCurveStrip (sx, sy, coreHalf,
+                          ghostTint (PinkXP::chartRamp[6], PinkXP::sel), rawMode);
     }
 
     // ---- 3) 峰值保持虚线（弧长 3px 段 / 3px 空，与旧版 createDashedStroke 一致）----
@@ -788,7 +1279,8 @@ void SpectrumModule::buildGlSnapshot()
     //   处截断，每根虚线严格 ≤3px。
     if (peakHoldEnabled && (int) peakDb.size() == N)
     {
-        samplePts (peakDb, px, py);
+        // 峰值虚线跟随主曲线的插值模式（raw 下同样是折线）
+        samplePts (peakDb, smoothedHz, px, py, useSpline(), splineSubdiv());
         const int Mp = (int) px.size();
         if (Mp > 1)
         {
@@ -867,6 +1359,57 @@ void SpectrumModule::mouseMove(const juce::MouseEvent& e)
         hoverPos    = pos;
         repaint();
     }
+}
+
+void SpectrumModule::mouseDrag (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDrag (e);
+
+    // 按住拖动期间 JUCE 只派发 mouseDrag（mouseMove 会被抑制），若不同步更新
+    //   hoverPos，十字线与频率/dB 读数就会停在按下那一刻的位置不动。
+    const auto canvas = getCanvasBounds (getContentBounds());
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains (pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+// ----------------------------------------------------------
+// 子弹时间：按住频谱画布 → release 回落放慢 50 倍 + 曲线转为残影色；
+//   松手 → 恢复原速，残影色按 ghostFadeSec 渐隐
+// ----------------------------------------------------------
+void SpectrumModule::mouseDown (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDown (e);   // 保留基类行为（toFront / 右键菜单 / 边缘拖拽）
+
+    // 只在"左键按在频谱画布内"时进入子弹时间：
+    //   工具栏按钮 / 标题栏 / 边缘的按下交给基类逻辑（拖动、resize），
+    //   不触发减速（JUCE 的按钮点击先于本组件的 mouseDown，互不干扰）。
+    if (e.mods.isLeftButtonDown()
+        && getCanvasBounds (getContentBounds()).contains (e.getPosition()))
+    {
+        bulletTimeActive = true;
+        ghostMix = 1.0f;          // 曲线立即切换为残影色
+
+        // 立刻重建快照并重绘，不等下一帧（按住瞬间就要看到变色）
+        buildGlSnapshot();
+        repaint();
+    }
+}
+
+void SpectrumModule::mouseUp (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseUp (e);
+
+    // 无论松手位置在哪（按住后拖出画布再松开），都恢复正常速度。
+    //   若按下的位置不在画布（未进入子弹时间），这里只是无害地写一次 false。
+    //   残影色不在这里清零：由 onFrame 按 ghostFadeSec 逐帧消散。
+    if (bulletTimeActive)
+        bulletTimeActive = false;
 }
 
 void SpectrumModule::mouseExit(const juce::MouseEvent& e)
@@ -1002,17 +1545,37 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
     auto inner = canvas.reduced(2);
     if (inner.getWidth() <= 2) return;
 
-    // ---------- 先把 N 个采样点映射到像素坐标 ----------
-    //   (等距 x；y 由 dbToY 换算)
+    // ---------- 先把采样点映射到像素坐标 ----------
+    //   smooth 模式：等距列；Semi / Raw：按每个 bin 的中心频率定位（不等距）。
     curvePts.resize ((size_t) N);
     const float x0   = (float) inner.getX();
     const float xLen = (float) inner.getWidth();
     const float invMax = 1.0f / (float) juce::jmax (1, N - 1);
-    for (int i = 0; i < N; ++i)
+    const float logMinF  = std::log10 (minFreqHz);
+    const float logSpanF = juce::jmax (1.0e-6f, std::log10 (maxFreqHz) - logMinF);
+
+    auto xAt = [&] (int i, const std::vector<float>& hz) noexcept
     {
-        const float x = x0 + (float) i * invMax * xLen;
-        const float y = dbToY (smoothedDb[(size_t) i], canvas);
-        curvePts[(size_t) i] = { x, y };
+        if ((int) hz.size() == N)
+        {
+            const float lf = std::log10 (juce::jmax (minFreqHz, hz[(size_t) i]));
+            return (float) inner.getX()
+                 + juce::jlimit (0.0f, 1.0f, (lf - logMinF) / logSpanF) * (float) inner.getWidth();
+        }
+        return x0 + (float) i * invMax * xLen;
+    };
+
+    for (int i = 0; i < N; ++i)
+        curvePts[(size_t) i] = { xAt (i, smoothedHz), dbToY (smoothedDb[(size_t) i], canvas) };
+
+    // 次曲线采样点（MID+SIDE 的 side / LEFT+RIGHT 的 R）
+    const bool drawSecondary = hasSecondaryCurve() && (int) secondaryDb.size() == N;
+    if (drawSecondary)
+    {
+        secondaryPts.resize ((size_t) N);
+        for (int i = 0; i < N; ++i)
+            secondaryPts[(size_t) i] = { xAt (i, secondaryHz),
+                                         dbToY (secondaryDb[(size_t) i], canvas) };
     }
 
     // ---------- Catmull-Rom → cubicBezier 构建 Path ----------
@@ -1050,6 +1613,14 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
             const auto& p1 = P[i];
             const auto& p2 = P[i + 1];
             const auto& p3 = (i + 2 >= n) ? P[n - 1] : P[i + 2];
+
+            // ---------- 折线模式：不做任何插值 ----------
+            //   Raw 模式保持原始采样点连线，高频窄峰/尖刺按真实 dB 出角。
+            if (! useSpline())
+            {
+                path.lineTo (p2.x, p2.y);
+                continue;
+            }
 
             // ---------- 沉底直线段：p1、p2 都贴底 ----------
             //   Catmull-Rom 在"两端都贴底"的段里，仍会按 p0/p3 的斜率生成控制点，
@@ -1089,18 +1660,53 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
 
     // 1) 填充区域（从底部到曲线的 lightly tinted area）
     //   反馈修订：Sharper 模式下频谱曲线保持原样（主体），谱线仅叠加辅助
-    fillPath.clear();
-    buildSmoothPath (fillPath, curvePts, /*closeToBottom*/ true);
-    g.setColour (PinkXP::chartRamp[3].withAlpha (0.25f));
-    g.fillPath (fillPath);
+    //   残影态：填充 / 光晕 / 主线三层与 GL 路径同款混向 PinkXP::sel
+    //   是否着色只看通道模式：mid 一律着色，M+S / L+R 不着色（与曲线模式无关）
+    const bool rawMode = (curveMode == CurveMode::raw);
+    if (channelMode == ChannelMode::mid)
+    {
+        fillPath.clear();
+        buildSmoothPath (fillPath, curvePts, /*closeToBottom*/ true);
+        g.setColour (ghostTint (PinkXP::chartRamp[3].withAlpha (0.25f),
+                                PinkXP::sel.withAlpha (0.22f)));
+        g.fillPath (fillPath);
+    }
+
+    // 1.5) 次曲线（side / R）：只画线不填充。没有填充托底时，原来的浅色
+    //   细线在浅色画布上几乎不可见 —— 改用更饱和的颜色 + 加粗。
+    if (drawSecondary)
+    {
+        secondaryPath.clear();
+        buildSmoothPath (secondaryPath, secondaryPts, /*closeToBottom*/ false);
+        g.setColour (ghostTint (PinkXP::interpolateOkLab (PinkXP::chartRamp[5], PinkXP::ink, 0.22f)
+                                          .withAlpha (0.88f),
+                                PinkXP::sel.withAlpha (0.88f)));
+        g.strokePath (secondaryPath, juce::PathStrokeType (rawMode ? 1.4f : 1.7f,
+                                                           juce::PathStrokeType::curved,
+                                                           juce::PathStrokeType::rounded));
+    }
 
     // 2) 主曲线（双层描边：浅底 + 深顶，视觉厚度）
+    //   无填充模式（M+S / L+R）整体加粗提亮；raw 模式去掉浅底描边，
+    //   接合样式用 rounded（默认 miter 在尖刺处会拉出长尖/断口）。
+    const bool noFillCpu = (channelMode != ChannelMode::mid);
     curvePath.clear();
     buildSmoothPath (curvePath, curvePts, /*closeToBottom*/ false);
-    g.setColour (PinkXP::chartRamp[5].withAlpha (0.35f));
-    g.strokePath (curvePath, juce::PathStrokeType (3.0f));
-    g.setColour (PinkXP::chartRamp[6]);
-    g.strokePath (curvePath, juce::PathStrokeType (1.4f));
+    if (! rawMode)
+    {
+        const float glowW = noFillCpu ? 3.6f
+                                      : ((curveMode == CurveMode::semi) ? 2.1f : 3.0f);
+        g.setColour (ghostTint (PinkXP::chartRamp[5].withAlpha (noFillCpu ? 0.42f : 0.32f),
+                                PinkXP::sel.withAlpha (0.60f)));
+        g.strokePath (curvePath, juce::PathStrokeType (glowW, juce::PathStrokeType::curved,
+                                                       juce::PathStrokeType::rounded));
+    }
+    g.setColour (ghostTint (PinkXP::chartRamp[6], PinkXP::sel));
+    const float coreW = rawMode ? (noFillCpu ? 1.4f : 1.1f)
+                                : (noFillCpu ? 1.9f : 1.4f);
+    g.strokePath (curvePath, juce::PathStrokeType (coreW,
+                                                   juce::PathStrokeType::curved,
+                                                   juce::PathStrokeType::rounded));
 
     // 3) 峰值保持（虚线）—— 同样做 Catmull-Rom 平滑
     if (peakHoldEnabled && (int) peakDb.size() == N)
@@ -1108,9 +1714,8 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
         peakCurvePts.resize ((size_t) N);
         for (int i = 0; i < N; ++i)
         {
-            const float x = x0 + (float) i * invMax * xLen;
             const float y = dbToY (peakDb[(size_t) i], canvas);
-            peakCurvePts[(size_t) i] = { x, y };
+            peakCurvePts[(size_t) i] = { xAt (i, smoothedHz), y };
         }
         peakPath.clear();
         buildSmoothPath (peakPath, peakCurvePts, /*closeToBottom*/ false);

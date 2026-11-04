@@ -328,6 +328,15 @@ AnalyserHub::AnalyserHub()
     rebuildMainFft (mainFftOrder);
     const size_t magN = (size_t) (mainFftSize / 2);
     magData.assign (magN, 0.0f);
+    // 修复（Stereo Map 无读数）：发布侧 L/R/side 幅度缓冲此前只在
+    //   applyMainFftSizeChange() 里分配 —— 默认尺寸（2048）下该函数直接
+    //   返回，于是 magDataL/R 永远为空：getSpectrumMagnitudesBlendedLR
+    //   拷到 0 个样本、全部输出 0 → 只有 Stereo Map 整条曲线不可见。
+    //   任何用户只要手动改过一次 FFT 尺寸就会"自愈"，因此表现为
+    //   "部分机器正常、部分机器没读数"。这里与 magData 一起初始化。
+    magDataL.assign (magN, 0.0f);
+    magDataR.assign (magN, 0.0f);
+    magDataS.assign (magN, 0.0f);
     specRe.assign (magN, 0.0f);
     specIm.assign (magN, 0.0f);
     prevSpecRe.assign (magN, 0.0f);
@@ -358,6 +367,9 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
     std::fill (fftData.begin(), fftData.end(), 0.0f);
     specDataWork.fill(0.0f);
     std::fill (magDataWork.begin(), magDataWork.end(), 0.0f);
+    std::fill (magDataWorkL.begin(), magDataWorkL.end(), 0.0f);
+    std::fill (magDataWorkR.begin(), magDataWorkR.end(), 0.0f);
+    std::fill (magDataWorkS.begin(), magDataWorkS.end(), 0.0f);
     std::fill (specReWork.begin(), specReWork.end(), 0.0f);
     std::fill (specImWork.begin(), specImWork.end(), 0.0f);
     std::fill (specReWorkPrev.begin(), specReWorkPrev.end(), 0.0f);
@@ -369,6 +381,9 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
         const juce::SpinLock::ScopedLockType sl(specLock);
         specData.fill(0.0f);
         std::fill (magData.begin(), magData.end(), 0.0f);
+        std::fill (magDataL.begin(), magDataL.end(), 0.0f);
+        std::fill (magDataR.begin(), magDataR.end(), 0.0f);
+        std::fill (magDataS.begin(), magDataS.end(), 0.0f);
         std::fill (specRe.begin(), specRe.end(), 0.0f);
         std::fill (specIm.begin(), specIm.end(), 0.0f);
         std::fill (prevSpecRe.begin(), prevSpecRe.end(), 0.0f);
@@ -607,6 +622,7 @@ void AnalyserHub::rebuildMainFft (int order)
     magDataWork.assign (magN, 0.0f);
     magDataWorkL.assign (magN, 0.0f);
     magDataWorkR.assign (magN, 0.0f);
+    magDataWorkS.assign (magN, 0.0f);
     specReWork.assign (magN, 0.0f);
     specImWork.assign (magN, 0.0f);
     specReWorkPrev.assign (magN, 0.0f);
@@ -640,6 +656,7 @@ void AnalyserHub::applyMainFftSizeChange()
         magData.assign (magN, 0.0f);
         magDataL.assign (magN, 0.0f);
         magDataR.assign (magN, 0.0f);
+        magDataS.assign (magN, 0.0f);
         specRe.assign (magN, 0.0f);
         specIm.assign (magN, 0.0f);
         prevSpecRe.assign (magN, 0.0f);
@@ -763,6 +780,11 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
                 magDataWork[static_cast<size_t> (iBin)] = std::sqrt (re * re + im * im) * invMax;
                 magDataWorkL[static_cast<size_t> (iBin)] = std::sqrt (reL * reL + imL * imL) * invMax;
                 magDataWorkR[static_cast<size_t> (iBin)] = std::sqrt (reR * reR + imR * imR) * invMax;
+                // side = (L-R)/2：由 L/R 复频谱直接相减再取模（零额外 FFT，
+                //   只是多一次 sqrt）。与 mid=(L+R)/2 同一套归一化。
+                const float dRe = reL - reR;
+                const float dIm = imL - imR;
+                magDataWorkS[static_cast<size_t> (iBin)] = std::sqrt (dRe * dRe + dIm * dIm) * 0.5f * invMax;
                 specReWork[static_cast<size_t> (iBin)] = re * invMax;
                 specImWork[static_cast<size_t> (iBin)] = im * invMax;
             }
@@ -813,6 +835,8 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
                          sizeof (float) * magDataL.size());
             std::memcpy (magDataR.data(), magDataWorkR.data(),
                          sizeof (float) * magDataR.size());
+            std::memcpy (magDataS.data(), magDataWorkS.data(),
+                         sizeof (float) * magDataS.size());
             std::memcpy (specData.data(), specDataWork.data(),
                          sizeof (float) * specData.size());
             // 复频谱发布：prev ← workPrev，cur ← workCur（相邻帧对）
@@ -875,7 +899,8 @@ void AnalyserHub::getSpectrumMagnitudes(juce::Array<float>& dest)
 void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
                                                 int   numPoints,
                                                 float fMin,
-                                                float fMax)
+                                                float fMax,
+                                                bool  perBin)
 {
     numPoints = juce::jmax (2, numPoints);
     dest.resize (numPoints);
@@ -949,9 +974,19 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
         float mag = 0.0f;
         if (hzToBin > 0.0 && ! magSnapshot.empty())
         {
-            const int binLo = static_cast<int> (std::floor (f0 * hzToBin));
-            const int binHi = static_cast<int> (std::ceil  (f1 * hzToBin));
-            mag = peakInRange (magSnapshot.data(), (int) magSnapshot.size(), binLo, binHi);
+            if (perBin)
+            {
+                // 逐 bin：只取"频率中心最近的那个 bin"，不做带宽合并
+                const int b = juce::jlimit (0, (int) magSnapshot.size() - 1,
+                                            (int) std::lround (f * hzToBin));
+                mag = std::abs (magSnapshot[(size_t) b]);
+            }
+            else
+            {
+                const int binLo = static_cast<int> (std::floor (f0 * hzToBin));
+                const int binHi = static_cast<int> (std::ceil  (f1 * hzToBin));
+                mag = peakInRange (magSnapshot.data(), (int) magSnapshot.size(), binLo, binHi);
+            }
         }
 
         outData[i] = mag;
@@ -962,7 +997,8 @@ void AnalyserHub::getSpectrumMagnitudesBlendedLR (juce::Array<float>& destL,
                                                   juce::Array<float>& destR,
                                                   int   numPoints,
                                                   float fMin,
-                                                  float fMax)
+                                                  float fMax,
+                                                  bool  perBin)
 {
     numPoints = juce::jmax (2, numPoints);
     destL.resize (numPoints);
@@ -1029,14 +1065,150 @@ void AnalyserHub::getSpectrumMagnitudesBlendedLR (juce::Array<float>& destL,
         float mL = 0.0f, mR = 0.0f;
         if (hzToBin > 0.0 && ! magSnapshotL.empty() && ! magSnapshotR.empty())
         {
-            const int binLo = static_cast<int> (std::floor (f0 * hzToBin));
-            const int binHi = static_cast<int> (std::ceil  (f1 * hzToBin));
-            mL = peakInRange (magSnapshotL.data(), (int) magSnapshotL.size(), binLo, binHi);
-            mR = peakInRange (magSnapshotR.data(), (int) magSnapshotR.size(), binLo, binHi);
+            if (perBin)
+            {
+                // 逐 bin：同一 bin 索引同时取 L / R，不做带宽合并
+                const int bL = juce::jlimit (0, (int) magSnapshotL.size() - 1,
+                                             (int) std::lround (f * hzToBin));
+                const int bR = juce::jlimit (0, (int) magSnapshotR.size() - 1,
+                                             (int) std::lround (f * hzToBin));
+                mL = std::abs (magSnapshotL[(size_t) bL]);
+                mR = std::abs (magSnapshotR[(size_t) bR]);
+            }
+            else
+            {
+                const int binLo = static_cast<int> (std::floor (f0 * hzToBin));
+                const int binHi = static_cast<int> (std::ceil  (f1 * hzToBin));
+                mL = peakInRange (magSnapshotL.data(), (int) magSnapshotL.size(), binLo, binHi);
+                mR = peakInRange (magSnapshotR.data(), (int) magSnapshotR.size(), binLo, binHi);
+            }
         }
         outL[i] = mL;
         outR[i] = mR;
     }
+}
+
+// side 路（(L-R)/2）对数频率轴幅度快照：
+//   与 getSpectrumMagnitudesBlended 同一频率轴 / 带宽聚合 / 归一化，
+//   数据源为音频线程合成的 magDataS（由 L/R 复频谱相减得到，零额外 FFT）。
+void AnalyserHub::getSpectrumMagnitudesBlendedSide (juce::Array<float>& dest,
+                                                    int   numPoints,
+                                                    float fMin,
+                                                    float fMax,
+                                                    bool  perBin)
+{
+    numPoints = juce::jmax (2, numPoints);
+    dest.resize (numPoints);
+
+    const double cachedSr = cachedSampleRate.load (std::memory_order_relaxed);
+    const double sr       = (cachedSr > 0.0) ? cachedSr : 48000.0;
+    const double nyquist  = sr * 0.5;
+
+    const double fLo2 = juce::jmax (1.0, static_cast<double> (fMin));
+    const double fHi2 = juce::jmin (nyquist, static_cast<double> (fMax));
+    auto* out = dest.getRawDataPointer();
+    if (fHi2 <= fLo2)
+    {
+        std::fill (out, out + numPoints, 0.0f);
+        return;
+    }
+
+    thread_local std::vector<float> magSnapshotS;
+    {
+        const juce::SpinLock::ScopedLockType sl (specLock);
+        magSnapshotS.resize (magDataS.size());
+        if (! magSnapshotS.empty())
+            std::memcpy (magSnapshotS.data(), magDataS.data(), sizeof (float) * magSnapshotS.size());
+    }
+
+    const double logMin = std::log10 (fLo2);
+    const double logMax = std::log10 (fHi2);
+    const double hzToBin = (magSnapshotS.size() > 1)
+        ? (static_cast<double> (magSnapshotS.size() - 1) / nyquist)
+        : 0.0;
+
+    auto peakInRange = [] (const float* buf, int bufN, int binLo, int binHi) noexcept
+    {
+        binLo = juce::jlimit (0, bufN - 1, binLo);
+        binHi = juce::jlimit (0, bufN - 1, binHi);
+        if (binHi < binLo) std::swap (binLo, binHi);
+        float m = 0.0f;
+        for (int b = binLo; b <= binHi; ++b)
+        {
+            const float v = std::abs (buf[b]);
+            if (std::isfinite (v) && v > m) m = v;
+        }
+        return m;
+    };
+
+    for (int i = 0; i < numPoints; ++i)
+    {
+        const double t     = static_cast<double> (i) / static_cast<double> (numPoints - 1);
+        const double f     = std::pow (10.0, logMin + t * (logMax - logMin));
+        const double tPrev = static_cast<double> (i - 1) / static_cast<double> (numPoints - 1);
+        const double tNext = static_cast<double> (i + 1) / static_cast<double> (numPoints - 1);
+        const double fPrev = (i == 0) ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
+        const double fNext = (i == numPoints - 1) ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
+        const double f0    = std::sqrt (fPrev * f);
+        const double f1    = std::sqrt (f * fNext);
+
+        float m = 0.0f;
+        if (hzToBin > 0.0 && ! magSnapshotS.empty())
+        {
+            if (perBin)
+            {
+                const int b = juce::jlimit (0, (int) magSnapshotS.size() - 1,
+                                            (int) std::lround (f * hzToBin));
+                m = std::abs (magSnapshotS[(size_t) b]);
+            }
+            else
+            {
+                const int binLo = static_cast<int> (std::floor (f0 * hzToBin));
+                const int binHi = static_cast<int> (std::ceil  (f1 * hzToBin));
+                m = peakInRange (magSnapshotS.data(), (int) magSnapshotS.size(), binLo, binHi);
+            }
+        }
+        out[i] = m;
+    }
+}
+
+// ==========================================================
+// 逐 bin 幅度快照（Semi / Raw 模式）：
+//   dest[i] = 第 i 个 bin 的线性幅度；bin 中心频率 = i * outBinHz。
+//   与上面的对数轴接口互补 —— 对数轴接口会把多个列映射到同一个 bin
+//   （低频列宽 < bin 宽），在低频形成大量"水平台阶"；逐 bin 接口让 UI
+//   直接以每个 bin 的中点连线，低频自然稀疏、不再有重复值的台阶。
+// ==========================================================
+void AnalyserHub::copySpectrumBins (juce::Array<float>& dest,
+                                    SpectrumSource src,
+                                    double& outBinHz)
+{
+    const double cachedSr = cachedSampleRate.load (std::memory_order_relaxed);
+    const double sr       = (cachedSr > 0.0) ? cachedSr : 48000.0;
+
+    int n = 0;
+    {
+        const juce::SpinLock::ScopedLockType sl (specLock);
+
+        const std::vector<float>* source = &magData;
+        switch (src)
+        {
+            case SpectrumSource::side:  source = &magDataS; break;
+            case SpectrumSource::left:  source = &magDataL; break;
+            case SpectrumSource::right: source = &magDataR; break;
+            case SpectrumSource::mid:
+            default:                    source = &magData;  break;
+        }
+
+        n = (int) source->size();
+        dest.resize (n);
+        if (n > 0)
+            std::memcpy (dest.getRawDataPointer(), source->data(),
+                         sizeof (float) * (size_t) n);
+    }
+
+    // bin 宽 = sr / fftSize = sr / (2 * binCount)
+    outBinHz = (n > 0) ? sr / (2.0 * (double) n) : 0.0;
 }
 
 // ==========================================================

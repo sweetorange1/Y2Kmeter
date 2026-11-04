@@ -518,10 +518,15 @@ public:
     //   返回的 dest[i] 是"以 f_i 为中心的那一段频率"的最大线性幅度（保峰）。
     //   分辨率完全由当前主路 FFT size 决定（分辨率 vs 刷新率由用户权衡）。
     // ======================================================
+    //   perBin = false（默认）：每个点 = 该频段内 FFT bin 的最大幅度（保峰，
+    //     适合少量显示列 / 圆滑曲线）。
+    //   perBin = true：每个点 = 频率中心最近的单个 bin 幅度（不做带宽合并，
+    //     配 numPoints ≥ bin 数时等价"逐 bin 显示"，噪底呈针状纹理）。
     void getSpectrumMagnitudesBlended (juce::Array<float>& dest,
                                        int   numPoints,
                                        float fMin,
-                                       float fMax);
+                                       float fMax,
+                                       bool  perBin = false);
 
     // 双通道对数频率轴幅度快照（L/R 分开）：
     //   与 getSpectrumMagnitudesBlended 使用同一频率轴与带宽聚合逻辑，
@@ -530,7 +535,30 @@ public:
                                          juce::Array<float>& destR,
                                          int   numPoints,
                                          float fMin,
-                                         float fMax);
+                                         float fMax,
+                                         bool  perBin = false);
+
+    // side 路（(L-R)/2）对数频率轴幅度快照：
+    //   与 getSpectrumMagnitudesBlended 同一频率轴与带宽聚合逻辑，
+    //   数据源为 magDataS（音频线程由 L/R 复频谱相减合成，零额外 FFT）。
+    //   供 Spectrum 的 Mid/Side 模式绘制第二条（弱化）曲线。
+    void getSpectrumMagnitudesBlendedSide (juce::Array<float>& dest,
+                                           int   numPoints,
+                                           float fMin,
+                                           float fMax,
+                                           bool  perBin = false);
+
+    // ======================================================
+    // 逐 bin 幅度快照（v3.1，Spectrum 的 Semi / Raw 模式使用）
+    //   dest[i] = 主路第 i 个 FFT bin 的线性幅度，第 i 个 bin 的中心频率
+    //   为 i * outBinHz。UI 侧据此把"每个 bin 的中点"直接放到对数横轴上
+    //   连线 —— 不再把若干列映射到同一个 bin（那会在低频产生大量水平台阶）。
+    //   src 选择数据源：mid（(L+R)/2）/ side（(L-R)/2）/ left / right。
+    // ======================================================
+    enum class SpectrumSource { mid = 0, side = 1, left = 2, right = 3 };
+    void copySpectrumBins (juce::Array<float>& dest,
+                           SpectrumSource src,
+                           double& outBinHz);
 
     // ======================================================
     // 重分配谱图（频率重分配 / reassigned spectrogram）——
@@ -671,6 +699,9 @@ private:
     std::vector<float> magDataR;
     std::vector<float> magDataWorkL;
     std::vector<float> magDataWorkR;
+    // side 路 = (L-R)/2：与 mid/L/R 同尺寸，音频线程逐 bin 合成后发布
+    std::vector<float> magDataS;
+    std::vector<float> magDataWorkS;
     int fftFifoIndex = 0;
 
     // 主路复频谱帧对（供重分配谱图：hop = size/4 → 无折叠范围恒 ±2 bin，

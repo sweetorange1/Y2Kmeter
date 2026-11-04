@@ -5118,4 +5118,121 @@ UI：RecorderModule 10 Hz Timer 轮询 isTaking / getTakeSeconds / getStatusText
 
 ---
 
+## v2.9.9 补充：Spectrum 子弹时间 / 三档曲线 / 通道显示 + Stereo Map 无读数修复
+
+> 本轮只改 `SpectrumModule`（交互 + 绘制 + 取数）与 `AnalyserHub`（频谱数据接口），
+> 不新增模块、不动布局预设与主题系统；`JucePlugin_VersionString` 仍为 `2.9.9`。
+
+### 1. Spectrum：子弹时间（按住降速）
+
+- 左键按在**频谱画布内**才触发（`getCanvasBounds().contains(pos)`）：工具栏按钮 / 标题栏 /
+  边缘的按下仍交给 `ModulePanel` 的拖动与 resize，不干扰；
+- 实现为**时间膨胀**：把回落路径的 `dt` 除以 `bulletTimeSlowdown`（= **50**），
+  上升沿（attack）保持原速。三条回落路径全部接入：
+  1) `processSeries` 的 `alphaDown`（主曲线 release）；
+  2) 峰值虚线下落速率 `peakFallRatePerSec`；
+  3) `updateSharpLines` 的谱线幅度回落 `aMagDn`；
+- 松手立即恢复；倍率集中在一个常量，改一处即全局生效。
+
+### 2. Spectrum：残影着色（Ghost Tint）
+
+- 按下时 `ghostMix = 1`，曲线三层（填充 / 光晕 / 主线）通过 `ghostTint()` 混向
+  `PinkXP::sel`（与旧 `SpectrumGhostActor` 同色）；松手后按 `ghostFadeSec = 0.6 s`
+  线性消散回原配色；
+- 原来"按下即打印一条冻结残影曲线"的 Toy actor 被删除（`makeSpectrumGhostActor` 调用与
+  `toyCaptureSpectrumCurve()` 实现一并移除），保留声呐环与音名/电平气泡；
+- GL 直渲染（顶点色）与 CPU 回退（`Graphics` 描边）两条路径同参数。
+
+### 3. Spectrum：Slope 按钮移除（恒开）
+
+- 删除 `btnSlope` / `setSlopeEnabled` / `slopeEnabled` 全链路；`processSeries`、Sharper 谱线
+  幅度、悬停/点击读数一律按 4.5 dB/oct 补偿（读数会再扣回来）；
+- 存档不再写 `"slope"`；旧存档里的 `slope=false` **被忽略**（强制适应新版本）。
+
+### 4. Spectrum：Smooth / Semi / Raw 三档曲线（按钮循环）
+
+| 模式 | 数据源 | 采样点 | 列间模糊 | 连接方式 | 线宽（逻辑 px） |
+| --- | --- | --- | --- | --- | --- |
+| Smooth（旧行为） | 对数轴 256 列，频段**保峰**聚合 | 256 | 有（[1,2,1]/4） | Catmull-Rom（4 段细分） | glow 1.5@0.35 + 主线 0.7 |
+| Semi | 逐 FFT bin | ≈ bin 数（自适应合并） | 无 | Catmull-Rom（2 段细分） | glow 1.05@0.26 + 主线 0.7 |
+| Raw | 逐 FFT bin | ≈ bin 数（自适应合并） | 无 | 折线（每段独立法线） | 仅主线 0.55 |
+
+- 无填充模式（MID+SIDE / LEFT+RIGHT）下两条线一并加粗：主曲线 0.95（raw 0.7）、
+  glow 1.8@0.42；**合并阈值同步跟随线宽**，加粗后不会又出现亚像素重叠；
+- 高频段（段宽 < 1px）自动省略样条细分，顶点数减半而视觉无差。
+
+### 5. Spectrum：MID / MID+SIDE / LEFT+RIGHT 通道模式
+
+- `ChannelMode { mid, midSide, leftRight }`，按钮文字 `MID / M+S / L/R` 循环；
+- 主/次曲线取数：
+
+  | 模式 | 主曲线 | 次曲线（弱色细线） |
+  | --- | --- | --- |
+  | MID | mid = (L+R)/2 | 无 |
+  | M+S | mid | side = (L-R)/2 |
+  | L/R | L | R |
+
+- 是否绘制线下填充**只看通道模式**：mid 一律填充，M+S / L/R 不填充（避免盖住次曲线）；
+- 次曲线视觉：glow 1.4@0.34 + 核心线 0.85（raw 0.7），核心色 = `chartRamp[5]` 在 OKLab 中
+  向 `PinkXP::ink` 混 22%（自定义浅色主题下保证对比度），alpha 0.88；
+- 存档：`"channel": "mid" | "midside" | "lr"`。
+
+### 6. Spectrum：逐 bin 取数 + 按像素间距自适应合并
+
+**问题**：对数横轴每列带宽 = 2.71% × f，20 Hz 处只有 0.54 Hz，而 FFT bin 宽 23.4 Hz
+（48k/2048）——"列 → 最近 bin"的映射让几十列共用同一个 bin 值，低频出现大量水平台阶；
+反之高频 bin 挤进不到 1px，一条线上叠几十个点，形成噪点。
+
+**做法**（`AnalyserHub::copySpectrumBins` + `SpectrumModule::processBinSeries`）：
+
+1. 取 `[20Hz, min(20k, sr/2)]` 内的原始 bin，中心频率 = `i × binHz`；
+2. 先按对数轴算出每个 bin 的像素 x（`binXScratch` 每帧复用，不分配）；
+3. 从当前 bin 向后吃邻居，直到下一个 bin 的 x 距**本组起点** ≥ `minGapPx`
+   （= 线宽 + 0.15px）为止 —— 组内取**最大**幅度（保峰），输出一个点；
+4. 输出频率取**组起点**（不是组中心）：取中心会让相邻点的中心间距只有 `minGap` 的一半，
+   又掉回重叠噪声；取起点可保证任意两点 x 间距 ≥ `minGapPx`；
+5. 最低可用 bin（如 1024FFT/48k 时 46.9 Hz）左侧补一个延伸到 20 Hz 的点，避免左下空白。
+
+效果：输出点数 ≈ 画布宽度 / 线宽 —— **模块拉得越宽，合并越少、细节越多**（2048FFT 在
+≥1100px 宽时达到逐 bin 全分辨率）；低频点天然稀疏，接近 Smooth 的观感；
+高频自动 1 点/线宽，不再有亚像素堆叠的锯齿。绘制时按频率定位 x（非等距），
+GL 与 CPU 两条路径、峰值虚线、次曲线、悬停读数全部同步。
+
+### 7. Spectrum：其他交互与布局
+
+- 新模块默认 **Peak 未按下 + Semi**（`peakHoldEnabled = false`、`curveMode = semi`）；
+  已存档的模块仍按各自的 `peakHold` / `curve` 恢复；
+- 工具栏 4 个按钮的宽度改为**按文字实测**分配（`PinkXP::getFont(12)` +
+  `GlyphArrangement::getStringWidth`，曲线/通道按钮按各自最长文案预留），修掉
+  "Smooth 少了最后一个 h"的裁字问题；窄模块按比例收缩；
+- `mouseDrag` 覆写：按住拖动时 JUCE 不再派发 `mouseMove`，此前十字线与频率/dB 读数会
+  停在按下点；现在 `mouseDrag` 同步更新 `hoverPos`（拖出画布隐藏、拖回恢复）。
+
+### 8. AnalyserHub：side 路 / 逐 bin 快照 / Stereo Map 无读数修复
+
+- **side 路**：音频线程在原有的逐 bin 循环里用 L/R 复频谱相减合成
+  `magDataS = |X_L − X_R| / 2 × 2/fftSize`（**零额外 FFT**，只多一次 `sqrt`），
+  与 mid/L/R 一起发布；新增 `getSpectrumMagnitudesBlendedSide()`；
+- **逐 bin 快照**：`copySpectrumBins(dest, SpectrumSource {mid|side|left|right}, outBinHz)`，
+  返回原始幅度序列与 bin 宽，供 Spectrum 的 Semi/Raw 与任何需要全分辨率数据的模块使用；
+- **`perBin` 采样**：三个对数频谱接口新增 `perBin` 参数（默认 `false`，旧调用点零改动），
+  为 `true` 时每点只取最近的一个 bin（不做带宽合并）；
+- **修复 Stereo Map「没有读数」**（真实 bug，非环境问题）：
+  `magDataL / magDataR` 此前**只在 `applyMainFftSizeChange()` 里分配**，而默认 FFT
+  尺寸下该函数在开头就 `return`，构造函数也只初始化了 `magData`。
+  于是 `getSpectrumMagnitudesBlendedLR()` 永远拷到 0 个样本、全部输出 0 →
+  Stereo Map 曲线强度恒为 0（整条不可见），其它模块完全正常；
+  只要手动改过一次 FFT 尺寸就会"自愈"，因此表现为"部分机器没读数"。
+  现已在构造函数与 `prepare()` 中补齐 `magDataL / magDataR / magDataS`
+  （发布侧与工作侧缓冲）的分配与清零。
+
+### 9. 验证状态
+
+- 用户实测通过：三档曲线、通道模式、子弹时间、残影着色、读数跟随、按钮排版；
+- 本轮改了 `AnalyserHub.h`（新增枚举 + 成员，**成员布局变化 = ABI 变化**）与
+  `SpectrumModule.h`，必须清理 obj 全量重编，不要只做增量链接；
+- 未构建/未实测：macOS 端（本轮无平台相关代码，风险低）。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
