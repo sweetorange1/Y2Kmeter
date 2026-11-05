@@ -448,7 +448,7 @@ void AnalyserHub::prepare(double sampleRate, int samplesPerBlock)
 // ==========================================================
 // pushStereo —— 音频线程
 // ==========================================================
-void AnalyserHub::pushStereo(const float* left, const float* right, int numSamples)
+void AnalyserHub::pushStereo(const float* left, const float* right, int numSamples, int numChannels)
 {
     if (left == nullptr || right == nullptr || numSamples <= 0)
         return;
@@ -486,7 +486,7 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
                                      y2k::perf::Partition::audioAnalysis,
                                      y2k::perf::ThreadRole::audio);
 #endif
-        loudnessMeter.pushStereo (left, right, numSamples);
+        loudnessMeter.pushStereo (left, right, numSamples, numChannels);
     }
 
     if (wantPhase)

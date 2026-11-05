@@ -55,7 +55,10 @@ public:
     void prepare(double sampleRate, int samplesPerBlock);
 
     // 在音频线程调用，推送立体声数据
-    void pushStereo(const float* left, const float* right, int numSamples);
+    //   numChannels：输入总通道数（默认 2）。单声道（1）时调用方通常把同一路信号
+    //   同时传进 left/right —— 必须按"1 个通道"计权，否则 L/R 各算一遍会让能量
+    //   翻倍 → LUFS 系统性 +3.01 dB（v3.0.1 外网报障）。
+    void pushStereo(const float* left, const float* right, int numSamples, int numChannels = 2);
 
     // 重置所有积分器（如 DAW 停止播放时）
     void reset();
@@ -152,9 +155,13 @@ private:
     //   · 相对门限：对通过绝对门限的所有块求平均，再 -10 LU（×0.1）
     //   · 最终 Integrated = 对 blockMean >= 相对门限 的块求平均
     std::deque<double> gatedBlocks; // 通过绝对门限的 400ms 块能量（左右合成均方）
-    // 绝对门限（-45 LUFS 线性均方 ≈ 10^(-45/10)）。原 -70 LUFS 太深，会导致
-    //   loopback / 输入本底噪声（约 -55 dB）也被计入 Integrated，I 无法归零。
-    static constexpr double absGateThreshold = 3.162e-5;
+    // 绝对门限：ITU-R BS.1770-4 规定 -70 LUFS，换算成线性均方即
+    //   z = 10^((-70 + 0.691) / 10) = 1.1725e-7。
+    //   v3.0.1 修正：旧值 3.162e-5 实际是 -45 dBFS（注释误写成 -70 LUFS），
+    //   会把 -45 ~ -70 之间的安静段落整段排除，导致 Integrated 系统性偏高。
+    //   本底噪声（约 -55 dBFS）不必靠抬高绝对门限处理：相对门限（均值 -10 LU）
+    //   会把它滤掉，另有 3s 静音自动重置兜底。
+    static constexpr double absGateThreshold = 1.1725e-7;
 
     // ---- Integrated 静音自动重置 ----
     //   连续 silenceResetSeconds 秒无音频信号（合成 RMS 均方 < silenceMeanSqThreshold）
@@ -340,8 +347,9 @@ public:
     void prepare(double sampleRate, int samplesPerBlock);
 
     // 在 processBlock 中调用，推送立体声数据
-    // left / right 可以是同一指针（mono 降级）
-    void pushStereo(const float* left, const float* right, int numSamples);
+    // left / right 可以是同一指针（mono 降级）——此时必须传 numChannels = 1，
+    //   否则响度计会把这一路信号当成两路独立信号累加，Integrated 高 3.01 dB。
+    void pushStereo(const float* left, const float* right, int numSamples, int numChannels = 2);
 
     // ======================================================
     // 按需计算（Phase-F 引入）—— 5 路独立的引用计数

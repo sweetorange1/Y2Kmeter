@@ -297,10 +297,12 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 
             if (std::abs (gainLin - 1.0f) < 0.0001f)
             {
-                // Mono 降级：L/R 使用同一指针
+                // Mono 降级：L/R 使用同一指针。
+                //   v3.0.1：必须显式声明"只有 1 个通道"，否则响度计会把同一路信号
+                //   当成 L+R 两路独立信号累加 → LUFS 高 3.01 dB（外网实测 -23.4 vs -26.5）。
                 analyserHub->pushStereo(buffer.getReadPointer(0),
                                         buffer.getReadPointer(0),
-                                        n);
+                                        n, /*numChannels=*/1);
             }
             else
             {
@@ -316,7 +318,8 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
                 for (int i = 0; i < n; ++i)
                     dst[i] = src[i] * gainLin;
 
-                analyserHub->pushStereo (dst, dst, n);
+                // 同上：mono 降级必须按 1 通道计权（否则 LUFS 高 3.01 dB）
+                analyserHub->pushStereo (dst, dst, n, /*numChannels=*/1);
             }
         }
     }

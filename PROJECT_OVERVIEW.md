@@ -5846,6 +5846,7 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 | `8a4881ac` | Starlight / Cyber Lilac 主题下气泡文字不可见（`face` 与 `ink` 撞色）→ 新增 `PinkXP::readableInkOn()` |
 | `8badac62` | macOS 编译失败（`restorePseudoFullScreen` 引用 Windows 专属成员） |
 | v3.0.1 内 | Tempo/Key 在"深蓝 / 紫"主题下外边缘发深：`paintContent` 只在 `reduced(4)` 的内嵌卡片里铺 `content`，外壳那一圈与底部按钮条露出变深后的 `face`。改为**内容区整块铺 `btnFace`**（与 Loudness / Dynamics 一致；这两套主题的 `btnFace` 是浅蓝白 / 浅紫白，注释即"深主题下按钮面"） |
+| v3.0.1 内 | **LUFS-I 比参考表高 3.1 dB**（外网 A/B：-23.4 vs -26.5）。根因：单声道母线上插件走 `pushStereo(L, L)`，响度计把同一路信号当 L/R 两路独立通道累加 → 能量 ×2 → `10·log10(2)` = **3.01 dB**。修法：`pushStereo` 增加 `numChannels`（默认 2），mono 时每通道能量权重 **0.5**（等价 BS.1770 的"1 通道 G=1.0"）；`AnalyserHub` / `PluginProcessor` 的 mono 分支传 1。附带修正绝对门限：常量 `3.162e-5` 实为 **-45 dBFS**（注释误写 -70 LUFS），会把安静段落整段排除导致 I 偏高，改为 BS.1770-4 的 -70 LUFS = `1.1725e-7` |
 
 ### 6. 抬头双击：嵌入式最大化 / 浮动窗口伪全屏（v3.0.1）
 

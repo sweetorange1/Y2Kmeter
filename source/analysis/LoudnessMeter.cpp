@@ -142,10 +142,18 @@ void LoudnessMeter::reset()
 // ==========================================================
 // pushStereo —— 音频线程
 // ==========================================================
-void LoudnessMeter::pushStereo(const float* left, const float* right, int numSamples)
+void LoudnessMeter::pushStereo(const float* left, const float* right, int numSamples, int numChannels)
 {
     if (left == nullptr || right == nullptr || numSamples <= 0)
         return;
+
+    // 单声道输入的计权（v3.0.1 修复 +3.01 dB）：
+    //   单声道时调用方把同一路信号同时传给 left/right，若按立体声各算一遍，
+    //   能量 = p + p = 2p → LUFS 比参考表高 10*log10(2) = 3.01 dB。
+    //   这里把每个通道的能量按 1/2 分摊：0.5p + 0.5p = p，等价于 BS.1770 里
+    //   "1 个通道、G = 1.0" 的定义。
+    const double chWeight = (numChannels <= 1) ? 0.5 : 1.0;
+    const double w        = std::sqrt (chWeight);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -153,8 +161,8 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
         const double r = (double) right[i];
 
         // ---- K-weighting ----
-        const double kl = applyKWeighting(l, filterL);
-        const double kr = applyKWeighting(r, filterR);
+        const double kl = applyKWeighting(l, filterL) * w;
+        const double kr = applyKWeighting(r, filterR) * w;
 
         // ---- 累积 400ms 块均方（供 Short-term / Integrated）----
         momentarySumL += kl * kl;
