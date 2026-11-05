@@ -336,6 +336,13 @@ juce::String TempoKeyModule::scaleNoteNames (int root, y2k::music::Mode mode)
 
 void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
+    // v3.0.1：内容区整块铺 btnFace —— 与 Loudness / Dynamics 等模块保持一致。
+    //   深色主题（深蓝 / 紫）下 PinkXP::face 会变深，而这里原先只在 reduced(4)
+    //   的内嵌卡片里铺 content，外壳那一圈 + 底部按钮条直接露出 face
+    //   → 外边缘比别的模块明显更暗（外网截图反馈）。
+    g.setColour (PinkXP::btnFace);
+    g.fillRect (contentBounds);
+
     auto area = contentBounds.reduced (4);
 
     if (area.getWidth() < 60 || area.getHeight() < 40)

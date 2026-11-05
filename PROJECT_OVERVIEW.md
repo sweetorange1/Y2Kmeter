@@ -5845,6 +5845,7 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 | --- | --- |
 | `8a4881ac` | Starlight / Cyber Lilac 主题下气泡文字不可见（`face` 与 `ink` 撞色）→ 新增 `PinkXP::readableInkOn()` |
 | `8badac62` | macOS 编译失败（`restorePseudoFullScreen` 引用 Windows 专属成员） |
+| v3.0.1 内 | Tempo/Key 在"深蓝 / 紫"主题下外边缘发深：`paintContent` 只在 `reduced(4)` 的内嵌卡片里铺 `content`，外壳那一圈与底部按钮条露出变深后的 `face`。改为**内容区整块铺 `btnFace`**（与 Loudness / Dynamics 一致；这两套主题的 `btnFace` 是浅蓝白 / 浅紫白，注释即"深主题下按钮面"） |
 
 ### 6. 抬头双击：嵌入式最大化 / 浮动窗口伪全屏（v3.0.1）
 
