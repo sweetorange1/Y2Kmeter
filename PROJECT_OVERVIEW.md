@@ -5643,14 +5643,14 @@ UTF-8 中文会被逐字节二次编码成 `åä¸æ`。修复：`write` / `writ
 ### 6. 仓库清洗
 
 删除一次性产物与开发素材（均可在 git 历史中找回）：
-`README.md`、`MACOS_ADAPTATION_DIFFS.md`、`Y2KMeter_Stick模式方案.md`、`运行过程中报错.txt`、
+`MACOS_ADAPTATION_DIFFS.md`、`Y2KMeter_Stick模式方案.md`、`运行过程中报错.txt`、
 `0000_test_single_wave.milk`、`s3d_cpu_orig.cpp`、`y2k_app_diff.txt.tmp`、`^`、`nul'`、
 `_gen_api_files.js`、`_temp_server.js`、`cleanup_y2kmeter.ps1`，以及目录
 `tools/`（含 butterchurn 子模块、milkdrop_tester、virtupet_cutter）、`test_tools/`、`申诉材料/`。
 
-保留（构建/打包必需）：`assets/`（预设、纹理、安装包 ZIP、图标）、`tests/`、`scripts/`、`ttf/`、
-`CMakeLists.txt`、`CMakePresets.json`、两个 `.iss`、两个 `build_installer*.bat`、`build_macos_installer.sh`、
-`LICENSE`、本文件。
+保留：`README.md`（仓库首页）、`LICENSE`、本文件；构建/打包必需内容
+`assets/`（预设、纹理、安装包 ZIP、图标）、`tests/`、`scripts/`、`ttf/`、
+`CMakeLists.txt`、`CMakePresets.json`、两个 `.iss`、两个 `build_installer*.bat`、`build_macos_installer.sh`。
 
 ---
 
