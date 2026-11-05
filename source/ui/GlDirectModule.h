@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <atomic>
 #include <memory>
+#include <string>
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
 
@@ -35,7 +36,8 @@
 class GlDirectModuleBase : public ModulePanel
 {
 public:
-    explicit GlDirectModuleBase (ModuleType type) : ModulePanel (type) {}
+    explicit GlDirectModuleBase (ModuleType type);
+    ~GlDirectModuleBase() override;
 
     enum class Primitive : juce::uint32 { Triangles = 0, Lines = 1 };
 
@@ -112,8 +114,26 @@ public:
         ModulePanel::setFloating (floating);
         if (floating && glDirectActive.load())
             glDirectActive.store (false);
+        diagSetFloating (floating);
         repaint();
     }
+
+    // ---- 诊断状态镜像（v3.0.x）----
+    //   只写原子量；看门狗线程在卡死时读取，绝不回读组件树。
+    //   全部在 .cpp 中实现（注册表也放在那里，避免头文件互相拖累）。
+    static juce::String dumpDiagStates();                       // 卡死报告用（任意线程）
+    void diagSetVisible (bool visible) noexcept;                // GL 线程，每帧
+    void diagOnRendered (double renderMs) noexcept;             // GL 线程，每帧
+    void diagSetFloating (bool floating) noexcept;
+
+    int diagSlot = -1;                                          // 全局注册表下标
+    std::string diagWaitPhase;                                  // 预生成的阶段标记（免热路径分配）
+    std::string diagRenderPhase;                                // "GlDirect.render(<模块名>)"
+    std::atomic<int> diagBuildUs { -1 };                        // 最近一次快照构建耗时
+    std::atomic<int> diagRenderUs { -1 };                       // 最近一次渲染耗时
+    std::atomic<int> diagRenderMaxUs { 0 };                     // 渲染耗时峰值
+    std::atomic<unsigned> diagRenderCount { 0 };                // 累计渲染帧数
+    double diagBuildStartMs = 0.0;                              // 仅 UI 线程使用
 
 protected:
     // 快照重建尺寸守卫（v2.9.5）：拖动窗口 / dock 时 workspace 每帧对所有

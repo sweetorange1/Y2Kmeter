@@ -435,7 +435,7 @@ void ToyDirector::spawnCanvasFountain (juce::Point<float> editorPos, float charg
         if (nowT - lastLog > 1.0)
         {
             lastLog = nowT;
-            toyperf::log ("fountain active: freeActors=" + juce::String ((int) clock->freeActors.size()));
+            TOYPERF_LOG ("fountain active: freeActors=" + juce::String ((int) clock->freeActors.size()));
         }
     }
 

@@ -658,6 +658,12 @@ private:
     std::atomic<juce::int64> glFrameCounter { 0 };
     juce::int64              lastGlFrameCounterSample = 0;
 
+    // —— 诊断（v3.0.x）：出帧流判定 ——
+    //   只有"最近确实在出帧"时才监视 GL 卡死：窗口静止 / 空工作区 / 最小化等
+    //   本来就不会重绘的场景不能被误报成卡死。
+    juce::int64 diagLastGlCounter         = -1;
+    double      diagGlCounterChangeWallMs = 0.0;
+
     // —— v2.9.1 vblank 对齐的帧时钟（wall-clock 判据 + 兜底 Timer）——
     //   VBlankAttachment 在 UI 线程按显示器 vblank 回调，只用来"对齐相位"；
     //   分发频率由墙钟判据保证：

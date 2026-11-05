@@ -81,6 +81,20 @@ if (Y2K_ENABLE_FRAME_PERF_LOG)
 endif()
 
 # ==========================================================
+# 运行时诊断日志（现场排查用，v3.0.x）
+#   · 与上面的 FRAME_PERF_LOG 不同：这套日志在**正式 Release** 里也编译进来，
+#     但默认关闭（关闭时每个埋点只做一次原子读，零开销）。
+#   · 给用户发"诊断包"时打开本开关，程序启动即自动在桌面
+#     Y2Kmeter_Diag 目录下写日志，卡死时自动输出状态报告 + Minidump。
+#   · 也可以不改构建：设环境变量 Y2K_DIAG_LOG=1，或在 exe 同目录放一个
+#     名为 Y2Kmeter_diag_on.txt 的空文件。
+# ==========================================================
+option(Y2K_DIAG_LOG_DEFAULT_ON "Enable runtime diagnostics log by default (customer diagnostic build)" OFF)
+if (Y2K_DIAG_LOG_DEFAULT_ON)
+    add_compile_definitions(Y2K_DIAG_LOG_DEFAULT=1)
+endif()
+
+# ==========================================================
 # macOS 平台：启用 Objective-C++ 语言
 #   · MacDesktopAudioCapture.mm 走 ScreenCaptureKit 做桌面音频采集，
 #     必须经由 Objective-C++ 编译才能解析 @interface / NSObject 等语法。
@@ -597,6 +611,9 @@ set(Y2KM_PLUGIN_SOURCES
   # v2.9.2：帧耗时统计日志（Y2K_ENABLE_FRAME_PERF_LOG 宏隔离，默认不编译内容）
   source/perf/FramePerfLog.h
   source/perf/FramePerfLog.cpp
+  # v3.0.x：运行时诊断日志（现场排查：GL 卡死报告 / 看门狗 / Minidump）
+  source/diag/Y2KDiagLog.h
+  source/diag/Y2KDiagLog.cpp
 
   # === 模块化 UI 框架 ===
 

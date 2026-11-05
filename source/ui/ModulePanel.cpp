@@ -3,6 +3,7 @@
 #include "source/ui/toys/ToyKit.h"
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/perf/FramePerfLog.h"
+#include "source/diag/Y2KDiagLog.h"
 
 namespace
 {
@@ -239,6 +240,14 @@ juce::Colour ModulePanel::getShellFillColour() const
 
 void ModulePanel::paint(juce::Graphics& g)
 {
+    // ---- 诊断：单模块绘制耗时 ----
+    //   paint 跑在消息线程上，任一模块超过 40ms 都会造成肉眼可见的掉帧/卡顿；
+    //   与 GL 直渲染卡死区分开（GL 卡死时日志会显示 GL 线程停摆而 paint 正常）。
+    const bool diagPaint = y2k::diag::isEnabled();
+    const double diagPaintStartMs = diagPaint ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+    if (diagPaint)
+        y2k::diag::setPhase ("UI:ModulePanel::paint");
+
 #if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::ui, "UI-ModulePaint");
     const auto paintStartNs = y2k::perf::PerformanceCounterSystem::nowNs();
@@ -342,6 +351,14 @@ void ModulePanel::paint(juce::Graphics& g)
         paintEndNs - paintStartNs,
         0);
 #endif
+
+    if (diagPaint)
+    {
+        const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - diagPaintStartMs;
+        if (elapsedMs > 40.0)
+            Y2K_DIAG ("SLOW", "ModulePanel::paint " + moduleTypeToString (moduleType)
+                                  + " " + juce::String (elapsedMs, 1) + "ms");
+    }
 }
 
 void ModulePanel::paintOverChildren(juce::Graphics& g)

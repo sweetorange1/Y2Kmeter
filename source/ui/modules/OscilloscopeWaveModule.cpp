@@ -302,8 +302,8 @@ void OscilloscopeWaveModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
         return;
     lastToyPokeTime_ = now;
 
-    // 性能日志：快照烘焙耗时
-    const toyperf::ScopedTimer timer ("oscwave snapshot");
+    // 性能日志：快照烘焙耗时（仅 RelWithDebInfo；Release 整条语句消失）
+    TOYPERF_SCOPED_TIMER ("oscwave snapshot");
 
     // 相纸真正掉出模块（浮动态降级为面板内裁剪）
     ctx.promoteToFree (makePolaroidActor (hit.pos, snapshotL, snapshotR, {}));

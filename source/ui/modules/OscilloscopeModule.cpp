@@ -83,7 +83,8 @@ void OscilloscopeModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
     lastToyPokeTime_ = now;
 
     // 性能日志：快照生成耗时（烘焙一次，paint 每帧只 blit）
-    const toyperf::ScopedTimer timer ("osc snapshot (" + juce::String (displayMode == DisplayMode::waveform ? "wave" : "xy") + ")");
+    //   仅 RelWithDebInfo；Release 下宏展开为空，连字符串拼接都不发生
+    TOYPERF_SCOPED_TIMER ("osc snapshot (" + juce::String (displayMode == DisplayMode::waveform ? "wave" : "xy") + ")");
 
     // 反馈 C1：与 OscilloscopeWave 一致的"拍立得快照"——定格当前真实波形/散点。
     juce::Array<float> l, r;

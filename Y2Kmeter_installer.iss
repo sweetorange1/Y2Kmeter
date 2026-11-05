@@ -1,11 +1,37 @@
 #define MyAppName      "Y2Kmeter"
-#define MyAppVersion   "3.0.0"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyAppExeName   "Y2Kmeter.exe"
 #define MyPluginBundle "Y2Kmeter.vst3"
 #define MyPluginBundleMilkdrop "Y2Kmeter_milkdrop.vst3"
+
+; -----------------------------------------------------------------------
+; 以下变量都可被"外层包装脚本"预先 #define 覆盖（见 Y2Kmeter_diag_installer.iss），
+;   用 #ifndef 保护，保证直接编译本脚本时行为与以前完全一致。
+; -----------------------------------------------------------------------
+#ifndef MyAppVersion
+#define MyAppVersion   "3.0.0"
+#endif
+
 ; 打包产物来源目录：默认使用用户自己编译的 VS 工程输出（而非 AI 编译的 build\msvc）
+#ifndef MyBuildDir
 #define MyBuildDir "cmake-build-release-visual-studio"
+#endif
+
+; 构建配置名：既是 artefacts 下的配置子目录名，也是 VS 多配置生成器下的输出目录名
+#ifndef MyConfig
+#define MyConfig "Release"
+#endif
+
+; 安装包输出目录 / 文件名后缀 / 卸载列表里显示的版本后缀
+#ifndef MyOutputDir
+#define MyOutputDir "dist"
+#endif
+#ifndef MyOutputSuffix
+#define MyOutputSuffix ""
+#endif
+#ifndef MyVersionSuffix
+#define MyVersionSuffix ""
+#endif
 
 ; -----------------------------------------------------------------------
 ; 安装目录说明：
@@ -19,13 +45,13 @@
 AppId={{C9B9FCA5-9D58-4F34-A856-214E5F972B25}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppVerName={#MyAppName} {#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}{#MyVersionSuffix}
 AppPublisher={#MyAppPublisher}
 ; 主安装目录指向 EXE 组件的目标路径（VST3 组件有自己的目录页，不受此影响）
 DefaultDirName={autopf64}\iisaacbeats.cn\{#MyAppName}
 DefaultGroupName={#MyAppName}
-OutputDir=dist
-OutputBaseFilename={#MyAppName}_Setup_{#MyAppVersion}_x64
+OutputDir={#MyOutputDir}
+OutputBaseFilename={#MyAppName}_Setup_{#MyAppVersion}{#MyOutputSuffix}_x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -75,6 +101,9 @@ Type: files; Name: "{app}\glew32.dll"; Components: standalone
 Type: filesandordirs; Name: "{app}\assets\milkdrop_presets"; Components: standalone
 Type: filesandordirs; Name: "{app}\assets\milkdrop_textures"; Components: standalone
 Type: files; Name: "{app}\assets\milkdrop_presets.zip"; Components: standalone
+; Standalone：清理历史遗留的调试日志（v3.0.x 起改为仅诊断构建输出，正式包不再产生）
+Type: files; Name: "{app}\toy_perf_log.txt"; Components: standalone
+Type: files; Name: "{app}\Y2Kmeter_debug.log"; Components: standalone
 ; AppData 共享目录：删除旧版散装文件（若存在，v2.3.1 及之前为直接安装），升级时统一改为 ZIP 解压
 ;   不绑定组件，确保 Standalone 或 VST3 单独/同时升级时都能清理旧预设
 Type: filesandordirs; Name: "{userappdata}\Y2Kmeter\milkdrop_textures"
@@ -94,7 +123,7 @@ Type: filesandordirs; Name: "{commoncf}\VST3\iisaacbeats.cn\{#MyPluginBundle}\Co
 ; -----------------------------------------------------------------------
 [Files]
 ; Standalone EXE
-Source: "{#MyBuildDir}\Y2Kmeter_artefacts\Release\Standalone\{#MyAppExeName}"; \
+Source: "{#MyBuildDir}\Y2Kmeter_artefacts\{#MyConfig}\Standalone\{#MyAppExeName}"; \
     DestDir: "{app}"; \
     Flags: ignoreversion; \
     Components: standalone
@@ -108,11 +137,11 @@ Source: "assets\virtupet_assets.zip"; \
     Components: standalone
 
 ; Standalone Milkdrop 运行时 DLL（projectM 渲染库 + OpenGL 扩展加载器）
-Source: "{#MyBuildDir}\Y2Kmeter_artefacts\Release\Standalone\projectM-4.dll"; \
+Source: "{#MyBuildDir}\Y2Kmeter_artefacts\{#MyConfig}\Standalone\projectM-4.dll"; \
     DestDir: "{app}"; \
     Flags: ignoreversion; \
     Components: standalone
-Source: "{#MyBuildDir}\Y2Kmeter_artefacts\Release\Standalone\glew32.dll"; \
+Source: "{#MyBuildDir}\Y2Kmeter_artefacts\{#MyConfig}\Standalone\glew32.dll"; \
     DestDir: "{app}"; \
     Flags: ignoreversion; \
     Components: standalone
@@ -139,17 +168,18 @@ Source: "assets\milkdrop_textures.zip"; \
 ;   v2.3.1: 排除 milkdrop_presets/ 和 milkdrop_textures/，预设和纹理已集中存放于
 ;   %APPDATA%\Y2Kmeter\，Standalone 和 VST3 共享同一份，不再随 bundle 冗余分发。
 ; DestDir 走 [Code] 段 GetVst3Dir —— 用户在独立向导页里选择的路径
-Source: "{#MyBuildDir}\Y2Kmeter_artefacts\Release\VST3\{#MyPluginBundle}\*"; \
+Source: "{#MyBuildDir}\Y2Kmeter_artefacts\{#MyConfig}\VST3\{#MyPluginBundle}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
-    Excludes: "milkdrop_presets\*;milkdrop_textures\*"; \
+    Excludes: "milkdrop_presets\*;milkdrop_textures\*;*.pdb;*.ilk;*.exp;*.lib"; \
     Components: vst3
 
 ; Y2Kmeter_milkdrop（Milkdrop-only VST3 变体，独立插件，与完整版同装到 VST3 目录）
 ;   · 预设/纹理与完整版共享 AppData，bundle 内不携带
-Source: "{#MyBuildDir}\Y2Kmeter_milkdrop_artefacts\Release\VST3\{#MyPluginBundleMilkdrop}\*"; \
+Source: "{#MyBuildDir}\Y2Kmeter_milkdrop_artefacts\{#MyConfig}\VST3\{#MyPluginBundleMilkdrop}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundleMilkdrop}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Excludes: "*.pdb;*.ilk;*.exp;*.lib"; \
     Components: vst3
 
 ; -----------------------------------------------------------------------

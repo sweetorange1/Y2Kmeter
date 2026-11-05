@@ -795,7 +795,7 @@ void EmojiAtlas::timerCallback()
         if (! logged)
         {
             logged = true;
-            toyperf::log (juce::String ("atlas prebake done: ") + juce::String (total) + " entries");
+            TOYPERF_LOG (juce::String ("atlas prebake done: ") + juce::String (total) + " entries");
         }
     }
 }

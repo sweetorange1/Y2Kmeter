@@ -51,6 +51,7 @@
 #include "../../PluginProcessor.h"
 #include "../analysis/AnalyserHub.h"
 #include "../perf/PerformanceCounterSystem.h"
+#include "../diag/Y2KDiagLog.h"
 #include "../Y2KLogging.h"
 
 // 主题持久化：从 settings 读取/写回 PinkXP 全局主题 id
@@ -457,6 +458,14 @@ public:
     // --------------------------------------------------
     void initialise (const juce::String&) override
     {
+        // 0) 运行时诊断日志：必须放在所有东西之前 —— 现场"一打开就卡死"
+        //    时，只有在此之前创建的日志文件才能留下证据。
+        //    未开启（默认）时这里只做一次原子判定，无任何文件操作。
+        y2k::diag::ensureInitialised();
+        y2k::diag::setThreadTag ("UI");
+        y2k::diag::setPhase ("App::initialise");
+        Y2K_DIAGC ("BOOT", "Y2KStandaloneApp::initialise begin");
+
        #if JUCE_MAC
         // 0) macOS：若检测到 App 版本已升级（或首次启动），主动重置
         //    本 bundleID 的 Microphone / ScreenCapture 权限记录，
@@ -609,8 +618,18 @@ public:
         //    让 processor 清掉它内部的 activeEditor 指针。
         if (auto* proc = pluginHolder->processor.get())
         {
-            if (auto* editor = proc->createEditorIfNeeded())
+            Y2K_DIAGC ("BOOT", "createEditorIfNeeded begin (含 GL 上下文 attach)");
+            const double diagEditorStartMs = juce::Time::getMillisecondCounterHiRes();
+            auto* createdEditor = proc->createEditorIfNeeded();
+            Y2K_DIAGC ("BOOT", juce::String ("createEditorIfNeeded done | ")
+                                   + juce::String (juce::Time::getMillisecondCounterHiRes() - diagEditorStartMs, 1)
+                                   + "ms ok=" + (createdEditor != nullptr ? "1" : "0"));
+
+            if (auto* editor = createdEditor)
             {
+                Y2K_DIAGC ("BOOT", juce::String ("editor bounds=")
+                                       + juce::String (editor->getWidth()) + "x"
+                                       + juce::String (editor->getHeight()));
                 pluginEditor.reset (editor);
                 mainWindow->setContentNonOwned (editor, /*resizeToFit*/ true);
 
@@ -742,8 +761,10 @@ public:
         //
         //    chromeVisible 恢复通过 callAsync 延迟：setChromeVisible 内部依赖
         //    editor.isShowing() 和 canResizeWindow 的标准路径，必须在窗口可见后执行。
+        Y2K_DIAGC ("BOOT", "mainWindow.addToDesktop begin");
         mainWindow->addToDesktop();
         mainWindow->setVisible(true);
+        Y2K_DIAGC ("BOOT", "mainWindow visible (首帧 GL 渲染即将开始)");
 
         if (cachedEditor != nullptr)
         {
@@ -857,6 +878,11 @@ public:
         juce::Logger::setCurrentLogger (nullptr);
         runtimeFileLogger.reset();
        #endif
+
+        // 6) 诊断日志收尾：写 session end + 刷盘。放在最后，
+        //    前面的析构过程（GL 资源/编辑器销毁）也会被完整记录下来。
+        Y2K_DIAGC ("BOOT", "Y2KStandaloneApp::shutdown complete");
+        y2k::diag::shutdown();
     }
 
     void systemRequestedQuit() override
@@ -1805,6 +1831,9 @@ private:
         //   · 因此 prepare() 与 pushStereo() 串行调用，deque 的 push/pop 不会跟读并发
         loopback->onAudio = [y2kProc, this] (const float* L, const float* R, int n, double sr)
         {
+            // 诊断：采集线程心跳（音频断流时看门狗/摘要能区分"没声音"与"线程死"）
+            y2k::diag::heartbeat (y2k::diag::Channel::Audio);
+
             // 采样率变化 → 重新 prepare（内部会 clear 所有 deque，现在无并发线程，安全）
             const double cached = loopbackLastSampleRate.load (std::memory_order_acquire);
             if (std::abs (cached - sr) > 0.5)
@@ -1812,6 +1841,9 @@ private:
                 const int blk = juce::jmax (64, (int) (sr * 0.01));
                 y2kProc->getAnalyserHub().prepare (sr, blk);
                 loopbackLastSampleRate.store (sr, std::memory_order_release);
+                Y2K_DIAG ("AUDIO", "loopback format sr=" + juce::String (sr, 0)
+                                       + " block=" + juce::String (blk)
+                                       + " callbackFrames=" + juce::String (n));
             }
 
             // 录音机：pre-gain 原始采集数据（忽略用户 gain、不受界面可见性影响）
@@ -1852,9 +1884,12 @@ private:
         {
             // 启动失败：恢复 holder callback，避免普通设备模式下也丢输入
             attachHolderCallback();
+            Y2K_DIAGC ("AUDIO", "loopback start FAILED: " + loopback->getLastError());
             return false;
         }
 
+        Y2K_DIAGC ("AUDIO", "loopback start OK");
+        y2k::diag::setChannelActive (y2k::diag::Channel::Audio, true);
         loopbackActive.store (true, std::memory_order_release);
         return true;
     }
@@ -1862,7 +1897,11 @@ private:
     void stopLoopbackCapture()
     {
         if (loopback != nullptr)
+        {
+            Y2K_DIAGC ("AUDIO", "loopback stop begin");
             loopback->stop();   // 同步 join 采集线程，确保返回后不再有回调
+        }
+        y2k::diag::setChannelActive (y2k::diag::Channel::Audio, false);
         loopbackActive.store (false, std::memory_order_release);
         loopbackLastSampleRate.store (0.0, std::memory_order_release);
 

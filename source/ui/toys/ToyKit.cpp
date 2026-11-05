@@ -258,11 +258,12 @@ void ToyClock::cancelPanel (ModulePanel& p)
 void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
     // 性能日志 session 行：延迟到首帧（消息循环已稳定）才写，构造期零文件 IO
+    //   Release 下 TOYPERF_BEGIN_SESSION() 展开为空（ToyPerf.h 编译期门控）。
     static bool perfSessionBegun = false;
     if (! perfSessionBegun)
     {
         perfSessionBegun = true;
-        toyperf::beginSession();
+        TOYPERF_BEGIN_SESSION();
     }
 
     const double elapsed = lastFrameTime_ > 0.0
@@ -479,6 +480,8 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
     frameTotalMs_ += lastFrameMs_;
     frameMaxMs_ = juce::jmax (frameMaxMs_, lastFrameMs_);
     ++perfFrames_;
+   #if defined (Y2K_ENABLE_LOGGING)
+    // Release 下整段不编译：连每秒一次的统计与字符串拼接都不做
     if (frame.timeSec - perfLastLogTime_ >= 1.0)
     {
         const double span = frame.timeSec - perfLastLogTime_;
@@ -488,7 +491,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
             for (auto& p : panels)
                 if (p != nullptr && p->toyState)
                     moduleActors += (int) p->toyState->actors.size();
-            toyperf::log (juce::String ("frame: fps=")
+            TOYPERF_LOG (juce::String ("frame: fps=")
                           + juce::String ((double) perfFrames_ / span, 1)
                           + " freeActors=" + juce::String ((int) freeActors.size())
                           + " visibleFreeActors=" + juce::String (visibleFreeActorCount_)
@@ -510,6 +513,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         overlayPaintTotalMs_ = 0.0;
         perfLastLogTime_ = frame.timeSec;
     }
+   #endif
 }
 
 // ==========================================================

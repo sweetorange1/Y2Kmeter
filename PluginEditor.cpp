@@ -32,6 +32,7 @@
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/perf/FramePerfLog.h"
+#include "source/diag/Y2KDiagLog.h"
 #include "source/Y2KLogging.h"
 
 #if JUCE_WINDOWS
@@ -1395,6 +1396,16 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 {
     Y2K_LOG ("[boot] PluginEditor ctor begin");
 
+    // 0) 运行时诊断日志（现场排查用）：插件形态下也必须尽早初始化，
+    //    否则"打开界面就卡死"的场景连日志文件都来不及创建。
+    y2k::diag::ensureInitialised();
+    y2k::diag::setThreadTag ("UI");
+    y2k::diag::setPhase ("Editor::ctor");
+    y2k::diag::heartbeat (y2k::diag::Channel::UiMessage);
+    Y2K_DIAGC ("BOOT", juce::String ("PluginEditor ctor begin | pluginHost=")
+                           + (isPluginHost ? "yes" : "no")
+                           + " log=" + y2k::diag::getLogFile().getFullPathName());
+
     // 0) 异步加载自定义字体。
     //   VST3/AU 宿主在创建插件 Editor 时，Direct2D/DirectWrite 基础
     //   设施可能尚未初始化。同步调用 createSystemTypefaceFor() 会触发
@@ -1960,6 +1971,11 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   右下角标签，同时计算实际 FPS 下发给 workspace 的 FPS 标签
     startTimerHz (10);
 
+    // 诊断：到这里为止构造已完成、Timer 已启动，UI 通道才开始参与
+    //   "卡死"判定（否则构造本身耗时较长会被误报）。
+    y2k::diag::setChannelActive (y2k::diag::Channel::UiMessage, true);
+    y2k::diag::heartbeat (y2k::diag::Channel::UiMessage);
+
     // Phase F：启动全局 FrameDispatcher（模块构造中的 retain() 已让 refCounts 就绪）
     userRequestedFpsLimit = workspace->getFpsLimit();
     if (userRequestedFpsLimit == 0)
@@ -2233,7 +2249,20 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     openGLContext.setRenderer(this);
     openGLContext.setContinuousRepainting(false);
     openGLContext.setComponentPaintingEnabled(true);
-    openGLContext.attachTo(*this);
+
+    // 诊断：attachTo 是"整个窗口进入 GL 合成"的开关，某些驱动在这一步就会
+    //   卡住或抛异常。前后各留一行，卡在这里时日志能立刻看出来。
+    Y2K_DIAGC ("GL", juce::String ("openGLContext.attachTo begin | bounds=")
+                          + juce::String (getWidth()) + "x"
+                          + juce::String (getHeight()) + " displayScale="
+                          + juce::String ((double) openGLContext.getRenderingScale(), 2));
+    {
+        Y2K_DIAG_SLOW ("GL", "openGLContext.attachTo", 500.0);
+        openGLContext.attachTo(*this);
+    }
+    Y2K_DIAGC ("GL", juce::String ("openGLContext.attachTo done | isAttached=")
+                          + (openGLContext.isAttached() ? "1" : "0"));
+    y2k::diag::setGlAttached (true);
 
     // ==================================================================
     // v1.9.x：新手引导覆盖层 —— 按需创建/销毁，不提前驻留在 child list 中
@@ -2254,6 +2283,16 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     //   嵌入子窗口时塞给我们的 ~175×85 极小中间态）都不应被 resized() 回写到
     //   Processor.savedEditorSize，否则下次打开窗口会恢复成异常小尺寸。
     editorBeingDestructed = true;
+
+    y2k::diag::setThreadTag ("UI");
+    y2k::diag::setPhase ("Editor::~ctor");
+    Y2K_DIAGC ("GL", "Editor destructor begin");
+
+    // 析构期间关闭心跳判定：编辑器销毁/窗口关闭本身就要停 Timer、拆 GL，
+    //   不关掉会被看门狗误判成"卡死"。析构若真的挂住，日志最后一行
+    //   （phase=Editor::~ctor）仍然在，足够定位。
+    y2k::diag::setChannelActive (y2k::diag::Channel::GlFrame, false);
+    y2k::diag::setChannelActive (y2k::diag::Channel::UiMessage, false);
 
     // -3) 先把所有浮动窗口里的模块 dock 回 workspace，并在停靠前后各存一次布局。
     //   关键：dock 前先清零 onLayoutChanged，防止 dockModule → notifyLayoutChanged
@@ -2309,7 +2348,13 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
 
     // -1) Editor 级 GL 上下文 detach：最先解除 GPU 绑定，确保 workspace 等子组件
     //      析构时 GL 资源（Texture/VBO/FBO）已经在上下文解除后安全释放。
-    openGLContext.detach();
+    Y2K_DIAGC ("GL", "openGLContext.detach begin");
+    {
+        Y2K_DIAG_SLOW ("GL", "openGLContext.detach", 500.0);
+        openGLContext.detach();
+    }
+    y2k::diag::setGlAttached (false);
+    Y2K_DIAGC ("GL", "openGLContext.detach done");
 
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
@@ -6133,6 +6178,34 @@ void Y2KmeterAudioProcessorEditor::mouseDoubleClick (const juce::MouseEvent& e)
 }
 
 bool Y2KmeterAudioProcessorEditor::keyPressed(const juce::KeyPress& key) {
+  // ---- 诊断快捷键：Ctrl(⌘)+Shift+D ----
+  //   导出"当前状态快照"并打开日志目录。用于用户反馈"偶尔卡一下但没卡死"
+  //   的场景：让他在卡顿刚发生时按一下，日志里就留下当时的完整状态。
+  if (y2k::diag::isEnabled())
+  {
+      const auto mods = key.getModifiers();
+      if ((mods.isCtrlDown() || mods.isCommandDown()) && mods.isShiftDown()
+          && key.getKeyCode() == 'D')
+      {
+          const auto snapshotPath = y2k::diag::exportSnapshot();
+          y2k::diag::reportNow ("user pressed Ctrl+Shift+D");
+
+          const auto dir = y2k::diag::getLogDirectory();
+          dir.revealToUser();
+
+          // 注意用 u8()：`"中文" + juce::String(...)` 会走 String(const char*)
+          //   的 ASCII 路径，中文变乱码。
+          juce::NativeMessageBox::showMessageBoxAsync (
+              juce::MessageBoxIconType::InfoIcon,
+              y2k::diag::u8 ("Diagnostics exported / 诊断日志已导出"),
+              y2k::diag::u8 ("日志目录：\n") + dir.getFullPathName()
+                  + (snapshotPath.isNotEmpty()
+                         ? y2k::diag::u8 ("\n\n快照：\n") + snapshotPath
+                         : juce::String()));
+          return true;
+      }
+  }
+
   // Milkdrop 键盘快捷键（v2.5.7）：← → 切预设，空格随机预设。
   // 只处理嵌入态 Milkdrop（脱离态由 FloatingModuleWindow::keyPressed 自行路由）。
   // 必须调用 MilkdropModule 的公开 API（prevPreset/nextPreset/randomPreset），
@@ -6444,6 +6517,48 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
    #if Y2K_ENABLE_FRAME_PERF_LOG
     y2k::perflog::dumpIfDue();
    #endif
+
+    // ---- 诊断：消息线程心跳 ----
+    //   这个 Timer 是 10Hz 消息线程存活的最可靠标志。它停了 = 消息线程
+    //   被卡住（无论是死在 GL 锁、音频锁还是绘制里），看门狗据此报警。
+    if (y2k::diag::isEnabled())
+    {
+        y2k::diag::setThreadTag ("UI");
+        y2k::diag::heartbeat (y2k::diag::Channel::UiMessage);
+        y2k::diag::setChannelActive (y2k::diag::Channel::UiMessage, true);
+        y2k::diag::addUiTick();
+
+        // GL 通道：仅当窗口真的在屏幕上、且最近确实在出帧时才要求出帧。
+        //   · 最小化 / 隐藏 / 上下文未 attach：JUCE 本来就不出帧，不能算卡死；
+        //   · 窗口静止（空工作区、无任何重绘）：30s 内出帧计数不变 → 不再监视，
+        //     否则"界面静止"会被误报成"卡死"。
+        const juce::int64 glNow = glFrameCounter.load (std::memory_order_relaxed);
+        const double nowWallMs  = juce::Time::getMillisecondCounterHiRes();
+        if (glNow != diagLastGlCounter)
+        {
+            diagLastGlCounter         = glNow;
+            diagGlCounterChangeWallMs = nowWallMs;
+        }
+
+        // 至少真正出过一帧才开始监视（从未出帧的窗口不算"卡死"，
+        //   那种情况由看门狗的"attach 后 10s 无 GL 上下文"告警覆盖）。
+        const bool glFlowing = glNow > 0
+                                 && (nowWallMs - diagGlCounterChangeWallMs) < 30000.0;
+
+        bool glActive = openGLContext.isAttached() && isShowing() && isVisible() && glFlowing;
+        if (auto* peer = getPeer())
+            if (peer->isMinimised())
+                glActive = false;
+        y2k::diag::setChannelActive (y2k::diag::Channel::GlFrame, glActive);
+
+        y2k::diag::setEditorState (getWidth(), getHeight(),
+                                   (float) openGLContext.getRenderingScale(),
+                                   openGLContext.isAttached(),
+                                   true,
+                                   milkdrop_render_ready_,
+                                   (int) getNumChildComponents(),
+                                   glFrameCounter.load (std::memory_order_relaxed));
+    }
 
     if (workspace == nullptr) return;
 
@@ -6916,6 +7031,57 @@ static juce::File FindMilkdropLikeDir()
 
 void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
   Y2K_LOG("[EditorGL] newOpenGLContextCreated fired");
+
+  // ---- 诊断：GL 线程身份 + 驱动能力 ----
+  //   现场"所有 GL 模块卡死"最常见的两类根因：
+  //     ① 落到软件渲染器（GDI Generic / Microsoft Basic Render / llvmpipe），
+  //        FBO + blit 路径极慢甚至假死；
+  //     ② 驱动版本 / GL 版本过低或 Core/Compat profile 不匹配。
+  //   这里把 vendor/renderer/version 一次性落盘，拿到日志就能排除。
+  y2k::diag::setThreadTag ("GL");
+  y2k::diag::setPhase ("Editor::newOpenGLContextCreated");
+  y2k::diag::markGlContextCreated();
+  {
+    using namespace juce::gl;
+    const auto glString = [] (GLenum e) -> juce::String
+    {
+      const auto* s = reinterpret_cast<const char*> (glGetString (e));
+      return s != nullptr ? juce::String (s) : juce::String ("(null)");
+    };
+
+    GLint maxTex = 0, maxViewport[2] = { 0, 0 };
+    juce::gl::glGetIntegerv (GL_MAX_TEXTURE_SIZE, &maxTex);
+    juce::gl::glGetIntegerv (GL_MAX_VIEWPORT_DIMS, maxViewport);
+
+    const juce::String info =
+        "vendor=" + glString (GL_VENDOR)
+      + " | renderer=" + glString (GL_RENDERER)
+      + " | version=" + glString (GL_VERSION)
+      + " | glsl=" + glString (GL_SHADING_LANGUAGE_VERSION)
+      + " | maxTex=" + juce::String (maxTex)
+      + " | maxViewport=" + juce::String ((int) maxViewport[0]) + "x" + juce::String ((int) maxViewport[1])
+      + " | renderScale=" + juce::String ((double) openGLContext.getRenderingScale(), 2)
+      + " | editor=" + juce::String (getWidth()) + "x" + juce::String (getHeight())
+      + " | imageCacheMB=96";
+
+    y2k::diag::setGlInfo (info);
+
+    // 软件渲染器 / 远程桌面是"GL 模块整体卡死"的高危环境，单独提升可见度
+    const juce::String rendererLower = glString (GL_RENDERER).toLowerCase();
+    if (rendererLower.contains ("gdi generic")
+        || rendererLower.contains ("basic render")
+        || rendererLower.contains ("llvmpipe")
+        || rendererLower.contains ("swiftshader")
+        || rendererLower.contains ("software"))
+    {
+      Y2K_DIAGC ("GL", "!! SOFTWARE RENDERER DETECTED -> GL 直渲染可能极慢或卡死");
+    }
+  }
+
+  Y2K_DIAGC ("GL", "newOpenGLContextCreated enter");
+  {
+    Y2K_DIAG_SLOW ("GL", "newOpenGLContextCreated (projectM init total)", 300.0);
+
   // v2.9.3：调大 GL 图片纹理缓存（JUCE 默认仅 8MB）。
   //   workspace 画布背景（~5.8MB）+ 二十个模块的静态/动态图层纹理总量远超 8MB，
   //   默认缓存下每帧互相挤占 LRU —— workspace 背景纹理被逐出后整图重传
@@ -7016,10 +7182,41 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
   milkdrop_render_ready_ = true;
 
+  } // 诊断计时作用域
+
+  Y2K_DIAGC ("GL", juce::String ("newOpenGLContextCreated done | milkdropRenderReady=")
+                        + (milkdrop_render_ready_ ? "1" : "0")
+                        + " projectM=" + (milkdrop_pm_handle_ != nullptr ? "ok" : "null")
+                        + " presets=" + juce::String (milkdrop_preset_paths_.size()));
 }
 
 void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   using namespace juce::gl;
+
+  // ---- 诊断：GL 帧入口 ----
+  //   · heartbeat 让看门狗知道"GL 线程还在出帧"；
+  //   · 后续每个大步骤都会 setPhase，卡死时日志最后一行就是卡住的位置。
+  y2k::diag::setThreadTag ("GL");
+  y2k::diag::setPhase ("Editor::renderOpenGL");
+  y2k::diag::heartbeat (y2k::diag::Channel::GlFrame);
+
+  const bool diagOn = y2k::diag::isEnabled();
+  const double diagFrameStartMs = diagOn ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+  double diagMilkdropMs = 0.0, diagDirectMs = 0.0;
+
+  // 诊断：帧间隔异常（500ms 以上但还没到看门狗 5s 阈值）也要留痕 ——
+  //   现场常见的不是"彻底死住"，而是"卡 1~3 秒后恢复"，这种最容易被漏掉。
+  if (diagOn)
+  {
+      static double s_lastGlFrameMs = 0.0;
+      if (s_lastGlFrameMs > 0.0)
+      {
+          const double gapMs = diagFrameStartMs - s_lastGlFrameMs;
+          if (gapMs > 500.0)
+              Y2K_DIAG ("GL", "frame gap " + juce::String (gapMs, 0) + "ms");
+      }
+      s_lastGlFrameMs = diagFrameStartMs;
+  }
 
   // v2.9：真实出帧计数（GL 线程每出一帧调用一次 renderOpenGL）
   glFrameCounter.fetch_add(1, std::memory_order_relaxed);
@@ -7149,7 +7346,11 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
 
   // 消费 PCM
   {
+    // 诊断：这把锁由 UI 线程（PushMilkdropPcm）与 GL 线程共同持有。
+    //   若 GL 线程卡在 "wait milkdrop_pcm_mutex_"，说明 UI 线程持锁未放。
+    Y2K_DIAG_PHASE ("gl:wait milkdrop_pcm_mutex_");
     std::lock_guard<std::mutex> lock(milkdrop_pcm_mutex_);
+    Y2K_DIAG_PHASE ("gl:milkdrop pcm feed");
     if (milkdrop_pending_frames_ > 0) {
       api.addPcmFloat(milkdrop_pm_handle_,
                       milkdrop_pending_pcm_.data(),
@@ -7228,6 +7429,15 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   bool need_resize  = (milkdrop_render_fbo_ != 0
                        && (fbo_w != milkdrop_last_fbo_w_
                            || fbo_h != milkdrop_last_fbo_h_));
+  if (need_realloc || need_resize) {
+    // 诊断：projectM 离屏 FBO 的尺寸随最上层 Milkdrop 模块尺寸 × DPI / renderScale
+    //   变化而重分配。4K + 150% DPI 时这里可能是 5000×3000 级别，弱显卡上
+    //   glTexImage2D 会明显卡顿甚至失败。
+    Y2K_DIAG ("GL", "milkdrop FBO resize -> " + juce::String (fbo_w) + "x" + juce::String (fbo_h)
+                          + " (dpi=" + juce::String ((double) dpi_scale, 2)
+                          + " renderScale=1/" + juce::String (milkdrop_render_scale_) + ")");
+    Y2K_DIAG_PHASE ("gl:TexImage2D (milkdrop render FBO)");
+  }
   if (need_realloc) {
     juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
     juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
@@ -7283,6 +7493,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       api.setWindowSize(milkdrop_pm_handle_,
                         static_cast<std::size_t>(fbo_w),
                         static_cast<std::size_t>(fbo_h));
+      Y2K_DIAG_PHASE ("gl:projectM renderFrameFbo");
       api.openglRenderFrameFbo(milkdrop_pm_handle_, milkdrop_render_fbo_);
       milkdrop_last_render_sec_ = nowSec;
     }
@@ -7363,6 +7574,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
             || visualVersion != milkdrop_tint_applied_version_);
 
     if (needTintPass) {
+      Y2K_DIAG_PHASE ("gl:milkdrop tint pass");
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
       juce::gl::glViewport(0, 0, fbo_w, fbo_h);
       milkdrop_tint_pass_->apply(milkdrop_render_tex_, visual_state);
@@ -7384,9 +7596,16 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   // v2.9.3：GL 直渲染 z 序统一遍历（Milkdrop blit + S3D 条带按组件树
   //   顺序绘制，重叠区域由 z 序决定遮挡 —— 聚焦模块覆盖另一个）
   // ================================================================
+  if (diagOn)
+    diagMilkdropMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs;
+
+  y2k::diag::setPhase ("Editor::renderOpenGL -> zOrder walk");
   renderGlDirectModulesZOrdered(dpi_scale, editor_h,
-                                (int)(editor_h * dpi_scale),
-                                true, blit_source_fbo);
+                               (int)(editor_h * dpi_scale),
+                               true, blit_source_fbo);
+
+  if (diagOn)
+    diagDirectMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs - diagMilkdropMs;
 
   // ================================================================
   // 浮动 Milkdrop 窗口共享帧捕获
@@ -7405,7 +7624,10 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     const int capture_h = juce::jmax(
         static_cast<int>(floating_ch * dpi_scale) / milkdrop_render_scale_, 1);
     {
+      // 诊断：浮动窗口共享帧锁（UI 线程读帧、GL 线程写帧）
+      Y2K_DIAG_PHASE ("gl:wait milkdrop_shared_frame_mutex_");
       std::lock_guard<std::mutex> lock(milkdrop_shared_frame_mutex_);
+      Y2K_DIAG_PHASE ("gl:floating milkdrop capture");
 
       // 确保共享帧 Image 尺寸匹配
       const bool frameNeedsResize = (milkdrop_shared_frame_.getWidth() != capture_w
@@ -7426,6 +7648,9 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       }
 
       // 同步回读 FBO → CPU 缓冲区（仅在浮动 Milkdrop 存在时执行）
+      //   注意：glReadPixels 会强制等待 GPU 完成，是整条 GL 链路上最容易
+      //   "看起来卡死"的调用（驱动差 / 独显切换 / 软件渲染时尤其明显）。
+      Y2K_DIAG_PHASE ("gl:ReadPixels (floating milkdrop capture)");
       juce::gl::glReadPixels(0, 0, capture_w, capture_h,
                               juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
                               milkdrop_capture_buf_.get());
@@ -7470,14 +7695,58 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   else
   {
     // Milkdrop 未就绪/挂起：仍要画 S3D（glDirectActive 已接管的模块不能变透明）
+    if (diagOn)
+      diagMilkdropMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs;
+
+    y2k::diag::setPhase ("Editor::renderOpenGL -> zOrder walk (no milkdrop)");
     renderGlDirectModulesZOrdered(dpi_scale, editor_h,
                                   (int)(editor_h * dpi_scale),
                                   false, 0);
+
+    if (diagOn)
+      diagDirectMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs - diagMilkdropMs;
   }
 
   // 恢复原始 viewport，供 JUCE CPE 渲染子组件 CachedImage
   juce::gl::glViewport(orig_viewport[0], orig_viewport[1],
                         orig_viewport[2], orig_viewport[3]);
+
+  // ---- 诊断：帧统计 + 状态镜像 + GL 错误码 ----
+  //   注意：glGetError 每帧只查一次，避免逐模块查询带来的驱动往返开销。
+  if (diagOn)
+  {
+    const double totalMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs;
+    y2k::diag::addFrameSample (totalMs, diagMilkdropMs, diagDirectMs);
+    y2k::diag::setEditorState (getWidth(), getHeight(),
+                               (float) openGLContext.getRenderingScale(),
+                               openGLContext.isAttached(),
+                               true,
+                               milkdrop_render_ready_,
+                               (int) getNumChildComponents(),
+                               glFrameCounter.load (std::memory_order_relaxed));
+
+    static int  s_glErrorCount = 0;      // 本会话累计（限流用）
+    static bool s_glErrorActive = false; // 上一帧是否处于报错状态
+
+    const GLenum glErr = juce::gl::glGetError();
+    if (glErr != juce::gl::GL_NO_ERROR)
+    {
+      s_glErrorActive = true;
+      if (s_glErrorCount < 40)
+      {
+        ++s_glErrorCount;
+        Y2K_DIAG ("GL", "glGetError=0x" + juce::String::toHexString ((int) glErr)
+                              + " (occurrence " + juce::String (s_glErrorCount) + ")");
+      }
+    }
+    else if (s_glErrorActive)
+    {
+      s_glErrorActive = false;
+      Y2K_DIAG ("GL", "glGetError clean again");
+    }
+
+    y2k::diag::setPhase ("Editor::renderOpenGL done");
+  }
 }
 
 // ================================================================
@@ -7551,6 +7820,9 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
     }
     Y2K_LOG (s3dGlReady ? juce::String ("[EditorGL] s3d vertex shader link OK")
                         : juce::String ("[EditorGL] s3d vertex shader link FAILED"));
+    // 诊断：shader 链接失败 → 所有 GL 直渲染模块回退软件路径（画面"不动"但没卡死）
+    Y2K_DIAGC ("GL", juce::String ("s3d vertex shader link ")
+                          + (s3dGlReady ? "OK" : "FAILED（模块将回退软件绘制）"));
 
     // ---- v2.9.5：纹理 shader（纹理通道 + trail FBO 合成）----
     const char* tvs =
@@ -7634,11 +7906,38 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
   //   解决 150% DPI 下 1px 柱在物理网格上的交替混合闪动。
   auto renderOneGlModule = [&] (GlDirectModuleBase& mod)
   {
+    const bool dOn = y2k::diag::isEnabled();
+    const double dStart = dOn ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+
     auto snap = mod.getGlSnapshot();
     if (snap == nullptr || snap->segments.empty())
+    {
+      mod.diagSetVisible (true);
       return;
+    }
     if (snap->vertices.empty() && snap->texW <= 0 && ! snap->trailFbo)
+    {
+      mod.diagSetVisible (true);
       return;
+    }
+
+    // 诊断：模块级阶段标记（预生成字符串，热路径零分配）
+    if (dOn)
+      y2k::diag::setPhase (mod.diagRenderPhase.c_str());
+
+    // 渲染结束（含所有提前返回路径）统一记录耗时
+    struct DiagRenderScope
+    {
+        GlDirectModuleBase& m;
+        double startMs;
+        bool   on;
+        ~DiagRenderScope()
+        {
+            if (on)
+                m.diagOnRendered (juce::Time::getMillisecondCounterHiRes() - startMs);
+        }
+    } diagRenderScope { mod, dStart, dOn };
+    juce::ignoreUnused (diagRenderScope);
 
     // v2.9.5：每个模块开始前恢复默认渲染目标与视口 —— renderToLogical 分支
     //   结束时 GL_FRAMEBUFFER 仍绑定模块 FBO（blit 只解绑了 READ/DRAW 别名），
@@ -7739,6 +8038,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
 
       // 渲染到逻辑 FBO（模块本地坐标 → FBO：2x 缩放、x 减 canvas 偏移、
       //   Y 翻转；背景 quad 每帧全量覆盖，无需 clear）
+      Y2K_DIAG_PHASE ("gl:draw module (logical FBO)");
       glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
       glViewport (0, 0, fboW, fboH);
       s3dNdcUniform->set (2.0f / (float) fboW, 2.0f / (float) fboH, -1.0f, -1.0f);
@@ -7762,6 +8062,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       // 线性缩小 blit 到后缓冲的模块 canvas 物理区域（2x 缩小 = 4 采样 box AA）
       const auto cPos = getLocalPoint (&mod, snap->canvasLocal.getPosition());
       const auto cBR  = getLocalPoint (&mod, snap->canvasLocal.getBottomRight());
+      Y2K_DIAG_PHASE ("gl:BlitFramebuffer (module logical->screen)");
       glBindFramebuffer (GL_READ_FRAMEBUFFER, mod.glFbo);
       glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
       glViewport (0, 0, vw, vh);
@@ -7804,6 +8105,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
         mod.glTrailCleared = false;
       }
 
+      Y2K_DIAG_PHASE ("gl:draw module (trail FBO)");
       glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
       glViewport (0, 0, snap->texW, snap->texH);
       if (! mod.glTrailCleared)
@@ -7894,6 +8196,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       //   2) NDC：上一模块（renderToLogical）留下的是 FBO 尺寸 NDC —— 不重设
       //      会让背景顶点被错误缩放画飞（四周透底 + 巨大错位底图）。
       const auto tl = getLocalPoint (&mod, juce::Point<int>());
+      Y2K_DIAG_PHASE ("gl:draw module (direct)");
       s3dShader->use();
       s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
       s3dTransformUniform->set (dpiScale, -dpiScale,
@@ -7918,6 +8221,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       {
         if (mod.glTex == 0)
           glGenTextures (1, &mod.glTex);
+        Y2K_DIAG_PHASE ("gl:TexImage2D (module texture upload)");
         glBindTexture (GL_TEXTURE_2D, mod.glTex);
         if (snap->texDirty)
         {
@@ -7950,6 +8254,8 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       mod.glDirectActive.store (true);
       mod.repaint();
     }
+
+    mod.diagSetVisible (true);
   };
 
   // 统一 z 序遍历：组件树先序（兄弟按索引序）即 z 从低到高，
@@ -7994,6 +8300,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
             sw = std::max (sw, 1);
             sh = std::max (sh, 1);
 
+            Y2K_DIAG_PHASE ("gl:BlitFramebuffer (milkdrop -> screen)");
             glBindFramebuffer (GL_READ_FRAMEBUFFER, milkdropBlitSourceFbo);
             glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
             glBlitFramebuffer (0, 0, sw, sh,
@@ -8006,6 +8313,8 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       {
         if (s3dOk && gmod->isVisible() && gmod->isShowing())
           renderOneGlModule (*gmod);
+        else
+          gmod->diagSetVisible (false);
       }
       else
       {
@@ -8072,6 +8381,10 @@ void Y2KmeterAudioProcessorEditor::destroyMilkdropEditorResources() {
 
 void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
   // GL 上下文真正关闭（Editor 析构/重建）时才走这里：清理直渲染资源 + milkdrop。
+  y2k::diag::setThreadTag ("GL");
+  y2k::diag::setPhase ("Editor::openGLContextClosing");
+  Y2K_DIAGC ("GL", "openGLContextClosing enter (释放 GL 资源)");
+
   // v2.9.4：清理 GL 直渲染资源（VAO + 各 GlDirectModuleBase 模块专属 VBO）
   if (s3dVao != 0) { juce::gl::glDeleteVertexArrays (1, &s3dVao); s3dVao = 0; }
   if (s3dQuadVbo != 0) { juce::gl::glDeleteBuffers (1, &s3dQuadVbo); s3dQuadVbo = 0; }

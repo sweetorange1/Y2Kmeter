@@ -3,6 +3,7 @@
 #include <algorithm>
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/perf/FramePerfLog.h"
+#include "source/diag/Y2KDiagLog.h"
 
 // ==========================================================
 // Phase F —— FrameDispatcher 内部实现类
@@ -39,6 +40,13 @@ public:
         if (dispatching)
             return;
         const juce::ScopedValueSetter<bool> dispatchingScope (dispatching, true);
+
+        // 诊断：帧分发是"UI 数据是否还在流动"的唯一判据。
+        //   分发停了 = 所有模块会停更（看起来像"全部卡死"），与 GL 卡死要区分开。
+        y2k::diag::heartbeat (y2k::diag::Channel::Dispatch);
+        y2k::diag::addDispatchTick();
+        Y2K_DIAG_PHASE ("Hub::dispatch");
+        const double diagDispatchStartMs = juce::Time::getMillisecondCounterHiRes();
 
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::ui, "UI-FrameDispatcher");
@@ -292,6 +300,16 @@ public:
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordMemoryFree(sizeof(FrameSnapshot));
 #endif
+
+        // 诊断：整个分发（含所有模块 onFrame）耗时过长会直接表现为界面卡顿。
+        //   25ms 阈值 ≈ 一帧 40fps 的预算，超过说明某个模块在 UI 线程上失控。
+        if (y2k::diag::isEnabled())
+        {
+            const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - diagDispatchStartMs;
+            if (elapsedMs > 25.0)
+                Y2K_DIAG ("SLOW", "Hub::dispatch " + juce::String (elapsedMs, 1)
+                                      + "ms listeners=" + juce::String ((int) activeListeners.size()));
+        }
     }
 
 private:
@@ -434,6 +452,9 @@ void AnalyserHub::pushStereo(const float* left, const float* right, int numSampl
 {
     if (left == nullptr || right == nullptr || numSamples <= 0)
         return;
+
+    // 诊断：音频链路心跳（开关开启时一次原子写；关闭时一次原子读）
+    y2k::diag::heartbeat (y2k::diag::Channel::Audio);
 
 #if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().markCurrentThreadRole(y2k::perf::ThreadRole::audio, "Audio-AnalyserHub");
@@ -1702,6 +1723,8 @@ void AnalyserHub::startFrameDispatcher (int hz)
     // 外部 vblank 时钟接管期间只记录目标频率（供回退时使用），不启动 Timer
     if (! externalFrameClock)
         frameDispatcher->startTimerHz (safeHz);
+
+    y2k::diag::setChannelActive (y2k::diag::Channel::Dispatch, true);
 }
 
 void AnalyserHub::stopFrameDispatcher()
@@ -1710,6 +1733,7 @@ void AnalyserHub::stopFrameDispatcher()
         frameDispatcher->stopTimer();
     currentFrameDispatcherHz.store (0, std::memory_order_relaxed);
     externalFrameClock = false;
+    y2k::diag::setChannelActive (y2k::diag::Channel::Dispatch, false);
 }
 
 void AnalyserHub::setExternalFrameClock (bool shouldUseExternalClock)

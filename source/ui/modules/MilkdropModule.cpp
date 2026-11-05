@@ -14,6 +14,7 @@
 #include "MilkdropModule_mac.h"
 #endif
 #include "source/ui/PinkXPStyle.h"
+#include "source/diag/Y2KDiagLog.h"
 #include "source/Y2KLogging.h"
 #include "PluginEditor.h"
 
@@ -2104,6 +2105,12 @@ void MilkdropModule::GLView::LoadCurrentPreset() {
 }
 
 void MilkdropModule::GLView::newOpenGLContextCreated() {
+  // 诊断：浮动态独立 GL 上下文的创建（projectM handle / GLEW / 预设扫描）
+  //   在这一步卡住时，整个 JUCE GL 线程都会被占住 → 所有 GL 模块一起"卡死"。
+  y2k::diag::setThreadTag ("GL");
+  y2k::diag::setPhase ("MilkdropGLView::newOpenGLContextCreated");
+  Y2K_DIAGC ("GL", "MilkdropGLView context created (浮动态独立上下文)");
+
   // === Debug 死循环修复 + 首帧乱码修复 ===
   // 1) 清空可能存在的历史 GL 错误。macOS Core Profile / OpenGL over Metal
   //    下，刚 attach 时 GL error 队列里常有残留项，而 JUCE Debug 构建的
@@ -2428,6 +2435,13 @@ void MilkdropModule::GLView::DestroyScaleFbo() {
 }
 
 void MilkdropModule::GLView::renderOpenGL() {
+  // 诊断：浮动态（脱离到独立窗口）时 projectM 由 GLView 自己的上下文渲染，
+  //   但用的是同一条 JUCE GL 线程 —— 这里卡住会让整个程序的 GL 全部停摆，
+  //   因此必须单独打阶段标记，否则日志里只会看到 Editor 的最后一步。
+  y2k::diag::setThreadTag ("GL");
+  y2k::diag::setPhase ("MilkdropGLView::renderOpenGL");
+  y2k::diag::heartbeat (y2k::diag::Channel::GlFrame);
+
   juce::OpenGLHelpers::clear(juce::Colours::black);
   if (!local_render_ready_ || local_pm_handle_ == nullptr)
     return;
@@ -2489,6 +2503,7 @@ void MilkdropModule::GLView::renderOpenGL() {
       api.setWindowSize (local_pm_handle_,
                          static_cast<std::size_t>(render_w),
                          static_cast<std::size_t>(render_h));
+      Y2K_DIAG_PHASE ("gl:MilkdropGLView openglRenderFrameFbo");
       api.openglRenderFrameFbo (local_pm_handle_, scale_fbo_);
       juce::gl::glDisable (juce::gl::GL_SCISSOR_TEST);
     } else {
@@ -2568,6 +2583,7 @@ void MilkdropModule::GLView::renderOpenGL() {
                        static_cast<std::size_t>(surface_h));
     juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
     juce::gl::glViewport (0, 0, surface_w, surface_h);
+    Y2K_DIAG_PHASE ("gl:MilkdropGLView openglRenderFrame (1:1)");
     api.openglRenderFrame (local_pm_handle_);
   }
 }

@@ -111,6 +111,55 @@
 - `Y2K_LOG` 参数必须是纯字符串/拼接表达式，**禁止含副作用**（如会修改状态的函数调用），否则关闭日志的构建中副作用会被一并删除。
 - 已使用 `Y2K_LOG` 的调用点：`UpdateChecker.cpp`、`Y2KStandaloneApp.cpp`、`MilkdropModule.cpp`、`ProjectMApi.cpp`、`UpdateDialog.cpp`。
 
+### 1.5 现场诊断日志（`source/diag/Y2KDiagLog.h`，v3.0.x）
+
+**为什么单独再做一套**：`Y2K_LOG` 只在 RelWithDebInfo 编译期开启，正式发出去的 Release 包**根本不含日志代码**，用户现场出问题（如"所有 GL 模块卡死"）时无法让用户自己产日志。本模块是**运行时开关**的诊断日志，Release 包也编译，默认关闭。
+
+**开关**（任一即可）：
+
+1. **RelWithDebInfo 构建自动开启**（`shouldEnable()` 里判 `Y2K_ENABLE_LOGGING`，
+   该宏只在本工程的 RelWithDebInfo 配置定义）→ 打 RelWithDebInfo 安装包即"带日志的包"，
+   Release 安装包不含任何日志输出（`toy_perf_log.txt` / `Y2Kmeter_debug.log` 同样只在
+   RelWithDebInfo 编译）；
+2. 显式打开（Release 也要日志时）：`cmake ... -DY2K_DIAG_LOG_DEFAULT_ON=ON`；
+3. 环境变量 `Y2K_DIAG_LOG=1`（`0/off` 可强制关闭）；
+4. exe 同目录或 `<用户数据目录>/Y2Kmeter/` 下放一个 `Y2Kmeter_diag_on.txt` 空文件。
+
+`Y2K_DIAG_VERBOSE=1` 额外每 5 s 打印一次全部 GL 直渲染模块状态。
+
+**产物**：`<桌面>/Y2Kmeter_Diag/`（桌面不可写回退文档/用户数据目录）
+
+| 文件 | 内容 |
+| --- | --- |
+| `Y2Kmeter_diag_*.log` | 主日志：环境信息（OS/CPU/内存/多屏 DPI/是否远程桌面）、GL vendor/renderer/version/GLSL、上下文创建/attach/detach、每 5 s 的出帧与耗时摘要、慢操作告警 |
+| `Y2Kmeter_hang_*.dmp` | 卡死瞬间的 Minidump（Windows，最多 3 份），配合构建 PDB 可直接看所有线程调用栈 |
+| `Y2Kmeter_snapshot_*.txt` | 手动快照（`Ctrl/⌘ + Shift + D` 或 `reportNow()`） |
+| `README_请把这个文件夹发给开发者.txt` | 给非技术用户的回收说明 |
+
+**卡死定位机制**（全自动，不需要用户操作）：
+
+1. `y2k::diag::setPhase("...")` 在 GL 线程每个大步骤前后打标记（projectM 渲染、FBO blit、`glTexImage2D`、`glReadPixels`、各模块的 snapshot 锁等待与绘制分支……）。日志里"最后一次 phase"就是卡住的位置。
+2. 心跳通道 `GlFrame / UiMessage / Dispatch / Audio`：看门狗线程每 250 ms 检查，GL 5 s、UI 4 s 无心跳即判停摆，自动输出 `STALL` 报告（各线程 phase、通道空闲时长、Editor 尺寸/DPI/attach 状态、全部 GL 直渲染模块的可见性/顶点数/纹理与 FBO 尺寸/构建与渲染耗时）+ Minidump。
+3. `attach` 后 10 s 仍无 `newOpenGLContextCreated` → 单独告警（驱动创建上下文卡死 / 远程桌面软件渲染）。
+4. GL 线程每次 `renderOpenGL` 末尾查一次 `glGetError`，异常限流记录。
+
+**编码约定**：
+
+- 高频路径只允许 `heartbeat()` / `setPhase()`（原子写）与 `addFrameSample()` 这类累加，**禁止**直接 `write()` 拼字符串。
+- 一律用宏 `Y2K_DIAG / Y2K_DIAGC / Y2K_DIAG_PHASE / Y2K_DIAG_SLOW`，关闭时参数表达式完全不求值（零开销）。
+- `writeCritical` 会立即 flush，仅用于上下文创建/销毁、STALL、会话头等"崩了也必须留下"的事件。
+
+**出包**（两套并行，互不影响）：
+
+| 包 | 构建配置 / 目录 | 脚本 | 产物 |
+| --- | --- | --- | --- |
+| 正式包 | `Release` / `cmake-build-release-visual-studio` | `build_installer.bat` | `dist/Y2Kmeter_Setup_<ver>_x64.exe` |
+| 诊断包 | `RelWithDebInfo` / `cmake-build-relwithdebinfo-visual-studio-ninja` | `build_installer_diag.bat` | `dist/Y2Kmeter_Setup_<ver>_Diag_x64.exe` |
+
+- 两个 `.iss` 的关系：`Y2Kmeter_diag_installer.iss` 只定义 `MyConfig/MyBuildDir/MyOutputSuffix/MyVersionSuffix` 后 `#include "Y2Kmeter_installer.iss"`，安装逻辑（组件页、VST3 目录页、预设解压、AppId 覆盖安装）完全共用；主脚本里所有可变项都用 `#ifndef` 保护，默认值保持原来的 Release 行为。
+- 诊断构建的 configure 必须带 `-DY2K_DIAG_LOG_DEFAULT_ON=ON`，否则打出来的包不写日志（`build_installer_diag.bat` 会检查 `CMakeCache.txt` 并在为 OFF 时二次确认）。
+- 诊断包产物带 `Y2Kmeter.pdb`：用户回传的 `.dmp` 只能靠同一次构建的 PDB 解析，**打包后不要再重新编译**。
+
 ---
 
 ## 2. 核心分层架构
@@ -5534,6 +5583,74 @@ L/R 独立 → HP 5 kHz（两级 Butterworth 级联 = LR4，24 dB/oct）
 - 本轮未改 `ModuleType` / `Kind` 枚举、未改存档字段、未改 CMake 源文件列表 → 增量编译即可，无需全量重建；
 - 待实机确认项：红点在 1 小时处自动收尾（可临时把 `maxTakeSeconds` 改小验证）、
   颜色按钮循环后 GL / legacy 双路径配色一致、Stereo Field 在 -40 LUFS 级弱信号下散点是否铺满雷达。
+
+---
+
+## v3.0.0 补充：运行时诊断日志 / 纯净 Release / 诊断安装包
+
+> 本轮目标：让"用户现场偶发卡死（开发者多台机器均无法复现）"变得可定位。
+> 版本号保持 **3.0.0**，不新增用户可见功能，不改存档格式。
+
+### 1. 新增 `source/diag/Y2KDiagLog`（运行时诊断日志）
+
+与 `Y2K_LOG`（编译期开关，只有 RelWithDebInfo 才有代码）互补：这套是**运行时开关**，
+Release 里也编译、默认关闭、关闭时每个埋点只做一次 relaxed 原子读。
+
+- 开关：RelWithDebInfo 自动开启 / `-DY2K_DIAG_LOG_DEFAULT_ON=ON` / 环境变量 `Y2K_DIAG_LOG=1` /
+  exe 目录放 `Y2Kmeter_diag_on.txt`；
+- 产物（桌面 `Y2Kmeter_Diag\`）：`Y2Kmeter_diag_*.log`、卡死时的 `Y2Kmeter_hang_*.dmp`
+  （Minidump，需用同一次构建的 PDB 解析）、`Y2Kmeter_snapshot_*.txt`、给用户看的 README；
+- 看门狗线程每 250 ms 检查心跳：GL 5 s / UI 4 s 无心跳即判定停摆，自动输出 `STALL` 报告
+  （各线程最后一次 phase、通道空闲时长、Editor 尺寸/DPI/attach 状态、全部 GL 直渲染模块状态）
+  + Minidump；`attach` 后 10 s 无 `newOpenGLContextCreated`、启动 30 s 无 UI 心跳均单独告警；
+- 手动导出：`Ctrl/⌘ + Shift + D`（写快照 + 打开日志目录）。
+
+### 2. GL 渲染链路埋点
+
+| 位置 | 内容 |
+| --- | --- |
+| `Editor::newOpenGLContextCreated` | vendor/renderer/version/GLSL/maxTex/maxViewport/renderScale；命中软件渲染器（GDI Generic / Basic Render / llvmpipe / SwiftShader）单独告警 |
+| `Editor::renderOpenGL` | 帧入口心跳、帧间隔 >500 ms、projectM 渲染 / 染色 pass / FBO 重分配 / blit 分段计时、`glReadPixels` 单独 phase、每帧 `glGetError` 限流记录 |
+| `renderGlDirectModulesZOrdered` | 每模块 snapshot 锁等待（>8 ms 告警）与渲染耗时统计 |
+| `GlDirectModuleBase` | 全局槽位状态镜像（可见性 / 浮动态 / GL 接管 / 顶点数 / 纹理与 FBO 尺寸 / 构建与渲染耗时）；看门狗只读原子量，绝不回读组件树 |
+| `MilkdropModule::GLView` | 浮动态独立上下文的创建与 projectM 渲染 phase（与 Editor 共用同一条 GL 线程） |
+| `AnalyserHub` | 帧分发心跳 + 单次分发 >25 ms 告警；音频线程心跳 |
+| `ModulePanel::paint` | 单模块绘制 >40 ms 告警 |
+
+### 3. 修复：诊断日志中文乱码
+
+JUCE 的 `String (const char*)` 按 **ASCII** 解释（`juce_String.cpp` 中的 `CharPointer_ASCII`），
+UTF-8 中文会被逐字节二次编码成 `åä¸æ`。修复：`write` / `writeCritical` 增加 `const char*` 重载
+（内部用 `CharPointer_UTF8` 解析），并新增 `y2k::diag::u8()` 用于"中文起头"的字符串拼接。
+
+### 4. Release 纯净 / RelWithDebInfo 全量日志
+
+| 输出 | Release | RelWithDebInfo |
+| --- | --- | --- |
+| `toy_perf_log.txt`（ToyPerf 每秒性能采样） | ✗ 整段不编译（`TOYPERF_LOG` / `TOYPERF_SCOPED_TIMER` 展开为空，参数不求值） | ✓ |
+| `Y2Kmeter_debug.log`（`juce::Logger` 落盘） | ✗ `#ifdef Y2K_ENABLE_LOGGING` | ✓ |
+| 桌面 `Y2Kmeter_Diag\`（诊断日志） | ✗ 默认关闭 | ✓ 自动开启 |
+
+### 5. 打包链路
+
+- `Y2Kmeter_installer.iss` 参数化：`MyConfig / MyBuildDir / MyOutputDir / MyOutputSuffix / MyVersionSuffix`
+  全部用 `#ifndef` 保护，默认值保持原 Release 行为；VST3 复制额外排除 `*.pdb/*.ilk/*.exp/*.lib`；
+- 新增 `Y2Kmeter_diag_installer.iss`：只覆盖 4 个变量后 `#include` 正式脚本，AppId 相同（原地覆盖安装）；
+- 新增 `build_installer_diag.bat`：预检产物 + 预检编译命令里的日志宏 + 打印产物时间戳，
+  输出 `dist/Y2Kmeter_Setup_<ver>_Diag_x64.exe`；
+- 安装时清理历史遗留的 `toy_perf_log.txt` / `Y2Kmeter_debug.log`。
+
+### 6. 仓库清洗
+
+删除一次性产物与开发素材（均可在 git 历史中找回）：
+`README.md`、`MACOS_ADAPTATION_DIFFS.md`、`Y2KMeter_Stick模式方案.md`、`运行过程中报错.txt`、
+`0000_test_single_wave.milk`、`s3d_cpu_orig.cpp`、`y2k_app_diff.txt.tmp`、`^`、`nul'`、
+`_gen_api_files.js`、`_temp_server.js`、`cleanup_y2kmeter.ps1`，以及目录
+`tools/`（含 butterchurn 子模块、milkdrop_tester、virtupet_cutter）、`test_tools/`、`申诉材料/`。
+
+保留（构建/打包必需）：`assets/`（预设、纹理、安装包 ZIP、图标）、`tests/`、`scripts/`、`ttf/`、
+`CMakeLists.txt`、`CMakePresets.json`、两个 `.iss`、两个 `build_installer*.bat`、`build_macos_installer.sh`、
+`LICENSE`、本文件。
 
 ---
 
