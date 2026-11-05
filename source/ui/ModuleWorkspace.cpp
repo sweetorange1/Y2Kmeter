@@ -3668,6 +3668,11 @@ void ModuleWorkspace::rebuildLayoutPresetItems()
     layoutPresetBox.addItem ("Focus + Sidecar",     (int) LayoutPreset::focusSidecar);
     layoutPresetBox.addItem ("Broadcast Loudness",  (int) LayoutPreset::broadcastLoudness);
     layoutPresetBox.addItem ("Only Milkdrop",       (int) LayoutPreset::onlyMilkdrop);
+    // 全屏磁贴预设（14~16）：窗口铺满屏幕，模块排布来自用户自定义存档，
+    // 全部模块用默认设置、不含 VirtuPet（详见 PluginEditor::applyFullScreenTilePreset）。
+    layoutPresetBox.addItem ("FULL: SPECTRUM",      (int) LayoutPreset::fullSpectrumFocus);
+    layoutPresetBox.addItem ("FULL: ALL MODULES",   (int) LayoutPreset::fullAllModules);
+    layoutPresetBox.addItem ("FULL: MULTI COMBO",   (int) LayoutPreset::fullMultiCombo);
     layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
 }
 

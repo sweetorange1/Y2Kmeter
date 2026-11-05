@@ -327,6 +327,20 @@ namespace {
         f.appendText (line + "\r\n");
     }
 
+    // ---- 诊断构建标识（v3.0.1）----
+    //   "能出日志"的构建 = RelWithDebInfo（Y2K_ENABLE_LOGGING）
+    //   或显式打开诊断日志的构建（Y2K_DIAG_LOG_DEFAULT_ON=ON）。
+    //   这类构建在顶部抬头（drawTitleBar / ChromeHiddenOverlay）的版本号右侧
+    //   显示 " debug"，让用户和客服一眼确认装的是诊断包而不是正式包。
+    bool y2kIsDiagnosticBuild() noexcept
+    {
+       #if defined (Y2K_ENABLE_LOGGING) || (defined (Y2K_DIAG_LOG_DEFAULT) && Y2K_DIAG_LOG_DEFAULT)
+        return true;
+       #else
+        return false;
+       #endif
+    }
+
     BOOL CALLBACK y2kEnumMonitorProc (HMONITOR hMon, HDC, LPRECT, LPARAM lp)
     {
         auto* out = reinterpret_cast<juce::String*> (lp);
@@ -509,6 +523,112 @@ juce::String stripPresetLabel (int presetId)
     if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMilkdrop)    return "BAR: MILKDROP";
     if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpecMilk)    return "BAR: SPEC + MILK";
     return "BAR: CLASSIC";
+}
+
+// ----------------------------------------------------------
+// 全屏磁贴预设（14~16）的静态布局表
+//   · 来源：用户用 Save 导出的三份自定义布局存档
+//       "频谱为主.settings" / "所有模块全部放到屏幕里.settings" / "多功能集合.settings"
+//   · 只取 <PBEQ_Layout> 里每个 <Module> 的 type + x/y/w/h（参考画布 2560×1328），
+//     刻意丢弃：
+//       a) VirtuPet 模块（存档里的宠物角色 / 饱食度 / 健康度是运行时数据，
+//          且它是浮在别的模块上的贴片，不该固化进预设）；
+//       b) 所有 <state> 子节点与模块额外属性（显示模式、颜色、缩放、
+//          Milkdrop 预设、瀑布参数等）—— 模块一律由 createModule() 以各自
+//          独立的构造默认值创建。
+//   · 坐标保留存档原值（本身已 8px 网格对齐），应用时按当前 canvas 归一化
+//     映射，因此换屏幕 / 换分辨率后相对排布不变。
+// ----------------------------------------------------------
+struct FullScreenTile
+{
+    ModuleType type;
+    int x, y, w, h;
+};
+
+// 14 FULL: SPECTRUM —— 频谱为主（左侧三块大图 + 顶部波形 + 右侧仪表列）
+static const FullScreenTile kFullSpectrumTiles[] =
+{
+    { ModuleType::spectrum,         0,    0, 1816, 456 },
+    { ModuleType::loudness,      1816,  328,  248, 1000 },
+    { ModuleType::waveform,      1816,    0,  744, 328 },
+    { ModuleType::oscilloscopeWave, 2064, 328,  496, 368 },
+    { ModuleType::oscilloscope,  2064,  696,  496, 368 },
+    { ModuleType::recorder,      2064, 1064,  160, 264 },
+    { ModuleType::tempoKey,      2224, 1064,  328, 264 },
+    { ModuleType::spectrogram,      0,  456, 1816, 456 },
+    { ModuleType::stereoMap,        0,  912, 1816, 416 }
+};
+
+// 15 FULL: ALL MODULES —— 所有模块全部放到屏幕里（26 块密排铺满整屏）
+static const FullScreenTile kFullAllModulesTiles[] =
+{
+    { ModuleType::dynamics,         2176,  256, 384, 256 },
+    { ModuleType::phaseCorrelation, 1984,  256, 192, 128 },
+    { ModuleType::phaseBalance,     1984,  384, 192, 128 },
+    { ModuleType::oscilloscopeWave,  768,  256, 384, 256 },
+    { ModuleType::dynamicsMeters,      0,  512, 256, 256 },
+    { ModuleType::oscilloscopeWave,    0,  256, 384, 256 },
+    { ModuleType::oscilloscopeWave,  384,  256, 384, 256 },
+    { ModuleType::phase,            1600,  256, 384, 256 },
+    { ModuleType::eq,               1152,  256, 448, 256 },
+    { ModuleType::oscilloscope,     2176,    0, 384, 256 },
+    { ModuleType::oscilloscope,     1792,    0, 384, 256 },
+    { ModuleType::vuMeter,          1064,    0, 344, 256 },
+    { ModuleType::truePeak,          744,    0, 320, 256 },
+    { ModuleType::lufsRealtime,      424,    0, 320, 256 },
+    { ModuleType::loudness,            0,    0, 424, 256 },
+    { ModuleType::oscilloscope,     1408,    0, 384, 256 },
+    { ModuleType::stereoField,         0, 1064, 632, 264 },
+    { ModuleType::waveform,         1800,  512, 760, 256 },
+    { ModuleType::stereoMap,        1288,  512, 512, 256 },
+    { ModuleType::spectrogram3d,     824,  512, 464, 256 },
+    { ModuleType::spectrogram,       256,  512, 568, 256 },
+    { ModuleType::spectrum,            0,  768, 544, 296 },
+    { ModuleType::stereoMap,         544,  768, 664, 296 },
+    { ModuleType::tempoKey,          632, 1064, 416, 264 },
+    { ModuleType::recorder,         1048, 1064, 160, 264 },
+    { ModuleType::milkdrop,         1208,  768, 1352, 560 }
+};
+
+// 16 FULL: MULTI COMBO —— 多功能集合（顶部通栏波形 + 中部频谱 + 右下可视化）
+static const FullScreenTile kFullMultiComboTiles[] =
+{
+    { ModuleType::loudness,         1816,  328,  248, 1000 },
+    { ModuleType::spectrogram,         0,  328,  576, 512 },
+    { ModuleType::spectrogram3d,       0,  840,  576, 488 },
+    { ModuleType::oscilloscopeWave,  576,  840,  672, 488 },
+    { ModuleType::oscilloscope,     1248,  840,  568, 488 },
+    { ModuleType::lufsRealtime,     2064,  328,  496, 256 },
+    { ModuleType::milkdrop,         2064,  584,  488, 376 },
+    { ModuleType::waveform,            0,    0, 2560, 328 },
+    { ModuleType::stereoMap,        2064,  960,  496, 368 },
+    { ModuleType::spectrum,          576,  328, 1240, 512 }
+};
+
+bool isFullScreenTilePreset (int presetId)
+{
+    return presetId == (int) ModuleWorkspace::LayoutPreset::fullSpectrumFocus
+        || presetId == (int) ModuleWorkspace::LayoutPreset::fullAllModules
+        || presetId == (int) ModuleWorkspace::LayoutPreset::fullMultiCombo;
+}
+
+const FullScreenTile* fullScreenTilesForPreset (int presetId, int& count)
+{
+    switch (presetId)
+    {
+        case (int) ModuleWorkspace::LayoutPreset::fullSpectrumFocus:
+            count = (int) (sizeof (kFullSpectrumTiles) / sizeof (kFullSpectrumTiles[0]));
+            return kFullSpectrumTiles;
+        case (int) ModuleWorkspace::LayoutPreset::fullAllModules:
+            count = (int) (sizeof (kFullAllModulesTiles) / sizeof (kFullAllModulesTiles[0]));
+            return kFullAllModulesTiles;
+        case (int) ModuleWorkspace::LayoutPreset::fullMultiCombo:
+            count = (int) (sizeof (kFullMultiComboTiles) / sizeof (kFullMultiComboTiles[0]));
+            return kFullMultiComboTiles;
+        default:
+            count = 0;
+            return nullptr;
+    }
 }
 
 // UI 密度缩放的判据区域（跨平台差异）：
@@ -833,7 +953,9 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth ("v3.0.0");
+        // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
+        const int versionW = versionFont.getStringWidth (y2kIsDiagnosticBuild() ? "v3.0.1 debug"
+                                                                                : "v3.0.1");
         const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -873,17 +995,22 @@ public:
     void paint (juce::Graphics& g) override
     {
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
+        //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v3.0.0";
+        const juce::String versionBase = "v3.0.1";
+        const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
+        const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont(12.0f, juce::Font::plain);
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionW = versionFont.getStringWidth (versionText);
-        const int urlW     = urlFont.getStringWidth (urlText);
+        const int nameW        = nameFont.getStringWidth ("Y2Kmeter");
+        const int versionBaseW = versionFont.getStringWidth (versionBase);
+        const int versionW     = versionFont.getStringWidth (versionText);   // 含 " debug"
+        const int versionTagW  = versionW - versionBaseW;
+        const int urlW         = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -909,7 +1036,15 @@ public:
         g.setFont (nameFont);
         g.drawText (nameText, x0, y, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (versionText, x0 + nameW + gap1, y, versionW, h, juce::Justification::centredLeft, false);
+        g.drawText (versionBase, x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
+        if (versionTagW > 0)
+        {
+            // " debug" 用强调色（hover 时更亮），一眼能认出诊断包
+            g.setColour (PinkXP::warn.withAlpha (juce::jmax (0.75f, textAlpha)));
+            g.drawText (versionTag, x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
+                        juce::Justification::centredLeft, false);
+            g.setColour (PinkXP::ink.withAlpha (textAlpha));   // 恢复 url 文字颜色
+        }
         g.setFont (urlFont);
         g.drawText (urlText, x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
 
@@ -2793,6 +2928,8 @@ void Y2KmeterAudioProcessorEditor::seedDefaultModules()
 //   · presetId = 1 (defaultGrid)    → 恢复默认布局 + 默认窗口大小 960×640
 //   · presetId = 2 (horizontalFull) → 拉伸顶层窗口到当前屏幕宽，默认模块横向
 //                                      等分 canvas，高度撑满 canvas
+//   · presetId = 14/15/16           → 全屏磁贴预设（存档布局 + 模块默认设置），
+//                                      详见 applyFullScreenTilePreset()
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 {
@@ -3497,6 +3634,12 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
                 rw->setFullScreen(true);
 #endif
     }
+    else if (isFullScreenTilePreset (presetId))
+    {
+        // 14/15/16 全屏磁贴预设：窗口铺满屏幕，模块只按存档布局摆放，
+        // 全部走 createModule() 的独立默认设置、不带存档里的任何模块内部状态。
+        applyFullScreenTilePreset (presetId);
+    }
 
     // 重新添加 VirtuPet 模块到 canvas 右下角（切换预设时保留宠物不被清除）
     for (const auto& state : virtuPetStates)
@@ -3542,6 +3685,127 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
     // ------------------------------------------------------------------
     if (alwaysOnTopActive)
         setAlwaysOnTopActive (true);
+}
+
+// ----------------------------------------------------------
+// 全屏磁贴预设（14/15/16）
+//   · 窗口几何与 Preset 10 (Only Milkdrop) 一致：Windows 铺满 userArea
+//     （物理口径 rcWork，兼容混合 DPI），macOS 铺满 totalArea 后进入原生
+//     全屏；resizeLimits 锁死到全屏尺寸。
+//   · 模块按静态表的参考画布（2560×1328）归一化映射到实际 canvas，边界
+//     统一吸附到 8px 网格 → 相邻模块共享同一条边界，密排无缝隙。
+//   · 只调用 createModule()：每个模块保持自己独立的默认设置，不套用存档
+//     里的显示模式 / 颜色 / 缩放 / Milkdrop 预设等任何内部状态。
+// ----------------------------------------------------------
+void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
+{
+    if (workspace == nullptr) return;
+
+    int tileCount = 0;
+    const auto* tiles = fullScreenTilesForPreset (presetId, tileCount);
+    if (tiles == nullptr || tileCount <= 0) return;
+
+    auto* top = getTopLevelComponent();
+    if (top == nullptr) top = this;
+
+   #if JUCE_WINDOWS
+    // Windows：物理口径（rcWork + MoveWindow），理由同 Preset 5 / 10。
+    Y2KMonitorPx monPx;
+    const bool usePxTarget = (top != this)
+                             && ! y2kScreenSimulationActive()
+                             && y2kGetMonitorPxForWindow (top, monPx)
+                             && ! monPx.work.isEmpty();
+   #endif
+
+    const auto display = juce::Desktop::getInstance()
+                             .getDisplays()
+                             .getDisplayForPoint (top->getScreenBounds().getCentre());
+   #if JUCE_MAC
+    const auto realArea = (display != nullptr) ? display->totalArea
+                                               : juce::Rectangle<int> (1280, 720);
+   #else
+    const auto realArea = (display != nullptr) ? display->userArea
+                                               : juce::Rectangle<int> (1280, 720);
+   #endif
+    const auto area = resolveDisplayArea (realArea);
+   #if JUCE_WINDOWS
+    const int screenW = usePxTarget ? y2kPxToLogical (monPx.work.getWidth(),  monPx.scale)  : area.getWidth();
+    const int screenH = usePxTarget ? y2kPxToLogical (monPx.work.getHeight(), monPx.scale) : area.getHeight();
+   #else
+    const int screenW = area.getWidth();
+    const int screenH = area.getHeight();
+   #endif
+
+    // 先放开 resizeLimits，确保试探 setBounds 不会被 constrainer 夹回
+    if (auto* cbc0 = getConstrainer())
+        setResizeLimits (640, 420,
+                         juce::jmax (cbc0->getMaximumWidth(),  screenW),
+                         juce::jmax (cbc0->getMaximumHeight(), screenH));
+
+    if (top == this)
+        setSize (screenW, screenH);
+    else
+    {
+       #if JUCE_WINDOWS
+        if (usePxTarget)
+            y2kMoveWindowToRectPx (top, monPx.work);
+        else
+       #endif
+        top->setBounds (area.getX(), area.getY(), screenW, screenH);
+    }
+
+    // 全屏预设锁死尺寸（与 Preset 5 / 10 一致）
+    if (auto* cbc = getConstrainer())
+        setResizeLimits (screenW, screenH, screenW, screenH);
+
+    const auto canvas = workspace->getCanvasArea();
+
+    constexpr int kRefW  = 2560;   // 存档布局的参考画布宽
+    constexpr int kRefH  = 1328;   // 存档布局的参考画布高
+    constexpr int kGrid  = 8;      // 与 ModuleWorkspace::gridSize 一致
+
+    const int xL = ((canvas.getX() + kGrid - 1) / kGrid) * kGrid;
+    const int xR = (canvas.getRight()  / kGrid) * kGrid;
+    const int yT = ((canvas.getY() + kGrid - 1) / kGrid) * kGrid;
+    const int yB = (canvas.getBottom() / kGrid) * kGrid;
+    const int usableW = juce::jmax (kGrid, xR - xL);
+    const int usableH = juce::jmax (kGrid, yB - yT);
+
+    // 把参考坐标换算成"网格格数"再取整，保证 tile 的两条边都落在 8px 网格上；
+    // 相邻 tile 用同一个函数算边界，因此天然共享边界、不会留缝或重叠。
+    auto mapX = [&] (int refX)
+    {
+        const double cells = (double) refX * usableW / (kRefW * kGrid);
+        return juce::jlimit (xL, xR, xL + juce::roundToInt (cells) * kGrid);
+    };
+    auto mapY = [&] (int refY)
+    {
+        const double cells = (double) refY * usableH / (kRefH * kGrid);
+        return juce::jlimit (yT, yB, yT + juce::roundToInt (cells) * kGrid);
+    };
+
+    for (int i = 0; i < tileCount; ++i)
+    {
+        const auto& t = tiles[i];
+
+        // 只创建、只定位：不读存档 <state>，也不调任何 setDisplayMode / setXXX，
+        // 每个模块都是自己构造函数里的默认设置。
+        auto panel = createModule (t.type);
+        if (panel == nullptr) continue;
+
+        const int x0 = mapX (t.x);
+        const int y0 = mapY (t.y);
+        const int w  = juce::jmax (panel->getMinWidth(),  mapX (t.x + t.w) - x0);
+        const int h  = juce::jmax (panel->getMinHeight(), mapY (t.y + t.h) - y0);
+        panel->setBounds (x0, y0, w, h);
+        workspace->addModule (std::move (panel), false);
+    }
+
+   #if JUCE_MAC
+    if (juce::JUCEApplicationBase::isStandaloneApp())
+        if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+            rw->setFullScreen (true);
+   #endif
 }
 
 // ----------------------------------------------------------
@@ -4077,17 +4341,23 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         auto textArea = getTitleTextBounds();
 
         // 主标题 "Y2Kmeter"
+        //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
+        //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionText = "v3.0.0";
+        const juce::String versionBase = "v3.0.1";
+        const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
+        const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
 
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const int nameW    = nameFont.getStringWidth (nameText);
-                const int versionW = versionFont.getStringWidth ("v3.0.0");
-        const int urlW     = urlFont.getStringWidth (urlText);
+        const int nameW        = nameFont.getStringWidth (nameText);
+        const int versionBaseW = versionFont.getStringWidth (versionBase);
+        const int versionW     = versionFont.getStringWidth (versionText);   // 含 " debug"
+        const int versionTagW  = versionW - versionBaseW;
+        const int urlW         = urlFont.getStringWidth (urlText);
 
         constexpr int gap1 = 6;   // name ↔ version 之间
         constexpr int gap2 = 10;  // version ↔ url 之间
@@ -4110,7 +4380,15 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         g.setFont (nameFont);
         g.drawText (nameText, x0, y, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (versionText, x0 + nameW + gap1, y, versionW, h, juce::Justification::centredLeft, false);
+        g.drawText (versionBase, x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
+        if (versionTagW > 0)
+        {
+            // " debug" 用强调色，方便一眼认出诊断包
+            g.setColour (PinkXP::warn);
+            g.drawText (versionTag, x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
+                        juce::Justification::centredLeft, false);
+            g.setColour (PinkXP::selInk);   // 恢复后续 url 文字颜色
+        }
         g.setFont (urlFont);
         g.drawText (urlText, x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
 
@@ -7878,6 +8156,11 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
   if (! s3dOk && ! milkOk)
     return;
 
+  // 记下进入前的 sRGB 状态：本函数结束时原样恢复，保证 JUCE 的组件绘制
+  //   （paintComponent 在本函数之后执行）看到的状态与以前完全一致，
+  //   不引入任何 UI 配色变化。我们只在自己的绘制/blit 期间强制关闭。
+  const bool s3dSrgbWasOn = (glIsEnabled (GL_FRAMEBUFFER_SRGB) != GL_FALSE);
+
   const int vw = juce::jmax (1, juce::roundToInt ((float) getWidth() * dpiScale));
   const int vh = juce::jmax (1, editorPhysH);
 
@@ -7892,6 +8175,11 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
   glDisable (GL_SCISSOR_TEST);
   glDisable (GL_STENCIL_TEST);
   glDisable (GL_DEPTH_TEST);
+  // 外网 v3.0.0：默认帧缓冲在部分驱动上是 sRGB-capable，若 GL_FRAMEBUFFER_SRGB
+  //   被（projectM / 驱动）打开，"线性 RGBA8 FBO → 后缓冲"的 glBlitFramebuffer
+  //   会按规范返回 GL_INVALID_OPERATION 并整帧丢弃（现场日志每帧一次 0x502）。
+  //   这里统一关掉：我们的颜色本来就是 8bit 直通，不需要 sRGB 转换。
+  glDisable (GL_FRAMEBUFFER_SRGB);
   glEnable (GL_BLEND);
   glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -7901,6 +8189,67 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
     s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
     glBindVertexArray (s3dVao);
   }
+
+  // ==========================================================
+  // 外网 v3.0.0 现场（RTX 3070 / NVIDIA 595.79）的两个兜底
+  // ==========================================================
+
+  // 1) 模块矩形先清成卡片底色。
+  //    组件层在 glDirectActive 后会把 canvas 挖成透明（只透出 GL 内容），
+  //    而 JUCE 的 OpenGL CPE 不会每帧整屏清屏（只清脏区）。因此只要某一帧
+  //    这里没画出像素，用户看到的就是上一帧残留 —— 即外网反馈的"卡死 + 拖影"。
+  //    先铺一层底色后，任何失败最差也只是"空画布"，不会再有残影。
+  auto paintModuleBackdrop = [&] (GlDirectModuleBase& mod)
+  {
+    // 只有"已接管（组件挖洞）"的模块才需要铺底色：
+    //   · 走 CPU 旧路径的模块整块由组件绘制覆盖，清屏纯属浪费；
+    //   · GL 接管后 canvas 是透明的，才需要这层保险。
+    if (! mod.glDirectActive.load (std::memory_order_relaxed))
+      return;
+
+    // 注意：getLocalPoint 的入参是**模块本地坐标**（模块左上角 = (0,0)），
+    //   不能传 getBounds()（那是父容器坐标，会重复叠加偏移）。
+    const auto tl = getLocalPoint (&mod, juce::Point<int> (0, 0));
+    const auto br = getLocalPoint (&mod, juce::Point<int> (mod.getWidth(), mod.getHeight()));
+
+    const int gx = (int) std::floor ((double) tl.x * dpiScale);
+    const int gy = (int) std::floor ((double) (editorLogicalH - br.y) * dpiScale);
+    const int gw = juce::jmax (1, (int) std::ceil ((double) br.x * dpiScale) - gx);
+    const int gh = juce::jmax (1, (int) std::ceil ((double) (editorLogicalH - tl.y) * dpiScale) - gy);
+
+    const auto c = PinkXP::face;
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    glViewport (0, 0, vw, vh);
+    glEnable (GL_SCISSOR_TEST);
+    glScissor (gx, gy, gw, gh);
+    glClearColor (c.getFloatRed(), c.getFloatGreen(), c.getFloatBlue(), 1.0f);
+    glClear (GL_COLOR_BUFFER_BIT);
+    glDisable (GL_SCISSOR_TEST);
+  };
+
+  // 2) 每个模块绘制前把 2D 绘制依赖的状态拉回确定值。
+  //    projectM 是 3D 渲染，可能残留 RASTERIZER_DISCARD / COLOR_MASK /
+  //    BLEND_EQUATION / PBO 绑定 / sRGB 编码等；这些都会让后续 2D 绘制
+  //    "画了但看不见"或整批被驱动拒绝（GL_INVALID_OPERATION）。
+  auto resetModuleGlState = [&] ()
+  {
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    glViewport (0, 0, vw, vh);
+    glDisable (GL_CULL_FACE);
+    glDisable (GL_SCISSOR_TEST);
+    glDisable (GL_STENCIL_TEST);
+    glDisable (GL_DEPTH_TEST);
+    glDisable (GL_RASTERIZER_DISCARD);                 // 开着的话 draw 全被丢弃
+    glDisable (GL_FRAMEBUFFER_SRGB);                   // sRGB 编码不匹配会让 blit 非法
+    glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);  // 写掩码被清 → 画了等于没画
+    glDepthMask (GL_FALSE);
+    glBlendEquation (GL_FUNC_ADD);                     // 残留 SUBTRACT 会让颜色互相抵消
+    glEnable (GL_BLEND);
+    glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glActiveTexture (GL_TEXTURE0);
+    glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);          // 残留 PBO 会让 glTexImage2D 指针被当偏移
+    glBindVertexArray (s3dVao);
+  };
 
   // v2.9.4：统一 GL 直渲染入口 —— 所有 GlDirectModuleBase 模块共用同一条
   //   "transform + 版本化上传 + 按 segments 逐段 draw"路径（此前三个模块
@@ -7913,6 +8262,17 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
     const bool dOn = y2k::diag::isEnabled();
     const double dStart = dOn ? juce::Time::getMillisecondCounterHiRes() : 0.0;
 
+    // 诊断：分段检查 GL 错误（仅诊断构建；关闭时整段被 if 短路）
+    auto diagCheckGl = [dOn] (const char* where)
+    {
+      if (! dOn)
+        return;
+      const GLenum e = juce::gl::glGetError();
+      if (e != juce::gl::GL_NO_ERROR)
+        Y2K_DIAG ("GL", juce::String ("module GL error @ ") + where
+                              + " = 0x" + juce::String::toHexString ((int) e));
+    };
+
     auto snap = mod.getGlSnapshot();
     if (snap == nullptr || snap->segments.empty())
     {
@@ -7924,6 +8284,15 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       mod.diagSetVisible (true);
       return;
     }
+
+    // 有内容要画时才重置状态 + 铺底色：
+    //   · 重置保证 clear / draw 不会被 projectM 残留的 colorMask、rasterizer discard、
+    //     blend equation、PBO 绑定、sRGB 编码等状态破坏；
+    //   · 先铺卡片底色，即使下面 blit/FBO 失败，也只有"空画布"而没有上一帧残影。
+    //   （空快照直接 return 的模块不铺底色 —— 避免误擦上层模块的内容。）
+    resetModuleGlState();
+    paintModuleBackdrop (mod);
+    diagCheckGl ("state-reset");
 
     // 诊断：模块级阶段标记（预生成字符串，热路径零分配）
     if (dOn)
@@ -8035,6 +8404,16 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
         glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
         glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                 GL_TEXTURE_2D, mod.glFboTex, 0);
+
+        // 诊断：FBO 不完整是"模块画不出来"的另一种典型原因（纹理分配失败等）
+        if (dOn)
+        {
+          const GLenum st = glCheckFramebufferStatus (GL_FRAMEBUFFER);
+          if (st != GL_FRAMEBUFFER_COMPLETE)
+            Y2K_DIAG ("GL", "module FBO incomplete: status=0x" + juce::String::toHexString ((int) st)
+                                  + " size=" + juce::String (fboW) + "x" + juce::String (fboH));
+        }
+
         glBindFramebuffer (GL_FRAMEBUFFER, 0);
         mod.glFboW = fboW;
         mod.glFboH = fboH;
@@ -8062,21 +8441,60 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       for (const auto& seg : snap->segments)
         glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
                       seg.offset, seg.count);
+      diagCheckGl ("logical-draw");
 
       // 线性缩小 blit 到后缓冲的模块 canvas 物理区域（2x 缩小 = 4 采样 box AA）
       const auto cPos = getLocalPoint (&mod, snap->canvasLocal.getPosition());
       const auto cBR  = getLocalPoint (&mod, snap->canvasLocal.getBottomRight());
-      Y2K_DIAG_PHASE ("gl:BlitFramebuffer (module logical->screen)");
-      glBindFramebuffer (GL_READ_FRAMEBUFFER, mod.glFbo);
-      glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
-      glViewport (0, 0, vw, vh);
-      glBlitFramebuffer (0, 0, fboW, fboH,
-                         (int) (cPos.x * dpiScale),
-                         (int) (editorPhysH - cBR.y * dpiScale),
-                         (int) (cBR.x * dpiScale),
-                         (int) (editorPhysH - cPos.y * dpiScale),
-                         GL_COLOR_BUFFER_BIT, GL_LINEAR);
-      glBindFramebuffer (GL_READ_FRAMEBUFFER, 0);
+
+      if (! s3dBlitBroken)
+      {
+        // 首帧探测：先清空错误队列，再单独检查 blit 是否报错。
+        //   外网（RTX 3070 / NVIDIA 595.79）实测该 blit 每帧返回
+        //   GL_INVALID_OPERATION(0x502) 被整帧丢弃 → 模块永远不更新。
+        const bool probeNow = ! s3dBlitProbed;
+        if (probeNow)
+        {
+          s3dBlitProbed = true;
+          while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+        }
+
+        Y2K_DIAG_PHASE ("gl:BlitFramebuffer (module logical->screen)");
+        glBindFramebuffer (GL_READ_FRAMEBUFFER, mod.glFbo);
+        glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
+        glViewport (0, 0, vw, vh);
+        glBlitFramebuffer (0, 0, fboW, fboH,
+                           (int) (cPos.x * dpiScale),
+                           (int) (editorPhysH - cBR.y * dpiScale),
+                           (int) (cBR.x * dpiScale),
+                           (int) (editorPhysH - cPos.y * dpiScale),
+                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer (GL_READ_FRAMEBUFFER, 0);
+
+        if (probeNow)
+        {
+          const GLenum e = juce::gl::glGetError();
+          if (e != juce::gl::GL_NO_ERROR)
+          {
+            s3dBlitBroken = true;
+            Y2K_DIAGC ("GL", juce::String ("!! glBlitFramebuffer 失败 (0x")
+                                  + juce::String::toHexString ((int) e)
+                                  + ") → 直渲染模块改用纹理 quad 合成回退");
+          }
+        }
+      }
+
+      if (s3dBlitBroken && s3dTexShader != nullptr)
+      {
+        // 回退：把逻辑 FBO 的纹理直接画到屏幕（完全不走 blit）。
+        //   与 blit 的线性缩放等价，只是多一个纹理采样 pass。
+        glBindFramebuffer (GL_FRAMEBUFFER, 0);
+        glViewport (0, 0, vw, vh);
+        glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        drawTexQuad (mod.glFboTex, snap->canvasLocal, 0.0f, 1.0f);
+        s3dShader->use();
+      }
+      diagCheckGl ("logical-fbo-blit");
     }
     else if (snap->trailFbo && snap->texW > 0 && snap->texH > 0 && s3dTexShader != nullptr)
     {
@@ -8188,6 +8606,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
       drawTexQuad (mod.glFboTex, snap->texTargetRect, 0.0f, 1.0f);
       glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // 恢复直通混合，避免污染后续模块
+      diagCheckGl ("trail-compose");
     }
     else
     {
@@ -8245,6 +8664,7 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
         drawTexQuad (mod.glTex, snap->texTargetRect, snap->texScrollU, snap->texWinW);
         s3dShader->use();   // 恢复主 shader（下一模块开头也会再设）
       }
+      diagCheckGl ("direct-draw");
     }
 
     if (needUpload)
@@ -8339,6 +8759,12 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
     glEnable (GL_BLEND);
     glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // JUCE GL 渲染器的预乘约定
   }
+
+  // 原样恢复进入前的 sRGB 状态：本函数之外（JUCE 组件绘制）行为与改动前一致
+  if (s3dSrgbWasOn)
+    glEnable (GL_FRAMEBUFFER_SRGB);
+  else
+    glDisable (GL_FRAMEBUFFER_SRGB);
 }
 
 void Y2KmeterAudioProcessorEditor::destroyMilkdropEditorResources() {
@@ -8430,6 +8856,9 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
   s3dGlReady = false;
   // 重置 shader 编译标志：上下文重建后 renderOpenGL 会重新懒编译 shader。
   s3dShaderUseChecked = false;
+  // blit 能力需要在新上下文里重新探测（换显卡/驱动后结论可能不同）
+  s3dBlitProbed = false;
+  s3dBlitBroken = false;
 
   destroyMilkdropEditorResources();
 }

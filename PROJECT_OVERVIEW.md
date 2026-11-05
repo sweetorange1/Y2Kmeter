@@ -8,10 +8,10 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.0.0`）
+- **产品名**：`Y2Kmeter` （版本：`3.0.1`）
   - 历史：`v2.9.9` 之后的功能曾以「v2.9.9 补充」形式入库、不 bump 版本号（`Stereo Map`、多屏混合 DPI 修复、
     实时 BPM / 调性模块），随后 `v2.9.10` 归拢了 Waveform 模块重构；**v3.0.0** 起恢复常规语义化版本号
-    （见文末「v3.0.0：...」章节）。
+    （见文末「v3.0.0：...」章节）；**v3.0.1** 为补丁版（GL 直渲染修复 / 全屏布局预设，见文末）。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -61,9 +61,10 @@
 - **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
 - 拖入图片生成「拼豆像素画」贴到桌面背景
 
-**⑤ 布局预设**（8 个常规 + 3 个 stick 条状变体，编号 4 / 8 已废弃）
+**⑤ 布局预设**（11 个常规 + 3 个 stick 条状变体，编号 4 / 8 已废弃）
 
 - 默认网格 / 横向铺满（顶部 / 底部）/ MV（全屏 + 模块条 + Milkdrop）/ Studio Monitor 双行监听 / Focus + Sidecar 主视觉 + 仪表列 / Broadcast Loudness 广播响度合规 / Only Milkdrop 全屏单模块
+- **全屏磁贴预设**（14/15/16，提炼自用户三份 Save 存档 `频谱为主` / `所有模块全部放到屏幕里` / `多功能集合`）：下拉名 `FULL: SPECTRUM` / `FULL: ALL MODULES` / `FULL: MULTI COMBO`。三者都是全屏且锁死窗口尺寸；只复刻模块类型与位置尺寸，**不含 VirtuPet**、**不带任何模块内部设置**，模块一律用各自独立的构造默认值（详见 §4.4）。
 - **stick 条状变体**（仅 stick 模式下出现在下拉里，条高同为 250px，只是条内模块不同）：`BAR: CLASSIC` 经典条 / `BAR: SPECTROGRAM`（3D 瀑布 → 2D 瀑布）/ `BAR: MILKDROP`（Stereo Field → Milkdrop）/ `BAR: SPEC + MILK`（两者叠加）
 
 **⑥ 桌面集成（Standalone 专属）**
@@ -336,7 +337,7 @@
 ### 4.4 `ModuleWorkspace`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
 - **模块工厂**：`setModuleFactory(f)`，Editor 侧会按 `ModuleType` 构造具体 `ModulePanel` 派生类（见 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `createModule`）。
 - **底部 Toolbar 组件**（自左至右）：`ThemeSwatchBar` → 布局预设下拉 + Save/Load → Grid → FPS → GAIN → Source → Hide。
-- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / mv=5 / studioMonitor=6 / focusSidecar=7 / broadcastLoudness=9 / onlyMilkdrop=10`（编号 `4`、`8` 已废弃，保留空洞以兼容历史存档）；另有三条 stick 条状变体 `stickBarSpectrogram=11 / stickBarMilkdrop=12 / stickBarSpecMilk=13`。
+- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / mv=5 / studioMonitor=6 / focusSidecar=7 / broadcastLoudness=9 / onlyMilkdrop=10 / fullSpectrumFocus=14 / fullAllModules=15 / fullMultiCombo=16`（编号 `4`、`8` 已废弃，保留空洞以兼容历史存档）；另有三条 stick 条状变体 `stickBarSpectrogram=11 / stickBarMilkdrop=12 / stickBarSpecMilk=13`。枚举只追加不重排，保护旧存档里记录的 preset id。
   - **Horizontal Bar T/B (2/3)**：横向铺满屏幕宽度，默认模块横向等分 canvas；Preset 2 贴屏幕顶部、Preset 3 贴屏幕底部。默认模块序列为 `Spectrogram3D / LUFS RT / VU / StereoField / Spectrum / OscWave / Waveform`（v2.7.3 起将 `Dynamics` 替换为 `LUFS RT` 并拉短，`VU`/`StereoField` 拉宽以适配低分辨率屏幕）。
   - **stick 条状变体 (11/12/13)**：只在 stick 驻留态的下拉里出现（避免改窗口形状破坏 AppBar 占位）。三条与 2/3 共用**同一套**"屏幕宽 × 条高 250"几何 + 网格对齐 + redock 流程，仅条内模块序列/宽度权重不同：11 = `Spectrogram` 替换 `Spectrogram3D`；12 = `Milkdrop` 替换 `StereoField`（权重 2.2，窄条靠加宽才看得清）；13 = 两者同时替换。贴顶/贴底由当前 dock 侧（T/B）决定，`applyLayoutPreset` 用 `stickActive ? stickBottomAligned : (presetId==3)` 判定；应用后回写 `ModuleWorkspace::setStickPresetLabel()`，下拉 placeholder 显示当前条状预设名。
   - **MV (Preset 5)**：**Windows** 铺满当前显示器 userArea（视觉等同全屏）；**macOS** 铺满 totalArea 后调用 `rw->setFullScreen(true)` 进入系统原生全屏（隐藏菜单栏/Dock）。上方 180px 横向模块条（同 Preset 2 的 7 个默认模块），下方 Milkdrop 模块占满剩余 canvas 区域。代码位于 `applyLayoutPreset` case 5。
@@ -344,6 +345,7 @@
   - **Focus + Sidecar (7)**：左 65% `Spectrogram` 主视觉（普通瀑布，帧率友好）+ 右 35% `VU / StereoField / LUFS RT` 竖排。
   - **Broadcast Loudness (9)**：上排响度读数（`LUFS RT / TruePeak / Dynamics DR / Dynamics Crest`）+ 下排仪表（`VU / StereoField / Dynamics Meters`）。
   - **Only Milkdrop (10)**：全屏（Windows userArea / macOS 原生全屏）+ 单个最大化 `Milkdrop` 模块。
+  - **全屏磁贴预设 (14/15/16)**：由用户三份 Save 存档（`.settings` → `filterState` → `<PBEQ_Layout>`）提炼，静态表在 `PluginEditor.cpp` 匿名 namespace 的 `kFullSpectrumTiles / kFullAllModulesTiles / kFullMultiComboTiles`（9 / 26 / 10 块）。只取 `<Module>` 的 `type + x/y/w/h`（参考画布 2560×1328，均为 8px 网格对齐），**丢弃 VirtuPet 节点与全部 `<state>` 子节点**；`applyFullScreenTilePreset()` 复制 Preset 10 的全屏几何（Windows 物理口径 userArea / macOS totalArea + 原生全屏、resizeLimits 锁死），按当前 canvas 归一化映射并吸附 8px 网格后逐块 `createModule()` + `setBounds()` + `addModule(false)`，不调用任何模块 setter。切换预设时用户当前养着的 VirtuPet 仍按 `applyLayoutPreset` 末尾的既有机制保留到右下角（存档里的宠物状态不复刻）。
 - **拼豆像素画（PerlerImage）**：拖入图片 → 按 `cellSize`（默认 4，范围 1..15）降采样 + 每格取原图平均色 → 生成像素画 → 作为 canvas 底图；每张贴画对应一个 `PerlerImageLayer` 子 Component 与模块**同 z-order 层级**。
 - **P4 debounce**：`LayoutChangeCoalescer`（16ms 单发计时器），大量小改动只派发 1 次 `onLayoutChanged`。
 - **hit-test 挖洞**：`setHitTestHoles`，chrome 隐藏态下让浮层按钮的鼠标事件冒泡回 Editor。
@@ -5630,6 +5632,7 @@ UTF-8 中文会被逐字节二次编码成 `åä¸æ`。修复：`write` / `writ
 | `toy_perf_log.txt`（ToyPerf 每秒性能采样） | ✗ 整段不编译（`TOYPERF_LOG` / `TOYPERF_SCOPED_TIMER` 展开为空，参数不求值） | ✓ |
 | `Y2Kmeter_debug.log`（`juce::Logger` 落盘） | ✗ `#ifdef Y2K_ENABLE_LOGGING` | ✓ |
 | 桌面 `Y2Kmeter_Diag\`（诊断日志） | ✗ 默认关闭 | ✓ 自动开启 |
+| 界面标识（顶部抬头版本号） | `v3.0.0` | **`v3.0.0 debug`**（强调色，`y2kIsDiagnosticBuild()`；`drawTitleBar` 与 `ChromeHiddenOverlay` 两处一致） |
 
 ### 5. 打包链路
 
@@ -5651,6 +5654,41 @@ UTF-8 中文会被逐字节二次编码成 `åä¸æ`。修复：`write` / `writ
 保留：`README.md`（仓库首页）、`LICENSE`、本文件；构建/打包必需内容
 `assets/`（预设、纹理、安装包 ZIP、图标）、`tests/`、`scripts/`、`ttf/`、
 `CMakeLists.txt`、`CMakePresets.json`、两个 `.iss`、两个 `build_installer*.bat`、`build_macos_installer.sh`。
+
+### 7. 外网现场修复：GL 直渲染模块"卡死 + 拖影"
+
+**现场**：RTX 3070 / NVIDIA 595.79 / Win11 / 3×1920×1080@100%。
+Milkdrop 正常，其余 GL 直渲染模块不出新内容，冻结区域带拖影。诊断日志：
+
+```
+[GL] s3d vertex shader link OK
+[GL] glGetError=0x502 (occurrence 1..40)   ← 每帧一次，持续
+[STATS] GL 60f/s | md 10.7ms | direct 0.7ms | dispatch 111/s   ← 没有 STALL
+```
+
+**判定**：不是卡死（GL/UI 心跳都正常、`direct` 每次都有耗时），而是
+`renderToLogical` 分支的 `glBlitFramebuffer`（线性 RGBA8 FBO → 后缓冲）被驱动
+判为 `GL_INVALID_OPERATION` 并整帧丢弃。组件层此时已把 canvas 挖成透明，而 JUCE
+的 OpenGL CPE 只清脏区、不整屏清屏 → 用户看到的就是上一帧残留（拖影）。
+Milkdrop 不受影响，因为 projectM 直接渲染到后缓冲。
+
+**修复（四层）**：
+
+1. `renderGlDirectModulesZOrdered` 开头 `glDisable (GL_FRAMEBUFFER_SRGB)`；
+   默认帧缓冲在部分驱动上是 sRGB-capable，与线性 FBO 混用 blit 按规范即非法；
+2. **每个模块**绘制前调用 `resetModuleGlState()`：取景器回到确定态 ——
+   cull / scissor / stencil / depth / `GL_RASTERIZER_DISCARD` /
+   `GL_FRAMEBUFFER_SRGB` / `glColorMask` / `glBlendEquation` /
+   `glActiveTexture` / `GL_PIXEL_UNPACK_BUFFER` 绑定 / VAO 重绑；
+3. **blit 自适应回退**：首帧探测 blit 是否报错，失败则永久改走
+   "纹理 quad 合成"（`drawTexQuad`，不依赖 blit），换上下文时重新探测；
+4. **消灭残影观感**：每个模块绘制前先把模块矩形 `glScissor + glClear` 成
+   `PinkXP::face`；任何一步失败最多是"空画布"，不会再出现上一帧残留。
+   同时补齐诊断：模块级 GL 错误检查点（`state-reset` / `logical-draw` /
+   `logical-fbo-blit` / `direct-draw` / `trail-compose`）与
+   `glCheckFramebufferStatus` 不完备告警。
+
+新增成员 `s3dBlitProbed` / `s3dBlitBroken`（`openGLContextClosing` 里复位）。
 
 ## v3.0.0 补充：修复 Starlight / Cyber Lilac 主题下气泡文字不可见（face/ink 撞色）
 
@@ -5709,6 +5747,111 @@ UTF-8 中文会被逐字节二次编码成 `åä¸æ`。修复：`write` / `writ
 - `ReadoutBubbleActor` 的 `b.constrainedWithin(clampRect)` 在**模块内容区比气泡还窄**时会压缩矩形；
   当压缩后宽度 < 图标宽（22）+ 4px 时，文字区宽度 ≤ 0，`Graphics::drawText` 会整体跳过（框在、字没）。
   常规布局与预设下不会触发，故本轮未改；若后续出现「极窄模块」场景，改法为「只钳位置不钳尺寸」或给文字区最小宽度。
+
+---
+
+## v3.0.1：GL 直渲染模块卡死修复 / 全屏布局预设 / 诊断标识
+
+> 3.0.0 之后第一个补丁版。核心是修复外网反馈的「GL 直渲染模块卡死 + 拖影」，
+> 另含三个全屏磁贴布局预设、诊断构建的界面 debug 标识。
+
+### 1. 版本号 3.0.1
+
+| 位置 | 改动 |
+| --- | --- |
+| `CMakeLists.txt` | `project(Y2Kmeter VERSION 3.0.1)` + 两处 `juce_add_plugin(... VERSION 3.0.1)` |
+| `Y2Kmeter_installer.iss` | `MyAppVersion "3.0.1"`（`AppVerName` / `OutputBaseFilename` 随之变化） |
+| `PluginEditor.cpp` | 抬头版本号 `v3.0.1`（诊断构建为 `v3.0.1 debug`） |
+| `README.md` | 版本徽章 `3.0.1` |
+
+`JucePlugin_VersionString` 由 CMake 生成，更新检查、遥测、关于对话框、诊断日志里
+`app=Y2Kmeter 3.0.1` 全部自动跟着变，无需逐处修改。
+
+### 2. 外网问题：GL 直渲染模块「卡死 + 拖影」
+
+**现场**：RTX 3070 / NVIDIA 595.79 / Win11 / 3×1920×1080@100%。
+Milkdrop 正常渲染，其余 GL 直渲染模块不出新内容，冻结区域带拖影；开发者多台机器
+（RTX 5060 / 616.92 / 150% DPI / 18 个预设）均无法复现，现场机器有 **9921 个预设**。
+
+**日志证据**（诊断包第一版）：
+
+```
+[GL] s3d vertex shader link OK
+[GL] glGetError=0x502 (occurrence 1..40)        ← 每帧一次，从首帧直渲染开始
+[STATS] GL 60f/s | md 10.7ms | direct 0.7ms | dispatch 111/s | UI 9/s
+```
+
+`GL 60f/s` + `direct` 有耗时 + 无 `STALL` ⇒ **不是卡死**，是「画了但没落到屏幕上」。
+
+**根因链**：
+
+1. `renderToLogical` 模块的 `glBlitFramebuffer`（线性 `GL_RGBA8` FBO → 后缓冲）
+   被该驱动判为 `GL_INVALID_OPERATION` 并整帧丢弃 → 模块永远没有新像素；
+2. 组件层在 `glDirectActive` 后把 canvas 挖成透明（只透出 GL 内容），而 JUCE 的
+   OpenGL CPE **只清脏区、不整屏清屏** → 该区域保留上一帧内容，即「拖影」；
+3. Milkdrop 不受影响，因为 projectM 直接渲染到后缓冲，不经过我们的 blit。
+
+**修复（四层兜底，全部在 `PluginEditor.cpp::renderGlDirectModulesZOrdered`）**：
+
+| 层 | 做法 | 治什么 |
+| --- | --- | --- |
+| 1 | 遍历开始 + 每模块前 `glDisable (GL_FRAMEBUFFER_SRGB)`，函数结束按进入前状态恢复 | 默认帧缓冲在部分驱动上是 sRGB-capable，与线性 FBO 混用 blit 按规范即非法 |
+| 2 | 每模块 `resetModuleGlState()`：cull / scissor / stencil / depth / `RASTERIZER_DISCARD` / `FRAMEBUFFER_SRGB` / `glColorMask` / `glBlendEquation` / `glActiveTexture` / `PIXEL_UNPACK_BUFFER` / VAO | projectM 3D pass 与上一模块留下的脏状态 |
+| 3 | blit 首帧探测（`s3dBlitProbed`），失败则永久改走「纹理 quad 合成」`drawTexQuad` 回退（`s3dBlitBroken`），换上下文重新探测 | 驱动对 blit 参数/格式的具体实现差异 |
+| 4 | 每模块绘制前 `glScissor + glClear` 铺 `PinkXP::face` 底色（仅 `glDirectActive` 的模块） | 兜底观感：任何失败最差是「空画布」，不再有残影 |
+
+配套诊断增强：模块级 GL 错误检查点（`state-reset` / `logical-draw` / `logical-fbo-blit` /
+`direct-draw` / `trail-compose`）、`glCheckFramebufferStatus` 不完备告警、
+blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改用纹理 quad 合成回退`。
+
+**成本**：每模块约 18 次状态调用 + 1 次裁剪清屏，5 模块合计约 0.03ms（3070）；
+`GL_FRAMEBUFFER_SRGB` 在函数末尾原样恢复，JUCE 组件绘制的状态与改动前一致。
+
+### 3. 诊断构建的界面标识
+
+`y2kIsDiagnosticBuild()`（`Y2K_ENABLE_LOGGING` 或 `Y2K_DIAG_LOG_DEFAULT_ON=ON`）为真时，
+抬头版本号显示 **`v3.0.1 debug`**，`debug` 用 `PinkXP::warn` 强调色：
+
+- `drawTitleBar()`（正常 / chrome 变暗浮现两种状态）与 `ChromeHiddenOverlay::paint()`（chrome 隐藏态）三处一致；
+- `ChromeHiddenOverlay` 构造函数里预计算的点击命中宽度同步带上后缀；
+- 正式 Release 仍是纯 `v3.0.1`。
+
+### 4. 全屏磁贴布局预设（14 / 15 / 16）
+
+来源是三份用户自定义布局存档，只提取每个 `<Module>` 的 `type + x/y/w/h`
+（参考画布 2560×1328），刻意丢弃：
+
+- **VirtuPet 模块**（宠物角色/饱食度/健康度是运行时数据，且它浮在别的模块上）；
+- 所有 `<state>` 与模块额外属性（显示模式、颜色、缩放、Milkdrop 预设、瀑布参数等）。
+
+| id | 下拉名 | 模块数 | 说明 |
+| --- | --- | --- | --- |
+| 14 | `FULL: SPECTRUM` | 10 | 频谱为主：左侧三块大图 + 顶部波形 + 右侧仪表列 |
+| 15 | `FULL: ALL MODULES` | 27 | 全部模块密排铺满整屏 |
+| 16 | `FULL: MULTI COMBO` | 11 | 顶部通栏波形 + 分区多功能集合 |
+
+实现要点（`PluginEditor::applyFullScreenTilePreset`）：
+
+- 窗口先铺满当前屏幕：Windows 走 `rcWork` 物理口径（兼容混合 DPI），macOS 走
+  `totalArea` + 原生全屏，`resizeLimits` 锁死到屏幕尺寸；
+- 参考坐标换算成「网格格数」再取整（8px 网格），相邻 tile 用同一函数取边界 →
+  天然共享边界，密排无缝隙、不重叠；
+- 只调 `createModule()`，每个模块保持各自构造函数里的默认设置；
+- `LayoutPreset` 枚举**只追加不重排**（14~16），保护旧存档里记录的 preset id。
+
+### 5. 同期并入的修复
+
+| 提交 | 内容 |
+| --- | --- |
+| `8a4881ac` | Starlight / Cyber Lilac 主题下气泡文字不可见（`face` 与 `ink` 撞色）→ 新增 `PinkXP::readableInkOn()` |
+| `8badac62` | macOS 编译失败（`restorePseudoFullScreen` 引用 Windows 专属成员） |
+
+### 6. 验证与遗留
+
+- 现场机器装 v3.0.1 诊断包后：`glGetError=0x502` 应消失；若走回退路径，日志会打印
+  `!! glBlitFramebuffer 失败 …`；无论哪种，画面都不再出现残影；
+- 若问题复现，日志里的 `module GL error @ <checkpoint>` 会直接指到具体绘制段；
+- 三个全屏预设需在 1080p / 1440p / 混合 DPI 多屏下各点一次，确认窗口铺满、模块无缝。
 
 ---
 

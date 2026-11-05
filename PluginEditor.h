@@ -249,9 +249,15 @@ private:
     //   presetId = 7 (focusSidecar)       = 主视觉 + 右侧仪表列
     //   presetId = 9 (broadcastLoudness)  = 广播响度合规
     //   presetId = 10 (onlyMilkdrop)      = 全屏 + 单个最大化 Milkdrop
+    //   presetId = 14/15/16               = 全屏磁贴预设（只取存档布局，模块默认设置）
     //   · 由 ModuleWorkspace::onLayoutPresetChanged 触发（参数用 int 承载枚举值，
     //     以避免在此头文件里 include 完整的 ModuleWorkspace.h）
     void applyLayoutPreset (int presetId);
+
+    // 全屏磁贴预设（14/15/16）：窗口铺满屏幕，按归一化矩形把模块密排到 canvas。
+    //   · 只参考用户存档的模块排布（类型 + 位置尺寸），不含 VirtuPet；
+    //   · 每个模块都走 createModule() 的构造默认值，不加载存档里的 <state>。
+    void applyFullScreenTilePreset (int presetId);
 
     // stick 模式是否激活（Windows 专属；非 Windows 恒 false，paint 无需 #if 即可判断）
     bool isStickActive() const noexcept { return stickActive; }
@@ -748,6 +754,15 @@ private:
     int s3dPosAttrib = 0, s3dColAttrib = 1;
     bool s3dShaderUseChecked = false;
     bool s3dGlReady = false;
+
+    // —— 外网 v3.0.0 回退路径（RTX 3070 / NVIDIA 595.79 现场）——
+    //   该驱动下 renderToLogical 模块的 glBlitFramebuffer 每帧报 GL_INVALID_OPERATION
+    //   （0x502），blit 被整帧丢弃 → 模块永远画不出新内容，只留上一帧残影，
+    //   而 Milkdrop 因 projectM 直接渲染到后缓冲不受影响。
+    //   首帧做一次探测：若 blit 后出现 GL 错误，就永久切到"纹理 quad 合成"
+    //   回退路径（不依赖 blit）。
+    bool s3dBlitProbed    = false;
+    bool s3dBlitBroken    = false;
 
     // ================================================================
     // 模块浮动窗口（Standalone 模式下的模块弹出/脱离功能）

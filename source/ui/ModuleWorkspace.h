@@ -682,7 +682,17 @@ public:
         //   · 贴顶还是贴底由当前 dock 侧（T/B 按钮）决定，不写进 id。
         stickBarSpectrogram = 11, // 3D 瀑布 → SPECTROGRAM（2D 瀑布，更省 GPU）
         stickBarMilkdrop    = 12, // Stereo Field → Milkdrop（多一块可视化）
-        stickBarSpecMilk    = 13  // SPECTROGRAM + Milkdrop 同时替换
+        stickBarSpecMilk    = 13, // SPECTROGRAM + Milkdrop 同时替换
+
+        // ---- 全屏磁贴预设（14~16）：由用户三个自定义存档提炼 ----
+        //   · 只复刻"模块类型 + 位置/尺寸"（按 2560×1328 参考画布归一化后
+        //     映射到当前 canvas），不含 VirtuPet、不带任何模块内部 state；
+        //   · 应用时窗口铺满屏幕（Windows userArea / macOS 原生全屏），
+        //     与 mv(5) / onlyMilkdrop(10) 一样锁死尺寸；
+        //   · 编号只追加不重排，保护旧存档里记录的 preset id。
+        fullSpectrumFocus = 14, // FULL: SPECTRUM    —— 频谱为主（三块大图 + 右侧仪表列）
+        fullAllModules    = 15, // FULL: ALL MODULES —— 所有模块全部放到屏幕里（26 块密排）
+        fullMultiCombo    = 16  // FULL: MULTI COMBO —— 多功能集合（顶部通栏波形 + 分区）
     };
     std::function<void(LayoutPreset)> onLayoutPresetChanged;
 
