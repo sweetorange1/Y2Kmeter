@@ -6417,7 +6417,11 @@ void Y2KmeterAudioProcessorEditor::restorePseudoFullScreen()
 
     // stick 驻留态与全屏互斥：启动时若有待恢复的 stick 会话，
     //   restoreSavedStickSession() 会接管窗口几何，这里不能抢先搬窗口。
+    //   pendingStickRestore 是 Windows 专属成员（见 PluginEditor.h 的
+    //   #if JUCE_WINDOWS 块），非 Windows 上 stick 恒不激活，无需判断。
+   #if JUCE_WINDOWS
     if (stickActive || pendingStickRestore) return;
+   #endif
 
     auto* top = getTopLevelComponent();
     if (top == nullptr || top == this) return;
