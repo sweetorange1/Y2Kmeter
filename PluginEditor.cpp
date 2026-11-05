@@ -1771,7 +1771,19 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   · 若 processor 未保存过（缺省 false），则仅刷新一下按钮视觉即 no-op，
     //     applyLayoutLocked 内部会将 setResizable(true,true) 重推一次——与上面刚刚手动
     //     setResizable(true,true) 同步，安全。
-    applyLayoutLocked (processor.getLayoutLocked(), /*initial*/ true);
+    //
+    // v3.0.1 修复：插件宿主模式**没有** L 按钮（paint / hit-test 都跳过它），
+    //   一旦从存档（shared settings 或工程状态）里恢复了 layoutLocked=true，
+    //   用户看到的就是"所有模块拖不动 / 关不掉 / 右键弹不出添加菜单"，
+    //   而且没有任何按钮能解锁 —— 即外网反馈的"VST 模式偶发锁死"。
+    //   这里强制清零并回写一次，让该工程自愈（下次打开不再锁定）。
+    if (isPluginHost && processor.getLayoutLocked())
+    {
+        processor.setLayoutLocked (false);
+        Y2K_LOG ("[Layout] plugin host: cleared stale layoutLocked state");
+    }
+
+    applyLayoutLocked (isPluginHost ? false : processor.getLayoutLocked(), /*initial*/ true);
     // ------------------------------------------------------------------
 
     // 插件模式（VST3/AU）：若 host state 里保存过上次 Editor 关闭时的窗口尺寸，
@@ -5646,6 +5658,13 @@ void Y2KmeterAudioProcessorEditor::handleLockClicked()
 
 void Y2KmeterAudioProcessorEditor::applyLayoutLocked (bool locked, bool initial)
 {
+    // v3.0.1：插件宿主模式一律视为"未锁定"。
+    //   插件模式不绘制也不命中 L 按钮（见 getLockButtonBounds / drawTitleBar），
+    //   任何来源的锁定（历史 settings、工程状态、布局预设里的 layoutLocked）
+    //   都会变成无法解锁的死锁，因此在这里做最后一道闸门。
+    if (isPluginHost)
+        locked = false;
+
     layoutLocked = locked;
 
     // 复位任何进行中的窗口拖拽（避免用户按住鼠标切锁的边缘态）
