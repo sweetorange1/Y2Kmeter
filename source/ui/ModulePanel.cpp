@@ -790,3 +790,31 @@ void ModulePanel::mouseUp(const juce::MouseEvent& e)
             onBoundsChangedByUser(*this);
     }
 }
+
+// ----------------------------------------------------------
+// v3.0.1：抬头（标题栏空白区）双击
+//   · 嵌入式：工作区内最大化 / 恢复（详见 ModuleWorkspace::toggleModuleMaximize）
+//   · 浮动态：浮动窗口伪全屏 / 恢复（由 Editor 接管）
+//   · 刻意排除关闭 / 弹出按钮：它们的点击已经有单击语义，双击不应触发最大化
+// ----------------------------------------------------------
+void ModulePanel::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const auto pos = e.getPosition();
+
+    if (! getTitleBarBounds().contains (pos))
+        return;
+    if (getCloseButtonBounds().contains (pos))
+        return;
+    if ((popOutEnabled_ || isFloating_) && getPopOutButtonBounds().contains (pos))
+        return;
+
+    // 双击前的 mouseDown 已经启动过拖拽（浮动态拖窗口 / 嵌入态移动），
+    //   这里复位，避免双击之后残留拖动状态。
+    dragMode = DragMode::none;
+    resizeEdge = Edge::none;
+    isDraggingFloatingWindow_ = false;
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+
+    if (onTitleDoubleClicked)
+        onTitleDoubleClicked (*this);
+}

@@ -5846,12 +5846,46 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 | `8a4881ac` | Starlight / Cyber Lilac 主题下气泡文字不可见（`face` 与 `ink` 撞色）→ 新增 `PinkXP::readableInkOn()` |
 | `8badac62` | macOS 编译失败（`restorePseudoFullScreen` 引用 Windows 专属成员） |
 
-### 6. 验证与遗留
+### 6. 抬头双击：嵌入式最大化 / 浮动窗口伪全屏（v3.0.1）
+
+**交互**：双击模块抬头（标题栏空白区，排除关闭/弹出按钮）。
+
+| 场景 | 行为 |
+| --- | --- |
+| 嵌入式，未压住其它模块 | 在不覆盖任何模块的前提下向四边扩张到最大 |
+| 嵌入式，已压住其它模块 | 直接占满整个模块显示区（`getCanvasArea()`） |
+| 再次双击 | 回到双击前的位置与尺寸 |
+| 浮动态（脱离到独立窗口） | 浮动窗口伪全屏：Windows 铺满 `rcWork`（不覆盖任务栏）；macOS 原生 `setFullScreen` |
+
+**实现要点**：
+
+- `ModulePanel::mouseDoubleClick` 只认标题栏空白区；双击前的 `mouseDown` 已启动过
+  拖拽（浮动态拖窗口 / 嵌入态移动），进入处理前先复位 `dragMode` / `isDraggingFloatingWindow_`；
+- `ModuleWorkspace::computeMaximizedBoundsFor()`：先做遮挡判定，再**贪心四向扩张** ——
+  每轮按当前矩形的投影找最近障碍边（左右看垂直交叠、上下看水平交叠），最多 12 轮
+  （实际 2~3 轮收敛，每轮只增不减必然收敛）；
+- 结果**向内吸附** 8px 网格（左/上 ceil、右/下 floor），保证吸附后仍不压邻居；
+  窄缝里吸附反而变小则保持原 bounds 不动；
+- 布局锁定（L）下禁止进入最大化，但**允许**从最大化恢复；
+- 已有别的模块处于最大化 → 先恢复它再计算新目标（避免两个模块同时"最大化"）；
+- 存档（`saveLayoutTree`）写入的是**双击前的 bounds**，重启不会一开机就占满画布；
+- 窗口尺寸变化时 `resized()` 调 `reapplyMaximizeIfNeeded()` 重算，继续贴合新 canvas；
+- 用户手动拖动/缩放过最大化模块 → 自动退出最大化态（否则下次双击会跳回旧位置）；
+- 浮动态全屏期间不把窗口几何回写 workspace（`handleAsyncUpdate` 早退），
+  否则从全屏直接停靠回工作区会变成整屏大小。
+
+**显存保护**：最大化后 `renderToLogical` 的 2x 超采样 FBO 面积按 4 倍增长
+（4K@150% 可达 48MP ≈ 190MB），因此 `logicalW × logicalH × 4 > 16MP` 时自动退回 1x ——
+大模块本来不缺抗锯齿。
+
+### 7. 验证与遗留
 
 - 现场机器装 v3.0.1 诊断包后：`glGetError=0x502` 应消失；若走回退路径，日志会打印
   `!! glBlitFramebuffer 失败 …`；无论哪种，画面都不再出现残影；
 - 若问题复现，日志里的 `module GL error @ <checkpoint>` 会直接指到具体绘制段；
-- 三个全屏预设需在 1080p / 1440p / 混合 DPI 多屏下各点一次，确认窗口铺满、模块无缝。
+- 三个全屏预设需在 1080p / 1440p / 混合 DPI 多屏下各点一次，确认窗口铺满、模块无缝；
+- 抬头双击需验证：单模块独占区域、密排布局、最大化后再拖别的模块、
+  布局锁定（L）下双击、浮动态双击全屏后直接停靠回工作区。
 
 ---
 

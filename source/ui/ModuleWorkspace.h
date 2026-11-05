@@ -247,6 +247,10 @@ public:
     std::function<void(ModulePanel&)> onBroughtToFront;
     std::function<void(ModulePanel&, juce::Point<int> localPos)> onRightClick;  // 右键模块任意位置 → 弹出添加菜单
     std::function<void(ModulePanel&)> onPopOutClicked;  // 弹出/停靠按钮被点击
+    // v3.0.1：抬头（标题栏空白区）双击
+    //   · 嵌入式 → 工作区内最大化 / 恢复（不覆盖其它模块）
+    //   · 浮动态 → 浮动窗口伪全屏 / 恢复（由 Editor 接管）
+    std::function<void(ModulePanel&)> onTitleDoubleClicked;
 
     void paint(juce::Graphics& g) override;
     // CPU 小字绘制在所有子组件之上（子组件如 EQ 的 PixelEqGraph 会填满整个
@@ -259,6 +263,7 @@ public:
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp   (const juce::MouseEvent& e) override;
+    void mouseDoubleClick (const juce::MouseEvent& e) override;
 
 protected:
     virtual void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds);
@@ -452,6 +457,23 @@ public:
 
     int getNumModules() const noexcept { return modules.size(); }
     ModulePanel* getModule(int idx) const noexcept { return modules[idx]; }
+
+    // ==========================================================
+    // v3.0.1：抬头双击最大化（嵌入式）
+    //   · 模块当前**没有**压住其它模块时：在不覆盖任何模块的前提下，向四边
+    //     扩张到最大（贪心四向扩张，结果吸附 8px 网格）；
+    //   · 模块已经压住别的模块时：直接占满整个 canvas（模块显示区）；
+    //   · 再次双击同一个模块 → 回到双击前的 bounds。
+    //   · 布局锁定时禁止进入最大化，但**允许**从最大化恢复。
+    // ==========================================================
+    void toggleModuleMaximize (ModulePanel& panel);
+    bool isModuleMaximized (const ModulePanel& panel) const noexcept
+    {
+        return maximizedPanel.getComponent() == &panel;
+    }
+
+    // 浮动态模块的抬头双击（由 Editor 接管 → 让对应浮动窗口伪全屏）
+    std::function<void(ModulePanel&)> onFloatingTitleDoubleClicked;
 
     // 清空所有模块（含 OwnedArray 自动 delete）与拼豆贴画。
     //   · 用于布局预设切换：先清空再由外部重新填充。
@@ -865,6 +887,13 @@ private:
     void hookPanel(ModulePanel& panel);
 
     juce::OwnedArray<ModulePanel> modules;
+
+    // ---- v3.0.1：抬头双击最大化状态 ----
+    //   SafePointer：模块被删除（关闭 / 切换预设 clearAllModules）后自动置空。
+    juce::Component::SafePointer<ModulePanel> maximizedPanel;
+    juce::Rectangle<int> maximizedRestoreBounds;   // 双击前的原始 bounds（存档也用它）
+    juce::Rectangle<int> computeMaximizedBoundsFor (ModulePanel& panel) const;
+    void reapplyMaximizeIfNeeded();
 
     // 模块弹出功能开关（Standalone=true，插件模式=false）
     bool popOutEnabled_ = true;

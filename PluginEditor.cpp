@@ -718,6 +718,11 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::handleAsyncUpdate()
     //   更新 FBO → 捕获新尺寸共享帧 → callAsync 通知浮动窗口 repaint）
     editor_->repaint();
 
+    // v3.0.1：伪全屏只是临时视图，不写回 workspace 的"浮动窗口尺寸"，
+    //   否则用户从全屏直接停靠回工作区时，模块会变成一整屏大小。
+    if (pseudoFullScreen_)
+        return;
+
     // 更新 workspace 浮动状态屏幕坐标（持久化用）
     if (editor_->workspace)
         editor_->workspace->updateFloatingStateScreenBounds(
@@ -736,6 +741,66 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::applyModuleResizeLimits
     setResizeLimits (juce::jmax (1, module_.getMinWidth()),
                      juce::jmax (1, module_.getMinHeight()),
                      0x3fffffff, 0x3fffffff);
+}
+
+// ----------------------------------------------------------
+// v3.0.1：浮动模块窗口抬头双击 → 伪全屏 / 恢复
+//   · Windows：铺满当前显示器的 userArea（已扣除任务栏，**不覆盖任务栏**）；
+//     走物理像素 MoveWindow —— 与主窗口 toggleFakeFullScreen 同一套口径，
+//     避免混合 DPI 下 setBounds(userArea) 把窗口甩到另一块屏；
+//   · macOS：走原生 setFullScreen（独立 Space，覆盖菜单栏/Dock）；
+//   · 尺寸约束本来就是"模块最小尺寸 ~ 0x3fffffff"，全屏尺寸不会撞到上限，
+//     因此这里不需要像主窗口那样接管 constrainer。
+//   · 全屏期间不把窗口几何回写 workspace（见 handleAsyncUpdate），
+//     否则停靠回工作区时会变成一整屏大小。
+// ----------------------------------------------------------
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::togglePseudoFullScreen()
+{
+   #if JUCE_MAC
+    setFullScreen (! isFullScreen());
+    return;
+   #endif
+
+    if (! pseudoFullScreen_)
+    {
+        preFullScreenBounds_ = getBounds();
+
+       #if JUCE_WINDOWS
+        Y2KMonitorPx monPx;
+        if (! y2kScreenSimulationActive()
+             && y2kGetMonitorPxForWindow (this, monPx)
+             && ! monPx.work.isEmpty())
+        {
+            y2kMoveWindowToRectPx (this, monPx.work);
+            pseudoFullScreen_ = true;
+            triggerAsyncUpdate();
+            return;
+        }
+       #endif
+
+        if (auto* display = juce::Desktop::getInstance().getDisplays()
+                                .getDisplayForPoint (getScreenBounds().getCentre()))
+            setBounds (display->userArea);
+
+        pseudoFullScreen_ = true;
+    }
+    else
+    {
+        pseudoFullScreen_ = false;
+        setBounds (preFullScreenBounds_);
+    }
+
+    triggerAsyncUpdate();
+}
+
+void Y2KmeterAudioProcessorEditor::toggleFloatingModuleFullScreen (ModulePanel& panel)
+{
+    for (auto& w : floatingWindows_)
+        if (w != nullptr && &w->getModulePanel() == &panel)
+        {
+            w->togglePseudoFullScreen();
+            return;
+        }
 }
 
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::refreshThemeColours()
@@ -1747,6 +1812,12 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     workspace->onLayoutChanged = [this]()
     {
         persistCurrentLayoutToProcessor();
+    };
+
+    // 4.0) v3.0.1：浮动态模块抬头双击 → 该浮动窗口伪全屏 / 恢复
+    workspace->onFloatingTitleDoubleClicked = [this](ModulePanel& panel)
+    {
+        toggleFloatingModuleFullScreen (panel);
     };
 
     // 4.0) 模块弹出请求 → 创建浮动窗口（仅 Standalone 模式）
@@ -8378,7 +8449,12 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       //   三角形，直接渲染会呈现 1px 台阶锯齿）。纯 2D 机制，无 MSAA 的
       //   驱动兼容性风险（上一版 GL_TEXTURE_2D_MULTISAMPLE 在部分驱动上
       //   创建失败导致 FBO 不完整 → 全部模块透明）。
-      constexpr int kSsaa = 2;
+      // v3.0.1：抬头双击最大化后 canvas 可能接近整屏，2x 的 FBO 面积按 4 倍增长
+      //   （4K@150% 会到 48MP ≈ 190MB 显存）。超过 16MP 时退回 1x —— 大模块
+      //   本来就不缺抗锯齿，避免弱显卡上 glTexImage2D 直接失败。
+      const bool needSsaa = (juce::int64) snap->logicalW * (juce::int64) snap->logicalH * 4
+                              <= 16 * 1000 * 1000;
+      const int kSsaa = needSsaa ? 2 : 1;
       const int fboW = snap->logicalW * kSsaa;
       const int fboH = snap->logicalH * kSsaa;
 

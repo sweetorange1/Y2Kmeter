@@ -1092,6 +1092,140 @@ void ModuleWorkspace::snapToGrid(ModulePanel& panel)
     panel.setBounds(snapped);
 }
 
+// ==========================================================
+// v3.0.1：抬头双击最大化（嵌入式）
+// ==========================================================
+juce::Rectangle<int> ModuleWorkspace::computeMaximizedBoundsFor (ModulePanel& panel) const
+{
+    const auto canvas = getCanvasArea();
+    if (canvas.isEmpty())
+        return {};
+
+    auto r = panel.getBounds().getIntersection (canvas);
+    if (r.isEmpty())
+        r = panel.getBounds();
+
+    // 其它可见、非浮动态模块（浮动态是独立窗口，不参与遮挡判定）
+    juce::Array<juce::Rectangle<int>> others;
+    for (auto* m : modules)
+        if (m != nullptr && m != &panel && m->isVisible() && ! m->isFloating())
+            others.add (m->getBounds());
+
+    // ---- 1) 当前已经压住别的模块 → 直接占满整个模块显示区 ----
+    for (const auto& o : others)
+        if (o.intersects (r))
+            return canvas;
+
+    // ---- 2) 未压住任何模块 → 贪心四向扩张 ----
+    //   每轮按当前矩形的投影找出最近的障碍边：横向取左右可达边界，纵向取上下
+    //   可达边界；因为每一步只会"变大"，最多 12 轮（模块数量有限，实际 2~3 轮收敛）。
+    for (int iter = 0; iter < 12; ++iter)
+    {
+        const auto before = r;
+
+        int left   = canvas.getX();
+        int right  = canvas.getRight();
+        int top    = canvas.getY();
+        int bottom = canvas.getBottom();
+
+        for (const auto& o : others)
+        {
+            // 垂直方向有交叠 → 左右扩张被它挡住
+            if (o.getBottom() > r.getY() && o.getY() < r.getBottom())
+            {
+                if (o.getRight() <= r.getX())      left  = juce::jmax (left,  o.getRight());
+                else if (o.getX() >= r.getRight()) right = juce::jmin (right, o.getX());
+            }
+            // 水平方向有交叠 → 上下扩张被它挡住
+            if (o.getRight() > r.getX() && o.getX() < r.getRight())
+            {
+                if (o.getBottom() <= r.getY())      top    = juce::jmax (top,    o.getBottom());
+                else if (o.getY() >= r.getBottom()) bottom = juce::jmin (bottom, o.getY());
+            }
+        }
+
+        r = juce::Rectangle<int> (left, top,
+                                  juce::jmax (gridSize, right - left),
+                                  juce::jmax (gridSize, bottom - top));
+
+        if (r == before)
+            break;
+    }
+
+    // ---- 3) 向内吸附 8px 网格 ----
+    //   向内取整（左/上 ceil、右/下 floor）保证吸附后仍然不会压到邻居；
+    //   极端窄缝里吸附反而变小的话，就保持原 bounds 不动。
+    const int sx0 = ((r.getX() + gridSize - 1) / gridSize) * gridSize;
+    const int sy0 = ((r.getY() + gridSize - 1) / gridSize) * gridSize;
+    const int sx1 = (r.getRight()  / gridSize) * gridSize;
+    const int sy1 = (r.getBottom() / gridSize) * gridSize;
+
+    juce::Rectangle<int> snapped (sx0, sy0,
+                                  juce::jmax (gridSize, sx1 - sx0),
+                                  juce::jmax (gridSize, sy1 - sy0));
+
+    const auto original = panel.getBounds();
+    if (snapped.getWidth() < original.getWidth() || snapped.getHeight() < original.getHeight())
+        return original;
+
+    // 兜底夹回 canvas（吸附公式理论上已保证，防御性处理）
+    return snapped.getIntersection (canvas).isEmpty() ? original
+                                                      : snapped.getIntersection (canvas);
+}
+
+void ModuleWorkspace::toggleModuleMaximize (ModulePanel& panel)
+{
+    if (panel.isFloating())
+        return;   // 浮动态由 Editor 处理（浮动窗口伪全屏）
+
+    // ---- 再次双击 → 恢复 ----
+    if (maximizedPanel.getComponent() == &panel)
+    {
+        const auto restore = maximizedRestoreBounds;
+        maximizedPanel = nullptr;
+        panel.setBounds (restore);
+        panel.repaint();
+        notifyLayoutChanged();
+        return;
+    }
+
+    // ---- L 布局锁定：禁止进入最大化（但上面已允许从最大化恢复）----
+    if (layoutLocked)
+        return;
+
+    // ---- 已有别的模块处于最大化 → 先恢复它，再重新计算目标 ----
+    if (auto* other = maximizedPanel.getComponent())
+    {
+        const auto restore = maximizedRestoreBounds;
+        maximizedPanel = nullptr;
+        other->setBounds (restore);
+        other->repaint();
+    }
+
+    auto target = computeMaximizedBoundsFor (panel);
+    if (target.isEmpty() || target == panel.getBounds())
+        return;
+
+    maximizedRestoreBounds = panel.getBounds();
+    panel.setBounds (target);
+    panel.toFront (false);      // 提到最前，但不抢键盘焦点
+    maximizedPanel = &panel;
+    panel.repaint();
+    notifyLayoutChanged();
+}
+
+// 窗口尺寸变化后重算：保证"最大化"的模块继续贴合新的 canvas。
+void ModuleWorkspace::reapplyMaximizeIfNeeded()
+{
+    auto* p = maximizedPanel.getComponent();
+    if (p == nullptr)
+        return;
+
+    auto target = computeMaximizedBoundsFor (*p);
+    if (! target.isEmpty() && target != p->getBounds())
+        p->setBounds (target);
+}
+
 // ----------------------------------------------------------
 // Phase E —— 邻居吸附（snap-to-edge）
 //   对 r 的每条边（左/右/上/下）与其他模块的对应边做距离判断，
@@ -1204,6 +1338,11 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
 {
     panel.onBoundsChangedByUser = [this](ModulePanel& p)
     {
+        // v3.0.1：用户手动拖动/缩放过"最大化"的模块 → 退出最大化态，
+        //   否则下次双击会跳回双击前的旧位置，体验很怪。
+        if (maximizedPanel.getComponent() == &p)
+            maximizedPanel = nullptr;
+
         snapToGrid(p);
         clearDragPreview();
         // Toybox：模块几何变化（缩放/移动）后，取消该面板的 actor（§7.1 步骤 5）
@@ -1216,6 +1355,17 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
         updateDragPreview(p);
     };
     panel.onCloseClicked   = [this](ModulePanel& p) { removeModule(p); };
+    // v3.0.1：抬头双击 —— 浮动态交给 Editor（浮动窗口伪全屏），嵌入式就地最大化
+    panel.onTitleDoubleClicked = [this](ModulePanel& p)
+    {
+        if (p.isFloating())
+        {
+            if (onFloatingTitleDoubleClicked)
+                onFloatingTitleDoubleClicked (p);
+            return;
+        }
+        toggleModuleMaximize (p);
+    };
     // 弹出按钮：回调到 popOutModule，再由 Editor 订阅 onModulePopOutRequested 创建浮动窗口
     panel.onPopOutClicked  = [this](ModulePanel& p) { popOutModule(p); };
     // 同步当前弹出功能开关（插件模式下 popOutEnabled_=false 会隐藏所有按钮）
@@ -3450,6 +3600,9 @@ void ModuleWorkspace::resized()
 
     // P7：窗口尺寸变化 → 画布背景缓存下次 paint 时重建
     canvasBgCacheDirty = true;
+
+    // v3.0.1：最大化中的模块跟随新的 canvas（窗口/预设尺寸变化后仍铺满）
+    reapplyMaximizeIfNeeded();
 }
 void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
 {
@@ -3966,7 +4119,10 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
             juce::ValueTree node(kLayoutModule);
             node.setProperty(kPropType, moduleTypeToString(m->getModuleType()), nullptr);
             node.setProperty(kPropId,   m->getModuleId(),                       nullptr);
-            const auto b = m->getBounds();
+            // v3.0.1：最大化态不写入存档 —— 存的是双击前的原始 bounds，
+            //   重启后模块回到原位置，而不是"一开机就占满画布"。
+            const auto b = (maximizedPanel.getComponent() == m) ? maximizedRestoreBounds
+                                                                : m->getBounds();
             node.setProperty(kPropX, b.getX(),      nullptr);
             node.setProperty(kPropY, b.getY(),      nullptr);
             node.setProperty(kPropW, b.getWidth(),  nullptr);

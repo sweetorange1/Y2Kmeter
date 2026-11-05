@@ -785,7 +785,14 @@ private:
         void resized() override;
         juce::BorderSize<int> getBorderThickness() const override;
         juce::Rectangle<int> getSavedBounds() const noexcept { return savedBounds_; }
+        ModulePanel& getModulePanel() const noexcept { return module_; }
         void setLayoutLocked(bool locked);
+
+        // v3.0.1：抬头双击 → 伪全屏 / 恢复
+        //   Windows：铺满当前显示器 userArea（已扣任务栏，不覆盖任务栏）；
+        //   macOS：走原生 setFullScreen（独立 Space，覆盖菜单栏/Dock）。
+        void togglePseudoFullScreen();
+        bool isPseudoFullScreen() const noexcept { return pseudoFullScreen_; }
 
         // 浮动窗口的缩放限制 = 模块自身的最小尺寸（与嵌入态完全一致）。
         //   之前浮动窗口直接用 JUCE 默认 constrainer（最小 0），用户可以把它拖得比
@@ -815,7 +822,14 @@ private:
         int floatingLockMinH_ = 0;
         int floatingLockMaxW_ = 0;
         int floatingLockMaxH_ = 0;
+
+        // v3.0.1：伪全屏状态（双击抬头切换）
+        bool                 pseudoFullScreen_ = false;
+        juce::Rectangle<int> preFullScreenBounds_;
     };
+
+    // v3.0.1：找到 panel 所属的浮动窗口并切换其伪全屏
+    void toggleFloatingModuleFullScreen (ModulePanel& panel);
 
     std::vector<std::unique_ptr<FloatingModuleWindow>> floatingWindows_;
 
