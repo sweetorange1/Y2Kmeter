@@ -9,6 +9,7 @@
 #include <juce_opengl/juce_opengl.h>
 
 #include <unordered_map>
+#include <cmath>
 
 // ==========================================================
 // PinkXPStyle.cpp —— 像素风配色/绘制/LookAndFeel 的实现
@@ -288,6 +289,56 @@ namespace PinkXP
         if (hz >= 1000.0f)
             return juce::String(hz / 1000.0f, 1) + " kHz";
         return juce::String((int) std::lround(hz)) + " Hz";
+    }
+
+    // ==========================================================
+    // 前景色可读性兜底（WCAG 相对亮度 / 对比度）
+    // ==========================================================
+    namespace
+    {
+        float srgbToLinear (juce::uint8 v) noexcept
+        {
+            const float s = (float) v / 255.0f;
+            return s <= 0.04045f ? s / 12.92f
+                                 : std::pow ((s + 0.055f) / 1.055f, 2.4f);
+        }
+
+        float relativeLuminance (juce::Colour c) noexcept
+        {
+            return 0.2126f * srgbToLinear (c.getRed())
+                 + 0.7152f * srgbToLinear (c.getGreen())
+                 + 0.0722f * srgbToLinear (c.getBlue());
+        }
+
+        float contrastRatio (juce::Colour a, juce::Colour b) noexcept
+        {
+            const float la = relativeLuminance (a);
+            const float lb = relativeLuminance (b);
+            return (juce::jmax (la, lb) + 0.05f) / (juce::jmin (la, lb) + 0.05f);
+        }
+    }
+
+    juce::Colour readableInkOn (juce::Colour fill, float minContrast)
+    {
+        const auto bg = fill.withAlpha (1.0f);
+
+        // 主题 ink 优先 —— 其余 10 套预设主题都在 11:1 以上，保持原有配色观感
+        if (contrastRatio (ink, bg) >= minContrast)
+            return ink;
+
+        // 兜底：Starlight(1.48:1) / Cyber Lilac(1.04:1) 这类"face 与 ink 同为深色"，
+        //   以及用户把 Control 调得与 Text 接近的自定义主题。挑对比度最高的候选，
+        //   保证文字至少可读（这两套主题会落到纯白）。
+        const juce::Colour candidates[] = { ink, selInk,
+                                            juce::Colours::black, juce::Colours::white };
+        juce::Colour best = juce::Colours::white;
+        float bestRatio = 0.0f;
+        for (const auto c : candidates)
+        {
+            const auto r = contrastRatio (c, bg);
+            if (r > bestRatio) { bestRatio = r; best = c; }
+        }
+        return best;
     }
 
     void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas,

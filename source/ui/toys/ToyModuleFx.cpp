@@ -112,7 +112,9 @@ namespace
             auto b = juce::Rectangle<int> ((int) at.x - w / 2, (int) at.y - 24, w, 20);
             g.setOpacity (a);
             PinkXP::drawRaised (g, b, PinkXP::face);
-            g.setColour (PinkXP::ink);
+            // 气泡底色是 face（不是 content）：Starlight / Cyber Lilac 的 face 与 ink
+            //   同为深色，直接用 ink 会"框在字没了"，统一走可读性兜底。
+            g.setColour (PinkXP::readableInkOn (PinkXP::face));
             g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
             g.drawText (note, b, juce::Justification::centred, false);
             g.setOpacity (1.0f);
@@ -607,13 +609,15 @@ namespace
             PinkXP::drawRaised (g, juce::Rectangle<int> (x, y, w, h), PinkXP::face);
             g.setColour (ToyPalette::accent());
             g.fillRect (x, y, w, 14);
-            g.setColour (PinkXP::ink);
+            // 标题条底色是强调色、正文/按钮底色是 face —— 两者都按可读性兜底
+            g.setColour (PinkXP::readableInkOn (ToyPalette::accent()));
             g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
             g.drawText ("Y2K TRUE PEAK", juce::Rectangle<int> (x + 2, y, w, 14), juce::Justification::centredLeft, false);
 
             const auto& img = dir.atlas->themedImage (icon, EmojiAtlas::Size::S);
             if (img.isValid())
                 g.drawImage (img, x + 6, y + 20, 18, 18, 0, 0, img.getWidth(), img.getHeight());
+            g.setColour (PinkXP::readableInkOn (PinkXP::face));
             g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
             g.drawText (text, juce::Rectangle<int> (x + 28, y + 18, w - 32, 18),
                         juce::Justification::centredLeft, false);
@@ -853,7 +857,7 @@ namespace
                     g.drawImage (img, b.getX() + 3, b.getY() + (h - 16) / 2, 16, 16, 0, 0,
                                  img.getWidth(), img.getHeight());
             }
-            g.setColour (PinkXP::ink);
+            g.setColour (PinkXP::readableInkOn (PinkXP::face));
             // 文字区域在 emoji 右侧，不重叠
             g.drawText (text, b.withTrimmedLeft (iconW).reduced (2, 0),
                         juce::Justification::centredLeft, false);

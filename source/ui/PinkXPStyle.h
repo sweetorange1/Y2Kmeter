@@ -231,6 +231,14 @@ namespace PinkXP
     // 格式化频率读数：<1kHz 显示 "xxx Hz"，>=1kHz 显示 "x.x kHz"
     juce::String formatFreqHz(float hz);
 
+    // 前景文字色（可读性兜底）：
+    //   主题 ink 相对 fill 的 WCAG 对比度 >= minContrast 时原样返回 ink；
+    //   否则在 ink / selInk / 纯黑 / 纯白中挑对比度最高者。
+    //   用途：底色取"面"(face)而非画布(content)的绘制（读数气泡、Win95 弹窗、
+    //   调色面板行等）。Starlight / Cyber Lilac 的 face 与 ink 同为深色
+    //   （对比度 1.48:1 / 1.04:1），不兜底就是"气泡框在、文字看不见"。
+    juce::Colour readableInkOn (juce::Colour fill, float minContrast = 4.5f);
+
     // 鼠标悬停标尺：在仪表区域 canvas 内以 pos 为中心绘制十字线，
     // 并在鼠标右上方绘制读数框（readout 为读数文本）。用于频谱类/
     // 时序类模块的悬停读数，读数只与鼠标位置有关，与音频信号无关。

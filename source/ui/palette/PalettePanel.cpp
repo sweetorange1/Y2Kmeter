@@ -499,6 +499,11 @@ void RoleRow::applyRowColours(bool darkMode)
     //   不变）存量字符会一直保留上一次的颜色 —— 就是"最后一行还是白字"的
     //   直接原因。applyColourToAllText() 才是改存量文本颜色的正确接口。
     hexEditor_.applyColourToAllText(fg, true);
+
+    // 行底色是 face（不是 content）：face 与 ink 撞色的主题（Starlight / Cyber Lilac）
+    //   下名字会看不见，这里与气泡共用同一套可读性兜底。
+    //   hex 输入框仍按明暗走黑/白（它的底色是 content）。
+    nameLabel_.setColour(juce::Label::textColourId, PinkXP::readableInkOn(PinkXP::face));
 }
 
 void RoleRow::paint(juce::Graphics& g)
@@ -644,8 +649,8 @@ void MyThemesList::paint(juce::Graphics& g)
         g.setColour(PinkXP::dark);
         g.drawRect(sw, 1);
 
-        // 名字
-        g.setColour(PinkXP::ink);
+        // 名字（行底色是 face：Starlight / Cyber Lilac 下 ink 与 face 撞色，需兜底）
+        g.setColour(PinkXP::readableInkOn(PinkXP::face));
         g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
         g.drawText(t.name, r.withTrimmedLeft(4), juce::Justification::centredLeft, true);
 

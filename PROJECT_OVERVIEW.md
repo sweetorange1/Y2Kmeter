@@ -5652,6 +5652,64 @@ UTF-8 中文会被逐字节二次编码成 `åä¸æ`。修复：`write` / `writ
 `assets/`（预设、纹理、安装包 ZIP、图标）、`tests/`、`scripts/`、`ttf/`、
 `CMakeLists.txt`、`CMakePresets.json`、两个 `.iss`、两个 `build_installer*.bat`、`build_macos_installer.sh`。
 
+## v3.0.0 补充：修复 Starlight / Cyber Lilac 主题下气泡文字不可见（face/ink 撞色）
+
+> 本轮为**纯缺陷修复**：版本号保持 **3.0.0**，不改存档格式、不改模块布局与交互。
+
+### 1. 现象
+
+- 切到 **Cyber Lilac**（赛博紫）或 **Starlight**（星空深蓝）后，点击任意模块弹出的**读数气泡只剩凸起边框和 emoji，文字完全看不见**
+  （用户描述：「空白的气泡」）；所有能弹气泡的模块表现一致。
+- 同一时刻模块内容、按钮、标题栏、工具栏文字都正常 —— 极易误判为「气泡文字没画出来」。
+- 重启后现象消失（原因见 §2 末尾的存档时序说明），因此无法稳定复现。
+
+### 2. 根因：气泡底色取 `face`、文字取 `ink`，两套主题这两个槽位撞色
+
+- 所有玩具气泡都是「`drawRaised(g, b, PinkXP::face)` 填底 + `g.setColour(PinkXP::ink)` 写字」：
+  读数气泡（全部模块共用，`ReadoutBubbleActor`）、Spectrum 音名气泡（`NoteBubbleActor`）、
+  TruePeak 的 Win95 弹窗（`PopUpWindowActor`）。
+- `buildThemes()` 中这两套主题的 `face` 是深色，`ink` 也是深色（实测对比度）：
+
+| 主题 | face | ink | **face ÷ ink** | btnFace ÷ ink | content ÷ ink |
+| --- | --- | --- | --- | --- | --- |
+| Starlight | `#2a3465` | `#10163a` | **1.48 : 1** | 11.79 | 14.89 |
+| Cyber Lilac | `#2a1e5a` | `#2e1873` | **1.04 : 1** | 8.75 | 11.79 |
+| 其余 10 套预设 | — | — | 11 ~ 17 : 1 | 正常 | 正常 |
+
+- 这两套主题的设计是「**深色外壳 `face` + 浅色画布 `content` / 控件面 `btnFace`**」，
+  所以模块内容、按钮、标题栏、工具栏全部可读，**唯独以 `face` 为底色的玩具气泡**变成同色文字 —— 这正是「只有气泡空白」的原因。
+  文字其实是画出来的，只是与底色几乎同色。
+- 重启能「自己好」：主题只在**正常退出**时写盘（`Y2KStandaloneApp::shutdown` → `persistAllSettings()` → `ui.themeId`）。
+  非正常退出（进程被杀 / 崩溃），或该次切换主题是在上一次存档之后发生的，重启就会回到上次存档的主题（本次现场为 WinXP）。
+
+### 3. 修复：新增 `PinkXP::readableInkOn(fill, minContrast = 4.5f)`
+
+- 位置：`source/ui/PinkXPStyle.h` / `.cpp`（与 `formatFreqHz` 相邻，内部含 `srgbToLinear` / `relativeLuminance` / `contrastRatio` 三个工具函数）。
+- 逻辑：按 WCAG 相对亮度计算对比度；`ink` 相对 `fill` ≥ 4.5:1 时**原样返回 `ink`**（其余 10 套主题配色零变化）；
+  否则在 `ink / selInk / 纯黑 / 纯白` 中取对比度最高者。
+- 实测落点：Starlight → 纯白（≈11.8:1），Cyber Lilac → 纯白（≈14.7:1）。
+- 附带收益：用户自定义调色板把 Control（→ `face`）调得与 Text（→ `ink`）接近时同样自动兜底，不必逐套改色板。
+
+### 4. 改动点
+
+| 文件 | 改动 |
+| --- | --- |
+| `source/ui/PinkXPStyle.h` / `.cpp` | 新增 `readableInkOn()` 与亮度/对比度工具函数 |
+| `source/ui/toys/ToyModuleFx.cpp` | `ReadoutBubbleActor`（所有模块共用的读数气泡）、`NoteBubbleActor`（Spectrum 音名）、`PopUpWindowActor`（TruePeak 弹窗：标题条按 `accent` 底色兜底，正文/OK 按钮按 `face` 兜底） |
+| `source/ui/palette/PalettePanel.cpp` | `MyThemesList` 的主题名、`RoleRow` 的角色名 Label（两者行底色同为 `face`）；hex 输入框仍按明暗走黑/白（它的底色是 `content`） |
+
+### 5. 验证
+
+- 切 **Cyber Lilac** → 点任意模块：气泡为白字 + 深紫底，清晰可读；切 **Starlight**：白字 + 深蓝底，同样可读。
+- 其余 10 套主题：`readableInkOn` 直接返回 `ink`，气泡配色与改动前完全一致。
+- 版本号保持 `3.0.0`（本轮为补充修复，不 bump）。
+
+### 6. 已知遗留（本轮未处理）
+
+- `ReadoutBubbleActor` 的 `b.constrainedWithin(clampRect)` 在**模块内容区比气泡还窄**时会压缩矩形；
+  当压缩后宽度 < 图标宽（22）+ 4px 时，文字区宽度 ≤ 0，`Graphics::drawText` 会整体跳过（框在、字没）。
+  常规布局与预设下不会触发，故本轮未改；若后续出现「极窄模块」场景，改法为「只钳位置不钳尺寸」或给文字区最小宽度。
+
 ---
 
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
