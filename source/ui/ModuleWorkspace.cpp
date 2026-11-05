@@ -1207,6 +1207,7 @@ void ModuleWorkspace::toggleModuleMaximize (ModulePanel& panel)
         return;
 
     maximizedRestoreBounds = panel.getBounds();
+    maximizedAppliedSize   = { target.getWidth(), target.getHeight() };
     panel.setBounds (target);
     panel.toFront (false);      // 提到最前，但不抢键盘焦点
     maximizedPanel = &panel;
@@ -1223,7 +1224,10 @@ void ModuleWorkspace::reapplyMaximizeIfNeeded()
 
     auto target = computeMaximizedBoundsFor (*p);
     if (! target.isEmpty() && target != p->getBounds())
+    {
+        maximizedAppliedSize = { target.getWidth(), target.getHeight() };
         p->setBounds (target);
+    }
 }
 
 // ----------------------------------------------------------
@@ -1338,10 +1342,19 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
 {
     panel.onBoundsChangedByUser = [this](ModulePanel& p)
     {
-        // v3.0.1：用户手动拖动/缩放过"最大化"的模块 → 退出最大化态，
-        //   否则下次双击会跳回双击前的旧位置，体验很怪。
+        // v3.0.1：最大化态的特殊处理
+        //   · 只是被点了一下 / 轻微抖动（尺寸没变）→ 直接返回：不吸附、不通知、
+        //     也**不能清掉最大化状态**，否则第二次双击无法恢复（外网反馈的 bug）；
+        //   · 用户真的缩放了模块（尺寸变了）→ 退出最大化态，把当前几何当作新基准。
         if (maximizedPanel.getComponent() == &p)
+        {
+            const bool sizeChanged = (p.getWidth()  != maximizedAppliedSize.x
+                                   || p.getHeight() != maximizedAppliedSize.y);
+            if (! sizeChanged)
+                return;
+
             maximizedPanel = nullptr;
+        }
 
         snapToGrid(p);
         clearDragPreview();

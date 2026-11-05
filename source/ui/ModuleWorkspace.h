@@ -892,6 +892,7 @@ private:
     //   SafePointer：模块被删除（关闭 / 切换预设 clearAllModules）后自动置空。
     juce::Component::SafePointer<ModulePanel> maximizedPanel;
     juce::Rectangle<int> maximizedRestoreBounds;   // 双击前的原始 bounds（存档也用它）
+    juce::Point<int>     maximizedAppliedSize;     // 应用最大化后的尺寸（用于识别"用户是否真的缩放过"）
     juce::Rectangle<int> computeMaximizedBoundsFor (ModulePanel& panel) const;
     void reapplyMaximizeIfNeeded();
 

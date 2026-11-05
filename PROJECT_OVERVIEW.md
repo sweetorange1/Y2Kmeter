@@ -5878,6 +5878,13 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 （4K@150% 可达 48MP ≈ 190MB），因此 `logicalW × logicalH × 4 > 16MP` 时自动退回 1x ——
 大模块本来不缺抗锯齿。
 
+**修复记录（同版本内）**：
+
+| 现象 | 根因 | 修法 |
+| --- | --- | --- |
+| 最大化后再次双击不恢复 | 双击的第一次 `mouseDown` 已把 `dragMode` 置为 move，`mouseUp` 即便没移动也会回调 `onBoundsChangedByUser` → 把最大化状态清掉 | `ModulePanel::mouseUp` 只在**几何真的变化**时回调；`ModuleWorkspace` 在最大化态下对"尺寸未变"的改动直接返回（不吸附、不通知、不退出最大化） |
+| 开启 L 锁定后 Milkdrop 内部按钮点不动 | `MilkdropModule::mouseDown` 里对非裸模式有 `isPanelLayoutLocked() && ! isBareMode()` 早退，与旁边注释"锁定只锁布局交互"自相矛盾 | 删除该早退；锁定只在 `ModulePanel::mouseDown` 内拦截拖拽/缩放/关闭，内容按钮（预设切换/color/收藏/库/auto）继续可用 |
+
 ### 7. 验证与遗留
 
 - 现场机器装 v3.0.1 诊断包后：`glGetError=0x502` 应消失；若走回退路径，日志会打印

@@ -30,18 +30,12 @@
 #include <vector>
 
 // ==========================================================
-// 布局锁定判断（ModulePanel / VirtuPetModule 各自都有一份,
-//   供 mouseDown 中判断是否禁止拖拽/缩放/关闭等操作）
+// v3.0.1：布局锁定只在基类 ModulePanel::mouseDown 内部拦截"拖拽/缩放/关闭"，
+//   模块内容按钮（预设切换 / color / 收藏 …）不再受锁定影响 —— 这里原先那份
+//   isPanelLayoutLocked() 已删除（它导致 L 锁定后 milkdrop 内部按钮全部失效）。
 // ==========================================================
 namespace
 {
-    bool isPanelLayoutLocked(const juce::Component& panel) noexcept
-    {
-        if (auto* ws = dynamic_cast<const ModuleWorkspace*>(panel.getParentComponent()))
-            return ws->isLayoutLocked();
-        return false;
-    }
-
     /**
      * @brief 运行时修正 .milk 预设中 Milkdrop DSL → GLSL 的类型不兼容问题。
      *
@@ -3165,12 +3159,11 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
 
     setFocusVisual(true);
 
-    // 布局锁定只锁"布局交互"（拖拽/缩放/关闭，已在基类 ModulePanel::mouseDown
-    // 内部单独拦截）；模块内容按钮（预设切换/color/收藏等）不应被锁。
-    // 裸模式（milkdrop-only）下即使布局锁定，仍要放行 overlay 按钮，
-    // 否则整个 milkdrop-only 插件的按钮全部失效（键盘切换预设走 keyPressed 不受影响）。
-    if (isPanelLayoutLocked(*this) && ! isBareMode())
-        return;
+    // 布局锁定只锁"布局交互"（拖拽 / 缩放 / 关闭，已在基类 ModulePanel::mouseDown
+    // 内部单独拦截）；模块内容按钮（预设切换 / color / 收藏 / 库 / auto …）属于
+    // 内容交互，锁定态下必须继续可用。
+    // v3.0.1 修复：旧实现在这里对非裸模式直接 return，导致开启右上角 L 锁定后
+    // milkdrop 模块内部所有按钮都点不动（与上面的注释自相矛盾）。
 
     // 内容区 overlay 按钮点击（顶部控制栏 + 右下角收藏/切换按钮）
     if (focused_ && glView != nullptr)

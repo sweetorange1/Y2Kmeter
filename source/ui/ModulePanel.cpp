@@ -781,12 +781,19 @@ void ModulePanel::mouseUp(const juce::MouseEvent& e)
 
     if (dragMode != DragMode::none || isDraggingFloatingWindow_)
     {
+        // v3.0.1：只有几何**真的变了**才回调。
+        //   单纯点一下抬头时 dragMode 已经进入 move 态（但没移动），
+        //   旧实现会照常触发 onBoundsChangedByUser → 工作区吸附 + 通知存档，
+        //   顺带把"抬头双击最大化"的状态清掉，导致第二次双击无法恢复。
+        const bool boundsChanged = (getBounds() != dragStartBounds);
+        const bool floatingDrag  = isDraggingFloatingWindow_;
+
         dragMode = DragMode::none;
         resizeEdge = Edge::none;
         isDraggingFloatingWindow_ = false;
         setMouseCursor(juce::MouseCursor::NormalCursor);
 
-        if (onBoundsChangedByUser)
+        if ((boundsChanged || floatingDrag) && onBoundsChangedByUser)
             onBoundsChangedByUser(*this);
     }
 }
