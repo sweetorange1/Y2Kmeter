@@ -1734,7 +1734,9 @@ void MilkdropModule::paint(juce::Graphics& g) {
   //     projectM 帧，表现为"模块底色色块"。必须用 transparentBlack 让内容区
   //     透明透出帧（边框 hl/dark/shdw 仍为不透明正常显示）。
   // 嵌入态外壳透明（透出 Editor GL 在 FBO 0 上的 Milkdrop 内容）；浮动态不透明。
-  if (isFloating())
+  // 软件绘制目标（添加模块菜单的 hover 预览快照）同样是"没有 GL 帧可透出"的场景，
+  // 必须用不透明 face，否则透明像素在 macOS 的 GL 合成下会透出后缓冲残留（花屏）。
+  if (isFloating() || isSoftwarePaintTarget())
     PinkXP::drawRaised(g, bounds, PinkXP::face);
   else
     PinkXP::drawRaised(g, bounds, juce::Colours::transparentBlack);
@@ -1796,6 +1798,25 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
   //   · 未就绪时的兜底黑屏 + 错误提示
   //   · 加载指示器 / 叠加控制栏（top bar、auto 控件等）
   //   · 浮动态：读取 Editor 共享帧（glReadPixels 抓取的离线 FBO 内容）
+
+  // ---- 软件绘制目标：添加模块菜单的 hover 预览快照 ----
+  //   快照是一张 CPU Image，嵌入态的 projectM 帧完全不在里面（帧由
+  //   Editor::renderOpenGL 直接写进后缓冲，CPU 侧内容区是透明的）。
+  //   Windows 的软件光栅器下面就是画布底色，透明看不出问题；macOS 的窗口
+  //   走 OpenGL 合成，快照里那块透明区域会把后缓冲的残留内容透出来，
+  //   表现为「预览窗内花屏 / 彩色噪声」。这里主动画一块不透明底色 +
+  //   静态标识，让预览在任何平台都是确定的画面（真实插入后的模块不受影响，
+  //   那条路径没有本分支）。
+  if (isSoftwarePaintTarget())
+  {
+    g.setColour(juce::Colours::black);
+    g.fillRect(content);
+
+    g.setColour(juce::Colours::grey.withAlpha(0.55f));
+    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+    g.drawText(y2k::tr ("MILKDROP"), content, juce::Justification::centred, false);
+    return;
+  }
 
   // 浮动态由 GLView 自己的 native OpenGL surface 直接渲染 projectM。
   // 不再绘制 Editor 共享帧，避免画面继续受主窗口 FBO 0 尺寸裁剪。

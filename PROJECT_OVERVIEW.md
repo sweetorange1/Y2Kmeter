@@ -6119,4 +6119,81 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 
 ---
 
+## v3.0.2 补充：macOS 端编译修复 + Milkdrop 悬停预览花屏
+
+> Windows 端开发机上编译一切正常，切到 macOS 打包机后连续报错。三次都是同一类问题：**Windows 专属代码（宏 / 头 / 系统 framework）与跨平台调用点混用**。本轮把三处编译问题与一个只在 mac 复现的渲染缺陷一并修掉，版本号保持 `3.0.2`。
+
+### 1. `restorePseudoFullScreen()` 引用 Windows 专属成员（编译错误）
+
+`pendingStickRestore` / `pendingStickBottom` 只声明在 `PluginEditor.h` 的 `#if JUCE_WINDOWS` 块内，而 `restorePseudoFullScreen()` 的 stick 互斥判断写在了宏外：
+
+```
+error: use of undeclared identifier 'pendingStickRestore'
+```
+
+改为 `#if JUCE_WINDOWS` 包裹该判断（非 Windows 上 stick 恒不激活，功能无变化）。**该修复在同步 Win 端改动后曾被覆盖并再次报错，现已入库，Win 端拉取时不要再回退。**
+
+### 2. `y2kIsDiagnosticBuild()` 定义在 Windows 匿名命名空间内（编译错误）
+
+v3.0.1 新增的诊断构建标识被放进了 `PluginEditor.cpp` 顶部那段 `#if JUCE_WINDOWS` 包住的匿名命名空间（同块内是 `HWND` / `SHAppBarMessage` 等 Windows 代码），但它的三个调用点 —— `ChromeHiddenOverlay` 构造函数、`ChromeHiddenOverlay::paint()`、`drawTitleBar()` —— 都是跨平台的：
+
+```
+error: use of undeclared identifier 'y2kIsDiagnosticBuild'
+```
+
+该函数只做编译期宏判断、无任何平台 API 依赖，已移到 Windows 块之后的独立匿名命名空间。同类问题自查口径：**匿名命名空间内定义的工具函数，只要调用点没有平台宏保护，就不应放在平台宏里。**
+
+### 3. `MacDesktopAudioCapture.mm` 与 Carbon 头撞名（编译错误）
+
+v3.0.2 为 `y2k::trf` 给该 `.mm` 加了 `#include "../i18n/Localisation.h"`，而它依赖整个 `<JuceHeader.h>`。JUCE 自动生成的 `JuceHeader.h` 末尾有一句全局 `using namespace juce;`（`#if ! DONT_SET_USING_JUCE_NAMESPACE`），随后 `#import <Foundation/Foundation.h>` 经 `CoreServices → CarbonCore → MacTypes.h` 时，系统 C 类型 `Point` / `Component` 与 `juce::Point` / `juce::Component` 撞名：
+
+```
+MacTypes.h:548: error: reference to 'Point' is ambiguous
+Finder.h / Components.h: 大批同类报错
+```
+
+两种直觉改法都验证过不行：把系统头全部前置会撞 JUCE 的 `gltypes.h included before juce_gl.h` 规则；全局定义 `DONT_SET_USING_JUCE_NAMESPACE` 会波及所有依赖隐式 juce 命名空间的代码。最终拆出轻量头：
+
+- **新增 `source/i18n/I18nTranslate.h`**：只 `#include <juce_core/juce_core.h>`，声明 `y2k::i18n::translate / translateFormat` 并定义 `y2k::tr / y2k::trf`（实现仍在 `Localisation.cpp`）；
+- `Localisation.h` 改为引入该头，删除其中重复的声明与包装函数 —— **对外 API 不变**，几十个 `.cpp` 无需改动；
+- `MacDesktopAudioCapture.mm` 只 include `../i18n/I18nTranslate.h`，include 顺序恢复原样。
+
+> 约定：**ObjC++ 源文件不要直接 include `Localisation.h`**，需要翻译入口时用 `I18nTranslate.h`。
+
+### 4. Milkdrop 悬停预览花屏（macOS 独有渲染缺陷）
+
+「添加模块」菜单悬停 Milkdrop 条目时，预览窗内容区显示彩色噪声；真实插入后的模块正常。
+
+根因是预览快照里那块内容区本来就是透明的，与平台无关：
+
+- `MilkdropModule::paint()` 嵌入态用 `drawRaised(..., transparentBlack)`，内容区留空以透出 Editor GL 合成的视频帧；
+- `paintContent()` 在 `IsRenderReady()` 为真时一个像素都不画。
+
+`ModuleWorkspace::getHoverPreviewImage()`（`ModuleWorkspace.cpp:2092`）用 factory **临时造一个真正的 `MilkdropModule`** 再 `createComponentSnapshot()` 成 CPU Image，这张图里没有 GL 帧 → 内容区 alpha=0。Windows 上透明处露出的是已画好的不透明画布底色，视觉上就是一个"空模块"，所以长期没被当成 bug；macOS 的窗口走 `NSOpenGLContext`（Metal 转译 + CoreAnimation 合成），该区域没有底色兜底，且 projectM 视频帧是绕开组件纹理的旁路（`glBlitFramebuffer` 直接打后缓冲），透明区于是露出残留像素 → 花屏。
+
+修复（`MilkdropModule` 此前从不读 `isSoftwarePaintTarget()`，本轮补上）：
+
+| 位置 | 处理 |
+| --- | --- |
+| `MilkdropModule.cpp` `paint()` | 外壳填充条件改为 `isFloating() \|\| isSoftwarePaintTarget()` → 用不透明 `PinkXP::face`，不再留透明区 |
+| `MilkdropModule.cpp` `paintContent()` | 开头新增 `isSoftwarePaintTarget()` 分支：填不透明黑底 + 居中灰字 `MILKDROP` 后返回，跳过"透出 GL 帧"的透明逻辑（预览态无 focused 控制栏与加载指示器，跳过无损失） |
+
+真实模块的绘制路径不经过新分支，显示与改动前完全一致。`setSoftwarePaintTarget` 是 `ModulePanel` 已有的跨平台机制（原本只有 `Spectrogram3DModule` 使用，用于规避 macOS CoreGraphics 越界读崩溃）。
+
+### 5. 与 Win 端改动合并
+
+Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单按钮循环 / 调性点击反馈）与本轮修复通过 rebase 合成线性历史。两者的 `PluginEditor.cpp` 改动区域不重叠（`applyFullScreenTilePreset()` vs 顶部匿名命名空间），无冲突。
+
+### 6. 改动点
+
+`PluginEditor.cpp`（stick 判断加宏保护、`y2kIsDiagnosticBuild()` 搬移）、`source/i18n/I18nTranslate.h`（新增）、`source/i18n/Localisation.h`、`source/standalone/MacDesktopAudioCapture.mm`、`source/ui/modules/MilkdropModule.cpp`、本文档。
+
+### 7. 验证
+
+- macOS Release（`cmake-build-release`，Universal `x86_64;arm64`，deployment target 12.3）三处编译错误逐一复现 → 修复 → `Y2Kmeter_All` 完整构建通过（Standalone / VST3 / AU / milkdrop VST3 / milkdrop AU 全部链接并完成 dylib + 预设部署与重签名）；
+- Milkdrop 悬停预览花屏由用户在本机编译后实测确认已消失，真实模块与浮动态显示无回归；
+- `git diff --check` 通过。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
