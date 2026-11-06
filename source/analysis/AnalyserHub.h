@@ -21,11 +21,11 @@
 //
 // 实现：
 //   - K-weighting 两级 IIR 滤波（pre-filter + RLB-weighting）
-//   - 400ms 块均方（Momentary LUFS）
-//   - 约 3.2s 滑动窗口（Short-term LUFS，8×400ms 块）
-//   - 全程积分（Integrated LUFS，含 -70 LUFS 绝对门限 + 相对门限）
+//   - Momentary：400ms 逐样本滑动窗口（无门限）
+//   - Short-term：最近 30 个 100ms 子块 = 3.0s（无门限）
+//   - Integrated：400ms 窗口、100ms 步进（75% 重叠）+ 绝对/相对双门限
 //   - 每通道 RMS（100ms 滑动窗口）
-//   - True Peak（4× 过采样插值）
+//   - True Peak（4× 多相插值，窗函数 sinc，每相 DC 增益归一化）
 //
 // 线程安全：
 //   pushStereo() 在音频线程调用；
@@ -39,7 +39,7 @@ public:
     struct Snapshot
     {
         float lufsM     = -144.0f;   // Momentary LUFS（400ms）
-        float lufsS     = -144.0f;   // Short-term LUFS（约 3.2s）
+        float lufsS     = -144.0f;   // Short-term LUFS（3.0s）
         float lufsI     = -144.0f;   // Integrated LUFS（全程）
         float rmsL      = -144.0f;   // 左声道 RMS dBFS（100ms）
         float rmsR      = -144.0f;   // 右声道 RMS dBFS（100ms）
@@ -104,8 +104,12 @@ private:
     // ---- True Peak（4× 过采样，FIR 插值）----
     static constexpr int tpOversample = 4;
     static constexpr int tpFirLen     = 12; // 每相位 FIR 长度
-    // 4 相位 × 12 抽头的 FIR 系数（Sinc + Hann 窗）
-    static const float tpFirCoeffs[tpOversample][tpFirLen];
+
+    // 4 相位 × 12 抽头的多相插值核（窗函数 sinc）。
+    //   v3.0.1：改为运行时生成 + 每相单独归一化（DC 增益 = 1）。
+    //   旧的手写表 phase2 系数和为 0.3806（-8.4 dB），采样点之间的峰值被严重低估。
+    static void initTruePeakCoeffs (float (&out)[tpOversample][tpFirLen]) noexcept;
+    float tpFirCoeffs[tpOversample][tpFirLen] {};
 
     struct TruePeakState
     {
@@ -119,7 +123,7 @@ private:
                 history[(size_t)i] = history[(size_t)(i - 1)];
             history[0] = x;
         }
-        float interpolate(int phase) const noexcept;
+        float interpolate (int phase, const float (&coeffs)[tpOversample][tpFirLen]) const noexcept;
     };
 
     // ---- 内部状态 ----
@@ -131,8 +135,8 @@ private:
     ChannelFilter filterL, filterR;
     TruePeakState tpL, tpR;
 
-    // 400ms 块（Momentary，供 Short-term / Integrated 做块级累积）
-    int momentaryBlockSize  = 0;   // 采样数
+    // 100ms 子块（BS.1770 的 400ms 门控块 = 4 个子块，步进 100ms = 75% 重叠）
+    int momentaryBlockSize  = 0;   // 采样数（0.1 s）
     int momentaryWriteCount = 0;
     double momentarySumL    = 0.0;
     double momentarySumR    = 0.0;
@@ -145,10 +149,13 @@ private:
     double momentarySlideSumL = 0.0;
     double momentarySlideSumR = 0.0;
 
-    // 短期（Short-term）：用 400ms 块的滑动队列（8 块 ≈ 3.2s）
-    static constexpr int shortTermBlocks = 8;
-    std::deque<double> shortTermBlocksL;
-    std::deque<double> shortTermBlocksR;
+    // 短期（Short-term）：最近 30 个 100ms 子块 = 3.0 s（EBU Tech 3341 / BS.1770）
+    //   v3.0.1 之前是 8 个 400ms 块（3.2 s）且对静音块做了归零（相当于加了门限），
+    //   与标准不符：S 不应用任何门限，窗口内变安静时读数应随之降低。
+    static constexpr int shortTermSubBlocks = 30;
+    static constexpr int gatingSubBlocks    = 4;    // 400ms / 100ms
+    std::deque<double> energy100L;
+    std::deque<double> energy100R;
 
     // 积分（Integrated）：BS.1770-4 两阶段门限
     //   · 绝对门限：blockMean >= absGateThreshold（-70 LUFS）

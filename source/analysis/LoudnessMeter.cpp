@@ -3,33 +3,54 @@
 #include <numeric>
 
 // ==========================================================
-// True Peak FIR 系数（4× 过采样，Sinc + Hann 窗，12 抽头/相位）
-// 相位 0 = 原始采样（直通），相位 1/2/3 = 插值相位
+// True Peak 多相插值核（4× 过采样，窗函数 sinc，12 抽头/相位）
+//
+//   v3.0.1 重写：旧表是手写的，phase2（半样本相位）系数和只有 0.3806
+//   （DC 增益 -8.4 dB），采样点之间的峰值被严重低估 → True Peak 偏小。
+//   现改为运行时按公式生成，并**每相单独归一化到 DC 增益 = 1**：
+//     h[i] = sinc(i - (5 + p/4)) × Hann(i)
+//   相位 0（整数延迟）退化为单抽头直通，等价于把原始采样也计入峰值（BS.1770 要求
+//   TP 不小于 Sample Peak）。
 // ==========================================================
-const float LoudnessMeter::tpFirCoeffs[tpOversample][tpFirLen] =
+void LoudnessMeter::initTruePeakCoeffs (float (&out)[tpOversample][tpFirLen]) noexcept
 {
-    // Phase 0（直通，中心抽头 = 1）
-    { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
-      0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
-    // Phase 1（0.25 偏移 Sinc+Hann）
-    { -0.00065f,  0.00424f, -0.01678f,  0.05928f, -0.17659f,  0.61710f,
-       0.61710f, -0.17659f,  0.05928f, -0.01678f,  0.00424f, -0.00065f },
-    // Phase 2（0.5 偏移 Sinc+Hann）
-    { -0.00092f,  0.00601f, -0.02381f,  0.08404f, -0.25000f,  0.75000f,
-      -0.25000f,  0.08404f, -0.02381f,  0.00601f, -0.00092f,  0.00000f },
-    // Phase 3（0.75 偏移 Sinc+Hann）
-    { -0.00065f,  0.00424f, -0.01678f,  0.05928f, -0.17659f,  0.61710f,
-       0.61710f, -0.17659f,  0.05928f, -0.01678f,  0.00424f, -0.00065f },
-};
+    constexpr int    kCenter = 5;   // 整数延迟抽头（history[5] = 5 个样本前）
+    constexpr double kPi     = juce::MathConstants<double>::pi;
+
+    for (int p = 0; p < tpOversample; ++p)
+    {
+        const double d = (double) kCenter + (double) p / (double) tpOversample;
+
+        double h[tpFirLen] {};
+        double sum = 0.0;
+
+        for (int i = 0; i < tpFirLen; ++i)
+        {
+            const double t    = (double) i - d;
+            const double sinc = (std::abs (t) < 1.0e-9) ? 1.0
+                                                        : std::sin (kPi * t) / (kPi * t);
+            // Hann 窗（以 12 抽头窗口中心为对称轴）
+            const double w    = 0.5 - 0.5 * std::cos (2.0 * kPi * ((double) i + 0.5)
+                                                        / (double) tpFirLen);
+            h[i] = sinc * w;
+            sum += h[i];
+        }
+
+        const double norm = (std::abs (sum) > 1.0e-12) ? (1.0 / sum) : 0.0;
+        for (int i = 0; i < tpFirLen; ++i)
+            out[p][i] = (float) (h[i] * norm);
+    }
+}
 
 // ==========================================================
 // TruePeakState::interpolate
 // ==========================================================
-float LoudnessMeter::TruePeakState::interpolate(int phase) const noexcept
+float LoudnessMeter::TruePeakState::interpolate (int phase,
+                                                 const float (&coeffs)[tpOversample][tpFirLen]) const noexcept
 {
     float sum = 0.0f;
     for (int i = 0; i < tpFirLen; ++i)
-        sum += tpFirCoeffs[phase][i] * history[(size_t)i];
+        sum += coeffs[phase][i] * history[(size_t) i];
     return sum;
 }
 
@@ -87,6 +108,9 @@ LoudnessMeter::LoudnessMeter()
 {
     // 默认系数（44100 Hz）
     calcKWeightingCoeffs(44100.0, preFilterCoeffs, rlbFilterCoeffs);
+
+    // True Peak 多相插值核（与采样率无关，构造时生成一次）
+    initTruePeakCoeffs (tpFirCoeffs);
 }
 
 void LoudnessMeter::prepare(double sr, int /*samplesPerBlock*/)
@@ -94,8 +118,8 @@ void LoudnessMeter::prepare(double sr, int /*samplesPerBlock*/)
     sampleRate = sr;
     calcKWeightingCoeffs(sr, preFilterCoeffs, rlbFilterCoeffs);
 
-    // 400ms 块大小
-    momentaryBlockSize  = juce::roundToInt(sr * 0.4);
+    // 100ms 子块（门控块 400ms = 4 个子块，步进 100ms）
+    momentaryBlockSize  = juce::roundToInt(sr * 0.1);
     momentaryWriteCount = 0;
     momentarySumL = momentarySumR = 0.0;
 
@@ -122,8 +146,8 @@ void LoudnessMeter::reset()
     momentaryHistR.clear();
     momentarySlideSumL = momentarySlideSumR = 0.0;
 
-    shortTermBlocksL.clear();
-    shortTermBlocksR.clear();
+    energy100L.clear();
+    energy100R.clear();
 
     gatedBlocks.clear();
 
@@ -211,36 +235,48 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
             tpR.push(right[i]);
             for (int ph = 0; ph < tpOversample; ++ph)
             {
-                tpL.peak = juce::jmax(tpL.peak, std::abs(tpL.interpolate(ph)));
-                tpR.peak = juce::jmax(tpR.peak, std::abs(tpR.interpolate(ph)));
+                tpL.peak = juce::jmax (tpL.peak, std::abs (tpL.interpolate (ph, tpFirCoeffs)));
+                tpR.peak = juce::jmax (tpR.peak, std::abs (tpR.interpolate (ph, tpFirCoeffs)));
             }
         }
 
-        // ---- 400ms 块结束 ----
+        // ---- 100ms 子块结束 ----
+        //   BS.1770-4 的门控块是 400ms 窗口、100ms 步进（相邻重叠 75%），
+        //   旧实现用 400ms 非重叠块，统计样本数只有 1/4，I 会随素材偏差。
         if (momentaryWriteCount >= momentaryBlockSize)
         {
-            const double meanL = momentarySumL / (double) momentaryBlockSize;
-            const double meanR = momentarySumR / (double) momentaryBlockSize;
+            const double e100L = momentarySumL / (double) momentaryBlockSize;
+            const double e100R = momentarySumR / (double) momentaryBlockSize;
             // BS.1770-4：立体声两通道能量"相加"（G_L = G_R = 1.0），不是平均。
-            //   平均会系统性偏低 3.01 dB。
-            const double blockMean = meanL + meanR;
 
-            // 静音/本底门限：低于门限的块视为静音，能量归零，
-            //   避免 loopback / 输入本底噪声污染 Short-term / Integrated。
-            const bool silentBlock = (blockMean < absGateThreshold);
-
-            // 短期队列（保留最近 shortTermBlocks 个块）
-            shortTermBlocksL.push_back(silentBlock ? 0.0 : meanL);
-            shortTermBlocksR.push_back(silentBlock ? 0.0 : meanR);
-            if ((int)shortTermBlocksL.size() > shortTermBlocks)
+            // Short-term 环形队列：最近 30 个 100ms 子块 = 3.0 s（无门限）
+            energy100L.push_back (e100L);
+            energy100R.push_back (e100R);
+            while ((int) energy100L.size() > shortTermSubBlocks)
             {
-                shortTermBlocksL.pop_front();
-                shortTermBlocksR.pop_front();
+                energy100L.pop_front();
+                energy100R.pop_front();
             }
 
-            // 积分：只保存超过绝对门限的块
-            if (!silentBlock)
-                gatedBlocks.push_back(blockMean);
+            // Integrated 门控块：最近 4 个子块 = 400ms（与上一块重叠 300ms）
+            if ((int) energy100L.size() >= gatingSubBlocks)
+            {
+                double sumL = 0.0, sumR = 0.0;
+                const int n = (int) energy100L.size();
+                for (int k = n - gatingSubBlocks; k < n; ++k)
+                {
+                    sumL += energy100L[(size_t) k];
+                    sumR += energy100R[(size_t) k];
+                }
+
+                const double blockMean = sumL / (double) gatingSubBlocks
+                                       + sumR / (double) gatingSubBlocks;
+
+                // 绝对门限（-70 LUFS ≈ 1.1725e-7 线性均方）：
+                //   低于门限的块不参与相对门限的计算。
+                if (blockMean >= absGateThreshold)
+                    gatedBlocks.push_back (blockMean);
+            }
 
             momentarySumL = momentarySumR = 0.0;
             momentaryWriteCount = 0;
@@ -293,7 +329,7 @@ void LoudnessMeter::pushStereo(const float* left, const float* right, int numSam
 }
 
 // ==========================================================
-// updateSnapshot —— 在音频线程每 400ms 块结束时调用
+// updateSnapshot —— 在音频线程每 100ms 子块结束时调用
 // ==========================================================
 void LoudnessMeter::updateSnapshot()
 {
@@ -308,15 +344,17 @@ void LoudnessMeter::updateSnapshot()
         s.lufsM = (ms >= absGateThreshold) ? linearToLUFS(ms) : -144.0f;
     }
 
-    // Short-term（最近 shortTermBlocks 块均值）
-    if (!shortTermBlocksL.empty())
+    // Short-term（最近 30 个 100ms 子块 = 3.0 s 的矩形滑动窗口，无门限）
+    //   EBU Tech 3341：S 不应用 -70 LUFS 或相对 -10 LU 门限，窗口内容变小时
+    //   读数应随之降低（旧实现把低能量块归零，相当于偷偷加了门限）。
+    if (!energy100L.empty())
     {
         double sumL = 0.0, sumR = 0.0;
-        for (auto v : shortTermBlocksL) sumL += v;
-        for (auto v : shortTermBlocksR) sumR += v;
-        const int n = (int)shortTermBlocksL.size();
+        for (auto v : energy100L) sumL += v;
+        for (auto v : energy100R) sumR += v;
+        const int n = (int) energy100L.size();
         const double meanS = (sumL + sumR) / (double) n;
-        s.lufsS = (meanS >= absGateThreshold) ? linearToLUFS(meanS) : -144.0f;
+        s.lufsS = (meanS >= absGateThreshold) ? linearToLUFS (meanS) : -144.0f;
     }
 
     // Integrated（BS.1770 两阶段门限）
@@ -347,9 +385,12 @@ void LoudnessMeter::updateSnapshot()
         const int n = juce::jmax(1, (int)rmsHistL.size());
         const double msL = rmsSumL / (double) n;
         const double msR = rmsSumR / (double) n;
-        // 低于 -45 dBFS 均方视为静音/本底，归零（原 1e-10 太深，本底会被显示）
-        s.rmsL = (msL >= absGateThreshold) ? (float)(10.0 * std::log10(msL)) : -144.0f;
-        s.rmsR = (msR >= absGateThreshold) ? (float)(10.0 * std::log10(msR)) : -144.0f;
+        // RMS 是"电平条"用途，仍按 -45 dBFS 均方把本底噪声压成"无读数"；
+        //   不能用 absGateThreshold（那是 -70 LUFS 的响度门限），否则
+        //   loopback / 输入本底（约 -55 dBFS）会一直显示成有效 RMS。
+        constexpr double rmsFloor = 3.162e-5;   // 10^(-45/10)
+        s.rmsL = (msL >= rmsFloor) ? (float)(10.0 * std::log10(msL)) : -144.0f;
+        s.rmsR = (msR >= rmsFloor) ? (float)(10.0 * std::log10(msR)) : -144.0f;
     }
 
     // True Peak：峰值比 RMS 高 crest factor（噪声约 10~15dB），用 -45dB 均方门限的
