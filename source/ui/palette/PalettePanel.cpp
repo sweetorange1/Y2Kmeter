@@ -271,12 +271,12 @@ void MiniPreviewCard::paint(juce::Graphics& g)
         g.fillRect(ramp.getX() + i * w, ramp.getBottom() - h, w - 1, h);
     }
 
-    // 文字行（"Aa 123 · Y2K" 含 · 装饰符号：SymbolGlyphs 统一切英文字体）
+    // 文字行（"Aa 123 · Y2K" 含 · 装饰符号：SymbolGlyphs 按 run 选字体）
     body.removeFromTop(4);
     g.setColour(L(gen_->ink, PinkXP::ink));
-    g.setFont(PinkXP::SymbolGlyphs::getFont (
-        juce::String::fromUTF8 ("Aa 123 \xC2\xB7 Y2K"), 8.0f, juce::Font::bold));
-    g.drawText(y2k::tr (juce::String::fromUTF8("Aa 123 \xC2\xB7 Y2K")), body, juce::Justification::centredLeft, false);
+    PinkXP::SymbolGlyphs::drawText (g, y2k::tr (juce::String::fromUTF8("Aa 123 \xC2\xB7 Y2K")),
+                                    body, juce::Justification::centredLeft,
+                                    PinkXP::getFont(8.0f, juce::Font::bold));
 }
 
 // ==========================================================
@@ -652,9 +652,11 @@ void MyThemesList::paint(juce::Graphics& g)
         g.drawRect(sw, 1);
 
         // 名字（行底色是 face：Starlight / Cyber Lilac 下 ink 与 face 撞色，需兜底）
+        //   用户命名的主题可能含装饰符号 → 走 run 化绘制
         g.setColour(PinkXP::readableInkOn(PinkXP::face));
-        g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-        g.drawText(y2k::tr (t.name), r.withTrimmedLeft(4), juce::Justification::centredLeft, true);
+        PinkXP::SymbolGlyphs::drawText (g, y2k::tr (t.name), r.withTrimmedLeft(4),
+                                        juce::Justification::centredLeft,
+                                        PinkXP::getFont(10.0f, juce::Font::bold));
 
         // 右侧按钮区（Apply ↑ ↓ ✎ ×）
         auto btnArea = r.removeFromRight(148);
@@ -670,16 +672,22 @@ void MyThemesList::paint(juce::Graphics& g)
         PinkXP::drawRaised(g, rnR,    PinkXP::btnFace);
         PinkXP::drawRaised(g, delR,   PinkXP::btnFace);
 
-        // "Use ↑ ↓ ✎ ×" 含装饰符号：经 SymbolGlyphs 切英文字体（与英文界面一致）
-        g.setFont(PinkXP::SymbolGlyphs::getFont (
-            juce::String::fromUTF8 ("Use \xE2\x86\x91 \xE2\x86\x93 \xE2\x9C\x8E \xC3\x97"),
-            8.0f, juce::Font::bold));
+        // "Use ↑ ↓ ✎ ×"：Use 的译文是中文（"应用"），必须用当前语言字体；
+        //   四个图标是纯符号，各自走 SymbolGlyphs（英文 UI 字体，字形固定）。
         g.setColour(PinkXP::ink);
-        g.drawText(y2k::tr("Use"), applyR, juce::Justification::centred, false);
-        g.drawText(y2k::tr (juce::String::fromUTF8("\xE2\x86\x91")), upR, juce::Justification::centred, false);   // ↑
-        g.drawText(y2k::tr (juce::String::fromUTF8("\xE2\x86\x93")), dnR, juce::Justification::centred, false);   // ↓
-        g.drawText(y2k::tr (juce::String::fromUTF8("\xE2\x9C\x8E")), rnR, juce::Justification::centred, false);   // ✎
-        g.drawText(y2k::tr (juce::String::fromUTF8("\xC3\x97")), delR, juce::Justification::centred, false);      // ×
+        PinkXP::SymbolGlyphs::drawText (g, y2k::tr("Use"), applyR,
+                                        juce::Justification::centred,
+                                        PinkXP::getFont(8.0f, juce::Font::bold));
+        const auto drawIcon = [&] (const char* utf8, juce::Rectangle<int> r)
+        {
+            const auto text = juce::String::fromUTF8 (utf8);
+            PinkXP::SymbolGlyphs::drawText (g, text, r, juce::Justification::centred,
+                                            PinkXP::SymbolGlyphs::getFont (text, 8.0f, juce::Font::bold));
+        };
+        drawIcon ("\xE2\x86\x91", upR);   // ↑
+        drawIcon ("\xE2\x86\x93", dnR);   // ↓
+        drawIcon ("\xE2\x9C\x8E", rnR);   // ✎
+        drawIcon ("\xC3\x97",     delR);  // ×
     }
 }
 

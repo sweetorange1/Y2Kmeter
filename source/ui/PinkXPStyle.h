@@ -178,20 +178,30 @@ namespace PinkXP
     // ==========================================================
     // 符号字形集中管理（界面国际化补充）
     //   中文像素字体（ChillBitmap）对一批装饰符号（✓ ♡ ★ ● × ↑ ↓ ← → ▸ ▾ ▲
-    //   ✎ ∞ ⚠ · … 等）存在 cmap 条目，但**没有可渲染的字形数据**（像素位图
-    //   缺失），DirectWrite 认为字形存在、不会回退系统字体，直接绘制就是空白。
-    //   英文 UI 字体（Silkscreen）本身没有这些字形，反而会触发系统字体回退——
-    //   这正是英文界面下符号显示正常的原因。
-    //   规则集中在本类：文本只要包含上述符号，整串改用英文 UI 字体渲染；
-    //   英文界面下两个字体相同，机制自然失效（no-op）。
-    //   所有绘制 / 测量点统一通过 getFont() / rebase() 取字体，
-    //   不要在别处自行判断字形。
+    //   ✎ ∞ ⚠ · … 等）存在 cmap 条目：Windows 的 DirectWrite 下这些位图字形
+    //   画不出来，且不会回退系统字体，直接绘制就是空白（mac 实测可正常渲染）。
+    //   英文 UI 字体（Silkscreen）本身没有这些字形，反而会触发系统字体回退 ——
+    //   这正是英文界面下符号正常的原因。
+    //
+    //   关键约束（mac 回归教训）：
+    //     · 英文 UI 字体**没有任何 CJK 字形**。把「中文 + 符号」混排的整串文本
+    //       换成 Silkscreen 后，CJK 只能靠系统回退；macOS 的系统回退会挑到
+    //       PingFang SC，而 JUCE 8.0.12 + CoreText 下该字体描不出字形（实测
+    //       整段空白），于是"我的主题 ▸""← 较早"这类按钮/提示全部消失。
+    //     · 因此**混排文本必须拆 run 绘制**：符号片段用英文 UI 字体，其余片段
+    //       仍用当前语言字体。纯符号/纯英文文案才允许整串切换。
+    //     · 两种字体都带一层显式回退族（cpp 的 uiFallbackFamilies /
+    //       symbolFallbackFamilies）：即使某处漏拆 run，CJK 也会落到能渲染的
+    //       系统字体，而不是空白。
+    //
+    //   所有绘制 / 测量点统一通过本类的 getFont() / rebase() / drawText() /
+    //   getTextWidth() 取字体，不要在别处自行判断字形。
     // ==========================================================
     class SymbolGlyphs
     {
     public:
-        // 文本是否含"当前语言字体画不出来"的装饰符号
-        //   （只覆盖 Unicode 装饰符号，不含 ASCII 字母数字与基本标点）
+        // 文本是否含"当前语言字体画不出来"的装饰符号，
+        //   且整串可以安全地换成英文 UI 字体（**不含 CJK**）。
         static bool needsSymbolFont (const juce::String& text);
 
         // 文本是否**只**由装饰符号组成（不含字母/数字/CJK/空格）。
@@ -200,7 +210,8 @@ namespace PinkXP
         //   "切中文后 × 变小"）。
         static bool isSymbolsOnly (const juce::String& text) noexcept;
 
-        // 按文本内容选字体：含符号 → 英文 UI 字体；否则沿用当前语言字体。
+        // 按文本内容选字体：纯符号/纯英文且含符号 → 英文 UI 字体；
+        //   混排（含 CJK）→ 沿用当前语言字体，符号交给 splitRuns/drawText。
         //   高度换算与 PinkXP::getFont 完全一致（1.5x / uiScale / minFontHeight）。
         static juce::Font getFont (const juce::String& text, float height,
                                    int styleFlags = juce::Font::plain);
@@ -225,8 +236,44 @@ namespace PinkXP
         //   标题栏等关键位置用它决定是否做 1px 向下微调。
         static bool cjkFontActive();
 
+        // ---- 混排文本 run 化（符号字体 + 语言字体混排）----
+        struct Run
+        {
+            juce::String text;
+            bool         symbol = false;   // true = 用英文 UI 字体
+        };
+
+        // 按字符类别把文本切成若干 run（CJK/拉丁 与 装饰符号分开）。
+        //   英文界面 / 纯 CJK 文本只会得到 1 个 run（零额外开销）。
+        static std::vector<Run> splitRuns (const juce::String& text);
+
+        // run 宽度（与 drawText 完全一致；走 GlyphArrangement，含系统回退字形）。
+        //   注意：不能用 Font::getStringWidthFloat —— 它按 Silkscreen 的 notdef
+        //   宽度测量，会明显小于回退后的真实宽度。
+        static float getTextWidth (const juce::String& text, const juce::Font& baseFont);
+
+        // 以 run 为单位绘制单行文本（不会因"放不下"丢字）：
+        //   · baseFont 决定普通文字的字体、行高与基线；
+        //   · 符号 run 用同高度的英文 UI 字体；
+        //   · 支持 left / centred / right + top / centred / bottom。
+        //   文本含 \n 时退回整串绘制（多行场景很少且不需要 run 化）。
+        static void drawText (juce::Graphics& g,
+                              const juce::String& text,
+                              juce::Rectangle<int> area,
+                              juce::Justification justification,
+                              const juce::Font& baseFont);
+
+        // 把文本按 run 追加到 AttributedString（tooltip 多行排版用）。
+        static void appendRuns (juce::AttributedString& as,
+                                const juce::String& text,
+                                const juce::Font& baseFont,
+                                juce::Colour colour);
+
     private:
         static juce::Typeface::Ptr getSymbolTypeface();   // 缓存的英文 UI 字体
+
+        // 给定高度生成"英文 UI 字体 + 系统符号回退"的 Font
+        static juce::Font makeSymbolFont (float height);
     };
 
     // ==========================================================

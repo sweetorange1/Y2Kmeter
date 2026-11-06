@@ -94,12 +94,13 @@ namespace
 
             // "∞FPS" 的 ∞ 属于中文像素字体的空白符号：经 SymbolGlyphs 切英文字体
             const juce::String shown = y2k::tr (button.getButtonText());
-            g.setFont (PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold));
+            const auto baseFont = PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold);
 
             auto area = button.getLocalBounds();
             if (shouldDrawButtonAsDown || button.getToggleState())
                 area.translate (1, 1);
-            g.drawText (shown, area, juce::Justification::centred, false);
+            PinkXP::SymbolGlyphs::drawText (g, shown, area,
+                                            juce::Justification::centred, baseFont);
         }
     };
 
@@ -4925,10 +4926,11 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
         if (tw > 10 && tx < getWidth())
         {
             const juce::String shown = y2k::tr (th.displayName);
-            g.setFont(PinkXP::SymbolGlyphs::getFont (shown, 10.0f, juce::Font::bold));
             g.setColour(PinkXP::ink);
-            g.drawText(shown, tx, 0, tw, getHeight(),
-                       juce::Justification::centredLeft, true);
+            PinkXP::SymbolGlyphs::drawText (g, shown,
+                                            { tx, 0, tw, getHeight() },
+                                            juce::Justification::centredLeft,
+                                            PinkXP::getFont (10.0f, juce::Font::bold));
         }
     }
 }

@@ -1606,8 +1606,11 @@ private:
             if (targetLabel.isNotEmpty())
             {
                 g.setColour (PinkXP::ink);
-                g.setFont (PinkXP::SymbolGlyphs::getFont (targetLabel, 8.0f, juce::Font::bold));
-                g.drawText (targetLabel, lb, juce::Justification::centred, false);
+                // 目标语言标签可能是 CJK（"中"）：必须用当前语言字体，
+                //   不能走"纯符号 → 英文字体"分支（Silkscreen 无 CJK 字形）。
+                PinkXP::SymbolGlyphs::drawText (g, targetLabel, lb,
+                                                juce::Justification::centred,
+                                                PinkXP::getFont (8.0f, juce::Font::bold));
             }
         }
 

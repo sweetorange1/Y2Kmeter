@@ -6310,4 +6310,33 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 
 ---
 
+## v3.0.2 补充：macOS 中文界面字符缺失（混排 run 化 + 字形宽度 + PingFang）
+
+> 版本号保持 `3.0.2` 不变。Windows 端汉化后的新版在 mac 上出现"很多字符不显示"：调色工作室的「高级 ▸ / 我的主题 ▸」按钮整块无字、模块标题栏左侧主题图标（♥ / ★）空白、大量提示与按钮缺字。根因是三个独立问题叠加：
+
+### 1. 混排文本整串换字体 → CJK 全部丢失（主因）
+
+- `SymbolGlyphs` 原规则：文本只要含装饰符号（✓ ♡ ★ ▸ ← …），**整串**改用英文 UI 字体（Silkscreen）。中文译文里 `高级 ▸`、`← 较早`、`应用=使用 ↑↓=排序 …` 这类混排文案极多，Silkscreen 没有任何 CJK 字形，只能靠系统回退。
+- mac 的系统回退恰好选中 **PingFang SC**，而 JUCE 8.0.12 + CoreText 下 PingFang SC 的 CJK 字形**描不出来**（本机 `Graphics::drawText` 实测 0 像素；`Hiragino Sans GB` 正常）→ 整串中文空白。Windows 的 DirectWrite 回退能正常出字，所以只在 mac 暴露。
+- 修复：**按 run 绘制**。`SymbolGlyphs::splitRuns()` 把文本切成「装饰符号片段 / 其余片段」，`drawText()` / `getTextWidth()` / `appendRuns()` 分别用英文 UI 字体与当前语言字体绘制；`needsSymbolFont()` 对含 CJK 的文本直接返回 false（不再整串切换）。已接入：`drawButtonText` / `getTextButtonWidthToFitText` / `drawLabel` / `drawComboBoxTextWhenNothingSelected` / `drawPopupMenuItem`（含理想宽度）/ `drawTitleIconText` / `cachedStaticTextImage` / tooltip（标题 + 正文 AttributedString）/ `FpsMiniLookAndFeel` / 语谱图方向提示 / 调色板 `Use ↑ ↓ ✎ ×` 与主题名 / 引导页语言标签。
+- `kBrokenSymbolGlyphs` 同时剔除 `— – “ ” ‘ ’ ‹ ›`（两套字体都有正常字形，留在表里只会把中文句子切碎）。
+
+### 2. 字形 advance 略大于图标框 → 整颗 glyph 被丢弃（♥ / ★ 空白）
+
+- `Graphics::drawText` 走 `addCurtailedLineOfText`：放不下的 glyph **整颗丢弃**。主题图标的绘制框只有 16×14，而回退字体里 ♥/★ 的 advance ≈ 字号（中文界面 16.07px、英文界面 18.9px）→ 恰好超框，被整颗丢掉（Windows 的 Segoe UI Symbol 更窄，所以没暴露）。
+- 修复：`SymbolGlyphs::drawText()` 改用 `GlyphArrangement::addLineOfText`（无 maxWidth 截断）+ 手动对齐后 `draw`；`drawTitleIconText` 的绘制区由 16×14 放宽到 20×20（左右 +2、上下 +3，仍完整落在 22px 高的标题栏内；标题文字从 +25 才开始，不会与图标重叠）。
+
+### 3. 显式回退族（兜底 + 避开 PingFang）
+
+- `PinkXP::getFont` 产出的字体统一挂 `uiFallbackFamilies()`（mac：Hiragino Sans GB / Arial Unicode MS / Heiti SC；Win：Microsoft YaHei UI / Microsoft YaHei / SimSun）。
+- 符号字体挂 `symbolFallbackFamilies()`（mac：Apple Symbols → Arial Unicode MS → Hiragino Sans GB → Lucida Grande；Win：Segoe UI Symbol → Segoe UI Emoji → Microsoft YaHei UI）。分工：Apple Symbols 覆盖 ♥★◆●▲▸↑↓… 大部分装饰符号，它缺的 ✓✎✦✿❀❤ 由 Arial Unicode MS 补，Hiragino Sans GB 兜底 CJK。这样即使某处漏拆 run，CJK 也不会落到 PingFang 变成空白。
+- 独立版系统弹窗 `SystemLookAndFeel` 原先硬编码 `PingFang SC`，中文按钮/正文/标题在 mac 上同样空白 → 统一改为 `Hiragino Sans GB`。
+- 宽度测量统一改走 `SymbolGlyphs::getTextWidth()`（GlyphArrangement，含回退字形）；`Font::getStringWidthFloat` 按主字体 notdef advance 测量，回退字形更宽时会把末位字符切掉。
+
+**改动点**：`source/ui/PinkXPStyle.h/.cpp`、`PluginEditor.cpp`、`source/ui/ModuleWorkspace.cpp`、`source/ui/palette/PalettePanel.cpp`、`source/ui/modules/SpectrogramModule.cpp`、`source/ui/modules/Spectrogram3DModule.cpp`、`source/standalone/Y2KStandaloneApp.cpp`、本文档。
+
+**验证**：各改动文件以项目 `compile_commands.json` 的编译参数 `-fsyntax-only` 通过；行宽/字形行为以独立 JUCE 最小程序实测（PingFang SC 0 像素、Hiragino Sans GB 正常；16px 图标框内 ♥/★ 在 run 化 + 不截断后正常出图）。用户在本机编译实测确认：mac 中文界面字符缺失问题已修复（调色工作室「高级 / 我的主题」按钮、模块抬头 ♥/★、中文 tooltip 等均正常显示）。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

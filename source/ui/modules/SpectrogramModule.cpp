@@ -788,15 +788,14 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
         g.fillRect (canvas.getRight() - 58,         by, 56, bh);
 
         g.setColour (PinkXP::hl);
-        // "← older" / "newer →" 含箭头符号：经 SymbolGlyphs 切英文字体渲染
-        g.setFont (PinkXP::SymbolGlyphs::getFont (
-            juce::String::fromUTF8 ("\xe2\x86\x90 older newer \xe2\x86\x92"),
-            8.5f, juce::Font::plain));
-        g.drawText (y2k::tr (juce::String::fromUTF8 ("\xe2\x86\x90 older")),
-                    canvas.getX() + 2, by, 56, bh,
-                    juce::Justification::centred, false);
-        g.drawText (y2k::tr (juce::String::fromUTF8 ("newer \xe2\x86\x92")),
-                    canvas.getRight() - 58, by, 56, bh,
-                    juce::Justification::centred, false);
+        // "← older" / "newer →" 含箭头符号：按 run 绘制（中文译文是
+        //   "← 较早" —— 整串换英文 UI 字体会让 CJK 在 mac 上消失）
+        const auto hintFont = PinkXP::getFont (8.5f, juce::Font::plain);
+        PinkXP::SymbolGlyphs::drawText (g, y2k::tr (juce::String::fromUTF8 ("\xe2\x86\x90 older")),
+                                        { canvas.getX() + 2, by, 56, bh },
+                                        juce::Justification::centred, hintFont);
+        PinkXP::SymbolGlyphs::drawText (g, y2k::tr (juce::String::fromUTF8 ("newer \xe2\x86\x92")),
+                                        { canvas.getRight() - 58, by, 56, bh },
+                                        juce::Justification::centred, hintFont);
     }
 }

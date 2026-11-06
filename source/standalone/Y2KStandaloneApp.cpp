@@ -111,6 +111,10 @@ static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
     //   1) getTypefaceForFont → nullptr：阻断任何 LNF 层字体替换
     //   2) drawButtonText → 用 getTextButtonFont() 显式设置字体
     //   3) 字体方法返回显式 typefaceName 的 FontOptions
+    //
+    //   mac 字体选择：不要用 "PingFang SC" —— JUCE 8.0.12 + CoreText 下它的
+    //   CJK 字形描不出来（实测 drawText 输出 0 像素，整段中文空白）。
+    //   "Hiragino Sans GB" 有完整可渲染字形，系统自带、无需打包。
     // ----------------------------------------------------------
     struct SystemLookAndFeel : juce::LookAndFeel_V4
     {
@@ -125,7 +129,7 @@ static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
         juce::Font getAlertWindowTitleFont() override
         {
            #if JUCE_MAC
-            return juce::Font (juce::FontOptions ("PingFang SC", 18.0f, juce::Font::bold));
+            return juce::Font (juce::FontOptions ("Hiragino Sans GB", 18.0f, juce::Font::bold));
            #elif JUCE_WINDOWS
             return juce::Font (juce::FontOptions ("Microsoft YaHei", 18.0f, juce::Font::bold));
            #elif JUCE_LINUX
@@ -140,7 +144,7 @@ static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
         {
            #if JUCE_MAC
             (void) tb;
-            return juce::Font (juce::FontOptions ("PingFang SC",
+            return juce::Font (juce::FontOptions ("Hiragino Sans GB",
                                                   juce::jmin (15.0f, (float) buttonHeight * 0.6f),
                                                   juce::Font::plain));
            #elif JUCE_WINDOWS
@@ -179,7 +183,7 @@ static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
         juce::Font getAlertWindowFont() override
         {
            #if JUCE_MAC
-            return juce::Font (juce::FontOptions ("PingFang SC", 12.0f, juce::Font::plain));
+            return juce::Font (juce::FontOptions ("Hiragino Sans GB", 12.0f, juce::Font::plain));
            #elif JUCE_WINDOWS
             return juce::Font (juce::FontOptions ("Microsoft YaHei", 12.0f, juce::Font::plain));
            #elif JUCE_LINUX
@@ -221,7 +225,7 @@ static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
     // 其 LookAndFeel 解析链路可能不与 AlertWindow 一致，必须直接设置。
     {
        #if JUCE_MAC
-        editor->applyFontToAllText (juce::Font (juce::FontOptions ("PingFang SC", 14.0f, juce::Font::plain)));
+        editor->applyFontToAllText (juce::Font (juce::FontOptions ("Hiragino Sans GB", 14.0f, juce::Font::plain)));
        #elif JUCE_WINDOWS
         editor->applyFontToAllText (juce::Font (juce::FontOptions ("Microsoft YaHei", 14.0f, juce::Font::plain)));
        #elif JUCE_LINUX
