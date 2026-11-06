@@ -4361,6 +4361,9 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 {
+    // 诊断：组件层（父层）真正被合成的次数，用于对比 GL 出帧数。
+    diagCompositeTicks.fetch_add (1, std::memory_order_relaxed);
+
 #ifdef Y2KMETER_MILKDROP_ONLY
     // Milkdrop-only：整个窗口由 projectM 帧（Editor GL 渲染）填充，
     // 不画桌面纹理 / 标题栏。
@@ -6555,6 +6558,11 @@ bool Y2KmeterAudioProcessorEditor::keyPressed(const juce::KeyPress& key) {
       if ((mods.isCtrlDown() || mods.isCommandDown()) && mods.isShiftDown()
           && key.getKeyCode() == 'D')
       {
+          // 顺手把当前 z 序打进日志：图片被 GL 盖住时，这一行能直接说明
+          //   "图片在模块下面"还是"合成没跑"。
+          if (workspace != nullptr)
+              Y2K_DIAG ("PAINT", juce::String ("[manual] z=") + workspace->diagDescribeZOrder());
+
           const auto snapshotPath = y2k::diag::exportSnapshot();
           y2k::diag::reportNow ("user pressed Ctrl+Shift+D");
 
@@ -6922,6 +6930,63 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
             if (peer->isMinimised())
                 glActive = false;
         y2k::diag::setChannelActive (y2k::diag::Channel::GlFrame, glActive);
+
+        // ---- v3.0.1：组件层合成健康度（每 5s 一行）----
+        //   GL 每帧都会写后缓冲，但 JUCE 只在"存在组件脏区"时才重新合成组件层
+        //   （juce_OpenGLContext.cpp: renderOpenGL → 仅 isUpdating 时 paintComponent）。
+        //   所以一旦组件重绘链断了，GL 内容就会永久压住图片/其它模块。
+        //   这里同时记录：GL 出帧数、组件合成数、各模块的重绘/合并/跳过计数、
+        //   以及工作区 z 序（判断图片到底在模块上面还是下面）。
+        {
+            static juce::uint32 lastGlTicks   = 0;
+            static juce::uint32 lastCompTicks = 0;
+            static double       lastReportMs  = 0.0;
+
+            const juce::uint32 glT   = (juce::uint32) glNow;
+            const juce::uint32 compT = diagCompositeTicks.load (std::memory_order_relaxed);
+
+            if (lastReportMs <= 0.0)
+            {
+                lastReportMs  = nowWallMs;
+                lastGlTicks   = glT;
+                lastCompTicks = compT;
+            }
+            else if (nowWallMs - lastReportMs >= 5000.0)
+            {
+                const double dt = juce::jmax (0.001, (nowWallMs - lastReportMs) / 1000.0);
+                const juce::uint32 dGl   = glT   - lastGlTicks;
+                const juce::uint32 dComp = compT - lastCompTicks;
+
+                juce::String line;
+                line << "gl=" << juce::String ((int) std::lround ((double) dGl / dt)) << "/s"
+                     << " comp=" << juce::String ((double) dComp / dt, 1) << "/s";
+
+                if (workspace != nullptr)
+                    line << " | z=" << workspace->diagDescribeZOrder()
+                         << " | "  << workspace->diagTakePaintStats();
+
+                Y2K_DIAG ("PAINT", line);
+
+                if (workspace != nullptr)
+                {
+                    for (int i = 0; i < workspace->getNumModules(); ++i)
+                        if (auto* md = dynamic_cast<MilkdropModule*> (workspace->getModule (i)))
+                        {
+                            Y2K_DIAG ("PAINT", juce::String ("milkdrop ") + md->diagDescribeGlView());
+                            break;
+                        }
+                }
+
+                if (dGl > 0 && dComp == 0)
+                    Y2K_DIAG ("PAINT", y2k::diag::u8 ("!! 5s 内 GL 出了 ")
+                                        + juce::String ((int) dGl)
+                                        + y2k::diag::u8 (" 帧但组件层零合成 —— GL 内容会永久压住所有组件"));
+
+                lastReportMs  = nowWallMs;
+                lastGlTicks   = glT;
+                lastCompTicks = compT;
+            }
+        }
 
         y2k::diag::setEditorState (getWidth(), getHeight(),
                                    (float) openGLContext.getRenderingScale(),

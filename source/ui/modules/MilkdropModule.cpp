@@ -2659,6 +2659,22 @@ void MilkdropModule::GLView::RequestRenderScale() {
 #endif
 }
 
+juce::String MilkdropModule::diagDescribeGlView() const
+{
+  if (glView == nullptr)
+    return "glView=null";
+
+  juce::String s;
+  s << "ready="      << (glView->IsRenderReady() ? 1 : 0)
+    << " float="     << (isFloating() ? 1 : 0)
+    << " glAttached=" << (glView->IsGLAttached() ? 1 : 0)
+    << " onDesktop=" << (glView->isOnDesktop() ? 1 : 0)
+    << " timer="     << (int) glView->diagTimerTicks;
+
+  glView->diagTimerTicks = 0;
+  return s;
+}
+
 bool MilkdropModule::GLView::IsRenderReady() const {
   // 嵌入态由 Editor GL 渲染，浮动态由本地上下文渲染。
   if (owner_.isFloating())
@@ -2763,6 +2779,7 @@ int64_t MilkdropModule::GLView::GetLastPresetSwitchTimeMs() const {
 }
 
 void MilkdropModule::GLView::timerCallback() {
+  ++diagTimerTicks;
   UpdateOpenGLAttachment();
   if (!IsRenderReady()) return;
 

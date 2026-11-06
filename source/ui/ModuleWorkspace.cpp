@@ -1215,6 +1215,70 @@ void ModuleWorkspace::toggleModuleMaximize (ModulePanel& panel)
     notifyLayoutChanged();
 }
 
+// ==========================================================
+// v3.0.1 诊断：z-order / 重绘统计
+// ==========================================================
+juce::String ModuleWorkspace::diagDescribeZOrder() const
+{
+    juce::String s;
+
+    for (auto* c : getChildren())
+    {
+        if (c == nullptr)
+            continue;
+
+        juce::String tag;
+
+        if (auto* mp = dynamic_cast<ModulePanel*> (c))
+        {
+            tag = moduleTypeToString (mp->getModuleType());
+            if (mp->isFloating())
+                tag << "(float)";
+        }
+        else if (perlerLayers.contains (c))
+        {
+            // 注意：PerlerImageLayer 在本文件里可能只有前向声明，
+            //   不能用 dynamic_cast（不完整类型），直接用成员数组比对指针。
+            tag = "IMG";
+        }
+        else
+        {
+            continue;   // 按钮 / 标签 / 下拉等 chrome 不参与 z 序判定
+        }
+
+        if (s.isNotEmpty())
+            s << " > ";
+        s << tag;
+    }
+
+    return s.isEmpty() ? juce::String ("(empty)") : s;
+}
+
+juce::String ModuleWorkspace::diagTakePaintStats()
+{
+    juce::String s;
+
+    for (auto* m : modules)
+    {
+        if (m == nullptr)
+            continue;
+
+        const auto c = m->diagTakePaintCounters();
+
+        if (s.isNotEmpty())
+            s << " ";
+
+        // 格式：Type[p合成/i请求/c合并/s跳过]
+        s << moduleTypeToString (m->getModuleType())
+          << "[p" << (int) c.paints
+          << "/i" << (int) c.issued
+          << "/c" << (int) c.coalesced
+          << "/s" << (int) c.skipped << "]";
+    }
+
+    return s.isEmpty() ? juce::String ("(none)") : s;
+}
+
 // 窗口尺寸变化后重算：保证"最大化"的模块继续贴合新的 canvas。
 void ModuleWorkspace::reapplyMaximizeIfNeeded()
 {

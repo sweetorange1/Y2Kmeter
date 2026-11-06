@@ -241,6 +241,18 @@ public:
     void setSoftwarePaintTarget(bool isSoftware) noexcept { softwarePaintTarget_ = isSoftware; }
     bool isSoftwarePaintTarget() const noexcept { return softwarePaintTarget_; }
 
+    // ---- v3.0.1 诊断：组件重绘 / 合成计数（只在消息线程读写）----
+    //   用来定位"GL 内容（Milkdrop 视频）永久压住组件"这一类问题：
+    //   GL 每帧都会写后缓冲，但 JUCE 只有在存在组件脏区时才重新合成组件层。
+    struct DiagPaintCounters
+    {
+        juce::uint32 paints    = 0;   // paintOverChildren 真正执行（= 组件层被合成）
+        juce::uint32 issued    = 0;   // 真正向 JUCE 请求了重绘
+        juce::uint32 coalesced = 0;   // 被合并守卫丢弃
+        juce::uint32 skipped   = 0;   // 因不可见 / 不在工作区被跳过
+    };
+    DiagPaintCounters diagTakePaintCounters() noexcept;
+
     std::function<void(ModulePanel&)> onBoundsChangedByUser;
     std::function<void(ModulePanel&)> onBoundsDragging;   // 拖拽过程中持续回调（吸附预览用）
     std::function<void(ModulePanel&)> onCloseClicked;
@@ -341,6 +353,9 @@ private:
     //   再也不会重新合成组件层，GL 内容（Milkdrop 视频 / GL 直渲染）就会"永远
     //   压在所有组件之上"，且表现为永久性。见 ModulePanel::repaint()。
     juce::uint32 pendingRepaintStampMs = 0;
+
+    // 诊断计数（见 DiagPaintCounters）
+    juce::uint32 diagPaints = 0, diagIssued = 0, diagCoalesced = 0, diagSkipped = 0;
 
     enum class DragMode { none, move, resize };
     DragMode dragMode = DragMode::none;
@@ -480,6 +495,12 @@ public:
 
     // 浮动态模块的抬头双击（由 Editor 接管 → 让对应浮动窗口伪全屏）
     std::function<void(ModulePanel&)> onFloatingTitleDoubleClicked;
+
+    // ---- v3.0.1 诊断（消息线程）----
+    //   z-order 描述（下 → 上），用于判断"图片到底在 Milkdrop 上面还是下面"；
+    //   paint 统计，读取并清零各模块的重绘/合成计数。
+    juce::String diagDescribeZOrder() const;
+    juce::String diagTakePaintStats();
 
     // 清空所有模块（含 OwnedArray 自动 delete）与拼豆贴画。
     //   · 用于布局预设切换：先清空再由外部重新填充。

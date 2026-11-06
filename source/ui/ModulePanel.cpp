@@ -363,6 +363,9 @@ void ModulePanel::paint(juce::Graphics& g)
 
 void ModulePanel::paintOverChildren(juce::Graphics& g)
 {
+    // 诊断：组件层真正被合成的次数（与 GL 出帧数对比，即可判断"合成饥饿"）
+    ++diagPaints;
+
     // 重绘合并标记在这里统一清理：
     // 某些模块（如 VirtuPet）会重写 paint()，导致 ModulePanel::paint() 不一定执行；
     // 若仅在 paint() 里清理，pendingFullRepaint 可能长期为 true，后续 repaint 全被合并掉。
@@ -419,10 +422,23 @@ void ModulePanel::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBo
     PinkXP::drawSunken(g, contentBounds, PinkXP::content);
 }
 
+ModulePanel::DiagPaintCounters ModulePanel::diagTakePaintCounters() noexcept
+{
+    DiagPaintCounters c;
+    c.paints    = diagPaints;
+    c.issued    = diagIssued;
+    c.coalesced = diagCoalesced;
+    c.skipped   = diagSkipped;
+
+    diagPaints = diagIssued = diagCoalesced = diagSkipped = 0;
+    return c;
+}
+
 void ModulePanel::repaint()
 {
     if (! isVisuallyActiveInWorkspace())
     {
+        ++diagSkipped;
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintSkippedInvisible((int) moduleType);
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintDroppedOffscreen((int) moduleType);
@@ -441,6 +457,7 @@ void ModulePanel::repaint()
     const auto stampNow = juce::Time::getMillisecondCounter();
     if (pendingFullRepaint && stampNow - pendingRepaintStampMs < 120)
     {
+        ++diagCoalesced;
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
 #endif
@@ -450,6 +467,7 @@ void ModulePanel::repaint()
 #if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintRequest((int) moduleType);
 #endif
+    ++diagIssued;
     pendingFullRepaint = true;
     pendingAreaRepaint = false;
     pendingRepaintArea = getLocalBounds();
@@ -461,6 +479,7 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
 {
     if (! isVisuallyActiveInWorkspace())
     {
+        ++diagSkipped;
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintSkippedInvisible((int) moduleType);
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintDroppedOffscreen((int) moduleType);
@@ -479,6 +498,7 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
 
     if (pendingFullRepaint && stampNow - pendingRepaintStampMs < 120)
     {
+        ++diagCoalesced;
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
 #endif
@@ -488,6 +508,7 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
     if (pendingAreaRepaint)
     {
         pendingRepaintArea = pendingRepaintArea.getUnion(area);
+        ++diagIssued;
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
 #endif
@@ -498,6 +519,7 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
 #if Y2K_ENABLE_PERF_COUNTERS
     y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintRequest((int) moduleType);
 #endif
+    ++diagIssued;
     pendingAreaRepaint = true;
     pendingRepaintArea = area;
     pendingRepaintStampMs = stampNow;

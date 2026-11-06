@@ -217,6 +217,12 @@ public:
     void checkOverlayAutoHide();  ///< 由 GLView::timerCallback 在 UI 线程轮询调用
     void checkAutoMode();         ///< 由 GLView::timerCallback 在 UI 线程轮询，自动切换预设
 
+    // === 诊断（v3.0.1）===
+    //   GLView 的就绪 / 附加状态：用于排查"视频永久压住组件"到底是
+    //   ① 浮动态或原生子窗口残留（glAttached/onDesktop），还是
+    //   ② 组件层根本没被重新合成（看 paint 计数）。
+    juce::String diagDescribeGlView() const;
+
     // === 自动轮播模式 ===
     bool isAutoModeActive() const noexcept { return isAutoMode_; }
     float getAutoIntervalSeconds() const noexcept { return autoIntervalSeconds_; }
@@ -292,6 +298,10 @@ private:
         juce::String GetCurrentPresetName() const;
         juce::String GetCurrentPresetFilePath() const;  // 当前预设完整路径（供收藏拷贝）
         int64_t GetLastPresetSwitchTimeMs() const;
+
+        // 诊断：是否挂着本地 GL 上下文（只有浮动态才应为 true）
+        bool IsGLAttached() const noexcept { return attached_; }
+        juce::uint32 diagTimerTicks = 0;   // timerCallback 执行次数（诊断，读取后清零）
 
         // 最后一帧快照（UI 线程读取，GL 线程写入，互斥锁保护）
         // 用于在 detach/attach 重建期间显示上一帧画面，消除切换模式时的黑屏闪烁。

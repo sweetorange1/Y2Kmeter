@@ -5891,7 +5891,28 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 | 最大化后再次双击不恢复 | 双击的第一次 `mouseDown` 已把 `dragMode` 置为 move，`mouseUp` 即便没移动也会回调 `onBoundsChangedByUser` → 把最大化状态清掉 | `ModulePanel::mouseUp` 只在**几何真的变化**时回调；`ModuleWorkspace` 在最大化态下对"尺寸未变"的改动直接返回（不吸附、不通知、不退出最大化） |
 | 开启 L 锁定后 Milkdrop 内部按钮点不动 | `MilkdropModule::mouseDown` 里对非裸模式有 `isPanelLayoutLocked() && ! isBareMode()` 早退，与旁边注释"锁定只锁布局交互"自相矛盾 | 删除该早退；锁定只在 `ModulePanel::mouseDown` 内拦截拖拽/缩放/关闭，内容按钮（预设切换/color/收藏/库/auto）继续可用 |
 
-### 7. 验证状态
+### 7. 诊断：组件合成健康度（`[PAINT]`）
+
+**为什么需要**：JUCE 的 OpenGL CPE 每帧先 `renderOpenGL()` 写后缓冲，**只有存在组件脏区时**才
+`paintComponent()` 重新合成组件层（`juce_OpenGLContext.cpp:414-435`）。因此"GL 内容永久压住
+图片 / 其它模块"只可能落在下面几个环节之一，日志里各有对应字段：
+
+| 环节 | 日志字段 | 判读 |
+| --- | --- | --- |
+| 组件重绘链断（`repaint()` 被合并 / 丢弃） | 每模块 `[p合成/i请求/c合并/s跳过]` | `i>0 但 p=0` → 请求了却没被合成 |
+| 整个组件层没合成 | `gl=N/s comp=M/s` | `gl>0 && comp=0` → 直接告警 `!! 5s 内 GL 出了 N 帧但组件层零合成` |
+| Milkdrop 定时器没跑 / 未就绪 | `milkdrop ready=… timer=…` | `timer=0` 或 `ready=0` → 30Hz 重绘链根本没启动 |
+| 图片被压在模块下面（z 序） | `z=频谱>IMG>Milkdrop`（下→上） | 顺序即可判定"图片到底在模块上面还是下面" |
+| 浮动态 / 原生子窗口残留 | `float= / glAttached= / onDesktop=` | 嵌入态出现 `glAttached=1` 或 `onDesktop=1` 即异常 |
+
+输出位置与频率：
+
+- 每 5 s 一行 `[PAINT] gl=… comp=… | z=… | 各模块计数`（仅诊断构建；Release 不编译）；
+- 手动 `Ctrl/⌘+Shift+D` 时额外打一行 `[PAINT] [manual] z=…`，对应快照时间点。
+
+配合已有的 `[STATS]`（GL fps / md / direct）即可把"GL 正常但组件层停摆"与"真卡死"彻底区分开。
+
+### 8. 验证状态
 
 **已在本机验证通过（v3.0.1 发布前）**：
 
