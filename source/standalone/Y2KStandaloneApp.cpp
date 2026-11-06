@@ -704,10 +704,8 @@ public:
                         .getIntValue ("ui.fftSize", 2048);
                     y2kEditor->RestoreFftSize (savedFftSize);
 
-                    // 4.5) 恢复 Toybox 档位（默认 Normal=2；Standalone 默认 Normal，决策 1）
-                    const int savedToyLevel = getUserSettings()
-                        .getIntValue ("ui.toyLevel", 2);
-                    y2kEditor->setToyLevel (savedToyLevel);
+                    // 4.5) Toybox 档位不再从 ui.toyLevel 恢复：改为连续互动自动升级，
+                    //     启动时恒为 Chill，3 s 无互动自动降回 Chill。
 
                     // 4.5) 恢复 Milkdrop 预设索引。即使预设尚未加载
                     //     （GL 上下文异步初始化），也直接入队跳转请求；
@@ -1435,7 +1433,7 @@ private:
         // 保存 FFT size 档位（1024/2048/4096/8192/16384，反馈 #7）
         s.setValue ("ui.fftSize", (int) cachedEditor->GetUserRequestedFftSize());
 
-        // 保存 Toybox 档位（0/1/2/3）
+        // 记录最后一次 Toybox 档位（1/2/3；仅用于诊断，启动时不再恢复）
         s.setValue ("ui.toyLevel", (int) cachedEditor->getToyLevel());
 
         // 保存当前 Milkdrop 预设索引（-1 表示尚未加载）

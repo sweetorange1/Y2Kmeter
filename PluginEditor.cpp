@@ -2213,20 +2213,25 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
 
     // ------------------------------------------------------
-    // Toybox（v3.0.0）：点击解压互动主管（挂在 Editor 全局鼠标监听 + FrameListener）
-    //   · 初始档位：Standalone 默认 Normal，插件宿主默认 Chill（决策 1）。
+    // Toybox：点击解压互动主管（挂在 Editor 全局鼠标监听 + FrameListener）
+    //   · 启动时恒为 Chill；档位由连续互动（间隔 < 3 s）每 5 次自动升一档，
+    //     3 s 无互动自动降回 Chill；不再有工具栏切换按钮 / OFF 选项。
     // ------------------------------------------------------
     Y2K_LOG ("[boot] ToyDirector create begin");
     toyDirector = std::make_unique<ToyDirector> (*this, *workspace, processor.getAnalyserHub());
     Y2K_LOG ("[boot] ToyDirector created");
 
-    const int savedToy = processor.getSavedToyLevel();
-    const int initialToy = (savedToy >= 0) ? juce::jlimit (0, 3, savedToy)
-                                           : (isPluginHost ? 1 : 2);   // 1=Chill 2=Normal
+    // Toybox 档位改为「连续互动自动升级」：启动时恒为 Chill，
+    //   不再从工程状态 / ui.toyLevel 恢复（旧存档里的 Off=0 也不再可达）。
+    const int initialToy = (int) ToyLevel::Chill;
     workspace->setToyDirector (toyDirector.get());
     workspace->setToyLevel (initialToy);
     toyDirector->setLevel ((ToyLevel) initialToy);
-    workspace->onToyLevelChanged = [this] (int level) { setToyLevel (level); };
+    toyDirector->onLevelChanged = [this] (int level)
+    {
+        if (workspace) workspace->setToyLevel (level);
+        processor.setSavedToyLevel (level);
+    };
 
     // v2.9：挂 vblank 帧时钟。首个 vblank 到来时才切换到外部时钟，
     //   在此之前（peer 尚未创建）仍由 Hub 内部 Timer 驱动，不会出现空窗。
@@ -6011,11 +6016,11 @@ int Y2KmeterAudioProcessorEditor::GetUserRequestedFftSize() const noexcept
 }
 
 // ======================================================
-// Toybox（v3.0.0）档位
+// Toybox 档位（Off 已下线，钳制到 1..3）
 // ======================================================
 void Y2KmeterAudioProcessorEditor::setToyLevel (int level)
 {
-    const int l = juce::jlimit (0, 3, level);
+    const int l = juce::jlimit ((int) ToyLevel::Chill, (int) ToyLevel::Party, level);
     if (toyDirector) toyDirector->setLevel ((ToyLevel) l);
     if (workspace)   workspace->setToyLevel (l);
     processor.setSavedToyLevel (l);
@@ -6023,7 +6028,7 @@ void Y2KmeterAudioProcessorEditor::setToyLevel (int level)
 
 int Y2KmeterAudioProcessorEditor::getToyLevel() const noexcept
 {
-    return toyDirector ? (int) toyDirector->getLevel() : 2;
+    return toyDirector ? (int) toyDirector->getLevel() : (int) ToyLevel::Chill;
 }
 
 

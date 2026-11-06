@@ -12,6 +12,8 @@
   - 历史：`v2.9.9` 之后的功能曾以「v2.9.9 补充」形式入库、不 bump 版本号（`Stereo Map`、多屏混合 DPI 修复、
     实时 BPM / 调性模块），随后 `v2.9.10` 归拢了 Waveform 模块重构；**v3.0.0** 起恢复常规语义化版本号
     （见文末「v3.0.0：...」章节）；**v3.0.1** 为补丁版（GL 直渲染修复 / 全屏布局预设，见文末）。
+    当前 `3.0.1` 固定为「补丁 + 补充」版本，后续补充（响度计时序对齐、VST 布局锁死修复、
+    GL 组件合成诊断、**Toybox 档位改为连续互动自动升级**）均以 `v3.0.1补充：` 形式入库、不再 bump 版本号。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -4104,7 +4106,7 @@ v2.8.1 引入 Stick（AppBar 驻留）后，与既有的 Hide、L（锁定）共
 ### 1. 新子系统：Toybox（`source/ui/toys/`，约 30 文件）
 
 - **交互引擎**：`ToyDirector`（全局鼠标监听 + 路由 + 连击 + 彩蛋）→ `ToyClock`（FrameListener 驱动物理/渲染）→ `ToyOverlay`（全窗口透明叠加层，鼠标穿透）→ `ToyActor` 体系（自由 actor / 模块 actor，step/paint/onClick/isPoppable/impulse 统一接口）。
-- **档位**：OFF / CHILL / NORMAL / PARTY 四档，工具栏 TOY 按钮循环切换，档位持久化（Standalone `ui.toyLevel`、VST3 工程状态）。
+- **档位**（v2.9.3 交付态）：OFF / CHILL / NORMAL / PARTY 四档，工具栏 TOY 按钮循环切换，档位持久化（Standalone `ui.toyLevel`、VST3 工程状态）。**现行行为已改为连续互动自动升档，见文末「Toybox 档位改为连击自动升级」章节**。
 - **画布 2.0**：按下当帧喷（修复"松开才喷"）、按住持续喷（花洒随鼠标）、鼠标力场、点爆、连击 5/10/20 喷口形态升级、落地挤压回弹、左右墙反弹、模块平台上沿碰撞（带 x 范围，无空气墙）、FIFO 硬上限 400 粒子。
 - **emoji 图集**：Segoe UI Emoji 经 DirectWrite + D2D1.0 WIC 软件渲染目标烘焙（COLR 彩色）；编码链路最终以 `u"\U0001F496"` 硬编码 UTF-16 字面量终结（曾因 UTF-8 字节被当 Latin-1 渲染出乱码，历 5 轮定位）；主题 duotone 着色 + 描边；预烘焙消息线程分帧；旋转 12 桶预烘焙缓存。
 - **模块"数据玩具"化**：全部 19 个模块接入 `toyHitTest/toyPoke`，各有专属互动效果 + 真实读数气泡（拍电视、拍立得快照、拨弦音名、老虎机、Win95 弹窗、入侵者、橡皮筋、弹珠、幸运方块、压扁、Line Rider、爆米花等），读数内容如实取自分析数据。
@@ -4483,7 +4485,7 @@ Milkdrop 模块顶部 overlay 的所有自定义控制（**color 面板的 RGB/B
 #### ② 新增：底部工具栏溢出折叠 + 向上二级控制区
 
 - **目标**：窗口变窄时，右侧按钮不再挤压/覆盖左侧颜色控制区（`themeBar`）。
-- **行为**：当工具栏宽度不足时，右侧可选控件（布局预设/SaveLoad/Stick/Toy）自动折叠，主栏显示 `More` 按钮；点击后在工具栏上方展开二级控制区，再点 `Less` 收起。
+- **行为**：当工具栏宽度不足时，右侧可选控件（布局预设/SaveLoad/Stick；TOY 按钮已删除）自动折叠，主栏显示 `More` 按钮；点击后在工具栏上方展开二级控制区，再点 `Less` 收起。
 - **实现要点**：
   - `ModuleWorkspace` 新增 `toolbarOverflowBtn`、`toolbarOverflowCollapsed/Expanded` 状态；
   - 新增 `ToolbarOverflowBackdrop` 作为上浮二级区底板；
@@ -5928,6 +5930,42 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
   `!! glBlitFramebuffer 失败 …`；无论哪种，画面都不再出现残影；
 - 若问题复现，日志里的 `module GL error @ <checkpoint>` 会直接指到具体绘制段；
 - 三个全屏预设与抬头双击在 1080p / 1440p / 混合 DPI 多屏下的表现。
+
+---
+
+## v3.0.1 补充：Toybox 档位改为连续互动自动升级
+
+**需求**：删除工具栏的 TOY 档位切换按钮（OFF/CHILL/NORMAL/PARTY），档位改由用户连续互动次数决定；不再提供 OFF。
+
+**现行行为**：
+
+| 项 | 规则 |
+| --- | --- |
+| 初始档位 | 启动恒为 `CHILL`（插件态 / Standalone 一致），不再从 `ui.toyLevel` 或工程状态恢复 |
+| 升级 | 每满 5 次连续互动升一档：`CHILL → NORMAL → PARTY`，`PARTY` 封顶 |
+| 连续判定 | 两次互动间隔 `< 3 s` 视为连续；`>= 3 s` 立即断连并降回 `CHILL` |
+| 超时降级 | 最后一次互动后 3 s 无互动，连击归零、停掉持续喷 / 彩带雨并降回 `CHILL`（`ToyDirector` 的 100 ms Timer） |
+| OFF | 从 UI 下线；`ToyDirector::setLevel()` 与 Editor / Workspace 入口均把 0 / 越界值钳制到 `[Chill, Party]`，旧存档的 `0` 会被抬到 `CHILL` |
+| 保留 | 连击字幕（NICE!/COOL!/WOW!/Y2K MODE）、连击喷口形态、彩带雨彩蛋全部保留；`CHILL` 档现在也计入连击 |
+| 双击添加模块菜单 | 互动恒开启（无 OFF），仍保持「非 OFF 档禁用双击」，右键菜单入口不变 |
+
+**交互流程示例**：启动为 `CHILL` → 3 秒内连点 5 下升到 `NORMAL`（第 5 下同时触发 NICE! 字幕）→ 继续连点 5 下升到 `PARTY`（第 10 下触发 COOL!）→ 停手 3 秒自动回到 `CHILL`，连击计数归零。
+
+**实现要点**：
+
+- `ToyDirector` 增加 `private juce::Timer`（100 ms），构造 `startTimer`、析构 `stopTimer`；超时只降级一次（判定后 `lastComboTime_ = 0`）。
+- `registerComboClick()` 不再对 `CHILL` 早退；断连判定窗口由 1.2 s 改为 3 s，升级步长为 5 次。
+- 档位变化统一走 `setLevel()`：钳制 `[Chill, Party]`、降回 Chill 时清理持续喷 / 彩带雨、随后触发 `onLevelChanged(int)` 通知 Editor。
+- Editor 回调同步 `ModuleWorkspace::setToyLevel()` 与 `Processor::setSavedToyLevel()`；`ui.toyLevel` 仅记录，不再参与启动恢复。
+
+**改动点**：`source/ui/toys/ToyKit.h/.cpp`（Timer + 连击升档 + 钳制 + `onLevelChanged` 回调）、
+`source/ui/ModuleWorkspace.h/.cpp`（删除 `toyBtn` 及其工具栏占位 / More 溢出分支 / 分割线）、
+`PluginEditor.cpp/.h`（初始化固定 Chill、钳制、订阅回调）、
+`source/standalone/Y2KStandaloneApp.cpp`（不再恢复 `ui.toyLevel`）、
+`PluginProcessor.h`（存档字段注释）。
+`ToyLevel::Off` 枚举值仅为兼容旧存档数值保留，运行时不可达。
+
+**验证**：`git diff --check` 通过、IDE 静态诊断 0 错误；本地构建与运行时手感按项目约定由用户在目标机器验证。
 
 ---
 

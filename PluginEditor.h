@@ -220,9 +220,10 @@ public:
     int  GetUserRequestedFftSize() const noexcept;
 
     // ======================================================
-    // Toybox（v3.0.0）档位（0=Off / 1=Chill / 2=Normal / 3=Party）
-    //   · setToyLevel：同步 ToyDirector + workspace TOY 按钮 + Processor 持久化。
-    //   · getToyLevel：读取当前档位（供 Standalone 退出时保存 ui.toyLevel）。
+    // Toybox 档位（1=Chill / 2=Normal / 3=Party；Off 已下线）
+    //   · 现行档位由 ToyDirector 按连续互动次数自动升级 / 3 s 超时降回 Chill，
+    //     不再有工具栏切换按钮；setToyLevel 仅作为同步入口（钳制到 1..3）。
+    //   · getToyLevel：读取当前档位（供 Standalone 退出时记录 ui.toyLevel）。
     // ======================================================
     void setToyLevel (int level);
     int  getToyLevel() const noexcept;

@@ -31,10 +31,12 @@ struct ToyActor;
 
 // ==========================================================
 // 档位
+//   Off 已从 UI 下线（不再给用户提供关闭选项）：ToyDirector::setLevel
+//   会把任何 Off / 越界入参钳制到 [Chill, Party]，启动恒为 Chill。
 // ==========================================================
 enum class ToyLevel : int
 {
-    Off    = 0,
+    Off    = 0,   // 仅为兼容旧存档/枚举数值保留，运行时不可达
     Chill  = 1,
     Normal = 2,
     Party  = 3
@@ -427,7 +429,8 @@ public:
 // ==========================================================
 // ToyDirector —— 全局鼠标监听器 + 路由 + 连击 + 彩蛋（§7）
 // ==========================================================
-class ToyDirector : public juce::MouseListener
+class ToyDirector : public juce::MouseListener,
+                    private juce::Timer
 {
 public:
     ToyDirector (juce::Component& editorComponent,
@@ -474,14 +477,15 @@ public:
     struct Platform { float x0 = 0.0f, x1 = 0.0f, y = 0.0f; };
     std::vector<Platform> platformTops;
 
-    std::function<void()>                 onLevelChangedByUi;
+    // 档位被连击逻辑自动改变（含 3 s 超时降级）后通知 Editor 同步状态。
+    std::function<void(int)>             onLevelChanged;
 
     juce::Component&  editor;
     ModuleWorkspace&  workspace;
     AnalyserHub&      hub;
 
 private:
-    ToyLevel level_ = ToyLevel::Normal;
+    ToyLevel level_ = ToyLevel::Chill;
 
     int    comboCount_   = 0;
     double lastComboTime_ = 0.0;
@@ -516,6 +520,7 @@ private:
     bool gateAllows    (const juce::MouseEvent& e) const;
     bool isOptOut      (juce::Component* c) const;
 
+    void timerCallback() override;   // 3 s 无互动 → 连击归零并降级回 Chill
     void registerComboClick (juce::Point<float> editorPos);
     void onComboMilestone (int count, juce::Point<float> pos);
     void notifyPetReaction (int animId);

@@ -458,18 +458,7 @@ ModuleWorkspace::ModuleWorkspace()
     fftSizeLabel.setColour (juce::Label::textColourId, PinkXP::ink);
     addAndMakeVisible (fftSizeLabel);
 
-    // Toybox 档位循环按钮（Off/Chill/Normal/Party，§10.2 首选入口）
-    toyBtn.setButtonText ("NORMAL");
-    toyBtn.setTooltip    ("Toybox click-toys level (Off / Chill / Normal / Party)");
-    toyBtn.onClick = [this]()
-    {
-        setToyLevel ((toyLevel + 1) % 4);
-        if (onToyLevelChanged)
-            onToyLevelChanged (toyLevel);
-    };
-    toyBtn.setColour (juce::TextButton::textColourOffId, PinkXP::ink);
-    toyBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
-    addAndMakeVisible (toyBtn);
+    // Toybox 档位切换按钮已移除：档位改由 ToyDirector 按连续互动自动升级。
 
     // gain：输入增益按钮（位于 hide 左侧）
     gainBtn.setButtonText ("gain");
@@ -698,10 +687,6 @@ ModuleWorkspace::ModuleWorkspace()
     {
         fpsLabel.setColour (juce::Label::textColourId, PinkXP::ink);
         fpsLabel.repaint();
-
-        toyBtn.setColour (juce::TextButton::textColourOffId, PinkXP::ink);
-        toyBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
-        toyBtn.repaint();
 
         fftSizeLabel.setColour (juce::Label::textColourId, PinkXP::ink);
         fftSizeLabel.repaint();
@@ -1049,14 +1034,9 @@ bool ModuleWorkspace::isFpsLabel (juce::Component* c) const noexcept
 
 void ModuleWorkspace::setToyLevel (int level)
 {
-    toyLevel = juce::jlimit (0, 3, level);
-    switch (toyLevel)
-    {
-        case 0:  toyBtn.setButtonText ("OFF");    break;
-        case 1:  toyBtn.setButtonText ("CHILL");  break;
-        case 2:  toyBtn.setButtonText ("NORMAL"); break;
-        default: toyBtn.setButtonText ("PARTY");  break;
-    }
+    // 档位由 ToyDirector 自动变化后同步到这里；Off 已下线，钳制到 1..3。
+    // 仅用于「非 Off 档禁用双击添加模块菜单」的判断，不再有按钮文字。
+    toyLevel = juce::jlimit ((int) ToyLevel::Chill, (int) ToyLevel::Party, level);
 }
 
 // ----------------------------------------------------------
@@ -2432,7 +2412,6 @@ void ModuleWorkspace::paintToolbarBackground (juce::Graphics& g, juce::Rectangle
     drawDivider (toolbarDividerX3);
     drawDivider (toolbarDividerXLayout);
     drawDivider (toolbarDividerXStick);
-    drawDivider (toolbarDividerXToy);
 }
 
 void ModuleWorkspace::ToolbarOverlayBackdrop::paint (juce::Graphics& g)
@@ -2466,7 +2445,6 @@ void ModuleWorkspace::ToolbarOverflowBackdrop::paint (juce::Graphics& g)
     drawDivider (owner.overflowDividerX3);
     drawDivider (owner.overflowDividerXLayout);
     drawDivider (owner.overflowDividerXStick);
-    drawDivider (owner.overflowDividerXToy);
 }
 
 void ModuleWorkspace::layoutOptionalToolbarControls (juce::Rectangle<int>& tb,
@@ -2476,7 +2454,6 @@ void ModuleWorkspace::layoutOptionalToolbarControls (juce::Rectangle<int>& tb,
                                                     bool showLayout,
                                                     bool showSaveLoad,
                                                     bool showStick,
-                                                    bool showToy,
                                                     bool hideExcluded)
 {
     const bool layoutVisible   = layoutPresetUiVisible && showLayout;
@@ -2578,37 +2555,6 @@ void ModuleWorkspace::layoutOptionalToolbarControls (juce::Rectangle<int>& tb,
 #else
     toolbarDividerXStick = -1;
 #endif
-
-    if (showToy)
-    {
-        bool needToyDivider = false;
-       #if JUCE_WINDOWS
-        needToyDivider = stickUiVisible && showStick;
-       #endif
-
-        if (needToyDivider)
-        {
-            tb.removeFromRight (4);
-            const auto div = tb.removeFromRight (1).getX();
-            tb.removeFromRight (4);
-            toolbarDividerXToy = writeDividers ? div : -1;
-        }
-        else
-        {
-            toolbarDividerXToy = -1;
-        }
-
-        const int toyBtnW = btnW + PinkXP::ui (20);
-        auto toyBtnArea = tb.removeFromRight (toyBtnW + 4);
-        toyBtn.setBounds (toyBtnArea.withSizeKeepingCentre (toyBtnW, btnH));
-        toyBtn.setVisible (true);
-    }
-    else
-    {
-        toolbarDividerXToy = -1;
-        if (hideExcluded)
-            toyBtn.setVisible (false);
-    }
 }
 
 void ModuleWorkspace::setToolbarOverflowExpanded (bool expanded)
@@ -2652,7 +2598,6 @@ void ModuleWorkspace::raiseToolbarOverflowPanel()
     stickBtn.toFront (false);
     stickExitBtn.toFront (false);
     stickToggleBtn.toFront (false);
-    toyBtn.toFront (false);
 }
 
 void ModuleWorkspace::setToolbarOverlayRevealed (bool revealed)
@@ -2695,7 +2640,7 @@ void ModuleWorkspace::raiseToolbarOverlay()
         &themeBar, &audioSourceLabel, &audioSourceBox, &fpsLabel, &fpsBtn,
         &fftSizeLabel, &fftSizeBtn, &gridBtn, &layoutPresetBox, &savePresetBtn, &loadPresetBtn,
         &stickBtn, &stickExitBtn, &stickToggleBtn,
-        &toyBtn, &toolbarOverflowBtn, &gainBtn, &hideBtn, &gainSlider
+        &toolbarOverflowBtn, &gainBtn, &hideBtn, &gainSlider
     };
 
     const int n = getNumChildComponents();
@@ -3111,7 +3056,7 @@ void ModuleWorkspace::resized()
             const bool oldCollapsed = toolbarOverflowCollapsed;
             toolbarOverflowCollapsed = false;
             layoutOptionalToolbarControls (probeOpt, btnW, btnH, false,
-                                          true, true, true, true, true);
+                                          true, true, true, true);
             toolbarOverflowCollapsed = oldCollapsed;
         }
         const int optionalNeedW = beforeProbeW - probeOpt.getWidth();
@@ -3125,7 +3070,6 @@ void ModuleWorkspace::resized()
         bool showLayout = layoutPresetUiVisible;
         bool showSaveLoad = saveLoadUiVisible;
         bool showStick = stickUiVisible;
-        bool showToy = true;
 
         auto sectionNeedLayoutSave = [&]()
         {
@@ -3151,18 +3095,6 @@ void ModuleWorkspace::resized()
            #endif
         };
 
-        auto sectionNeedToy = [&]()
-        {
-            if (! showToy) return 0;
-            const int toyBtnW = btnW + PinkXP::ui (20);
-            int w = toyBtnW + 4;
-           #if JUCE_WINDOWS
-            if (stickUiVisible && showStick)
-                w += 9;
-           #endif
-            return w;
-        };
-
         auto currentVisibleNeed = [&]()
         {
             int w = 0;
@@ -3173,14 +3105,12 @@ void ModuleWorkspace::resized()
             if (showGrid)   w += btnW + 13;
             w += sectionNeedLayoutSave();
             w += sectionNeedStick();
-            w += sectionNeedToy();
             return w;
         };
 
         auto hasHiddenAny = [&]()
         {
-            return !showToy
-                || (stickUiVisible && !showStick)
+            return (stickUiVisible && !showStick)
                 || (saveLoadUiVisible && !showSaveLoad)
                 || (layoutPresetUiVisible && !showLayout)
                 || (audioSourceUiVisible && !showSource)
@@ -3193,12 +3123,9 @@ void ModuleWorkspace::resized()
             return tb.getWidth() >= (minThemeW + moreNeed + currentVisibleNeed());
         };
 
-        // 先一起回收 Toy+Stick，避免只挤掉一个按钮就出现 More。
-        if (! fitsNow() && (showToy || showStick))
-        {
-            showToy = false;
+        // 先回收 Stick，避免只挤掉一个按钮就出现 More。
+        if (! fitsNow() && showStick)
             showStick = false;
-        }
         if (! fitsNow() && showSaveLoad) showSaveLoad = false;
         if (! fitsNow() && showLayout)   showLayout = false;
         if (! fitsNow() && showGrid)     showGrid = false;
@@ -3215,8 +3142,7 @@ void ModuleWorkspace::resized()
         const bool hideLayout = layoutPresetUiVisible && ! showLayout;
         const bool hideSave   = saveLoadUiVisible && ! showSaveLoad;
         const bool hideStick  = stickUiVisible && ! showStick;
-        const bool hideToy    = ! showToy;
-        const bool hideOptAny = hideLayout || hideSave || hideStick || hideToy;
+        const bool hideOptAny = hideLayout || hideSave || hideStick;
 
         const int layoutBoxW = PinkXP::ui (stickActive ? 200 : 150);
         int hiddenLayoutSaveNeed = 0;
@@ -3240,25 +3166,13 @@ void ModuleWorkspace::resized()
             hiddenStickNeed = 9 + (stickActive ? (btnW + 4 + btnW) : btnW);
        #endif
 
-        int hiddenToyNeed = 0;
-        if (hideToy)
-        {
-            const int toyBtnW = btnW + PinkXP::ui (20);
-            hiddenToyNeed = toyBtnW + 4;
-           #if JUCE_WINDOWS
-            if (hideStick && stickUiVisible)
-                hiddenToyNeed += 9;
-           #endif
-        }
-
         const int hiddenNeed = (hideGain ? (btnW + 13) : 0)
                              + (hideSource ? (sourceBoxW + sourceLabelW + 9) : 0)
                              + (hideFps ? (fpsLabelW + fpsBtnW + 13) : 0)
                              + (hideFft ? (fftBtnW + fftLabelW + 13) : 0)
                              + (hideGrid ? (btnW + 13) : 0)
                              + hiddenLayoutSaveNeed
-                             + hiddenStickNeed
-                             + hiddenToyNeed;
+                             + hiddenStickNeed;
 
         toolbarOverflowCollapsed = hasHiddenAny();
         if (! toolbarOverflowCollapsed)
@@ -3394,8 +3308,7 @@ void ModuleWorkspace::resized()
         {
             // 可选区中仍可见的部分继续放在主工具栏。
             layoutOptionalToolbarControls (tb, btnW, btnH, true,
-                                          showLayout, showSaveLoad, showStick, showToy,
-                                          true);
+                                          showLayout, showSaveLoad, showStick, true);
 
             // More 放在按钮区最左侧：在所有主栏按钮都排完后再放。
             auto overflowArea = tb.removeFromRight (overflowBtnW + 4);
@@ -3422,17 +3335,15 @@ void ModuleWorkspace::resized()
                         stickExitBtn.setVisible   (false);
                         stickToggleBtn.setVisible (false);
                     }
-                    if (hideToy) toyBtn.setVisible (false);
                     toolbarDividerXLayout = -1;
                     toolbarDividerXStick  = -1;
-                    toolbarDividerXToy    = -1;
                 }
 
                 if (toolbarOverflowBackdrop != nullptr)
                     toolbarOverflowBackdrop->setVisible (false);
                 toolbarOverflowPanelBounds = {};
                 overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
-                overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = overflowDividerXToy = -1;
+                overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
             }
             else
             {
@@ -3471,15 +3382,12 @@ void ModuleWorkspace::resized()
                     const int savedX3 = toolbarDividerX3;
                     const int savedXLayout = toolbarDividerXLayout;
                     const int savedXStick = toolbarDividerXStick;
-                    const int savedXToy = toolbarDividerXToy;
 
                     layoutOptionalToolbarControls (panelTb, btnW, btnH, true,
-                                                  hideLayout, hideSave, hideStick, hideToy,
-                                                  false);
+                                                  hideLayout, hideSave, hideStick, false);
 
                     overflowDividerXLayout = toolbarDividerXLayout;
                     overflowDividerXStick  = toolbarDividerXStick;
-                    overflowDividerXToy    = toolbarDividerXToy;
                     overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
                     overflowDividerX3 = -1;
 
@@ -3490,12 +3398,11 @@ void ModuleWorkspace::resized()
                     toolbarDividerX3 = savedX3;
                     toolbarDividerXLayout = savedXLayout;
                     toolbarDividerXStick = savedXStick;
-                    toolbarDividerXToy = savedXToy;
                 }
                 else
                 {
                     overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
-                    overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = overflowDividerXToy = -1;
+                    overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
                 }
             }
         }
@@ -3506,11 +3413,10 @@ void ModuleWorkspace::resized()
                 toolbarOverflowBackdrop->setVisible (false);
             toolbarOverflowPanelBounds = {};
             overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
-            overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = overflowDividerXToy = -1;
+            overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
 
             layoutOptionalToolbarControls (tb, btnW, btnH, true,
-                                          showLayout, showSaveLoad, showStick, showToy,
-                                          true);
+                                          showLayout, showSaveLoad, showStick, true);
         }
 
         // gain 弹出控制条的位置依赖 gainBtn 最终 bounds，必须放在动态布局之后。
@@ -3562,7 +3468,6 @@ void ModuleWorkspace::resized()
         audioSourceBox.setVisible (false);
         fpsBtn.setVisible   (false);
         fpsLabel.setVisible (false);
-        toyBtn.setVisible   (false);
         toolbarOverflowBtn.setVisible (false);
         toolbarOverflowCollapsed = false;
         toolbarOverflowExpanded  = false;
@@ -3570,7 +3475,7 @@ void ModuleWorkspace::resized()
             toolbarOverflowBackdrop->setVisible (false);
         toolbarOverflowPanelBounds = {};
         overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
-        overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = overflowDividerXToy = -1;
+        overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
         gainBtn.setVisible  (false);
         setGainPopupVisible (false);
         gridBtn.setVisible  (false);
@@ -3590,7 +3495,6 @@ void ModuleWorkspace::resized()
         toolbarDividerX3 = -1;
         toolbarDividerXLayout = -1;
         toolbarDividerXStick = -1;
-        toolbarDividerXToy   = -1;
     }
 
     // Hide 浮层背景板：与工具栏同位置，位于模块之上

@@ -874,11 +874,11 @@ public:
     bool isFpsLabel (juce::Component* c) const noexcept;
     juce::Label* getFpsLabel() noexcept { return &fpsLabel; }
 
-    // Toybox 档位（int 承载 ToyLevel 枚举值，0/1/2/3），供 TOY 按钮显示。
+    // Toybox 当前档位（1=Chill / 2=Normal / 3=Party），由 Editor 在档位自动
+    //   变化时同步；用于「非 Off 档禁用双击添加模块菜单」的判断。
+    //   TOY 切换按钮已删除，档位改由 ToyDirector 按连续互动次数自动升级。
     void setToyLevel (int level);
     int  getToyLevel() const noexcept { return toyLevel; }
-    // TOY 按钮循环切换后的回调（int = ToyLevel 枚举值），由 Editor 订阅。
-    std::function<void(int)> onToyLevelChanged;
     // Editor 下发的 ToyDirector（供 hookPanel 在几何变化时取消 actor）。
     void setToyDirector (ToyDirector* d) noexcept { toyDirector = d; }
 
@@ -1004,7 +1004,6 @@ private:
                                        bool showLayout,
                                        bool showSaveLoad,
                                        bool showStick,
-                                       bool showToy,
                                        bool hideExcluded);
     void setToolbarOverflowExpanded (bool expanded);
     void raiseToolbarOverflowPanel();
@@ -1029,9 +1028,7 @@ private:
     int              fftSize = 2048;
     void cycleFftSize();
 
-    // Toybox 档位循环按钮（Off/Chill/Normal/Party），与 fpsBtn 同构。
-    juce::TextButton toyBtn;
-    int              toyLevel = 2;   // ToyLevel::Normal
+    int              toyLevel = 1;   // ToyLevel::Chill
     ToyDirector*     toyDirector = nullptr;
 
     // FPS 按钮专用的 mini LookAndFeel：仅重写 getTextButtonFont 把 "30FPS" / "60FPS"
@@ -1208,14 +1205,12 @@ private:
     int toolbarDividerXFft = -1; // fft 与 fps 之间（反馈 #7）
     int toolbarDividerX1 = -1; // fps 与 source 之间
     int toolbarDividerX2 = -1; // source 与 hide 之间
-    int toolbarDividerXToy = -1;   // toy 与 stick 之间
     int toolbarDividerXStick = -1; // stick 与 load 之间
     int toolbarDividerX3 = -1; // gain 与 hide 之间
     int overflowDividerX0 = -1;
     int overflowDividerXFft = -1;
     int overflowDividerX1 = -1;
     int overflowDividerX2 = -1;
-    int overflowDividerXToy = -1;
     int overflowDividerXStick = -1;
     int overflowDividerX3 = -1;
 

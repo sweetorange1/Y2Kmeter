@@ -306,7 +306,8 @@ private:
     int savedEditorWidth  = 0;
     int savedEditorHeight = 0;
 
-    // Toybox 档位（0=Off / 1=Chill / 2=Normal / 3=Party）；-1 = 未保存
+    // Toybox 档位（1=Chill / 2=Normal / 3=Party；Off 已下线）；-1 = 未保存。
+    //   仅记录最后一次自动档位，启动时不再据此恢复（恒从 Chill 起步）。
     int savedToyLevel = -1;
 
     // Milkdrop 整体染色 + 效果（全局状态，持久化到 host state）

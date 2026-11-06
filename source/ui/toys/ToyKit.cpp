@@ -37,6 +37,10 @@ namespace
         }
     };
 
+    // 连续互动窗口与升级步长：间隔 < 3 s 视为连续，每满 5 次升一档；
+    // 3 s 无互动（timerCallback）连击归零并降回 Chill。
+    constexpr double kInteractionWindowSec = 3.0;
+    constexpr int    kUpgradeEveryClicks   = 5;
 }
 
 // ==========================================================
@@ -568,11 +572,15 @@ ToyDirector::ToyDirector (juce::Component& editorComponent,
         if (atlas)
             atlas->invalidateThemed();
     });
+    // 3 s 无互动降级检查走消息线程 Timer（与鼠标事件同线程，无需加锁）。
+    startTimer (100);
     Y2K_LOG ("[toy] director: ctor done");
 }
 
 ToyDirector::~ToyDirector()
 {
+    stopTimer();
+
     if (themeSubToken >= 0)
     {
         PinkXP::unsubscribeThemeChanged (themeSubToken);
@@ -591,17 +599,42 @@ ToyDirector::~ToyDirector()
 
 void ToyDirector::setLevel (ToyLevel l)
 {
-    if (level_ == l)
-        return;
-    level_ = l;
+    // Off 已下线：任何 Off / 越界入参一律钳制到 [Chill, Party]，
+    // 保证用户永远无法把互动关掉（旧存档里的 0 也会被抬到 Chill）。
+    const int li = juce::jlimit ((int) ToyLevel::Chill, (int) ToyLevel::Party, (int) l);
+    const auto clamped = (ToyLevel) li;
 
-    if (level_ == ToyLevel::Off)
+    if (level_ == clamped)
+        return;
+    level_ = clamped;
+
+    // 降回 Chill 时收掉 Party 级的持续效果，避免降级后仍在喷彩带。
+    if (level_ == ToyLevel::Chill)
     {
         spraying_ = false;
         confettiRainRemaining_ = 0;
         nextConfettiRainTime_ = 0.0;
-        comboCount_ = 0;
     }
+
+    if (onLevelChanged)
+        onLevelChanged (li);
+}
+
+void ToyDirector::timerCallback()
+{
+    if (lastComboTime_ <= 0.0)
+        return;
+
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    if (now - lastComboTime_ < kInteractionWindowSec)
+        return;
+
+    // 3 s 没有互动：连击归零、停掉按住持续喷 / 彩带雨，并降回 Chill。
+    lastComboTime_ = 0.0;
+    comboCount_ = 0;
+    spraying_ = false;
+    confettiRainRemaining_ = 0;
+    setLevel (ToyLevel::Chill);
 }
 
 void ToyDirector::attachToFloating (ModulePanel& p)
@@ -948,15 +981,29 @@ float ToyDirector::audioEnergy() const
 
 void ToyDirector::registerComboClick (juce::Point<float> editorPos)
 {
-    if (level_ == ToyLevel::Chill || level_ == ToyLevel::Off)
-        return;
-
     const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
-    if (now - lastComboTime_ > 1.2)
+
+    // 连续互动判定：与上一次互动间隔 >= 3 s 即断连，连击归零并降回 Chill。
+    if (lastComboTime_ > 0.0 && now - lastComboTime_ >= kInteractionWindowSec)
+    {
         comboCount_ = 0;
+        setLevel (ToyLevel::Chill);
+    }
+
     lastComboTime_ = now;
     ++comboCount_;
 
+    // 每满 5 次连续互动升一档：Chill → Normal → Party（Party 封顶）。
+    // 升级放在连击字幕之前，这样第 5/10 击的文字对应升级后的档位效果。
+    if (comboCount_ % kUpgradeEveryClicks == 0)
+    {
+        const int cur  = juce::jlimit ((int) ToyLevel::Chill, (int) ToyLevel::Party, (int) level_);
+        const int next = juce::jmin ((int) ToyLevel::Party, cur + 1);
+        if (next != cur)
+            setLevel ((ToyLevel) next);
+    }
+
+    // 原有连击字幕（NICE!/COOL!/WOW!/Y2K MODE）与彩蛋继续保留。
     if (comboCount_ == 5 || comboCount_ == 10 || comboCount_ == 20 || comboCount_ == 40)
         onComboMilestone (comboCount_, editorPos);
 }
