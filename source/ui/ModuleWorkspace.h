@@ -335,6 +335,12 @@ private:
     bool pendingFullRepaint = false;
     bool pendingAreaRepaint = false;
     juce::Rectangle<int> pendingRepaintArea;
+    // 上一次"待重绘"标记的发起时刻（ms）。用于自愈：
+    //   若 JUCE 丢弃了那一次 damage（最小化/恢复、窗口被遮挡、DPI 切换、移动窗口
+    //   等），标记会永久停在 true，此后所有 repaint() 都被合并掉 —— 该模块矩形内
+    //   再也不会重新合成组件层，GL 内容（Milkdrop 视频 / GL 直渲染）就会"永远
+    //   压在所有组件之上"，且表现为永久性。见 ModulePanel::repaint()。
+    juce::uint32 pendingRepaintStampMs = 0;
 
     enum class DragMode { none, move, resize };
     DragMode dragMode = DragMode::none;

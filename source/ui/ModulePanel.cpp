@@ -369,6 +369,7 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
     pendingFullRepaint = false;
     pendingAreaRepaint = false;
     pendingRepaintArea = {};
+    pendingRepaintStampMs = 0;
 
     // Toybox：模块内 actor 绘制（插在标志清零之后、早退 return 之前，§R5）
     if (toyState != nullptr)
@@ -429,7 +430,16 @@ void ModulePanel::repaint()
         return;
     }
 
-    if (pendingFullRepaint)
+    // 合并守卫 + 自愈：
+    //   正常情况下上一次 repaint 会在几十毫秒内被 paint()/paintOverChildren() 消费，
+    //   标记随之清零。但如果那次 damage 被 JUCE 丢弃了（窗口最小化/恢复、被完全
+    //   遮挡、DPI 切换、移动窗口跨屏……），标记会**永久**停在 true，之后这个模块
+    //   所有 repaint() 都被合并掉 → 该矩形内再也不会重新合成组件层。
+    //   由于 GL 内容（Milkdrop 视频 / GL 直渲染模块）每帧都会覆盖后缓冲，而组件层
+    //   不再重合成，视觉上就变成"GL 永远压在所有组件之上、图片和其他模块盖不住"。
+    //   → 超时 120ms 仍未消费就强制再发一次，避免永久卡死。
+    const auto stampNow = juce::Time::getMillisecondCounter();
+    if (pendingFullRepaint && stampNow - pendingRepaintStampMs < 120)
     {
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
@@ -443,6 +453,7 @@ void ModulePanel::repaint()
     pendingFullRepaint = true;
     pendingAreaRepaint = false;
     pendingRepaintArea = getLocalBounds();
+    pendingRepaintStampMs = stampNow;
     juce::Component::repaint();
 }
 
@@ -464,7 +475,9 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
     if (area.isEmpty())
         return;
 
-    if (pendingFullRepaint)
+    const auto stampNow = juce::Time::getMillisecondCounter();
+
+    if (pendingFullRepaint && stampNow - pendingRepaintStampMs < 120)
     {
 #if Y2K_ENABLE_PERF_COUNTERS
         y2k::perf::PerformanceCounterSystem::instance().recordUiRepaintCoalesced((int) moduleType);
@@ -487,6 +500,7 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
 #endif
     pendingAreaRepaint = true;
     pendingRepaintArea = area;
+    pendingRepaintStampMs = stampNow;
     juce::Component::repaint(area);
 }
 
