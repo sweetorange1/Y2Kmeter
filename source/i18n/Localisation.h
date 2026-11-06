@@ -4,6 +4,12 @@
 #include <JuceHeader.h>
 #include <functional>
 
+// 翻译入口（y2k::tr / y2k::trf）拆到轻量头里，只依赖 juce_core：
+//   Objective-C++ 源文件不能安全地引入本文件（JuceHeader.h 末尾有全局
+//   `using namespace juce;`，会与随后 import 的 Carbon/CoreServices 头撞名），
+//   它们应当只 include I18nTranslate.h。详见该文件头部说明。
+#include "I18nTranslate.h"
+
 // ==========================================================
 // y2k::i18n —— 界面国际化（运行时切换、无需重启）
 //
@@ -72,10 +78,8 @@ namespace y2k::i18n
     juce::uint32 getGeneration() noexcept;
 
     // ---- 翻译 ----
-    juce::String translate (const juce::String& source);
-
-    // 模板翻译："Saved: {0}"（模板本身是翻译键）→ 译文模板 → 依次替换 {0} {1} ...
-    juce::String translateFormat (const juce::String& templ, const juce::StringArray& args);
+    //   translate / translateFormat 声明在 I18nTranslate.h（上方已引入），
+    //   这样 ObjC++ 源文件可以只依赖轻量头拿到 y2k::tr / y2k::trf。
 
     // ---- 字体 ----
     //   当前语言的字体数据；返回 false 表示使用内置默认字体（Silkscreen）。
@@ -90,22 +94,6 @@ namespace y2k::i18n
     juce::File getUserLanguageDirectory();
 }
 
-namespace y2k
-{
-    // 便捷入口：y2k::tr ("Hide")
-    inline juce::String tr (const juce::String& source) { return i18n::translate (source); }
-    inline juce::String tr (const char* source)         { return i18n::translate (juce::String (source)); }
-    // StringRef 同时可隐式转换到 const char* 与 juce::String，直接传会二义
-    inline juce::String tr (juce::StringRef source)     { return i18n::translate (juce::String (source.text)); }
-
-    // 模板入口：y2k::trf ("Saved: {0}", fileName)、y2k::trf ("Wave {0} of {1}", a, b)
-    template <typename... Args>
-    juce::String trf (const juce::String& templ, Args&&... args)
-    {
-        juce::StringArray a;
-        (a.add (juce::String (std::forward<Args> (args))), ...);
-        return i18n::translateFormat (templ, a);
-    }
-}
+// y2k::tr / y2k::trf 的便捷入口定义在 I18nTranslate.h（上方已引入）。
 
 #endif // Y2K_LOCALISATION_H_INCLUDED

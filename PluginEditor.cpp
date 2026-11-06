@@ -329,20 +329,6 @@ namespace {
         f.appendText (line + "\r\n");
     }
 
-    // ---- 诊断构建标识（v3.0.1）----
-    //   "能出日志"的构建 = RelWithDebInfo（Y2K_ENABLE_LOGGING）
-    //   或显式打开诊断日志的构建（Y2K_DIAG_LOG_DEFAULT_ON=ON）。
-    //   这类构建在顶部抬头（drawTitleBar / ChromeHiddenOverlay）的版本号右侧
-    //   显示 " debug"，让用户和客服一眼确认装的是诊断包而不是正式包。
-    bool y2kIsDiagnosticBuild() noexcept
-    {
-       #if defined (Y2K_ENABLE_LOGGING) || (defined (Y2K_DIAG_LOG_DEFAULT) && Y2K_DIAG_LOG_DEFAULT)
-        return true;
-       #else
-        return false;
-       #endif
-    }
-
     BOOL CALLBACK y2kEnumMonitorProc (HMONITOR hMon, HDC, LPRECT, LPARAM lp)
     {
         auto* out = reinterpret_cast<juce::String*> (lp);
@@ -475,6 +461,25 @@ namespace {
     }
 } // namespace
 #endif
+
+namespace {
+    // ---- 诊断构建标识（v3.0.1）----
+    //   纯编译期判断、无任何平台 API 依赖，因此必须放在上面的
+    //   #if JUCE_WINDOWS 块之外：drawTitleBar / ChromeHiddenOverlay
+    //   在 macOS 上同样会调用它。
+    //   "能出日志"的构建 = RelWithDebInfo（Y2K_ENABLE_LOGGING）
+    //   或显式打开诊断日志的构建（Y2K_DIAG_LOG_DEFAULT_ON=ON）。
+    //   这类构建在顶部抬头（drawTitleBar / ChromeHiddenOverlay）的版本号右侧
+    //   显示 " debug"，让用户和客服一眼确认装的是诊断包而不是正式包。
+    bool y2kIsDiagnosticBuild() noexcept
+    {
+       #if defined (Y2K_ENABLE_LOGGING) || (defined (Y2K_DIAG_LOG_DEFAULT) && Y2K_DIAG_LOG_DEFAULT)
+        return true;
+       #else
+        return false;
+       #endif
+    }
+} // namespace
 
 // ==========================================================
 // 屏幕尺寸模拟（仅开发调试用）

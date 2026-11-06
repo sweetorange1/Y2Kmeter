@@ -1,5 +1,10 @@
 #include "MacDesktopAudioCapture.h"
-#include "../i18n/Localisation.h"
+// i18n 入口只用轻量头 I18nTranslate.h（仅 juce_core）：
+//   Localisation.h 会拉进整个 JuceHeader.h，其末尾那句全局
+//   `using namespace juce;` 会与随后 import 的 Foundation → CoreServices →
+//   CarbonCore → MacTypes.h 里的 C 类型 Point / Component 撞名，
+//   报 "reference to 'Point' is ambiguous"。详见 I18nTranslate.h 头部说明。
+#include "../i18n/I18nTranslate.h"
 
 #if JUCE_MAC
 
