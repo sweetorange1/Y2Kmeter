@@ -239,15 +239,20 @@ namespace y2k::i18n
 
         int detectSystemLanguage (const std::vector<Pack>& packs)
         {
-            const auto userLang    = juce::SystemStats::getUserLanguage();     // "zh"
-            const auto displayLang = juce::SystemStats::getDisplayLanguage();  // "zh-CN" / "zh-Hans-CN"
+            // 只按"系统界面首选语言"判定 —— getDisplayLanguage：
+            //   · Windows：GetUserPreferredUILanguages[0]（界面显示语言，如 "en-US"）
+            //   · macOS  ：CFLocaleCopyPreferredLanguages[0]（系统首选语言，如 "zh-Hans"）
+            //   不再用 getUserLanguage —— 它是"区域/格式"语言（Windows 的
+            //   LOCALE_USER_DEFAULT / mac 的 CFLocale 区域），英文界面 + 中文区域
+            //   的机器上会被误判为中文，造成"新用户默认中文、不跟随系统界面语言"。
+            const auto displayLang = juce::SystemStats::getDisplayLanguage();
 
             for (size_t i = 0; i < packs.size(); ++i)
             {
                 if (packs[i].info.isSource)
                     continue;
                 for (auto& m : packs[i].matches)
-                    if (displayLang.startsWithIgnoreCase (m) || userLang.startsWithIgnoreCase (m))
+                    if (displayLang.startsWithIgnoreCase (m))
                         return (int) i;
             }
             return -1;

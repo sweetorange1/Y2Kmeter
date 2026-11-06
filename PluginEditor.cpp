@@ -641,14 +641,20 @@ const FullScreenTile* fullScreenTilesForPreset (int presetId, int& count)
 // UI 密度缩放的判据区域（跨平台差异）：
 //   · Windows：必须用 totalArea —— AppBar/stick 驻留会真实压缩 userArea，
 //     条高拉大时若用 userArea 会把"屏幕变矮了"的假象喂给分级表；
-//   · macOS：保持 userArea —— 菜单栏 / Dock 减少的是真实可用空间，
-//     且 mac 没有 stick/AppBar，用 totalArea 会改变部分机型的缩放档位。
+//   · macOS：userArea（菜单栏 / Dock 是真实可用空间，且没有 stick/AppBar），
+//     但必须换算回【物理像素】—— JUCE 的 userArea 是 Retina 缩放后的逻辑
+//     points，200% Retina 下逻辑高度只有同尺寸 Windows 屏（150%）的一半，
+//     会被 uiScaleForDisplay 误判为低分辨率屏（UI 整体缩到 0.75，工具栏里的
+//     色票/预览块随之变小）。换成物理尺寸后，同一块物理屏两端拿到同一档位。
 juce::Rectangle<int> resolveUiScaleArea (const juce::Displays::Display& display) noexcept
 {
    #if JUCE_WINDOWS
     return display.totalArea;
    #else
-    return display.userArea;
+    const double s = display.scale > 0.1 ? display.scale : 1.0;
+    return { 0, 0,
+             juce::roundToInt ((double) display.userArea.getWidth()  * s),
+             juce::roundToInt ((double) display.userArea.getHeight() * s) };
    #endif
 }
 }  // namespace
@@ -1278,6 +1284,15 @@ public:
         // 左键点击气泡 × 关闭按钮
         if (e.mods.isLeftButtonDown())
         {
+            // 语言切换按钮：新手引导期间也允许切换界面语言（点击循环切换）
+            const auto langBtn = getLangButtonBounds();
+            if (langBtn.contains (pos))
+            {
+                y2k::i18n::cycleToNextLanguage();
+                repaint();
+                return;
+            }
+
             const auto closeBtn = getCloseButtonBounds();
             if (closeBtn.contains (pos))
             {
@@ -1363,6 +1378,14 @@ private:
         return { bubble.getRight() - margin - btnSize,
                  bubble.getY() + margin,
                  btnSize, btnSize };
+    }
+
+    // 气泡标题行右侧、× 左边的语言切换按钮（新手引导期间允许切换界面语言）
+    juce::Rectangle<int> getLangButtonBounds() const
+    {
+        const auto cb = getCloseButtonBounds();
+        constexpr int btnW = 42;
+        return { cb.getX() - 4 - btnW, cb.getY(), btnW, 18 };
     }
 
     // 二次确认弹窗区域（居中于 Editor）
@@ -1564,6 +1587,29 @@ private:
                 : "Right-click the canvas to\nadd ur VirtuPet pet! <3")
             : "Play some audio to\nhatch the egg! :3";
         g.drawFittedText (y2k::tr (text), body, juce::Justification::centred, 2);
+
+        // 语言切换按钮（× 左边）：显示"目标语言"标签，点击循环切换。
+        //   新手引导期间工具栏被遮罩挡住，这里是唯一的语言切换入口。
+        {
+            auto lb = getLangButtonBounds();
+            PinkXP::drawRaised (g, lb, PinkXP::btnFace);
+
+            const auto currentCode = y2k::i18n::getCurrentLanguageCode();
+            juce::String targetLabel;
+            for (int i = 0; i < y2k::i18n::getNumLanguages(); ++i)
+                if (y2k::i18n::getLanguage (i).code != currentCode)
+                {
+                    targetLabel = y2k::i18n::getLanguage (i).buttonLabel;
+                    break;
+                }
+
+            if (targetLabel.isNotEmpty())
+            {
+                g.setColour (PinkXP::ink);
+                g.setFont (PinkXP::SymbolGlyphs::getFont (targetLabel, 8.0f, juce::Font::bold));
+                g.drawText (targetLabel, lb, juce::Justification::centred, false);
+            }
+        }
 
         // 右上角 × 关闭按钮（参考 ChromeHiddenOverlay 的浮动关闭按钮样式）
         {

@@ -211,6 +211,12 @@ public:
     void buttonClicked(juce::Button*) override {}   // Button::Listener 纯虚，空实现
     bool keyPressed(const juce::KeyPress& key) override;
 
+    // 标题栏 × 按钮：完全复刻 ModulePanel 的自绘样式（无 TextButton）
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseUp   (const juce::MouseEvent& e) override;
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
+
     void show();
     void dismiss();
     bool isShowing() const noexcept { return visible_; }
@@ -246,7 +252,7 @@ private:
     juce::TextButton harmonyBtns_[5];
     juce::ComboBox patternCombo_;
     juce::TextButton iconBtns_[8];
-    juce::TextButton randomBtn_, compareBtn_, revertBtn_, saveBtn_, closeBtn_;
+    juce::TextButton randomBtn_, compareBtn_, revertBtn_, saveBtn_;
     MiniPreviewCard previewCard_;
     juce::TextButton advancedToggle_, myThemesToggle_;
     std::unique_ptr<RoleRow> roleRows_[7];
@@ -281,6 +287,11 @@ private:
     //   避免每帧触发桌面纹理重烘焙 + 全模块重绘的卡顿），松手统一提交。
     bool hueDragging_    = false;
     bool sliderDragging_ = false;
+
+    // 标题栏 × 按钮 hover/pressed 状态（自绘，复刻 ModulePanel 样式）
+    bool closeHovered_  = false;
+    bool closePressed_  = false;
+    juce::Rectangle<int> getCloseButtonBounds() const;
 
     // 主题库订阅
     int libToken_ = 0;

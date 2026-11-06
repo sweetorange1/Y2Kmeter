@@ -346,6 +346,21 @@ namespace PinkXP
         return text.containsAnyOf (kBrokenSymbolGlyphs);
     }
 
+    bool SymbolGlyphs::isSymbolsOnly (const juce::String& text) noexcept
+    {
+        if (text.isEmpty())
+            return false;
+
+        for (auto p = text.getCharPointer(); ! p.isEmpty();)
+        {
+            const juce_wchar c = p.getAndAdvance();
+            if (juce::CharacterFunctions::isLetterOrDigit (c)) return false; // 拉丁字母/数字
+            if (c >= 0x2E80) return false;                                   // CJK 及宽字符块
+            if (c == ' ')     return false;
+        }
+        return true;
+    }
+
     bool SymbolGlyphs::cjkFontActive()
     {
         if (gTypeface == nullptr)
@@ -1967,7 +1982,13 @@ void PinkXPLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& butt
     g.setColour(tc.isOpaque() ? tc : PinkXP::ink);
 
     const juce::String shown = y2k::tr (button.getButtonText());
-    g.setFont(PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold));
+
+    // 纯符号文本（如关闭 ×）恒用英文 UI 字体 iconFont：字号不受 CJK 界面
+    //   的 0.9 收紧影响，中英文界面字形/大小完全一致。
+    if (PinkXP::SymbolGlyphs::isSymbolsOnly (shown))
+        g.setFont(PinkXP::SymbolGlyphs::iconFont (14.0f, juce::Font::bold));
+    else
+        g.setFont(PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold));
 
     auto area = button.getLocalBounds();
     if (shouldDrawButtonAsDown || button.getToggleState())
@@ -1984,11 +2005,13 @@ juce::Font PinkXPLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHei
 int PinkXPLookAndFeel::getTextButtonWidthToFitText (juce::TextButton& b, int buttonHeight)
 {
     // 测量与 drawButtonText 用同一套"按文本选字体"，避免符号文本宽度不一致
-    const auto font = PinkXP::SymbolGlyphs::buttonFont (y2k::tr (b.getButtonText()),
-                                                        juce::jmin (14.0f, buttonHeight * 0.55f),
-                                                        juce::Font::bold);
-    return juce::GlyphArrangement::getStringWidthInt (font, y2k::tr (b.getButtonText()))
-           + buttonHeight;
+    const juce::String shown = y2k::tr (b.getButtonText());
+    const juce::Font font = PinkXP::SymbolGlyphs::isSymbolsOnly (shown)
+        ? PinkXP::SymbolGlyphs::iconFont (14.0f, juce::Font::bold)
+        : PinkXP::SymbolGlyphs::buttonFont (shown,
+                                            juce::jmin (14.0f, buttonHeight * 0.55f),
+                                            juce::Font::bold);
+    return juce::GlyphArrangement::getStringWidthInt (font, shown) + buttonHeight;
 }
 
 void PinkXPLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w, int h,

@@ -6270,4 +6270,44 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 
 ---
 
+## v3.0.2 补充：调色工作室样式对齐 / mac 密度缩放 / 语言相关收尾
+
+> 版本号保持 `3.0.2` 不变。本轮 4 组修复（均由用户实测确认）：
+
+### 1. 调色工作室（Palette Studio）样式对齐模块
+
+**× 关闭按钮**（`PalettePanel.h/.cpp`）：原实现是 `TextButton`（文本 "X"），字体走 `buttonFont` —— 中文界面下 CJK 字号收紧 10%，且字号/位移与模块不一致。改为 **paint 自绘**，完全复刻 `ModulePanel`：几何公式相同（s=`ui(16)`，x=右缘−4−s，y 标题栏内垂直居中）、`iconFont(11)` 小写 "x" + `translate(0,-1)`（按下 +1,+1）、`drawRaised`/`drawPressed` + hover（pink200）/pressed（pink100）视觉，新增 `mouseDown/Up/Move/Exit` 处理。
+
+**外框与抬头**：面板外框从 `drawSunken`（凹陷）改为 `drawRaised`（凸起，与模块一致）；标题栏从平涂色块改为与模块同一套 `PinkXP::drawPinkTitleBar`（顶部高光 + 底部暗线 + 主题图标 + 带阴影标题）+ 底边外补 1px `dark` 分割线；标题栏高度从硬编码 26 改为 `PinkXP::ui(22)`（与 `ModulePanel::titleBarHeight` 一致）。
+
+**置顶**：曾尝试"跟随主窗口 * 按钮置顶"与"owned 窗口 z 序跟随"（后者因 JUCE Windows 把 `nativeWindowToAttachTo` 当 WS_CHILD 父窗口、超出主窗口边界被裁剪而放弃），衍生问题较多，**最终回退为悬浮态始终置顶**（原始行为），主窗口 * 按钮与面板解耦。
+
+**附带**：`PinkXPStyle` 新增 `SymbolGlyphs::isSymbolsOnly()`（纯符号判定）；`drawButtonText` / `getTextButtonWidthToFitText` 对纯符号按钮文本改用 `iconFont(14)`——恒用英文 UI 字体、不随语言缩放，中英文界面完全一致。
+
+### 2. mac 端调色工作室预览块过小（UI 密度缩放对齐）
+
+- 根因一：mac 的 `uiScaleForDisplay` 拿 JUCE **逻辑 points**（200% Retina 下逻辑高度只有同尺寸 Windows 150% 屏的一半），被误判为低分辨率屏 → UI 整体缩到 0.75。
+- 根因二：`ThemeSwatchBar` 的色票/预览块用硬编码像素（18/30），不随 `PinkXP::ui()` 缩放，低档位下预览块被 `getHeight()-6` 压到比色票还小。
+- 修复：`resolveUiScaleArea` 的 mac 分支把 userArea 换算回**物理像素**（同物理屏两端同档位）；`ThemeSwatchBar` 全部几何（预览块/色票/间距/主题名最小宽）改走 `PinkXP::ui()`，任何档位下比例正确。
+
+### 3. 语言按钮与新手引导
+
+- 语言按钮不再缩写：`i18n/zh-CN.lang` 的 `@label` 由"中"改为"中文"，按钮宽度 `ui(40)` → `ui(52)`。
+- 新手引导气泡标题行右侧（× 左边）新增语言切换小按钮：显示目标语言标签，点击 `cycleToNextLanguage()` 循环切换（引导遮罩全屏拦截点击，这是引导期间唯一切换入口），气泡文案本身走 `y2k::tr` 即时刷新。
+
+### 4. 新用户默认语言跟随系统
+
+- 根因：`detectSystemLanguage` 同时用 `getUserLanguage()` 与 `getDisplayLanguage()` 匹配，而 JUCE 的 `getUserLanguage` 实为**区域/格式语言**（Windows `LOCALE_USER_DEFAULT` / mac `CFLocale` 区域）——英文界面 + 中文区域的机器被误判为中文。
+- 修复：只按 `getDisplayLanguage()`（Windows `GetUserPreferredUILanguages[0]` / mac `CFLocaleCopyPreferredLanguages[0]`，即系统界面首选语言）匹配；用户显式切换后的存档仍优先。
+
+### 5. 改动点
+
+`source/ui/palette/PalettePanel.h/.cpp`、`source/ui/PinkXPStyle.h/.cpp`、`source/ui/ModuleWorkspace.h/.cpp`、`PluginEditor.cpp`、`source/i18n/Localisation.cpp`、`i18n/zh-CN.lang`、本文档。
+
+### 6. 验证
+
+`git diff --check` 通过；IDE 静态诊断 0 错误；用户编译实测：× 按钮与模块一致且中英文不变化、抬头与模块同高同纹理、面板展开到窗口外完整可见且始终置顶、mac 端预览块与 win 一致、语言按钮显示"中文"、引导期间可切换语言、新用户（无存档）默认语言跟随系统界面语言。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

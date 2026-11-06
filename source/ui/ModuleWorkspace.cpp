@@ -3169,7 +3169,7 @@ void ModuleWorkspace::resized()
         const int fpsBtnW      = btnW + PinkXP::ui (12);
         const int fftBtnW      = PinkXP::ui (60);
         const int fftLabelW    = PinkXP::ui (86);
-        const int langBtnW     = PinkXP::ui (40);
+        const int langBtnW     = PinkXP::ui (52);   // 放得下"中文"两个全角字
         const int overflowBtnW = btnW + PinkXP::ui (12);
         const int minThemeW    = PinkXP::ui (220);
 
@@ -4721,43 +4721,52 @@ ThemeSwatchBar::~ThemeSwatchBar()
 
 juce::Rectangle<int> ThemeSwatchBar::getPreviewBounds() const
 {
-    const int side = juce::jmin(getHeight() - 6, kPreviewW);
+    // 尺寸全部跟随 PinkXP::ui() 密度缩放：低分辨率档（uiScale<1）下与
+    //   色票/间距保持同一比例，不再出现"预览块比色票还小"的比例崩坏。
+    const int side = juce::jmin(getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW));
     const int y = (getHeight() - side) / 2;
-    return { kBarLeftPad - scrollX_, y, side, side };
+    return { PinkXP::ui (kBarLeftPad) - scrollX_, y, side, side };
 }
 
 juce::Rectangle<int> ThemeSwatchBar::getPresetSwatchBounds(int index) const
 {
-    const int startX = kBarLeftPad + juce::jmin(getHeight() - 6, kPreviewW) + kGroupGap;
-    const int y = (getHeight() - kSwatchH) / 2;
-    return { startX - scrollX_ + index * (kSwatchW + kSwatchGap), y, kSwatchW, kSwatchH };
+    const int startX = PinkXP::ui (kBarLeftPad)
+                     + juce::jmin(getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
+                     + PinkXP::ui (kGroupGap);
+    const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
+    return { startX - scrollX_ + index * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)),
+             y, PinkXP::ui (kSwatchW), PinkXP::ui (kSwatchH) };
 }
 
 juce::Rectangle<int> ThemeSwatchBar::getUserSwatchBounds(int index) const
 {
     const int presetCount = (int) PinkXP::getAllThemes().size();
-    const int usersX = kBarLeftPad + juce::jmin(getHeight() - 6, kPreviewW) + kGroupGap
-                       + presetCount * (kSwatchW + kSwatchGap) + kGroupGap;
-    const int y = (getHeight() - kSwatchH) / 2;
-    return { usersX - scrollX_ + index * (kSwatchW + kSwatchGap), y, kSwatchW, kSwatchH };
+    const int usersX = PinkXP::ui (kBarLeftPad)
+                     + juce::jmin(getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
+                     + PinkXP::ui (kGroupGap)
+                     + presetCount * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap))
+                     + PinkXP::ui (kGroupGap);
+    const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
+    return { usersX - scrollX_ + index * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)),
+             y, PinkXP::ui (kSwatchW), PinkXP::ui (kSwatchH) };
 }
 
 juce::Rectangle<int> ThemeSwatchBar::getNewButtonBounds() const
 {
     const auto& lib = PinkXP::ThemeLibrary::instance();
     const int x = (lib.size() > 0)
-        ? getUserSwatchBounds(lib.size() - 1).getRight() + 6
+        ? getUserSwatchBounds(lib.size() - 1).getRight() + PinkXP::ui (6)
         : getUserSwatchBounds(0).getX();
-    const int y = (getHeight() - kSwatchH) / 2;
-    return { x, y, kSwatchH, kSwatchH };
+    const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
+    return { x, y, PinkXP::ui (kSwatchH), PinkXP::ui (kSwatchH) };
 }
 
 int ThemeSwatchBar::totalContentWidth() const
 {
     const auto& lib = PinkXP::ThemeLibrary::instance();
     const int usersW = lib.size() > 0
-        ? lib.size() * (kSwatchW + kSwatchGap) - kSwatchGap : 0;
-    return getNewButtonBounds().getRight() + kGroupGap + 90;  // 90 = 主题名最小宽度
+        ? lib.size() * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)) - PinkXP::ui (kSwatchGap) : 0;
+    return getNewButtonBounds().getRight() + PinkXP::ui (kGroupGap) + PinkXP::ui (90);  // 90 = 主题名最小宽度
 }
 
 void ThemeSwatchBar::updateScrollLimits()
@@ -4911,7 +4920,7 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
     // ---- 右侧当前主题名 ----
     {
         const auto& th = PinkXP::getCurrentTheme();
-        const int tx = getNewButtonBounds().getRight() + kGroupGap;
+        const int tx = getNewButtonBounds().getRight() + PinkXP::ui (kGroupGap);
         const int tw = juce::jmax(0, getWidth() - tx - 4);
         if (tw > 10 && tx < getWidth())
         {

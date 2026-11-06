@@ -901,9 +901,7 @@ PalettePanel::PalettePanel()
     saveBtn_.onClick = [this] { saveCurrentAsUserTheme(); };
     addAndMakeVisible(saveBtn_);
 
-    closeBtn_.setButtonText("X");
-    closeBtn_.onClick = [this] { dismiss(); };
-    addAndMakeVisible(closeBtn_);
+    // 标题栏 × 已改为 paint 自绘（复刻 ModulePanel 样式），不再使用 TextButton。
 
     // ---- 预览卡 / 徽章 / 提示 ----
     previewCard_.setGen(&lastGen_);   // 预览卡直接读面板生成结果（拖动中实时）
@@ -1755,7 +1753,9 @@ void PalettePanel::updatePanelHeight()
 // ==================================================
 void PalettePanel::paint(juce::Graphics& g)
 {
-    PinkXP::drawSunken(g, getLocalBounds(), PinkXP::btnFace);
+    // 凸起外框（上/左亮、下/右暗）：工作室应像模块一样"浮"在画布上。
+    //   之前误用 drawSunken（上/左暗、下/右亮），面板视觉上向下凹陷。
+    PinkXP::drawRaised(g, getLocalBounds(), PinkXP::btnFace);
     auto inner = getLocalBounds().reduced(3);
     g.setColour(PinkXP::content);
     g.fillRect(inner);
@@ -1764,22 +1764,90 @@ void PalettePanel::paint(juce::Graphics& g)
     if (namePromptVisible_ && nameEditor_.isVisible())
         PinkXP::drawSunken(g, nameEditor_.getBounds().expanded(3), PinkXP::btnFace);
 
-    // 标题栏
-    auto bar = inner.removeFromTop(26);
-    g.setColour(PinkXP::sel);
-    g.fillRect(bar);
-    g.setColour(PinkXP::selInk);
-    g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
-    g.drawText(y2k::tr("PALETTE STUDIO"), bar.reduced(8, 0), juce::Justification::centredLeft, false);
+    // 标题栏：与模块抬头同一套 PinkXP 标题栏绘制（玫瑰粉底 + 顶部高光 +
+    //   底部暗线 + 左侧主题图标 + 带阴影标题）。高度与 ModulePanel 一致（ui(22)）。
+    auto bar = inner.removeFromTop(PinkXP::ui(22));
+    PinkXP::drawPinkTitleBar(g, bar, y2k::tr("PALETTE STUDIO"), 12.0f);
+
+    // 标题栏下沿深色分割线（与 ModulePanel 一致：在标题栏底边外再补 1px）
+    g.setColour(PinkXP::dark);
+    g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
+
+    // 右上角 × 关闭按钮：完全复刻 ModulePanel 的自绘样式
+    //   （drawRaised/drawPressed + iconFont(11) "x" + translate(0,-1)）
+    {
+        auto cb = getCloseButtonBounds();
+        if (closePressed_)
+            PinkXP::drawPressed(g, cb, PinkXP::pink100);
+        else
+            PinkXP::drawRaised(g, cb, closeHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
+
+        g.setColour(PinkXP::ink);
+        g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
+        auto cbText = cb;
+        cbText.translate(0, -1);
+        if (closePressed_) cbText.translate(1, 1);
+        g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
+    }
+}
+
+// 标题栏 × 按钮几何：完全对齐 ModulePanel 的公式
+//   （s = ui(16)，x = 右缘 - 4 - s；y 在标题栏内垂直居中）
+juce::Rectangle<int> PalettePanel::getCloseButtonBounds() const
+{
+    const auto bar = getLocalBounds().reduced(3).removeFromTop(PinkXP::ui(22));
+    const int s = PinkXP::ui(16);
+    const int y = bar.getY() + (bar.getHeight() - s) / 2;
+    return { bar.getRight() - 4 - s, y, s, s };
+}
+
+void PalettePanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (getCloseButtonBounds().contains (e.getPosition()))
+    {
+        closePressed_ = true;
+        repaint (getCloseButtonBounds());
+    }
+}
+
+void PalettePanel::mouseUp (const juce::MouseEvent& e)
+{
+    if (! closePressed_)
+        return;
+
+    closePressed_ = false;
+    repaint (getCloseButtonBounds());
+
+    if (getCloseButtonBounds().contains (e.getPosition()))
+        dismiss();
+}
+
+void PalettePanel::mouseMove (const juce::MouseEvent& e)
+{
+    const bool hovered = getCloseButtonBounds().contains (e.getPosition());
+    if (hovered != closeHovered_)
+    {
+        closeHovered_ = hovered;
+        repaint (getCloseButtonBounds());
+    }
+}
+
+void PalettePanel::mouseExit (const juce::MouseEvent&)
+{
+    if (closeHovered_ || closePressed_)
+    {
+        closeHovered_ = false;
+        closePressed_ = false;
+        repaint (getCloseButtonBounds());
+    }
 }
 
 void PalettePanel::resized()
 {
     auto area = getLocalBounds().reduced(4, 4);
 
-    // 标题栏 + 关闭按钮
-    auto bar = area.removeFromTop(26);
-    closeBtn_.setBounds(bar.removeFromRight(24).reduced(2));
+    // 标题栏（高度与 ModulePanel 一致；× 按钮为自绘，无需在此布局）
+    area.removeFromTop(PinkXP::ui(22));
 
     // ---- 主体区 ----
     auto main = area.removeFromTop(214);

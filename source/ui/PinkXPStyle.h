@@ -194,6 +194,12 @@ namespace PinkXP
         //   （只覆盖 Unicode 装饰符号，不含 ASCII 字母数字与基本标点）
         static bool needsSymbolFont (const juce::String& text);
 
+        // 文本是否**只**由装饰符号组成（不含字母/数字/CJK/空格）。
+        //   这类按钮（如关闭 ×）恒用英文 UI 字体 iconFont —— 字形与字号在
+        //   中英文界面完全一致（buttonFont 会按 CJK 界面再收紧 10%，导致
+        //   "切中文后 × 变小"）。
+        static bool isSymbolsOnly (const juce::String& text) noexcept;
+
         // 按文本内容选字体：含符号 → 英文 UI 字体；否则沿用当前语言字体。
         //   高度换算与 PinkXP::getFont 完全一致（1.5x / uiScale / minFontHeight）。
         static juce::Font getFont (const juce::String& text, float height,
