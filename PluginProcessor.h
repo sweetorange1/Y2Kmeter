@@ -328,6 +328,11 @@ private:
     std::atomic<double> hostPlayheadBpm     { 0.0 };
     std::atomic<double> hostPlayheadPpq     { 0.0 };
 
+    // 上一块缓存的 ppq 是否有效（仅音频线程读写，非原子）。
+    //   用于检测宿主"重置播放"（transport 跳回开头 / 循环折返）：
+    //   ppq 相对上一块显著回退 → 请求重置 integrated 响度积分。
+    bool hostPlayheadPpqInitialized { false };
+
     // processBlock 时间占比测量器（JUCE 内置，读写原子，实时线程友好）
     juce::AudioProcessLoadMeasurer loadMeasurer;
 

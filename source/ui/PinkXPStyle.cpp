@@ -377,6 +377,23 @@ namespace PinkXP
         return getFont (text, cjkFontActive() ? height * 0.9f : height, styleFlags);
     }
 
+    juce::Font SymbolGlyphs::iconFont (float height, int styleFlags)
+    {
+        // 图标字符在任何语言下都必须与英文界面完全一致（字形 + 尺寸 + 位置）。
+        //   因此高度只走"语言无关"的换算：1.5x 主字号放大 + uiScale 密度缩放，
+        //   **不**应用语言包 @fontScale / @minFontHeight（否则中文模式下图标会
+        //   比英文模式缩小、居中位置跟着微移）。
+        //   英文界面下 gFontScale=1 / 无 minFontHeight，本路径与 getFont 结果相同。
+        const float scaled = (height >= 8.0f) ? height * 1.5f : height;
+        const float h = scaled * uiScale();
+
+        if (auto sym = getSymbolTypeface())
+            return juce::Font (juce::FontOptions (sym).withHeight (h));
+
+        // 英文 UI 字体不可用（异常兜底）：回退当前语言字体
+        return PinkXP::getFont (height, styleFlags);
+    }
+
     // ======================================================
     // 静态文本位图缓存（v2.9.6 性能）
     //   mac 上 Editor GL（CPE）渲染下，drawText 每帧触发 HarfBuzz 塑形 +

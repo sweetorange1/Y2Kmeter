@@ -190,9 +190,25 @@ void Y2KmeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
                     hostPlayheadBpm.store (0.0, std::memory_order_relaxed);
 
                 if (const auto ppq = pos->getPpqPosition())
-                    hostPlayheadPpq.store (*ppq, std::memory_order_relaxed);
+                {
+                    // 宿主"重置播放"跟随：ppq 相对上一块显著回退（transport 跳回
+                    //   开头 / 循环段折返 / 手动 seek 到更早位置）→ 请求重置
+                    //   integrated 响度积分（下一块 consumePendingLoudnessReset
+                    //   统一在音频线程消费，与增益变更共用同一通道）。
+                    //   Standalone 无 playhead，天然不进入此分支；软件版行为不变。
+                    const double p = *ppq;
+                    if (hostPlayheadPpqInitialized && pos->getIsPlaying()
+                        && p < hostPlayheadPpq.load (std::memory_order_relaxed) - 1.0)
+                        pendingLoudnessReset.store (true, std::memory_order_relaxed);
+
+                    hostPlayheadPpq.store (p, std::memory_order_relaxed);
+                    hostPlayheadPpqInitialized = true;
+                }
                 else
+                {
                     hostPlayheadPpq.store (0.0, std::memory_order_relaxed);
+                    hostPlayheadPpqInitialized = false;
+                }
             }
             else
             {

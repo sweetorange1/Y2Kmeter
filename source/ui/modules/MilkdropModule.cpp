@@ -1763,7 +1763,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
   else
     PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
   g.setColour(PinkXP::ink);
-  g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+  g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
   auto cbText = cb;
   cbText.translate(0, -1);
   if (closeButtonPressed) cbText.translate(1, 1);
@@ -1778,7 +1778,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
     else
       PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
     g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
+    g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
     auto popBtnText = popBtn;
     popBtnText.translate(0, -1);
     if (popOutButtonPressed_) popBtnText.translate(1, 1);
@@ -4064,7 +4064,8 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
         }
 
         g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
-        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+        // 图标字符（< / > / ?）：恒用英文 UI 字体，不随语言切换变样
+        g.setFont(PinkXP::SymbolGlyphs::iconFont(9.0f, juce::Font::bold));
         g.drawText(y2k::tr (text), r, juce::Justification::centred, false);
     };
 

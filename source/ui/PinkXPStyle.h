@@ -208,6 +208,12 @@ namespace PinkXP
         static juce::Font buttonFont (const juce::String& text, float height,
                                       int styleFlags = juce::Font::plain);
 
+        // 图标字符专用：恒用英文 UI 字体（Silkscreen），不随界面语言切换。
+        //   用于标题栏 × 关闭 / - = 弹出停靠 / < > ? 等"纯图标"字符按钮 ——
+        //   与表情字符同理：这类符号的字形属于品牌视觉的一部分，
+        //   不应因中英文切换而跟着换字体变样。
+        static juce::Font iconFont (float height, int styleFlags = juce::Font::plain);
+
         // 当前界面字体是否为 CJK 像素字体（非英文 Silkscreen）。
         //   CJK 方块字紧贴 em 顶部、descent 很小，垂直居中时视觉偏上；
         //   标题栏等关键位置用它决定是否做 1px 向下微调。

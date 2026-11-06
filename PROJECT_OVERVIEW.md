@@ -16,7 +16,8 @@
     GL 组件合成诊断、Toybox 档位连续互动自动升级）以及本轮两大新功能 —— **悬停提示 Hover Help** 与
     **界面国际化 / 中文本地化（运行时中英文切换）**，连同后续迭代（符号字形集中管理、CJK 视觉校正、
     按钮字号收紧、翻译文案自查、多屏混合 DPI 下模块脱离窗口物理像素落位等），详见文末「v3.0.2」章节。
-    v3.0.2 发布后的调整（Milkdrop 按钮等宽、示波器单按钮循环、调性点击反馈）以 `v3.0.2补充` 形式入库、不再 bump 版本号。
+    v3.0.2 发布后的调整（Milkdrop 按钮等宽、示波器单按钮循环、调性点击反馈、macOS 编译修复、
+    VST 响度 Integrated 跟随宿主播放重置、图标字符固定英文 UI 字体）均以 `v3.0.2补充` 形式入库、不再 bump 版本号。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -6193,6 +6194,34 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 - macOS Release（`cmake-build-release`，Universal `x86_64;arm64`，deployment target 12.3）三处编译错误逐一复现 → 修复 → `Y2Kmeter_All` 完整构建通过（Standalone / VST3 / AU / milkdrop VST3 / milkdrop AU 全部链接并完成 dylib + 预设部署与重签名）；
 - Milkdrop 悬停预览花屏由用户在本机编译后实测确认已消失，真实模块与浮动态显示无回归；
 - `git diff --check` 通过。
+
+---
+
+## v3.0.2 补充：VST 响度 Integrated 跟随宿主播放重置 + 图标字符固定英文 UI 字体
+
+> 版本号保持 `3.0.2` 不变。Win 端本轮 2 项需求（均已由用户实测确认）：
+
+### 1. VST 插件形态：Integrated 响度跟随宿主"重置播放"重新累计
+
+- 需求：宿主每次重置播放（transport 跳回开头）时 LUFS-I 重新累计；**软件（Standalone）版本行为不变**。
+- 实现（音频线程，无锁）：`PluginProcessor::processBlock` 读取 `AudioPlayHead` 的位置缓存处（供 Milkdrop BPM 同步的同一段代码）新增 ppq 回退检测 —— 当前块 ppq 比上一块**回退超过 1 拍**（覆盖 transport 跳回开头 / 循环段折返 / 手动 seek 到更早位置）→ 置位 `pendingLoudnessReset`，下一块由既有的 `consumePendingLoudnessReset()` 在音频线程消费 → `AnalyserHub::resetLoudness()`。与"改增益自动重置"共用同一通道，无新增跨线程触碰。
+- 暂停后原地继续、stop 后继续播放（ppq 不回退）不触发；Standalone 无 playhead，天然不进入该分支。
+- 新增成员 `hostPlayheadPpqInitialized`（仅音频线程读写，非原子）；ppq 无值时复位基准，避免宿主不报告 ppq 期间误触发。
+
+### 2. 按钮图标字符不随中英文切换变样
+
+- 需求：软件右上角四个按钮（L / _ / * / x）、所有模块右上角的 × / - = 按钮等**图标字符**在切换语言时字形、尺寸、位置完全不变（与表情字符同理，字形属于品牌视觉）。
+- 根因：这些字符原走 `PinkXP::getFont`，中文模式下用中文字体（ChillBitmap）渲染，字形与英文模式不同。
+- 实现：`PinkXP::SymbolGlyphs` 新增 `iconFont(height, style)` —— **恒用英文 UI 字体（Silkscreen）**；高度换算只保留语言无关部分（1.5x 主字号放大 + `uiScale()` 密度缩放），**跳过语言包 `@fontScale` / `@minFontHeight`**（否则中文模式图标会缩小、居中位置微移）。英文界面下与 `gTypeface` 同一对象，零变化。
+- 应用点：`PluginEditor.cpp`（主标题栏四个按钮、浮动窗口关闭 ×、新手引导关闭 ×）、`ModulePanel.cpp`（× 与 - =）、`MilkdropModule.cpp`（× 、- = 、< > ?）。
+
+### 3. 改动点
+
+`PluginProcessor.h/.cpp`、`source/ui/PinkXPStyle.h/.cpp`、`PluginEditor.cpp`、`source/ui/ModulePanel.cpp`、`source/ui/modules/MilkdropModule.cpp`、本文档。
+
+### 4. 验证
+
+`git diff --check` 通过；IDE 静态诊断 0 错误；VST 宿主重置播放后 Integrated 重新累计、图标切换语言逐像素不变均由用户实测确认。
 
 ---
 

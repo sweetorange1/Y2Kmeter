@@ -1147,7 +1147,7 @@ public:
             PinkXP::drawRaised  (g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
 
         g.setColour (PinkXP::ink);
-        g.setFont   (PinkXP::getFont (12.0f, juce::Font::bold));
+        g.setFont   (PinkXP::SymbolGlyphs::iconFont (12.0f, juce::Font::bold));
         auto cbText = cb;
         cbText.translate (-1, -1);
         if (closeButtonPressed) cbText.translate (1, 1);
@@ -1577,7 +1577,7 @@ private:
                 PinkXP::drawRaised  (g, cb, closeBtnHovered ? PinkXP::pink200 : PinkXP::btnFace);
 
             g.setColour (PinkXP::ink);
-            g.setFont   (PinkXP::getFont (11.0f, juce::Font::bold));
+            g.setFont   (PinkXP::SymbolGlyphs::iconFont (11.0f, juce::Font::bold));
             auto cbText = cb;
             cbText.translate (-1, -1);
             if (closeBtnPressed) cbText.translate (1, 1);
@@ -4615,7 +4615,8 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
                     PinkXP::drawRaised  (g, rc, hovered ? PinkXP::pink200 : PinkXP::btnFace);
 
                 g.setColour (PinkXP::ink);
-                g.setFont   (PinkXP::getFont (fontHeight, juce::Font::bold));
+                // 图标字符（L / _ / * / x）：恒用英文 UI 字体，不随语言切换变样
+                g.setFont   (PinkXP::SymbolGlyphs::iconFont (fontHeight, juce::Font::bold));
                 auto txt = rc;
                 txt.translate (glyphDxWhenIdle, glyphDyWhenIdle);
                 if (pressed || activeLatched) txt.translate (1, 1);
