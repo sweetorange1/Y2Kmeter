@@ -190,6 +190,15 @@ public:
     */
     void setContinuousRepainting (bool shouldContinuouslyRepaint) noexcept;
 
+    /** (Y2Kmeter patch, macOS only) When continuous repainting is disabled, coalesces
+        component invalidations (Component::repaint) to the display refresh: instead of
+        waking the render thread immediately, the frame is rendered on the next display
+        link tick, so several repaints within one refresh period produce a single frame.
+        Explicit triggerRepaint() calls are not affected. Has no effect on other platforms.
+        Call this before attachTo().
+    */
+    void setComponentRepaintsPacedToDisplay (bool shouldPace) noexcept;
+
     /** Asynchronously causes a repaint to be made. */
     void triggerRepaint();
 
@@ -373,6 +382,7 @@ private:
     size_t imageCacheMaxSize = 8 * 1024 * 1024;
     bool renderComponents = true, useMultisampling = false, overrideCanAttach = false;
     std::atomic<bool> continuousRepaint { false };
+    std::atomic<bool> componentRepaintsPacedToDisplay { false };
     TextureMagnificationFilter texMagFilter = linear;
 
     //==============================================================================

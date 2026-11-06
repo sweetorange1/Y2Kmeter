@@ -460,6 +460,11 @@ bool Font::operator!= (const Font& other) const noexcept
 
 bool Font::compare (const Font& a, const Font& b) noexcept
 {
+    // [Y2Kmeter patch] 同一共享实例必然相等（与 operator== 的快速路径一致），
+    //   免去整组字段比较 —— 调用方复用 Font 实例时缓存命中的比较近乎零成本。
+    if (a.font == b.font)
+        return false;
+
     return *a.font < *b.font;
 }
 

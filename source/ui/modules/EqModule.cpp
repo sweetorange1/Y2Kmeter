@@ -351,9 +351,11 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
                 juce::String label = (db > 0) ? ("+" + juce::String(db)) : juce::String(db);
                 g.setColour(PinkXP::ink.withAlpha(0.85f));
                 const int textH = 10;
-                g.drawText(y2k::tr (label), (int) scaleLeft, (int) std::round(y) - textH / 2,
-                           (int)(scaleRight - tickLen - 1 - scaleLeft), textH,
-                           juce::Justification::centredRight, false);
+                PinkXP::drawCachedText(g, label,
+                                       juce::Rectangle<int>((int) scaleLeft, (int) std::round(y) - textH / 2,
+                                                            (int)(scaleRight - tickLen - 1 - scaleLeft), textH),
+                                       juce::Justification::centredRight, 9.0f, juce::Font::plain,
+                                       PinkXP::ink.withAlpha(0.85f), true);
             }
         }
     }

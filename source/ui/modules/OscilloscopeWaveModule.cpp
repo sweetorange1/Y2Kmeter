@@ -115,7 +115,7 @@ void OscilloscopeWaveModule::onFrame(const AnalyserHub::FrameSnapshot& frame)
     // v2.9.3：同步生成 GL 直渲染快照
     buildGlSnapshot();
     if (dynamicLayerDirty)
-        repaint();
+        repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -353,8 +353,10 @@ void OscilloscopeWaveModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
     const juce::String modeLabel = (channelMode == ChannelMode::left)  ? "L" :
                                    (channelMode == ChannelMode::right) ? "R" : "L+R";
-    g.drawText (y2k::tr (modeLabel), canvas.getX() + 4, canvas.getBottom() - 14,
-                40, 12, juce::Justification::centredLeft, false);
+    PinkXP::drawCachedText (g, modeLabel,
+                            juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 14, 40, 12),
+                            juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                            PinkXP::ink.withAlpha (0.85f), true);
 }
 
 void OscilloscopeWaveModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)

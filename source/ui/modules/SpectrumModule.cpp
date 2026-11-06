@@ -590,7 +590,7 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     curve_cache_dirty_ = true;
     // v2.9.4：同步生成 GL 直渲染快照
     buildGlSnapshot();
-    repaint();
+    repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -1774,14 +1774,14 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
     {
         const int y = (int) std::round(dbToY((float) db, canvas));
         juce::String s = (db == 0) ? " 0" : juce::String(db);
-        const juce::Image img = PinkXP::cachedStaticTextImage (
-            s, 9.0f, juce::Font::plain, labelColour,
+        const auto img = PinkXP::cachedStaticText (
+            g, s, 9.0f, juce::Font::plain, labelColour,
             juce::Colours::transparentBlack, true);
         if (img.isValid())
         {
-            g.drawImageAt (img,
-                           canvas.getX() - 32 + (28 - img.getWidth()),
-                           y - img.getHeight() / 2, false);
+            img.drawAt (g,
+                        (float) (canvas.getX() - 32 + (28 - img.getWidth())),
+                        (float) (y - img.getHeight() / 2));
         }
         else
         {
@@ -1802,12 +1802,12 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
     {
         const int x = (int) std::round(freqToX(l.hz, canvas));
         if (x < canvas.getX() - 4 || x > canvas.getRight() + 4) continue;
-        const juce::Image img = PinkXP::cachedStaticTextImage (
-            l.label, 9.0f, juce::Font::plain, labelColour,
+        const auto img = PinkXP::cachedStaticText (
+            g, l.label, 9.0f, juce::Font::plain, labelColour,
             juce::Colours::transparentBlack, true);
         if (img.isValid())
         {
-            g.drawImageAt (img, x - img.getWidth() / 2, canvas.getBottom() + 2, false);
+            img.drawAt (g, (float) (x - img.getWidth() / 2), (float) (canvas.getBottom() + 2));
         }
         else
         {

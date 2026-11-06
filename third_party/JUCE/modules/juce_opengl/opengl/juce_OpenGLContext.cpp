@@ -243,15 +243,39 @@ public:
     bool invalidateAll() override
     {
         validArea.clear();
-        triggerRepaint();
+        requestComponentRepaint();
         return false;
     }
 
     bool invalidate (const Rectangle<int>& area) override
     {
         validArea.subtract (area.toFloat().transformedBy (transform).getSmallestIntegerContainer());
-        triggerRepaint();
+        requestComponentRepaint();
         return false;
+    }
+
+    // Y2Kmeter patch: component invalidations may be coalesced to the next display
+    //   link tick (see OpenGLContext::setComponentRepaintsPacedToDisplay).
+    void requestComponentRepaint()
+    {
+       #if JUCE_MAC
+        if (context.componentRepaintsPacedToDisplay && ! context.continuousRepaint
+            && connection.has_value() && lastDisplay.load() != 0)
+        {
+            // Watchdog: if the display link has not ticked recently (display asleep,
+            //   screen reconfiguration...), fall back to an immediate render.
+            const auto now = Time::getMillisecondCounter();
+            const auto lastTick = lastDisplayTickMs.load();
+
+            if (lastTick != 0 && now - lastTick < 100)
+            {
+                pacedRepaintPending = true;
+                return;
+            }
+        }
+       #endif
+
+        triggerRepaint();
     }
 
     void releaseResources() override
@@ -907,13 +931,24 @@ public:
     void refreshDisplayLinkConnection()
     {
        #if JUCE_MAC
-        if (context.continuousRepaint)
+        if (context.continuousRepaint || context.componentRepaintsPacedToDisplay)
         {
             connection.emplace (sharedDisplayLinks->registerFactory ([this] (CGDirectDisplayID display)
             {
                 return [this, display] (double)
                 {
-                    if (display == lastDisplay)
+                    if (display != lastDisplay)
+                        return;
+
+                    if (context.continuousRepaint)
+                    {
+                        triggerRepaint();
+                        return;
+                    }
+
+                    lastDisplayTickMs = jmax ((uint32) 1, Time::getMillisecondCounter());
+
+                    if (pacedRepaintPending.exchange (false))
                         triggerRepaint();
                 };
             }));
@@ -1052,6 +1087,10 @@ public:
 
     std::atomic<CGDirectDisplayID> lastDisplay { 0 };
     double refreshPeriod = 0.0;
+
+    // Y2Kmeter patch: display-paced component repaints
+    std::atomic<bool> pacedRepaintPending { false };
+    std::atomic<uint32> lastDisplayTickMs { 0 };
 
     FunctionNotificationCenterObserver observer { NSWindowDidChangeScreenNotification,
                                                   getCurrentWindow(),
@@ -1288,6 +1327,16 @@ void OpenGLContext::setContinuousRepainting (bool shouldContinuouslyRepaint) noe
    #endif
 
     triggerRepaint();
+}
+
+void OpenGLContext::setComponentRepaintsPacedToDisplay (bool shouldPace) noexcept
+{
+    componentRepaintsPacedToDisplay = shouldPace;
+
+   #if JUCE_MAC
+    if (auto* cachedImage = getCachedImage())
+        cachedImage->refreshDisplayLinkConnection();
+   #endif
 }
 
 void OpenGLContext::setPixelFormat (const OpenGLPixelFormat& preferredPixelFormat) noexcept

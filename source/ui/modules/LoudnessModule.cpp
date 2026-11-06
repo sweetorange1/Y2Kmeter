@@ -71,7 +71,7 @@ void LoudnessModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     //   60Hz 屏上读数/柱高 30Hz 刷新肉眼无差，光栅化成本减半。
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 // ==========================================================
@@ -194,10 +194,11 @@ void LoudnessModule::drawScale(juce::Graphics& g,
         // 标签
         g.setColour(PinkXP::ink.withAlpha(0.8f));
         juce::String label = (db == 0) ? "0" : juce::String(db);
-        g.drawText(y2k::tr (label),
-                   scaleArea.getX() + 5, (int)y - 5,
-                   scaleArea.getWidth() - 5, 10,
-                   juce::Justification::centredLeft, false);
+        PinkXP::drawCachedText(g, label,
+                               juce::Rectangle<int>(scaleArea.getX() + 5, (int)y - 5,
+                                                    scaleArea.getWidth() - 5, 10),
+                               juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                               PinkXP::ink.withAlpha(0.8f), true);
     }
 }
 
@@ -321,8 +322,9 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         //     的柱标签一致）。
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getAxisFont(11.0f, juce::Font::bold));
-        g.drawText(y2k::tr (bar.label), x, labelY, barW, labelH,
-                   juce::Justification::centred, false);
+        PinkXP::drawCachedText(g, bar.label, juce::Rectangle<int>(x, labelY, barW, labelH),
+                               juce::Justification::centred, 11.0f, juce::Font::bold,
+                               PinkXP::ink, true);
 
         // 数字读数（防御：NaN / Inf / 过小 → 显示 -∞；其余数值做 clamp）
         const float raw = bar.smoothed;
@@ -344,8 +346,8 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         {
             readoutCacheText_[idx]   = readout;
             readoutCacheTimeMs_[idx] = nowMs;
-            readoutCache_[idx] = PinkXP::cachedStaticTextImage (
-                readout, 9.0f, juce::Font::plain, rc);
+            readoutCache_[idx] = PinkXP::cachedStaticText (
+                g, readout, 9.0f, juce::Font::plain, rc);
         }
 
         if (readoutCache_[idx].isValid())
@@ -354,10 +356,9 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
             //   避免压到上方的 M/S/I/L/R 标签。
             const int readoutY = labelY + labelH
                     + juce::jmax(0, (readoutH - readoutCache_[idx].getHeight()) / 2);
-            g.drawImageAt (readoutCache_[idx],
-                           x + (barW - readoutCache_[idx].getWidth()) / 2,
-                           readoutY,
-                           false);
+            readoutCache_[idx].drawAt (g,
+                                       (float) (x + (barW - readoutCache_[idx].getWidth()) / 2),
+                                       (float) readoutY);
         }
         else
         {

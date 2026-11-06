@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <cmath>
 #include "source/ui/ModuleWorkspace.h"
+#include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 
@@ -122,7 +123,7 @@ private:
 
     // 读数位图缓存（v2.9.6 性能）：数字读数每帧变化，mac GL 下逐帧 drawText
     //   开销大；缓存位图 + 100ms 节流刷新（10Hz，人眼无感知）。
-    mutable juce::Image  readoutCache_[5];
+    mutable PinkXP::StaticText readoutCache_[5];
     mutable juce::String readoutCacheText_[5];
     mutable double       readoutCacheTimeMs_[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
 

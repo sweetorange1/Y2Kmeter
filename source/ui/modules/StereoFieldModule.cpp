@@ -98,7 +98,7 @@ void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     buildGlSnapshot();
 
     // v2.9：去掉 15ms×DPI 硬编码节流，每个分发帧重绘
-    repaint();
+    repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -180,12 +180,15 @@ void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> 
     const int actualMargin = plot.getWidth() / 2 - R;
     const int labelH = juce::jmax (10, (int) std::ceil (labelFontSize) + 4);
     const int y = baseY - labelH;
-    g.setColour (PinkXP::ink.withAlpha (0.7f));
-    g.setFont (PinkXP::getAxisFont (labelFontSize, juce::Font::bold));
-    g.drawText (y2k::tr ("C"), cx - 8, y, 16, labelH, juce::Justification::centred, false);
-    g.setFont (PinkXP::getAxisFont (juce::jmin (labelFontSize, 11.0f), juce::Font::bold));
-    g.drawText (y2k::tr ("L"), plot.getX(), y, actualMargin, labelH, juce::Justification::centredRight, false);
-    g.drawText (y2k::tr ("R"), plot.getRight() - actualMargin, y, actualMargin, labelH, juce::Justification::centredLeft, false);
+    const auto lcrColour = PinkXP::ink.withAlpha (0.7f);
+    const float lrFontSize = juce::jmin (labelFontSize, 11.0f);
+    PinkXP::drawCachedText (g, "C", juce::Rectangle<int> (cx - 8, y, 16, labelH), juce::Justification::centred,
+                            labelFontSize, juce::Font::bold, lcrColour, true);
+    g.setFont (PinkXP::getAxisFont (lrFontSize, juce::Font::bold));
+    PinkXP::drawCachedText (g, "L", juce::Rectangle<int> (plot.getX(), y, actualMargin, labelH), juce::Justification::centredRight,
+                            lrFontSize, juce::Font::bold, lcrColour, true);
+    PinkXP::drawCachedText (g, "R", juce::Rectangle<int> (plot.getRight() - actualMargin, y, actualMargin, labelH), juce::Justification::centredLeft,
+                            lrFontSize, juce::Font::bold, lcrColour, true);
 
     // 当前自动增益（1.0x 是默认比例尺，不显示，避免多余文字）
     if (std::abs (autoGainFactor - 1.0f) > 0.05f)

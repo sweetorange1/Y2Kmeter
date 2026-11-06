@@ -205,12 +205,27 @@ if (NOT DEFINED FETCHCONTENT_SOURCE_DIR_JUCE OR FETCHCONTENT_SOURCE_DIR_JUCE STR
   unset(_Y2K_LOCAL_JUCE)
 endif()
 
+# ==========================================================
+# JUCE 本地补丁（third_party/juce_patches/，说明见该目录 README.md）
+#   · 使用仓库内 third_party/JUCE（默认）：补丁已直接提交在源码里；
+#   · 走 FetchContent 拉原版 8.0.12：PATCH_COMMAND 自动按顺序打补丁
+#     （本地源码目录覆盖时 CMake 不执行 PATCH_COMMAND，不会重复打）；
+#   · 无论哪条路径，配置期都校验补丁标记，缺失直接报错，防止优化静默丢失。
+# ==========================================================
+set(Y2K_JUCE_PATCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/juce_patches")
+option(Y2K_ALLOW_UNPATCHED_JUCE "允许使用未打 Y2Kmeter 补丁的 JUCE（仅警告）" OFF)
+include("${Y2K_JUCE_PATCH_DIR}/Y2KJucePatches.cmake")
+
 FetchContent_Declare(
         juce
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
         GIT_TAG 8.0.12
+        UPDATE_DISCONNECTED TRUE
+        PATCH_COMMAND "${CMAKE_COMMAND}" -DPATCH_DIR=${Y2K_JUCE_PATCH_DIR}
+                      -P "${Y2K_JUCE_PATCH_DIR}/ApplyJucePatches.cmake"
 )
 FetchContent_MakeAvailable(juce)
+y2k_verify_juce_patches("${juce_SOURCE_DIR}")
 
 if (TARGET juceaide AND NOT TARGET juce::juceaide)
   add_executable(juce::juceaide ALIAS juceaide)

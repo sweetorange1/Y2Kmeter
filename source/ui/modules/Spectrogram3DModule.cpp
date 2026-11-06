@@ -441,7 +441,7 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     buildGlSnapshot();
 
     // v2.9：去掉 20ms（≈50fps）硬编码节流；仅在本帧确有新列推入时重绘
-    repaint();
+    repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -983,12 +983,12 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.fillRect (x - 12, y, 24, 11);
         // 静态标签位图缓存（v2.9.6 性能）
-        const juce::Image img = PinkXP::cachedStaticTextImage (
-            l.label, 9.0f, juce::Font::plain, PinkXP::hl,
+        const auto img = PinkXP::cachedStaticText (
+            g, l.label, 9.0f, juce::Font::plain, PinkXP::hl,
             juce::Colours::transparentBlack, true);
         if (img.isValid())
         {
-            g.drawImageAt (img, x - img.getWidth() / 2, y + (11 - img.getHeight()) / 2, false);
+            img.drawAt (g, (float) (x - img.getWidth() / 2), (float) (y + (11 - img.getHeight()) / 2));
         }
         else
         {
@@ -1008,12 +1008,11 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
         g.setColour (PinkXP::hl);
         // "↗ older" / "newer ↙" 含箭头符号：按 run 绘制（中文译文是
         //   "↗ 较早" —— 整串换英文 UI 字体会让 CJK 在 mac 上消失）
-        const auto hintFont = PinkXP::getFont (8.5f, juce::Font::plain);
-        PinkXP::SymbolGlyphs::drawText (g, y2k::tr (juce::String::fromUTF8 ("\xe2\x86\x97 older")),
-                                        { canvas.getX() + 2, canvas.getY() + 2, ow, oh },
-                                        juce::Justification::centred, hintFont);
-        PinkXP::SymbolGlyphs::drawText (g, y2k::tr (juce::String::fromUTF8 ("newer \xe2\x86\x99")),
-                                        { canvas.getRight() - ow - 2, canvas.getBottom() - oh - 2, ow, oh },
-                                        juce::Justification::centred, hintFont);
+        PinkXP::drawCachedSymbolText (g, juce::String::fromUTF8 ("\xe2\x86\x97 older"),
+                                      juce::Rectangle<int> (canvas.getX() + 2, canvas.getY() + 2, ow, oh),
+                                      juce::Justification::centred, 8.5f, juce::Font::plain, PinkXP::hl);
+        PinkXP::drawCachedSymbolText (g, juce::String::fromUTF8 ("newer \xe2\x86\x99"),
+                                      juce::Rectangle<int> (canvas.getRight() - ow - 2, canvas.getBottom() - oh - 2, ow, oh),
+                                      juce::Justification::centred, 8.5f, juce::Font::plain, PinkXP::hl);
     }
 }

@@ -2587,6 +2587,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     openGLContext.setRenderer(this);
     openGLContext.setContinuousRepainting(false);
     openGLContext.setComponentPaintingEnabled(true);
+#if JUCE_MAC
+    // mac 性能：repaint() 不再立即唤醒 GL 线程，而是合并到下一个显示器刷新
+    //   （CVDisplayLink）再出帧 —— 各模块 / 计时器相位不同的 repaint 在同一刷新
+    //   周期内只画一帧，GL 帧率与屏幕刷新率对齐（此前约 90~100 帧/秒 @60Hz）。
+    //   JUCE 补丁，见 OpenGLContext::setComponentRepaintsPacedToDisplay。
+    openGLContext.setComponentRepaintsPacedToDisplay(true);
+#endif
 
     // 诊断：attachTo 是"整个窗口进入 GL 合成"的开关，某些驱动在这一步就会
     //   卡住或抛异常。前后各留一行，卡在这里时日志能立刻看出来。

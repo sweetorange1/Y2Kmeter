@@ -283,12 +283,93 @@ namespace PinkXP
     //   仅一次 drawImageAt。shadowColour 非透明时额外叠一层 1px 偏移阴影。
     //   key 含文本/字号/颜色/缩放，主题切换后自然失效；容量有上限保护。
     // ==========================================================
+    //   注意：返回 1x 位图。Retina 下会被放大且走 JUCE 变换采样慢路径，
+    //   绘制场景请优先用下面的 cachedStaticText / drawCachedText。
     juce::Image cachedStaticTextImage (const juce::String& text,
                                        float fontHeight,
                                        int styleFlags,
                                        juce::Colour colour,
                                        juce::Colour shadowColour = juce::Colours::transparentBlack,
                                        bool axisFont = false);
+
+    // 设备分辨率静态文本位图（mac 性能）：按 g 的物理像素缩放光栅化，
+    //   getWidth/getHeight 为逻辑尺寸（与 cachedStaticTextImage 的 Image 尺寸一致），
+    //   drawAt 对齐到设备像素后单次 blit；与 drawImageAt 一样按当前填充色 alpha 调制。
+    struct StaticText
+    {
+        juce::Image image;           // 设备分辨率像素
+        float scale      = 1.0f;     // 设备像素 / 逻辑像素
+        int   width      = 0;        // 逻辑尺寸
+        int   height     = 0;
+        float textWidth  = 0.0f;     // 文本测量宽度（逻辑）
+        float boxHeight  = 0.0f;     // 位图内排版框高度（逻辑，文字在框内垂直居中）
+        float lineHeight = 0.0f;     // 字体行高（逻辑）
+        float textTop    = 0.0f;     // 位图内文字行顶部偏移（逻辑）
+        float originX    = 0.0f;     // 位图内文字左缘 / 排版框顶部偏移（逻辑；
+        float boxTop     = 0.0f;     //   含符号回退字形的文本四周留白，防止字形被位图裁掉）
+
+        bool isValid()   const noexcept { return image.isValid(); }
+        int  getWidth()  const noexcept { return width; }
+        int  getHeight() const noexcept { return height; }
+        void drawAt (juce::Graphics& g, float x, float y) const;
+    };
+
+    StaticText cachedStaticText (juce::Graphics& g,
+                                 const juce::String& text,
+                                 float fontHeight,
+                                 int styleFlags,
+                                 juce::Colour colour,
+                                 juce::Colour shadowColour = juce::Colours::transparentBlack,
+                                 bool axisFont = false);
+
+    // g.drawText 的静态文本替代：排版与 drawText(text, area, justification, false)
+    //   一致（放不下时自动退回 drawText，保持其"整颗丢弃溢出 glyph"的行为）。
+    //   text 传原文（内部做 y2k::tr）；字体 = getFont / getAxisFont(fontHeight, styleFlags)。
+    //   副作用：g 的当前颜色被设为 colour（与 setColour + drawText 一致）；字体不变。
+    void drawCachedText (juce::Graphics& g,
+                         const juce::String& text,
+                         juce::Rectangle<int> area,
+                         juce::Justification justification,
+                         float fontHeight,
+                         int styleFlags,
+                         juce::Colour colour,
+                         bool axisFont = false);
+
+    void drawCachedText (juce::Graphics& g,
+                         const juce::String& text,
+                         juce::Rectangle<float> area,
+                         juce::Justification justification,
+                         float fontHeight,
+                         int styleFlags,
+                         juce::Colour colour,
+                         bool axisFont = false);
+
+    // 静态文本位图的基准字体（与对应的取字体函数完全一致）
+    enum class StaticTextFont
+    {
+        ui,          // getFont (h, style)
+        axis,        // getAxisFont (h, style)
+        symbolAuto,  // SymbolGlyphs::getFont (shown, h, style)
+        button,      // SymbolGlyphs::buttonFont (shown, h, style)
+        icon         // SymbolGlyphs::iconFont (h, style)
+    };
+
+    // SymbolGlyphs::drawText(g, shown, area, just, <fontKind 对应字体>) 的静态文本替代：
+    //   超出 area 的部分按裁剪处理（不丢 glyph）。
+    //   translate = true 时 shown = y2k::tr(text)，否则 shown = text。
+    //   shadowColour 非透明时位图内叠 (1,1) 偏移阴影，颜色按原样烘焙，此时以不透明
+    //   填充色绘制（不做 alpha 调制）；否则按 colour 的 alpha 调制。
+    //   副作用：g 的当前颜色被改写（与 setColour + drawText 一致）；字体不变。
+    void drawCachedSymbolText (juce::Graphics& g,
+                               const juce::String& text,
+                               juce::Rectangle<int> area,
+                               juce::Justification justification,
+                               float fontHeight,
+                               int styleFlags,
+                               juce::Colour colour,
+                               StaticTextFont fontKind = StaticTextFont::ui,
+                               juce::Colour shadowColour = juce::Colours::transparentBlack,
+                               bool translate = true);
 
     // ==========================================================
     // UI 密度缩放（低分辨率适配）

@@ -103,7 +103,8 @@ namespace
         auto titleRow = inner.removeFromTop(12);
         g.setColour(PinkXP::ink.withAlpha(0.85f));
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(y2k::tr (label), titleRow, juce::Justification::centredLeft, false);
+        PinkXP::drawCachedText(g, label, titleRow, juce::Justification::centredLeft,
+                               9.0f, juce::Font::bold, PinkXP::ink.withAlpha(0.85f));
 
         // 右上角信号灯 6x6：有信号（tNorm>0）时呼吸脉动，静音时熄灭
         {
@@ -139,7 +140,8 @@ namespace
 
         g.setColour(PinkXP::ink.withAlpha(0.7f));
         g.setFont(PinkXP::getFont(10.0f, juce::Font::plain));
-        g.drawText(y2k::tr (unit), inner, juce::Justification::centredRight, false);
+        PinkXP::drawCachedText(g, unit, inner, juce::Justification::centredRight,
+                               10.0f, juce::Font::plain, PinkXP::ink.withAlpha(0.7f));
 
         if (! barArea.isEmpty())
             drawReadoutBar(g, barArea, tNorm, pulsePhase);
@@ -201,7 +203,7 @@ void LufsRealtimeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 void LufsRealtimeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
@@ -289,7 +291,7 @@ void TruePeakModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 void TruePeakModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
@@ -338,7 +340,7 @@ void PhaseCorrelationModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.2：读数类模块 30Hz 重绘
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 void PhaseCorrelationModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
@@ -419,7 +421,7 @@ void PhaseBalanceModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.2：读数类模块 30Hz 重绘
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 void PhaseBalanceModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
@@ -494,7 +496,7 @@ void DynamicsMetersModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.2：读数类模块 30Hz 重绘
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 void DynamicsMetersModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
@@ -560,8 +562,9 @@ void DynamicsMetersModule::paintContent(juce::Graphics& g, juce::Rectangle<int> 
         // 标签（跟随主题 ink 色，已由 PinkXPStyle 全局主题控制）
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getFont(8.5f, juce::Font::bold));
-        g.drawText(y2k::tr (labels[i]), area.getX() + i * (w + gap), area.getBottom() - (labelH - 2), w, 12,
-                   juce::Justification::centred, false);
+        PinkXP::drawCachedText(g, labels[i],
+                               juce::Rectangle<int>(area.getX() + i * (w + gap), area.getBottom() - (labelH - 2), w, 12),
+                               juce::Justification::centred, 8.5f, juce::Font::bold, PinkXP::ink);
     }
 }
 
@@ -610,7 +613,7 @@ void DynamicsDrModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 void DynamicsDrModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
@@ -730,7 +733,7 @@ void DynamicsCrestModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     }
     pendingCrestMax = 0.0f;
 
-    repaint();
+    repaintFrameContent();
 }
 
 void DynamicsCrestModule::layoutContent(juce::Rectangle<int> contentBounds)
@@ -1084,7 +1087,7 @@ void VuMeterModule::advanceBallistics (float dt)
     if (pulsePhase > juce::MathConstants<float>::twoPi)
         pulsePhase -= juce::MathConstants<float>::twoPi;
 
-    repaint();
+    repaintFrameContent();
 }
 
 float VuMeterModule::currentMonoDbfs() const noexcept
@@ -1491,7 +1494,8 @@ void VuMeterModule::drawDial(juce::Graphics& g,
             const float ty = cy - cosA * (R - 16.0f);
             juce::Rectangle<float> labRect (tx - 12.0f, ty - 6.0f, 24.0f, 12.0f);
             g.setColour(red ? juce::Colour(0xffb61325) : inkCol);
-            g.drawText(y2k::tr (t.label), labRect, juce::Justification::centred, false);
+            PinkXP::drawCachedText(g, t.label, labRect, juce::Justification::centred,
+                                   9.0f, juce::Font::bold, red ? juce::Colour(0xffb61325) : inkCol, true);
         }
     }
 
@@ -1501,8 +1505,8 @@ void VuMeterModule::drawDial(juce::Graphics& g,
         g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
         // 圆心在底边之上一点，"dBFS" 放在圆心偏上
         const float ly = cy - R * 0.42f;
-        g.drawText(y2k::tr ("dBFS"), juce::Rectangle<float>(cx - 30.0f, ly - 8.0f, 60.0f, 16.0f),
-                   juce::Justification::centred, false);
+        PinkXP::drawCachedText(g, "dBFS", juce::Rectangle<float>(cx - 30.0f, ly - 8.0f, 60.0f, 16.0f),
+                               juce::Justification::centred, 12.0f, juce::Font::bold, inkCol.withAlpha(0.75f));
     }
 
     // ---- 圆心轴 (主题色小凸起 + ink 描边) ----

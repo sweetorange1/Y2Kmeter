@@ -248,7 +248,7 @@ void StereoMapModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     computeStereoMap (frame.dtSec);
     buildGlSnapshot();
-    repaint();
+    repaintFrameContent();
 }
 
 void StereoMapModule::computeStereoMap (float dtSec)

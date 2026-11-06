@@ -109,7 +109,7 @@ private:
     float smoothedCrest   = 0.0f;
 
     // DR 面板读数位图缓存（v2.9.6 性能：100ms 节流刷新，见 drawDrPanel）
-    mutable juce::Image  drValueCache_[3];
+    mutable PinkXP::StaticText drValueCache_[3];
     mutable juce::String drValueText_[3];
     mutable double       drValueTime_[3] = { 0.0, 0.0, 0.0 };
 

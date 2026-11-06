@@ -1,0 +1,2 @@
+# 补丁文件保持原样（LF），避免 Windows autocrlf 转换后 git apply 失败
+*.patch -text

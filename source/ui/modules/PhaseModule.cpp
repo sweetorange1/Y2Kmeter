@@ -77,7 +77,7 @@ void PhaseModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9：去掉 16ms×DPI 硬编码节流（会把本模块锁在 ≤60fps），每个分发帧重绘
     // v2.9.4：同步生成 GL 直渲染快照
     buildGlSnapshot();
-    repaint();
+    repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -185,17 +185,16 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
         const float cx = (float) inner.getCentreX();
         const float cy = (float) inner.getCentreY();
         const float R  = (float) juce::jmin (inner.getWidth(), inner.getHeight()) * 0.48f;
-        g.setColour (PinkXP::ink.withAlpha (0.85f));
-        g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::bold));
-        g.drawText (y2k::tr ("M"), juce::Rectangle<int> ((int) cx - 10, (int) (cy - R) - 12, 20, 12),
-                    juce::Justification::centred, false);
-        g.drawText (y2k::tr ("S"), juce::Rectangle<int> ((int) (cx + R) + 2, (int) cy - 6, 12, 12),
-                    juce::Justification::centredLeft, false);
-        g.setColour (PinkXP::ink.withAlpha (0.55f));
-        g.drawText (y2k::tr ("L"), juce::Rectangle<int> ((int) (cx - R) - 12, (int) (cy - R) - 12, 12, 12),
-                    juce::Justification::centredRight, false);
-        g.drawText (y2k::tr ("R"), juce::Rectangle<int> ((int) (cx + R), (int) (cy - R) - 12, 12, 12),
-                    juce::Justification::centredLeft, false);
+        const auto axisStrong = PinkXP::ink.withAlpha (0.85f);
+        const auto axisWeak   = PinkXP::ink.withAlpha (0.55f);
+        PinkXP::drawCachedText (g, "M", juce::Rectangle<int> ((int) cx - 10, (int) (cy - R) - 12, 20, 12),
+                                juce::Justification::centred, 9.0f, juce::Font::bold, axisStrong, true);
+        PinkXP::drawCachedText (g, "S", juce::Rectangle<int> ((int) (cx + R) + 2, (int) cy - 6, 12, 12),
+                                juce::Justification::centredLeft, 9.0f, juce::Font::bold, axisStrong, true);
+        PinkXP::drawCachedText (g, "L", juce::Rectangle<int> ((int) (cx - R) - 12, (int) (cy - R) - 12, 12, 12),
+                                juce::Justification::centredRight, 9.0f, juce::Font::bold, axisWeak, true);
+        PinkXP::drawCachedText (g, "R", juce::Rectangle<int> ((int) (cx + R), (int) (cy - R) - 12, 12, 12),
+                                juce::Justification::centredLeft, 9.0f, juce::Font::bold, axisWeak, true);
     }
 
     // ---- Dial 刻度 + CORR 读数 ----
@@ -217,23 +216,20 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
                 { -1.0f, "-1" }, { -0.5f, "-.5" }, { 0.0f, "0" },
                 {  0.5f, "+.5"}, {  1.0f, "+1" }
             };
-            g.setColour (PinkXP::ink.withAlpha (0.75f));
-            g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
             for (auto& m : marks)
             {
                 const float th = thetaFor (m.v);
                 const float px = cx - std::cos (th) * (R + 10.0f);
                 const float py = cy - std::sin (th) * (R + 10.0f);
-                g.drawText (y2k::tr (m.s), juce::Rectangle<int> ((int) px - 12, (int) py - 6, 24, 12),
-                            juce::Justification::centred, false);
+                PinkXP::drawCachedText (g, m.s, juce::Rectangle<int> ((int) px - 12, (int) py - 6, 24, 12),
+                                        juce::Justification::centred, 8.0f, juce::Font::plain,
+                                        PinkXP::ink.withAlpha (0.75f), true);
             }
 
             const juce::Colour needleCol = (smoothedCorr < 0.0f) ? PinkXP::sel : PinkXP::pink600;
-            g.setColour (PinkXP::ink);
-            g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-            g.drawText (y2k::tr ("CORR"),
-                        juce::Rectangle<int> (inner.getX(), inner.getY() + 2, inner.getWidth(), 12),
-                        juce::Justification::centred, false);
+            PinkXP::drawCachedText (g, "CORR",
+                                    juce::Rectangle<int> (inner.getX(), inner.getY() + 2, inner.getWidth(), 12),
+                                    juce::Justification::centred, 10.0f, juce::Font::bold, PinkXP::ink);
             g.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
             g.setColour (needleCol);
             juce::String numTxt = juce::String (smoothedCorr, 2);
@@ -247,10 +243,10 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
     // ---- Width / Balance 标签与数值 ----
     {
         const int labelW = 56;
-        g.setColour (PinkXP::ink);
-        g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText (y2k::tr ("WIDTH"), areaWidth.withWidth (labelW), juce::Justification::centredLeft, false);
-        g.drawText (y2k::tr ("BAL"), areaBalance.withWidth (labelW), juce::Justification::centredLeft, false);
+        PinkXP::drawCachedText (g, "WIDTH", areaWidth.withWidth (labelW), juce::Justification::centredLeft,
+                                9.0f, juce::Font::bold, PinkXP::ink);
+        PinkXP::drawCachedText (g, "BAL", areaBalance.withWidth (labelW), juce::Justification::centredLeft,
+                                9.0f, juce::Font::bold, PinkXP::ink);
 
         g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
         g.drawText (y2k::tr (juce::String ((int) std::round (smoothedWidth * 100.0f)) + "%"),

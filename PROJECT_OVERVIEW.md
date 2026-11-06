@@ -526,6 +526,7 @@ main
 - ★ **永远不 clear FBO 0**（CachedImage 合成面）——clear 会破坏 JUCE 已合成的所有组件 UI。
 - 插件宿主与 Standalone **共用**，宿主下 JUCE 会为 Editor 创建 GL 子层不影响宿主窗口其余部分。
 - 坐标系统：`getLocalPoint(milk, point)` 纯组件树遍历 + `openGLContext.getRenderingScale()` DPI 缩放 + Y-flip。
+- ★ **vendored JUCE 有本地补丁**（含 mac GL 的 VBO orphaning、repaint 按显示器刷新合并、Font 比较快速路径等），补丁清单 / 升级流程见 [third_party/juce_patches/README.md](third_party/juce_patches/README.md)；改 JUCE 源码必须同步导出补丁并补配置期校验标记（否则 CMake 配置会报错）。
 - ★ **`OpenGLContext::getCurrentContext() != nullptr` 不等于"绘制目标是 GL 目标"**。GL 渲染线程上跑的任何离屏软件绘制（`createComponentSnapshot` 等）也同样满足这个判断。`OpenGLImageType` 的 Image 只能被 GL 上下文消费，画进软件 Image 在 macOS 会越界读崩溃（Windows 不炸）—— 见 §6.30。
 
 ### 6.6 性能优化点
@@ -6336,6 +6337,98 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 **改动点**：`source/ui/PinkXPStyle.h/.cpp`、`PluginEditor.cpp`、`source/ui/ModuleWorkspace.cpp`、`source/ui/palette/PalettePanel.cpp`、`source/ui/modules/SpectrogramModule.cpp`、`source/ui/modules/Spectrogram3DModule.cpp`、`source/standalone/Y2KStandaloneApp.cpp`、本文档。
 
 **验证**：各改动文件以项目 `compile_commands.json` 的编译参数 `-fsyntax-only` 通过；行宽/字形行为以独立 JUCE 最小程序实测（PingFang SC 0 像素、Hiragino Sans GB 正常；16px 图标框内 ♥/★ 在 run 化 + 不截断后正常出图）。用户在本机编译实测确认：mac 中文界面字符缺失问题已修复（调色工作室「高级 / 我的主题」按钮、模块抬头 ♥/★、中文 tooltip 等均正常显示）。
+
+## v3.0.2 补充：macOS 模块全开卡顿（GL 合成性能）+ JUCE 补丁固化
+
+> 版本号保持 `3.0.2` 不变。现象：mac（Intel 集显）上把模块全部打开后界面明显卡顿，GL 实际只出 13~20 帧/秒。本轮两步优化：先把帧率拉回约 59 帧/秒，再削掉多余的帧和文字开销。最终在 60Hz 屏上 GL 稳定 59~60 帧/秒；进程 CPU 在同一场景下 A/B 对比约 64% → 57%。测量方法：`Y2K_DIAG_LOG=1` 启动后看诊断日志的 `[STATS]` 行，配合 `sample <pid> 8` 采样 GL 线程（`OpenGL Renderer`），按帧数归一后比较。
+
+### 1. 第一步：13~20 fps → 59 fps
+
+- **VBO orphaning（JUCE 补丁 0004）**：JUCE 2D GL 渲染器每批 quad 都用 `glBufferSubData` 覆盖同一个 VBO。mac GL（Metal 转译层）遇到"GPU 还在用的 buffer 被改写"会隐式同步等待，每帧卡在驱动里。修复：`#if JUCE_MAC` 下先 `glBufferData(..., nullptr, GL_STREAM_DRAW)` 让驱动换一块新存储，再 `glBufferSubData`。
+- **逐帧只重画内容区**：
+  - `ModulePanel` 新增 `repaintFrameContent()` 和虚函数 `getFrameRepaintBounds()`（默认返回内容区）。19 处 onFrame / 弹道推进的高频 `repaint()` 改为 `repaintFrameContent()`，标题栏、外壳、按钮等静态部分不再每帧重新光栅化。结构性变化（尺寸、主题、标题、按钮状态）仍然调用 `repaint()`。
+  - `ModulePanel::paint()` 用 `g.clipRegionIntersects(...)` 判断：标题栏不在脏区内就直接跳过。
+  - `GlDirectModuleBase` 覆写 `getFrameRepaintBounds()`：GL 接管时只失效画布外扩 4px 与内容区的交集（几何由 GL 每帧直画，组件层只剩 overlay 文字）。
+- **Font 比较开销（JUCE 补丁 0003）**：GlyphCache 和 drawText 的排版缓存都以 `std::map<Font>` 为键，`FontOptions::operator<` 曾占 GL 线程约 10%。
+  - `FontOptions::tie()` 原来按值构造 tuple（每次比较都拷贝 String 和 fallback 名称 vector），改为返回 const 引用 tuple。比较的字段和顺序不变。
+  - `Font::compare` 增加"同一共享实例直接判等"的快速路径。
+  - 配套地，`PinkXP::makeFontRaw` / `getFont` 增加 **Font 实例缓存**（`FontCacheState`，以 `(kind, height, styleFlags)` 为键）。字体代次、语言字号换算、最小字号、UI 密度任一变化时整体清空；容量超过 256 也清空。同参数调用拿到的是同一个共享实例，比较时直接命中快速路径。Font 是写时复制的，所以共享实例对调用方没有副作用。
+- **静态文本按设备分辨率缓存**：
+  - 新增 `PinkXP::StaticText` 和 `cachedStaticText(g, …)`：按 `g.getInternalContext().getPhysicalPixelScaleFactor()`（按 0.25 档量化，限制在 1~4）以 Retina 2x 光栅化。
+  - `drawAt` 先把坐标对齐到设备像素，最终变换只剩整数平移，JUCE `renderImage` 因此走无变换 blit 快速路径。旧的 1x 位图在 Retina 下既发虚，又会退化成 `clipToPath` → EdgeTable 慢路径。
+  - `cachedStaticTextImage` 保留，作为 1x 兼容封装。
+- **`drawCachedText`（替代 `g.drawText` 画静态文字）**：
+  - 排版与 `drawText(text, area, just, false)` 一致：水平按测量宽度对齐，垂直按排版框中心对齐。
+  - 位图以不透明色烘焙，绘制时由当前填充色的 alpha 调制，所以不同 alpha 共享同一张位图。
+  - 文字宽度超出区域时，退回原 `drawText`（保持其"整颗丢弃溢出 glyph"的行为），并恢复原字体。
+  - 已迁移：Spectrum / Spectrogram / S3D 轴标签，Loudness 和 Dynamics 读数缓存（`StaticText[]`），Oscilloscope / Phase / StereoField / OscilloscopeWave / Eq 的 overlay 静态标签，FineSplit 的 readout 标签和单位、DynamicsMeters 标签、VU 刻度与 "dBFS"，Dynamics 柱标签和 "CREST HISTORY"，Loudness 刻度与 M/S/I/L/R 柱标签，以及标题栏标题文字。动态数值仍走 `drawText`。
+  - 注意：`drawCachedText` 同时有 `Rectangle<int>` 和 `Rectangle<float>` 两个重载，花括号实参 `{x, y, w, h}` 会二义，调用时要写成显式 `juce::Rectangle<int>(...)`。
+
+### 2. 第二步：GL 帧对齐显示器刷新（JUCE 补丁 0005）
+
+- 问题：`setContinuousRepainting(false)` 下，任何组件的 `repaint()` 都会立即唤醒 GL 线程出一帧。各模块、计时器、玩具粒子的 repaint 相位各不相同，在 60Hz 屏上 GL 跑到 92~100 帧/秒，多出来的帧全是浪费。
+- 修复：给 JUCE 新增 `OpenGLContext::setComponentRepaintsPacedToDisplay(bool)`，需要主动开启，只在 mac 上生效。
+  - 开启后，`CachedImage::invalidate / invalidateAll` 只设置 `pacedRepaintPending` 标记，不再唤醒渲染线程。
+  - 显示器刷新回调（CVDisplayLink，每块屏一个）取出标记后再触发 `triggerRepaint()`。同一个刷新周期内的所有 repaint 合成一帧，脏区由 `validArea` 自然合并。
+  - 保险：显示器刷新信号超过 100ms 没来（显示器休眠、换屏、刚启动），或者还拿不到当前显示器 ID 时，退回立即渲染。直接调用 `triggerRepaint()` 的路径（含 `execute` 的工作队列）不受影响。
+  - `PluginEditor.cpp` 在 `attachTo` 之前开启这个开关。代价是画面最多晚一个刷新周期（约 16ms）。
+- 实测 A/B（同一构建，环境变量临时切换，两轮交替）：GL 约 100 → 59 帧/秒；GL 线程每秒耗时约 220 → 170ms；进程 CPU 约 64% → 57%。
+
+### 3. 第二步：剩余 `SymbolGlyphs::drawText` 热点也改用位图
+
+- 静态文本缓存的键从"是否用轴字体"扩展为 `PinkXP::StaticTextFont`（`ui` / `axis` / `symbolAuto` / `button` / `icon`），分别对应 `getFont`、`getAxisFont`、`SymbolGlyphs::getFont`、`buttonFont`、`iconFont`。
+- 新增 `drawCachedSymbolText(g, text, area, just, h, style, colour, fontKind, shadowColour, translate)`，语义与 `SymbolGlyphs::drawText` 一致：超出区域的部分被裁剪，不丢 glyph。
+  - 位图放得下就直接 blit；放不下则用 `ScopedSaveState` + `reduceClipRegion`。
+  - 横向放不下、多行文字、缓存生成失败时，退回原路径。
+  - 带阴影时两层颜色原样烘焙，以不透明填充色绘制。
+- 含符号 run（♥ ★ ∞ ← 等回退字形）的位图四周留白（横向约 0.15 倍字高 + 1，纵向约 0.35 倍字高），排版框改为水平居中；`StaticText` 新增 `originX` / `boxTop` 记录留白。回退字形常比主字体的 ascent/advance 更大，留白防止它被位图边缘裁掉。只有 `drawCachedSymbolText` 会启用留白，其它调用方的位图尺寸和排版不变。标题栏标题绘制时也减去 `originX`。
+- 已迁移：Spectrogram / S3D 的 "← older / newer →" 提示；标题栏主题图标 `drawTitleIconText`（Milkdrop 和 Editor 的标题栏每帧都会重画，原来每帧都要塑形）；`PinkXPLookAndFeel::drawButtonText`；`FpsMiniLookAndFeel::drawButtonText`（`∞FPS` 等少量动态文本也走缓存，缓存容量上限因此从 512 调到 1024）。
+- 结果：这几处 `SymbolGlyphs::drawText` 在 GL 线程的采样基本归零。
+
+### 4. 退出崩溃修复（本轮新引入，已修）
+
+- 现象：退出程序时 `libc++abi: terminating … mutex lock failed: Invalid argument`。崩溃栈是 `exit` → 静态析构 Font 实例缓存的 `std::map` → `~CoreTextTypeface`，而此时 JUCE 字体系统内部的互斥量已经销毁。
+- 修复：
+  - Font 实例缓存和静态文本缓存都改成"有意不析构"的堆对象（`static auto& s = *new …`），不再参与退出时的静态析构。
+  - `releaseTypefaceCache()`（Editor 析构时调用）先清空这两份缓存，再释放 Typeface。
+  - 以后在静态缓存里存放 Font、Typeface 或其它依赖 JUCE 运行时的对象，都必须照此处理。
+
+### 5. JUCE 补丁固化（防止升级 / 重新拉取时丢失）
+
+- 现状：`third_party/JUCE` 是直接提交在仓库里的 JUCE 8.0.12（vendored，不是 submodule），补丁改动本身随提交固定。但有两个隐患：一是升级 JUCE 时直接覆盖目录会丢补丁；二是本地没有 `third_party/JUCE` 时，CMake 会通过 FetchContent 静默拉取原版。
+- 新增 `third_party/juce_patches/`：
+  - `0001`~`0005` 五个 `.patch` 文件，以 `e4bc0b78` 时的原版 JUCE 为基线，路径相对 JUCE 根目录。历史补丁（v2.8.6 PopupMenu、v2.9.9 混合 DPI 显示器表）一并收录。
+  - `ApplyJucePatches.cmake`：按顺序打补丁，已存在的自动跳过，可重复执行。
+  - `Y2KJucePatches.cmake`：每个补丁对应的"文件|标记"表，以及 `y2k_verify_juce_patches()` 校验函数。
+  - `README.md`：补丁清单、升级流程、新增补丁流程和自检命令。
+  - `.gitattributes`：`*.patch -text`，防止 Windows 换行转换破坏补丁。
+- `CMakeLists.txt`：
+  - FetchContent 加上 `PATCH_COMMAND`（自动打补丁）和 `UPDATE_DISCONNECTED`。
+  - `FetchContent_MakeAvailable` 之后调用 `y2k_verify_juce_patches("${juce_SOURCE_DIR}")`：缺少任何标记就报 `FATAL_ERROR`。确需用原版构建时传 `-DY2K_ALLOW_UNPATCHED_JUCE=ON`，只给警告。
+- `.gitignore`：原来忽略所有 `*.cmake`，新增例外 `!/third_party/juce_patches/*.cmake`。
+- 规则：**以后改 JUCE 源码，必须同步导出补丁、补校验标记、更新 README**（见 `third_party/juce_patches/README.md`）。
+
+### 6. 改动点
+
+- JUCE：`juce_Font.cpp`、`juce_FontOptions.cpp`、`juce_OpenGLGraphicsContext.cpp`、`juce_OpenGLContext.h/.cpp`
+- 补丁管理：`third_party/juce_patches/*`、`CMakeLists.txt`、`.gitignore`
+- UI 框架：`PluginEditor.cpp`、`source/ui/PinkXPStyle.h/.cpp`、`source/ui/ModuleWorkspace.h/.cpp`、`source/ui/ModulePanel.cpp`、`source/ui/GlDirectModule.h`
+- 模块：Dynamics(.h)、Eq、FineSplitModules、Loudness(.h)、Oscilloscope、OscilloscopeWave、Phase、Spectrogram、Spectrogram3D、Spectrum、StereoField、StereoMap、TempoKey
+- 本文档
+
+### 7. 验证
+
+- macOS Release 全量构建通过（Standalone / VST3 / AU），各改动文件无新的 lint 问题。
+- 诊断日志 `[STATS]`：
+  - 第一步后 GL 从 13~20 帧/秒恢复到约 59 帧/秒；
+  - 第二步后 GL 稳定在 59~60 帧/秒（原来 92~100），A/B 对比进程 CPU 约 64% → 57%。
+- 退出崩溃修复后，连续 8 次启动和退出都没有新的崩溃报告。
+- 补丁固化：
+  - 5 个补丁依次打到原版基线上，结果与 `third_party/JUCE/modules` 逐文件一致；
+  - 打补丁脚本重复执行会正确跳过已有补丁；
+  - 原版基线的校验会按预期报错，当前仓库配置时输出 `Y2K: JUCE 本地补丁校验通过`。
+- 用户本机目测确认：标题栏图标、按钮文字、频谱图提示、中英文界面的显示都正常。
+- 遗留：随机触发的玩具粒子（`ToyOverlay` / `EmojiParticle`）出现时每帧约 1.8ms，并会让大片区域重画。这是玩具功能本身的开销，本轮没有处理。
 
 ---
 

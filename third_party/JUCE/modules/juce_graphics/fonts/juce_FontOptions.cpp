@@ -88,20 +88,37 @@ FontOptions::FontOptions (const Typeface::Ptr& ptr)
 
 auto FontOptions::tie() const
 {
-    return std::tuple (name,
-                       style,
-                       typeface.get(),
-                       fallbacks,
-                       features,
-                       metricsKind,
-                       ascentOverride,
-                       descentOverride,
-                       height,
-                       pointHeight,
-                       tracking,
-                       horizontalScale,
-                       fallbackEnabled,
-                       underlined);
+    // [Y2Kmeter patch] 返回成员的 const 引用 tuple（原实现按值构造 tuple，每次比较都会
+    //   拷贝 name/style 两个 String 与 fallbacks/features 两个 vector —— 含堆分配）。
+    //   Font 比较位于 GlyphCache / drawText 排版缓存的 std::map 查找热路径上，每个 glyph
+    //   都要比较多次；比较语义（字段与顺序）完全不变。
+    return std::tuple<const String&,
+                      const String&,
+                      Typeface*,
+                      const std::vector<String>&,
+                      const std::vector<FontFeatureSetting>&,
+                      const TypefaceMetricsKind&,
+                      const float&,
+                      const float&,
+                      const float&,
+                      const float&,
+                      const float&,
+                      const float&,
+                      const bool&,
+                      const bool&> (name,
+                                    style,
+                                    typeface.get(),
+                                    fallbacks,
+                                    features,
+                                    metricsKind,
+                                    ascentOverride,
+                                    descentOverride,
+                                    height,
+                                    pointHeight,
+                                    tracking,
+                                    horizontalScale,
+                                    fallbackEnabled,
+                                    underlined);
 }
 
 struct FontFeatureSettingSortHelper

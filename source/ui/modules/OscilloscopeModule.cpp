@@ -239,7 +239,7 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9：去掉 15ms×DPI 硬编码节流（高 DPI 下会锁到 ≤33fps），每个分发帧重绘
     // v2.9.3：同步生成 GL 直渲染快照（waveform / XY / Lissajous 三种模式）
     buildGlSnapshot();
-    repaint();
+    repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -558,21 +558,23 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
 
     if (displayMode == DisplayMode::waveform)
     {
-        g.drawText (y2k::tr ("L"), canvas.getX() + 4, canvas.getBottom() - 14,
-                    24, 12, juce::Justification::centredLeft, false);
+        PinkXP::drawCachedText (g, "L", juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 14, 24, 12),
+                                juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                                PinkXP::ink.withAlpha (0.85f), true);
         g.setColour (PinkXP::pink400);
         g.fillRect  (canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
-        g.setColour (PinkXP::ink.withAlpha (0.85f));
-        g.drawText (y2k::tr ("R"), canvas.getX() + 32, canvas.getBottom() - 14,
-                    24, 12, juce::Justification::centredLeft, false);
+        PinkXP::drawCachedText (g, "R", juce::Rectangle<int> (canvas.getX() + 32, canvas.getBottom() - 14, 24, 12),
+                                juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                                PinkXP::ink.withAlpha (0.85f), true);
         g.setColour (PinkXP::pink600);
         g.fillRect  (canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
     }
     else
     {
         const juce::String hint = (displayMode == DisplayMode::lissajous) ? "M/S" : "X=L  Y=R";
-        g.drawText (y2k::tr (hint), canvas.getX() + 4, canvas.getBottom() - 14,
-                    80, 12, juce::Justification::centredLeft, false);
+        PinkXP::drawCachedText (g, hint, juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 14, 80, 12),
+                                juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                                PinkXP::ink.withAlpha (0.85f), true);
         if (std::abs (autoGainFactor - 1.0f) > 0.05f)
         {
             const juce::String gainText = juce::String (autoGainFactor, 1) + "x";
@@ -585,8 +587,6 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
         const float baseRadius = (float) juce::jmin (innerXY.getWidth(), innerXY.getHeight()) * 0.45f;
         if (baseRadius * autoGainFactor >= 20.0f)
         {
-            g.setColour (PinkXP::ink.withAlpha (0.55f));
-            g.setFont (PinkXP::getAxisFont (7.5f, juce::Font::plain));
             const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
             const char* labels[4] = { "-12", "-6", "-2.5", "0 dB" };
             const float cx = (float) innerXY.getCentreX();
@@ -595,9 +595,10 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
             {
                 const float rr = baseRadius * autoGainFactor * ringFrac[ri];
                 if (rr < 8.0f) continue;
-                g.drawText (y2k::tr (labels[ri]),
-                            juce::Rectangle<int> ((int) (cx + rr + 3), (int) (cy - 6), 26, 12),
-                            juce::Justification::centredLeft, false);
+                PinkXP::drawCachedText (g, labels[ri],
+                                        juce::Rectangle<int> ((int) (cx + rr + 3), (int) (cy - 6), 26, 12),
+                                        juce::Justification::centredLeft, 7.5f, juce::Font::plain,
+                                        PinkXP::ink.withAlpha (0.55f), true);
             }
         }
     }
@@ -607,10 +608,9 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
         auto dot = juce::Rectangle<int> (canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
         g.setColour (PinkXP::sel);
         g.fillEllipse (dot.toFloat());
-        g.setColour (PinkXP::ink);
-        g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText (y2k::tr ("FROZEN"), canvas.getRight() - 60, canvas.getY() + 4,
-                    42, 12, juce::Justification::centredRight, false);
+        PinkXP::drawCachedText (g, "FROZEN", juce::Rectangle<int> (canvas.getRight() - 60, canvas.getY() + 4, 42, 12),
+                                juce::Justification::centredRight, 9.0f, juce::Font::bold,
+                                PinkXP::ink);
     }
 }
 

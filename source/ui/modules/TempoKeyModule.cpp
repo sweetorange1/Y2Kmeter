@@ -114,7 +114,7 @@ void TempoKeyModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         return;
 
     lastRepaintMs = nowMs;
-    repaint();
+    repaintFrameContent();
 }
 
 void TempoKeyModule::onStartStopClicked()

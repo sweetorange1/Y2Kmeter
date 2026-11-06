@@ -1,0 +1,64 @@
+diff --git a/modules/juce_gui_basics/menus/juce_PopupMenu.cpp b/modules/juce_gui_basics/menus/juce_PopupMenu.cpp
+index 275b8a2c..65391b58 100644
+--- a/modules/juce_gui_basics/menus/juce_PopupMenu.cpp
++++ b/modules/juce_gui_basics/menus/juce_PopupMenu.cpp
+@@ -858,6 +858,11 @@ struct MenuWindow final : public Component
+         auto* display = Desktop::getInstance().getDisplays().getDisplayForPoint (targetPoint * scaleFactor);
+         auto parentArea = display->userArea.getIntersection (display->safeAreaInsets.subtractedFrom (display->totalArea));
+ 
++        // App-supplied override: allows menus to extend over desktop space that the
++        // app itself reserved (e.g. an AppBar strip carved out of the user area).
++        if (! options.getParentAreaOverride().isEmpty())
++            parentArea = options.getParentAreaOverride();
++
+         if (auto* pc = options.getParentComponent())
+         {
+             return pc->getLocalArea (nullptr,
+@@ -2128,6 +2133,11 @@ PopupMenu::Options PopupMenu::Options::withPreferredPopupDirection (PopupDirecti
+     return with (*this, &Options::preferredPopupDirection, direction);
+ }
+ 
++PopupMenu::Options PopupMenu::Options::withParentAreaOverride (Rectangle<int> area) const
++{
++    return with (*this, &Options::parentAreaOverride, area);
++}
++
+ PopupMenu::Options PopupMenu::Options::withInitiallySelectedItem (int idOfItemToBeSelected) const
+ {
+     return with (*this, &Options::initiallySelectedItemId, idOfItemToBeSelected);
+diff --git a/modules/juce_gui_basics/menus/juce_PopupMenu.h b/modules/juce_gui_basics/menus/juce_PopupMenu.h
+index 24ec4bd3..d4a997c6 100644
+--- a/modules/juce_gui_basics/menus/juce_PopupMenu.h
++++ b/modules/juce_gui_basics/menus/juce_PopupMenu.h
+@@ -564,6 +564,23 @@ public:
+         /** Sets the direction of the popup menu relative to the target screen area. */
+         [[nodiscard]] Options withPreferredPopupDirection (PopupDirection direction) const;
+ 
++        /** Sets a custom screen area within which the popup window will be constrained.
++
++            By default the menu is constrained to the display's user area (i.e. the
++            part of the display not covered by taskbars or other reserved desktop
++            space). Apps that reserve desktop space themselves (for example by
++            registering a window as an AppBar) can pass a larger area, such as the
++            display's total area, so that menus opened from the reserved strip are
++            placed next to their target instead of being pushed into the remaining
++            work area.
++
++            The area is in screen coordinates. An empty area restores the default.
++        */
++        [[nodiscard]] Options withParentAreaOverride (Rectangle<int> area) const;
++
++        /** Gets the custom parent area set with withParentAreaOverride(). */
++        Rectangle<int> getParentAreaOverride() const noexcept        { return parentAreaOverride; }
++
+         /** Sets an item to select in the menu.
+ 
+             This is useful for controls such as combo boxes, where opening the combo box
+@@ -659,6 +676,7 @@ public:
+     private:
+         //==============================================================================
+         Rectangle<int> targetArea;
++        Rectangle<int> parentAreaOverride; // 非空时覆盖 userArea，允许弹窗越过 AppBar 等保留区
+         WeakReference<Component> targetComponent, parentComponent, componentToWatchForDeletion, topLevelTarget;
+         int visibleItemID = 0, minWidth = 0, minColumns = 1, maxColumns = 0, standardHeight = 0, initiallySelectedItemId = 0;
+         bool isWatchingForDeletion = false;

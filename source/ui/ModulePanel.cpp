@@ -324,49 +324,56 @@ void ModulePanel::paint(juce::Graphics& g)
         PinkXP::drawRaised(g, bounds, getShellFillColour());
     }
 
-    // 2. 玫瑰粉标题栏
+    // 2~3.5：标题栏 / 分割线 / 关闭 & 弹出按钮 —— 均位于 tb（含下沿 1px 分割线）内。
+    //   逐帧刷新只失效内容区（repaintFrameContent），此时裁剪区与标题栏不相交，
+    //   整段跳过即可（裁剪区外的绘制本来就不会产生像素，输出完全一致），省掉
+    //   标题图标/按钮文字逐帧塑形 + 逐 glyph 绘制的 CPU 开销。
     auto tb = getTitleBarBounds();
-    PinkXP::drawPinkTitleBar(g, tb, titleText, 12.0f);
-
-    // 标题栏下沿深色分割线（凸出边框外 1px）
-    g.setColour(PinkXP::dark);
-    g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 1);
-
-    // 3. 关闭按钮（×）
-    auto cb = getCloseButtonBounds();
-    if (closeButtonPressed)
-        PinkXP::drawPressed(g, cb, PinkXP::pink100);
-    else
-        PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
-
-    g.setColour(PinkXP::ink);
-    // 图标字符（× / - / =）：恒用英文 UI 字体，不随语言切换变样
-    g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
-    auto cbText = cb;
-    cbText.translate(0, -1);
-    if (closeButtonPressed) cbText.translate(1, 1);
-    g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
-
-    // 3.5. 弹出/停靠按钮（仅在 Standalone 模式或已处于浮动态时绘制）
-    if (popOutEnabled_ || isFloating_)
+    if (g.clipRegionIntersects (tb.withHeight (tb.getHeight() + 1)))
     {
-        auto popBtn = getPopOutButtonBounds();
-        if (popOutButtonPressed_)
-            PinkXP::drawPressed(g, popBtn, PinkXP::pink100);
+        PinkXP::drawPinkTitleBar(g, tb, titleText, 12.0f);
+
+        // 标题栏下沿深色分割线（凸出边框外 1px）
+        g.setColour(PinkXP::dark);
+        g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 1);
+
+        // 3. 关闭按钮（×）
+        auto cb = getCloseButtonBounds();
+        if (closeButtonPressed)
+            PinkXP::drawPressed(g, cb, PinkXP::pink100);
         else
-            PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
+            PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
 
         g.setColour(PinkXP::ink);
+        // 图标字符（× / - / =）：恒用英文 UI 字体，不随语言切换变样
         g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
-        auto popBtnText = popBtn;
-        popBtnText.translate(0, -1);
-        if (popOutButtonPressed_) popBtnText.translate(1, 1);
-        g.drawText(y2k::tr (isFloating_ ? "=" : "-"), popBtnText, juce::Justification::centred, false);
-    }
+        auto cbText = cb;
+        cbText.translate(0, -1);
+        if (closeButtonPressed) cbText.translate(1, 1);
+        g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
+
+        // 3.5. 弹出/停靠按钮（仅在 Standalone 模式或已处于浮动态时绘制）
+        if (popOutEnabled_ || isFloating_)
+        {
+            auto popBtn = getPopOutButtonBounds();
+            if (popOutButtonPressed_)
+                PinkXP::drawPressed(g, popBtn, PinkXP::pink100);
+            else
+                PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
+
+            g.setColour(PinkXP::ink);
+            g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
+            auto popBtnText = popBtn;
+            popBtnText.translate(0, -1);
+            if (popOutButtonPressed_) popBtnText.translate(1, 1);
+            g.drawText(y2k::tr (isFloating_ ? "=" : "-"), popBtnText, juce::Justification::centred, false);
+        }
+    } // 标题栏区域
 
     // 4. 内容区（默认白底凹陷，子类可覆盖 paintContent 重绘）
     auto content = getContentBounds();
-    if (content.getWidth() > 0 && content.getHeight() > 0)
+    if (content.getWidth() > 0 && content.getHeight() > 0
+        && g.clipRegionIntersects (content))
     {
         paintContent(g, content);
     }
@@ -568,6 +575,20 @@ void ModulePanel::repaint(juce::Rectangle<int> area)
     pendingRepaintArea = area;
     pendingRepaintStampMs = stampNow;
     juce::Component::repaint(area);
+}
+
+juce::Rectangle<int> ModulePanel::getFrameRepaintBounds()
+{
+    return getContentBounds();
+}
+
+void ModulePanel::repaintFrameContent()
+{
+    const auto area = getFrameRepaintBounds();
+    if (area.isEmpty())
+        repaint();
+    else
+        repaint (area);
 }
 
 void ModulePanel::resized()

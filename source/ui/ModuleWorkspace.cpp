@@ -90,17 +90,17 @@ namespace
         void drawButtonText (juce::Graphics& g, juce::TextButton& button,
                              bool, bool shouldDrawButtonAsDown) override
         {
-            g.setColour (PinkXP::ink);
-
             // "∞FPS" 的 ∞ 属于中文像素字体的空白符号：经 SymbolGlyphs 切英文字体
+            //   （字体 = SymbolGlyphs::buttonFont(shown, 12, bold)；静态位图缓存）
             const juce::String shown = y2k::tr (button.getButtonText());
-            const auto baseFont = PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold);
 
             auto area = button.getLocalBounds();
             if (shouldDrawButtonAsDown || button.getToggleState())
                 area.translate (1, 1);
-            PinkXP::SymbolGlyphs::drawText (g, shown, area,
-                                            juce::Justification::centred, baseFont);
+            PinkXP::drawCachedSymbolText (g, shown, area, juce::Justification::centred,
+                                          12.0f, juce::Font::bold, PinkXP::ink,
+                                          PinkXP::StaticTextFont::button,
+                                          juce::Colours::transparentBlack, false);
         }
     };
 

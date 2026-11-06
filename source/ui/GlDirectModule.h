@@ -164,6 +164,21 @@ protected:
     // 统一 paintContent：接管时挖洞填充 + overlay 文字；否则旧路径
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) final;
 
+    // 逐帧失效区域：接管后组件层随帧变化的只有画布内的 overlay（几何由 GL
+    //   每帧直画，与组件层脏区无关），画布外的 btnFace 底衬 / 控件条是静态的。
+    //   外扩 4px 兜住贴边绘制的文字；未接管时退回整个内容区（旧路径）。
+    juce::Rectangle<int> getFrameRepaintBounds() override
+    {
+        const auto content = getContentBounds();
+        if (glDirectActive.load())
+        {
+            const auto canvas = getGlCanvasBounds (content);
+            if (canvas.getWidth() > 8 && canvas.getHeight() > 8)
+                return canvas.expanded (4).getIntersection (content);
+        }
+        return content;
+    }
+
     // ---- 子类钩子 ----
     // GL 直渲染的画布区域（模块本地坐标，用于挖洞）
     virtual juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) = 0;

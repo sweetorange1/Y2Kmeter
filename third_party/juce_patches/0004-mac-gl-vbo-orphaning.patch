@@ -1,0 +1,20 @@
+diff --git a/modules/juce_opengl/opengl/juce_OpenGLGraphicsContext.cpp b/modules/juce_opengl/opengl/juce_OpenGLGraphicsContext.cpp
+index 7c45f8f3..0346fe34 100644
+--- a/modules/juce_opengl/opengl/juce_OpenGLGraphicsContext.cpp
++++ b/modules/juce_opengl/opengl/juce_OpenGLGraphicsContext.cpp
+@@ -1469,6 +1469,15 @@ struct StateHelpers
+ 
+         void draw() noexcept
+         {
++           #if JUCE_MAC
++            // [Y2Kmeter patch] VBO orphaning：macOS（尤其 Intel 集显）GL 驱动下，
++            //   对"上一批 draw 仍在 GPU 队列中引用"的同一 VBO 直接 glBufferSubData
++            //   会触发隐式 CPU/GPU 同步 —— 每个批次都要等 GPU 把前一批画完。
++            //   组件树一帧有数百个批次，实测 GPU 时间被串行化放大到 40~50ms/帧。
++            //   先以 nullptr 重新分配同尺寸存储（orphan），驱动会给出新的后备内存，
++            //   旧内存待 GPU 用完后自动回收，消除同步等待（实测 ~50ms → ~6ms）。
++            context.extensions.glBufferData (GL_ARRAY_BUFFER, sizeof (vertexData), nullptr, GL_STREAM_DRAW);
++           #endif
+             context.extensions.glBufferSubData (GL_ARRAY_BUFFER, 0, (GLsizeiptr) ((size_t) numVertices * sizeof (VertexInfo)), vertexData);
+             // NB: If you get a random crash in here and are running in a Parallels VM, it seems to be a bug in
+             // their driver. Can't find a workaround unfortunately.

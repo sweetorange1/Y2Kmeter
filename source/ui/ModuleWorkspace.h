@@ -209,6 +209,13 @@ public:
     void repaint();
     void repaint(juce::Rectangle<int> area);
 
+    // 逐帧数据刷新专用重绘（onFrame / 弹道推进等高频路径使用）：
+    //   只失效 getFrameRepaintBounds() 返回的"随帧变化"区域，外壳 / 标题栏 /
+    //   按钮等静态 chrome 不再每帧重新光栅化（mac 上标题栏文字逐帧塑形 +
+    //   逐 glyph 绘制曾是 GL 线程 CPU 的最大热点）。
+    //   结构性变化（尺寸 / 主题 / 标题 / 按钮状态）仍应调用 repaint()。
+    void repaintFrameContent();
+
     // 模块是否处于"可见且在父容器可视区域内"状态（用于 onFrame/重绘裁剪）
     bool isVisuallyActiveInWorkspace() const noexcept;
 
@@ -303,6 +310,10 @@ protected:
     //   只是用钩子避免整段复制标题栏/按钮绘制代码）。
     //   实现位于 ModulePanel.cpp（本头文件不包含 PinkXPStyle.h）。
     virtual juce::Colour getShellFillColour() const;
+
+    // repaintFrameContent() 的失效区域：默认整个内容区；GL 直渲染模块接管后
+    //   仅为画布（overlay 绘制范围），见 GlDirectModuleBase。
+    virtual juce::Rectangle<int> getFrameRepaintBounds();
 
     juce::Rectangle<int> getCloseButtonBounds() const;
     juce::Rectangle<int> getPopOutButtonBounds() const;  // 弹出/停靠按钮边界

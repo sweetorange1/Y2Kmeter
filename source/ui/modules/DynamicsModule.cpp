@@ -76,7 +76,7 @@ void DynamicsModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
     if ((frame.tickCount & 1ull) != 0)
         return;
-    repaint();
+    repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -232,9 +232,9 @@ void DynamicsModule::drawMeterGroup(juce::Graphics& g, juce::Rectangle<int> area
         // 标签
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(y2k::tr (bars[i]->label),
-                   r.getX(), area.getBottom() - labelH, r.getWidth(), labelH,
-                   juce::Justification::centred, false);
+        PinkXP::drawCachedText(g, bars[i]->label,
+                               juce::Rectangle<int>(r.getX(), area.getBottom() - labelH, r.getWidth(), labelH),
+                               juce::Justification::centred, 9.0f, juce::Font::bold, PinkXP::ink);
     }
 }
 
@@ -340,8 +340,8 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
         {
             drValueText_[rowIdx] = cacheKey;
             drValueTime_[rowIdx] = nowMs;
-            drValueCache_[rowIdx] = PinkXP::cachedStaticTextImage (
-                numText, px, juce::Font::bold, PinkXP::pink600,
+            drValueCache_[rowIdx] = PinkXP::cachedStaticText (
+                g, numText, px, juce::Font::bold, PinkXP::pink600,
                 juce::Colours::transparentBlack, true);
         }
 
@@ -353,10 +353,9 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
             const auto& numImg = drValueCache_[rowIdx];
             if (numImg.isValid())
             {
-                g.drawImageAt (numImg,
-                               row.getX(),
-                               row.getY() + juce::jmax(0, (row.getHeight() - numImg.getHeight()) / 2),
-                               false);
+                numImg.drawAt (g,
+                               (float) row.getX(),
+                               (float) (row.getY() + juce::jmax(0, (row.getHeight() - numImg.getHeight()) / 2)));
             }
             else
             {
@@ -370,11 +369,11 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
         if (unitRect.isEmpty())
             return;
 
-        const juce::Image unitImg = PinkXP::cachedStaticTextImage (
-            unit, 9.0f, juce::Font::plain, PinkXP::ink.withAlpha(0.75f),
+        const auto unitImg = PinkXP::cachedStaticText (
+            g, unit, 9.0f, juce::Font::plain, PinkXP::ink.withAlpha(0.75f),
             juce::Colours::transparentBlack, true);
         if (unitImg.isValid())
-            g.drawImageAt (unitImg, unitRect.getX(), unitRect.getY(), false);
+            unitImg.drawAt (g, (float) unitRect.getX(), (float) unitRect.getY());
         else
         {
             g.setColour(PinkXP::ink.withAlpha(0.75f));
@@ -403,8 +402,8 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
     // 标题
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(y2k::tr ("CREST HISTORY"),
-               inner.withHeight(12), juce::Justification::topLeft, false);
+    PinkXP::drawCachedText(g, "CREST HISTORY", inner.withHeight(12), juce::Justification::topLeft,
+                           9.0f, juce::Font::bold, PinkXP::ink);
 
     auto plot = inner.withTrimmedTop(14);
     if (plot.isEmpty()) return;

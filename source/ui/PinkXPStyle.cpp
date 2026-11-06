@@ -11,6 +11,8 @@
 #include <juce_opengl/juce_opengl.h>
 
 #include <unordered_map>
+#include <map>
+#include <tuple>
 #include <atomic>
 #include <cmath>
 
@@ -94,8 +96,17 @@ namespace PinkXP
         return tf;
     }
 
+    // 定义见下方（Font 实例缓存 / 静态文本位图缓存）
+    static void releaseFontInstanceCache();
+    static void releaseStaticTextCache();
+
     void releaseTypefaceCache()
     {
+        // 先释放持有 Font / 位图的缓存，再释放 Typeface：缓存若拖到进程 exit 的
+        //   静态析构阶段才释放，CoreTextTypeface 析构时 JUCE 内部互斥量已销毁，
+        //   会以 "mutex lock failed" 终止进程。
+        releaseFontInstanceCache();
+        releaseStaticTextCache();
         gTypefaceCache.clear();
         gSymbolTypeface = nullptr;
     }
@@ -290,11 +301,70 @@ namespace PinkXP
     //   正确写法：使用 FontOptions(Typeface::Ptr) 构造函数，让 name/style
     //   从一开始就和 typeface 保持一致（withTypeface 内部同样是这样做的），
     //   然后 withHeight() 覆盖字号即可。
-    static juce::Font makeFontRaw(float height, int styleFlags)
+    // ----------------------------------------------------------
+    // Font 实例缓存（mac GL 性能）
+    //   JUCE 的 GlyphCache / drawText 排版缓存都以 Font 为 std::map 键，每个 glyph
+    //   查找都要比较多次 Font。每次 getFont 都新建 Font 时，比较需逐字段进行
+    //   （含 fallback 字体名 vector 逐项字符串比较）；复用同一实例后，命中时
+    //   Font::compare 走"同一共享实例"快速路径（见 JUCE juce_Font.cpp 补丁）。
+    //   Font 写时复制（setX 会先 dupe），共享实例对调用方无副作用。
+    //   失效：字体代次 / 语言字号换算 / 最小字号 / UI 密度任一变化即整体清空。
+    // ----------------------------------------------------------
+    namespace
     {
-        if (! gFontMetricsLoaded)
-            refreshFontMetricsFromLanguage();
+        struct FontCacheState
+        {
+            juce::SpinLock lock;
+            std::map<std::tuple<int, float, int>, juce::Font> fonts;
+            juce::uint32 generation = 0;
+            float fontScale = 0.0f, minFontHeight = -1.0f, uiScaleValue = 0.0f;
+        };
 
+        FontCacheState& fontCacheState()
+        {
+            // 有意不析构（进程退出的静态析构阶段 JUCE 字体系统已拆除）；
+            //   正常释放走 releaseTypefaceCache → releaseFontInstanceCache
+            static auto& s = *new FontCacheState();
+            return s;
+        }
+
+        template <typename Make>
+        juce::Font cachedFont (int kind, float height, int styleFlags, Make&& make)
+        {
+            auto& s = fontCacheState();
+            const juce::SpinLock::ScopedLockType sl (s.lock);
+
+            const auto gen = gFontGeneration.load();
+            if (s.generation != gen || s.fontScale != gFontScale
+                || s.minFontHeight != gMinFontHeight || s.uiScaleValue != gUiScale)
+            {
+                s.fonts.clear();
+                s.generation    = gen;
+                s.fontScale     = gFontScale;
+                s.minFontHeight = gMinFontHeight;
+                s.uiScaleValue  = gUiScale;
+            }
+
+            const auto key = std::make_tuple (kind, height, styleFlags);
+            if (const auto it = s.fonts.find (key); it != s.fonts.end())
+                return it->second;
+
+            if (s.fonts.size() > 256)
+                s.fonts.clear();
+
+            return s.fonts.emplace (key, make()).first->second;
+        }
+    }
+
+    static void releaseFontInstanceCache()
+    {
+        auto& s = fontCacheState();
+        const juce::SpinLock::ScopedLockType sl (s.lock);
+        s.fonts.clear();
+    }
+
+    static juce::Font makeFontRawUncached(float height, int styleFlags)
+    {
         // 界面语言字号换算：不同字体的 em 框 / 字面比例差异很大
         //   （Silkscreen 大写仅占字高 ~55%，中文像素字体方块字占满整个字高），
         //   由语言包 @fontScale 统一校正，保证同一 height 下视觉大小接近。
@@ -314,17 +384,32 @@ namespace PinkXP
                                .withFallbacks (uiFallbackFamilies()));
     }
 
+    static juce::Font makeFontRaw(float height, int styleFlags)
+    {
+        if (! gFontMetricsLoaded)
+            refreshFontMetricsFromLanguage();
+
+        return cachedFont (0, height, styleFlags,
+                           [&] { return makeFontRawUncached (height, styleFlags); });
+    }
+
     // 通用字体：高度 >= 8 时做 1.5x 放大（UI 主字号），极小字 (<8) 保持原样
     // 坐标轴/刻度数字请显式使用 getAxisFont 以不放大
     juce::Font getFont(float height, int styleFlags)
     {
-        const float scaled = (height >= 8.0f) ? height * 1.5f : height;
-        auto f = makeFontRaw(scaled * uiScale(), styleFlags);
+        if (! gFontMetricsLoaded)
+            refreshFontMetricsFromLanguage();
 
-        // 语言包最小字号（CJK 像素字过小会糊成一团；坐标轴字体不受此限制）
-        if (gMinFontHeight > 0.0f && f.getHeight() < gMinFontHeight)
-            f = f.withHeight (gMinFontHeight);
-        return f;
+        return cachedFont (1, height, styleFlags, [&]
+        {
+            const float scaled = (height >= 8.0f) ? height * 1.5f : height;
+            auto f = makeFontRawUncached(scaled * uiScale(), styleFlags);
+
+            // 语言包最小字号（CJK 像素字过小会糊成一团；坐标轴字体不受此限制）
+            if (gMinFontHeight > 0.0f && f.getHeight() < gMinFontHeight)
+                f = f.withHeight (gMinFontHeight);
+            return f;
+        });
     }
 
     // ==========================================================
@@ -651,7 +736,278 @@ namespace PinkXP
     //   一次 drawImageAt（单纹理 quad），热点降一个数量级。
     //   缓存 key 含文本/字号/颜色/缩放，主题切换后 key 变化自然失效；
     //   容量上限保护避免极端主题组合下内存失控。
+    //
+    //   v3.x（mac 性能）：位图按"设备像素缩放"光栅化（StaticText）。Retina 下
+    //   Graphics 变换含 2x 缩放，1x 位图既会被放大发虚，又走不了 JUCE 的整数
+    //   平移 blit 快速路径（退化成 clipToPath → EdgeTable → 变换采样）。
+    //   设备分辨率位图配合 drawAt 的设备像素对齐，绘制只剩一次纹理 blit。
     // ======================================================
+    namespace
+    {
+        struct StaticTextKey
+        {
+            juce::String shown;
+            float fontHeight;
+            int styleFlags;
+            juce::uint32 colour, shadow;
+            float uiScaleValue;
+            int fontKind;
+            bool padded;
+            juce::uint32 generation;
+            float scale;
+
+            bool operator== (const StaticTextKey& o) const noexcept
+            {
+                return fontHeight == o.fontHeight && styleFlags == o.styleFlags
+                    && colour == o.colour && shadow == o.shadow
+                    && uiScaleValue == o.uiScaleValue && fontKind == o.fontKind
+                    && padded == o.padded
+                    && generation == o.generation && scale == o.scale
+                    && shown == o.shown;
+            }
+        };
+
+        struct StaticTextKeyHash
+        {
+            size_t operator() (const StaticTextKey& k) const noexcept
+            {
+                size_t h = (size_t) k.shown.hash();
+                auto mix = [&h] (size_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+                mix (std::hash<float>{} (k.fontHeight));
+                mix ((size_t) k.styleFlags);
+                mix ((size_t) k.colour);
+                mix ((size_t) k.shadow);
+                mix (std::hash<float>{} (k.uiScaleValue));
+                mix ((size_t) k.fontKind);
+                mix ((size_t) (k.padded ? 1 : 0));
+                mix ((size_t) k.generation);
+                mix (std::hash<float>{} (k.scale));
+                return h;
+            }
+        };
+
+        using StaticTextCache = std::unordered_map<StaticTextKey, StaticText, StaticTextKeyHash>;
+
+        // 有意不析构（同 fontCacheState）；正常释放走 releaseTypefaceCache
+        StaticTextCache& staticTextCache()
+        {
+            static auto& cache = *new StaticTextCache();
+            return cache;
+        }
+
+        // 设备像素缩放：量化到 0.25 档，限制缓存键数量（窗口跨屏时才会变化）
+        float quantiseDeviceScale (float s) noexcept
+        {
+            if (! std::isfinite (s) || s <= 0.0f)
+                return 1.0f;
+            return juce::jlimit (1.0f, 4.0f, std::round (s * 4.0f) / 4.0f);
+        }
+
+        // padForSymbols：含符号 run 时位图四周留白、文字不贴边（回退字形常比
+        //   主字体的 ascent/advance 更大）；仅 drawCachedSymbolText 使用，
+        //   其余调用方的位图尺寸 / 排版保持不变。
+        StaticText buildStaticText (const juce::String& text,
+                                    float fontHeight,
+                                    int styleFlags,
+                                    juce::Colour colour,
+                                    juce::Colour shadowColour,
+                                    StaticTextFont fontKind,
+                                    float scale,
+                                    bool translate = true,
+                                    bool padForSymbols = false);
+
+        juce::Font makeStaticTextFont (StaticTextFont kind, const juce::String& shown,
+                                       float fontHeight, int styleFlags)
+        {
+            switch (kind)
+            {
+                case StaticTextFont::axis:       return getAxisFont (fontHeight, styleFlags);
+                case StaticTextFont::symbolAuto: return SymbolGlyphs::getFont (shown, fontHeight, styleFlags);
+                case StaticTextFont::button:     return SymbolGlyphs::buttonFont (shown, fontHeight, styleFlags);
+                case StaticTextFont::icon:       return SymbolGlyphs::iconFont (fontHeight, styleFlags);
+                case StaticTextFont::ui:
+                default:                         return getFont (fontHeight, styleFlags);
+            }
+        }
+
+        StaticTextFont kindFor (bool axisFont) noexcept
+        {
+            return axisFont ? StaticTextFont::axis : StaticTextFont::ui;
+        }
+
+        juce::Point<float> layoutStaticText (const StaticText& t,
+                                             juce::Rectangle<float> area,
+                                             juce::Justification justification);
+    }
+
+    static void releaseStaticTextCache()
+    {
+        staticTextCache().clear();
+    }
+
+    void StaticText::drawAt (juce::Graphics& g, float x, float y) const
+    {
+        if (! image.isValid())
+            return;
+
+        if (scale == 1.0f)
+        {
+            g.drawImageAt (image, juce::roundToInt (x), juce::roundToInt (y), false);
+            return;
+        }
+
+        // 对齐到设备像素：最终变换只剩整数平移 → JUCE renderImage 走无变换 blit
+        const float sx = std::round (x * scale) / scale;
+        const float sy = std::round (y * scale) / scale;
+        g.drawImageTransformed (image,
+                                juce::AffineTransform::scale (1.0f / scale).translated (sx, sy),
+                                false);
+    }
+
+    StaticText cachedStaticText (juce::Graphics& g,
+                                 const juce::String& text,
+                                 float fontHeight,
+                                 int styleFlags,
+                                 juce::Colour colour,
+                                 juce::Colour shadowColour,
+                                 bool axisFont)
+    {
+        const float scale = quantiseDeviceScale (g.getInternalContext().getPhysicalPixelScaleFactor());
+        return buildStaticText (text, fontHeight, styleFlags, colour, shadowColour, kindFor (axisFont), scale);
+    }
+
+    void drawCachedText (juce::Graphics& g,
+                         const juce::String& text,
+                         juce::Rectangle<int> area,
+                         juce::Justification justification,
+                         float fontHeight,
+                         int styleFlags,
+                         juce::Colour colour,
+                         bool axisFont)
+    {
+        drawCachedText (g, text, area.toFloat(), justification, fontHeight, styleFlags, colour, axisFont);
+    }
+
+    void drawCachedText (juce::Graphics& g,
+                         const juce::String& text,
+                         juce::Rectangle<float> area,
+                         juce::Justification justification,
+                         float fontHeight,
+                         int styleFlags,
+                         juce::Colour colour,
+                         bool axisFont)
+    {
+        if (text.isEmpty() || area.isEmpty())
+            return;
+
+        // 位图烘焙不透明色，绘制时用当前填充色的 alpha 调制（renderImage 语义）
+        //   → 与 drawText 的"字形覆盖率 × 颜色 alpha"等价，且不同 alpha 共享同一位图。
+        g.setColour (colour);
+        const auto t = cachedStaticText (g, text, fontHeight, styleFlags,
+                                         colour.withAlpha (1.0f),
+                                         juce::Colours::transparentBlack, axisFont);
+
+        // 放不下：drawText 会整颗丢弃溢出的 glyph —— 退回原路径保持完全一致
+        if (! t.isValid() || t.textWidth > area.getWidth())
+        {
+            const auto previousFont = g.getCurrentFont();
+            const juce::ScopeGuard restoreFont { [&] { g.setFont (previousFont); } };
+            g.setFont (axisFont ? getAxisFont (fontHeight, styleFlags)
+                                : getFont (fontHeight, styleFlags));
+            g.drawText (y2k::tr (text), area, justification, false);
+            return;
+        }
+
+        const auto pos = layoutStaticText (t, area, justification);
+        t.drawAt (g, pos.x, pos.y);
+    }
+
+    void drawCachedSymbolText (juce::Graphics& g,
+                               const juce::String& text,
+                               juce::Rectangle<int> area,
+                               juce::Justification justification,
+                               float fontHeight,
+                               int styleFlags,
+                               juce::Colour colour,
+                               StaticTextFont fontKind,
+                               juce::Colour shadowColour,
+                               bool translate)
+    {
+        if (text.isEmpty() || area.isEmpty())
+            return;
+
+        // 无阴影：位图烘焙不透明色、按填充色 alpha 调制（不同 alpha 共享位图）；
+        //   有阴影：两层颜色原样烘焙，以不透明填充色绘制。
+        const bool hasShadow = ! shadowColour.isTransparent();
+        g.setColour (hasShadow ? colour.withAlpha (1.0f) : colour);
+
+        const float scale = quantiseDeviceScale (g.getInternalContext().getPhysicalPixelScaleFactor());
+        const auto t = buildStaticText (text, fontHeight, styleFlags,
+                                        hasShadow ? colour : colour.withAlpha (1.0f),
+                                        shadowColour, fontKind, scale, translate, true);
+
+        // 缓存失败 / 横向放不下（单 run 普通文本在原路径会丢 glyph）：走原路径保持一致
+        if (! t.isValid() || t.textWidth > (float) area.getWidth())
+        {
+            const auto shown = translate ? y2k::tr (text) : text;
+            const auto font = makeStaticTextFont (fontKind, shown, fontHeight, styleFlags);
+            if (hasShadow)
+            {
+                g.setColour (shadowColour);
+                SymbolGlyphs::drawText (g, shown, area.translated (1, 1), justification, font);
+            }
+            g.setColour (colour);
+            SymbolGlyphs::drawText (g, shown, area, justification, font);
+            return;
+        }
+
+        // SymbolGlyphs::drawText 语义：超出部分按 area 裁剪（不丢 glyph）
+        const auto pos = layoutStaticText (t, area.toFloat(), justification);
+        const bool fits = pos.x >= (float) area.getX()
+                       && pos.y >= (float) area.getY()
+                       && pos.x + (float) t.getWidth()  <= (float) area.getRight()
+                       && pos.y + (float) t.getHeight() <= (float) area.getBottom();
+        if (fits)
+        {
+            t.drawAt (g, pos.x, pos.y);
+            return;
+        }
+
+        juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (area);
+        t.drawAt (g, pos.x, pos.y);
+    }
+
+    namespace
+    {
+    juce::Point<float> layoutStaticText (const StaticText& t,
+                                         juce::Rectangle<float> area,
+                                         juce::Justification justification)
+    {
+        // 与 Graphics::drawText 相同的排版：文本行（宽 textWidth、高 fontH）按
+        //   justification 放入 area；位图内文字左缘在 originX、行顶在 textTop。
+        float x = area.getX() - t.originX;
+        const int hFlags = justification.getOnlyHorizontalFlags();
+        if ((hFlags & juce::Justification::horizontallyCentred) != 0)
+            x += (area.getWidth() - t.textWidth) * 0.5f;
+        else if ((hFlags & juce::Justification::right) != 0)
+            x += area.getWidth() - t.textWidth;
+
+        // 垂直：位图内文字垂直居中排在 [boxTop, boxTop + boxHeight) 的框里。居中时
+        //   直接对齐两个框的中心（与行高的具体口径无关；仅有 ≤ 半个设备像素的对齐取整）。
+        float y = area.getY();
+        const int vFlags = justification.getOnlyVerticalFlags();
+        if ((vFlags & juce::Justification::verticallyCentred) != 0)
+            y += (area.getHeight() - t.boxHeight) * 0.5f - t.boxTop;
+        else if ((vFlags & juce::Justification::bottom) != 0)
+            y += area.getHeight() - t.lineHeight - t.textTop;
+        else
+            y -= t.textTop;
+
+        return { x, y };
+    }
+    } // namespace
+
     juce::Image cachedStaticTextImage (const juce::String& text,
                                        float fontHeight,
                                        int styleFlags,
@@ -659,21 +1015,38 @@ namespace PinkXP
                                        juce::Colour shadowColour,
                                        bool axisFont)
     {
+        return buildStaticText (text, fontHeight, styleFlags, colour, shadowColour, kindFor (axisFont), 1.0f).image;
+    }
+
+    namespace
+    {
+    StaticText buildStaticText (const juce::String& text,
+                                float fontHeight,
+                                int styleFlags,
+                                juce::Colour colour,
+                                juce::Colour shadowColour,
+                                StaticTextFont fontKind,
+                                float scale,
+                                bool translate,
+                                bool padForSymbols)
+    {
         if (text.isEmpty())
             return {};
 
         // 界面语言：位图里画的是译文（键里也是译文 + 字体代次，切语言 / 换字体自然失效）
-        const juce::String shown = y2k::tr (text);
+        const juce::String shown = translate ? y2k::tr (text) : text;
 
-        const juce::String key = shown + "|" + juce::String (fontHeight) + "|"
-                               + juce::String (styleFlags) + "|"
-                               + colour.toString() + "|"
-                               + shadowColour.toString() + "|"
-                               + juce::String (uiScale()) + "|"
-                               + juce::String (axisFont ? 1 : 0) + "|"
-                               + juce::String ((int) getFontGeneration());
+        // drawCachedSymbolText：多行文本走 drawFittedText，不做位图缓存（调用方回退原路径）
+        if (shown.isEmpty() || (padForSymbols && shown.containsChar ('\n')))
+            return {};
 
-        static std::unordered_map<juce::String, juce::Image> cache;
+        StaticTextKey key { shown, fontHeight, styleFlags,
+                            colour.getARGB(), shadowColour.getARGB(),
+                            uiScale(), (int) fontKind, padForSymbols,
+                            getFontGeneration(), scale };
+
+        // 仅在消息线程 / 持 MessageManager 锁的 GL 渲染线程上绘制调用，天然串行
+        auto& cache = staticTextCache();
 
         const auto it = cache.find (key);
         if (it != cache.end())
@@ -681,8 +1054,19 @@ namespace PinkXP
 
         // 基准字体（不含"整串换符号字体"）：混排文本由 drawText 按 run 绘制，
         //   符号片段自动换英文 UI 字体，CJK 仍用当前语言字体。
-        const juce::Font font = axisFont ? getAxisFont (fontHeight, styleFlags)
-                                         : getFont (fontHeight, styleFlags);
+        const juce::Font font = makeStaticTextFont (fontKind, shown, fontHeight, styleFlags);
+
+        // 含符号 run 时（SymbolGlyphs::drawText 走按 run 绘制 + 裁剪到排版框）四周留白：
+        //   回退字形（♥ ★ ∞ 等）的字面常超出主字体的 ascent/advance，贴边会被裁掉。
+        //   排版框放大到整张位图并水平居中：按 run 绘制的居中口径正是
+        //   (框宽 - getTextWidth) / 2，故 originX 可精确求得。
+        bool hasSymbolRun = false;
+        if (padForSymbols)
+            for (const auto& run : SymbolGlyphs::splitRuns (shown))
+                hasSymbolRun = hasSymbolRun || run.symbol;
+
+        const int padX = hasSymbolRun ? (int) std::ceil (font.getHeight() * 0.15f) + 1 : 0;
+        const int padY = hasSymbolRun ? (int) std::ceil (font.getHeight() * 0.35f) : 0;
 
         // 位图尺寸必须"向上取整 + 留余量"，不能四舍五入：
         //   Graphics::drawText 内部走 GlyphArrangement::addCurtailedLineOfText，
@@ -693,29 +1077,52 @@ namespace PinkXP
         //   现在 w - 2 >= ceil(测量宽度) + 2，且右侧再留 2px 给阴影偏移。
         //   宽度必须走 getTextWidth（GlyphArrangement）：Font::getStringWidthFloat
         //   按主字体的 notdef advance 测量，回退字形更宽时会把末位字符切掉。
-        const int w = (int) std::ceil (SymbolGlyphs::getTextWidth (shown, font)) + 4;
-        const int h = (int) std::ceil (font.getHeight()) + 3;
-        if (w <= 4 || h <= 3)
+        const float textW = SymbolGlyphs::getTextWidth (shown, font);
+        if ((int) std::ceil (textW) <= 0 || (int) std::ceil (font.getHeight()) <= 0)
             return {};
+        const int w = (int) std::ceil (textW) + 4 + 2 * padX;
+        const int h = (int) std::ceil (font.getHeight()) + 3 + 2 * padY;
 
-        juce::Image img (juce::Image::ARGB, w, h, true, juce::SoftwareImageType());
-        juce::Graphics g2 (img);
-        if (! shadowColour.isTransparent())
+        // 逻辑尺寸 w×h 不变（调用方按 getWidth/getHeight 布局），像素按设备缩放
+        const int pw = juce::jmax (1, (int) std::ceil ((float) w * scale));
+        const int ph = juce::jmax (1, (int) std::ceil ((float) h * scale));
+        juce::Image img (juce::Image::ARGB, pw, ph, true, juce::SoftwareImageType());
         {
-            g2.setColour (shadowColour);
-            SymbolGlyphs::drawText (g2, shown, { 1, 1, w - 2, h - 2 },
-                                    juce::Justification::centredLeft, font);
-        }
-        g2.setColour (colour);
-        SymbolGlyphs::drawText (g2, shown, { 0, 0, w - 2, h - 2 },
-                                juce::Justification::centredLeft, font);
+            juce::Graphics g2 (img);
+            if (scale != 1.0f)
+                g2.addTransform (juce::AffineTransform::scale (scale));
 
-        // 容量保护：超限整体清空（静态文本数量有限，正常远达不到）
-        if (cache.size() > 512)
+            const auto just = hasSymbolRun ? juce::Justification::centred
+                                           : juce::Justification::centredLeft;
+            if (! shadowColour.isTransparent())
+            {
+                g2.setColour (shadowColour);
+                SymbolGlyphs::drawText (g2, shown, { 1, 1, w - 2, h - 2 }, just, font);
+            }
+            g2.setColour (colour);
+            SymbolGlyphs::drawText (g2, shown, { 0, 0, w - 2, h - 2 }, just, font);
+        }
+
+        StaticText t;
+        t.image      = img;
+        t.scale      = scale;
+        t.width      = w;
+        t.height     = h;
+        t.textWidth  = textW;
+        t.boxTop     = (float) padY;
+        t.boxHeight  = (float) (h - 2 - 2 * padY);
+        t.lineHeight = font.getHeight();
+        t.textTop    = ((float) (h - 2) - t.lineHeight) * 0.5f;
+        t.originX    = hasSymbolRun ? ((float) (w - 2) - textW) * 0.5f : 0.0f;
+
+        // 容量保护：超限整体清空（静态文本数量有限，正常远达不到；
+        //   按钮上的 FPS 等少量动态文本也走这里，故留足余量）
+        if (cache.size() > 1024)
             cache.clear();
-        cache.emplace (key, img);
-        return img;
+        cache.emplace (std::move (key), t);
+        return t;
     }
+    } // namespace
 
     // 坐标轴/刻度专用字体：不放大，保持原始尺寸
     juce::Font getAxisFont(float height, int styleFlags)
@@ -1315,21 +1722,18 @@ namespace PinkXP
         if (iconArea.getWidth() <= 2 || iconArea.getHeight() <= 2)
             return;
 
-        const auto font = SymbolGlyphs::getFont (iconText, fontHeight, juce::Font::bold);
-
         // 图标框只有 16×14，而回退字形（♥/★ 的 advance / 字面高 ≈ 字号）
         //   在 uiScale=1 时约 16~19px，会被裁掉边上一条甚至整颗丢弃。
         //   绘制区放宽到 20×20（仍完整落在 22px 高的标题栏内；标题文字从
         //   +25 才开始，也不会与图标重叠）。
         const auto drawArea = iconArea.expanded (2, 3);
 
-        g.setColour(shadowColour.withAlpha(0.55f));
-        SymbolGlyphs::drawText (g, iconText, drawArea.translated(1, 1),
-                                juce::Justification::centred, font);
-
-        g.setColour(colour);
-        SymbolGlyphs::drawText (g, iconText, drawArea,
-                                juce::Justification::centred, font);
+        // 静态位图缓存（mac 性能：标题栏随内容区逐帧重绘时不再逐帧塑形）；
+        //   字体 = SymbolGlyphs::getFont(iconText, fontHeight, bold)，阴影 (1,1) 偏移
+        drawCachedSymbolText (g, iconText, drawArea, juce::Justification::centred,
+                              fontHeight, juce::Font::bold, colour,
+                              StaticTextFont::symbolAuto, shadowColour.withAlpha (0.55f),
+                              false);
     }
 
     juce::Rectangle<int> drawPinkTitleBar(juce::Graphics& g,
@@ -1363,8 +1767,8 @@ namespace PinkXP
         auto textRect = bounds.reduced(6, 0);
         textRect.removeFromLeft(19); // 给左侧图标留空间
 
-        const juce::Image titleImg = cachedStaticTextImage (
-            title, fontHeight, juce::Font::bold, selInk, sel.darker(0.50f).withAlpha(0.55f));
+        const auto titleImg = cachedStaticText (
+            g, title, fontHeight, juce::Font::bold, selInk, sel.darker(0.50f).withAlpha(0.55f));
 
         // CJK 方块字紧贴 em 顶部、descent 很小，按字体 metrics 垂直居中后视觉偏上
         //   —— 中文界面下标题统一向下微移 1px（英文界面为 0，无变化）
@@ -1372,10 +1776,9 @@ namespace PinkXP
 
         if (titleImg.isValid())
         {
-            g.drawImageAt (titleImg,
-                           textRect.getX(),
-                           textRect.getY() + (textRect.getHeight() - titleImg.getHeight()) / 2 + titleVNudge,
-                           false);
+            titleImg.drawAt (g,
+                             (float) textRect.getX() - titleImg.originX,
+                             (float) (textRect.getY() + (textRect.getHeight() - titleImg.getHeight()) / 2 + titleVNudge));
         }
         else
         {
@@ -2224,7 +2627,7 @@ void PinkXPLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& butt
     const bool toggled = shouldDrawButtonAsDown || button.getToggleState();
     const juce::Colour tc = button.findColour(toggled ? juce::TextButton::textColourOnId
                                                       : juce::TextButton::textColourOffId);
-    g.setColour(tc.isOpaque() ? tc : PinkXP::ink);
+    const juce::Colour textColour = tc.isOpaque() ? tc : PinkXP::ink;
 
     const juce::String shown = y2k::tr (button.getButtonText());
 
@@ -2232,15 +2635,18 @@ void PinkXPLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& butt
     //   的 0.9 收紧影响，中英文界面字形/大小完全一致。
     //   混排文本（如「高级 ▸」）由 drawText 拆 run：CJK 留中文字体，
     //   ▸ 用英文字体 —— 整串换字体会让中文消失。
-    const juce::Font baseFont = PinkXP::SymbolGlyphs::isSymbolsOnly (shown)
-        ? PinkXP::SymbolGlyphs::iconFont (14.0f, juce::Font::bold)
-        : PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold);
+    const bool symbolsOnly = PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
 
     auto area = button.getLocalBounds();
     if (shouldDrawButtonAsDown || button.getToggleState())
         area.translate(1, 1);
 
-    PinkXP::SymbolGlyphs::drawText (g, shown, area, juce::Justification::centred, baseFont);
+    // 静态位图缓存（mac 性能）：与 SymbolGlyphs::drawText(shown, area, centred, baseFont) 等价
+    PinkXP::drawCachedSymbolText (g, shown, area, juce::Justification::centred,
+                                  symbolsOnly ? 14.0f : 12.0f, juce::Font::bold, textColour,
+                                  symbolsOnly ? PinkXP::StaticTextFont::icon
+                                              : PinkXP::StaticTextFont::button,
+                                  juce::Colours::transparentBlack, false);
 }
 
 juce::Font PinkXPLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHeight)
