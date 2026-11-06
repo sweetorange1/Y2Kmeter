@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 3.0.1 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 3.0.2 LANGUAGES C CXX)
 
 # ==========================================================
 # v2.9.2：帧耗时统计日志（仅开发者诊断构建，默认 OFF）
@@ -401,7 +401,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 3.0.1
+        VERSION 3.0.2
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -454,7 +454,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 3.0.1
+        VERSION 3.0.2
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -503,6 +503,32 @@ juce_add_binary_data(Y2Kmeter_BinaryData
   SOURCES
     "${CMAKE_CURRENT_BINARY_DIR}/resources/SilkscreenRegular.ttf"
     "${CMAKE_CURRENT_BINARY_DIR}/resources/logo.png"
+)
+
+# ==========================================================
+# 界面国际化资源（y2k::i18n，见 source/i18n/Localisation.h）
+#   · i18n/*.lang —— 语言包（UTF-8 文本，键 = 英文源文案）。新增语言只需往
+#     i18n/ 目录放一个 <code>.lang 文件，CONFIGURE_DEPENDS 让 CMake 自动重新
+#     glob，不必改任何 C++ 代码；
+#   · 语言包 @font 引用的字体一并打进这里（中文：ChillBitmap_16px.ttf）。
+#   独立成一个 binary data target：字体 12 MB，与 Y2Kmeter_BinaryData 分开后
+#   改动英文资源 / logo 不会触发这份大文件重新生成与编译。
+# ==========================================================
+file(GLOB Y2KM_I18N_LANG_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/i18n/*.lang")
+set(Y2KM_FONT_ZH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ttf/ChillBitmap_16px.ttf")
+if (NOT EXISTS "${Y2KM_FONT_ZH_SRC}")
+  message(FATAL_ERROR "缺少中文字体资源：${Y2KM_FONT_ZH_SRC}")
+endif()
+if (NOT Y2KM_I18N_LANG_FILES)
+  message(FATAL_ERROR "缺少语言包：${CMAKE_CURRENT_SOURCE_DIR}/i18n/*.lang")
+endif()
+
+juce_add_binary_data(Y2KI18nData
+  HEADER_NAME Y2KI18nData.h
+  NAMESPACE   Y2KI18nData
+  SOURCES
+    ${Y2KM_I18N_LANG_FILES}
+    "${Y2KM_FONT_ZH_SRC}"
 )
 
 # ==========================================================
@@ -623,6 +649,15 @@ set(Y2KM_PLUGIN_SOURCES
   source/ui/ModulePanel.cpp
   source/ui/ModuleWorkspace.h
   source/ui/ModuleWorkspace.cpp
+  # 悬停提示（HoverHelp）：按钮 / 仪表模块详细说明 + Pink XP 风格提示窗口
+  source/ui/HoverHelp.h
+  source/ui/HoverHelp.cpp
+  # 进程级 UI 偏好（悬停提示开关 / 界面语言），独立于布局与预设
+  source/ui/UiPrefs.h
+  source/ui/UiPrefs.cpp
+  # 界面国际化：语言包注册表 / 运行时切换 / 翻译查表（语言包见 i18n/*.lang）
+  source/i18n/Localisation.h
+  source/i18n/Localisation.cpp
   # v2.9.4：GL 直渲染统一框架（Spectrogram3D / Oscilloscope / OscilloscopeWave 基类）
   source/ui/GlDirectModule.h
   source/ui/GlDirectModule.cpp
@@ -745,6 +780,7 @@ target_include_directories(Y2Kmeter_milkdrop PRIVATE
 
 set(Y2KM_COMMON_LINK_LIBS
   Y2Kmeter_BinaryData
+  Y2KI18nData
   juce::juce_audio_utils
   juce::juce_dsp
   # GPU 合成层：Editor 里挂 juce::OpenGLContext 后，整个绘制管线会被翻译

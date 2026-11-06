@@ -1,5 +1,7 @@
 #include "source/ui/modules/FineSplitModules.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 
@@ -101,7 +103,7 @@ namespace
         auto titleRow = inner.removeFromTop(12);
         g.setColour(PinkXP::ink.withAlpha(0.85f));
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(label, titleRow, juce::Justification::centredLeft, false);
+        g.drawText(y2k::tr (label), titleRow, juce::Justification::centredLeft, false);
 
         // 右上角信号灯 6x6：有信号（tNorm>0）时呼吸脉动，静音时熄灭
         {
@@ -133,11 +135,11 @@ namespace
         const juce::String numStr = (v <= -60.0f)
             ? juce::String("-144")
             : juce::String(v, 1);
-        g.drawText(numStr, inner, juce::Justification::centredLeft, false);
+        g.drawText(y2k::tr (numStr), inner, juce::Justification::centredLeft, false);
 
         g.setColour(PinkXP::ink.withAlpha(0.7f));
         g.setFont(PinkXP::getFont(10.0f, juce::Font::plain));
-        g.drawText(unit, inner, juce::Justification::centredRight, false);
+        g.drawText(y2k::tr (unit), inner, juce::Justification::centredRight, false);
 
         if (! barArea.isEmpty())
             drawReadoutBar(g, barArea, tNorm, pulsePhase);
@@ -384,7 +386,7 @@ void PhaseCorrelationModule::paintContent(juce::Graphics& g, juce::Rectangle<int
     g.setFont(PinkXP::getFont(16.0f, juce::Font::bold));
     auto txt = juce::String(corr, 2);
     if (corr >= 0.0f) txt = "+" + txt;
-    g.drawText(txt, inner.removeFromTop(20), juce::Justification::centred, false);
+    g.drawText(y2k::tr (txt), inner.removeFromTop(20), juce::Justification::centred, false);
 }
 
 PhaseBalanceModule::PhaseBalanceModule(AnalyserHub& h)
@@ -438,7 +440,7 @@ void PhaseBalanceModule::paintContent(juce::Graphics& g, juce::Rectangle<int> co
     g.drawRect(wi, 1);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    g.drawText("WIDTH " + juce::String((int) std::round(width * 100.0f)) + "%", wBar.reduced(4), juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr ("WIDTH " + juce::String((int) std::round(width * 100.0f)) + "%"), wBar.reduced(4), juce::Justification::centredLeft, false);
 
     PinkXP::drawSunken(g, area, PinkXP::content);
     auto bi = area.reduced(4);
@@ -456,7 +458,7 @@ void PhaseBalanceModule::paintContent(juce::Graphics& g, juce::Rectangle<int> co
 
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    g.drawText(btxt, area.reduced(4), juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (btxt), area.reduced(4), juce::Justification::centredLeft, false);
 }
 
 DynamicsMetersModule::DynamicsMetersModule(AnalyserHub& h)
@@ -558,7 +560,7 @@ void DynamicsMetersModule::paintContent(juce::Graphics& g, juce::Rectangle<int> 
         // 标签（跟随主题 ink 色，已由 PinkXPStyle 全局主题控制）
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getFont(8.5f, juce::Font::bold));
-        g.drawText(labels[i], area.getX() + i * (w + gap), area.getBottom() - (labelH - 2), w, 12,
+        g.drawText(y2k::tr (labels[i]), area.getX() + i * (w + gap), area.getBottom() - (labelH - 2), w, 12,
                    juce::Justification::centred, false);
     }
 }
@@ -668,6 +670,9 @@ DynamicsCrestModule::DynamicsCrestModule(AnalyserHub& h)
     spanLabel.setColour(juce::Label::textColourId, PinkXP::ink);
     spanLabel.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
     spanLabel.setText("SPAN", juce::dontSendNotification);
+    spanSlider.setTooltip (y2k::help::make ("Span",
+        "How many seconds of crest-factor history fit on screen (1 - 35 s)."));
+    spanLabel.setTooltip (spanSlider.getTooltip());
 
     addAndMakeVisible(spanSlider);
     addAndMakeVisible(spanLabel);
@@ -812,7 +817,7 @@ void DynamicsCrestModule::paintContent(juce::Graphics& g, juce::Rectangle<int> c
     // 左下角跨度提示
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-    g.drawText(juce::String(spanSeconds) + "s  history",
+    g.drawText(y2k::tr (juce::String(spanSeconds) + "s  history"),
                plot.getX() + 2, plot.getBottom() - 12, 120, 12,
                juce::Justification::centredLeft, false);
 
@@ -1486,7 +1491,7 @@ void VuMeterModule::drawDial(juce::Graphics& g,
             const float ty = cy - cosA * (R - 16.0f);
             juce::Rectangle<float> labRect (tx - 12.0f, ty - 6.0f, 24.0f, 12.0f);
             g.setColour(red ? juce::Colour(0xffb61325) : inkCol);
-            g.drawText(t.label, labRect, juce::Justification::centred, false);
+            g.drawText(y2k::tr (t.label), labRect, juce::Justification::centred, false);
         }
     }
 
@@ -1496,7 +1501,7 @@ void VuMeterModule::drawDial(juce::Graphics& g,
         g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
         // 圆心在底边之上一点，"dBFS" 放在圆心偏上
         const float ly = cy - R * 0.42f;
-        g.drawText("dBFS", juce::Rectangle<float>(cx - 30.0f, ly - 8.0f, 60.0f, 16.0f),
+        g.drawText(y2k::tr ("dBFS"), juce::Rectangle<float>(cx - 30.0f, ly - 8.0f, 60.0f, 16.0f),
                    juce::Justification::centred, false);
     }
 

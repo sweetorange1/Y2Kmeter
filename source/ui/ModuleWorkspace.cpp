@@ -7,6 +7,8 @@
 #include "source/ui/palette/PalettePanel.h"
 #include "source/ui/palette/ThemeLibrary.h"
 #include "source/Y2KLogging.h"
+#include "source/ui/HoverHelp.h"
+#include "source/i18n/Localisation.h"
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
@@ -16,6 +18,18 @@
 // ==========================================================
 namespace
 {
+    // 悬停提示：右键菜单里"Hover Tips"开关的菜单项 ID（远离模块项 1..N）
+    constexpr int kHoverTipsMenuItemId = 0x7100;
+
+    // 悬停提示：gain 按钮文案（带当前值，多处刷新共用）
+    juce::String makeGainTooltip (float db)
+    {
+        return y2k::help::make ("Input gain: " + juce::String (db, 1) + " dB",
+            "Click to open the gain slider (-4 to +18 dB, double-click it for 0 dB). "
+            "Only boosts what the meters see - your audio is untouched. "
+            "The Recorder always records the raw input.");
+    }
+
     // 软件默认 settings 文件的实际磁盘路径（与 Y2KStandaloneApp 构造 PropertiesFile
     //   时的存储参数完全一致）。Save/Load 预设弹窗默认定位到这里，避免默认打开"文档"目录。
     juce::File getDefaultSettingsFile()
@@ -60,11 +74,12 @@ namespace
 
     {
     public:
-        juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override
+        juce::Font getTextButtonFont (juce::TextButton& button, int buttonHeight) override
         {
             // 基线：min(14, h*0.55)；这里再 × 0.78 得到一个更紧凑的字号
             const float base = juce::jmin (14.0f, buttonHeight * 0.55f);
-            return PinkXP::getFont (base * 0.78f, juce::Font::bold);
+            return PinkXP::SymbolGlyphs::buttonFont (y2k::tr (button.getButtonText()),
+                                                     base * 0.78f, juce::Font::bold);
         }
 
         // 完全自绘文字（不经过 findColour 颜色链）：恒用主题 ink——
@@ -75,12 +90,15 @@ namespace
                              bool, bool shouldDrawButtonAsDown) override
         {
             g.setColour (PinkXP::ink);
-            g.setFont (PinkXP::getFont (12.0f, juce::Font::bold));
+
+            // "∞FPS" 的 ∞ 属于中文像素字体的空白符号：经 SymbolGlyphs 切英文字体
+            const juce::String shown = y2k::tr (button.getButtonText());
+            g.setFont (PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold));
 
             auto area = button.getLocalBounds();
             if (shouldDrawButtonAsDown || button.getToggleState())
                 area.translate (1, 1);
-            g.drawText (button.getButtonText(), area, juce::Justification::centred, false);
+            g.drawText (shown, area, juce::Justification::centred, false);
         }
     };
 
@@ -366,7 +384,10 @@ ModuleWorkspace::ModuleWorkspace()
     audioSourceBox.clear (juce::dontSendNotification);
     audioSourceBox.addItem (audioSourceItems[0].displayName, 1);
     audioSourceBox.setSelectedId (1, juce::dontSendNotification);
-    audioSourceBox.setTooltip ("Audio source: defaults to system master output (Loopback).");
+    audioSourceBox.setTooltip (y2k::help::make ("Audio source",
+        "What Y2Kmeter listens to. System Output (Loopback) meters everything your "
+        "computer plays; pick a microphone / input device to meter that instead."));
+    audioSourceLabel.setTooltip (audioSourceBox.getTooltip());
 
     // 显式挂 Pink XP LookAndFeel —— 保证下拉框 / 弹出菜单的配色与主题统一
     //（否则 ComboBox 会使用 LookAndFeel_V4 的默认浅蓝色，跟粉色主题格格不入）
@@ -396,6 +417,10 @@ ModuleWorkspace::ModuleWorkspace()
     // 右下角 Hide 按钮：默认"显示态"不透明
     hideBtn.setButtonText("Hide");
     hideBtn.setDimWhenIdle(false);
+    hideBtn.setTooltip (y2k::help::make ("Hide / Show",
+        "Hide: fold away the title bar and this toolbar so the meters get the whole window. "
+        "Move the mouse over the window to bring them back temporarily.\n"
+        "Show: keep them visible again."));
     hideBtn.onClick = [this]()
     {
         // v2.8.2：Hide 态下 chromeVisible 恒为 false（悬停只显示浮层，不翻转 chromeVisible），
@@ -406,7 +431,7 @@ ModuleWorkspace::ModuleWorkspace()
 
     // 工具栏溢出开关：窗口较窄时把右侧可选控件折叠，点击后在上方展开二级控制区。
     toolbarOverflowBtn.setButtonText ("More");
-    toolbarOverflowBtn.setTooltip ("Show additional toolbar controls");
+    toolbarOverflowBtn.setTooltip (y2k::help::make ("More", "The window is narrow: show the toolbar controls that did not fit."));
     toolbarOverflowBtn.onClick = [this]()
     {
         setToolbarOverflowExpanded (! toolbarOverflowExpanded);
@@ -417,7 +442,9 @@ ModuleWorkspace::ModuleWorkspace()
     // 左下角：FPS 限制按钮 + 实时 FPS 标签
     //   · 按钮文案循环："30FPS" → "60FPS" → "120FPS" → "∞FPS"
     fpsBtn.setButtonText ("120FPS");
-    fpsBtn.setTooltip    ("Click to cycle target frame rate (30 / 60 / 120 / Unlimited)");
+    fpsBtn.setTooltip    (y2k::help::make ("Frame rate cap",
+        "Click to cycle 30 / 60 / 120 / Unlimited FPS. Lower values save CPU and GPU; "
+        "the number on the right is the real frame rate."));
     fpsBtn.onClick = [this]()
     {
         int next;
@@ -440,7 +467,9 @@ ModuleWorkspace::ModuleWorkspace()
     //   · 复用 fpsMiniLnf：drawButtonText 在绘制时硬编码主题 ink ——
     //     与 FPS 按钮同一套字体颜色逻辑，浅色/深色主题下文字都清晰
     fftSizeBtn.setButtonText (juce::String (fftSize));
-    fftSizeBtn.setTooltip ("FFT size (spectrum resolution): 1024 / 2048 / 4096 / 8192 / 16384");
+    fftSizeBtn.setTooltip (y2k::help::make ("FFT size",
+        "Spectrum resolution: 1024 / 2048 / 4096 / 8192 / 16384. Bigger = finer frequency "
+        "detail but slower to react and more CPU. Affects Spectrum, Spectrogram and friends."));
     fftSizeBtn.setLookAndFeel (fpsMiniLnf.get());
     fftSizeBtn.setColour (juce::TextButton::textColourOffId, PinkXP::ink);
     fftSizeBtn.setColour (juce::TextButton::textColourOnId,  PinkXP::ink);
@@ -456,13 +485,14 @@ ModuleWorkspace::ModuleWorkspace()
     fftSizeLabel.setJustificationType (juce::Justification::centredLeft);
     fftSizeLabel.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
     fftSizeLabel.setColour (juce::Label::textColourId, PinkXP::ink);
+    fftSizeLabel.setTooltip (fftSizeBtn.getTooltip());
     addAndMakeVisible (fftSizeLabel);
 
     // Toybox 档位切换按钮已移除：档位改由 ToyDirector 按连续互动自动升级。
 
     // gain：输入增益按钮（位于 hide 左侧）
     gainBtn.setButtonText ("gain");
-    gainBtn.setTooltip ("Input gain (-4.0 dB ~ +18.0 dB)");
+    gainBtn.setTooltip (makeGainTooltip (inputGainDb));
     gainBtn.onClick = [this]()
     {
         setGainPopupVisible (! gainPopupVisible);
@@ -477,6 +507,8 @@ ModuleWorkspace::ModuleWorkspace()
     gainSlider.setColour (juce::Slider::thumbColourId, PinkXP::btnFace);
     gainSlider.setTextValueSuffix (" dB");
     gainSlider.setDoubleClickReturnValue (true, 0.0);
+    gainSlider.setTooltip (y2k::help::make ("Input gain",
+        "Drag to set the analysis gain. Snaps to 0 dB near the centre; double-click to reset."));
     gainSlider.setValue ((double) inputGainDb, juce::dontSendNotification);
     gainSlider.onValueChange = [this]()
     {
@@ -498,7 +530,7 @@ ModuleWorkspace::ModuleWorkspace()
         // 拖动过程中不刷新 tooltip：tooltip 在拖拽时本就不可见，逐帧 setTooltip
         //   会给 TooltipWindow 制造大量无谓的失效与重算。
         if (! gainSliderDragging)
-            gainBtn.setTooltip ("Input gain (" + juce::String (inputGainDb, 1) + " dB)");
+            gainBtn.setTooltip (makeGainTooltip (inputGainDb));
         if (onInputGainChanged)
             onInputGainChanged (inputGainDb);
 
@@ -515,21 +547,34 @@ ModuleWorkspace::ModuleWorkspace()
         if (! isToolbarShown())
             setGainPopupVisible (false);
 
-        gainBtn.setTooltip ("Input gain (" + juce::String (inputGainDb, 1) + " dB)");
+        gainBtn.setTooltip (makeGainTooltip (inputGainDb));
     };
     addChildComponent (gainSlider);
 
     fpsLabel.setText ("-- fps", juce::dontSendNotification);
+    fpsLabel.setTooltip (y2k::help::make ("Real frame rate",
+        "Frames actually drawn per second. If it stays well below the cap, try a lower "
+        "cap, a smaller window or fewer heavy modules (3D / Milkdrop)."));
     fpsLabel.setJustificationType (juce::Justification::centredLeft);
     fpsLabel.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
     fpsLabel.setColour (juce::Label::textColourId, PinkXP::ink);
     addAndMakeVisible (fpsLabel);
 
+    // 界面语言切换按钮（FPS 区右侧，分割线之后）
+    langBtn.setTooltip (y2k::help::make ("Language",
+        "Switch the interface language (English / Chinese). "
+        "Takes effect immediately - no restart needed."));
+    langBtn.onClick = [this]() { showLanguageChooser(); };
+    langBtn.setButtonText (y2k::i18n::getCurrentLanguage().buttonLabel);
+    addAndMakeVisible (langBtn);
+
     // Grid 显示切换按钮：在画布上叠加 8px 网格线（方便对齐拼豆贴画/模块）
     //   · 默认关闭（gridOverlayVisible=false）；通过 layout tree 持久化
     //   · 使用 setClickingTogglesState 让按钮保持"按下"视觉状态
     gridBtn.setButtonText ("Grid");
-    gridBtn.setTooltip    ("Toggle 8px alignment grid overlay");
+    gridBtn.setTooltip    (y2k::help::make ("Grid",
+        "Show an 8 px alignment grid on the desktop. Modules always snap to it when "
+        "dragged or resized - the grid just makes it visible."));
     gridBtn.setClickingTogglesState (true);
     gridBtn.setToggleState (gridOverlayVisible, juce::dontSendNotification);
     gridBtn.onClick = [this]()
@@ -545,7 +590,10 @@ ModuleWorkspace::ModuleWorkspace()
     //   · 样式与音频源下拉完全一致：显式挂 PinkXP LookAndFeel，ComboBox 箭头 + 条目
     //     颜色跟随主题；nothing-selected 文本作为占位，选中后触发 onLayoutPresetChanged
     layoutPresetBox.setTextWhenNothingSelected ("preset");
-    layoutPresetBox.setTooltip ("Choose a layout preset");
+    layoutPresetBox.setTooltip (y2k::help::make ("Layout presets",
+        "Rearrange the whole workspace in one click: default grid, horizontal bars, MV, "
+        "studio monitor, broadcast loudness, full-screen tiles and more. "
+        "Replaces the current module layout."));
     layoutPresetBox.setLookAndFeel (&getPinkXPLookAndFeel());
     rebuildLayoutPresetItems();
     layoutPresetBox.onChange = [this]()
@@ -597,11 +645,13 @@ ModuleWorkspace::ModuleWorkspace()
     //   · 用 std::shared_ptr<juce::FileChooser> 持有（launchAsync 要求 chooser 生命
     //     周期覆盖到回调触发；lambda 捕获 shared_ptr 保证不析构）。
     savePresetBtn.setButtonText ("Save");
-    savePresetBtn.setTooltip    ("Save current settings (layout + theme + window) as a preset file");
+    savePresetBtn.setTooltip    (y2k::help::make ("Save",
+        "Export everything - layout, module settings, theme and window - to a .settings "
+        "file you can back up or share."));
     savePresetBtn.onClick = [this]()
     {
         auto chooser = std::make_shared<juce::FileChooser> (
-            "Save current settings as preset",
+            y2k::tr ("Save current settings as preset"),
             getDefaultSettingsFile(),
             "*.settings");
 
@@ -624,11 +674,13 @@ ModuleWorkspace::ModuleWorkspace()
     addAndMakeVisible (savePresetBtn);
 
     loadPresetBtn.setButtonText ("Load");
-    loadPresetBtn.setTooltip    ("Load a previously saved preset file (reloads the app)");
+    loadPresetBtn.setTooltip    (y2k::help::make ("Load",
+        "Load a .settings file saved with Save. Replaces the current setup "
+        "(the standalone app restarts to apply it)."));
     loadPresetBtn.onClick = [this]()
     {
         auto chooser = std::make_shared<juce::FileChooser> (
-            "Load preset",
+            y2k::tr ("Load preset"),
             getDefaultSettingsFile().getParentDirectory(),
             "*.settings");
 
@@ -652,8 +704,9 @@ ModuleWorkspace::ModuleWorkspace()
     //   · STICK：进入 stick（未激活时显示）
     //   · X：退出 stick；T/B：顶/底切换（激活时显示，STICK 隐藏）
     stickBtn.setButtonText ("Stick");
-    stickBtn.setTooltip ("Enter stick mode: dock to the top screen edge and shrink "
-                         "the work area (like the taskbar)");
+    stickBtn.setTooltip (y2k::help::make ("Stick",
+        "Dock Y2Kmeter as a bar on the top screen edge, like a second taskbar: other windows "
+        "make room for it. Stick mode keeps its own layout."));
     stickBtn.onClick = [this]()
     {
         if (onStickClicked) onStickClicked();
@@ -661,7 +714,8 @@ ModuleWorkspace::ModuleWorkspace()
     addAndMakeVisible (stickBtn);
 
     stickExitBtn.setButtonText ("X");
-    stickExitBtn.setTooltip ("Exit stick mode and restore the previous layout");
+    stickExitBtn.setTooltip (y2k::help::make ("Leave stick mode",
+        "Undock the bar and restore your previous window and layout."));
     stickExitBtn.onClick = [this]()
     {
         if (onStickExitClicked) onStickExitClicked();
@@ -669,7 +723,9 @@ ModuleWorkspace::ModuleWorkspace()
     addChildComponent (stickExitBtn);
 
     stickToggleBtn.setButtonText ("T/B");
-    stickToggleBtn.setTooltip ("Switch stick position between Top and Bottom");
+    stickToggleBtn.setTooltip (y2k::help::make ("Top / Bottom",
+        "Move the docked bar between the top and the bottom screen edge. "
+        "Each edge remembers its own layout."));
     stickToggleBtn.onClick = [this]()
     {
         if (onStickToggleClicked) onStickToggleClicked();
@@ -878,7 +934,7 @@ void ModuleWorkspace::GainPopupBackdrop::paint (juce::Graphics& g)
 
     g.setColour (PinkXP::ink.withAlpha (0.92f));
     g.setFont (PinkXP::getFont (10.0f, juce::Font::plain));
-    g.drawText (juce::String (owner.inputGainDb, 1) + " dB",
+    g.drawText (y2k::tr (juce::String (owner.inputGainDb, 1) + " dB"),
                 valueArea, juce::Justification::centredRight, false);
 }
 
@@ -1844,6 +1900,21 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
         maxItemW = juce::jmax (maxItemW, iw);
     }
 
+    // 悬停提示总开关（新手引导的白名单菜单里不出现，避免干扰引导步骤）
+    if (enabledOnlyTypes.isEmpty())
+    {
+        const juce::String tipsText ("Show Hover Tips");
+        m.addSeparator();
+        juce::PopupMenu::Item tipsItem (tipsText);
+        tipsItem.itemID   = kHoverTipsMenuItemId;
+        tipsItem.isTicked = y2k::help::isEnabled();
+        m.addItem (std::move (tipsItem));
+
+        int iw = 180, ih = 22;
+        lfRef.getIdealPopupMenuItemSize (tipsText, false, 22, iw, ih);
+        maxItemW = juce::jmax (maxItemW, iw);
+    }
+
     auto options = juce::PopupMenu::Options()
         .withMinimumWidth (menuMinWidth)
         // 目标组件用 workspace 自身（而不是顶层窗口）：
@@ -1918,6 +1989,13 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
             if (onMenuClosed) onMenuClosed();
             return;
         }
+
+        if (result == kHoverTipsMenuItemId)
+        {
+            y2k::help::setEnabled (! y2k::help::isEnabled());
+            return;
+        }
+
         const int idx = result - 1;
         if (idx < 0 || idx >= availableTypes.size())
             return;
@@ -2408,6 +2486,7 @@ void ModuleWorkspace::paintToolbarBackground (juce::Graphics& g, juce::Rectangle
     drawDivider (toolbarDividerX0);
     drawDivider (toolbarDividerXFft);
     drawDivider (toolbarDividerX1);
+    drawDivider (toolbarDividerXLang);
     drawDivider (toolbarDividerX2);
     drawDivider (toolbarDividerX3);
     drawDivider (toolbarDividerXLayout);
@@ -2441,6 +2520,7 @@ void ModuleWorkspace::ToolbarOverflowBackdrop::paint (juce::Graphics& g)
     drawDivider (owner.overflowDividerX0);
     drawDivider (owner.overflowDividerXFft);
     drawDivider (owner.overflowDividerX1);
+    drawDivider (owner.overflowDividerXLang);
     drawDivider (owner.overflowDividerX2);
     drawDivider (owner.overflowDividerX3);
     drawDivider (owner.overflowDividerXLayout);
@@ -2589,6 +2669,7 @@ void ModuleWorkspace::raiseToolbarOverflowPanel()
     audioSourceBox.toFront (false);
     fpsBtn.toFront (false);
     fpsLabel.toFront (false);
+    langBtn.toFront (false);
     fftSizeBtn.toFront (false);
     fftSizeLabel.toFront (false);
     gridBtn.toFront (false);
@@ -2637,7 +2718,7 @@ void ModuleWorkspace::raiseToolbarOverlay()
 
     // 已经在最顶层（最后一个子组件是工具栏控件）就不重复排序，避免无谓重绘
     juce::Component* toolbarComps[] = {
-        &themeBar, &audioSourceLabel, &audioSourceBox, &fpsLabel, &fpsBtn,
+        &themeBar, &audioSourceLabel, &audioSourceBox, &fpsLabel, &fpsBtn, &langBtn,
         &fftSizeLabel, &fftSizeBtn, &gridBtn, &layoutPresetBox, &savePresetBtn, &loadPresetBtn,
         &stickBtn, &stickExitBtn, &stickToggleBtn,
         &toolbarOverflowBtn, &gainBtn, &hideBtn, &gainSlider
@@ -2716,8 +2797,8 @@ void ModuleWorkspace::paint(juce::Graphics& g)
         auto fontMain = PinkXP::getFont (11.0f, juce::Font::bold);
         auto fontSub  = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const juce::String line1 = "Drag an image here to pixelate it"; // →
-        const juce::String line2 = "Supported: PNG / JPG / JPEG / BMP / GIF";
+        const juce::String line1 = y2k::tr ("Drag an image here to pixelate it"); // →
+        const juce::String line2 = y2k::tr ("Supported: PNG / JPG / JPEG / BMP / GIF");
 
         const int h1 = (int) std::ceil (fontMain.getHeight());
         const int h2 = (int) std::ceil (fontSub .getHeight());
@@ -2731,13 +2812,13 @@ void ModuleWorkspace::paint(juce::Graphics& g)
 
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.setFont   (fontMain);
-        g.drawText  (line1,
+        g.drawText  (y2k::tr (line1),
                      juce::Rectangle<int> (right - 600, bottom - totalH, 600, h1),
                      juce::Justification::centredRight, false);
 
         g.setColour (PinkXP::ink.withAlpha (0.40f));
         g.setFont   (fontSub);
-        g.drawText  (line2,
+        g.drawText  (y2k::tr (line2),
                      juce::Rectangle<int> (right - 600, bottom - h2, 600, h2),
                      juce::Justification::centredRight, false);
     }
@@ -2838,7 +2919,7 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
                 auto xrText = xr;
                 xrText.translate (-1, -1);
                 if (deleteBtnPressed) xrText.translate (1, 1);
-                g.drawText ("x", xrText, juce::Justification::centred, false);
+                g.drawText (y2k::tr ("x"), xrText, juce::Justification::centred, false);
             }
 
             // 左侧 cellSize 滑块
@@ -2861,7 +2942,7 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
                     const juce::String label = juce::String (curCS) + "px";
                     const int labelW = 36;
                     const int labelX = slider.getX() - labelW - 2;
-                    g.drawText (label,
+                    g.drawText (y2k::tr (label),
                                 labelX, thumb.getCentreY() - 8,
                                 labelW, 16,
                                 juce::Justification::centredRight, false);
@@ -2888,7 +2969,7 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
                     const juce::String label = juce::String ((int) std::round (curOp * 100.0f)) + "%";
                     const int labelW = 36;
                     const int labelX = slider.getRight() + 2;
-                    g.drawText (label,
+                    g.drawText (y2k::tr (label),
                                 labelX, thumb.getCentreY() - 8,
                                 labelW, 16,
                                 juce::Justification::centredLeft, false);
@@ -2922,7 +3003,7 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
                 g.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
                 const int textX = boxRect.getRight() + 4;
                 const int textW = rowRect.getRight() - textX;
-                g.drawText ("PerlerBeads",
+                g.drawText (y2k::tr ("PerlerBeads"),
                             textX, rowRect.getY(),
                             juce::jmax (0, textW), rowRect.getHeight(),
                             juce::Justification::centredLeft, false);
@@ -2942,7 +3023,7 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
                 g.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
                 const auto tip = juce::String (resizePreviewCellsW)
                                     + " × " + juce::String (resizePreviewCellsH);
-                g.drawText (tip,
+                g.drawText (y2k::tr (tip),
                             resizePreviewRect.getX(),
                             resizePreviewRect.getBottom() + 2,
                             200, 14,
@@ -3004,7 +3085,7 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
         const auto body = box.withTrimmedTop (titleH).reduced (1);
         g.setColour (PinkXP::ink.withAlpha (0.35f));
         g.setFont   (PinkXP::getFont (28.0f, juce::Font::bold));
-        g.drawText  ("+", body, juce::Justification::centred, false);
+        g.drawText  (y2k::tr ("+"), body, juce::Justification::centred, false);
         g.setOpacity (1.0f);
     }
 
@@ -3047,6 +3128,7 @@ void ModuleWorkspace::resized()
         const int fpsBtnW      = btnW + PinkXP::ui (12);
         const int fftBtnW      = PinkXP::ui (60);
         const int fftLabelW    = PinkXP::ui (86);
+        const int langBtnW     = PinkXP::ui (40);
         const int overflowBtnW = btnW + PinkXP::ui (12);
         const int minThemeW    = PinkXP::ui (220);
 
@@ -3065,6 +3147,7 @@ void ModuleWorkspace::resized()
         bool showGain = true;
         bool showSource = audioSourceUiVisible;
         bool showFps = true;
+        bool showLang = true;
         bool showFft = true;
         bool showGrid = true;
         bool showLayout = layoutPresetUiVisible;
@@ -3101,6 +3184,7 @@ void ModuleWorkspace::resized()
             if (showGain)   w += btnW + 13;
             if (showSource) w += sourceBoxW + sourceLabelW + 9;
             if (showFps)    w += fpsLabelW + fpsBtnW + 13;
+            if (showLang)   w += langBtnW + 13;
             if (showFft)    w += fftBtnW + fftLabelW + 13;
             if (showGrid)   w += btnW + 13;
             w += sectionNeedLayoutSave();
@@ -3114,7 +3198,7 @@ void ModuleWorkspace::resized()
                 || (saveLoadUiVisible && !showSaveLoad)
                 || (layoutPresetUiVisible && !showLayout)
                 || (audioSourceUiVisible && !showSource)
-                || !showGrid || !showFft || !showFps || !showGain;
+                || !showGrid || !showFft || !showFps || !showLang || !showGain;
         };
 
         auto fitsNow = [&]()
@@ -3131,12 +3215,14 @@ void ModuleWorkspace::resized()
         if (! fitsNow() && showGrid)     showGrid = false;
         if (! fitsNow() && showFft)      showFft = false;
         if (! fitsNow() && showFps)      showFps = false;
+        if (! fitsNow() && showLang)     showLang = false;
         if (! fitsNow() && showSource)   showSource = false;
         if (! fitsNow() && showGain)     showGain = false;
 
         const bool hideGain   = ! showGain;
         const bool hideSource = audioSourceUiVisible && ! showSource;
         const bool hideFps    = ! showFps;
+        const bool hideLang   = ! showLang;
         const bool hideFft    = ! showFft;
         const bool hideGrid   = ! showGrid;
         const bool hideLayout = layoutPresetUiVisible && ! showLayout;
@@ -3169,6 +3255,7 @@ void ModuleWorkspace::resized()
         const int hiddenNeed = (hideGain ? (btnW + 13) : 0)
                              + (hideSource ? (sourceBoxW + sourceLabelW + 9) : 0)
                              + (hideFps ? (fpsLabelW + fpsBtnW + 13) : 0)
+                             + (hideLang ? (langBtnW + 13) : 0)
                              + (hideFft ? (fftBtnW + fftLabelW + 13) : 0)
                              + (hideGrid ? (btnW + 13) : 0)
                              + hiddenLayoutSaveNeed
@@ -3298,8 +3385,31 @@ void ModuleWorkspace::resized()
             }
         };
 
+        // 语言按钮：位于 FPS 区右侧（FPS 区自带的分割线 X1 在其左边），
+        //   自身右侧再写一条分割线与 Source 区隔开。
+        auto placeLang = [&] (juce::Rectangle<int>& area, bool show, bool writeDivider)
+        {
+            if (show)
+            {
+                area.removeFromRight (4);
+                const auto div = area.removeFromRight (1).getX();
+                area.removeFromRight (4);
+                toolbarDividerXLang = writeDivider ? div : -1;
+
+                auto langArea = area.removeFromRight (langBtnW + 4);
+                langBtn.setBounds (langArea.withSizeKeepingCentre (langBtnW, btnH));
+                langBtn.setVisible (true);
+            }
+            else
+            {
+                langBtn.setVisible (false);
+                toolbarDividerXLang = -1;
+            }
+        };
+
         placeGain   (tb, showGain,   true);
         placeSource (tb, showSource, true);
+        placeLang   (tb, showLang,   true);
         placeFps    (tb, showFps,    true);
         placeFft    (tb, showFft,    true);
         placeGrid   (tb, showGrid,   true);
@@ -3314,8 +3424,9 @@ void ModuleWorkspace::resized()
             auto overflowArea = tb.removeFromRight (overflowBtnW + 4);
             toolbarOverflowBtn.setBounds (overflowArea.withSizeKeepingCentre (overflowBtnW, btnH));
             toolbarOverflowBtn.setButtonText (toolbarOverflowExpanded ? "Less" : "More");
-            toolbarOverflowBtn.setTooltip (toolbarOverflowExpanded ? "Hide additional toolbar controls"
-                                                                   : "Show additional toolbar controls");
+            toolbarOverflowBtn.setTooltip (toolbarOverflowExpanded
+                ? y2k::help::make ("Less", "Fold the extra toolbar controls away again.")
+                : y2k::help::make ("More", "The window is narrow: show the toolbar controls that did not fit."));
             toolbarOverflowBtn.setVisible (true);
 
             if (! toolbarOverflowExpanded)
@@ -3342,7 +3453,7 @@ void ModuleWorkspace::resized()
                 if (toolbarOverflowBackdrop != nullptr)
                     toolbarOverflowBackdrop->setVisible (false);
                 toolbarOverflowPanelBounds = {};
-                overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
+                overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerXLang = overflowDividerX2 = -1;
                 overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
             }
             else
@@ -3368,6 +3479,7 @@ void ModuleWorkspace::resized()
                 auto panelTb = toolbarOverflowPanelBounds.reduced (4, 4);
                 if (hideGain)   placeGain   (panelTb, true, false);
                 if (hideSource) placeSource (panelTb, true, false);
+                if (hideLang)   placeLang   (panelTb, true, false);
                 if (hideFps)    placeFps    (panelTb, true, false);
                 if (hideFft)    placeFft    (panelTb, true, false);
                 if (hideGrid)   placeGrid   (panelTb, true, false);
@@ -3388,7 +3500,7 @@ void ModuleWorkspace::resized()
 
                     overflowDividerXLayout = toolbarDividerXLayout;
                     overflowDividerXStick  = toolbarDividerXStick;
-                    overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
+                    overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerXLang = overflowDividerX2 = -1;
                     overflowDividerX3 = -1;
 
                     toolbarDividerX0 = savedX0;
@@ -3401,7 +3513,7 @@ void ModuleWorkspace::resized()
                 }
                 else
                 {
-                    overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
+                    overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerXLang = overflowDividerX2 = -1;
                     overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
                 }
             }
@@ -3412,7 +3524,7 @@ void ModuleWorkspace::resized()
             if (toolbarOverflowBackdrop != nullptr)
                 toolbarOverflowBackdrop->setVisible (false);
             toolbarOverflowPanelBounds = {};
-            overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
+            overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerXLang = overflowDividerX2 = -1;
             overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
 
             layoutOptionalToolbarControls (tb, btnW, btnH, true,
@@ -3468,13 +3580,15 @@ void ModuleWorkspace::resized()
         audioSourceBox.setVisible (false);
         fpsBtn.setVisible   (false);
         fpsLabel.setVisible (false);
+        langBtn.setVisible  (false);
+        toolbarDividerXLang = -1;
         toolbarOverflowBtn.setVisible (false);
         toolbarOverflowCollapsed = false;
         toolbarOverflowExpanded  = false;
         if (toolbarOverflowBackdrop != nullptr)
             toolbarOverflowBackdrop->setVisible (false);
         toolbarOverflowPanelBounds = {};
-        overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerX2 = -1;
+        overflowDividerX0 = overflowDividerXFft = overflowDividerX1 = overflowDividerXLang = overflowDividerX2 = -1;
         overflowDividerX3 = overflowDividerXLayout = overflowDividerXStick = -1;
         gainBtn.setVisible  (false);
         setGainPopupVisible (false);
@@ -3874,6 +3988,53 @@ void ModuleWorkspace::setFpsLimit (int hz)
 }
 
 // ==========================================================
+// 界面语言切换按钮
+// ==========================================================
+void ModuleWorkspace::refreshLanguageUi()
+{
+    langBtn.setButtonText (y2k::i18n::getCurrentLanguage().buttonLabel);
+    resized();
+    repaint();
+}
+
+void ModuleWorkspace::showLanguageChooser()
+{
+    const int n = y2k::i18n::getNumLanguages();
+    if (n < 2)
+        return;
+
+    // 两种语言：单击直接切换（最常见，零额外操作）
+    if (n == 2)
+    {
+        y2k::i18n::cycleToNextLanguage();
+        return;
+    }
+
+    // 三种及以上：弹出语言菜单。菜单项用"语言代码 - 自称"：
+    //   当前界面字体未必含其它语言的字形，代码部分（ASCII）保证总能认出来。
+    juce::PopupMenu m;
+    m.setLookAndFeel (&getPinkXPLookAndFeel());
+    const auto current = y2k::i18n::getCurrentLanguageCode();
+    for (int i = 0; i < n; ++i)
+    {
+        const auto& lang = y2k::i18n::getLanguage (i);
+        juce::PopupMenu::Item item (lang.code + "  " + lang.nativeName);
+        item.itemID   = i + 1;
+        item.isTicked = lang.code == current;
+        m.addItem (std::move (item));
+    }
+
+    juce::Component::SafePointer<ModuleWorkspace> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&langBtn),
+                     [safe] (int result)
+                     {
+                         if (safe == nullptr || result <= 0)
+                             return;
+                         y2k::i18n::setLanguage (y2k::i18n::getLanguage (result - 1).code);
+                     });
+}
+
+// ==========================================================
 // FFT size 按钮（反馈 #7 第二轮）—— 控制台全局档位
 // ==========================================================
 void ModuleWorkspace::setFftSize (int size)
@@ -3935,7 +4096,7 @@ void ModuleWorkspace::setInputGainDb (float db)
 
     inputGainDb = clamped;
     gainSlider.setValue ((double) inputGainDb, juce::dontSendNotification);
-    gainBtn.setTooltip ("Input gain (" + juce::String (inputGainDb, 1) + " dB)");
+    gainBtn.setTooltip (makeGainTooltip (inputGainDb));
     if (onInputGainChanged)
         onInputGainChanged (inputGainDb);
     notifyLayoutChanged();
@@ -4697,7 +4858,7 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
             g.fillRect(r.reduced(1));
             g.setColour(PinkXP::ink);
             g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-            g.drawText("+", r, juce::Justification::centred, false);
+            g.drawText(y2k::tr ("+"), r, juce::Justification::centred, false);
             if (hoverHit_.kind == 4)
             {
                 g.setColour(PinkXP::ink.withAlpha(0.55f));
@@ -4713,9 +4874,10 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
         const int tw = juce::jmax(0, getWidth() - tx - 4);
         if (tw > 10 && tx < getWidth())
         {
-            g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
+            const juce::String shown = y2k::tr (th.displayName);
+            g.setFont(PinkXP::SymbolGlyphs::getFont (shown, 10.0f, juce::Font::bold));
             g.setColour(PinkXP::ink);
-            g.drawText(th.displayName, tx, 0, tw, getHeight(),
+            g.drawText(shown, tx, 0, tw, getHeight(),
                        juce::Justification::centredLeft, true);
         }
     }
@@ -4735,20 +4897,25 @@ void ThemeSwatchBar::mouseMove(const juce::MouseEvent& e)
         switch (h.kind)
         {
             case 1:
-                setTooltip("Open palette studio");
+                setTooltip(y2k::help::make ("Palette Studio",
+                    "Open the theme designer: hue wheel, mood, harmony, readability guard, "
+                    "My Themes, share codes and desktop textures."));
                 break;
             case 2:
             {
                 const auto& th = PinkXP::getAllThemes()[(size_t) h.index];
-                setTooltip(th.displayName + "  --  " + th.keywordHint);
+                setTooltip(y2k::help::make (th.displayName,
+                                            th.keywordHint + "\nClick to apply this preset theme."));
                 break;
             }
             case 3:
-                setTooltip(PinkXP::ThemeLibrary::instance().themes()[(size_t) h.index].name
-                           + "  --  My theme");
+                setTooltip(y2k::help::make (PinkXP::ThemeLibrary::instance().themes()[(size_t) h.index].name,
+                                            "One of My Themes - click to apply. Rename, reorder or "
+                                            "share it in Palette Studio."));
                 break;
             case 4:
-                setTooltip("New / edit palette");
+                setTooltip(y2k::help::make ("New palette",
+                                            "Open Palette Studio to build a new theme from the current one."));
                 break;
             default:
                 setTooltip({});
@@ -4881,7 +5048,7 @@ void HideChromeButton::paintButton(juce::Graphics& g, bool isMouseOver, bool isB
     //   之前 reduced(4, 2) 会在 btnW=52 / font≈12pt 下把 "w" 切掉半像素。
     auto textArea = r.reduced(1, 2);
     if (isButtonDown) textArea.translate(1, 1);
-    g.drawText(getButtonText(), textArea,
+    g.drawText(y2k::tr (getButtonText()), textArea,
                juce::Justification::centred, false);
 }
 

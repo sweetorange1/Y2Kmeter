@@ -1,5 +1,7 @@
 #include "source/ui/ModulePanel.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/perf/FramePerfLog.h"
@@ -130,6 +132,47 @@ juce::Rectangle<int> ModulePanel::getPopOutButtonBounds() const
     const int s = PinkXP::ui(popOutButtonSize);
     return juce::Rectangle<int>(cb.getX() - gap - s,
                                  cb.getY(), s, s);
+}
+
+// ==========================================================
+// 悬停提示（HoverHelp）默认实现
+// ==========================================================
+ModulePanel::HoverHelp ModulePanel::getHoverHelp (juce::Point<int> pos) const
+{
+    HoverHelp h;
+    const bool locked = isPanelLayoutLocked (*this);
+
+    if (! bareMode_)
+    {
+        if (getCloseButtonBounds().contains (pos))
+        {
+            h.text = y2k::help::make ("Close module",
+                locked ? juce::String ("Layout is locked (L in the title bar) - unlock it to remove modules.")
+                       : juce::String ("Remove this module. Add it back any time with a right-click "
+                                       "or double-click on the empty desktop."));
+            return h;
+        }
+
+        if ((popOutEnabled_ || isFloating_) && getPopOutButtonBounds().contains (pos))
+        {
+            h.text = isFloating_
+                ? y2k::help::make ("Dock", "Put this module back into the main window at its old place.")
+                : y2k::help::make ("Pop out", "Detach this module into its own floating window "
+                                              "(great for a second screen). Its settings travel with it.");
+            return h;
+        }
+
+        if (getTitleBarBounds().contains (pos))
+        {
+            h.text = y2k::help::moduleHelp (moduleType) + "\n\n"
+                   + y2k::help::moduleTitleUsage (isFloating_, locked);
+            return h;
+        }
+    }
+
+    h.text = y2k::help::moduleHelp (moduleType);
+    h.contentZone = true;
+    return h;
 }
 
 void ModulePanel::setFloating(bool floating) noexcept
@@ -301,7 +344,7 @@ void ModulePanel::paint(juce::Graphics& g)
     auto cbText = cb;
     cbText.translate(0, -1);
     if (closeButtonPressed) cbText.translate(1, 1);
-    g.drawText("x", cbText, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
 
     // 3.5. 弹出/停靠按钮（仅在 Standalone 模式或已处于浮动态时绘制）
     if (popOutEnabled_ || isFloating_)
@@ -317,7 +360,7 @@ void ModulePanel::paint(juce::Graphics& g)
         auto popBtnText = popBtn;
         popBtnText.translate(0, -1);
         if (popOutButtonPressed_) popBtnText.translate(1, 1);
-        g.drawText(isFloating_ ? "=" : "-", popBtnText, juce::Justification::centred, false);
+        g.drawText(y2k::tr (isFloating_ ? "=" : "-"), popBtnText, juce::Justification::centred, false);
     }
 
     // 4. 内容区（默认白底凹陷，子类可覆盖 paintContent 重绘）
@@ -400,7 +443,7 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
 
     // 先画一层 65% 黑色阴影（文字下方 1px），保证在亮红不够醒目的背景上也能读
     g.setColour (juce::Colours::black.withAlpha (0.65f));
-    g.drawText (txt, cpuBox.translated (1, 1), juce::Justification::centredRight, false);
+    g.drawText (y2k::tr (txt), cpuBox.translated (1, 1), juce::Justification::centredRight, false);
 
     // CPU 颜色：0% 深暗红 → 9% 及以上 纯亮红，线性插值
     //   · 低负载时字色偏暗，避免满屏都是亮红看不出差异
@@ -414,7 +457,7 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
     const auto fg = coldRed.interpolatedWith (hotRed, t);
 
     g.setColour (fg);
-    g.drawText (txt, cpuBox, juce::Justification::centredRight, false);
+    g.drawText (y2k::tr (txt), cpuBox, juce::Justification::centredRight, false);
 }
 
 void ModulePanel::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)

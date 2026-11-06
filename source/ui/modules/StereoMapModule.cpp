@@ -1,5 +1,7 @@
 #include "source/ui/modules/StereoMapModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 
 #include <cmath>
@@ -163,10 +165,13 @@ void StereoMapModule::applyModeToButton()
     btnMode.setToggleState (mode == Mode::cancel, juce::dontSendNotification);
     btnMode.setButtonText (mode == Mode::pan ? "PAN" : "MONO");
     btnMode.setTooltip (mode == Mode::pan
-        ? juce::String ("Mode: Pan - per-band L/R position (up = left, down = right). Click for Mono.")
-        : juce::String ("Mode: Mono - level retained after summing to mono. Top = 100%, bottom = "
-                        + formatPercent (1.0f - kCancelFullScale)
-                        + " (full-scale cancellation). Lower = worse. Click for Pan."));
+        ? y2k::help::make ("Mode: PAN",
+                           "Where each frequency band sits in the stereo field: up = left, "
+                           "middle = centre, down = right. Click for MONO.")
+        : y2k::help::make ("Mode: MONO",
+                           "How much of each band survives when summed to mono.\nTop = 100% (safe), bottom = "
+                           + formatPercent (1.0f - kCancelFullScale)
+                           + " (heavy cancellation).\nLower is worse. Click for PAN."));
 }
 
 // ==========================================================
@@ -198,7 +203,7 @@ void StereoMapModule::drawToolbarHint (juce::Graphics& g) const
     for (int pass = 0; pass < 4; ++pass)
     {
         const juce::Font f = PinkXP::getAxisFont (h, juce::Font::plain);
-        const float w = juce::GlyphArrangement::getStringWidth (f, text);
+        const float w = juce::GlyphArrangement::getStringWidth (f, y2k::tr (text));
 
         if (w <= avail || h <= 6.0f)
             break;
@@ -208,7 +213,7 @@ void StereoMapModule::drawToolbarHint (juce::Graphics& g) const
 
     g.setFont (PinkXP::getAxisFont (h, juce::Font::plain));
     g.setColour (PinkXP::ink.withAlpha (0.62f));
-    g.drawText (text, area, juce::Justification::centredRight, false);
+    g.drawText (y2k::tr (text), area, juce::Justification::centredRight, false);
 }
 
 juce::ValueTree StereoMapModule::saveModuleSpecificState() const
@@ -605,11 +610,11 @@ void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> ca
 
         g.setFont (PinkXP::getAxisFont (10.0f, juce::Font::bold));
         g.setColour (labelL.withAlpha (0.85f));
-        g.drawText ("L", plot.getX() - 18, plot.getY() - 2, 14, 12, juce::Justification::centredRight, false);
+        g.drawText (y2k::tr ("L"), plot.getX() - 18, plot.getY() - 2, 14, 12, juce::Justification::centredRight, false);
         g.setColour (PinkXP::ink.withAlpha (0.72f));
-        g.drawText ("C", plot.getX() - 18, plot.getCentreY() - 6, 14, 12, juce::Justification::centredRight, false);
+        g.drawText (y2k::tr ("C"), plot.getX() - 18, plot.getCentreY() - 6, 14, 12, juce::Justification::centredRight, false);
         g.setColour (labelR.withAlpha (0.85f));
-        g.drawText ("R", plot.getX() - 18, plot.getBottom() - 10, 14, 12, juce::Justification::centredRight, false);
+        g.drawText (y2k::tr ("R"), plot.getX() - 18, plot.getBottom() - 10, 14, 12, juce::Justification::centredRight, false);
     }
     else
     {
@@ -620,13 +625,13 @@ void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> ca
         g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
 
         g.setColour (sampleRamp (sev, 0.10f).withAlpha (0.80f));
-        g.drawText ("100%", plot.getX() - 25, plot.getY() - 5, 24, 11,
+        g.drawText (y2k::tr ("100%"), plot.getX() - 25, plot.getY() - 5, 24, 11,
                     juce::Justification::centredRight, false);
         g.setColour (PinkXP::ink.withAlpha (0.62f));
-        g.drawText ("75%", plot.getX() - 25, plot.getCentreY() - 5, 24, 11,
+        g.drawText (y2k::tr ("75%"), plot.getX() - 25, plot.getCentreY() - 5, 24, 11,
                     juce::Justification::centredRight, false);
         g.setColour (sampleRamp (sev, 0.90f).withAlpha (0.85f));
-        g.drawText ("50%", plot.getX() - 25, plot.getBottom() - 6, 24, 11,
+        g.drawText (y2k::tr ("50%"), plot.getX() - 25, plot.getBottom() - 6, 24, 11,
                     juce::Justification::centredRight, false);
     }
 
@@ -641,7 +646,7 @@ void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> ca
         else
             label = juce::String ((int) f);
 
-        g.drawText (label,
+        g.drawText (y2k::tr (label),
                     juce::roundToInt (x) - 14,
                     plot.getBottom() + 2,
                     28,

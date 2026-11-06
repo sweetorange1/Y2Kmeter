@@ -1,4 +1,5 @@
 #include "source/ui/toys/ToyKit.h"
+#include "source/i18n/Localisation.h"
 #include "source/Y2KLogging.h"
 
 #if JUCE_WINDOWS
@@ -468,8 +469,8 @@ void EmojiAtlas::bakeOne (EmojiId id, Size size)
         juce::Graphics g (img);
         g.setFont (juce::FontOptions (emojiFamily, (float) (px * 0.82f), juce::Font::plain));
         g.setColour (colour);
-        g.drawText (juce::String (juce::CharPointer_UTF16 (
-                        reinterpret_cast<const juce::CharPointer_UTF16::CharType*> (u16src))),
+        g.drawText (y2k::tr (juce::String (juce::CharPointer_UTF16 (
+                        reinterpret_cast<const juce::CharPointer_UTF16::CharType*> (u16src)))),
                     juce::Rectangle<int> (0, 0, px, px),
                     juce::Justification::centred, false);
         return img;
@@ -490,7 +491,7 @@ void EmojiAtlas::bakeOne (EmojiId id, Size size)
         juce::Graphics g (img);
         g.setFont (juce::FontOptions (emojiFamily, (float) (px * 0.82f), juce::Font::plain));
         g.setColour (colour);
-        g.drawText (emojiUtf8 (id), juce::Rectangle<int> (0, 0, px, px),
+        g.drawText (y2k::tr (emojiUtf8 (id)), juce::Rectangle<int> (0, 0, px, px),
                     juce::Justification::centred, false);
         return img;
     };

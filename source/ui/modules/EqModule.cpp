@@ -1,5 +1,7 @@
 #include "source/ui/modules/EqModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
@@ -349,7 +351,7 @@ void EqModule::PixelEqGraph::paint(juce::Graphics& g)
                 juce::String label = (db > 0) ? ("+" + juce::String(db)) : juce::String(db);
                 g.setColour(PinkXP::ink.withAlpha(0.85f));
                 const int textH = 10;
-                g.drawText(label, (int) scaleLeft, (int) std::round(y) - textH / 2,
+                g.drawText(y2k::tr (label), (int) scaleLeft, (int) std::round(y) - textH / 2,
                            (int)(scaleRight - tickLen - 1 - scaleLeft), textH,
                            juce::Justification::centredRight, false);
             }
@@ -436,6 +438,14 @@ EqModule::EqModule(Y2KmeterAudioProcessor& p)
     cellSizeLabel.setColour(juce::Label::textColourId, PinkXP::ink);
     cellSizeLabel.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
     cellSizeLabel.setText("SIZE", juce::dontSendNotification);
+
+    freqRangeSlider.setTooltip (y2k::help::make ("Frequency range",
+        "Drag the two handles to zoom the beads into a frequency band "
+        "(default 20 Hz - 20 kHz)."));
+    freqRangeLabel.setTooltip (freqRangeSlider.getTooltip());
+    cellSizeSlider.setTooltip (y2k::help::make ("Bead size",
+        "Size of each pixel bead (1 - 20 px). Small = more detail, big = chunky retro look."));
+    cellSizeLabel.setTooltip (cellSizeSlider.getTooltip());
 
     // 主题切换时重新下发 "SIZE" 标签的 textColourId —— 与标题栏墨色保持一致。
     //   JUCE Label 的 textColour 是在调用瞬间缓存到 Component 内部的 Colour 字段，

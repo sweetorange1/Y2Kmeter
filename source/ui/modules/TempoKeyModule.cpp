@@ -1,6 +1,8 @@
 #include "source/ui/modules/TempoKeyModule.h"
 
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 
 #include <cmath>
@@ -36,7 +38,7 @@ namespace
         for (int pass = 0; pass < 4; ++pass)
         {
             const juce::Font f = PinkXP::getFont (h, styleFlags);
-            const float w = juce::GlyphArrangement::getStringWidth (f, text);
+            const float w = juce::GlyphArrangement::getStringWidth (f, y2k::tr (text));
 
             if (w <= maxWidth || h <= minHeight)
                 break;
@@ -59,13 +61,16 @@ TempoKeyModule::TempoKeyModule (AnalyserHub& h)
     setDefaultSize (352, 200);
     setTitleText ("Tempo / Key");
 
-    btnStartStop.setTooltip ("Start / stop the tempo + key analysis.");
+    btnStartStop.setTooltip (y2k::help::make ("Start / Stop",
+        "Start or pause the tempo + key analysis. It runs in a background thread, "
+        "so it never affects the audio."));
     btnStartStop.onClick = [this]() { onStartStopClicked(); };
     addAndMakeVisible (btnStartStop);
 
     // 若分析尚未启动，RESET 会顺手按下 START（见 onResetClicked）。
-    btnReset.setTooltip ("Clear the analysis window and start over (BPM and key). "
-                         "Starts the analysis if it is not running.");
+    btnReset.setTooltip (y2k::help::make ("Reset",
+        "Forget what has been heard so far and start a fresh BPM and key estimate - "
+        "use it when the song changes. Starts the analysis if it is stopped."));
     btnReset.onClick = [this]() { onResetClicked(); };
     addAndMakeVisible (btnReset);
 
@@ -415,7 +420,7 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
         {
             const float avail = (float) labelArea.getWidth() - 2.0f;
             const float w = juce::GlyphArrangement::getStringWidth (
-                PinkXP::getAxisFont (labelH, juce::Font::bold), labelText);
+                PinkXP::getAxisFont (labelH, juce::Font::bold), y2k::tr (labelText));
 
             if (w > avail && w > 0.0f)
                 labelH = juce::jmax (6.0f, labelH * avail / w);
@@ -423,7 +428,7 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
 
         g.setFont (PinkXP::getAxisFont (labelH, juce::Font::bold));
         g.setColour (PinkXP::ink.withAlpha (stale ? 0.30f : (provisional ? 0.45f : 0.65f)));
-        g.drawText (labelText, labelArea, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (labelText), labelArea, juce::Justification::centredLeft, false);
 
         // 主数值：按"剩余高度 + 实际文字宽度"求最大可用字号，
         //   宽度用字体真实测量（不再靠字符数估算），任何尺寸都不会裁掉末尾字母。
@@ -439,7 +444,7 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
             g.setColour (stale ? PinkXP::ink.withAlpha (0.28f)
                                : (provisional ? PinkXP::pink700.withAlpha (0.55f)
                                               : PinkXP::pink700));
-            g.drawText (valueText, col, juce::Justification::centred, false);
+            g.drawText (y2k::tr (valueText), col, juce::Justification::centred, false);
         }
 
         // 关系调副行：字号约为主数值的 0.62（"gently smaller"），
@@ -459,14 +464,14 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
             g.setColour (PinkXP::ink.withAlpha (stale ? 0.25f : 0.60f));
 
             // 作为大字读数的"副标题"居中显示，视觉上隶属于上方调性
-            g.drawText (subText, subArea, juce::Justification::centred, false);
+            g.drawText (y2k::tr (subText), subArea, juce::Justification::centred, false);
         }
 
         // 时效
         g.setFont (PinkXP::getAxisFont (clampFont ((float) agePx * 0.92f, 6.5f, 9.5f),
                                         juce::Font::plain));
         g.setColour (PinkXP::ink.withAlpha (0.45f));
-        g.drawText (ageText, ageArea, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (ageText), ageArea, juce::Justification::centredLeft, false);
 
         // 置信度：细条 + 百分比（只在结果有效时显示）
         if (valid && confArea.getHeight() > 0)
@@ -488,7 +493,7 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
             g.setFont (PinkXP::getAxisFont (clampFont ((float) confPx * 0.72f, 6.0f, 8.5f),
                                             juce::Font::bold));
             g.setColour (PinkXP::ink.withAlpha (0.55f));
-            g.drawText (juce::String ((int) std::lround ((double) confidence * 100.0)) + "%",
+            g.drawText (y2k::tr (juce::String ((int) std::lround ((double) confidence * 100.0)) + "%"),
                         pctArea, juce::Justification::centredRight, false);
         }
     };
@@ -512,9 +517,9 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
         // 自然小调是默认值，不再重复写 "natural"；只有和声/旋律小调才标注限定词，
         // 这样副行留给关系调，且能放大到"略小于主数值"的字号而不被宽度裁掉。
         if (latest.keyMode == y2k::music::Mode::harmonicMinor)
-            keySub = "harmonic";
+            keySub = y2k::tr ("harmonic");
         else if (latest.keyMode == y2k::music::Mode::melodicMinor)
-            keySub = "melodic";
+            keySub = y2k::tr ("melodic");
 
         // 关系调：与当前调共享**完全相同的 7 个音**，只是主音不同。
         //   大调 ↔ 关系小调；自然小调 ↔ 关系大调；
@@ -523,8 +528,9 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
 
         if (rel.name != nullptr)
         {
-            const juce::String r = juce::String ("rel. ") + rel.name
-                                 + (rel.minor ? " minor" : " major");
+            // 界面语言：模板 + 调式词分别翻译（音名本身不翻译）
+            const juce::String r = y2k::trf ("rel. {0} {1}", rel.name,
+                                             y2k::tr (rel.minor ? "minor" : "major"));
 
             keySub = keySub.isEmpty() ? r : (keySub + " · " + r);
         }
@@ -554,7 +560,7 @@ void TempoKeyModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     g.setColour (PinkXP::ink.withAlpha (0.60f));
     g.setFont (PinkXP::getAxisFont (clampFont ((float) statusH * 0.85f, 7.5f, 10.0f),
                                     juce::Font::bold));
-    g.drawText (y2k::music::statusText (latest.status), statusRow,
+    g.drawText (y2k::tr (y2k::music::statusText (latest.status)), statusRow,
                 juce::Justification::centredLeft, false);
 
     // 电平条（仅作输入是否有信号的辅助提示）
@@ -600,8 +606,8 @@ juce::String TempoKeyModule::formatKey (const y2k::music::Result& r)
         return "--";
 
     // 主写法按调式选（大调 Db / 小调 Eb）；关系调显示在副行。
-    return juce::String (spelling.name)
-         + (y2k::music::isMinorMode (r.keyMode) ? " minor" : " major");
+    return juce::String (spelling.name) + " "
+         + y2k::tr (y2k::music::isMinorMode (r.keyMode) ? "minor" : "major");
 }
 
 juce::String TempoKeyModule::formatAge (double updatedMs)

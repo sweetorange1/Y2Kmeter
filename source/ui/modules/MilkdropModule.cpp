@@ -9,11 +9,13 @@
   ==============================================================================
 */
 #include "MilkdropModule.h"
+#include "source/i18n/Localisation.h"
 #include "ProjectMApi.h"
 #if JUCE_MAC
 #include "MilkdropModule_mac.h"
 #endif
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/diag/Y2KDiagLog.h"
 #include "source/Y2KLogging.h"
 #include "PluginEditor.h"
@@ -1763,7 +1765,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
   auto cbText = cb;
   cbText.translate(0, -1);
   if (closeButtonPressed) cbText.translate(1, 1);
-  g.drawText("x", cbText, juce::Justification::centred, false);
+  g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
 
   // 3.5. 弹出/停靠按钮
   if (isPopOutEnabled() || isFloating())
@@ -1778,7 +1780,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
     auto popBtnText = popBtn;
     popBtnText.translate(0, -1);
     if (popOutButtonPressed_) popBtnText.translate(1, 1);
-    g.drawText(isFloating() ? "=" : "-", popBtnText, juce::Justification::centred, false);
+    g.drawText(y2k::tr (isFloating() ? "=" : "-"), popBtnText, juce::Justification::centred, false);
   }
   } // if (!isBareMode())
 
@@ -1822,17 +1824,17 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         g.fillAll(juce::Colours::black);
         auto msg = glView->GetError().isEmpty()
                        ? juce::String("Milkdrop initializing...")
-                       : juce::String("Milkdrop error: ") + glView->GetError();
+                       : y2k::trf ("Milkdrop error: {0}", y2k::tr (glView->GetError()));
         g.setColour(juce::Colours::grey);
         g.setFont(juce::Font(12.0f));
-        g.drawText(msg, content, juce::Justification::centred, false);
+        g.drawText(y2k::tr (msg), content, juce::Justification::centred, false);
       }
     }
   } else {
     g.fillAll(juce::Colours::black);
     g.setColour(juce::Colours::grey);
     g.setFont(juce::Font(12.0f));
-    g.drawText("Milkdrop initializing...", content, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("Milkdrop initializing..."), content, juce::Justification::centred, false);
   }
 
   if (glView != nullptr && glView->IsRenderReady())
@@ -3451,6 +3453,267 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
     }
 }
 
+// ==========================================================
+// 悬停提示（HoverHelp）
+//   命中顺序与 mouseDown 一致：顶部控制栏 / 收藏按钮 → auto 行 → 各展开面板，
+//   全部复用现有的几何函数（与绘制 / 点击同源，不会漂移）。
+// ==========================================================
+namespace
+{
+    juce::String milkdropEffectHelp (MilkdropEffectId id)
+    {
+        switch (id)
+        {
+            case MilkdropEffectId::kInvert:       return "Invert all colours.";
+            case MilkdropEffectId::kShadows:      return "Add a mirrored grey glow on top (brightens, never darkens).";
+            case MilkdropEffectId::kSolarize:     return "Solarize: mid tones flare up, darks and highlights fold back.";
+            case MilkdropEffectId::kSplit:        return "Mirror the picture left / right around the centre.";
+            case MilkdropEffectId::kZoom:         return "Zoom 2x into the centre.";
+            case MilkdropEffectId::kMulti:        return "Tile the picture into repeated copies.";
+            case MilkdropEffectId::kRainbow:      return "Wash the picture with cycling rainbow colours.";
+            case MilkdropEffectId::kBlow:         return "Add a soft blurred glow on top.";
+            case MilkdropEffectId::kBurn:         return "Burn-style overlay blend for extra contrast.";
+            case MilkdropEffectId::kKaleidoscope: return "Fold the picture into mirrored kaleidoscope wedges.";
+            case MilkdropEffectId::kSwirl:        return "Twist the picture around the centre.";
+            case MilkdropEffectId::kPinch:        return "Pinch / bulge the centre like a lens.";
+            case MilkdropEffectId::kPixelate:     return "Chunky pixel blocks.";
+            case MilkdropEffectId::kGlitch:       return "Slightly offset RGB channels - digital glitch.";
+            case MilkdropEffectId::kPosterize:    return "Reduce to a few flat colour levels.";
+            case MilkdropEffectId::kSepia:        return "Old photo brown tint.";
+            case MilkdropEffectId::kGrayscale:    return "Black and white.";
+            case MilkdropEffectId::kEdge:         return "Edge detection - outlines only.";
+            case MilkdropEffectId::kVignette:     return "Darken the corners.";
+            case MilkdropEffectId::kTunnel:       return "Fly through an endless tunnel.";
+            case MilkdropEffectId::kRipple:       return "Concentric water ripples.";
+            case MilkdropEffectId::kMelt:         return "The picture droops and melts downwards.";
+            case MilkdropEffectId::kFisheye:      return "Extreme wide-angle fisheye lens.";
+            case MilkdropEffectId::kNoiseWarp:    return "High-frequency noise jitter.";
+            case MilkdropEffectId::kMirrorMaze:   return "Infinite nested mirrors.";
+            case MilkdropEffectId::kFragment:     return "Shuffle small blocks - shattered glass.";
+            case MilkdropEffectId::kSpiral:       return "Spiral twist (angle + radius).";
+            case MilkdropEffectId::kTwist:        return "Twist along the vertical axis.";
+            case MilkdropEffectId::kColorShift:   return "Explosive RGB split with boosted colour.";
+            case MilkdropEffectId::kNeon:         return "Neon glow around bright areas.";
+            case MilkdropEffectId::kThermal:      return "Thermal camera colour palette.";
+            case MilkdropEffectId::kAcid:         return "High-contrast green / magenta acid tones.";
+            case MilkdropEffectId::kVhs:          return "VHS tape: stripes, colour bleed and noise.";
+            case MilkdropEffectId::kCrt:          return "CRT scanlines and phosphor glow.";
+            case MilkdropEffectId::kDuotone:      return "Map brightness onto two colours.";
+            case MilkdropEffectId::kBloom:        return "Bright areas bloom and spread.";
+            case MilkdropEffectId::kBinary:       return "Hard black / white threshold.";
+            case MilkdropEffectId::kPrismatic:    return "Radial prism colour fringing.";
+            default:                              break;
+        }
+        return {};
+    }
+
+    juce::String milkdropTweakHelp (int row)
+    {
+        switch (row)
+        {
+            case 0: return "Zoom in or out.";
+            case 1: return "Rotate the picture.";
+            case 2: return "Wobbly warp distortion.";
+            case 3: return "Shift horizontally.";
+            case 4: return "Shift vertically.";
+            case 5: return "Stretch horizontally.";
+            case 6: return "Stretch vertically.";
+            default: return {};
+        }
+    }
+
+    juce::String milkdropTweakIntHelp (int row)
+    {
+        switch (row)
+        {
+            case 0: return "Kaleidoscope petals: N-fold mirror symmetry around the centre (1 = off).";
+            case 1: return "Cut the picture into N strips horizontally and mirror them (1 = off).";
+            case 2: return "Cut the picture into N strips vertically and mirror them (1 = off).";
+            default: return {};
+        }
+    }
+}
+
+ModulePanel::HoverHelp MilkdropModule::getHoverHelp (juce::Point<int> pos) const
+{
+    using y2k::help::make;
+
+    HoverHelp h;
+    auto tip = [&h] (const juce::String& text) { h.text = text; return h; };
+
+    if (glView == nullptr)
+        return ModulePanel::getHoverHelp (pos);
+
+    const auto content = getContentBounds();
+    const auto topBar  = content.withHeight (26);
+
+    // ---- 顶部控制栏 + 右下角收藏 / 切换库 ----
+    if (focused_)
+    {
+        auto btn = hitTestOverlayButton (pos, getOverlayBounds (content));
+        if (btn == OverlayButton::kNone)
+            btn = hitTestLibraryButton (pos, content);
+
+        switch (btn)
+        {
+            case OverlayButton::kPrev:
+                return tip (make ("Previous preset", "Go back one preset. Shortcut: Left arrow."));
+            case OverlayButton::kNext:
+                return tip (make ("Next preset", "Go to the next preset. Shortcut: Right arrow."));
+            case OverlayButton::kRandom:
+                return tip (make ("Random preset", "Jump to a random preset (no repeats until all are seen). "
+                                                   "Shortcut: Space."));
+            case OverlayButton::kPresetName:
+                return tip (make ("Preset name", "Click to jump straight to a preset number."));
+            case OverlayButton::kAuto:
+                return tip (make (isAutoMode_ ? "Auto: ON" : "Auto: OFF",
+                                  "Switch presets automatically - every N seconds, or every N beats "
+                                  "in a DAW. Click to cycle: on -> show settings -> off."));
+            case OverlayButton::kColor:
+                return tip (make ("Color", "Open the colour panel: tint the red / green / blue channels "
+                                           "and set the overall brightness."));
+            case OverlayButton::kEffects:
+                return tip (make ("Effects", "Open the effects panel: stack post-processing effects "
+                                             "(kaleidoscope, VHS, CRT, neon, glitch...) on any preset."));
+            case OverlayButton::kWave:
+                return tip (make ("Wave", "Open the wave panel: override the preset's waveform shape, "
+                                          "position, colour and drawing style."));
+            case OverlayButton::kTweak:
+                return tip (make ("Tweak", "Open the tweak panel: zoom, rotate, warp, shift, stretch and "
+                                           "mirror-fold the final picture in real time."));
+            case OverlayButton::kLike:
+            {
+                bool liked = false;
+                const auto path = glView->GetCurrentPresetFilePath();
+                if (path.isNotEmpty())
+                    liked = FindMilkdropLikeDirForModule()
+                                .getChildFile (juce::File (path).getFileName()).existsAsFile();
+                return tip (liked ? make ("Liked", "This preset is in your Likes. Click to remove it.")
+                                  : make ("Like", "Save this preset to your Likes so you can browse "
+                                                  "your favourites only."));
+            }
+            case OverlayButton::kLibraryToggle:
+            {
+                const bool inLikeLib = (editor_ != nullptr) && editor_->IsMilkdropUseLikeLibrary();
+                return tip (inLikeLib ? make ("Browsing: Likes", "Click to go back to all built-in presets.")
+                                      : make ("Browsing: All presets", "Click to browse only your liked presets."));
+            }
+            default:
+                break;
+        }
+    }
+
+    // ---- auto 展开行 ----
+    if (isAutoRowExpanded_)
+    {
+        if (! cachedAutoModeBtnRect_.isEmpty() && cachedAutoModeBtnRect_.contains (pos))
+            return tip (make ("Auto timing", autoModeIsBeat_
+                ? juce::String ("Beat mode: switch every N beats, locked to the DAW tempo. Click for seconds.")
+                : juce::String ("Time mode: switch every N seconds. Click for beats (DAW tempo).")));
+
+        const auto autoRow = getAutoRowBounds (topBar);
+        if (getSliderBounds (autoRow).expanded (4).contains (pos))
+            return tip (make (autoModeIsBeat_ ? "Beats per switch" : "Seconds per switch",
+                              autoModeIsBeat_ ? "Drag to set how many beats each preset stays (1 - 64)."
+                                              : "Drag to set how long each preset stays (1 - 60 s)."));
+
+        if (! autoModeIsBeat_ && cachedAutoTimeLabel_.contains (pos))
+            return tip (make ("Interval", "Click to type an exact number of seconds."));
+    }
+
+    // ---- color 面板 ----
+    if (isColorPanelOpen_)
+    {
+        const auto panel = getColorPanelBounds (topBar);
+        if (getTintResetBounds (panel).contains (pos))
+            return tip (make ("Reset color", "Back to neutral colours and normal brightness."));
+
+        static const char* const kTintHelp[][2] = {
+            { "Red tint",   "Scale the red channel of the whole picture (1.00 = unchanged)." },
+            { "Green tint", "Scale the green channel of the whole picture (1.00 = unchanged)." },
+            { "Blue tint",  "Scale the blue channel of the whole picture (1.00 = unchanged)." },
+            { "Brightness", "Centre = normal, left = darker, right = glowing (up to 8x)." },
+        };
+        for (int row = 0; row < 4; ++row)
+            if (getTintSliderBounds (panel, row).expanded (6).contains (pos))
+                return tip (make (kTintHelp[row][0], kTintHelp[row][1]));
+    }
+
+    // ---- effects 面板 ----
+    if (isEffectsPanelOpen_)
+    {
+        const auto panel = getEffectsPanelBounds (topBar);
+        if (getEffectsResetBounds (panel).contains (pos))
+            return tip (make ("Reset effects", "Turn every effect off."));
+
+        const int count = CountImplementedMilkdropEffects();
+        for (int row = 0; row < count; ++row)
+        {
+            if (! getEffectsToggleBounds (panel, row).expanded (4).contains (pos))
+                continue;
+
+            if (const auto* def = GetImplementedMilkdropEffect (row))
+                return tip (make (y2k::trf ("Effect: {0}", y2k::tr (def->display_name)) + " "
+                                      + y2k::tr (def->get (visualState_) ? "(on)" : "(off)"),
+                                  milkdropEffectHelp (def->id) + "\nEffects stack - try mixing a few."));
+        }
+    }
+
+    // ---- wave 面板 ----
+    if (isWavePanelOpen_)
+    {
+        const auto panel = getWavePanelBounds (topBar);
+        if (getWaveResetBounds (panel).contains (pos))
+            return tip (make ("Reset wave", "Drop all wave overrides and use the preset's own waveform."));
+
+        if (getWaveModeStepperBounds (panel).contains (pos))
+            return tip (make (y2k::trf ("Wave shape: {0}", y2k::tr (GetWaveModeName (waveState_.mode))),
+                              "Click the left / right half to step through the 16 waveform shapes."));
+
+        static const char* const kSwitchHelp[][2] = {
+            { "Dots",   "Draw the waveform as dots instead of a line." },
+            { "Thick",  "Draw a thicker waveform." },
+            { "Add",    "Additive blending - overlapping parts glow brighter." },
+            { "Bright", "Boost the waveform brightness." },
+        };
+        for (int idx = 0; idx < 4; ++idx)
+            if (getWaveSwitchBounds (panel, idx).expanded (4).contains (pos))
+                return tip (make (kSwitchHelp[idx][0], kSwitchHelp[idx][1]));
+
+        static const char* const kSliderHelp[][2] = {
+            { "Position X", "Move the waveform left / right." },
+            { "Position Y", "Move the waveform up / down." },
+            { "Red",        "Waveform red amount." },
+            { "Green",      "Waveform green amount." },
+            { "Blue",       "Waveform blue amount." },
+            { "Alpha",      "Waveform opacity." },
+            { "Mystery",    "Shape-specific extra parameter - its effect depends on the wave shape." },
+        };
+        for (int row = 0; row < 7; ++row)
+            if (getWaveSliderBounds (panel, row).expanded (6).contains (pos))
+                return tip (make (kSliderHelp[row][0], kSliderHelp[row][1]));
+    }
+
+    // ---- tweak 面板 ----
+    if (isTweakPanelOpen_)
+    {
+        const auto panel = getTweakPanelBounds (topBar);
+        if (getTweakResetBounds (panel).contains (pos))
+            return tip (make ("Reset tweak", "Remove all zoom / rotate / warp / shift / stretch / fold changes."));
+
+        for (int row = 0; row < MilkdropVisualOffsetState::kIntParamCount; ++row)
+            if (getTweakIntSliderBounds (panel, row).expanded (6).contains (pos))
+                return tip (make (GetVisualOffsetIntParams()[row].display_name, milkdropTweakIntHelp (row)));
+
+        for (int row = 0; row < MilkdropVisualOffsetState::kParamCount; ++row)
+            if (getTweakSliderBounds (panel, row).expanded (6).contains (pos))
+                return tip (make (GetVisualOffsetParams()[row].display_name,
+                                  milkdropTweakHelp (row) + "\nCentre = no change. Applies live."));
+    }
+
+    return ModulePanel::getHoverHelp (pos);
+}
+
 void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
 {
     // slider 拖动中（mouseDrag 是 JUCE 专为拖拽设计的回调，比 mouseMove 更可靠
@@ -3767,7 +4030,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
         g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(text, r, juce::Justification::centred, false);
+        g.drawText(y2k::tr (text), r, juce::Justification::centred, false);
     };
 
     drawBtn(prevBtn,   "<",   OverlayButton::kPrev);
@@ -3809,7 +4072,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
         g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText("color", colorBtn, juce::Justification::centred, false);
+        g.drawText(y2k::tr ("color"), colorBtn, juce::Justification::centred, false);
     }
 
     // effects 按钮：效果控制器展开时用高亮 toggle 样式
@@ -3832,7 +4095,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
         g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText("effects", effectsBtn, juce::Justification::centred, false);
+        g.drawText(y2k::tr ("effects"), effectsBtn, juce::Justification::centred, false);
     }
 
     // wave 按钮：波形样式控制器展开时用高亮 toggle 样式
@@ -3855,7 +4118,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
         g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText("wave", waveBtn, juce::Justification::centred, false);
+        g.drawText(y2k::tr ("wave"), waveBtn, juce::Justification::centred, false);
     }
 
     // tweak 按钮：全局变换偏移控制器展开时用高亮 toggle 样式
@@ -3878,7 +4141,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
         g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText("tweak", tweakBtn, juce::Justification::centred, false);
+        g.drawText(y2k::tr ("tweak"), tweakBtn, juce::Justification::centred, false);
     }
 
     // auto 按钮：轮播模式激活时用高亮 toggle 样式
@@ -3901,7 +4164,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
         g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
         g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText("auto", autoBtn, juce::Justification::centred, false);
+        g.drawText(y2k::tr ("auto"), autoBtn, juce::Justification::centred, false);
     }
 
     // 预设名：格式 "3/100  presetName"
@@ -3916,7 +4179,7 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
     // 序号部分用粉色高亮，名称部分用白色
     juce::String idxPart = juce::String(idx + 1) + "/" + juce::String(total) + "  ";
-    float idxW = PinkXP::getFont(9.0f, juce::Font::bold).getStringWidthFloat(idxPart) + 2.0f;
+    float idxW = PinkXP::getFont(9.0f, juce::Font::bold).getStringWidthFloat(y2k::tr (idxPart)) + 2.0f;
 
     auto idxRect = nameArea.withWidth(juce::jmin((int)idxW, nameArea.getWidth()));
     auto nameRect = nameArea.withTrimmedLeft(idxRect.getWidth());
@@ -3940,11 +4203,11 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
 
     g.setColour(PinkXP::pink300.withAlpha(namePressed ? 1.0f : 0.95f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(idxPart, idxRect, juce::Justification::centredLeft, true);
+    g.drawText(y2k::tr (idxPart), idxRect, juce::Justification::centredLeft, true);
 
     g.setColour(juce::Colour(0xEE, 0xEE, 0xEE).withAlpha(0.95f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-    g.drawText(presetDisplay.substring(idxPart.length()), nameRect, juce::Justification::centredLeft, true);
+    g.drawText(y2k::tr (presetDisplay.substring(idxPart.length())), nameRect, juce::Justification::centredLeft, true);
 }
 
 // ---- 右下角收藏 / 切换库按钮 ----
@@ -4178,7 +4441,7 @@ void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<in
 
   g.setColour(PinkXP::pink300.withAlpha(alpha));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
-  g.drawText("Switching...", bar, juce::Justification::centred, false);
+  g.drawText(y2k::tr ("Switching..."), bar, juce::Justification::centred, false);
 }
 
 // ==========================================================
@@ -4242,7 +4505,7 @@ void MilkdropModule::AutoIntervalDialog::paint(juce::Graphics& g)
     // 标题
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-    g.drawText("Set Auto Interval",
+    g.drawText(y2k::tr ("Set Auto Interval"),
                dlg.getX() + 14, dlg.getY() + 8,
                dlg.getWidth() - 28, 20,
                juce::Justification::centredLeft, false);
@@ -4250,7 +4513,7 @@ void MilkdropModule::AutoIntervalDialog::paint(juce::Graphics& g)
     // 提示文字
     g.setColour(PinkXP::pink700.withAlpha(0.75f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-    g.drawText("Enter interval (1.0-60.0 seconds):",
+    g.drawText(y2k::tr ("Enter interval (1.0-60.0 seconds):"),
                dlg.getX() + 14, dlg.getY() + 28,
                dlg.getWidth() - 28, 18,
                juce::Justification::centredLeft, false);
@@ -4261,7 +4524,7 @@ void MilkdropModule::AutoIntervalDialog::paint(juce::Graphics& g)
     PinkXP::drawRaised(g, goRect, PinkXP::btnFace);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText("OK", goRect, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("OK"), goRect, juce::Justification::centred, false);
 
     // Cancel 按钮
     auto cancelRect = juce::Rectangle<int>(
@@ -4269,7 +4532,7 @@ void MilkdropModule::AutoIntervalDialog::paint(juce::Graphics& g)
     PinkXP::drawRaised(g, cancelRect, PinkXP::btnFace);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText("Cancel", cancelRect, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("Cancel"), cancelRect, juce::Justification::centred, false);
 }
 
 void MilkdropModule::AutoIntervalDialog::resized()
@@ -4377,7 +4640,7 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     // 标题
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-    g.drawText("Jump to Preset",
+    g.drawText(y2k::tr ("Jump to Preset"),
                dlg.getX() + 14, dlg.getY() + 8,
                dlg.getWidth() - 28, 20,
                juce::Justification::centredLeft, false);
@@ -4385,7 +4648,7 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     // 提示文字
     g.setColour(PinkXP::pink700.withAlpha(0.75f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-    g.drawText("Enter preset number (1-" + juce::String(total_) + "):",
+    g.drawText(y2k::trf ("Enter preset number ({0}-{1}):", 1, total_),
                dlg.getX() + 14, dlg.getY() + 28,
                dlg.getWidth() - 28, 18,
                juce::Justification::centredLeft, false);
@@ -4396,7 +4659,7 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     PinkXP::drawRaised(g, goRect, PinkXP::btnFace);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText("Go", goRect, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("Go"), goRect, juce::Justification::centred, false);
 
     // Cancel 按钮
     auto cancelRect = juce::Rectangle<int>(
@@ -4404,7 +4667,7 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     PinkXP::drawRaised(g, cancelRect, PinkXP::btnFace);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText("Cancel", cancelRect, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("Cancel"), cancelRect, juce::Justification::centred, false);
 }
 
 void MilkdropModule::PresetJumpDialog::resized()
@@ -4936,14 +5199,14 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
 
     g.setColour (autoModeIsBeat_ ? PinkXP::pink300 : juce::Colour (0xDD, 0xDD, 0xDD));
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-    g.drawText (autoModeIsBeat_ ? "beat" : "sec", modeBtn, juce::Justification::centred, false);
+    g.drawText (y2k::tr (autoModeIsBeat_ ? "beat" : "sec"), modeBtn, juce::Justification::centred, false);
   }
   else
   {
     // Standalone（无宿主 playhead）：只保留时间模式标签，隐藏 BPM 入口
     g.setColour (PinkXP::pink300.withAlpha (0.95f));
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-    g.drawText ("Auto:", autoRow.getX() + 6, autoRow.getY(),
+    g.drawText (y2k::tr ("Auto:"), autoRow.getX() + 6, autoRow.getY(),
                 38, autoRow.getHeight(), juce::Justification::centredLeft, false);
   }
 
@@ -5017,7 +5280,7 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
 
   g.setColour(PinkXP::pink300.withAlpha(labelHovered ? 1.0f : 0.9f));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
-  g.drawText(valueLabel, valueLabelRect, juce::Justification::centredLeft, false);
+  g.drawText(y2k::tr (valueLabel), valueLabelRect, juce::Justification::centredLeft, false);
 }
 
 // ==========================================================
@@ -5283,7 +5546,7 @@ void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> top
   // 标题 "COLOR"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText("COLOR", panel.getX() + 6, panel.getY(),
+  g.drawText(y2k::tr ("COLOR"), panel.getX() + 6, panel.getY(),
              60, 22, juce::Justification::centredLeft, false);
 
   // Reset 按钮
@@ -5304,7 +5567,7 @@ void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> top
     g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
   }
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
 
   // RGB + Bright 四行滑块
   static const char* kLabels[4] = { "R", "G", "B", "Bri" };
@@ -5340,7 +5603,7 @@ void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> top
 
     g.setColour(kRowColours[row]);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(kLabels[row], labelRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (kLabels[row]), labelRect, juce::Justification::centredLeft, false);
 
     // 轨道底色
     g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
@@ -5376,7 +5639,7 @@ void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> top
         : juce::roundToInt(value * 100.0f);
     g.setColour(kRowColours[row].withAlpha(0.95f));
     g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
-    g.drawText(juce::String(percent) + "%", valueRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (juce::String(percent) + "%"), valueRect, juce::Justification::centredLeft, false);
   }
 }
 
@@ -5469,7 +5732,7 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
   // 标题 "EFFECTS"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText("EFFECTS", panel.getX() + 6, panel.getY(),
+  g.drawText(y2k::tr ("EFFECTS"), panel.getX() + 6, panel.getY(),
              60, 22, juce::Justification::centredLeft, false);
 
   // Reset 按钮
@@ -5490,7 +5753,7 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
     g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
   }
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
 
   // 开关按钮：基于效果注册表动态生成，按钮自身即开关（按下=开启，弹起=关闭）。
   int row = 0;
@@ -5516,7 +5779,7 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
       g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
     }
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText(def.display_name, toggle, juce::Justification::centred, false);
+    g.drawText(y2k::tr (def.display_name), toggle, juce::Justification::centred, false);
     ++row;
   }
 }
@@ -5630,7 +5893,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
   // 标题 "WAVE"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText("WAVE", panel.getX() + 6, panel.getY(),
+  g.drawText(y2k::tr ("WAVE"), panel.getX() + 6, panel.getY(),
              60, 22, juce::Justification::centredLeft, false);
 
   // Reset 按钮
@@ -5651,7 +5914,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
     g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
   }
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
 
   // mode stepper：< 模式名 >
   {
@@ -5682,7 +5945,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
 
         g.setColour(pressed ? PinkXP::pink300 : juce::Colour(0xEE, 0xEE, 0xEE));
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(label, r, juce::Justification::centred, false);
+        g.drawText(y2k::tr (label), r, juce::Justification::centred, false);
     };
 
     drawArrow(leftArrow,  "<", 0);
@@ -5692,7 +5955,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
     const bool override_on = waveState_.enabled;
     g.setColour(override_on ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(juce::String(GetWaveModeName(waveState_.mode)),
+    g.drawText(y2k::tr (juce::String(GetWaveModeName(waveState_.mode))),
                nameRect, juce::Justification::centred, false);
   }
 
@@ -5731,7 +5994,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
 
     g.setColour(kRowColours[row]);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(kLabels[row], labelRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (kLabels[row]), labelRect, juce::Justification::centredLeft, false);
 
     // 轨道底色
     g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
@@ -5765,7 +6028,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
         : juce::roundToInt(value * 100.0f);         // 其余: 0% ~ 100%
     g.setColour(kRowColours[row].withAlpha(0.95f));
     g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
-    g.drawText(juce::String(percent) + "%", valueRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (juce::String(percent) + "%"), valueRect, juce::Justification::centredLeft, false);
   }
 
   // 4 个开关：dots / thick / additive / brighten
@@ -5792,7 +6055,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
       g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
     }
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText(kSwitchNames[idx], sw, juce::Justification::centred, false);
+    g.drawText(y2k::tr (kSwitchNames[idx]), sw, juce::Justification::centred, false);
   }
 }
 
@@ -5893,7 +6156,7 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
   // 标题 "TWEAK"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText("TWEAK", panel.getX() + 6, panel.getY(),
+  g.drawText(y2k::tr ("TWEAK"), panel.getX() + 6, panel.getY(),
              60, 22, juce::Justification::centredLeft, false);
 
   // Reset 按钮
@@ -5914,7 +6177,7 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
     g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
   }
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText("Reset", resetRect, juce::Justification::centred, false);
+  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
 
   const auto* params = GetVisualOffsetParams();
   for (int row = 0; row < MilkdropVisualOffsetState::kParamCount; ++row)
@@ -5936,7 +6199,7 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
 
     g.setColour(PinkXP::pink300.withAlpha(0.95f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(params[row].display_name, labelRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (params[row].display_name), labelRect, juce::Justification::centredLeft, false);
 
     // 轨道底色
     g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
@@ -5973,7 +6236,7 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
     auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);
     g.setColour(PinkXP::pink300.withAlpha(0.95f));
     g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
-    g.drawText(juce::String(value, 2), valueRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (juce::String(value, 2)), valueRect, juce::Justification::centredLeft, false);
   }
 
   // 3 个整数滑块（kaleido / fold_x / fold_y，1~16）
@@ -5991,7 +6254,7 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
     // 名称 label
     g.setColour(PinkXP::pink300.withAlpha(0.95f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(intParams[row].display_name, labelRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (intParams[row].display_name), labelRect, juce::Justification::centredLeft, false);
 
     // 轨道底色
     g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
@@ -6025,6 +6288,6 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
     auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);
     g.setColour(PinkXP::pink300.withAlpha(0.95f));
     g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
-    g.drawText(juce::String(value), valueRect, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr (juce::String(value)), valueRect, juce::Justification::centredLeft, false);
   }
 }

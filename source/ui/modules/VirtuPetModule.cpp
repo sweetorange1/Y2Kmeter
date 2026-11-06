@@ -1,5 +1,7 @@
 #include "source/ui/modules/VirtuPetModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 
 #include <cmath>
 #include <random>
@@ -417,11 +419,11 @@ void VirtuPetModule::paint (juce::Graphics& g)
     {
         g.setColour (PinkXP::ink.withAlpha (0.7f));
         g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-        g.drawText ("VirtuPet", bounds.removeFromTop (18), juce::Justification::centred, false);
+        g.drawText (y2k::tr ("VirtuPet"), bounds.removeFromTop (18), juce::Justification::centred, false);
 
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.setFont (PinkXP::getFont (9.0f));
-        g.drawFittedText ("assets/VirtuPet not found", bounds.reduced (4), juce::Justification::centred, 2);
+        g.drawFittedText (y2k::tr ("assets/VirtuPet not found"), bounds.reduced (4), juce::Justification::centred, 2);
     }
     else
     {
@@ -456,13 +458,13 @@ void VirtuPetModule::paint (juce::Graphics& g)
             const int bubbleMinW = 36;
             const int bubbleMaxW = juce::jmax (bubbleMinW, getWidth() - 6);
             const int maxTextW = juce::jmax (16, bubbleMaxW - bubblePaddingX * 2);
-            const int singleLineW = juce::jmax (16, bubbleFont.getStringWidth (currentSpeechText));
+            const int singleLineW = juce::jmax (16, bubbleFont.getStringWidth (y2k::tr (currentSpeechText)));
             const int textW = juce::jlimit (16, maxTextW, singleLineW);
 
             juce::AttributedString bubbleText;
             bubbleText.setJustification (juce::Justification::centred);
             bubbleText.setWordWrap (juce::AttributedString::WordWrap::byWord);
-            bubbleText.append (currentSpeechText, bubbleFont, juce::Colours::black);
+            bubbleText.append (y2k::tr (currentSpeechText), bubbleFont, juce::Colours::black);
 
             juce::TextLayout textLayout;
             textLayout.createLayout (bubbleText, (float) textW);
@@ -508,7 +510,7 @@ void VirtuPetModule::paint (juce::Graphics& g)
         auto txt = del;
         txt.translate (-1, -1);
         if (deleteBtnPressed) txt.translate (1, 1);
-        g.drawText ("x", txt, juce::Justification::centred, false);
+        g.drawText (y2k::tr ("x"), txt, juce::Justification::centred, false);
 
         // 聚焦时在状态栏下方显示宠物名字
         if (roleName.isNotEmpty())
@@ -516,7 +518,7 @@ void VirtuPetModule::paint (juce::Graphics& g)
             auto nameArea = getHudBounds().withTrimmedTop (18);
             g.setColour (PinkXP::ink);
             g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-            g.drawText (roleName, nameArea.withHeight (14), juce::Justification::centred, false);
+            g.drawText (y2k::tr (roleName), nameArea.withHeight (14), juce::Justification::centred, false);
         }
     }
 
@@ -1455,7 +1457,7 @@ void VirtuPetModule::drawPixelBar (juce::Graphics& g,
 
     g.setColour (PinkXP::ink.withAlpha (0.92f));
     g.setFont (PinkXP::getFont (8.0f, juce::Font::bold));
-    g.drawText (label, area.removeFromLeft (22), juce::Justification::centredLeft, false);
+    g.drawText (y2k::tr (label), area.removeFromLeft (22), juce::Justification::centredLeft, false);
 }
 
 juce::Rectangle<int> VirtuPetModule::getHudBounds() const
@@ -1679,13 +1681,13 @@ juce::Rectangle<int> VirtuPetModule::getPetVisualBoundsFor (const juce::Image& f
         const int bubbleMinW = 36;
         const int bubbleMaxW = juce::jmax (bubbleMinW, getWidth() - 6);
         const int maxTextW = juce::jmax (16, bubbleMaxW - bubblePaddingX * 2);
-        const int singleLineW = juce::jmax (16, bubbleFont.getStringWidth (bubbleText));
+        const int singleLineW = juce::jmax (16, bubbleFont.getStringWidth (y2k::tr (bubbleText)));
         const int textW = juce::jlimit (16, maxTextW, singleLineW);
 
         juce::AttributedString bubbleTextLayout;
         bubbleTextLayout.setJustification (juce::Justification::centred);
         bubbleTextLayout.setWordWrap (juce::AttributedString::WordWrap::byWord);
-        bubbleTextLayout.append (bubbleText, bubbleFont, PinkXP::ink);
+        bubbleTextLayout.append (y2k::tr (bubbleText), bubbleFont, PinkXP::ink);
 
         juce::TextLayout textLayout;
         textLayout.createLayout (bubbleTextLayout, (float) textW);
@@ -2270,6 +2272,27 @@ juce::Rectangle<int> VirtuPetModule::getDeleteButtonBounds() const
     return { focus.getRight() - deleteButtonSize - 2, focus.getY() + 2, deleteButtonSize, deleteButtonSize };
 }
 
+// 悬停提示：VirtuPet 没有标题栏，只有聚焦后右上角的自绘 × 删除按钮
+ModulePanel::HoverHelp VirtuPetModule::getHoverHelp (juce::Point<int> localPos) const
+{
+    HoverHelp h;
+
+    if (focused && getDeleteButtonBounds().contains (localPos))
+    {
+        h.text = isPanelLayoutLocked (*this)
+            ? y2k::help::make ("Remove pet", "Layout is locked (L) - unlock it to remove the pet.")
+            : y2k::help::make ("Remove pet", "Say goodbye to this pet (asks for confirmation). "
+                                             "A new egg can be added with a right-click.");
+        return h;
+    }
+
+    h.text = y2k::help::moduleHelp (ModuleType::virtuPet);
+    if (isInEggPhase())
+        h.text << "\n\nStill an egg: play some music to hatch it!";
+    h.contentZone = true;
+    return h;
+}
+
 VirtuPetModule::Edge VirtuPetModule::detectEdge (juce::Point<int> pos) const
 {
     const auto b = getLocalBounds();
@@ -2351,14 +2374,14 @@ void VirtuPetConfirmOverlay::paint (juce::Graphics& g)
     // 标题文字
     g.setColour (PinkXP::selInk);
     g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-    g.drawText ("r u sure?", titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
+    g.drawText (y2k::tr ("r u sure?"), titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
 
     // 正文区域
     auto body = inner.reduced (2, 2);
     auto textArea = body.removeFromTop (body.getHeight() - 22);
     g.setColour (PinkXP::ink);
     g.setFont (PinkXP::getFont (9.0f));
-    g.drawFittedText ("say bye to ur pet? :)\ncan't undo this~", textArea,
+    g.drawFittedText (y2k::tr ("say bye to ur pet? :)\ncan't undo this~"), textArea,
                       juce::Justification::centred, 2);
 
     // 取消按钮
@@ -2369,7 +2392,7 @@ void VirtuPetConfirmOverlay::paint (juce::Graphics& g)
         PinkXP::drawRaised (g, cancelBounds, PinkXP::btnFace);
     g.setColour (PinkXP::ink);
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-    g.drawText ("Cancel", cancelBounds, juce::Justification::centred, false);
+    g.drawText (y2k::tr ("Cancel"), cancelBounds, juce::Justification::centred, false);
 
     // 确认按钮
     auto confirmBounds = getButtonBounds (1);
@@ -2379,7 +2402,7 @@ void VirtuPetConfirmOverlay::paint (juce::Graphics& g)
         PinkXP::drawRaised (g, confirmBounds, PinkXP::btnFace);
     g.setColour (PinkXP::ink);
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-    g.drawText ("OK", confirmBounds, juce::Justification::centred, false);
+    g.drawText (y2k::tr ("OK"), confirmBounds, juce::Justification::centred, false);
 }
 
 void VirtuPetConfirmOverlay::mouseDown (const juce::MouseEvent& e)

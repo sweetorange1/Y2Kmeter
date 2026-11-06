@@ -1,4 +1,5 @@
 #include "source/ui/modules/PhaseModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
@@ -186,14 +187,14 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
         const float R  = (float) juce::jmin (inner.getWidth(), inner.getHeight()) * 0.48f;
         g.setColour (PinkXP::ink.withAlpha (0.85f));
         g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::bold));
-        g.drawText ("M", juce::Rectangle<int> ((int) cx - 10, (int) (cy - R) - 12, 20, 12),
+        g.drawText (y2k::tr ("M"), juce::Rectangle<int> ((int) cx - 10, (int) (cy - R) - 12, 20, 12),
                     juce::Justification::centred, false);
-        g.drawText ("S", juce::Rectangle<int> ((int) (cx + R) + 2, (int) cy - 6, 12, 12),
+        g.drawText (y2k::tr ("S"), juce::Rectangle<int> ((int) (cx + R) + 2, (int) cy - 6, 12, 12),
                     juce::Justification::centredLeft, false);
         g.setColour (PinkXP::ink.withAlpha (0.55f));
-        g.drawText ("L", juce::Rectangle<int> ((int) (cx - R) - 12, (int) (cy - R) - 12, 12, 12),
+        g.drawText (y2k::tr ("L"), juce::Rectangle<int> ((int) (cx - R) - 12, (int) (cy - R) - 12, 12, 12),
                     juce::Justification::centredRight, false);
-        g.drawText ("R", juce::Rectangle<int> ((int) (cx + R), (int) (cy - R) - 12, 12, 12),
+        g.drawText (y2k::tr ("R"), juce::Rectangle<int> ((int) (cx + R), (int) (cy - R) - 12, 12, 12),
                     juce::Justification::centredLeft, false);
     }
 
@@ -223,21 +224,21 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
                 const float th = thetaFor (m.v);
                 const float px = cx - std::cos (th) * (R + 10.0f);
                 const float py = cy - std::sin (th) * (R + 10.0f);
-                g.drawText (m.s, juce::Rectangle<int> ((int) px - 12, (int) py - 6, 24, 12),
+                g.drawText (y2k::tr (m.s), juce::Rectangle<int> ((int) px - 12, (int) py - 6, 24, 12),
                             juce::Justification::centred, false);
             }
 
             const juce::Colour needleCol = (smoothedCorr < 0.0f) ? PinkXP::sel : PinkXP::pink600;
             g.setColour (PinkXP::ink);
             g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-            g.drawText ("CORR",
+            g.drawText (y2k::tr ("CORR"),
                         juce::Rectangle<int> (inner.getX(), inner.getY() + 2, inner.getWidth(), 12),
                         juce::Justification::centred, false);
             g.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
             g.setColour (needleCol);
             juce::String numTxt = juce::String (smoothedCorr, 2);
             if (smoothedCorr >= 0.0f) numTxt = "+" + numTxt;
-            g.drawText (numTxt,
+            g.drawText (y2k::tr (numTxt),
                         juce::Rectangle<int> (inner.getX(), inner.getY() + 14, inner.getWidth(), 14),
                         juce::Justification::centred, false);
         }
@@ -248,11 +249,11 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
         const int labelW = 56;
         g.setColour (PinkXP::ink);
         g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText ("WIDTH", areaWidth.withWidth (labelW), juce::Justification::centredLeft, false);
-        g.drawText ("BAL", areaBalance.withWidth (labelW), juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr ("WIDTH"), areaWidth.withWidth (labelW), juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr ("BAL"), areaBalance.withWidth (labelW), juce::Justification::centredLeft, false);
 
         g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
-        g.drawText (juce::String ((int) std::round (smoothedWidth * 100.0f)) + "%",
+        g.drawText (y2k::tr (juce::String ((int) std::round (smoothedWidth * 100.0f)) + "%"),
                     areaWidth.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
                     juce::Justification::centredRight, false);
 
@@ -261,7 +262,7 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
         if (std::abs (b) < 0.02f)      txt = "C";
         else if (b < 0)                txt = "L" + juce::String ((int) std::round (-b * 100.0f));
         else                           txt = "R" + juce::String ((int) std::round ( b * 100.0f));
-        g.drawText (txt,
+        g.drawText (y2k::tr (txt),
                     areaBalance.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
                     juce::Justification::centredRight, false);
     }
@@ -571,14 +572,14 @@ void PhaseModule::drawGonio(juce::Graphics& g, juce::Rectangle<int> area) const
     // 轴标签
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::bold));
-    g.drawText("M", juce::Rectangle<int>((int) cx - 10, (int)(cy - R) - 12, 20, 12),
+    g.drawText(y2k::tr ("M"), juce::Rectangle<int>((int) cx - 10, (int)(cy - R) - 12, 20, 12),
                juce::Justification::centred, false);
-    g.drawText("S", juce::Rectangle<int>((int)(cx + R) + 2, (int) cy - 6, 12, 12),
+    g.drawText(y2k::tr ("S"), juce::Rectangle<int>((int)(cx + R) + 2, (int) cy - 6, 12, 12),
                juce::Justification::centredLeft, false);
     g.setColour(PinkXP::ink.withAlpha(0.55f));
-    g.drawText("L", juce::Rectangle<int>((int)(cx - R) - 12, (int)(cy - R) - 12, 12, 12),
+    g.drawText(y2k::tr ("L"), juce::Rectangle<int>((int)(cx - R) - 12, (int)(cy - R) - 12, 12, 12),
                juce::Justification::centredRight, false);
-    g.drawText("R", juce::Rectangle<int>((int)(cx + R), (int)(cy - R) - 12, 12, 12),
+    g.drawText(y2k::tr ("R"), juce::Rectangle<int>((int)(cx + R), (int)(cy - R) - 12, 12, 12),
                juce::Justification::centredLeft, false);
 
     // 样本点云：L/R → M=(L+R)/√2, S=(L-R)/√2
@@ -674,7 +675,7 @@ void PhaseModule::drawCorrDial(juce::Graphics& g, juce::Rectangle<int> area) con
     {
         const float th = thetaFor(m.v);
         const auto  pOut = pointAt(th, R + 10.0f);
-        g.drawText(m.s, juce::Rectangle<int>((int) pOut.x - 12, (int) pOut.y - 6, 24, 12),
+        g.drawText(y2k::tr (m.s), juce::Rectangle<int>((int) pOut.x - 12, (int) pOut.y - 6, 24, 12),
                    juce::Justification::centred, false);
 
         // 刻度短线
@@ -707,7 +708,7 @@ void PhaseModule::drawCorrDial(juce::Graphics& g, juce::Rectangle<int> area) con
     // ------- 顶部读数 -------
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    g.drawText("CORR",
+    g.drawText(y2k::tr ("CORR"),
                juce::Rectangle<int>(inner.getX(), inner.getY() + 2, inner.getWidth(), 12),
                juce::Justification::centred, false);
 
@@ -715,7 +716,7 @@ void PhaseModule::drawCorrDial(juce::Graphics& g, juce::Rectangle<int> area) con
     g.setColour(needleCol);
     juce::String numTxt = juce::String(smoothedCorr, 2);
     if (smoothedCorr >= 0.0f) numTxt = "+" + numTxt;
-    g.drawText(numTxt,
+    g.drawText(y2k::tr (numTxt),
                juce::Rectangle<int>(inner.getX(), inner.getY() + 14, inner.getWidth(), 14),
                juce::Justification::centred, false);
 }
@@ -734,7 +735,7 @@ void PhaseModule::drawWidthBar(juce::Graphics& g, juce::Rectangle<int> area) con
 
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText("WIDTH", labelArea, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr ("WIDTH"), labelArea, juce::Justification::centredLeft, false);
 
     // 凹陷背景
     PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
@@ -765,7 +766,7 @@ void PhaseModule::drawWidthBar(juce::Graphics& g, juce::Rectangle<int> area) con
     // 数值读数
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-    g.drawText(juce::String((int) std::round(smoothedWidth * 100.0f)) + "%",
+    g.drawText(y2k::tr (juce::String((int) std::round(smoothedWidth * 100.0f)) + "%"),
                barArea.withTrimmedRight(4),
                juce::Justification::centredRight, false);
 }
@@ -783,7 +784,7 @@ void PhaseModule::drawBalanceBar(juce::Graphics& g, juce::Rectangle<int> area) c
 
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText("BAL", labelArea, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr ("BAL"), labelArea, juce::Justification::centredLeft, false);
 
     PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
     auto innerBar = barArea.reduced(2);
@@ -829,7 +830,7 @@ void PhaseModule::drawBalanceBar(juce::Graphics& g, juce::Rectangle<int> area) c
 
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-    g.drawText(txt, barArea.withTrimmedRight(4),
+    g.drawText(y2k::tr (txt), barArea.withTrimmedRight(4),
                juce::Justification::centredRight, false);
 }
 
@@ -905,14 +906,14 @@ void PhaseModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
 
         sg.setColour(PinkXP::ink.withAlpha(0.85f));
         sg.setFont(PinkXP::getAxisFont(9.0f, juce::Font::bold));
-        sg.drawText("M", juce::Rectangle<int>((int) cx - 10, (int)(cy - R) - 12, 20, 12),
+        sg.drawText(y2k::tr ("M"), juce::Rectangle<int>((int) cx - 10, (int)(cy - R) - 12, 20, 12),
                     juce::Justification::centred, false);
-        sg.drawText("S", juce::Rectangle<int>((int)(cx + R) + 2, (int) cy - 6, 12, 12),
+        sg.drawText(y2k::tr ("S"), juce::Rectangle<int>((int)(cx + R) + 2, (int) cy - 6, 12, 12),
                     juce::Justification::centredLeft, false);
         sg.setColour(PinkXP::ink.withAlpha(0.55f));
-        sg.drawText("L", juce::Rectangle<int>((int)(cx - R) - 12, (int)(cy - R) - 12, 12, 12),
+        sg.drawText(y2k::tr ("L"), juce::Rectangle<int>((int)(cx - R) - 12, (int)(cy - R) - 12, 12, 12),
                     juce::Justification::centredRight, false);
-        sg.drawText("R", juce::Rectangle<int>((int)(cx + R), (int)(cy - R) - 12, 12, 12),
+        sg.drawText(y2k::tr ("R"), juce::Rectangle<int>((int)(cx + R), (int)(cy - R) - 12, 12, 12),
                     juce::Justification::centredLeft, false);
     }
 

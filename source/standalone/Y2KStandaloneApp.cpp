@@ -56,6 +56,7 @@
 
 // 主题持久化：从 settings 读取/写回 PinkXP 全局主题 id
 #include "../ui/PinkXPStyle.h"
+#include "../i18n/Localisation.h"
 #include "../ui/palette/ThemeLibrary.h"
 
 // 网络遥测 + 自动更新检查
@@ -202,8 +203,10 @@ static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
     //   ★ 前缀不使用任何非 ASCII 符号（避免调用方传入的 title
     //     即便本身是 ASCII，也不会被前缀污染）。
     // ----------------------------------------------------------
+    //   界面语言：标题 / 正文 / 按钮在这里统一翻译（系统字体，任意语言字形可用）；
+    //   正文整段未命中时 y2k::tr 会逐行翻译（技术性错误细节行保持原文）。
     const juce::String fullMessage = (title.isEmpty() ? juce::String()
-            : (title + "\n\n")) + message;
+            : (y2k::tr (title) + "\n\n")) + y2k::tr (message);
 
     auto* editor = new juce::TextEditor ("alertMessage");
     editor->setMultiLine (true);
@@ -255,18 +258,18 @@ static void showSystemFontAlertAsync (juce::AlertWindow::AlertIconType iconType,
     // ------------------------------------------------------------------
     if (buttonTexts.isEmpty())
     {
-        aw->addButton ("OK", 1);
+        aw->addButton (y2k::tr ("OK"), 1);
     }
     else
     {
         for (int i = 0; i < buttonTexts.size(); ++i)
-            aw->addButton (buttonTexts[i], i + 1);
+            aw->addButton (y2k::tr (buttonTexts[i]), i + 1);
 
         // 除最后一个按钮外，其他按钮点击后不关闭弹窗
         const int lastIdx = buttonTexts.size() - 1;
         for (int i = 0; i < lastIdx; ++i)
         {
-            if (auto* btn = aw->getButton (buttonTexts[i]))
+            if (auto* btn = aw->getButton (y2k::tr (buttonTexts[i])))
             {
                 const int resultCode = i + 1;
                 btn->onClick = [onResult, resultCode]()
@@ -1521,11 +1524,11 @@ private:
                 juce::AlertWindow::showAsync (
                     juce::MessageBoxOptions()
                         .withIconType (juce::MessageBoxIconType::WarningIcon)
-                        .withTitle ("System Loopback error")
-                        .withMessage (juce::String ("Failed to start system output loopback:\n")
-                                        + (loopback != nullptr ? loopback->getLastError() : juce::String ("(unknown)"))
-                                        + "\n\nFalling back to Microphone.")
-                        .withButton ("OK"),
+                        .withTitle (y2k::tr ("System Loopback error"))
+                        .withMessage (y2k::tr ("Failed to start system output loopback:") + "\n"
+                                        + (loopback != nullptr ? loopback->getLastError() : y2k::tr ("(unknown)"))
+                                        + "\n\n" + y2k::tr ("Falling back to Microphone."))
+                        .withButton (y2k::tr ("OK")),
                     nullptr);
 
                 // 回退到"麦克风输入"
@@ -1627,12 +1630,12 @@ private:
             juce::AlertWindow::showAsync (
                 juce::MessageBoxOptions()
                     .withIconType (juce::MessageBoxIconType::WarningIcon)
-                    .withTitle ("System Loopback unavailable")
-                    .withMessage (
+                    .withTitle (y2k::tr ("System Loopback unavailable"))
+                    .withMessage (y2k::tr (
                         "No virtual loopback input device available.\n\n"
                         "Please install and configure a loopback tool, then try again.\n\n"
-                        "Falling back to Microphone.")
-                    .withButton ("OK"),
+                        "Falling back to Microphone."))
+                    .withButton (y2k::tr ("OK")),
                 nullptr);
 
             enableDefaultInput();
@@ -1688,11 +1691,11 @@ private:
             juce::AlertWindow::showAsync (
                 juce::MessageBoxOptions()
                     .withIconType (juce::MessageBoxIconType::WarningIcon)
-                    .withTitle ("Audio input error")
-                    .withMessage ("No input device available.\n"
+                    .withTitle (y2k::tr ("Audio input error"))
+                    .withMessage (y2k::tr ("No input device available.\n"
                                   "Please connect a microphone / audio interface, "
-                                  "or enable 'Stereo Mix' in Windows Sound settings.")
-                    .withButton ("OK"),
+                                  "or enable 'Stereo Mix' in Windows Sound settings."))
+                    .withButton (y2k::tr ("OK")),
                 nullptr);
             return;
         }
@@ -1728,9 +1731,9 @@ private:
             juce::AlertWindow::showAsync (
                 juce::MessageBoxOptions()
                     .withIconType (juce::MessageBoxIconType::WarningIcon)
-                    .withTitle ("Audio input error")
-                    .withMessage (juce::String ("Failed to open the default input device:\n") + err)
-                    .withButton ("OK"),
+                    .withTitle (y2k::tr ("Audio input error"))
+                    .withMessage (y2k::tr ("Failed to open the default input device:") + "\n" + err)
+                    .withButton (y2k::tr ("OK")),
                 nullptr);
             return;
         }

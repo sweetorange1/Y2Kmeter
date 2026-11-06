@@ -51,6 +51,9 @@ public:
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
 
+    // 悬停提示：像素红点（自绘按钮）按录制状态给出说明，其余回落基类
+    HoverHelp getHoverHelp (juce::Point<int> localPos) const override;
+
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
 

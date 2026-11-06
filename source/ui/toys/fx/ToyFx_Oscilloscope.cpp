@@ -1,5 +1,6 @@
 #include "source/ui/toys/ToyKit.h"
 
+#include "source/i18n/Localisation.h"
 // ==========================================================
 // ToyFx_Oscilloscope —— 拍电视（§8.3，GL 代表模块，纯 L1）
 //   一次白闪（alpha ≤ 0.35、≤120ms）、滚动暗带、水平撕裂线、
@@ -65,7 +66,7 @@ namespace
             const float blink = (std::fmod ((float) age, 0.4f) < 0.2f) ? 1.0f : 0.2f;
             g.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
             g.setColour (ToyPalette::ok().withAlpha (0.9f * blink));
-            g.drawText (readout,
+            g.drawText (y2k::tr (readout),
                         juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 18,
                                               juce::jmin (220, canvas.getWidth() - 8), 16),
                         juce::Justification::centredLeft, false);

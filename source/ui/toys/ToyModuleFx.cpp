@@ -1,4 +1,5 @@
 #include "source/ui/toys/ToyKit.h"
+#include "source/i18n/Localisation.h"
 #include <array>
 
 // ==========================================================
@@ -116,7 +117,7 @@ namespace
             //   同为深色，直接用 ink 会"框在字没了"，统一走可读性兜底。
             g.setColour (PinkXP::readableInkOn (PinkXP::face));
             g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-            g.drawText (note, b, juce::Justification::centred, false);
+            g.drawText (y2k::tr (note), b, juce::Justification::centred, false);
             g.setOpacity (1.0f);
         }
         juce::Rectangle<float> getBounds() const override { return juce::Rectangle<float> (at.x - 60, at.y - 26, 120, 30); }
@@ -560,7 +561,7 @@ namespace
             const juce::String shown = (age < 0.6f) ? juce::String (((int) (roll * 10.0f)) % 10) : digits;
             g.setColour (PinkXP::ink.withAlpha (a));
             g.setFont (PinkXP::getFont (12.0f, juce::Font::bold));
-            g.drawText (shown, juce::Rectangle<int> ((int) at.x - 24, (int) at.y + 22, 48, 14),
+            g.drawText (y2k::tr (shown), juce::Rectangle<int> ((int) at.x - 24, (int) at.y + 22, 48, 14),
                         juce::Justification::centred, false);
             g.setOpacity (1.0f);
         }
@@ -612,18 +613,18 @@ namespace
             // 标题条底色是强调色、正文/按钮底色是 face —— 两者都按可读性兜底
             g.setColour (PinkXP::readableInkOn (ToyPalette::accent()));
             g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-            g.drawText ("Y2K TRUE PEAK", juce::Rectangle<int> (x + 2, y, w, 14), juce::Justification::centredLeft, false);
+            g.drawText (y2k::tr ("Y2K TRUE PEAK"), juce::Rectangle<int> (x + 2, y, w, 14), juce::Justification::centredLeft, false);
 
             const auto& img = dir.atlas->themedImage (icon, EmojiAtlas::Size::S);
             if (img.isValid())
                 g.drawImage (img, x + 6, y + 20, 18, 18, 0, 0, img.getWidth(), img.getHeight());
             g.setColour (PinkXP::readableInkOn (PinkXP::face));
             g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
-            g.drawText (text, juce::Rectangle<int> (x + 28, y + 18, w - 32, 18),
+            g.drawText (y2k::tr (text), juce::Rectangle<int> (x + 28, y + 18, w - 32, 18),
                         juce::Justification::centredLeft, false);
 
             PinkXP::drawRaised (g, juce::Rectangle<int> (x + w / 2 - 20, y + h - 22, 40, 16), PinkXP::face);
-            g.drawText ("OK", juce::Rectangle<int> (x + w / 2 - 20, y + h - 22, 40, 16), juce::Justification::centred, false);
+            g.drawText (y2k::tr ("OK"), juce::Rectangle<int> (x + w / 2 - 20, y + h - 22, 40, 16), juce::Justification::centred, false);
             g.setOpacity (1.0f);
         }
         juce::Rectangle<float> getBounds() const override { return juce::Rectangle<float> (at.x - 90, at.y - 36, 180, 72); }
@@ -840,7 +841,7 @@ namespace
             // 反馈 A1：宽度按文字真实像素宽度计算（不再按字符数估算，避免截断）
             const juce::Font f = PinkXP::getFont (11.0f, juce::Font::bold);
             g.setFont (f);
-            const int textW = juce::roundToInt (f.getStringWidthFloat (text)) + 8;
+            const int textW = juce::roundToInt (f.getStringWidthFloat (y2k::tr (text))) + 8;
             const int w = iconW + textW;
             auto b = juce::Rectangle<int> ((int) at.x - w / 2, (int) at.y - h - 8, w, h);
 
@@ -859,7 +860,7 @@ namespace
             }
             g.setColour (PinkXP::readableInkOn (PinkXP::face));
             // 文字区域在 emoji 右侧，不重叠
-            g.drawText (text, b.withTrimmedLeft (iconW).reduced (2, 0),
+            g.drawText (y2k::tr (text), b.withTrimmedLeft (iconW).reduced (2, 0),
                         juce::Justification::centredLeft, false);
             g.setOpacity (1.0f);
         }

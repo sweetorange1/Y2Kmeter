@@ -1,5 +1,7 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <juce_opengl/juce_opengl.h>
@@ -40,11 +42,16 @@ Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
     speedLabel.setColour (juce::Label::textColourId, PinkXP::ink);
     speedLabel.setFont   (PinkXP::getFont (11.0f, juce::Font::bold));
     speedLabel.setText   ("SPEED", juce::dontSendNotification);
+    speedSlider.setTooltip (y2k::help::make ("Speed",
+        "How fast the landscape rolls back (10 - 200). Slower keeps a longer history."));
+    speedLabel.setTooltip (speedSlider.getTooltip());
 
     // ---------- 山峰着色按钮（默认按下：跟随主题着色）----------
     themeColourBtn.setClickingTogglesState (true);
     themeColourBtn.setToggleState (true, juce::dontSendNotification);
-    themeColourBtn.setTooltip ("山峰着色跟随当前主题（关闭则使用固定蓝→红热力图）");
+    themeColourBtn.setTooltip (y2k::help::make ("Tint",
+        "ON: peaks are coloured with the current theme.\n"
+        "OFF: classic blue-to-red heat map."));
     themeColourBtn.onClick = [this]()
     {
         useThemeColours = themeColourBtn.getToggleState();
@@ -986,7 +993,7 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
         else
         {
             g.setColour (PinkXP::hl);
-            g.drawText (l.label, x - 12, y, 24, 11, juce::Justification::centred, false);
+            g.drawText (y2k::tr (l.label), x - 12, y, 24, 11, juce::Justification::centred, false);
         }
     }
 
@@ -999,10 +1006,14 @@ void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int
         g.fillRect (canvas.getRight() - ow - 2,       canvas.getBottom() - oh - 2, ow, oh);
 
         g.setColour (PinkXP::hl);
-        g.drawText (juce::String::fromUTF8 ("\xe2\x86\x97 older"),
+        // "↗ older" / "newer ↙" 含箭头符号：经 SymbolGlyphs 切英文字体渲染
+        g.setFont (PinkXP::SymbolGlyphs::getFont (
+            juce::String::fromUTF8 ("\xe2\x86\x97 older newer \xe2\x86\x99"),
+            8.5f, juce::Font::plain));
+        g.drawText (y2k::tr (juce::String::fromUTF8 ("\xe2\x86\x97 older")),
                     canvas.getX() + 2, canvas.getY() + 2, ow, oh,
                     juce::Justification::centred, false);
-        g.drawText (juce::String::fromUTF8 ("newer \xe2\x86\x99"),
+        g.drawText (y2k::tr (juce::String::fromUTF8 ("newer \xe2\x86\x99")),
                     canvas.getRight() - ow - 2, canvas.getBottom() - oh - 2, ow, oh,
                     juce::Justification::centred, false);
     }

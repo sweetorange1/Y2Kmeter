@@ -14,6 +14,7 @@ class ModulePanel;
 enum class ModuleType;
 class MilkdropTintPass;  // 整体染色后处理着色器，完整定义在 MilkdropModule.h
 class ToyDirector;       // Toybox 点击互动主管（完整定义在 source/ui/toys/ToyKit.h）
+class Y2KTooltipWindow;  // 悬停提示窗口（完整定义在 source/ui/HoverHelp.h）
 
 // ==========================================================
 // Y2KmeterAudioProcessorEditor —— 多模块框架版
@@ -26,9 +27,14 @@ class ToyDirector;       // Toybox 点击互动主管（完整定义在 source/u
 
 class Y2KmeterAudioProcessorEditor : public juce::AudioProcessorEditor,
                                      public juce::OpenGLRenderer,
+                                     public juce::TooltipClient,
                                      private juce::Timer
 {
 public:
+    // TooltipClient：标题栏自绘按钮（× / 置顶 / 最小化 / L / 标题文字）的悬停提示，
+    //   按当前 hover 状态返回对应说明（详见 source/ui/HoverHelp.h）。
+    juce::String getTooltip() override;
+
     // ==============================================================
     // OpenGLRenderer —— projectM & GPU 模块在 Editor 上下文中渲染
     //   · newOpenGLContextCreated: GLEW init → 扫描预设/纹理路径 → create handle
@@ -495,6 +501,11 @@ private:
     // 主题变更订阅 token
     int themeSubToken = 0;
 
+    // 界面语言切换（y2k::i18n）：换字体 → 广播主题刷新（各模块失效文字缓存）
+    //   → 控件重取 LookAndFeel 字体 → 工具栏重排 → 全量重绘。运行时生效、无需重启。
+    int languageSubToken = 0;
+    void applyLanguageChange();
+
     // —— 顶部标题栏 + 右上角三个按钮（样式与 ModulePanel 的 × 一致）——
     static constexpr int titleBarHeight     = 26;   // XP 风标题栏高度
     static constexpr int closeButtonSize    = 18;   // 按钮尺寸（嵌入标题栏右侧）
@@ -653,6 +664,11 @@ private:
     //   覆盖掉 Editor 上的鼠标事件。
     class ChromeHiddenOverlay;
     std::unique_ptr<ChromeHiddenOverlay> chromeHiddenOverlay;
+
+    // —— 悬停提示窗口（HoverHelp）——
+    //   作为 Editor 子组件存在（插件宿主内不开原生窗口；随 Editor 的 GL 合成绘制，
+    //   伪全屏下也不会被主窗口表面压住）。析构开头最先 reset。
+    std::unique_ptr<Y2KTooltipWindow> tooltipWindow;
 
     std::atomic<juce::int64> frameCounter { 0 };
     juce::int64              lastFrameCounterSample = 0;
@@ -832,6 +848,10 @@ private:
         // v3.0.1：伪全屏状态（双击抬头切换）
         bool                 pseudoFullScreen_ = false;
         juce::Rectangle<int> preFullScreenBounds_;
+
+        // 浮动窗口是独立的顶层 peer，Editor 的提示窗口管不到这里 —— 每个浮动窗口
+        //   自带一个（以窗口自身为宿主）。
+        std::unique_ptr<Y2KTooltipWindow> tooltip_;
     };
 
     // v3.0.1：找到 panel 所属的浮动窗口并切换其伪全屏

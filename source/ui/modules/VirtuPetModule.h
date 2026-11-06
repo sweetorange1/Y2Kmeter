@@ -57,6 +57,9 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp   (const juce::MouseEvent& e) override;
 
+    // 悬停提示：右上角自绘删除按钮 + 宠物说明（无标题栏，整块按内容区处理）
+    HoverHelp getHoverHelp (juce::Point<int> localPos) const override;
+
     void setFocusVisual (bool shouldFocus);
     void setSignalLevel01 (float level01) noexcept;
 

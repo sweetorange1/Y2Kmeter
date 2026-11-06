@@ -15,6 +15,7 @@
 #include "Version.h"
 #include "TelemetryClient.h"
 #include "source/ui/UpdateDialog.h"
+#include "source/i18n/Localisation.h"
 #include "source/Y2KLogging.h"
 
 #include <juce_core/juce_core.h>
@@ -105,25 +106,25 @@ void ShowUpdateDialog(const UpdateInfo& info,
 
   // 回退路径：无可用 UI 组件时使用 NativeMessageBox
   juce::String message;
-  message << "A new version of Y2Kmeter is available!\n\n"
-          << "Current: " << JucePlugin_VersionString << "\n"
-          << "Latest:  " << info.latest_version << "\n\n";
+  message << y2k::tr("A new version of Y2Kmeter is available!") << "\n\n"
+          << y2k::trf("Current: {0}", JucePlugin_VersionString) << "\n"
+          << y2k::trf("Latest: {0}", info.latest_version) << "\n\n";
 
   if (info.changelog.isNotEmpty()) {
-    message << "What's new:\n" << info.changelog << "\n\n";
+    message << y2k::tr("What's new:") << "\n" << info.changelog << "\n\n";
   }
 
-  message << "Would you like to download it?";
+  message << y2k::tr("Would you like to download it?");
 
   juce::NativeMessageBox::showAsync(
     juce::MessageBoxOptions()
       .withIconType(info.force_update
                       ? juce::MessageBoxIconType::WarningIcon
                       : juce::MessageBoxIconType::QuestionIcon)
-      .withTitle("Update Available")
+      .withTitle(y2k::tr("Update Available"))
       .withMessage(message)
-      .withButton("Download")
-      .withButton("Remind Me Later"),
+      .withButton(y2k::tr("Download"))
+      .withButton(y2k::tr("Remind Me Later")),
     [info](int result) {
       Y2K_LOG("[UpdateCheck] NativeMessageBox result=" + juce::String(result));
       // JUCE NativeMessageBox::showAsync 使用 plainIndex 模式（0-based）：

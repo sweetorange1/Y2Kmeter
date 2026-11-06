@@ -243,6 +243,10 @@ public:
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
 
+    // 悬停提示：顶部控制栏 / 右下角收藏按钮 / auto 行 / color / effects / wave / tweak
+    //   面板里的自绘控件逐个给出说明；未命中回落到基类（标题栏 / 模块说明）。
+    HoverHelp getHoverHelp (juce::Point<int> localPos) const override;
+
 private:
     // ------------------------------------------------------
     // GLView：嵌入态为纯 CPU 子组件，浮动态挂载独立 OpenGLContext。

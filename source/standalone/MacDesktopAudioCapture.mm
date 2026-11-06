@@ -1,4 +1,5 @@
 #include "MacDesktopAudioCapture.h"
+#include "../i18n/Localisation.h"
 
 #if JUCE_MAC
 
@@ -1374,24 +1375,18 @@ struct MacDesktopAudioCapture::Impl : public std::enable_shared_from_this<Impl>
         //   必须先把 app 从"屏幕与系统音频录制"列表移除（-号），退出 app，
         //   再重新打开 app 让它触发一次授权请求。以下文本把这一步骤明确
         //   写清楚，避免用户误以为只需切开关。
-        return juce::String::fromUTF8 (u8"⚠️ 无法采集系统输出音频：\n")
-             + juce::String::fromUTF8 (u8"macOS 拒绝了本 App 的\"屏幕与系统音频录制\"权限 (TCC)。\n\n")
-             + juce::String::fromUTF8 (u8"请按以下步骤操作（这是 macOS 对 ad-hoc 签名 App 的限制）：\n")
-             + juce::String::fromUTF8 (u8"  1) 打开 系统设置 → 隐私与安全性 → 屏幕与系统音频录制\n")
-             + juce::String::fromUTF8 (u8"  2) 在列表里找到 ") + appName + juce::String::fromUTF8 (u8"，点右下角的 \"-\" 把它移除\n")
-             + juce::String::fromUTF8 (u8"  3) 完全退出 ") + appName + juce::String::fromUTF8 (u8"（Cmd+Q）\n")
-             + juce::String::fromUTF8 (u8"  4) 重新打开 ") + appName + juce::String::fromUTF8 (u8"，再次点击\"抓取系统输出\"，弹出授权时点\"允许\"\n\n")
-             + juce::String::fromUTF8 (u8"⚠️ 请勿只切换开关——升级后旧的授权记录已失效，\n")
-             + juce::String::fromUTF8 (u8"    必须先移除、再重新添加，权限才会真正生效。\n\n")
-             + "-------- English --------\n"
-             + "macOS denied Screen Recording / System Audio capture permission (TCC).\n\n"
-             + "Steps to fix (required for ad-hoc signed apps):\n"
-             + "  1) Open System Settings -> Privacy & Security -> Screen & System Audio Recording\n"
-             + "  2) Select \"" + appName + "\" in the list, click the \"-\" button to REMOVE it\n"
-             + "  3) Fully quit \"" + appName + "\" (Cmd+Q)\n"
-             + "  4) Relaunch \"" + appName + "\", trigger System Output again, and click Allow\n\n"
-             + "Do NOT just toggle the switch: the stale TCC record must be deleted first.\n\n"
-             + "App: " + appName + "\n"
+        //
+        //   界面语言：正文是一个模板翻译键（{0} = App 名），按当前语言输出单语版本
+        //   （中文译文见 i18n/zh-CN.lang）；App / Bundle ID 诊断行不翻译。
+        return y2k::trf ("macOS denied Screen Recording / System Audio capture permission (TCC).\n\n"
+                         "Steps to fix (required for ad-hoc signed apps):\n"
+                         "  1) Open System Settings -> Privacy & Security -> Screen & System Audio Recording\n"
+                         "  2) Select \"{0}\" in the list, click the \"-\" button to REMOVE it\n"
+                         "  3) Fully quit \"{0}\" (Cmd+Q)\n"
+                         "  4) Relaunch \"{0}\", trigger System Output again, and click Allow\n\n"
+                         "Do NOT just toggle the switch: the stale TCC record must be deleted first.",
+                         appName)
+             + "\n\nApp: " + appName + "\n"
              + "Bundle ID: " + bundleId;
     }
 

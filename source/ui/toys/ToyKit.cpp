@@ -1,4 +1,5 @@
 #include "source/ui/toys/ToyKit.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/Y2KLogging.h"
 
@@ -28,7 +29,7 @@ namespace
             const float fade = 1.0f - age / ttl;
             g.setFont (PinkXP::getFont (15.0f, juce::Font::bold));
             g.setColour (PinkXP::ink.withAlpha (fade));
-            g.drawText (text, juce::Rectangle<int> ((int) pos.x - 60, (int) pos.y - 14, 120, 28),
+            g.drawText (y2k::tr (text), juce::Rectangle<int> ((int) pos.x - 60, (int) pos.y - 14, 120, 28),
                         juce::Justification::centred, false);
         }
         juce::Rectangle<float> getBounds() const override

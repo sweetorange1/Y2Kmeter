@@ -1,5 +1,7 @@
 #include "source/ui/modules/OscilloscopeWaveModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
@@ -41,6 +43,10 @@ OscilloscopeWaveModule::OscilloscopeWaveModule(AnalyserHub& h)
     btnL.onClick    = [this]() { setChannelMode(ChannelMode::left);  };
     btnR.onClick    = [this]() { setChannelMode(ChannelMode::right); };
     btnBoth.onClick = [this]() { setChannelMode(ChannelMode::both);  };
+
+    btnL   .setTooltip (y2k::help::make ("Left",  "Draw only the left channel."));
+    btnR   .setTooltip (y2k::help::make ("Right", "Draw only the right channel."));
+    btnBoth.setTooltip (y2k::help::make ("Both",  "Draw left and right together to compare them."));
 
     btnBoth.setToggleState(true, juce::dontSendNotification);
 }
@@ -347,7 +353,7 @@ void OscilloscopeWaveModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
     const juce::String modeLabel = (channelMode == ChannelMode::left)  ? "L" :
                                    (channelMode == ChannelMode::right) ? "R" : "L+R";
-    g.drawText (modeLabel, canvas.getX() + 4, canvas.getBottom() - 14,
+    g.drawText (y2k::tr (modeLabel), canvas.getX() + 4, canvas.getBottom() - 14,
                 40, 12, juce::Justification::centredLeft, false);
 }
 
@@ -379,7 +385,7 @@ void OscilloscopeWaveModule::paintLegacyContent (juce::Graphics& g, juce::Rectan
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
     const juce::String modeLabel = (channelMode == ChannelMode::left)  ? "L" :
                                    (channelMode == ChannelMode::right) ? "R" : "L+R";
-    g.drawText(modeLabel, canvas.getX() + 4, canvas.getBottom() - 14,
+    g.drawText(y2k::tr (modeLabel), canvas.getX() + 4, canvas.getBottom() - 14,
                40, 12, juce::Justification::centredLeft, false);
 }
 
@@ -462,13 +468,13 @@ void OscilloscopeWaveModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int
     {
         g.setColour(PinkXP::ink.withAlpha(0.85f));
         g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-        g.drawText("L", canvas.getX() + 4, canvas.getBottom() - 14,
+        g.drawText(y2k::tr ("L"), canvas.getX() + 4, canvas.getBottom() - 14,
                    24, 12, juce::Justification::centredLeft, false);
         g.setColour(PinkXP::pink400);
         g.fillRect(canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
 
         g.setColour(PinkXP::ink.withAlpha(0.85f));
-        g.drawText("R", canvas.getX() + 32, canvas.getBottom() - 14,
+        g.drawText(y2k::tr ("R"), canvas.getX() + 32, canvas.getBottom() - 14,
                    24, 12, juce::Justification::centredLeft, false);
         g.setColour(PinkXP::pink600);
         g.fillRect(canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);

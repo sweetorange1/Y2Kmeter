@@ -12,6 +12,7 @@
 
 #include "UpdateDialog.h"
 #include "PinkXPStyle.h"
+#include "source/i18n/Localisation.h"
 #include "source/network/UpdateChecker.h"
 #include "source/Y2KLogging.h"
 
@@ -66,17 +67,17 @@ void UpdateDialog::paint(juce::Graphics& g) {
   const auto iconArea = titleRow.removeFromLeft(24).reduced(4, 2);
   g.setColour(PinkXP::selInk);
   g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
-  g.drawText(info_.force_update ? "!" : "i", iconArea,
+  g.drawText(y2k::tr (info_.force_update ? "!" : "i"), iconArea,
              juce::Justification::centred, false);
 
   // 标题文字（带阴影增强可读性）
   g.setColour(PinkXP::selInk.contrasting().withAlpha(0.45f));
   g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-  g.drawText("Update Available", titleRow.reduced(6, 0).translated(1, 1),
+  g.drawText(y2k::tr("Update Available"), titleRow.reduced(6, 0).translated(1, 1),
              juce::Justification::centredLeft, false);
 
   g.setColour(PinkXP::selInk);
-  g.drawText("Update Available", titleRow.reduced(6, 0),
+  g.drawText(y2k::tr("Update Available"), titleRow.reduced(6, 0),
              juce::Justification::centredLeft, false);
 
   // 4. 内容区域
@@ -92,13 +93,13 @@ void UpdateDialog::paint(juce::Graphics& g) {
     g.fillRoundedRectangle(iconBox.toFloat(), 4.0f);
     g.setColour(PinkXP::pink600);
     g.setFont(PinkXP::getFont(22.0f, juce::Font::bold));
-    g.drawText("!!", iconBox, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("!!"), iconBox, juce::Justification::centred, false);
   } else {
     g.setColour(PinkXP::pink300.withAlpha(0.20f));
     g.fillRoundedRectangle(iconBox.toFloat(), 4.0f);
     g.setColour(PinkXP::pink500);
     g.setFont(PinkXP::getFont(22.0f, juce::Font::bold));
-    g.drawText("i", iconBox, juce::Justification::centred, false);
+    g.drawText(y2k::tr ("i"), iconBox, juce::Justification::centred, false);
   }
 
   auto textCol = body;
@@ -106,7 +107,7 @@ void UpdateDialog::paint(juce::Graphics& g) {
   // 第一行：有新版本提示
   g.setColour(PinkXP::ink);
   g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-  g.drawText("A new version of Y2Kmeter is available!",
+  g.drawText(y2k::tr("A new version of Y2Kmeter is available!"),
              textCol.getX(), textCol.getY(),
              textCol.getWidth(), 18,
              juce::Justification::centredLeft, false);
@@ -115,8 +116,8 @@ void UpdateDialog::paint(juce::Graphics& g) {
   auto verRow = textCol.withY(textCol.getY() + 20).withHeight(16);
   g.setColour(PinkXP::pink700.withAlpha(0.7f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-  g.drawText("Current: " + juce::String(JucePlugin_VersionString)
-               + "    \xe2\x86\x92    Latest: " + info_.latest_version,
+  g.drawText(y2k::trf("Current: {0}", JucePlugin_VersionString)
+               + "    \xe2\x86\x92    " + y2k::trf("Latest: {0}", info_.latest_version),
              verRow, juce::Justification::centredLeft, false);
 
   // 更新日志区域
@@ -129,7 +130,7 @@ void UpdateDialog::paint(juce::Graphics& g) {
     if (changeArea.getHeight() > 20) {
       g.setColour(PinkXP::pink700.withAlpha(0.6f));
       g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-      g.drawText("What's new:",
+      g.drawText(y2k::tr("What's new:"),
                  changeArea.getX(), changeArea.getY(),
                  changeArea.getWidth(), 16,
                  juce::Justification::centredLeft, false);
@@ -141,7 +142,7 @@ void UpdateDialog::paint(juce::Graphics& g) {
 
       g.setColour(PinkXP::ink.withAlpha(0.75f));
       g.setFont(PinkXP::getFont(8.5f, juce::Font::plain));
-      g.drawFittedText(info_.changelog,
+      g.drawFittedText(y2k::tr (info_.changelog),
                        logArea.reduced(6, 4),
                        juce::Justification::topLeft,
                        12);
@@ -179,7 +180,7 @@ void UpdateDialog::paint(juce::Graphics& g) {
       g.setFont(PinkXP::getFont(8.5f, juce::Font::bold));
     }
 
-    g.drawText(label, btnRect, juce::Justification::centred, false);
+    g.drawText(y2k::tr(label), btnRect, juce::Justification::centred, false);
   }
 
   // 6. 四角像素 L 形装饰（Y2K 典型元素，对齐模块窗口风格）

@@ -1,5 +1,7 @@
 #include "source/ui/modules/WaveformModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
@@ -30,7 +32,8 @@ namespace
 
     juce::String windowHintText (float seconds)
     {
-        return juce::String (seconds, 1) + " s  (newest \xe2\x86\x92)";
+        // 界面语言：模板翻译（zh 里 "（最新 →）"），数值保持原格式
+        return y2k::trf ("{0} s  (newest \xe2\x86\x92)", juce::String (seconds, 1));
     }
 
     juce::String formatRelativeTime (float seconds)
@@ -75,8 +78,11 @@ WaveformModule::WaveformModule (AnalyserHub& h)
     //   旧的三个互斥按钮占掉了大半个工具栏；合成一个后按钮文字就是当前模式，
     //   单击即切到下一档（默认 PITCH），tooltip 里写明完整循环顺序。
     btnColourMode.setClickingTogglesState (false);
-    btnColourMode.setTooltip ("Colour source: PITCH (chroma hue) / LOUD (dBFS ramp) / "
-                              "SIB (5-12 kHz sibilance) - click to cycle");
+    btnColourMode.setTooltip (y2k::help::make ("Colour source",
+        "Click to cycle what the colours mean:\n"
+        "- PITCH: hue follows the musical note (chroma)\n"
+        "- LOUD: colour ramps with level (dBFS)\n"
+        "- SIB: highlights sibilance (5 - 12 kHz 's' sounds)"));
     btnColourMode.onClick = [this]()
     {
         setColorSource (nextColorSource (colorSource));
@@ -84,6 +90,7 @@ WaveformModule::WaveformModule (AnalyserHub& h)
     addAndMakeVisible (btnColourMode);
 
     btnFreeze.setClickingTogglesState (true);
+    btnFreeze.setTooltip (y2k::help::make ("Freeze", "Stop scrolling to inspect the history. Click again to resume."));
     btnFreeze.onClick = [this]() { setFrozen (btnFreeze.getToggleState()); };
     addAndMakeVisible (btnFreeze);
 
@@ -108,6 +115,10 @@ WaveformModule::WaveformModule (AnalyserHub& h)
     speedLabel.setColour (juce::Label::textColourId, PinkXP::ink);
     speedLabel.setFont (PinkXP::getFont (11.0f, juce::Font::bold));
     speedLabel.setText ("SPEED", juce::dontSendNotification);
+    speedSlider.setTooltip (y2k::help::make ("Speed",
+        "Scroll speed in pixels per second (10 - 400). Faster shows more detail, "
+        "slower shows a longer history."));
+    speedLabel.setTooltip (speedSlider.getTooltip());
     addAndMakeVisible (speedLabel);
 
     // 主题切换时重新下发文字颜色（Label / TextBox 都缓存颜色）
@@ -695,7 +706,7 @@ void WaveformModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> can
     // 窗口样本数提示（GL 路径下文字必须画在 overlay 里）
     g.setColour (PinkXP::ink.withAlpha (0.8f));
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
-    g.drawText (windowHintText (getDisplaySeconds()),
+    g.drawText (y2k::tr (windowHintText (getDisplaySeconds())),
                 canvas.getX() + 4, canvas.getBottom() - 14, 220, 12,
                 juce::Justification::centredLeft, false);
 
@@ -707,7 +718,7 @@ void WaveformModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> can
         g.fillEllipse (dot.toFloat());
         g.setColour (PinkXP::ink);
         g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText ("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
+        g.drawText (y2k::tr ("FROZEN"), canvas.getRight() - 60, canvas.getY() + 4,
                     42, 12, juce::Justification::centredRight, false);
     }
 
@@ -735,7 +746,7 @@ void WaveformModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int>
         g.fillEllipse (dot.toFloat());
         g.setColour (PinkXP::ink);
         g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText ("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
+        g.drawText (y2k::tr ("FROZEN"), canvas.getRight() - 60, canvas.getY() + 4,
                     42, 12, juce::Justification::centredRight, false);
     }
 
@@ -936,7 +947,7 @@ void WaveformModule::drawWaveform (juce::Graphics& g, juce::Rectangle<int> canva
     // 左下角说明：当前窗口样本数 / 时长
     g.setColour (PinkXP::ink.withAlpha (0.85f));
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
-    g.drawText (windowHintText (getDisplaySeconds()),
+    g.drawText (y2k::tr (windowHintText (getDisplaySeconds())),
                 canvas.getX() + 4, canvas.getBottom() - 14, 220, 12,
                 juce::Justification::centredLeft, false);
 }

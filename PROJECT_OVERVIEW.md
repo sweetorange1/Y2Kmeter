@@ -8,12 +8,14 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.0.1`）
+- **产品名**：`Y2Kmeter` （版本：`3.0.2`）
   - 历史：`v2.9.9` 之后的功能曾以「v2.9.9 补充」形式入库、不 bump 版本号（`Stereo Map`、多屏混合 DPI 修复、
     实时 BPM / 调性模块），随后 `v2.9.10` 归拢了 Waveform 模块重构；**v3.0.0** 起恢复常规语义化版本号
     （见文末「v3.0.0：...」章节）；**v3.0.1** 为补丁版（GL 直渲染修复 / 全屏布局预设，见文末）。
-    当前 `3.0.1` 固定为「补丁 + 补充」版本，后续补充（响度计时序对齐、VST 布局锁死修复、
-    GL 组件合成诊断、**Toybox 档位改为连续互动自动升级**）均以 `v3.0.1补充：` 形式入库、不再 bump 版本号。
+    **v3.0.2**（本轮）正式收拢此前以 `v3.0.1补充` 形式入库的内容（响度计时序对齐、VST 布局锁死修复、
+    GL 组件合成诊断、Toybox 档位连续互动自动升级）以及本轮两大新功能 —— **悬停提示 Hover Help** 与
+    **界面国际化 / 中文本地化（运行时中英文切换）**，连同后续迭代（符号字形集中管理、CJK 视觉校正、
+    按钮字号收紧、翻译文案自查、多屏混合 DPI 下模块脱离窗口物理像素落位等），详见文末「v3.0.2」章节。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -249,6 +251,9 @@
 | [PinkXPStyle.h/.cpp](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 主题系统（12 预设 + 生成器 custom）+ 19 色槽位 + 扩展槽（`accent2`/`chartRamp[8]`/`danger`/`warn`/`ok`）+ OKLab 渐变采样 + 桌面纹理 + `PinkXPLookAndFeel` |
 | [source/ui/palette/](/I:/Y2KMeter/source/ui/palette/) | 调色板重构模块：`OkLchUtils`（OKLCH/色域裁剪/WCAG）、`ThemeSpec`（意图参数+分享码）、`PaletteGenerator`（Recipe+护栏，纯 C++）、`ThemeLibrary`（我的主题）、`PalettePanel`（新面板 UI） |
 | [UiFrameClock.h/.cpp](/I:/Y2KMeter/source/ui/UiFrameClock.h) | 统一 UI 帧时钟（阶段1性能改造，目前尚未强制接线，主流数据流仍走 `AnalyserHub::FrameDispatcher`） |
+| [HoverHelp.h/.cpp](/I:/Y2KMeter/source/ui/HoverHelp.h) | 悬停提示：`y2k::help` 文案库（模块详细说明 / 全局开关持久化）+ `Y2KTooltipWindow`（统一解析控件 / 模块 / 自绘按钮提示，仪表内容区静止才弹出）；绘制在 `PinkXPLookAndFeel::drawTooltip`（见文末「v3.0.2：悬停提示」） |
+| [UiPrefs.h/.cpp](/I:/Y2KMeter/source/ui/UiPrefs.h) | 进程级 UI 偏好（`Y2Kmeter.uiPrefs.xml`：界面语言 / 悬停提示开关），独立于布局与预设 |
+| [../i18n/Localisation.h/.cpp](/I:/Y2KMeter/source/i18n/Localisation.h) | 界面国际化 `y2k::i18n` / `y2k::tr` / `y2k::trf`：语言包（`i18n/*.lang`）注册与合并、查表翻译（精确 / 数字模板 / 逐行）、按语言字体、运行时切换广播（见文末「v3.0.2：界面国际化」） |
 
 ### 3.4 `source/ui/modules`（分析模块 UI）
 每个模块都是 `ModulePanel + AnalyserHub::FrameListener` 双继承。
@@ -4807,7 +4812,7 @@ juce::OpenGLContext::CachedImage::RenderThread::renderAll
 ### 6. 遗留 / 已知缺口
 
 1. `exitStickMode` 还原 stick 备份 bounds 仍用逻辑坐标 —— stick 与备份基本总在同一块屏，跨缩放跨屏概率极低，本轮未动。
-2. 浮动模块窗口（脱离的 Milkdrop 等）创建时的 `getTotalBounds` 钳制、以及其拖拽仍走 JUCE `ComponentDragger` —— 依赖已修好的显示器表，当前行为正常；若将来 JUCE 升级丢了补丁，这两处会重新出现跨缝瞬移。
+2. ~~浮动模块窗口（脱离的 Milkdrop 等）创建时的 `getTotalBounds` 钳制、以及其拖拽仍走 JUCE `ComponentDragger` —— 依赖已修好的显示器表，当前行为正常；若将来 JUCE 升级丢了补丁，这两处会重新出现跨缝瞬移。~~ **已跟进（v3.0.1 补充，2026-11）**：模块脱离（pop out）的窗口落位改为物理像素 —— 模块相对 Editor 的逻辑偏移 × Editor 所在屏 scale = 物理偏移，以 Editor 物理左上角为基准 `SetWindowPos(SWP_NOSIZE)`，再夹到落点所在显示器的物理边界内；修复"模块靠近上方低分辨率屏时脱离窗口整块跳偏（标题栏跑到上方屏）"。浮动窗口的**拖拽**仍走 `ComponentDragger`（依赖已修好的显示器表）。
 3. macOS 走原生 `setFullScreen`，本轮补丁与物理路径均不参与（`#if JUCE_MAC` 早退 / `#if JUCE_WINDOWS` 包裹），未做实机验证。
 4. `resizeToTargetCanvas()`（预设 6~9 的"固定尺寸居中"）仍用逻辑坐标 —— 它只在**当前所在屏**内居中，不跨 DPI 换算，风险低。
 
@@ -5966,6 +5971,134 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 `ToyLevel::Off` 枚举值仅为兼容旧存档数值保留，运行时不可达。
 
 **验证**：`git diff --check` 通过、IDE 静态诊断 0 错误；本地构建与运行时手感按项目约定由用户在目标机器验证。
+
+---
+
+## v3.0.2：悬停提示（Hover Help）
+
+**需求**：鼠标悬停在按钮或仪表模块上时，展开该按钮 / 模块的详细功能说明。
+
+**背景**：历史代码里虽然有十几处 `setTooltip(...)`，但工程里从未创建 `juce::TooltipWindow`，这些文案**从来没有显示过**。本轮补上提示窗口，并把文案体系化。
+
+**架构**（核心文件 [source/ui/HoverHelp.h/.cpp](/I:/Y2KMeter/source/ui/HoverHelp.h)）：
+
+| 组成 | 说明 |
+| --- | --- |
+| `y2k::help::make(title, body)` | 统一文案格式 `"标题\n正文"`（正文可再含 `\n`）；不含 `\n` 时整段作为正文 |
+| `y2k::help::moduleHelp(ModuleType)` | 24 个模块的详细说明（模块名 + 功能 / 读法 / 控件） |
+| `y2k::help::moduleTitleUsage()` | 标题栏附加的操作提示（拖动 / 缩放 / 双击最大化 / 右键菜单；锁定态 / 浮动态各自文案） |
+| `y2k::help::isEnabled / setEnabled` | 全局开关，独立存档 `%APPDATA%\Y2Kmeter.uiPrefs.xml`（macOS：`~/Library/Application Support/`），Standalone 与插件共用、不随布局 / 预设切换；只缓存一个 bool，无 JUCE 静态对象（规避 DLL 卸载析构顺序问题） |
+| `Y2KTooltipWindow` | 继承 `juce::TooltipWindow`，覆写 `getTipFor()` 统一解析鼠标下的提示来源 |
+| `PinkXPLookAndFeel::getTooltipBounds / drawTooltip` | 迷你 Pink XP 窗口外观：凸起外框 + `sel/selInk` 标题条 + `content` 底正文（`readableInkOn` 兜底可读性），正文按词自动换行（最宽 `ui(300)`），两函数共用 `measureTip()` 保证测量与绘制换行一致；默认放在光标右下，越界翻到左 / 上并夹紧在宿主区域内 |
+
+**提示来源解析（`Y2KTooltipWindow::getTipFor`）**：从鼠标下组件沿父链向上：
+
+1. 遇到有文案的 `TooltipClient`（Button / Slider / ComboBox / Label / `ThemeSwatchBar` / Editor）→ 直接用；没文案的子组件继续向上（如 Slider 数值框 → Slider）。
+2. 遇到 `ModulePanel` → 调 `ModulePanel::getHoverHelp(面板本地坐标)`，返回 `{ text, contentZone }`：
+   - 默认实现：关闭 × / 弹出 - 停靠 = 按钮说明；标题栏 → 模块说明 + 操作提示；其余 → 模块说明（`contentZone = true`）。
+   - 自绘按钮模块覆写后先判自己的控件，未命中回落基类：`MilkdropModule`（顶部控制栏 `< 预设名 tweak wave effects color auto > ?`、右下角 Like / 库切换、auto 行、color / effects（38 个效果逐个说明 + 当前开关态）/ wave（16 种波形名）/ tweak 面板全部控件）、`RecorderModule`（像素红点，按录制态切换文案）、`VirtuPetModule`（聚焦后的删除 ×，蛋阶段追加孵化提示）。
+3. **仪表内容区节流**：`contentZone` 的说明要求鼠标静止 ≥ `kContentStillMs`（700 ms，容差 4 px）才出现，移动即收起 —— 不挡频谱 / 波形等模块自带的悬停读数标尺；按钮 / 标题栏走普通延迟 `kTipDelayMs`（650 ms）。
+4. 开关关闭、任意鼠标键按下、Standalone 不在前台、被模态框阻塞时一律不出提示。
+
+**宿主方式**：
+
+- 主窗口：`Editor::tooltipWindow` 以 Editor 为父组件（`unique_ptr`，构造末尾 GL attach 之后创建，析构**最开头** reset）—— 走 Editor 的 GL 合成层绘制，插件宿主内不开原生窗口；伪全屏时也不会被主窗口表面压住（与 `PinkXP::getInWindowMenuHost` 同一思路）。提示窗口 `setInterceptsMouseClicks(false,false)`，永远不会成为"鼠标下组件"。
+- 浮动模块窗口：独立 peer，Editor 的提示窗口管不到 —— `FloatingModuleWindow::tooltip_` 以窗口自身为父（直接 `Component::addChildComponent`，不触发 ResizableWindow 的 debug 断言；析构时先 reset，满足 `~ResizableWindow` 的"无额外子组件"断言）。已知限制：浮动态 Milkdrop 的内容区有独立原生 GL 子窗口，提示会被压在其下（标题栏区域正常）。
+- Editor 实现 `juce::TooltipClient::getTooltip()`：复用 `mouseMove` 维护的 hover 状态给出标题栏 × / 置顶 / 最小化 / L 锁定 / 标题文字（官网）/ 标题栏空白（拖窗 · 双击全屏，stick 态另有文案）的说明。
+
+**开关入口**：右键（或双击）桌面空白区 / 模块的"添加模块"菜单底部 `Show Hover Tips`（带勾选态）；新手引导的白名单菜单里不出现。
+
+**文案覆盖**：
+
+- 工具栏：Source（含标签）/ More-Less / FPS 按钮 + 实时 fps 标签 / FFT Size（含标签）/ gain 按钮（带当前 dB，统一走 `makeGainTooltip()`）+ gain 滑条 / Grid / 布局预设下拉 / Save / Load / Stick / X / T-B / Hide-Show；主题色票条（Palette Studio / 预设主题 / 我的主题 / 新建）。
+- 模块内 juce 控件：Spectrum（Peak / Sharp / 曲线三档 / 通道三档）、Oscilloscope（Wave / X-Y / Liss / Freeze）、Oscilloscope Wave（L / R / Both）、Waveform（颜色来源 / Freeze / SPEED）、Spectrogram（SPEED / 模式）、Spectrogram 3D（SPEED / TINT，原中文提示改为英文）、Stereo Map（PAN / MONO）、Tempo / Key（START-STOP / RESET）、Recorder（时长滑条 / SAVE LAST）、Spectrum Perlerbeads（频段双滑块 / SIZE）、Dynamics Crest（SPAN）。
+- 源文案统一写英文（翻译键）；中文等译文由显示层经 `y2k::i18n` 翻译（见下一节「界面国际化」）。
+
+**新增模块时的约定**：在 `y2k::help::moduleHelp()` 的 switch 里补一段说明；模块内 juce 控件用 `setTooltip(y2k::help::make(...))`；自绘按钮覆写 `getHoverHelp()`，未命中时 `return ModulePanel::getHoverHelp(pos);`。
+
+**改动点**：`source/ui/HoverHelp.h/.cpp`（新增）、`CMakeLists.txt`（登记源文件）、`source/ui/PinkXPStyle.h/.cpp`（tooltip LnF）、`source/ui/ModuleWorkspace.h`（`ModulePanel::HoverHelp` + `getHoverHelp` 虚函数）、`source/ui/ModulePanel.cpp`（默认实现）、`source/ui/ModuleWorkspace.cpp`（工具栏 / 色票文案、右键菜单开关）、`PluginEditor.h/.cpp`（TooltipWindow 宿主、浮动窗口提示、标题栏 `getTooltip`）、各模块 `.cpp/.h`（控件文案与自绘按钮覆写）。
+
+**验证**：IDE 静态诊断 0 错误；按项目约定编译与运行验证由用户在本机完成（头文件有改动，需全量构建）。
+
+---
+
+## v3.0.2：界面国际化（i18n）与中文本地化
+
+**需求**：底部工具栏 FPS 区右侧（分割线之后）新增语言切换按钮，英文 ↔ 中文运行时切换、无需重启；中文界面使用 `ttf/ChillBitmap_16px.ttf` 渲染；覆盖界面文本、菜单、提示与错误信息；新增语言不改核心逻辑。
+
+**架构总览**
+
+| 组成 | 位置 | 说明 |
+| --- | --- | --- |
+| 语言注册表 / 翻译 | [source/i18n/Localisation.h/.cpp](/I:/Y2KMeter/source/i18n/Localisation.h) | `y2k::i18n`：语言包发现与合并、当前语言、`translate` / `translateFormat`、字体数据、切换广播；便捷入口 `y2k::tr("…")` / `y2k::trf("Saved: {0}", name)` |
+| 语言包 | [i18n/*.lang](/I:/Y2KMeter/i18n/zh-CN.lang) | UTF-8 文本，键 = 英文源文案（gettext 风格）。CMake `file(GLOB … CONFIGURE_DEPENDS)` 自动打包进 `Y2KI18nData` |
+| 资源打包 | `CMakeLists.txt` → `juce_add_binary_data(Y2KI18nData …)` | 独立 binary data target：所有 `.lang` + 中文字体（12 MB，与 `Y2Kmeter_BinaryData` 分开，避免改 logo / 英文字体时重编大文件） |
+| 偏好存档 | [source/ui/UiPrefs.h/.cpp](/I:/Y2KMeter/source/ui/UiPrefs.h) | `y2k::prefs`：`Y2Kmeter.uiPrefs.xml`（`language` / `hoverTips`），Standalone 与插件共用、不随布局 / 预设切换；悬停提示开关也改走这里 |
+| 显示层延迟翻译 | `PinkXPLookAndFeel` | `drawButtonText` / `drawLabel` / `drawComboBoxTextWhenNothingSelected` / `drawPopupMenuItem`（+ 理想宽度）/ `drawTooltip` / `getTextButtonWidthToFitText` / `cachedStaticTextImage`（模块标题栏 + 大量静态标签）/ `drawHoverRuler` 读数，全部在绘制时调用 `y2k::tr` |
+| 自绘文本 | 各模块 / 工具栏 / Editor / 调色板 / 玩具 | `g.drawText / drawFittedText / drawSingleLineText / drawMultiLineText` 的文本参数与对应 `getStringWidth*` 测量统一包 `y2k::tr(...)`（共 230 处，含动态拼接的读数） |
+| 字体切换 | `PinkXP::loadActiveTypeface / initCustomTypeface` | 按当前语言包 `@font` 加载字体（进程内按 fontId 缓存 Typeface，切回零成本）；`@fontScale` / `@minFontHeight` 在 `getFont` / `makeFontRaw` 统一换算；`getFontGeneration()` 进入文字位图缓存键 |
+| CJK 视觉校正 | `PinkXP::SymbolGlyphs::cjkFontActive()` | CJK 方块字紧贴 em 顶部、descent 小，按 metrics 垂直居中后视觉偏上 —— 模块标题栏（`drawPinkTitleBar`）在 CJK 字体激活时统一向下微移 1px（英文界面 0） |
+| 按钮字号收紧 | `PinkXP::SymbolGlyphs::buttonFont()` | CJK 方块字视觉面积大，按钮文字在全局 `@fontScale` 之外再收紧 10%（`height * 0.9`，英文界面原样）；`drawButtonText` / `getTextButtonWidthToFitText` / `FpsMiniLookAndFeel` 全部统一走它，测量与绘制口径一致 |
+| 切换按钮 | `ModuleWorkspace::langBtn` | 位置：FPS 区 → 分割线 `X1` → 语言按钮 → 分割线 `XLang` → Source。文案 = 语言包 `@label`（"EN" / "中"）；2 种语言时单击直接循环，≥3 种弹出语言菜单（`code  自称`）。窄窗口时与其它可选控件一样折叠进 More 面板 |
+| 运行时刷新 | `Editor::applyLanguageChange()` | 订阅 `y2k::i18n` 广播：换字体 → `PinkXP::notifyThemeSubscribers()`（复用主题刷新链路，各模块失效静态文字层 / GL 快照 / 位图缓存，Editor 失效桌面缓存）→ `sendLookAndFeelChange()`（Editor + 浮动窗口，同时刷新浮动窗口标题）→ 工具栏语言按钮文案 + 重排 → 全量重绘 |
+
+**关键设计：控件里永远存英文源文案**
+
+- 显示时才翻译，因此切换语言不需要逐个 `setText`，代码中对按钮文字的比较、持久化、布局预设名、ValueTree 等全部不受影响。
+- 查表顺序（带缓存，线程安全，GL 线程也可调用）：整串精确 → 去首尾空白 → **数字模板化**（`"SAVE LAST 10 s"` → 按 `"SAVE LAST {0} s"` 查，命中后把数字回填）→ 多行逐行翻译 → 均未命中原样返回（缺译自动回退英文）。动态读数（`WIDTH 35%` / `12s ago` / `BAL L23` / `Input gain: 3.5 dB` / 预设编号范围等）都靠数字模板覆盖，无需改代码。
+- 含非数字变量的拼接（文件名、调名、效果名）在调用点改用 `y2k::trf` 模板（`"SAVED: {0}"`、`"rel. {0} {1}"`、`"Effect: {0}"`、`"Wave shape: {0}"`、`"Milkdrop error: {0}"`、更新对话框 `"Current: {0}"` 等），且都在绘制 / 悬停时现算，切换后立即生效。
+- 中英混排的旧文案已改为单语模板：macOS TCC 权限提示（原中英双语长文）→ `y2k::trf` 单一模板；诊断导出对话框（原中英混写）→ `y2k::tr`。
+
+**语言包格式（`i18n/<code>.lang`）**
+
+```
+@code          = zh-CN                 # 唯一键
+@name          = 简体中文               # 语言菜单显示的自称
+@label         = 中                    # 工具栏按钮短标签
+@order         = 10                    # 排序（英文恒为 0）
+@match         = zh                    # 系统语言前缀，首次启动自动匹配
+@font          = ChillBitmap_16px.ttf  # 内嵌资源原始文件名 / 资源名 / .lang 同目录文件；省略或 default = Silkscreen
+@fontScale     = 0.85                  # 字号换算（CJK 方块字占满 em，视觉比 Silkscreen 大 ~15%，0.85 校正）
+@minFontHeight = 11                    # 最小字号（px），防止小字号 CJK 糊成一团（坐标轴字体不受限）
+"English source" = "译文"               # 支持 \n \t \" \\；相邻 "…" "…" 自动拼接；# 注释
+"SAVE LAST {0} s" = "保存最近 {0} 秒"     # 数字模板 / trf 模板
+```
+
+- **新增语言**：在 `i18n/` 放一个 `<code>.lang`（需要专用字体时把字体加进 `Y2KI18nData` 的 SOURCES 并在 `@font` 引用）→ 重新构建即可；按钮在 ≥3 种语言时自动变为菜单。核心代码零改动。
+- **免编译热修 / 社区补译**：把 `.lang` 放到 `%APPDATA%\Y2Kmeter\lang\`（macOS：`~/Library/Application Support/Y2Kmeter/lang/`），同 `@code` 时逐条覆盖内置包、不同 `@code` 时新增语言；`@font` 可引用同目录字体文件。重启生效。
+- **当前语言选择顺序**：用户存档（显式点过按钮）> 系统语言 `@match` 自动匹配（仅首次、无存档时）> 英文。
+
+**覆盖范围**：工具栏全部控件与提示、右键菜单 / 语言菜单 / 布局预设、24 个模块标题与面板内标签 / 状态字 / 读数、悬停提示（模块说明逐行翻译）、Milkdrop 控制栏与四个面板（38 个效果名 + 说明、波形形状、微调参数、跳转 / 间隔输入框、错误信息）、调色工作室（按钮、标签、纹理 / 配色关系 / 颜色角色、生成器修正说明、toast、导入导出对话框标题）、预设主题名与关键词、新手引导与跳过确认、电子宠物（台词 / 删除确认）、互动玩具、录音机状态与错误、速度 / 调性（调式词、相对时间）、更新对话框（自绘与原生两种）、独立版音频设备错误与权限引导、诊断导出对话框。品牌名（Y2Kmeter / Milkdrop）、单位与行业缩写（dB / LUFS / dBTP / RMS / BPM / DR / FFT / L / R / M / S）保持原样。
+
+**注意事项**
+
+- 后续新增 UI 文案：源码里继续写英文；Button / Label / ComboBox / 菜单 / tooltip / `cachedStaticTextImage` 自动翻译，自绘 `g.drawText` 请包 `y2k::tr`，带非数字变量的拼接用 `y2k::trf`；然后在 `i18n/zh-CN.lang` 补一条译文。
+- `translate()` 对英文（源语言）直接返回，零开销；中文下有结果缓存（8192 条上限，满了整体清空）。
+- 首次切到中文会解析 12 MB 字体（一次性，之后缓存）；Editor 析构时 `releaseTypefaceCache()` 与原有 `initCustomTypeface(nullptr)` 一起清理，规避插件卸载期悬垂引用。
+- **符号字形集中管理（`PinkXP::SymbolGlyphs`，PinkXPStyle.h/.cpp）**：中文像素字体（ChillBitmap）对一批装饰符号（✓ ♡ ★ ● ◆ × ↑ ↓ ← → ↗ ↙ ▸ ▾ ▲ ✎ ∞ ⚠ · • … 等）存在 cmap 条目但**没有可渲染的字形数据**（像素位图缺失），DirectWrite 不会回退系统字体，直接绘制就是空白（英文界面正常是因为 Silkscreen 缺这些字形、反而触发系统回退）。规则集中在 `SymbolGlyphs` 一个类里：文本只要包含上述符号，整串改用英文 UI 字体（Silkscreen）渲染；英文界面下两字体是同一个 Typeface 对象，机制自然 no-op。统一入口：`SymbolGlyphs::getFont(text, height, style)` / `rebase(base, text)`；已接线的集中点：`drawButtonText` / `getTextButtonWidthToFitText` / `drawLabel` / `drawComboBoxTextWhenNothingSelected` / `drawPopupMenuItem`（含 ✓ 勾选与条目宽度测量）/ `drawTitleIconText`（模块标题栏主题图标）/ `cachedStaticTextImage` / 悬停提示排版（tooltip 标题与正文）/ `FpsMiniLookAndFeel`（"∞FPS"）。自绘符号点（语谱图 "←/→/↗/↙ older·newer"、调色板 "Use ↑ ↓ ✎ ×" 与 "Aa 123 · Y2K" 预览、主题名色票条）也改走该入口。后续任何地方要画符号文本，一律 `SymbolGlyphs::getFont(...)`，不要自行判断字形。
+
+**改动点**：新增 `source/i18n/Localisation.h/.cpp`、`source/ui/UiPrefs.h/.cpp`、`i18n/zh-CN.lang`；`CMakeLists.txt`（`Y2KI18nData` 目标 + 源文件登记 + 链接）；`source/ui/PinkXPStyle.h/.cpp`（按语言加载字体 / 字号换算 / LnF 延迟翻译 / `notifyThemeSubscribers`）；`source/ui/ModuleWorkspace.h/.cpp`（语言按钮、布局、分割线、文件对话框）；`PluginEditor.h/.cpp`（订阅与 `applyLanguageChange`、引导层 / 诊断对话框 / 浮动窗口标题）；`source/ui/HoverHelp.cpp`（偏好改走 UiPrefs）；`source/standalone/Y2KStandaloneApp.cpp`、`MacDesktopAudioCapture.mm`（对话框 / 权限提示）；`source/ui/UpdateDialog.cpp`、`source/network/UpdateChecker.cpp`；`source/ui/palette/PalettePanel.cpp`；各模块与 toys 的自绘文本。
+
+**验证**：`git diff --check` 通过；语言包所有非模板键均与源码文案逐字核对。按项目约定编译与运行验证由用户在本机完成（新增 CMake 目标与头文件改动，需重新 configure + 全量构建）。
+
+---
+
+## v3.0.2：收尾迭代记录（悬停提示 / i18n 上线后的修复与调优）
+
+> 上两章两大功能（悬停提示、界面国际化）上线后，根据用户实测反馈与自查进行的一轮修复，随 v3.0.2 一起发布。按时间顺序：
+
+| # | 事项 | 处理 |
+| --- | --- | --- |
+| 1 | 电子宠物对话未汉化 | 气泡绘制 `AttributedString::append` 用英文源文本、未走 `y2k::tr`（测量宽度却翻译了）—— 两处（巡逻气泡 + `getPetVisualBoundsFor`）补 `y2k::tr` |
+| 2 | 中文字体 7px 试用 | 换 `ChillBitmap_7px.ttf` 后用户觉得效果不好 → 回退 `ChillBitmap_16px.ttf`（CMake / `zh-CN.lang` / 文档同步） |
+| 3 | `y2k::tr` 重载二义 | `juce::StringRef` 同时可隐式转换 `const char*` 与 `juce::String` → 新增 `tr(juce::StringRef)` 精确重载 |
+| 4 | 符号字形集中管理（`PinkXP::SymbolGlyphs`） | 中文像素字体对 ✓ ♡ ★ ● × ↑ → ▸ ✎ ∞ ⚠ · 等 cmap 有条目但无字形数据，DWrite 不回退 → 空白。文本含这些符号时整串改英文 UI 字体渲染；接入 `drawButtonText` / `drawLabel` / `drawPopupMenuItem`（✓ 勾选）/ `drawTitleIconText`（标题栏主题图标）/ `cachedStaticTextImage` / tooltip / `FpsMiniLookAndFeel`（∞FPS）/ 语谱图方向提示 / 调色板符号 |
+| 5 | 悬停文案与翻译自查 | 实时 LUFS 悬停补 M/S/I 定义；真峰值补 TP-L/TP-R、RMS-L/RMS-R 定义；频谱悬停补"按住 → 子弹时间（1/50 回落 + 残影色）"说明；补译 `RMS L/R`、`PK-L/RMS-L`（连字符）、`SAVED/SAVING (1 H LIMIT)`、`Custom (migrated)`、`projectm_create() returned NULL.`、`GRID` 等遗漏；Milkdrop 预设编号输入框与波形窗提示从字符串拼接改 `y2k::trf` 模板（此前译文不生效） |
+| 6 | CJK 视觉校正 | 中文方块字撑满 em、descent 小：(a) `zh-CN.lang` `@fontScale 1.0 → 0.85`、`@minFontHeight 12 → 11`（全局收紧 ~15%）；(b) 标题栏文字偏上 —— `SymbolGlyphs::cjkFontActive()` + `drawPinkTitleBar` 中文界面下移 1px；(c) 按钮再收紧 —— `SymbolGlyphs::buttonFont()`（CJK 下 `height × 0.9`），按钮绘制与宽度测量统一口径 |
+| 7 | 多屏（混合 DPI）模块脱离跳变 | 参考「v2.9.9 补充」物理像素方案：pop out 的浮动窗口在 `addToDesktop()` 后、`setVisible(true)` 前，把"模块相对 Editor 的逻辑偏移 × Editor 所在屏 scale"换算成物理偏移，以 Editor 物理左上角为基准 `SetWindowPos(SWP_NOSIZE)`，再夹到落点所在显示器物理边界内（`#if JUCE_WINDOWS`，模拟开关跳过） |
+| 8 | 版本号 | `3.0.1 → 3.0.2`：`CMakeLists.txt`（project + 两处 `juce_add_plugin VERSION`）、`PluginEditor.cpp` 3 处版本显示字面量、`Y2Kmeter_installer.iss` `MyAppVersion`、本文档 |
+
+**验证**：IDE 静态诊断 0 错误、`git diff --check` 通过；构建与运行验证按项目约定由用户在本机完成（版本号变更需重新 configure 才会重写 `*_resources.rc`）。
 
 ---
 

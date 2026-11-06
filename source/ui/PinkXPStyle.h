@@ -152,11 +152,21 @@ namespace PinkXP
                          juce::Colour top, juce::Colour bottom, int bands = 6);
 
     // ---- 字体 ----
-    // 初始化全局 Typeface（由 PluginEditor 在启动时调用一次）
+    // 初始化全局 Typeface（由 PluginEditor 在启动时 / 切换界面语言后调用）
+    //   同时从 y2k::i18n 读取当前语言的字号缩放（fontScale / minFontHeight）。
     void initCustomTypeface(juce::Typeface::Ptr ptr);
 
-    // 从 BinaryData 加载当前字体（Silkscreen-Regular.ttf）
+    // 加载当前界面语言对应的字体：
+    //   · 英文 / 未声明字体的语言 → 内置 Silkscreen-Regular.ttf
+    //   · 其它语言 → 语言包 @font 指定的字体（如中文 ChillBitmap_16px）
+    //   同一字体只创建一次 Typeface（进程内缓存，见 releaseTypefaceCache）。
     juce::Typeface::Ptr loadActiveTypeface();
+
+    // 释放 loadActiveTypeface 的缓存（Editor 析构时调用，规避 DLL 卸载期悬垂引用）
+    void releaseTypefaceCache();
+
+    // 字体代次：每次 initCustomTypeface +1（供文字位图等缓存做键）
+    juce::uint32 getFontGeneration() noexcept;
 
     // 取自定义字体（按激活字体）
     // 注意：为整体可读性，此函数会对高度做 1.5x 放大（坐标轴刻度请用 getAxisFont）
@@ -164,6 +174,48 @@ namespace PinkXP
 
     // 坐标轴刻度专用字体：不做放大，保持原始 height
     juce::Font getAxisFont(float height, int styleFlags = juce::Font::plain);
+
+    // ==========================================================
+    // 符号字形集中管理（界面国际化补充）
+    //   中文像素字体（ChillBitmap）对一批装饰符号（✓ ♡ ★ ● × ↑ ↓ ← → ▸ ▾ ▲
+    //   ✎ ∞ ⚠ · … 等）存在 cmap 条目，但**没有可渲染的字形数据**（像素位图
+    //   缺失），DirectWrite 认为字形存在、不会回退系统字体，直接绘制就是空白。
+    //   英文 UI 字体（Silkscreen）本身没有这些字形，反而会触发系统字体回退——
+    //   这正是英文界面下符号显示正常的原因。
+    //   规则集中在本类：文本只要包含上述符号，整串改用英文 UI 字体渲染；
+    //   英文界面下两个字体相同，机制自然失效（no-op）。
+    //   所有绘制 / 测量点统一通过 getFont() / rebase() 取字体，
+    //   不要在别处自行判断字形。
+    // ==========================================================
+    class SymbolGlyphs
+    {
+    public:
+        // 文本是否含"当前语言字体画不出来"的装饰符号
+        //   （只覆盖 Unicode 装饰符号，不含 ASCII 字母数字与基本标点）
+        static bool needsSymbolFont (const juce::String& text);
+
+        // 按文本内容选字体：含符号 → 英文 UI 字体；否则沿用当前语言字体。
+        //   高度换算与 PinkXP::getFont 完全一致（1.5x / uiScale / minFontHeight）。
+        static juce::Font getFont (const juce::String& text, float height,
+                                   int styleFlags = juce::Font::plain);
+
+        // 已有基础字体（如 getLabelFont 返回值）时按文本内容决定是否换 Typeface；
+        //   换字时沿用基础字体的最终高度（含语言包字号换算）。
+        static juce::Font rebase (const juce::Font& base, const juce::String& text);
+
+        // 按钮文字专用：CJK 方块字视觉面积大，在全局 @fontScale 之外再收紧一点
+        //   （英文界面原样返回，无变化）。按钮绘制与宽度测量必须同用它保持口径一致。
+        static juce::Font buttonFont (const juce::String& text, float height,
+                                      int styleFlags = juce::Font::plain);
+
+        // 当前界面字体是否为 CJK 像素字体（非英文 Silkscreen）。
+        //   CJK 方块字紧贴 em 顶部、descent 很小，垂直居中时视觉偏上；
+        //   标题栏等关键位置用它决定是否做 1px 向下微调。
+        static bool cjkFontActive();
+
+    private:
+        static juce::Typeface::Ptr getSymbolTypeface();   // 缓存的英文 UI 字体
+    };
 
     // ==========================================================
     // 静态文本位图缓存（v2.9.6 性能）
@@ -359,6 +411,11 @@ namespace PinkXP
     using ThemeChangedCallback = std::function<void()>;
     int  subscribeThemeChanged(ThemeChangedCallback cb);
     void unsubscribeThemeChanged(int token);
+
+    // 不改配色、只把"主题已变更"广播给全部订阅者。
+    //   界面语言切换后复用这条链路：各模块订阅回调里本来就会失效静态文字层 /
+    //   GL 快照 / 位图缓存并重绘，换字体后需要的正是同一套刷新。
+    void notifyThemeSubscribers();
 }
 
 // ==========================================================
@@ -380,6 +437,14 @@ public:
 
     juce::Font getLabelFont(juce::Label&) override;
     juce::Label* createSliderTextBox(juce::Slider&) override;
+
+    // ---- 界面语言（y2k::i18n）延迟翻译 ----
+    //   Label / ComboBox 文本在绘制时翻译（控件内部始终保存英文源文案）；
+    //   字体每次绘制现取（getLabelFont），自动跟随当前语言字体。
+    void drawLabel (juce::Graphics&, juce::Label&) override;
+    void drawComboBoxTextWhenNothingSelected (juce::Graphics&, juce::ComboBox&, juce::Label&) override;
+    // 按钮自适应宽度（AlertWindow 按钮等）按译文测量
+    int getTextButtonWidthToFitText (juce::TextButton&, int buttonHeight) override;
 
     void drawPopupMenuBackground(juce::Graphics& g, int width, int height) override;
     void drawPopupMenuItem(juce::Graphics&, const juce::Rectangle<int>& area,
@@ -423,6 +488,15 @@ public:
     //   重写点即可覆盖 ComboBox 下拉、右键"添加模块"菜单以及所有其它 PopupMenu。
     //   其余情况原样返回 options.getParentComponent()，行为与 JUCE 默认完全一致。
     juce::Component* getParentComponentForMenuOptions (const juce::PopupMenu::Options&) override;
+
+    // ---- 悬停提示（HoverHelp / Y2KTooltipWindow）----
+    //   文案格式 "标题\n正文"：标题画成粉色小标题条，正文自动换行（最宽 ~300px）；
+    //   不含 \n 的单行提示只画正文。配色全部取当前主题，切主题自动跟随。
+    //   位置：优先鼠标右下方，越界时翻到左侧 / 上方，并夹紧在宿主区域内。
+    juce::Rectangle<int> getTooltipBounds (const juce::String& tipText,
+                                           juce::Point<int> screenPos,
+                                           juce::Rectangle<int> parentArea) override;
+    void drawTooltip (juce::Graphics&, const juce::String& text, int width, int height) override;
 };
 
 // 进程级单例 LookAndFeel

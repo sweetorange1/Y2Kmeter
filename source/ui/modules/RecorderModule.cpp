@@ -1,5 +1,7 @@
 #include "source/ui/modules/RecorderModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 
 #include <cmath>
 
@@ -53,10 +55,17 @@ RecorderModule::RecorderModule (AnalyserHub& hub)
         repaint();          // 右侧「N s」由 paintContent 画，需要主动重绘
     };
 
+    durationSlider.setTooltip (y2k::help::make ("Clip length",
+        "How many seconds SAVE LAST grabs from the rolling 60 s buffer (1 - 60 s). "
+        "Double-click for 10 s."));
+
     addAndMakeVisible (durationSlider);
 
     // ---- 导出按钮 ----
     saveButton.setButtonText ("SAVE LAST 10 s");
+    saveButton.setTooltip (y2k::help::make ("Save last N seconds",
+        "Missed a great moment? Y2Kmeter always keeps the last 60 s of input in memory. "
+        "Click to write the last N seconds to a WAV file (32-bit float, before gain)."));
     saveButton.onClick = [this] { saveNow(); };
     addAndMakeVisible (saveButton);
 
@@ -194,7 +203,7 @@ void RecorderModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
 
     g.setFont (PinkXP::getFont (headerFont, juce::Font::bold));
     g.setColour (PinkXP::ink.withAlpha (0.75f));
-    g.drawText ("RECORDER", header, juce::Justification::centredLeft, false);
+    g.drawText (y2k::tr ("RECORDER"), header, juce::Justification::centredLeft, false);
 
     // 状态灯：录制中 → 亮红 + 500 ms 闪烁；未录制 → 暗灰
     juce::String stateLabel  = "IDLE";
@@ -230,7 +239,7 @@ void RecorderModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
                                                          juce::jmax (PinkXP::ui (24), stateWanted)));
     g.setFont (PinkXP::getFont (headerFont, juce::Font::bold));
     g.setColour (stateColour);
-    g.drawText (stateLabel, stateArea, juce::Justification::centredRight, true);
+    g.drawText (y2k::tr (stateLabel), stateArea, juce::Justification::centredRight, true);
 
     // 状态灯：2×2 像素方块（不是圆球，保持像素风）
     {
@@ -247,7 +256,7 @@ void RecorderModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
     // ---- 本次录制时长 ----
     g.setFont (PinkXP::getFont (timeFont, juce::Font::bold));
     g.setColour (taking ? kRecRed : PinkXP::ink.withAlpha (0.4f));
-    g.drawText (formatElapsed (taking ? recorder.getTakeSeconds() : 0.0),
+    g.drawText (y2k::tr (formatElapsed (taking ? recorder.getTakeSeconds() : 0.0)),
                 r.time, juce::Justification::centred, false);
 
     // 录制中在计时右侧提示单段上限（到点自动保存并停止）
@@ -256,27 +265,27 @@ void RecorderModule::paintContent (juce::Graphics& g, juce::Rectangle<int> conte
         g.setFont (PinkXP::getFont (juce::jlimit (5.0f, 8.0f,
                                                   (float) r.time.getHeight() * 0.45f)));
         g.setColour (PinkXP::ink.withAlpha (0.35f));
-        g.drawText ("MAX " + formatElapsed (AudioRecorder::maxTakeSeconds),
+        g.drawText (y2k::tr ("MAX " + formatElapsed (AudioRecorder::maxTakeSeconds)),
                     r.time, juce::Justification::centredRight, false);
     }
 
     // ---- 拖动条数值（自己画，字号随行高缩放）----
     g.setFont (PinkXP::getFont (valueFont, juce::Font::bold));
     g.setColour (PinkXP::ink.withAlpha (0.8f));
-    g.drawText (juce::String ((int) selectedSeconds) + " s",
+    g.drawText (y2k::tr (juce::String ((int) selectedSeconds) + " s"),
                 r.value, juce::Justification::centredRight, false);
 
     // ---- 底部：最近保存文件 ----
     {
         juce::String fileLabel;
         if (const auto saved = recorder.getLastSavedFile(); saved != juce::File())
-            fileLabel = "SAVED: " + saved.getFileName();
+            fileLabel = y2k::trf ("SAVED: {0}", saved.getFileName());
         else
             fileLabel = "AUTO-CAPTURE: INPUT SIGNAL";
 
         g.setFont (PinkXP::getFont (footerFont));
         g.setColour (PinkXP::ink.withAlpha (0.5f));
-        g.drawText (fileLabel, r.footer, juce::Justification::centred, true);
+        g.drawText (y2k::tr (fileLabel), r.footer, juce::Justification::centred, true);
     }
 
     // ---- 像素装饰 ----
@@ -389,6 +398,25 @@ void RecorderModule::mouseMove (const juce::MouseEvent& e)
 void RecorderModule::mouseExit (const juce::MouseEvent& e)
 {
     ModulePanel::mouseExit (e);   // 三种视觉状态完全由「未录制 / 按下 / 录制中」决定
+}
+
+ModulePanel::HoverHelp RecorderModule::getHoverHelp (juce::Point<int> localPos) const
+{
+    const auto hit = getDotHitBounds();
+    if (! hit.isEmpty() && hit.contains (localPos))
+    {
+        HoverHelp h;
+        h.text = recorder.isTaking()
+            ? y2k::help::make ("Stop recording",
+                               "Click to stop and save this take as a WAV file. "
+                               "The folder opens automatically.")
+            : y2k::help::make ("Record",
+                               "Click to start recording the raw input (before gain) to a "
+                               "32-bit float WAV. Click again to stop and save. Up to 1 hour per take.");
+        return h;
+    }
+
+    return ModulePanel::getHoverHelp (localPos);
 }
 
 // ==========================================================

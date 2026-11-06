@@ -8,6 +8,8 @@
 #include "BinaryData.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/ModuleWorkspace.h"
+#include "source/ui/HoverHelp.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/palette/ThemeLibrary.h"
 #include "source/ui/modules/EqModule.h"
 #include "source/ui/modules/LoudnessModule.h"
@@ -670,10 +672,15 @@ Y2KmeterAudioProcessorEditor::FloatingModuleWindow::FloatingModuleWindow(
     //   鼠标事件，需把 director 作为 MouseListener 直接挂到面板上（§11.2）。
     if (editor_ != nullptr && editor_->toyDirector != nullptr)
         module_.addMouseListener (editor_->toyDirector.get(), true);
+
+    // 悬停提示：浮动窗口是独立 peer，挂一个以本窗口为宿主的提示窗口
+    tooltip_ = std::make_unique<Y2KTooltipWindow> (this);
 }
 
 Y2KmeterAudioProcessorEditor::FloatingModuleWindow::~FloatingModuleWindow()
 {
+    tooltip_.reset();
+
     if (editor_ != nullptr && editor_->toyDirector != nullptr)
         module_.removeMouseListener (editor_->toyDirector.get());
 }
@@ -1017,11 +1024,11 @@ public:
         const juce::Font nameFont    = PinkXP::getFont (12.0f, juce::Font::bold);
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
-        const int nameW    = nameFont.getStringWidth ("Y2Kmeter");
+        const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2kIsDiagnosticBuild() ? "v3.0.1 debug"
-                                                                                : "v3.0.1");
-        const int urlW     = urlFont.getStringWidth ("iisaacbeats.cn");
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.0.2 debug"
+                                                                                : "v3.0.2"));
+        const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
         cachedTitleTextW = nameW + gap1 + versionW + gap2 + urlW;
@@ -1062,7 +1069,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.0.1";
+        const juce::String versionBase = "v3.0.2";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -1071,11 +1078,11 @@ public:
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const int nameW        = nameFont.getStringWidth ("Y2Kmeter");
-        const int versionBaseW = versionFont.getStringWidth (versionBase);
-        const int versionW     = versionFont.getStringWidth (versionText);   // 含 " debug"
+        const int nameW        = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
+        const int versionBaseW = versionFont.getStringWidth (y2k::tr (versionBase));
+        const int versionW     = versionFont.getStringWidth (y2k::tr (versionText));   // 含 " debug"
         const int versionTagW  = versionW - versionBaseW;
-        const int urlW         = urlFont.getStringWidth (urlText);
+        const int urlW         = urlFont.getStringWidth (y2k::tr (urlText));
 
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1090,28 +1097,28 @@ public:
         // 文字描边（1px 阴影），帮助文字在任何底图上都可读
         g.setColour (juce::Colours::white.withAlpha (textAlpha * 0.6f));
         g.setFont (nameFont);
-        g.drawText (nameText, x0 + 1, y + 1, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0 + 1, y + 1, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (versionText, x0 + nameW + gap1 + 1, y + 1, versionW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionText), x0 + nameW + gap1 + 1, y + 1, versionW, h, juce::Justification::centredLeft, false);
         g.setFont (urlFont);
-        g.drawText (urlText, x0 + nameW + gap1 + versionW + gap2 + 1, y + 1, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2 + 1, y + 1, urlW, h, juce::Justification::centredLeft, false);
 
         // 主文字（墨色）
         g.setColour (PinkXP::ink.withAlpha (textAlpha));
         g.setFont (nameFont);
-        g.drawText (nameText, x0, y, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0, y, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (versionBase, x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionBase), x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
         if (versionTagW > 0)
         {
             // " debug" 用强调色（hover 时更亮），一眼能认出诊断包
             g.setColour (PinkXP::warn.withAlpha (juce::jmax (0.75f, textAlpha)));
-            g.drawText (versionTag, x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
+            g.drawText (y2k::tr (versionTag), x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
                         juce::Justification::centredLeft, false);
             g.setColour (PinkXP::ink.withAlpha (textAlpha));   // 恢复 url 文字颜色
         }
         g.setFont (urlFont);
-        g.drawText (urlText, x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
 
         if (titleTextHovered)
         {
@@ -1139,7 +1146,7 @@ public:
         auto cbText = cb;
         cbText.translate (-1, -1);
         if (closeButtonPressed) cbText.translate (1, 1);
-        g.drawText ("x", cbText, juce::Justification::centred, false);
+        g.drawText (y2k::tr ("x"), cbText, juce::Justification::centred, false);
     }
 
     int getCachedTitleTextWidth() const noexcept { return cachedTitleTextW; }
@@ -1405,14 +1412,14 @@ private:
         g.fillRect (titleRow.getX(), titleRow.getBottom(), titleRow.getWidth(), 1);
         g.setColour (PinkXP::selInk);
         g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-        g.drawText ("SKIP TUTORIAL?", titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr ("SKIP TUTORIAL?"), titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
 
         // 正文
         auto body = inner.reduced (2, 2);
         auto textArea = body.removeFromTop (body.getHeight() - 24);
         g.setColour (PinkXP::ink);
         g.setFont (PinkXP::getFont (9.0f));
-        g.drawFittedText ("U will miss the fun :(\nthis can't be undone~",
+        g.drawFittedText (y2k::tr ("U will miss the fun :(\nthis can't be undone~"),
                           textArea, juce::Justification::centred, 2);
 
         // Cancel 按钮（始终平面，不单独高亮）
@@ -1420,14 +1427,14 @@ private:
         PinkXP::drawRaised (g, cancelBounds, PinkXP::btnFace);
         g.setColour (PinkXP::ink);
         g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText ("Cancel", cancelBounds, juce::Justification::centred, false);
+        g.drawText (y2k::tr ("Cancel"), cancelBounds, juce::Justification::centred, false);
 
         // Skip 按钮（粉红突出，始终醒目）
         auto skipBounds = getConfirmBtnBounds (1);
         PinkXP::drawRaised (g, skipBounds, PinkXP::pink200);
         g.setColour (PinkXP::pink700);
         g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText ("Skip", skipBounds, juce::Justification::centred, false);
+        g.drawText (y2k::tr ("Skip"), skipBounds, juce::Justification::centred, false);
     }
 
     void drawSpotlight (juce::Graphics& g)
@@ -1540,7 +1547,7 @@ private:
         const juce::String title = (currentStep == Step::step1)
             ? (menuIsOpen ? "NOW CHOOSE IT!" : "WELCOME 2 Y2KMETER!")
             : "ALMOST THERE!";
-        g.drawText (title, titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (title), titleRow.reduced (3, 1), juce::Justification::centredLeft, false);
 
         // 正文
         auto body = inner.reduced (2, 2);
@@ -1551,7 +1558,7 @@ private:
                 ? "Click 'VirtuPet' in\nthe menu to add ur pet! <3"
                 : "Right-click the canvas to\nadd ur VirtuPet pet! <3")
             : "Play some audio to\nhatch the egg! :3";
-        g.drawFittedText (text, body, juce::Justification::centred, 2);
+        g.drawFittedText (y2k::tr (text), body, juce::Justification::centred, 2);
 
         // 右上角 × 关闭按钮（参考 ChromeHiddenOverlay 的浮动关闭按钮样式）
         {
@@ -1569,7 +1576,7 @@ private:
             auto cbText = cb;
             cbText.translate (-1, -1);
             if (closeBtnPressed) cbText.translate (1, 1);
-            g.drawText ("x", cbText, juce::Justification::centred, false);
+            g.drawText (y2k::tr ("x"), cbText, juce::Justification::centred, false);
         }
     }
 };
@@ -1929,7 +1936,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
                                           totalArea.getBottom() - screenBounds.getHeight()));
         }
 
-        auto name = panel->getTitleText() + " - Y2Kmeter";
+        auto name = y2k::tr (panel->getTitleText()) + " - Y2Kmeter";
         auto* window = new FloatingModuleWindow(
             name, *panel, savedBounds,
             [this](ModulePanel& p, juce::Rectangle<int> bounds)
@@ -1977,6 +1984,53 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         window->setLayoutLocked(layoutLocked);
 
         window->addToDesktop();               // 创建 native peer → 触发 resized() → 模块填满窗口
+
+       #if JUCE_WINDOWS
+        // 多屏（混合 DPI）落位修正（v2.9.9 经验：跨屏定位必须物理像素——JUCE 的
+        //   setBounds 会按"窗口当前所在显示器"换算，目标屏不是当前屏时位置整体用错
+        //   原点。模块靠近上方低分辨率屏时，peer 创建的初始落点会整块跳偏）。
+        //   修正：模块相对 Editor 的逻辑偏移 × Editor 所在屏 scale = 物理偏移，
+        //   以 Editor 物理左上角为基准 SetWindowPos（SWP_NOSIZE，尺寸交给系统按
+        //   目标屏处理），再夹到落点所在显示器的物理边界内。窗口尚未 setVisible，
+        //   全程不可见，无闪烁。
+        if (! y2kScreenSimulationActive())
+        {
+            if (auto* top = getTopLevelComponent())
+            {
+                Y2KMonitorPx mon;
+                if (y2kGetMonitorPxForWindow (top, mon) && ! mon.total.isEmpty())
+                {
+                    const auto topLogical = top->getScreenBounds();
+                    const auto topPx      = y2kGetWindowRectPx (top);
+                    if (! topPx.isEmpty())
+                    {
+                        const juce::Point<int> px {
+                            topPx.getX() + y2kLogicalToPx (screenBounds.getX() - topLogical.getX(), mon.scale),
+                            topPx.getY() + y2kLogicalToPx (screenBounds.getY() - topLogical.getY(), mon.scale)
+                        };
+
+                        Y2KMonitorPx target;
+                        if (y2kGetMonitorPxForPoint (px, target) && ! target.total.isEmpty())
+                        {
+                            const auto winRect = y2kGetWindowRectPx (window);
+                            y2kMoveWindowToPx (window, {
+                                juce::jlimit (target.total.getX(),
+                                              juce::jmax (target.total.getX(),
+                                                          target.total.getRight()  - winRect.getWidth()),  px.x),
+                                juce::jlimit (target.total.getY(),
+                                              juce::jmax (target.total.getY(),
+                                                          target.total.getBottom() - winRect.getHeight()), px.y) });
+                        }
+                        else
+                        {
+                            y2kMoveWindowToPx (window, px);
+                        }
+                    }
+                }
+            }
+        }
+       #endif
+
         window->setVisible(true);             // ★ DocumentWindow ctor addToDesktop=false 时 isVisible=false，
                                               //    addToDesktop() 仅创建 peer 不保证 setVisible(true)
 
@@ -2180,6 +2234,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
     // 应用默认主题（会把全局配色重写一次，确保状态一致）
     PinkXP::applyTheme(PinkXP::getCurrentThemeId());
+
+    // 订阅界面语言切换（工具栏语言按钮 → y2k::i18n::setLanguage → 这里统一刷新）
+    languageSubToken = y2k::i18n::subscribe ([safe = juce::Component::SafePointer<juce::Component> (this)]()
+    {
+        if (auto* self = dynamic_cast<Y2KmeterAudioProcessorEditor*> (safe.getComponent()))
+            self->applyLanguageChange();
+    });
 
     // 构造阶段 isShowing() 可能仍为 false，先确保分析链启动；
     // 后续由 visibilityChanged() 继续做可见性联动。
@@ -2487,6 +2548,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
                           + (openGLContext.isAttached() ? "1" : "0"));
     y2k::diag::setGlAttached (true);
 
+    // 悬停提示窗口：以 Editor 为宿主（随 GL 合成绘制；插件宿主内不开原生窗口）
+    tooltipWindow = std::make_unique<Y2KTooltipWindow> (this);
+
     // ==================================================================
     // v1.9.x：新手引导覆盖层 —— 按需创建/销毁，不提前驻留在 child list 中
     //   · startTutorial() 时创建 + addChildComponent
@@ -2506,6 +2570,10 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     //   嵌入子窗口时塞给我们的 ~175×85 极小中间态）都不应被 resized() 回写到
     //   Processor.savedEditorSize，否则下次打开窗口会恢复成异常小尺寸。
     editorBeingDestructed = true;
+
+    // 悬停提示窗口最先拆：停掉它的轮询 Timer / 全局鼠标监听，
+    //   避免后续 dock / workspace 析构过程中再去查询正在销毁的模块。
+    tooltipWindow.reset();
 
     y2k::diag::setThreadTag ("UI");
     y2k::diag::setPhase ("Editor::~ctor");
@@ -2609,6 +2677,12 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
         themeSubToken = 0;
     }
 
+    if (languageSubToken != 0)
+    {
+        y2k::i18n::unsubscribe (languageSubToken);
+        languageSubToken = 0;
+    }
+
     // 1) 释放 workspace（内部会停止所有 Timer、清空子组件）
     //    必须在清理 LookAndFeel / Typeface 之前完成
     workspace.reset();
@@ -2622,6 +2696,9 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     // 3) 关键：清空全局 Typeface 缓存，防止插件 DLL 卸载时
     //    BinaryData 内存已被释放而全局 gTypeface 仍持有悬垂引用导致宿主卡死
     PinkXP::initCustomTypeface(nullptr);
+    customTypeface = nullptr;
+    // 同理释放按界面语言加载的字体缓存（Silkscreen / 中文像素字体等）
+    PinkXP::releaseTypefaceCache();
 
     // 3.1) 关键：清空 PinkXPStyle 的桌面纹理缓存（getSharedDesktopTexture）。
     //
@@ -4435,7 +4512,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.0.1";
+        const juce::String versionBase = "v3.0.2";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -4444,11 +4521,11 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const juce::Font versionFont = PinkXP::getFont (10.0f, juce::Font::italic);
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
 
-        const int nameW        = nameFont.getStringWidth (nameText);
-        const int versionBaseW = versionFont.getStringWidth (versionBase);
-        const int versionW     = versionFont.getStringWidth (versionText);   // 含 " debug"
+        const int nameW        = nameFont.getStringWidth (y2k::tr (nameText));
+        const int versionBaseW = versionFont.getStringWidth (y2k::tr (versionBase));
+        const int versionW     = versionFont.getStringWidth (y2k::tr (versionText));   // 含 " debug"
         const int versionTagW  = versionW - versionBaseW;
-        const int urlW         = urlFont.getStringWidth (urlText);
+        const int urlW         = urlFont.getStringWidth (y2k::tr (urlText));
 
         constexpr int gap1 = 6;   // name ↔ version 之间
         constexpr int gap2 = 10;  // version ↔ url 之间
@@ -4460,28 +4537,28 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         // 文字阴影（1,1）
         g.setColour (PinkXP::sel.darker(0.55f));
         g.setFont (nameFont);
-        g.drawText (nameText, x0 + 1, y + 1, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0 + 1, y + 1, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (versionText, x0 + nameW + gap1 + 1, y + 1, versionW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionText), x0 + nameW + gap1 + 1, y + 1, versionW, h, juce::Justification::centredLeft, false);
         g.setFont (urlFont);
-        g.drawText (urlText, x0 + nameW + gap1 + versionW + gap2 + 1, y + 1, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2 + 1, y + 1, urlW, h, juce::Justification::centredLeft, false);
 
         // 主文字（白色）
         g.setColour (PinkXP::selInk);
         g.setFont (nameFont);
-        g.drawText (nameText, x0, y, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0, y, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (versionBase, x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionBase), x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
         if (versionTagW > 0)
         {
             // " debug" 用强调色，方便一眼认出诊断包
             g.setColour (PinkXP::warn);
-            g.drawText (versionTag, x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
+            g.drawText (y2k::tr (versionTag), x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
                         juce::Justification::centredLeft, false);
             g.setColour (PinkXP::selInk);   // 恢复后续 url 文字颜色
         }
         g.setFont (urlFont);
-        g.drawText (urlText, x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
 
         // hover 时在可点击区域（name + version + url 整段）画下划线
         if (titleTextHovered)
@@ -4523,7 +4600,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
                 auto txt = rc;
                 txt.translate (glyphDxWhenIdle, glyphDyWhenIdle);
                 if (pressed || activeLatched) txt.translate (1, 1);
-                g.drawText (glyph, txt, juce::Justification::centred, false);
+                g.drawText (y2k::tr (glyph), txt, juce::Justification::centred, false);
             };
 
             // 3a-lock) 布局锁定按钮（v1.8.3 新增）："L" 作为 Lock 的助记符号
@@ -6083,6 +6160,92 @@ void Y2KmeterAudioProcessorEditor::updateWorkspaceHitTestHoles()
 // 鼠标事件：关闭按钮 hover/press/click + TitleBar 区拖动顶层窗口
 //   · chromeDim 模式下，mouseEnter/Exit 控制 TitleBar 恢复/淡化
 // ==========================================================
+// ==========================================================
+// 界面语言切换（y2k::i18n 广播回调，消息线程）
+//   控件内部保存的是英文源文案，显示层在绘制时翻译 —— 所以这里不需要逐个
+//   setText，只需把"会缓存字体 / 文字位图"的地方全部刷新一遍：
+//     1) 换成新语言的字体（Typeface 进程内缓存，切回时零成本）；
+//     2) 广播主题刷新：各模块订阅回调本就会失效静态文字层 / GL 快照 / 位图缓存；
+//        Editor 自己的回调会失效桌面缓存并刷新所有浮动窗口；
+//     3) sendLookAndFeelChange：ComboBox / Slider 数值框等重建内部 Label 并重取字体；
+//     4) 工具栏语言按钮文案 + 重排；整窗重绘。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::applyLanguageChange()
+{
+    Y2K_LOG ("[i18n] language -> " + y2k::i18n::getCurrentLanguageCode());
+
+    customTypeface = PinkXP::loadActiveTypeface();
+    PinkXP::initCustomTypeface (customTypeface);
+
+    PinkXP::notifyThemeSubscribers();
+
+    sendLookAndFeelChange();
+    for (auto& wnd : floatingWindows_)
+    {
+        if (wnd == nullptr)
+            continue;
+        // 浮动窗口标题（任务栏 / 窗口标题）在创建时按当时语言生成，这里同步刷新
+        wnd->setName (y2k::tr (wnd->getModulePanel().getTitleText()) + " - Y2Kmeter");
+        wnd->sendLookAndFeelChange();
+        wnd->repaint();
+    }
+
+    if (workspace != nullptr)
+        workspace->refreshLanguageUi();
+
+    resized();
+    repaint();
+}
+
+// ==========================================================
+// 悬停提示（HoverHelp）：标题栏自绘按钮
+//   直接复用 mouseMove 维护的 hover 状态，不重复做几何命中；
+//   Y2KTooltipWindow 只在 Editor 本身位于鼠标下（标题栏 / 隐藏态浮层挖洞区）时
+//   才会问到这里，其余区域的鼠标都被 workspace / 模块截走。
+// ==========================================================
+juce::String Y2KmeterAudioProcessorEditor::getTooltip()
+{
+    using y2k::help::make;
+
+    if (titleTextHovered)
+        return make ("Y2Kmeter website",
+                     "Click to open the official website for updates, presets and news.");
+
+    if (isPluginHost)
+        return {};
+
+    if (closeButtonHovered)
+        return make ("Quit", "Close Y2Kmeter. Layout, theme and window position are saved "
+                             "automatically and restored next time.");
+
+    if (pinButtonHovered)
+        return make ("Always on top",
+                     alwaysOnTopActive ? juce::String ("ON - the window floats above other apps. Click to release it.")
+                                       : juce::String ("OFF - click to keep the window above other apps."));
+
+    if (minButtonHovered)
+        return make ("Minimise", "Send the window to the taskbar / Dock. Audio analysis keeps running.");
+
+    if (lockButtonHovered)
+        return make ("Layout lock (L)",
+                     layoutLocked
+                         ? juce::String ("LOCKED - modules and the window cannot be moved, resized or "
+                                         "closed. Buttons inside modules still work. Click to unlock.")
+                         : juce::String ("Click to lock the layout so nothing moves by accident while "
+                                         "you work. Buttons inside modules keep working."));
+
+    // 标题栏空白区：拖窗 / 双击伪全屏
+    if (isTitleBarInteractive() && getTitleBarBounds().contains (getMouseXYRelative()))
+        return make ("Title bar",
+                     stickActive
+                         ? juce::String ("Stick mode: the bar is docked to the screen edge. "
+                                         "Use X / T/B in the toolbar to leave or flip it.")
+                         : juce::String ("Drag to move the window. Double-click to fill the screen, "
+                                         "double-click again to restore."));
+
+    return {};
+}
+
 void Y2KmeterAudioProcessorEditor::mouseMove(const juce::MouseEvent& e)
 {
     // 插件宿主模式：不处理按钮 hover 与 chromeDim 分支；但仍要处理"标题文字 hover"，
@@ -6574,14 +6737,13 @@ bool Y2KmeterAudioProcessorEditor::keyPressed(const juce::KeyPress& key) {
           const auto dir = y2k::diag::getLogDirectory();
           dir.revealToUser();
 
-          // 注意用 u8()：`"中文" + juce::String(...)` 会走 String(const char*)
-          //   的 ASCII 路径，中文变乱码。
+          // 界面语言：标题 / 字段名走 y2k::tr（中文译文见 i18n/zh-CN.lang）
           juce::NativeMessageBox::showMessageBoxAsync (
               juce::MessageBoxIconType::InfoIcon,
-              y2k::diag::u8 ("Diagnostics exported / 诊断日志已导出"),
-              y2k::diag::u8 ("日志目录：\n") + dir.getFullPathName()
+              y2k::tr ("Diagnostics exported"),
+              y2k::tr ("Log folder:") + "\n" + dir.getFullPathName()
                   + (snapshotPath.isNotEmpty()
-                         ? y2k::diag::u8 ("\n\n快照：\n") + snapshotPath
+                         ? "\n\n" + y2k::tr ("Snapshot:") + "\n" + snapshotPath
                          : juce::String()));
           return true;
       }

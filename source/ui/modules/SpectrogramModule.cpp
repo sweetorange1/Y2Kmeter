@@ -1,5 +1,7 @@
 #include "source/ui/modules/SpectrogramModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/palette/OkLchUtils.h"
@@ -42,15 +44,20 @@ SpectrogramModule::SpectrogramModule (AnalyserHub& h)
     speedLabel.setColour (juce::Label::textColourId, PinkXP::ink);
     speedLabel.setFont   (PinkXP::getFont (11.0f, juce::Font::bold));
     speedLabel.setText   ("SPEED", juce::dontSendNotification);
+    speedSlider.setTooltip (y2k::help::make ("Speed",
+        "Scroll speed in pixels per second (5 - 120). Slower keeps a longer history on screen."));
+    speedLabel.setTooltip (speedSlider.getTooltip());
 
     // ---------- 右下角显示模式切换按钮（样式对齐 Spectrogram3DModule 的 TINT）----------
     //   · 三态循环：Classic → Sharp → Sharper → Classic，默认 Sharp
     //   · 不是 toggle（三选一循环），点击一次切到下一档
     modeBtn.setClickingTogglesState (false);
     modeBtn.setButtonText (displayModeText (displayMode));
-    modeBtn.setTooltip ("Spectrogram display mode: \"-\" Classic (raw magnitude), "
-                        "\"+\" Sharp (frequency reassignment), "
-                        "\"++\" Sharper (time + frequency reassignment).");
+    modeBtn.setTooltip (y2k::help::make ("Display mode",
+        "Click to cycle:\n"
+        "-  Classic: raw FFT magnitude\n"
+        "+  Sharp: frequency reassignment - thinner, clearer note lines\n"
+        "++ Sharper: time + frequency reassignment - also tighter transients"));
     modeBtn.onClick = [this]()
     {
         const int next = ((int) displayMode + 1) % 3;
@@ -768,7 +775,7 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
         else
         {
             g.setColour (PinkXP::hl);
-            g.drawText (l.label, bx, by, bw, bh, juce::Justification::centred, false);
+            g.drawText (y2k::tr (l.label), bx, by, bw, bh, juce::Justification::centred, false);
         }
     }
 
@@ -781,10 +788,14 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
         g.fillRect (canvas.getRight() - 58,         by, 56, bh);
 
         g.setColour (PinkXP::hl);
-        g.drawText (juce::String::fromUTF8 ("\xe2\x86\x90 older"),
+        // "← older" / "newer →" 含箭头符号：经 SymbolGlyphs 切英文字体渲染
+        g.setFont (PinkXP::SymbolGlyphs::getFont (
+            juce::String::fromUTF8 ("\xe2\x86\x90 older newer \xe2\x86\x92"),
+            8.5f, juce::Font::plain));
+        g.drawText (y2k::tr (juce::String::fromUTF8 ("\xe2\x86\x90 older")),
                     canvas.getX() + 2, by, 56, bh,
                     juce::Justification::centred, false);
-        g.drawText (juce::String::fromUTF8 ("newer \xe2\x86\x92"),
+        g.drawText (y2k::tr (juce::String::fromUTF8 ("newer \xe2\x86\x92")),
                     canvas.getRight() - 58, by, 56, bh,
                     juce::Justification::centred, false);
     }

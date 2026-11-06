@@ -1,5 +1,7 @@
 #include "source/ui/modules/SpectrumModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
@@ -24,13 +26,17 @@ SpectrumModule::SpectrumModule(AnalyserHub& h)
 
     btnPeak.setClickingTogglesState(true);
     btnPeak.setToggleState(peakHoldEnabled, juce::dontSendNotification);
+    btnPeak.setTooltip (y2k::help::make ("Peak hold",
+        "Keep a slowly falling line at the highest level each frequency has reached."));
     btnPeak.onClick = [this]() { setPeakHoldEnabled(btnPeak.getToggleState()); };
     addAndMakeVisible(btnPeak);
 
     // Sharper 模式（重分配谱线）：乐音收束成竖线
     btnSharp.setClickingTogglesState(true);
     btnSharp.setToggleState(sharpEnabled, juce::dontSendNotification);
-    btnSharp.setTooltip ("Sharper: reassign spectral energy to musical lines");
+    btnSharp.setTooltip (y2k::help::make ("Sharp",
+        "Reassign spectral energy to its true frequency so notes and harmonics collapse "
+        "into crisp lines instead of wide humps."));
     btnSharp.onClick = [this]() { setSharpEnabled(btnSharp.getToggleState()); };
     addAndMakeVisible(btnSharp);
 
@@ -136,10 +142,10 @@ void SpectrumModule::updateCurveButton()
                                                         : "Raw";
     btnSmooth.setButtonText (text);
     btnSmooth.setTooltip (curveMode == CurveMode::smooth
-        ? juce::String ("Curve: Smooth (256 cols, spline + column blur). Click for Semi.")
+        ? y2k::help::make ("Curve: Smooth", "256 columns, spline + column blur - calm and readable. Click for Semi.")
         : curveMode == CurveMode::semi
-        ? juce::String ("Curve: Semi (512 cols, spline, no blur - keeps more spikes). Click for Raw.")
-        : juce::String ("Curve: Raw (per-bin columns, polyline - maximum spike detail). Click for Smooth."));
+        ? y2k::help::make ("Curve: Semi", "512 columns, spline, no blur - keeps more spikes. Click for Raw.")
+        : y2k::help::make ("Curve: Raw", "One column per FFT bin, straight lines - maximum spike detail. Click for Smooth."));
 }
 
 void SpectrumModule::setChannelMode (ChannelMode m)
@@ -163,10 +169,10 @@ void SpectrumModule::updateChannelButton()
                                                               : "L/R";
     btnChannel.setButtonText (text);
     btnChannel.setTooltip (channelMode == ChannelMode::mid
-        ? juce::String ("Channel: MID ((L+R)/2). Click for MID+SIDE.")
+        ? y2k::help::make ("Channel: MID", "Analyse (L+R)/2 - what a mono speaker hears. Click for MID + SIDE.")
         : channelMode == ChannelMode::midSide
-        ? juce::String ("Channel: MID + SIDE ((L-R)/2 drawn as the faint line). Click for LEFT+RIGHT.")
-        : juce::String ("Channel: LEFT (solid) + RIGHT (faint). Click for MID."));
+        ? y2k::help::make ("Channel: MID + SIDE", "Solid = mid, faint = side (L-R)/2 - shows what lives only in the stereo width. Click for LEFT + RIGHT.")
+        : y2k::help::make ("Channel: LEFT + RIGHT", "Solid = left, faint = right - spot channel imbalances. Click for MID."));
 }
 
 void SpectrumModule::setSharpEnabled(bool b)
@@ -421,7 +427,7 @@ void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
     const auto btnFont = PinkXP::getFont (12.0f, juce::Font::bold);
     auto textW = [&] (const char* s)
     {
-        return (int) std::ceil (juce::GlyphArrangement::getStringWidth (btnFont, juce::String (s)));
+        return (int) std::ceil (juce::GlyphArrangement::getStringWidth (btnFont, y2k::tr (juce::String (s))));
     };
 
     constexpr int gap = 4;
@@ -1781,7 +1787,7 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
         {
             g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
             g.setColour(labelColour);
-            g.drawText(s, canvas.getX() - 32, y - 6, 28, 12,
+            g.drawText(y2k::tr (s), canvas.getX() - 32, y - 6, 28, 12,
                        juce::Justification::centredRight, false);
         }
     }
@@ -1807,7 +1813,7 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
         {
             g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
             g.setColour(labelColour);
-            g.drawText(l.label, x - 18, canvas.getBottom() + 2, 36, 12,
+            g.drawText(y2k::tr (l.label), x - 18, canvas.getBottom() + 2, 36, 12,
                        juce::Justification::centred, false);
         }
     }

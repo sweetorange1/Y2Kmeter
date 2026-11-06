@@ -1,5 +1,7 @@
 #include "source/ui/modules/OscilloscopeModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include <cmath>
@@ -40,7 +42,14 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
     btnXY  .onClick = [this]() { setDisplayMode(DisplayMode::xy);        };
     btnLiss.onClick = [this]() { setDisplayMode(DisplayMode::lissajous); };
 
+    btnWave.setTooltip (y2k::help::make ("Wave", "Classic oscilloscope: amplitude over time."));
+    btnXY  .setTooltip (y2k::help::make ("X-Y", "Plot left (X) against right (Y). A diagonal line = mono, "
+                                                "a round cloud = wide stereo. Auto-zooms to the peak."));
+    btnLiss.setTooltip (y2k::help::make ("Lissajous", "Mid / side view rotated 45 degrees: vertical = mono, "
+                                                      "horizontal = out of phase. Auto-zooms to the peak."));
+
     btnFreeze.setClickingTogglesState(true);
+    btnFreeze.setTooltip (y2k::help::make ("Freeze", "Hold the current picture so you can study it. Click again to resume."));
     btnFreeze.onClick = [this]() { setFrozen(btnFreeze.getToggleState()); };
     addAndMakeVisible(btnFreeze);
 
@@ -551,12 +560,12 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
 
     if (displayMode == DisplayMode::waveform)
     {
-        g.drawText ("L", canvas.getX() + 4, canvas.getBottom() - 14,
+        g.drawText (y2k::tr ("L"), canvas.getX() + 4, canvas.getBottom() - 14,
                     24, 12, juce::Justification::centredLeft, false);
         g.setColour (PinkXP::pink400);
         g.fillRect  (canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
         g.setColour (PinkXP::ink.withAlpha (0.85f));
-        g.drawText ("R", canvas.getX() + 32, canvas.getBottom() - 14,
+        g.drawText (y2k::tr ("R"), canvas.getX() + 32, canvas.getBottom() - 14,
                     24, 12, juce::Justification::centredLeft, false);
         g.setColour (PinkXP::pink600);
         g.fillRect  (canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
@@ -564,12 +573,12 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
     else
     {
         const juce::String hint = (displayMode == DisplayMode::lissajous) ? "M/S" : "X=L  Y=R";
-        g.drawText (hint, canvas.getX() + 4, canvas.getBottom() - 14,
+        g.drawText (y2k::tr (hint), canvas.getX() + 4, canvas.getBottom() - 14,
                     80, 12, juce::Justification::centredLeft, false);
         if (std::abs (autoGainFactor - 1.0f) > 0.05f)
         {
             const juce::String gainText = juce::String (autoGainFactor, 1) + "x";
-            g.drawText (gainText, canvas.getRight() - 46, canvas.getBottom() - 14,
+            g.drawText (y2k::tr (gainText), canvas.getRight() - 46, canvas.getBottom() - 14,
                         42, 12, juce::Justification::centredRight, false);
         }
 
@@ -588,7 +597,7 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
             {
                 const float rr = baseRadius * autoGainFactor * ringFrac[ri];
                 if (rr < 8.0f) continue;
-                g.drawText (labels[ri],
+                g.drawText (y2k::tr (labels[ri]),
                             juce::Rectangle<int> ((int) (cx + rr + 3), (int) (cy - 6), 26, 12),
                             juce::Justification::centredLeft, false);
             }
@@ -602,7 +611,7 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
         g.fillEllipse (dot.toFloat());
         g.setColour (PinkXP::ink);
         g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
-        g.drawText ("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
+        g.drawText (y2k::tr ("FROZEN"), canvas.getRight() - 60, canvas.getY() + 4,
                     42, 12, juce::Justification::centredRight, false);
     }
 }
@@ -647,7 +656,7 @@ void OscilloscopeModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<
             g.fillEllipse(dot.toFloat());
             g.setColour(PinkXP::ink);
             g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-            g.drawText("FROZEN", canvas.getRight() - 60, canvas.getY() + 4,
+            g.drawText(y2k::tr ("FROZEN"), canvas.getRight() - 60, canvas.getY() + 4,
                        42, 12, juce::Justification::centredRight, false);
         }
     }
@@ -725,13 +734,13 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
     // 左下角说明
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-    g.drawText("L", canvas.getX() + 4, canvas.getBottom() - 14,
+    g.drawText(y2k::tr ("L"), canvas.getX() + 4, canvas.getBottom() - 14,
                24, 12, juce::Justification::centredLeft, false);
     g.setColour(PinkXP::chartRamp[4]);
     g.fillRect(canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
 
     g.setColour(PinkXP::ink.withAlpha(0.85f));
-    g.drawText("R", canvas.getX() + 32, canvas.getBottom() - 14,
+    g.drawText(y2k::tr ("R"), canvas.getX() + 32, canvas.getBottom() - 14,
                24, 12, juce::Justification::centredLeft, false);
     g.setColour(PinkXP::chartRamp[6]);
     g.fillRect(canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
@@ -776,7 +785,7 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
             {
                 const float rr = baseRadius * gain * ringFrac[ri];
                 if (rr < 8.0f) continue;
-                g.drawText(labels[ri],
+                g.drawText(y2k::tr (labels[ri]),
                            juce::Rectangle<int>((int)(cx + rr + 3), (int)(cy - 6), 26, 12),
                            juce::Justification::centredLeft, false);
             }
@@ -847,13 +856,13 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
     const juce::String hint = rotate45 ? "M/S" : "X=L  Y=R";
-    g.drawText(hint, canvas.getX() + 4, canvas.getBottom() - 14,
+    g.drawText(y2k::tr (hint), canvas.getX() + 4, canvas.getBottom() - 14,
                80, 12, juce::Justification::centredLeft, false);
     // 当前增益倍数
     if (std::abs(gain - 1.0f) > 0.05f)
     {
         juce::String gainText = juce::String(gain, 1) + "x";
-        g.drawText(gainText, canvas.getRight() - 46, canvas.getBottom() - 14,
+        g.drawText(y2k::tr (gainText), canvas.getRight() - 46, canvas.getBottom() - 14,
                    42, 12, juce::Justification::centredRight, false);
     }
 }
@@ -1049,7 +1058,7 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
         dg.fillEllipse(dot.toFloat());
         dg.setColour(PinkXP::ink);
         dg.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        dg.drawText("FROZEN", localCanvas.getRight() - 60, localCanvas.getY() + 4,
+        dg.drawText(y2k::tr ("FROZEN"), localCanvas.getRight() - 60, localCanvas.getY() + 4,
                     42, 12, juce::Justification::centredRight, false);
     }
 

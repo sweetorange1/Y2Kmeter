@@ -4,6 +4,7 @@
 #include "source/ui/palette/PalettePanel.h"
 #include "source/ui/palette/ThemeLibrary.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/i18n/Localisation.h"
 
 namespace
 {
@@ -168,7 +169,7 @@ void HueRing::paint(juce::Graphics& g)
     g.fillEllipse((float) cx - 10.0f, (float) cy - 10.0f, 20.0f, 20.0f);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(juce::String((int) std::lroundf(hue_)), cx - 12, cy - 8, 24, 16,
+    g.drawText(y2k::tr (juce::String((int) std::lroundf(hue_))), cx - 12, cy - 8, 24, 16,
                juce::Justification::centred, false);
 
     // 拖点：环上小圆（与环颜色同方向：顶部 0°，顺时针）
@@ -234,7 +235,7 @@ void MiniPreviewCard::paint(juce::Graphics& g)
     g.fillRect(bar);
     g.setColour(L(gen_->selInk, PinkXP::selInk));
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText("MODULE 01", bar, juce::Justification::centred, false);
+    g.drawText(y2k::tr("MODULE 01"), bar, juce::Justification::centred, false);
 
     auto body = in.reduced(4, 2);
 
@@ -243,7 +244,7 @@ void MiniPreviewCard::paint(juce::Graphics& g)
     PinkXP::drawRaised(g, btn, L(gen_->btnFace, PinkXP::btnFace));
     g.setColour(L(gen_->ink, PinkXP::ink));
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText("OK", btn, juce::Justification::centred, false);
+    g.drawText(y2k::tr("OK"), btn, juce::Justification::centred, false);
 
     auto fader = body.removeFromTop(14);
     g.setColour(L(gen_->face, PinkXP::face));
@@ -270,11 +271,12 @@ void MiniPreviewCard::paint(juce::Graphics& g)
         g.fillRect(ramp.getX() + i * w, ramp.getBottom() - h, w - 1, h);
     }
 
-    // 文字行
+    // 文字行（"Aa 123 · Y2K" 含 · 装饰符号：SymbolGlyphs 统一切英文字体）
     body.removeFromTop(4);
     g.setColour(L(gen_->ink, PinkXP::ink));
-    g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText(juce::String::fromUTF8("Aa 123 \xC2\xB7 Y2K"), body, juce::Justification::centredLeft, false);
+    g.setFont(PinkXP::SymbolGlyphs::getFont (
+        juce::String::fromUTF8 ("Aa 123 \xC2\xB7 Y2K"), 8.0f, juce::Font::bold));
+    g.drawText(y2k::tr (juce::String::fromUTF8("Aa 123 \xC2\xB7 Y2K")), body, juce::Justification::centredLeft, false);
 }
 
 // ==========================================================
@@ -355,7 +357,7 @@ void SvHuePicker::paint(juce::Graphics& g)
     PinkXP::drawRaised(g, okRect_, PinkXP::btnFace);
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    g.drawText("OK", okRect_, juce::Justification::centred, false);
+    g.drawText(y2k::tr("OK"), okRect_, juce::Justification::centred, false);
 }
 
 void SvHuePicker::resized() { repaint(); }
@@ -652,7 +654,7 @@ void MyThemesList::paint(juce::Graphics& g)
         // 名字（行底色是 face：Starlight / Cyber Lilac 下 ink 与 face 撞色，需兜底）
         g.setColour(PinkXP::readableInkOn(PinkXP::face));
         g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-        g.drawText(t.name, r.withTrimmedLeft(4), juce::Justification::centredLeft, true);
+        g.drawText(y2k::tr (t.name), r.withTrimmedLeft(4), juce::Justification::centredLeft, true);
 
         // 右侧按钮区（Apply ↑ ↓ ✎ ×）
         auto btnArea = r.removeFromRight(148);
@@ -668,13 +670,16 @@ void MyThemesList::paint(juce::Graphics& g)
         PinkXP::drawRaised(g, rnR,    PinkXP::btnFace);
         PinkXP::drawRaised(g, delR,   PinkXP::btnFace);
 
-        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+        // "Use ↑ ↓ ✎ ×" 含装饰符号：经 SymbolGlyphs 切英文字体（与英文界面一致）
+        g.setFont(PinkXP::SymbolGlyphs::getFont (
+            juce::String::fromUTF8 ("Use \xE2\x86\x91 \xE2\x86\x93 \xE2\x9C\x8E \xC3\x97"),
+            8.0f, juce::Font::bold));
         g.setColour(PinkXP::ink);
-        g.drawText("Use", applyR, juce::Justification::centred, false);
-        g.drawText(juce::String::fromUTF8("\xE2\x86\x91"), upR, juce::Justification::centred, false);   // ↑
-        g.drawText(juce::String::fromUTF8("\xE2\x86\x93"), dnR, juce::Justification::centred, false);   // ↓
-        g.drawText(juce::String::fromUTF8("\xE2\x9C\x8E"), rnR, juce::Justification::centred, false);   // ✎
-        g.drawText(juce::String::fromUTF8("\xC3\x97"), delR, juce::Justification::centred, false);      // ×
+        g.drawText(y2k::tr("Use"), applyR, juce::Justification::centred, false);
+        g.drawText(y2k::tr (juce::String::fromUTF8("\xE2\x86\x91")), upR, juce::Justification::centred, false);   // ↑
+        g.drawText(y2k::tr (juce::String::fromUTF8("\xE2\x86\x93")), dnR, juce::Justification::centred, false);   // ↓
+        g.drawText(y2k::tr (juce::String::fromUTF8("\xE2\x9C\x8E")), rnR, juce::Justification::centred, false);   // ✎
+        g.drawText(y2k::tr (juce::String::fromUTF8("\xC3\x97")), delR, juce::Justification::centred, false);      // ×
     }
 }
 
@@ -1082,7 +1087,7 @@ PalettePanel::PalettePanel()
     // 与 hex 输入框一致：项目像素字体（写入后同样要 applyFontToAllText 重排版）
     nameEditor_.setFont(hexFieldFont());
     nameEditor_.setInputRestrictions(32, {});
-    nameEditor_.setTextToShowWhenEmpty("theme name", juce::Colours::grey);
+    nameEditor_.setTextToShowWhenEmpty(y2k::tr("theme name"), juce::Colours::grey);
     // 配色规则与 hex 输入框一致：底色 Surface，文字按主题明暗黑/白
     //   （refreshRoleRows() 会在每次 spec/主题变更时再同步一次）
     {
@@ -1238,8 +1243,9 @@ void PalettePanel::refreshBadge()
 
     juce::String tip = clean ? juce::String("All contrast guardrails pass (WCAG >= 4.5:1)")
                              : juce::String("Some values were auto-adjusted:");
+    tip = y2k::tr(tip);
     for (const auto& n : lastGen_.notes)
-        tip += "\n- " + juce::String::fromUTF8(n.c_str(), (int) n.size());
+        tip += "\n- " + y2k::tr(juce::String::fromUTF8(n.c_str(), (int) n.size()));
     badgeLabel_.setTooltip(tip);
 
     noteLabel_.setText(lastGen_.notes.empty()
@@ -1314,8 +1320,10 @@ void PalettePanel::revertToSnapshot()
 // ==================================================
 // 保存/分享/导入导出（R11/R12）
 // ==================================================
-void PalettePanel::showToast(const juce::String& msg)
+void PalettePanel::showToast(const juce::String& msgSource)
 {
+    // toast 文案可能是模板拼接结果：在这里统一翻译，宽度按译文测量
+    const juce::String msg = y2k::tr(msgSource);
     toastLabel_.setText(msg, juce::dontSendNotification);
     toastLabel_.setVisible(true);
     toastLabel_.toFront(false);
@@ -1323,7 +1331,7 @@ void PalettePanel::showToast(const juce::String& msg)
 
     // 按文本宽度调整 toast 尺寸
     const int w = juce::jmin(getWidth() - 60,
-        PinkXP::getFont(9.0f, juce::Font::bold).getStringWidth(msg) + 28);
+        PinkXP::getFont(9.0f, juce::Font::bold).getStringWidth(y2k::tr (msg)) + 28);
     toastLabel_.setSize(w, 22);
     toastLabel_.setTopLeftPosition((getWidth() - w) / 2,
                                    getHeight() - 60);
@@ -1373,13 +1381,12 @@ void PalettePanel::saveCurrentAsUserTheme()
         PinkXP::applyUserTheme(spec_, name);
         myThemesList_.refreshLayout();
         myThemesList_.repaint();
-        showToast("Saved: " + name);
+        showToast(y2k::trf("Saved: {0}", name));
     }
     else
     {
-        showToast("Library full (max "
-                  + juce::String(PinkXP::ThemeLibrary::kMaxUserThemes)
-                  + "). Delete a theme first.");
+        showToast(y2k::trf("Library full (max {0}). Delete a theme first.",
+                           PinkXP::ThemeLibrary::kMaxUserThemes));
     }
 }
 
@@ -1422,7 +1429,7 @@ void PalettePanel::copyShareCode()
 {
     const juce::String code = PinkXP::ThemeLibrary::specToShareCode(spec_);
     juce::SystemClipboard::copyTextToClipboard(code);
-    showToast("Code copied: " + code.substring(0, 12) + "...");
+    showToast(y2k::trf("Code copied: {0}", code.substring(0, 12) + "..."));
 }
 
 void PalettePanel::pasteShareCode()
@@ -1439,9 +1446,8 @@ void PalettePanel::pasteShareCode()
     const juce::String name = nextAutoThemeName();
     if (!lib.saveTheme(name, spec))
     {
-        showToast("Library full (max "
-                  + juce::String(PinkXP::ThemeLibrary::kMaxUserThemes)
-                  + "). Delete a theme first.");
+        showToast(y2k::trf("Library full (max {0}). Delete a theme first.",
+                           PinkXP::ThemeLibrary::kMaxUserThemes));
         return;
     }
 
@@ -1459,7 +1465,7 @@ void PalettePanel::exportCurrentToFile()
     // 插件模式下 JUCE_MODAL_LOOPS_PERMITTED=0，必须用 launchAsync（与工具栏
     //   Save/Load 预设一致的异步非模态写法）
     auto chooser = std::make_shared<juce::FileChooser>(
-        "Export palette...",
+        y2k::tr("Export palette..."),
         juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
             .getChildFile("my-palette.y2kpalette"),
         "*.y2kpalette");
@@ -1487,7 +1493,7 @@ void PalettePanel::exportCurrentToFile()
 void PalettePanel::importFromFile()
 {
     auto chooser = std::make_shared<juce::FileChooser>(
-        "Import palette...",
+        y2k::tr("Import palette..."),
         juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
         "*.y2kpalette");
 
@@ -1764,7 +1770,7 @@ void PalettePanel::paint(juce::Graphics& g)
     g.fillRect(bar);
     g.setColour(PinkXP::selInk);
     g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
-    g.drawText("PALETTE STUDIO", bar.reduced(8, 0), juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr("PALETTE STUDIO"), bar.reduced(8, 0), juce::Justification::centredLeft, false);
 }
 
 void PalettePanel::resized()

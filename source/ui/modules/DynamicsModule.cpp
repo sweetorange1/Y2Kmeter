@@ -1,4 +1,5 @@
 #include "source/ui/modules/DynamicsModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
@@ -231,7 +232,7 @@ void DynamicsModule::drawMeterGroup(juce::Graphics& g, juce::Rectangle<int> area
         // 标签
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(bars[i]->label,
+        g.drawText(y2k::tr (bars[i]->label),
                    r.getX(), area.getBottom() - labelH, r.getWidth(), labelH,
                    juce::Justification::centred, false);
     }
@@ -303,7 +304,7 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
         const int titleH = juce::jlimit(8, 12, row.getHeight() / 4);
         g.setColour(PinkXP::ink.withAlpha(0.85f));
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawFittedText(title, row.removeFromTop(titleH),
+        g.drawFittedText(y2k::tr (title), row.removeFromTop(titleH),
                          juce::Justification::topLeft, 1, 0.8f);
 
         // ② 单位 "dB" 移到数值下方（原实现占用右侧 28px，把大数字挤得只剩整数位）。
@@ -323,8 +324,8 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
             const juce::Font probeFont = PinkXP::getAxisFont(px, juce::Font::bold);
             // 以固定样本决定字号（稳定、不随位数抖动）；万一实际读数比样本更长，
             // 再按实际宽度补一次收缩，保证末位小数不被裁掉。
-            const float needW = juce::jmax(probeFont.getStringWidthFloat("88.8"),
-                                           probeFont.getStringWidthFloat(numText));
+            const float needW = juce::jmax(probeFont.getStringWidthFloat(y2k::tr ("88.8")),
+                                           probeFont.getStringWidthFloat(y2k::tr (numText)));
             if (needW > 1.0f && needW > (float) row.getWidth())
                 px *= (float) row.getWidth() / needW;
         }
@@ -361,7 +362,7 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
             {
                 g.setColour(PinkXP::pink600);
                 g.setFont(PinkXP::getAxisFont(px, juce::Font::bold));
-                g.drawText(numText, row, juce::Justification::centredLeft, false);
+                g.drawText(y2k::tr (numText), row, juce::Justification::centredLeft, false);
             }
         }
 
@@ -378,7 +379,7 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
         {
             g.setColour(PinkXP::ink.withAlpha(0.75f));
             g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-            g.drawText(unit, unitRect, juce::Justification::topLeft, false);
+            g.drawText(y2k::tr (unit), unitRect, juce::Justification::topLeft, false);
         }
     };
 
@@ -402,7 +403,7 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
     // 标题
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText("CREST HISTORY",
+    g.drawText(y2k::tr ("CREST HISTORY"),
                inner.withHeight(12), juce::Justification::topLeft, false);
 
     auto plot = inner.withTrimmedTop(14);

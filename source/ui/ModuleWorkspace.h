@@ -189,6 +189,22 @@ public:
     // 内容区（供 Toybox 裁剪 / 命中，公开只读）
     juce::Rectangle<int> getContentBounds() const;
 
+    // ---- 悬停提示（HoverHelp，见 source/ui/HoverHelp.h）----
+    //   Y2KTooltipWindow 发现鼠标落在本面板（或其没有自带文案的子组件）上时，
+    //   以面板本地坐标调用本函数取说明文字。
+    //   · text：文案（"标题\n正文"），为空表示此处不显示提示；
+    //   · contentZone：true = 仪表内容区 —— 需鼠标静止一会儿才出现、移动即收起，
+    //     避免挡住频谱 / 波形等模块自己的悬停读数。
+    //   默认实现：关闭 / 弹出按钮 → 按钮说明；标题栏 → 模块说明 + 操作提示；
+    //   其余 → 模块说明（contentZone）。自绘按钮的模块（Milkdrop / Recorder /
+    //   VirtuPet）覆写后先判自己的按钮，未命中再回落到基类。
+    struct HoverHelp
+    {
+        juce::String text;
+        bool contentZone = false;
+    };
+    virtual HoverHelp getHoverHelp (juce::Point<int> localPos) const;
+
     // 统一拦截模块 repaint 请求（用于性能计数）
     void repaint();
     void repaint(juce::Rectangle<int> area);
@@ -1019,6 +1035,17 @@ private:
     juce::Label      fpsLabel;
     int              fpsLimit = 120; // 30 / 60 / 120 / 0（0=无上限）
 
+    // 界面语言切换按钮（FPS 区右侧、分割线之后）
+    //   · 文案 = 当前语言短标签（"EN" / "中"，不参与翻译）
+    //   · 点击：2 种语言时直接循环切换；3 种及以上弹出语言菜单
+    //   · 真正的切换由 y2k::i18n::setLanguage 广播，Editor 统一换字体 + 刷新
+    juce::TextButton langBtn;
+    void showLanguageChooser();
+public:
+    // 语言切换后由 Editor 调用：刷新语言按钮文案并重排工具栏
+    void refreshLanguageUi();
+private:
+
     // FFT size 按钮（反馈 #7）：位于 FPS 区与 Grid 按钮之间，
     //   左右各有一条竖直分割线，按钮左侧带 "FFT Size:" 前缀标签。
     //   点击循环 1024/2048/4096/8192/16384，
@@ -1203,13 +1230,15 @@ private:
     //   · 值为 -1 表示未初始化 / 不绘制（如 chrome 隐藏时）
     int toolbarDividerX0 = -1;   // grid 与 fft 之间
     int toolbarDividerXFft = -1; // fft 与 fps 之间（反馈 #7）
-    int toolbarDividerX1 = -1; // fps 与 source 之间
+    int toolbarDividerX1 = -1; // fps 与 lang 之间
+    int toolbarDividerXLang = -1; // lang 与 source 之间
     int toolbarDividerX2 = -1; // source 与 hide 之间
     int toolbarDividerXStick = -1; // stick 与 load 之间
     int toolbarDividerX3 = -1; // gain 与 hide 之间
     int overflowDividerX0 = -1;
     int overflowDividerXFft = -1;
     int overflowDividerX1 = -1;
+    int overflowDividerXLang = -1;
     int overflowDividerX2 = -1;
     int overflowDividerXStick = -1;
     int overflowDividerX3 = -1;

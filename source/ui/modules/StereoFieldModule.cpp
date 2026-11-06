@@ -1,4 +1,5 @@
 #include "source/ui/modules/StereoFieldModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
@@ -172,7 +173,7 @@ void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> 
         // 环的几何固定；标签按当前自动增益换算成真实电平
         const float rr = (float) R * frac[ri];
         if (rr < 8.0f || rr > (float) R) continue;
-        g.drawText (ringDbLabel (frac[ri], autoGainFactor), cx + 4, baseY - (int) rr - 6, 34, 12,
+        g.drawText (y2k::tr (ringDbLabel (frac[ri], autoGainFactor)), cx + 4, baseY - (int) rr - 6, 34, 12,
                     juce::Justification::centredLeft, false);
     }
 
@@ -181,17 +182,17 @@ void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> 
     const int y = baseY - labelH;
     g.setColour (PinkXP::ink.withAlpha (0.7f));
     g.setFont (PinkXP::getAxisFont (labelFontSize, juce::Font::bold));
-    g.drawText ("C", cx - 8, y, 16, labelH, juce::Justification::centred, false);
+    g.drawText (y2k::tr ("C"), cx - 8, y, 16, labelH, juce::Justification::centred, false);
     g.setFont (PinkXP::getAxisFont (juce::jmin (labelFontSize, 11.0f), juce::Font::bold));
-    g.drawText ("L", plot.getX(), y, actualMargin, labelH, juce::Justification::centredRight, false);
-    g.drawText ("R", plot.getRight() - actualMargin, y, actualMargin, labelH, juce::Justification::centredLeft, false);
+    g.drawText (y2k::tr ("L"), plot.getX(), y, actualMargin, labelH, juce::Justification::centredRight, false);
+    g.drawText (y2k::tr ("R"), plot.getRight() - actualMargin, y, actualMargin, labelH, juce::Justification::centredLeft, false);
 
     // 当前自动增益（1.0x 是默认比例尺，不显示，避免多余文字）
     if (std::abs (autoGainFactor - 1.0f) > 0.05f)
     {
         g.setColour (PinkXP::ink.withAlpha (0.6f));
         g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
-        g.drawText (juce::String (autoGainFactor, 1) + "x",
+        g.drawText (y2k::tr (juce::String (autoGainFactor, 1) + "x"),
                     canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
                     juce::Justification::centredRight, false);
     }
@@ -555,7 +556,7 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
             const float rr = (float) R * frac[ri];
             if (rr < 8.0f || rr > (float) R) continue;
             const int ly = baseY - (int) rr - 6;
-            g.drawText (ringDbLabel (frac[ri], autoGainFactor), cx + 4, ly, 34, 12,
+            g.drawText (y2k::tr (ringDbLabel (frac[ri], autoGainFactor)), cx + 4, ly, 34, 12,
                         juce::Justification::centredLeft, false);
         }
     }
@@ -568,15 +569,15 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
 
         g.setColour (PinkXP::ink.withAlpha (0.7f));
         g.setFont (PinkXP::getAxisFont (labelFontSize, juce::Font::bold));
-        g.drawText ("C", cx - 8, y, 16, labelH,
+        g.drawText (y2k::tr ("C"), cx - 8, y, 16, labelH,
                     juce::Justification::centred, false);
 
         // L/R 标签位于 10px 侧边间隙内，字号单独收紧，确保单字符完整显示
         g.setFont (PinkXP::getAxisFont (juce::jmin (labelFontSize, 11.0f),
                                         juce::Font::bold));
-        g.drawText ("L", plot.getX(), y, actualMargin, labelH,
+        g.drawText (y2k::tr ("L"), plot.getX(), y, actualMargin, labelH,
                     juce::Justification::centredRight, false);
-        g.drawText ("R", plot.getRight() - actualMargin, y, actualMargin, labelH,
+        g.drawText (y2k::tr ("R"), plot.getRight() - actualMargin, y, actualMargin, labelH,
                     juce::Justification::centredLeft, false);
     }
 
@@ -585,7 +586,7 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
     {
         g.setColour (PinkXP::ink.withAlpha (0.6f));
         g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
-        g.drawText (juce::String (autoGainFactor, 1) + "x",
+        g.drawText (y2k::tr (juce::String (autoGainFactor, 1) + "x"),
                     canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
                     juce::Justification::centredRight, false);
     }

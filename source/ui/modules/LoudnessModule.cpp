@@ -1,4 +1,5 @@
 #include "source/ui/modules/LoudnessModule.h"
+#include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
@@ -193,7 +194,7 @@ void LoudnessModule::drawScale(juce::Graphics& g,
         // 标签
         g.setColour(PinkXP::ink.withAlpha(0.8f));
         juce::String label = (db == 0) ? "0" : juce::String(db);
-        g.drawText(label,
+        g.drawText(y2k::tr (label),
                    scaleArea.getX() + 5, (int)y - 5,
                    scaleArea.getWidth() - 5, 10,
                    juce::Justification::centredLeft, false);
@@ -320,7 +321,7 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         //     的柱标签一致）。
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getAxisFont(11.0f, juce::Font::bold));
-        g.drawText(bar.label, x, labelY, barW, labelH,
+        g.drawText(y2k::tr (bar.label), x, labelY, barW, labelH,
                    juce::Justification::centred, false);
 
         // 数字读数（防御：NaN / Inf / 过小 → 显示 -∞；其余数值做 clamp）
@@ -362,7 +363,7 @@ void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
         {
             g.setFont(PinkXP::getFont(9.0f));
             g.setColour(rc);
-            g.drawText(readout, x, labelY + labelH, barW, readoutH,
+            g.drawText(y2k::tr (readout), x, labelY + labelH, barW, readoutH,
                        juce::Justification::centred, false);
         }
     };
