@@ -247,7 +247,12 @@ void TempoKeyModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
     if (hit.kind == 1)
     {
         if (latest.bpm <= 0.0f)
+        {
+            // 还没抓到 BPM：也给出反馈，而不是点击无反应
+            ctx.bubble (bubbleAt, y2k::tr ("No BPM yet - play some music and wait a moment."),
+                        ToyRole::Reward);
             return;
+        }
 
         // 纯 ASCII：Silkscreen 只保证拉丁字形，"×/÷" 可能落到缺字方框
         const juce::String text = juce::String ("x2 ")
@@ -264,7 +269,14 @@ void TempoKeyModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
         const juce::String text = scaleNoteNames (latest.keyRoot, latest.keyMode);
 
         if (text.isNotEmpty())
+        {
             ctx.bubble (bubbleAt, text, ToyRole::Pin);
+            return;
+        }
+
+        // 还没识别出调性：同样给反馈
+        ctx.bubble (bubbleAt, y2k::tr ("No key detected yet - play some music and wait a moment."),
+                    ToyRole::Pin);
     }
 }
 

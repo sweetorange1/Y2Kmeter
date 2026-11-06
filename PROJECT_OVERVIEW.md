@@ -16,6 +16,7 @@
     GL 组件合成诊断、Toybox 档位连续互动自动升级）以及本轮两大新功能 —— **悬停提示 Hover Help** 与
     **界面国际化 / 中文本地化（运行时中英文切换）**，连同后续迭代（符号字形集中管理、CJK 视觉校正、
     按钮字号收紧、翻译文案自查、多屏混合 DPI 下模块脱离窗口物理像素落位等），详见文末「v3.0.2」章节。
+    v3.0.2 发布后的调整（Milkdrop 按钮等宽、示波器单按钮循环、调性点击反馈）以 `v3.0.2补充` 形式入库、不再 bump 版本号。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -6099,6 +6100,22 @@ blit 回退时打印 `!! glBlitFramebuffer 失败 (0x…) → 直渲染模块改
 | 8 | 版本号 | `3.0.1 → 3.0.2`：`CMakeLists.txt`（project + 两处 `juce_add_plugin VERSION`）、`PluginEditor.cpp` 3 处版本显示字面量、`Y2Kmeter_installer.iss` `MyAppVersion`、本文档 |
 
 **验证**：IDE 静态诊断 0 错误、`git diff --check` 通过；构建与运行验证按项目约定由用户在本机完成（版本号变更需重新 configure 才会重写 `*_resources.rc`）。
+
+---
+
+## v3.0.2 补充：Milkdrop 控制栏按钮等宽 / 示波器单按钮循环 / 调性点击反馈
+
+> 版本号保持 `3.0.2` 不变（按项目约定，发布后的调整以「补充」形式入库）。本轮 3 项 UI 交互修正，均来自用户实测反馈：
+
+| # | 事项 | 处理 |
+| --- | --- | --- |
+| 1 | Milkdrop 控制栏文字按钮（自动/颜色/效果/波形/画面）中文下长短不一 | 宽度常量（32~46px，按英文词长写死）改为 `MilkdropModule::overlayTextBtnWidth()`：按当前语言翻译后文本统一测量（`getFont(8, bold)` 口径，最小 32px），五个按钮等宽；hit-test / 各按钮 rect / paint 全部走同一函数。同时 `tweak` 按钮中文改译 **"画面"**（按钮 / 面板标题 TWEAK / 悬停说明 / 重置按钮同步） |
+| 2 | 示波器 / 示波波形上方三个互斥按钮 → 单按钮循环 | 参考 Waveform 的颜色循环按钮：`btnMode` 单按钮，按钮文字即当前模式，点击循环 —— 示波器 Wave → X-Y → Liss，示波波形 Left → Right → Both；`refreshModeButton / refreshChannelButton` 同步文字（预设改模式时跟随）。移除 radioGroup / 三按钮布局，工具栏改为「模式按钮 + 冻结」。附：全屏"全部模块"预设中示波器设为 X-Y、示波波形设为左声道（同屏多样，不都取默认） |
+| 3 | 速度/调性模块未抓到数据时点击无反应 | `toyPoke` 无数据分支补气泡：BPM 未抓到 → "还没抓到 BPM —— 播放音乐稍等片刻"；调性未识别 → "还没识别出调性 —— 播放音乐稍等片刻"（中英双语，走 `y2k::tr`） |
+
+**改动点**：`source/ui/modules/MilkdropModule.h/.cpp`（按钮等宽函数 + 调用点替换）、`source/ui/modules/OscilloscopeModule.h/.cpp`、`OscilloscopeWaveModule.h/.cpp`（单按钮循环）、`source/ui/modules/TempoKeyModule.cpp`（无数据气泡）、`PluginEditor.cpp`（全屏"全部模块"预设的模式注入）、`i18n/zh-CN.lang`（tweak→画面、Channel/循环说明、无数据气泡译文）。
+
+**验证**：IDE 静态诊断 0 错误、`git diff --check` 通过；按项目约定编译与运行验证由用户在本机完成。
 
 ---
 

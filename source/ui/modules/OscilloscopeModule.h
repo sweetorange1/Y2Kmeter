@@ -102,7 +102,7 @@ private:
     juce::Rectangle<int> getCanvasBounds  (juce::Rectangle<int> content) const;
 
     // 模式按钮点击 / 刷新外观
-    void refreshModeButtons();
+    void refreshModeButton();
 
     // ---- 成员 ----
     AnalyserHub& hub;
@@ -140,9 +140,9 @@ private:
     double lastPeriodicGainUpdateMs   = 0.0;     // 上次周期性增益更新的时间戳（ms，HiRes）
 
     // 顶部工具栏按钮
-    juce::TextButton btnWave   { "Wave"   };
-    juce::TextButton btnXY     { "X-Y"    };
-    juce::TextButton btnLiss   { "Liss"   };
+    // 显示模式：单按钮循环 Wave → X-Y → Liss（参考 Waveform 的颜色循环按钮），
+    //   按钮文字即当前模式
+    juce::TextButton btnMode   { "Wave"   };
     juce::TextButton btnFreeze { "Freeze" };
 
     static constexpr int toolbarH = 26;

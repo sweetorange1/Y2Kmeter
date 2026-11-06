@@ -3815,6 +3815,20 @@ void MilkdropModule::mouseExit(const juce::MouseEvent& e)
 
 // ---- 叠加层布局辅助 ----
 
+// 控制栏文字按钮统一宽度（auto / color / effects / wave / tweak）：
+//   按当前语言的按钮文本测量（中文模式下"颜色/效果/波形/画面/自动"两字等宽，
+//   按钮不再长短不一），与绘制处 getFont(8.0f, bold) 同字体同字号。
+int MilkdropModule::overlayTextBtnWidth()
+{
+    static const char* const kLabels[] = { "auto", "color", "effects", "wave", "tweak" };
+    const auto font = PinkXP::getFont (8.0f, juce::Font::bold);
+
+    int w = 32;   // 最小宽度（图标按钮 22 + 余量）
+    for (const auto* t : kLabels)
+        w = juce::jmax (w, juce::GlyphArrangement::getStringWidthInt (font, y2k::tr (t)) + 10);
+    return w;
+}
+
 juce::Rectangle<int> MilkdropModule::getOverlayBounds(juce::Rectangle<int> content) const
 {
     constexpr int kBarHeight = 26;
@@ -3833,11 +3847,11 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     auto prevBtn    = juce::Rectangle<int>(overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn  = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, overlay.getY() + 2, kAutoBtnW, kBtnSize);
-    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, overlay.getY() + 2, kColorBtnW, kBtnSize);
-    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, overlay.getY() + 2, kEffectsBtnW, kBtnSize);
-    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW, overlay.getY() + 2, kWaveBtnW, kBtnSize);
-    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - kTweakBtnW, overlay.getY() + 2, kTweakBtnW, kBtnSize);
+    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
 
     if (prevBtn.contains(pos))     return OverlayButton::kPrev;
     if (tweakBtn.contains(pos))    return OverlayButton::kTweak;
@@ -3879,8 +3893,8 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
-                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
         return autoBtn;
     }
     case OverlayButton::kColor:
@@ -3889,9 +3903,9 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
-                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
-        return { autoBtn.getX() - kPadding - kColorBtnW, overlay.getY() + 2, kColorBtnW, kBtnSize };
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        return { autoBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
     }
     case OverlayButton::kEffects:
     {
@@ -3899,11 +3913,11 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
-                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
-        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW,
-                                              overlay.getY() + 2, kColorBtnW, kBtnSize);
-        return { colorBtn.getX() - kPadding - kEffectsBtnW, overlay.getY() + 2, kEffectsBtnW, kBtnSize };
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        return { colorBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
     }
     case OverlayButton::kWave:
     {
@@ -3911,13 +3925,13 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
-                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
-        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW,
-                                              overlay.getY() + 2, kColorBtnW, kBtnSize);
-        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW,
-                                               overlay.getY() + 2, kEffectsBtnW, kBtnSize);
-        return { effectsBtn.getX() - kPadding - kWaveBtnW, overlay.getY() + 2, kWaveBtnW, kBtnSize };
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                               overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        return { effectsBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
     }
     case OverlayButton::kTweak:
     {
@@ -3925,15 +3939,15 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
-                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
-        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW,
-                                              overlay.getY() + 2, kColorBtnW, kBtnSize);
-        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW,
-                                               overlay.getY() + 2, kEffectsBtnW, kBtnSize);
-        auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW,
-                                               overlay.getY() + 2, kWaveBtnW, kBtnSize);
-        return { waveBtn.getX() - kPadding - kTweakBtnW, overlay.getY() + 2, kTweakBtnW, kBtnSize };
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                               overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                               overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+        return { waveBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
     }
     // 分辨率切换按钮已全平台阉割
 #if 0
@@ -3943,8 +3957,8 @@ juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
         auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
                                               overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW,
-                                              overlay.getY() + 2, kAutoBtnW, kBtnSize);
+        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
+                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
         auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW,
                                               overlay.getY() + 2, kResBtnW, kBtnSize);
         return resBtn;
@@ -4001,11 +4015,11 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
     auto prevBtn    = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
     auto randomBtn  = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
     auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - kAutoBtnW, bar.getY() + 2, kAutoBtnW, kBtnSize);
-    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - kColorBtnW, bar.getY() + 2, kColorBtnW, kBtnSize);
-    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - kEffectsBtnW, bar.getY() + 2, kEffectsBtnW, kBtnSize);
-    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - kWaveBtnW, bar.getY() + 2, kWaveBtnW, kBtnSize);
-    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - kTweakBtnW, bar.getY() + 2, kTweakBtnW, kBtnSize);
+    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
     // tweak/wave/effects/color 按钮在所有平台都显示，nameArea 延伸到 tweakBtn 左侧
     auto nameArea   = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
                                           tweakBtn.getX() - prevBtn.getRight() - 4, kBarHeight);

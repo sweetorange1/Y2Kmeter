@@ -3958,6 +3958,20 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
         auto panel = createModule (t.type);
         if (panel == nullptr) continue;
 
+        // 「全屏：全部模块」里两个波形模块同屏出现：给示波器 / 示波波形各选一个
+        // 与默认不同的显示模式，让画面更多样（示波器 → X-Y 立体声形状，
+        // 示波波形 → 左声道；按钮选中态由各自的 refreshModeButtons 同步）。
+        if (presetId == (int) ModuleWorkspace::LayoutPreset::fullAllModules)
+        {
+            if (t.type == ModuleType::oscilloscope)
+                if (auto* osc = dynamic_cast<OscilloscopeModule*> (panel.get()))
+                    osc->setDisplayMode (OscilloscopeModule::DisplayMode::xy);
+
+            if (t.type == ModuleType::oscilloscopeWave)
+                if (auto* oscw = dynamic_cast<OscilloscopeWaveModule*> (panel.get()))
+                    oscw->setChannelMode (OscilloscopeWaveModule::ChannelMode::left);
+        }
+
         const int x0 = mapX (t.x);
         const int y0 = mapY (t.y);
         const int w  = juce::jmax (panel->getMinWidth(),  mapX (t.x + t.w) - x0);

@@ -28,32 +28,29 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
         buildGlSnapshot();   // GL 快照含底色/几何颜色，主题切换必须重建
         repaint();
     });
-    auto setupModeBtn = [this](juce::TextButton& b)
+    // ---- 显示模式：单按钮循环 Wave → X-Y → Liss（参考 Waveform 的颜色循环按钮）----
+    //   按钮文字即当前模式，tooltip 里写明完整循环顺序
+    btnMode.setClickingTogglesState (false);
+    btnMode.setTooltip (y2k::help::make ("Display mode",
+        "Click to cycle:\n"
+        "- Wave: classic time-domain waveform\n"
+        "- X-Y: left vs right plot (stereo shape)\n"
+        "- Liss: Lissajous figure"));
+    btnMode.onClick = [this]()
     {
-        b.setClickingTogglesState(true);
-        b.setRadioGroupId(0x50424551); // "PBEQ"
-        addAndMakeVisible(b);
+        switch (displayMode)
+        {
+            case DisplayMode::waveform:  setDisplayMode (DisplayMode::xy);        break;
+            case DisplayMode::xy:        setDisplayMode (DisplayMode::lissajous); break;
+            case DisplayMode::lissajous: setDisplayMode (DisplayMode::waveform);  break;
+        }
     };
-    setupModeBtn(btnWave);
-    setupModeBtn(btnXY);
-    setupModeBtn(btnLiss);
-
-    btnWave.onClick = [this]() { setDisplayMode(DisplayMode::waveform);  };
-    btnXY  .onClick = [this]() { setDisplayMode(DisplayMode::xy);        };
-    btnLiss.onClick = [this]() { setDisplayMode(DisplayMode::lissajous); };
-
-    btnWave.setTooltip (y2k::help::make ("Wave", "Classic oscilloscope: amplitude over time."));
-    btnXY  .setTooltip (y2k::help::make ("X-Y", "Plot left (X) against right (Y). A diagonal line = mono, "
-                                                "a round cloud = wide stereo. Auto-zooms to the peak."));
-    btnLiss.setTooltip (y2k::help::make ("Lissajous", "Mid / side view rotated 45 degrees: vertical = mono, "
-                                                      "horizontal = out of phase. Auto-zooms to the peak."));
+    addAndMakeVisible (btnMode);
 
     btnFreeze.setClickingTogglesState(true);
     btnFreeze.setTooltip (y2k::help::make ("Freeze", "Hold the current picture so you can study it. Click again to resume."));
     btnFreeze.onClick = [this]() { setFrozen(btnFreeze.getToggleState()); };
     addAndMakeVisible(btnFreeze);
-
-    btnWave.setToggleState(true, juce::dontSendNotification);
 }
 
 OscilloscopeModule::~OscilloscopeModule()
@@ -134,7 +131,7 @@ void OscilloscopeModule::setDisplayMode(DisplayMode m)
 {
     if (displayMode == m) return;
     displayMode = m;
-    refreshModeButtons();
+    refreshModeButton();
     invalidateStaticLayer();
     invalidateDynamicLayer();
     // v2.9.3：三种模式都支持 GL 直渲染；切换后立即重建快照，避免旧模式闪一帧
@@ -151,11 +148,14 @@ void OscilloscopeModule::setFrozen(bool b)
     repaint();
 }
 
-void OscilloscopeModule::refreshModeButtons()
+void OscilloscopeModule::refreshModeButton()
 {
-    btnWave.setToggleState(displayMode == DisplayMode::waveform,  juce::dontSendNotification);
-    btnXY  .setToggleState(displayMode == DisplayMode::xy,        juce::dontSendNotification);
-    btnLiss.setToggleState(displayMode == DisplayMode::lissajous, juce::dontSendNotification);
+    switch (displayMode)
+    {
+        case DisplayMode::waveform:  btnMode.setButtonText ("Wave"); break;
+        case DisplayMode::xy:        btnMode.setButtonText ("X-Y");  break;
+        case DisplayMode::lissajous: btnMode.setButtonText ("Liss"); break;
+    }
 }
 
 // ----------------------------------------------------------
@@ -515,12 +515,10 @@ juce::Rectangle<int> OscilloscopeModule::getCanvasBounds(juce::Rectangle<int> co
 void OscilloscopeModule::layoutContent(juce::Rectangle<int> contentBounds)
 {
     auto tb = getToolbarBounds(contentBounds).reduced(2);
-    const int gap = 4;
-    const int modeBtnW = 60;
 
-    btnWave  .setBounds(tb.getX(),                        tb.getY(), modeBtnW, tb.getHeight());
-    btnXY    .setBounds(tb.getX() + (modeBtnW + gap),     tb.getY(), modeBtnW, tb.getHeight());
-    btnLiss  .setBounds(tb.getX() + (modeBtnW + gap) * 2, tb.getY(), modeBtnW, tb.getHeight());
+    // 左侧：单按钮模式循环（文字在 Wave / X-Y / Liss 之间切换）
+    const int modeBtnW = 72;
+    btnMode.setBounds (tb.getX(), tb.getY(), modeBtnW, tb.getHeight());
 
     const int freezeW = 64;
     btnFreeze.setBounds(tb.getRight() - freezeW, tb.getY(), freezeW, tb.getHeight());

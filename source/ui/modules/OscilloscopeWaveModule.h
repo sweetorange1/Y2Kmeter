@@ -85,7 +85,7 @@ private:
     // 布局辅助
     juce::Rectangle<int> getToolbarBounds(juce::Rectangle<int> content) const;
     juce::Rectangle<int> getCanvasBounds(juce::Rectangle<int> content) const;
-    void refreshChannelButtons();
+    void refreshChannelButton();
 
     // ---- 成员 ----
     AnalyserHub& hub;
@@ -112,9 +112,9 @@ private:
     ChannelMode lastDrawnMode = ChannelMode::both;
 
     // 顶部工具栏按钮
-    juce::TextButton btnL    { "L"    };
-    juce::TextButton btnR    { "R"    };
-    juce::TextButton btnBoth { "Both" };
+    // 声道：单按钮循环 Left → Right → Both（参考 Waveform 的颜色循环按钮），
+    //   按钮文字即当前声道
+    juce::TextButton btnMode { "Both" };
 
     static constexpr int toolbarH = 26;
 

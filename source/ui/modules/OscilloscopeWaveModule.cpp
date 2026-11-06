@@ -30,25 +30,24 @@ OscilloscopeWaveModule::OscilloscopeWaveModule(AnalyserHub& h)
         repaint();
     });
 
-    auto setupChannelBtn = [this](juce::TextButton& b)
+    // ---- 声道：单按钮循环 Left → Right → Both（参考 Waveform 的颜色循环按钮）----
+    //   按钮文字即当前声道，tooltip 里写明完整循环顺序
+    btnMode.setClickingTogglesState (false);
+    btnMode.setTooltip (y2k::help::make ("Channel",
+        "Click to cycle:\n"
+        "- Left: draw only the left channel\n"
+        "- Right: draw only the right channel\n"
+        "- Both: draw both together to compare them"));
+    btnMode.onClick = [this]()
     {
-        b.setClickingTogglesState(true);
-        b.setRadioGroupId(0x4F534357); // "OSCW" —— 与 OscilloscopeModule 的 "PBEQ" 区分
-        addAndMakeVisible(b);
+        switch (channelMode)
+        {
+            case ChannelMode::left:  setChannelMode (ChannelMode::right); break;
+            case ChannelMode::right: setChannelMode (ChannelMode::both);  break;
+            case ChannelMode::both:  setChannelMode (ChannelMode::left);  break;
+        }
     };
-    setupChannelBtn(btnL);
-    setupChannelBtn(btnR);
-    setupChannelBtn(btnBoth);
-
-    btnL.onClick    = [this]() { setChannelMode(ChannelMode::left);  };
-    btnR.onClick    = [this]() { setChannelMode(ChannelMode::right); };
-    btnBoth.onClick = [this]() { setChannelMode(ChannelMode::both);  };
-
-    btnL   .setTooltip (y2k::help::make ("Left",  "Draw only the left channel."));
-    btnR   .setTooltip (y2k::help::make ("Right", "Draw only the right channel."));
-    btnBoth.setTooltip (y2k::help::make ("Both",  "Draw left and right together to compare them."));
-
-    btnBoth.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible (btnMode);
 }
 
 OscilloscopeWaveModule::~OscilloscopeWaveModule()
@@ -80,16 +79,19 @@ void OscilloscopeWaveModule::setChannelMode(ChannelMode m)
 {
     if (channelMode == m) return;
     channelMode = m;
-    refreshChannelButtons();
+    refreshChannelButton();
     invalidateDynamicLayer();
     repaint();
 }
 
-void OscilloscopeWaveModule::refreshChannelButtons()
+void OscilloscopeWaveModule::refreshChannelButton()
 {
-    btnL.setToggleState   (channelMode == ChannelMode::left,  juce::dontSendNotification);
-    btnR.setToggleState   (channelMode == ChannelMode::right, juce::dontSendNotification);
-    btnBoth.setToggleState(channelMode == ChannelMode::both,  juce::dontSendNotification);
+    switch (channelMode)
+    {
+        case ChannelMode::left:  btnMode.setButtonText ("Left");  break;
+        case ChannelMode::right: btnMode.setButtonText ("Right"); break;
+        case ChannelMode::both:  btnMode.setButtonText ("Both");  break;
+    }
 }
 
 // ----------------------------------------------------------
@@ -318,12 +320,10 @@ void OscilloscopeWaveModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 void OscilloscopeWaveModule::layoutContent(juce::Rectangle<int> contentBounds)
 {
     auto tb = getToolbarBounds(contentBounds).reduced(2);
-    const int gap = 4;
-    const int btnW = 56;
 
-    btnL.setBounds   (tb.getX(),                    tb.getY(), btnW, tb.getHeight());
-    btnR.setBounds   (tb.getX() + (btnW + gap),     tb.getY(), btnW, tb.getHeight());
-    btnBoth.setBounds(tb.getX() + (btnW + gap) * 2, tb.getY(), btnW, tb.getHeight());
+    // 左侧：单按钮声道循环（文字在 Left / Right / Both 之间切换）
+    const int btnW = 72;
+    btnMode.setBounds (tb.getX(), tb.getY(), btnW, tb.getHeight());
 }
 
 // ----------------------------------------------------------

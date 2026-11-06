@@ -582,8 +582,11 @@ private:
     double lastBeatBucket_ { 0.0 };      ///< 上一次采样到的拍桶（floor(ppq / N)）
 
     static constexpr float kAutoRowHeight = 28.0f;
-    static constexpr int   kAutoBtnW = 32;
     static constexpr int   kResBtnW  = 32;  // [1:n] 渲染缩放按钮
+    // 控制栏文字按钮（auto / color / effects / wave / tweak）统一宽度：
+    //   按翻译后文本测量（中文两字等宽，不再按英文词长写死 32~46 而长短不一），
+    //   测量与绘制同为 getFont(8.0f, bold) 口径。见 MilkdropModule.cpp。
+    static int overlayTextBtnWidth();
     static constexpr float kMinAutoInterval = 1.0f;
     static constexpr float kMaxAutoInterval = 60.0f;
     static constexpr int   kMinAutoBeats = 1;
@@ -616,10 +619,6 @@ private:
     static constexpr float kEffectsPadBottom = 6.0f;   ///< effects 面板底部 padding
     static constexpr float kEffectsToggleMinW = 56.0f; ///< 每个效果按钮最小宽度（不足则换行）
     static constexpr float kEffectsToggleGap = 4.0f;   ///< 效果按钮水平/垂直间距
-    static constexpr int   kColorBtnW = 32;             ///< color 按钮宽度（与 auto 一致）
-    static constexpr int   kEffectsBtnW = 42;           ///< effects 按钮宽度
-    static constexpr int   kWaveBtnW = 40;              ///< wave 按钮宽度
-    static constexpr int   kTweakBtnW = 46;             ///< tweak 按钮宽度
     static constexpr int   kLibraryBtnSize = 22;        ///< 右下角收藏/切换按钮边长
     static constexpr float kWaveHeaderH = 22.0f;        ///< wave 面板标题高度
     static constexpr float kWaveModeRowH = 22.0f;       ///< wave 面板 mode stepper 行高度
