@@ -6225,4 +6225,49 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 
 ---
 
+## v3.0.2 补充：抬头双击最大化对角吞块修复 + 下拉框弹菜单卡顿（DropShadower）
+
+> 版本号保持 `3.0.2` 不变。本轮 2 项修复（均由用户编译 RelWithDebInfo 实测确认）：
+
+### 1. 抬头双击最大化：斜对角邻居被吞 + 切换语言卡成全屏
+
+**现场**：双击模块抬头最大化。常规布局正常；特殊布局（模块正上方无模块、右上方有模块）下同时向上 + 向右扩张会覆盖右上方的模块；触发后再切换语言，模块被直接放大成全屏卡死。
+
+**根因**（两层）：
+- `ModuleWorkspace::computeMaximizedBoundsFor` 的贪心扩张每轮把左/右/上/下四个边界**同时**一步到位 —— 斜对角邻居（如右上方模块）与当前矩形既无垂直交叠也无水平交叠，四个方向都拦不住它，矩形直接扩过去把它吞掉；
+- 切换语言 → `applyLanguageChange()` → `refreshLanguageUi()` → workspace `resized()` → `reapplyMaximizeIfNeeded()` 重算，此时模块已压住邻居，命中「已压住别的模块 → 直接占满 canvas」分支 → 放大成全屏卡死。
+
+**修复**：
+- 贪心扩张改为按「上 → 下 → 左 → 右」依次**单边扩张、立即生效**：每一边只扩到与当前矩形最近的障碍边 / canvas 边缘，扩展后的矩形绝不覆盖任何模块；对角障碍会在后续方向判定中自然拦截（如右上方的模块会在矩形先向上扩满后挡住向右扩张）。单边只增不减、一轮内收敛；非对角的常规布局结果与旧算法完全一致。
+- `reapplyMaximizeIfNeeded` 新增画布尺寸门槛：新增成员 `maximizedCanvasSize`（最大化时记录 canvas 尺寸），重算前先比较 —— 画布尺寸没变（语言切换、主题刷新等触发的 `resized()`）直接返回；只有窗口/预设尺寸真变化才重新贴合。语言切换不再影响模块大小位置。
+
+### 2. 布局预设 / 音频源下拉框点击卡一小下（每次弹菜单重建 DropShadower）
+
+**现场**：点击这两个下拉框后 UI 卡 100~300ms 才展开菜单，第一次点击最明显。
+
+**排查**（诊断埋点时间对齐，见 §3）：
+- GL 渲染帧 avg 4.4ms、max 21.65ms —— 排除「GL 线程持消息锁」假设；
+- mouseDown → showPopup → 菜单窗口构造起点 ≤16ms —— 排除消息线程处理；
+- 卡点在菜单窗口构造起点之后：**每次弹菜单新建临时顶层窗口，`updateShadower` 为它创建 DropShadower**（阴影子窗口 + Direct2D 高斯阴影渲染，实测 80~143ms，首次含 Direct2D 工厂初始化）；混合 DPI 三屏下菜单窗口创建后还会收到一次 `WM_DPICHANGED` → 二次重建阴影，双倍成本。
+
+**修复**：`PinkXPLookAndFeel::createDropShadowerForComponent` 重写 —— 菜单窗口（JUCE `MenuWindow`，组件名 `"menu"`）跳过阴影返回 nullptr（主题菜单自带粉色凸起边框，不需要系统阴影）；其余窗口保留基类阴影行为。**效果：首次点击 426ms → 55ms**，剩余 37~63ms 为 JUCE 临时窗口固定成本（CreateWindowEx / VBlankDispatcher 刷新 / DPI 重排）。
+
+**同类排查**：主窗口 `setDropShadowEnabled(false)` 显式关闭；UpdateDialog / PalettePanel / Milkdrop OverlayView 的 styleFlags 不含 `windowHasDropShadow`；浮动模块窗口有原生标题栏走原生阴影 —— 项目中已无同类问题；所有 PopupMenu（右键添加模块菜单、语言菜单等）自动受益。
+
+### 3. 诊断埋点（保留，正式 Release 零开销）
+
+- `[UIPOPUP]` 系列打点：`ModuleWorkspace::ComboPopupProbe`（ComboBox mouseDown）、`PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu`（showPopup 执行）、`getParentComponentForMenuOptions`（MenuWindow 构造起点）、`preparePopupMenuWindow`（构造末尾）、`drawPopupMenuBackground`（首帧绘制，间隔 >2s 判定新菜单）；另有 `[GL] slow frame`（单帧 >25ms 即时写，含 total/milkdrop/direct 分段）。
+- 方法：用 `Y2K_DIAG` 行首毫秒时间戳 + 线程 tag 做「点击 → 弹菜单」全链路时间对齐；RelWithDebInfo 默认开启、正式 Release 下宏展开为空。
+- `createDropShadowerForComponent` 对非菜单窗口保留 `Y2K_DIAG_SLOW("SHADOW", ...)` 30ms 阈值计时。
+
+### 4. 改动点
+
+`source/ui/ModuleWorkspace.h/.cpp`、`source/ui/PinkXPStyle.h/.cpp`、`PluginEditor.cpp`、本文档。
+
+### 5. 验证
+
+`git diff --check` 通过；IDE 静态诊断 0 错误；用户编译 RelWithDebInfo 实测：对角布局最大化不再覆盖邻居、切换语言模块几何不变、下拉框弹菜单明显不卡顿（首次 426ms → 55ms）。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

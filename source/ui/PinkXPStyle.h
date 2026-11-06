@@ -495,6 +495,16 @@ public:
     //   其余情况原样返回 options.getParentComponent()，行为与 JUCE 默认完全一致。
     juce::Component* getParentComponentForMenuOptions (const juce::PopupMenu::Options&) override;
 
+    // 诊断打点（UIPOPUP）：MenuWindow 构造末尾被 JUCE 调用（addToDesktop 已执行），
+    //   与 getParentComponentForMenuOptions 的时间差 = 构造主体 + 原生窗口创建耗时。
+    void preparePopupMenuWindow (juce::Component& newWindow) override;
+
+    // 菜单窗口（JUCE MenuWindow，组件名 "menu"）跳过 DropShadower：
+    //   每次弹下拉菜单都会新建临时顶层窗口，JUCE 默认给它挂 Direct2D 高斯阴影
+    //   （实测 80~143ms），是"点击下拉框卡一小下"的主因。主题菜单自带凸起边框。
+    //   其余窗口（主窗口等）保留基类阴影行为。
+    std::unique_ptr<juce::DropShadower> createDropShadowerForComponent (juce::Component&) override;
+
     // ---- 悬停提示（HoverHelp / Y2KTooltipWindow）----
     //   文案格式 "标题\n正文"：标题画成粉色小标题条，正文自动换行（最宽 ~300px）；
     //   不含 \n 的单行提示只画正文。配色全部取当前主题，切主题自动跟随。

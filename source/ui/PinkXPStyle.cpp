@@ -4,6 +4,7 @@
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/ui/palette/PaletteGenerator.h"
 #include "source/Y2KLogging.h"
+#include "source/diag/Y2KDiagLog.h"
 
 // 全屏菜单宿主判定需要识别"哪一层是 OpenGL 渲染表面宿主"
 //   （Editor 在构造末尾 openGLContext.attachTo(*this)）。
@@ -2142,6 +2143,17 @@ juce::Label* PinkXPLookAndFeel::createSliderTextBox(juce::Slider& slider)
 
 void PinkXPLookAndFeel::drawPopupMenuBackground(juce::Graphics& g, int width, int height)
 {
+    // 诊断埋点（UIPOPUP）：菜单窗口的绘制（paint）被调起。距上一次绘制超过 2s
+    //   视为"一个新菜单窗口的首帧绘制"—— 与 preparePopupMenuWindow 的时间差
+    //   即"窗口 setVisible → 首帧真正画出"的延迟。hover 重绘不刷屏（间隔短）。
+    {
+        static double s_lastMenuPaintMs = 0.0;
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        if (nowMs - s_lastMenuPaintMs > 2000.0)
+            Y2K_DIAG ("UIPOPUP", "menu first paint (drawPopupMenuBackground)");
+        s_lastMenuPaintMs = nowMs;
+    }
+
     PinkXP::drawRaised(g, { 0, 0, width, height }, PinkXP::btnFace);
 }
 
@@ -2310,6 +2322,11 @@ void PinkXPLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& l
 juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce::ComboBox& box,
                                                                             juce::Label& label)
 {
+    // 诊断埋点（UIPOPUP）：ComboBox::showPopup 已真正执行 —— 说明 mouseDown 里
+    //   排入的 callAsync 已经被消息线程取出。配合 ComboPopupProbe 的 mouseDown
+    //   时间戳，两条日志的时间差就是"点击 → 弹菜单"的延迟。
+    Y2K_DIAG ("UIPOPUP", "combobox showPopup (getOptionsForComboBoxPopupMenu)");
+
     auto options = juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu (box, label);
 
     // 需要放宽菜单允许区域的两种场景（默认区域 = display->userArea）：
@@ -2362,12 +2379,46 @@ juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce
 // ==========================================================
 juce::Component* PinkXPLookAndFeel::getParentComponentForMenuOptions (const juce::PopupMenu::Options& options)
 {
+    // 诊断埋点（UIPOPUP）：MenuWindow 构造函数正在询问父组件 —— 即菜单窗口
+    //   已经进入创建阶段。它与上一条 showPopup 的时间差反映 MenuWindow 创建耗时。
+    Y2K_DIAG ("UIPOPUP", "menu window create (getParentComponentForMenuOptions)");
+
     // 已经有父组件（子菜单、或调用方显式 withParentComponent）时原样保留，
     //   避免改写层级导致子菜单定位 / 关闭逻辑错乱。
     if (auto* existing = options.getParentComponent())
         return existing;
 
     return PinkXP::getInWindowMenuHost (options.getTargetComponent());
+}
+
+void PinkXPLookAndFeel::preparePopupMenuWindow (juce::Component& newWindow)
+{
+    // 诊断埋点（UIPOPUP）：MenuWindow 构造即将完成（addToDesktop 已执行，原生
+    //   HWND 已创建）。与 "menu window create" 的时间差 = 构造主体 + 原生窗口
+    //   创建耗时；与首帧 paint 的时间差 = setVisible 上屏 + 首帧调度耗时。
+    Y2K_DIAG ("UIPOPUP", "menu window prepared (preparePopupMenuWindow)");
+
+    juce::LookAndFeel_V4::preparePopupMenuWindow (newWindow);
+}
+
+std::unique_ptr<juce::DropShadower> PinkXPLookAndFeel::createDropShadowerForComponent (juce::Component& comp)
+{
+    // 菜单窗口（JUCE 的 MenuWindow，组件名为 "menu"）：跳过系统阴影。
+    //   根因（2026-11 日志定位）：每次弹下拉菜单都会新建临时顶层窗口，JUCE 的
+    //   updateShadower 会为它创建 DropShadower —— 阴影子窗口 + Direct2D 高斯
+    //   阴影渲染实测 80~143ms（首次最慢，Direct2D 工厂初始化），正是
+    //   "点击下拉框卡一小下"的主因。主题菜单自带凸起边框，不需要系统阴影。
+    if (comp.getName() == "menu")
+    {
+        Y2K_DIAG ("UIPOPUP", "menu drop shadow skipped (createDropShadowerForComponent)");
+        return nullptr;
+    }
+
+    // 其它窗口（主窗口等）保留阴影；顺带测量创建耗时（超 30ms 才写日志）。
+    {
+        Y2K_DIAG_SLOW ("SHADOW", "createDropShadowerForComponent", 30.0);
+        return juce::LookAndFeel_V2::createDropShadowerForComponent (comp);
+    }
 }
 
 // ==========================================================

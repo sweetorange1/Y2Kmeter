@@ -8341,6 +8341,15 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   {
     const double totalMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs;
     y2k::diag::addFrameSample (totalMs, diagMilkdropMs, diagDirectMs);
+
+    // 诊断埋点（GL）：单帧耗时超过阈值时即时落一行（带毫秒时间戳）。与 UIPOPUP
+    //   的"点击 → 弹菜单"时间戳对齐后，可判断点击后的卡顿是否夹在一条慢 GL 帧
+    //   之间（即 GL 线程持消息锁渲染整帧、把 callAsync 的弹窗排队到帧后）。
+    if (totalMs > 25.0)
+        Y2K_DIAG ("GL", "slow frame total=" + juce::String (totalMs, 1)
+                        + "ms milkdrop=" + juce::String (diagMilkdropMs, 1)
+                        + "ms direct=" + juce::String (diagDirectMs, 1));
+
     y2k::diag::setEditorState (getWidth(), getHeight(),
                                (float) openGLContext.getRenderingScale(),
                                openGLContext.isAttached(),

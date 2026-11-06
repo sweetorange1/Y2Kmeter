@@ -936,6 +936,7 @@ private:
     juce::Component::SafePointer<ModulePanel> maximizedPanel;
     juce::Rectangle<int> maximizedRestoreBounds;   // 双击前的原始 bounds（存档也用它）
     juce::Point<int>     maximizedAppliedSize;     // 应用最大化后的尺寸（用于识别"用户是否真的缩放过"）
+    juce::Point<int>     maximizedCanvasSize;      // 最大化时的 canvas 尺寸（画布没变时 reapply 不动模块）
     juce::Rectangle<int> computeMaximizedBoundsFor (ModulePanel& panel) const;
     void reapplyMaximizeIfNeeded();
 
@@ -1121,6 +1122,22 @@ private:
     };
     GainPopupDismissListener gainPopupDismissListener { *this };
     bool gainPopupListenerAttached = false;
+
+    // ------------------------------------------------------------
+    // 下拉框点击探针（仅诊断日志用）：记录 ComboBox mouseDown 时刻，
+    //   与 PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu 里的
+    //   showPopup 时间戳做差，测"点击 → 弹菜单"的延迟（排查卡顿）。
+    // ------------------------------------------------------------
+    class ComboPopupProbe : public juce::MouseListener
+    {
+    public:
+        explicit ComboPopupProbe (const juce::String& name) : name_ (name) {}
+        void mouseDown (const juce::MouseEvent& e) override;
+    private:
+        juce::String name_;
+    };
+    ComboPopupProbe layoutPresetProbe { "layoutPreset" };
+    ComboPopupProbe audioSourceProbe  { "audioSource" };
 
     // P3-1：记录 popup 打开时挂 MouseListener 的宿主（topLevelComponent）。
     //   析构 / setGainPopupVisible(false) 里需要用同一个指针 detach，

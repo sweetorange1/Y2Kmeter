@@ -7,6 +7,7 @@
 #include "source/ui/palette/PalettePanel.h"
 #include "source/ui/palette/ThemeLibrary.h"
 #include "source/Y2KLogging.h"
+#include "source/diag/Y2KDiagLog.h"
 #include "source/ui/HoverHelp.h"
 #include "source/i18n/Localisation.h"
 
@@ -413,6 +414,7 @@ ModuleWorkspace::ModuleWorkspace()
         });
     };
     addAndMakeVisible (audioSourceBox);
+    audioSourceBox.addMouseListener (&audioSourceProbe, true);
 
     // 右下角 Hide 按钮：默认"显示态"不透明
     hideBtn.setButtonText("Hide");
@@ -634,6 +636,7 @@ ModuleWorkspace::ModuleWorkspace()
         });
     };
     addAndMakeVisible (layoutPresetBox);
+    layoutPresetBox.addMouseListener (&layoutPresetProbe, true);
 
     // 布局预设 Save/Load 按钮（紧邻 layoutPresetBox 左侧）
     //   · 按钮样式跟随全局 LookAndFeel（与 gridBtn / fpsBtn 一致，像素化 TextButton）
@@ -964,6 +967,14 @@ void ModuleWorkspace::GainPopupDismissListener::mouseDown (const juce::MouseEven
 }
 
 // ----------------------------------------------------------
+// 下拉框点击探针：记录 mouseDown 时刻（与 showPopup 时间戳做差）
+// ----------------------------------------------------------
+void ModuleWorkspace::ComboPopupProbe::mouseDown (const juce::MouseEvent&)
+{
+    Y2K_DIAG ("UIPOPUP", "combo mouseDown: " + name_);
+}
+
+// ----------------------------------------------------------
 // 区域计算
 // ----------------------------------------------------------
 juce::Rectangle<int> ModuleWorkspace::getCanvasArea() const
@@ -1153,38 +1164,56 @@ juce::Rectangle<int> ModuleWorkspace::computeMaximizedBoundsFor (ModulePanel& pa
             return canvas;
 
     // ---- 2) 未压住任何模块 → 贪心四向扩张 ----
-    //   每轮按当前矩形的投影找出最近的障碍边：横向取左右可达边界，纵向取上下
-    //   可达边界；因为每一步只会"变大"，最多 12 轮（模块数量有限，实际 2~3 轮收敛）。
-    for (int iter = 0; iter < 12; ++iter)
+    //   v3.0.2 修复：旧实现每轮把左/右/上/下四个边界**同时**一步到位 —— 斜对角的
+    //   邻居（如"右上方的模块"）与当前矩形既无垂直交叠也无水平交叠，四个方向都拦
+    //   不住它，矩形会直接扩过它把它吞掉；之后语言切换等触发 reapplyMaximizeIfNeeded
+    //   时，又命中"已压住其它模块"分支被放大成全屏卡死。
+    //   新实现按"上 → 下 → 左 → 右"依次**单边扩张、立即生效**：每一边只扩到"与当前
+    //   矩形在该方向上最近的障碍边 / canvas 边缘"，扩展后的矩形绝不覆盖任何模块；
+    //   对角障碍会在后续方向的判定中自然参与（如右上方的模块会在矩形先向上扩满后
+    //   挡住向右的扩张）。单边只增不减，一轮内必然收敛。
+    for (int iter = 0; iter < 4; ++iter)
     {
-        const auto before = r;
+        bool moved = false;
 
-        int left   = canvas.getX();
-        int right  = canvas.getRight();
-        int top    = canvas.getY();
-        int bottom = canvas.getBottom();
-
-        for (const auto& o : others)
+        // 上：与当前矩形水平交叠、且整体在其上方的模块挡住上边缘
         {
-            // 垂直方向有交叠 → 左右扩张被它挡住
-            if (o.getBottom() > r.getY() && o.getY() < r.getBottom())
-            {
-                if (o.getRight() <= r.getX())      left  = juce::jmax (left,  o.getRight());
-                else if (o.getX() >= r.getRight()) right = juce::jmin (right, o.getX());
-            }
-            // 水平方向有交叠 → 上下扩张被它挡住
-            if (o.getRight() > r.getX() && o.getX() < r.getRight())
-            {
-                if (o.getBottom() <= r.getY())      top    = juce::jmax (top,    o.getBottom());
-                else if (o.getY() >= r.getBottom()) bottom = juce::jmin (bottom, o.getY());
-            }
+            int top = canvas.getY();
+            for (const auto& o : others)
+                if (o.getRight() > r.getX() && o.getX() < r.getRight()
+                    && o.getBottom() <= r.getY())
+                    top = juce::jmax (top, o.getBottom());
+            if (top < r.getY()) { r.setY (top); moved = true; }
+        }
+        // 下
+        {
+            int bottom = canvas.getBottom();
+            for (const auto& o : others)
+                if (o.getRight() > r.getX() && o.getX() < r.getRight()
+                    && o.getY() >= r.getBottom())
+                    bottom = juce::jmin (bottom, o.getY());
+            if (bottom > r.getBottom()) { r.setBottom (bottom); moved = true; }
+        }
+        // 左：与当前矩形垂直交叠、且整体在其左侧的模块挡住左边缘
+        {
+            int left = canvas.getX();
+            for (const auto& o : others)
+                if (o.getBottom() > r.getY() && o.getY() < r.getBottom()
+                    && o.getRight() <= r.getX())
+                    left = juce::jmax (left, o.getRight());
+            if (left < r.getX()) { r.setX (left); moved = true; }
+        }
+        // 右
+        {
+            int right = canvas.getRight();
+            for (const auto& o : others)
+                if (o.getBottom() > r.getY() && o.getY() < r.getBottom()
+                    && o.getX() >= r.getRight())
+                    right = juce::jmin (right, o.getX());
+            if (right > r.getRight()) { r.setRight (right); moved = true; }
         }
 
-        r = juce::Rectangle<int> (left, top,
-                                  juce::jmax (gridSize, right - left),
-                                  juce::jmax (gridSize, bottom - top));
-
-        if (r == before)
+        if (! moved)
             break;
     }
 
@@ -1242,8 +1271,10 @@ void ModuleWorkspace::toggleModuleMaximize (ModulePanel& panel)
     if (target.isEmpty() || target == panel.getBounds())
         return;
 
+    const auto canvas      = getCanvasArea();
     maximizedRestoreBounds = panel.getBounds();
     maximizedAppliedSize   = { target.getWidth(), target.getHeight() };
+    maximizedCanvasSize    = { canvas.getWidth(), canvas.getHeight() };
     panel.setBounds (target);
     panel.toFront (false);      // 提到最前，但不抢键盘焦点
     maximizedPanel = &panel;
@@ -1322,7 +1353,17 @@ void ModuleWorkspace::reapplyMaximizeIfNeeded()
     if (p == nullptr)
         return;
 
+    // v3.0.2 修复：语言切换、主题刷新等会触发一次"画布尺寸没有变化"的 resized()。
+    // 此时不应重算模块几何 —— 否则一旦最大化模块与邻居相碰（或旧 bug 遗留的
+    // "覆盖邻居"状态），computeMaximizedBoundsFor 的"已压住其它模块 → 直接占满
+    // canvas"分支会把它放大成全屏卡死。只有 canvas 尺寸真的变化（窗口/预设尺寸
+    // 调整）时才重新贴合。
+    const auto canvas = getCanvasArea();
+    if (juce::Point<int> (canvas.getWidth(), canvas.getHeight()) == maximizedCanvasSize)
+        return;
+
     auto target = computeMaximizedBoundsFor (*p);
+    maximizedCanvasSize = { canvas.getWidth(), canvas.getHeight() };
     if (! target.isEmpty() && target != p->getBounds())
     {
         maximizedAppliedSize = { target.getWidth(), target.getHeight() };
