@@ -103,7 +103,10 @@ public:
     // GL 线程调用：采样 srcTex（当前帧 projectM 输出），应用完整视觉状态
     // （RGB 染色 + bright + invert/shadows/solarize/split/zoom/multi/rainbow/blow/burn），
     // 把全屏三角形绘制到当前绑定的 framebuffer。
-    void apply (GLuint srcTex, const MilkdropVisualState& state);
+    // 返回 false 表示这一帧**没有画成功**（program 未就绪 / 绘制留下 GL 错误）。
+    //   调用方必须据此把 post FBO 标记为无效并回退到 projectM 原始输出，
+    //   否则会把"未被写入的空 post FBO"当成有效画面去 blit（整块纯黑）。
+    bool apply (GLuint srcTex, const MilkdropVisualState& state);
 
     bool isReady() const noexcept { return ready_; }
     juce::String getLastError() const { return lastError_; }

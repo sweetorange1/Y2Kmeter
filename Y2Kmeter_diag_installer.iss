@@ -19,7 +19,12 @@
 #define MyConfig        "RelWithDebInfo"
 
 ; 诊断构建目录（与正式包的 cmake-build-release-visual-studio 区分开）
+;   默认走"ninja 专用目录"；若本机用的是另一个 RelWithDebInfo 目录，可用
+;   ISCC 命令行覆盖（不要改这一行）：
+;     ISCC.exe /DMyBuildDir=cmake-build-relwithdebinfo-visual-studio Y2Kmeter_diag_installer.iss
+#ifndef MyBuildDir
 #define MyBuildDir      "cmake-build-relwithdebinfo-visual-studio-ninja"
+#endif
 
 ; 输出文件后缀 / 安装向导与卸载列表里显示的版本后缀
 #define MyOutputSuffix  "_Diag"

@@ -89,7 +89,10 @@ public:
     // 当前预设的完整文件路径（嵌入态专用，UI 线程安全）。
     juce::String GetMilkdropCurrentPresetFilePath() const;
     // 诊断
-    bool IsMilkdropRenderReady() const noexcept { return milkdrop_render_ready_; }
+    bool IsMilkdropRenderReady() const noexcept
+    {
+        return milkdrop_render_ready_.load (std::memory_order_acquire);
+    }
     juce::String GetMilkdropError() const;
     int  GetMilkdropCurrentPresetIndex() const noexcept;
     int  GetMilkdropTotalPresets() const noexcept;
@@ -903,7 +906,12 @@ private:
     // projectM 状态（由 Editor GL 上下文持有）
     // ==============================================================
     projectm_handle        milkdrop_pm_handle_ = nullptr;
-    bool                   milkdrop_render_ready_ = false;
+    // ⚠ 跨线程：GL 线程写（newOpenGLContextCreated / destroyMilkdropEditorResources），
+    //   消息线程读（MilkdropModule::paintContent → GLView::IsRenderReady）。
+    //   必须是 atomic —— 裸 bool 的数据竞争是 UB，Release（/GL+/LTCG）与
+    //   RelWithDebInfo 的表现会因此不同（现场：Release 黑屏、诊断包正常）。
+    std::atomic<bool>      milkdrop_render_ready_{ false };
+    // 同上前提：GL 线程写、消息线程读（GetMilkdropError），由 milkdrop_state_mutex_ 保护。
     std::string            milkdrop_error_;
 
     // v2.3 GPU: projectM 渲染到独立 offscreen FBO → glBlitFramebuffer 搬运到
@@ -956,9 +964,33 @@ private:
     int                        milkdrop_capture_buf_size_ = 0;
 
     // 预设
+    //   ⚠ 跨线程：milkdrop_preset_paths_ 由 GL 线程重扫，消息线程会读它
+    //     （预设名 / 总数 / 收藏按钮），无保护时可能读到"清空到一半"的 StringArray。
+    //     统一用 milkdrop_state_mutex_ 保护，只通过 MilkdropPresetCount /
+    //     MilkdropPresetPathAt 访问（锁内只做拷贝，绝不在锁里调 projectM 或读磁盘）。
+    //   milkdrop_current_preset_ 本身只在 GL 线程读写；给 UI 的镜像是
+    //     milkdrop_current_preset_ui_（原子）。
+    mutable std::mutex     milkdrop_state_mutex_;
     juce::StringArray      milkdrop_preset_paths_;
     int                    milkdrop_current_preset_ = -1;
     std::atomic<int>       milkdrop_current_preset_ui_{ -1 };
+
+    // 预设表的加锁访问（禁止在持锁期间调用 projectM / 做磁盘 IO）
+    int          MilkdropPresetCount() const;
+    juce::String MilkdropPresetPathAt (int index) const;
+    void         SetMilkdropError (const std::string& e);
+
+    // ---- 黑帧自愈（把"必须重建模块才恢复"变成"最多几秒自动恢复"）----
+    //   触发条件（全部满足才动手，避免误伤"本来就很暗的预设"）：
+    //     · projectM 已就绪且有有效预设；· 收到过真实 PCM（排除纯静音黑屏）；
+    //     · blit 源 FBO 连续多次采样**全黑**（maxLuma == 0，不是"很暗"）；
+    //   恢复阶梯：① 作废 post FBO（重跑染色 pass）→ ② 重载当前预设 → ③ 重建离屏 FBO。
+    //   全部只在 GL 线程执行，最多每 6s 尝试一级。
+    int    milkdrop_blackStreak_      = 0;      ///< 连续"全黑"采样次数
+    int    milkdrop_selfHealStage_    = 0;      ///< 已用到的恢复级别（0=尚未恢复）
+    int    milkdrop_selfHealCount_    = 0;      ///< 累计自愈次数（诊断）
+    double milkdrop_lastHealMs_       = 0.0;    ///< 上次自愈时刻（限流用）
+    double milkdrop_lastLumaProbeMs_  = 0.0;    ///< 上次亮度采样时刻（限流用）
     std::atomic<int>       milkdrop_requested_preset_delta_{ 0 };
     std::atomic<bool>      milkdrop_requested_preset_random_{ false };
     std::atomic<int>       milkdrop_requested_preset_jump_{ -1 };
@@ -980,6 +1012,9 @@ private:
     // shader 编译失败回退 Idle）。挂起期间跳过创建，dock 回来时再恢复。
     std::atomic<bool>      milkdrop_renderer_suspended_{ false };
     void LoadMilkdropPresetInternal();
+    // 黑帧自愈（GL 线程，renderMilkdropFrameCore 尾部调用）。
+    //   返回 true = 本帧应改用 projectM 原始 render FBO（染色后处理已作废）。
+    bool milkdropTickBlackFrameSelfHeal (unsigned int blitSourceFbo, int fboW, int fboH);
     static juce::File FindMilkdropAssetsDir(const juce::String& subdir);
     // 重扫预设目录（根据 milkdrop_use_like_library_ 选择内置库或收藏库）。
     // 必须在 GL 线程调用（或 projectM handle 尚未创建的初始化阶段）。

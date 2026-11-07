@@ -168,10 +168,15 @@ Source: "assets\milkdrop_textures.zip"; \
 ;   v2.3.1: 排除 milkdrop_presets/ 和 milkdrop_textures/，预设和纹理已集中存放于
 ;   %APPDATA%\Y2Kmeter\，Standalone 和 VST3 共享同一份，不再随 bundle 冗余分发。
 ; DestDir 走 [Code] 段 GetVst3Dir —— 用户在独立向导页里选择的路径
+;   ⚠ Excludes 的多个模式必须用**逗号**分隔（分号会被当成单个模式，等于不排除）：
+;     · *.ilk —— MSVC 增量链接数据库（link.exe 的构建中间产物，运行期无用；
+;       只在没有 LTO 的 RelWithDebInfo 里产生，Release 用 LTCG 不会生成）；
+;     · *.pdb / *.exp / *.lib —— 调试/链接中间产物，解析 dump 时由本机 PDB 提供；
+;     · milkdrop_presets\* / milkdrop_textures\* —— 与 AppData 共享，bundle 内不携带。
 Source: "{#MyBuildDir}\Y2Kmeter_artefacts\{#MyConfig}\VST3\{#MyPluginBundle}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundle}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
-    Excludes: "milkdrop_presets\*;milkdrop_textures\*;*.pdb;*.ilk;*.exp;*.lib"; \
+    Excludes: "milkdrop_presets\*,milkdrop_textures\*,*.pdb,*.ilk,*.exp,*.lib"; \
     Components: vst3
 
 ; Y2Kmeter_milkdrop（Milkdrop-only VST3 变体，独立插件，与完整版同装到 VST3 目录）
@@ -179,7 +184,7 @@ Source: "{#MyBuildDir}\Y2Kmeter_artefacts\{#MyConfig}\VST3\{#MyPluginBundle}\*";
 Source: "{#MyBuildDir}\Y2Kmeter_milkdrop_artefacts\{#MyConfig}\VST3\{#MyPluginBundleMilkdrop}\*"; \
     DestDir: "{code:GetVst3Dir}\{#MyPluginBundleMilkdrop}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
-    Excludes: "*.pdb;*.ilk;*.exp;*.lib"; \
+    Excludes: "*.pdb,*.ilk,*.exp,*.lib"; \
     Components: vst3
 
 ; -----------------------------------------------------------------------

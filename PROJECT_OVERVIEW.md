@@ -6594,3 +6594,151 @@ cmake --build build/msvc --config Release --target Y2Kmeter_Standalone -j 8
 ```
 
 产物：`build/msvc/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.exe`。
+
+---
+
+## v3.0.5 补充：Milkdrop 首启纯黑 — 现场诊断埋点 + 诊断包
+
+### 1. 已确认的事实（先看这三条）
+
+1. **Windows 随包的 `projectM-4.dll` 是 4.1.4**（`third_party/projectm/bin/`，来自 projectMSDL-2.0.0-pre1），
+   导出表**没有** `projectm_opengl_render_frame_fbo`（该 API 在 `render_opengl.h` 里标注 `@since 4.2.0`）。
+   → Windows 每帧只能走降级路径：`projectM → FBO 0 → glBlitFramebuffer → 离屏 FBO → glBlitFramebuffer → 后缓冲`。
+2. **macOS 的 `libprojectM-4.dylib` 已经导出该符号**（`_projectm_opengl_render_frame_fbo` 在符号表里），
+   走单趟渲染。这就是"同一个黑屏只有 Windows 端出现 / 只有 Windows 需要换 DLL"的真正原因 ——
+   macOS 并不需要升级，Windows 只是在追平。
+3. 外网那台机器（RTX 3070 / NVIDIA 595.79）的日志已经证明**它的 `glBlitFramebuffer` 会被驱动拒绝**
+   （`!! glBlitFramebuffer 失败 (0x502)`，S3D 探测）。S3D 有纹理 quad 回退，Milkdrop 没有 ——
+   一旦降级路径那一步被丢弃，离屏 FBO 就停在"分配时的空内容"，而 `ready=1 / timer=149 / md=2.4ms / gl=60/s`
+   全部正常，画面纯黑且不会自愈（重建模块/切布局会强制重分配 FBO + 强制渲染一帧，所以"看起来能修"）。
+
+另外：`PluginEditor::renderOpenGLPreLock()` 之后，JUCE 补丁 0006 立刻 `clearGLError()`，
+把预渲染阶段（正好是 projectM 渲染 + 降级路径 blit）的错误整段抹掉 —— 这是前两轮修复没能抓到现场的原因。
+
+### 2. 本轮新增的诊断埋点（`Y2K_DIAG`，tag = `MD`）
+
+| # | 位置 | 日志 | 判读 |
+|---|---|---|---|
+| 1 | `RescanMilkdropPresetPaths()` | `MD rescan useLike=… dir=… count=N` | `count=0` → 空库，后续 `LoadMilkdropPresetInternal` 必早退（纯黑且不自愈） |
+| 2 | `LoadMilkdropPresetInternal()` | `MD loadPreset SKIP: idx=… total=…` / `loadPreset data idx=… bytes=…` | 区分"没预设 / 文件丢失 / 注入失败" |
+| 3 | `newOpenGLContextCreated()` | `MD editor projectM init \| fboAPI=… presets=… likeLib=… tintPass=…` | `fboAPI=0` = 走降级路径（Windows 正常值） |
+| 4 | `renderMilkdropFrameCore()` | `MD fbo alloc/resize WxH fbo=… tex=… status=0x…` | status 不是 `0x8CD5` → 帧缓冲不完整，后续 blit 全废 |
+| 5 | 同上（离屏渲染后） | `MD !! offscreen stage GL error 0x…` | `0x502` = 驱动丢弃了 FBO0→离屏 FBO 的复制 |
+| 6 | `renderOpenGLPreLock()` | `MD !! prelock GL error 0x…` | 在补丁 `clearGLError()` 之前自查，专门补上被吞掉的那段 |
+| 7 | z 序遍历的模块 blit | `MD screen blit src=… dst=… content=… viewport=…`（矩形变化才打）+ `!! screen blit GL error` | 矩形/源 FBO 异常，或搬运到后缓冲失败 |
+| 8 | `renderMilkdropFrameCore()` 尾部 | `MD 5s \| path=… tint=… fbo=… src=… \| render N/s skip N/s \| offErr … \| screenBlit N/s screenErr … \| lumaMax=… nonBlack=…/…` | **决定性**：`lumaMax≈0` → 内容侧（①②③）；采样有内容但屏幕黑 → 合成侧（④） |
+| 9 | `MilkdropModule::paintContent()` | `MD module paint state=ready / notReady / glView=null` | 模块是否在自己整块填黑（ready 时内容区是透明的） |
+
+- 8 里的 `lumaMax/nonBlack` 由 `MilkdropProbeFbo()` 用 3×3 个 4×4 块 `glReadPixels` 采样得到，
+  **整段用 `#if defined(Y2K_ENABLE_LOGGING)` 包裹** —— 正式 Release 包里连代码都不存在（不会有多余 GPU 同步）。
+- 全部埋点走运行时诊断日志（`source/diag/Y2KDiagLog.h`）：关闭时每次只剩一次 relaxed 原子读。
+
+### 3. 诊断包
+
+- 配置：RelWithDebInfo（`Y2K_ENABLE_LOGGING=1` → `shouldEnable()` 自动开日志，落到桌面 `Y2Kmeter_Diag`）。
+- 构建目录：`cmake-build-relwithdebinfo-visual-studio`（Ninja 单配置，MSVC 14.50）。
+- 打包：`Y2Kmeter_diag_installer.iss` 的 `MyBuildDir` 改成 `#ifndef` 可覆盖，实际命令
+  `ISCC.exe /DMyBuildDir=cmake-build-relwithdebinfo-visual-studio Y2Kmeter_diag_installer.iss`
+  → `dist\Y2Kmeter_Setup_3.0.5_Diag_x64.exe`（约 54 MB）。
+- ⚠ `.ilk` 是 MSVC **增量链接数据库**（`link.exe /INCREMENTAL` 的构建中间产物，写在 `.vst3` 同目录），
+  运行期完全用不到、解析用户 `.dmp` 也用不到（要的是 `.pdb`）。它只在没有 LTO 的 RelWithDebInfo 里产生，
+  Release（LTCG）不会生成，所以正式包从来没有它。
+  `[Files]` 的 `Excludes` **必须用逗号**分隔模式；原脚本写成分号 → 整串被当成单个模式 → 什么也没排除，
+  诊断包因此多背了 226 MB 的 `.ilk`（压缩后约 23 MB）。已改为逗号，包体 76.9 → 53.9 MB。
+- ⚠ CMake 的 `COPY_PLUGIN_AFTER_BUILD` 会往 `C:\Program Files\Common Files\VST3` 复制，非管理员必然
+  `Permission denied`；用 `ninja -k 0` 继续即可，artefacts 内的 bundle 此时已完整（打包只取 artefacts）。
+- 用户侧操作：装上 → 复现 → 把桌面 `Y2Kmeter_Diag` 整个压缩回传（**不需要**设任何环境变量）。
+
+### 4. projectM 4.2 升级评估（结论：低风险，但不是修黑的必要条件）
+
+- **影响面小**：DLL 是 `LoadLibraryW + GetProcAddress` 动态加载，`Api` 里 FBO 符号走 `resolveOptional`，
+  `hasOpenglRenderFrameFbo()` 自动选择路径 —— 换新 DLL 不需要改代码，换回旧 DLL 也不会崩。
+- **API 只增不减**：`projectm_pcm_add_float` / `load_preset_data` / `set_texture_search_paths` /
+  `set_mesh_size` / `set_fps` / `set_preset_duration` / `set_soft_cut_duration` 在 4.1→4.2 均未变。
+- **需要复测的点**：① 预设过渡与 soft-cut 时序（依赖 `setPresetDuration(20)` + `setSoftCutDuration(1)`）；
+  ② 曲面 mesh 密度（`setMeshSize(128×80)`）观感；③ 曾报 `(97) Syntax error` 的那批预设（`FixMilkdropShaderTypes()`
+  是纯文本预处理，与版本无关，但要抽查）；④ 新构建的 Windows 依赖（仍需要 `glew32.dll`，可能新增 VC 运行库）。
+- **授权不变**：仍 LGPL-2.1-or-later，动态加载 + 独立文件分发即合规。
+- **注意**：升级 4.2 只是让 Windows 改走单趟 FBO 渲染、绕开"FBO0→离屏 FBO"这次被驱动拒绝的 blit；
+  即便不升级，也可以用与 S3D 同款的**纹理 quad 兜底**（`drawTexQuad`）修掉黑屏，二者不冲突。
+
+### 5. `DiagRel` 变体：Release 编译配置 + 诊断日志默认开
+
+**为什么需要**：外网机器上"纯黑"只出现在**正式 Release 包**里，RelWithDebInfo 诊断包不复现。
+两者源码相同，系统性差异只有编译配置（Release 开 `/GL` + `/LTCG`，RelWithDebInfo 明确排除 LTO）
+与日志开关。所以要拿到"会出问题的那个配置"的日志，必须用 Release 编译 + 日志默认开。
+
+| 项 | 值 |
+|---|---|
+| 构建目录 | `cmake-build-release-diag`（独立，不影响正式产物） |
+| 配置 | `cmake -S . -B cmake-build-release-diag -G Ninja -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_SOURCE_DIR_JUCE=D:/Code/Y2KMeter/third_party/JUCE -DY2K_DIAG_LOG_DEFAULT_ON=ON` |
+| 打包脚本 | `Y2Kmeter_diagrel_installer.iss`（`MyConfig=Release` / `MyOutputSuffix=_DiagRel`） |
+| 产物 | `dist\Y2Kmeter_Setup_3.0.5_DiagRel_x64.exe`（48.4 MB，与正式包同尺寸 = 同优化等级） |
+
+注意：`-DY2K_DIAG_LOG_DEFAULT_ON=ON` 只影响"日志默认开关"（`add_compile_definitions(Y2K_DIAG_LOG_DEFAULT=1)`），
+不改任何优化/运行路径；所以这个包与正式包**唯一**的差别就是"会不会写日志"。
+
+另：`cmake --build ... -- -k 0` 仍然会因为 `COPY_PLUGIN_AFTER_BUILD` 往
+`C:\Program Files\Common Files\VST3` 复制而被拒（非管理员），artefacts 内的 bundle 已完整，
+但**bundle 里会缺 `projectM-4.dll` / `glew32.dll`**（复制步骤排在被拒的 copyDir 之后），
+打包前要手工从 `third_party/projectm/bin/` 补进去 —— 这是当前 CMake 配置的一个坑。
+
+### 6. 黑屏加固（4 项，均为"无论现场是否复现都该修"）
+
+现场结论：同一份源码，`Release`（/GL+/LTCG）出黑屏、`RelWithDebInfo`（无 LTO）与
+`Release + 日志默认开`都正常 → 属于**时序/UB 敏感**，不是确定性逻辑错误。
+因此这轮不加"等复现再说"的补丁，直接加固：
+
+| # | 改动 | 位置 |
+|---|---|---|
+| 1 | **黑帧自愈**：1Hz 采样 blit 源 FBO（3×3 个 4×4 块，共 144 像素）；`maxLuma == 0` 连续 3 次（≈3s）且"有预设 + 收到过真实 PCM"时按阶梯恢复：① 作废染色 post FBO（本帧立刻改回原始输出）→ ② 重载当前预设 → ③ 重建离屏 FBO；最多 6s 一次，画面一有内容立即复位阶梯 | `milkdropTickBlackFrameSelfHeal()`、`MilkdropSampleLuma()` |
+| 2 | **降级路径不再用 blit**：`projectM(FBO 0) → 离屏 FBO` 改为 `glCopyTexSubImage2D`（1:1 拷屏，不走 `glBlitFramebuffer`；该 blit 在现场驱动上实测返回 0x502） | `renderMilkdropFrameCore()` 降级分支、浮动窗口 `GLView` 同名分支 |
+| 3 | **染色后处理不许"空置成功"**：`MilkdropTintPass::apply()` 改为返回 `bool`（内部画完查错），只有真正落笔才 `milkdrop_post_valid_ = true`；失败时回退到 projectM 原始输出（浮动窗口回退为无染色 blit） | `MilkdropTintPass::apply()`、两处调用点 |
+| 4 | **消除跨线程裸读写**：`milkdrop_render_ready_` → `std::atomic<bool>`；`milkdrop_preset_paths_` 统一由 `milkdrop_state_mutex_` 保护，新增 `MilkdropPresetCount()` / `MilkdropPresetPathAt()`（锁内只拷贝，绝不在锁里调 projectM 或读磁盘）；`milkdrop_error_` 同锁；`RescanMilkdropPresetPaths()` 改为"锁外扫描 + 锁内 swap"，不再出现"清空到一半"的表 | `PluginEditor.h/.cpp` |
+
+另外把 `lumaMax` 采样的编译守卫从 `Y2K_ENABLE_LOGGING` 放宽到
+`Y2K_ENABLE_LOGGING || (Y2K_DIAG_LOG_DEFAULT && Y2K_DIAG_LOG_DEFAULT)` ——
+上一版 `DiagRel` 包里这一项一直是 `(none)`，白丢一轮证据。
+
+验证：RelWithDebInfo Standalone、Release+LTO+诊断（三个 target）、正式 Release（三个 target）
+均编译通过；唯一失败仍是"复制到系统 VST3 目录"的权限拒绝（环境问题）。
+产物：`dist\Y2Kmeter_Setup_3.0.5_DiagRel_x64.exe`（48.4 MB）。
+
+### 7. 收尾：现场验证结论与对外发包
+
+**现场反馈（本轮的关键证据）**
+
+- 旧正式包（Release，诊断关）→ 纯黑；
+- `DiagRel`（Release + 诊断默认开，同一份源码）→ **不黑**，且日志显示整条链路健康：
+
+```
+[MD] rescan useLike=0 … count=9921
+[MD] loadPreset data idx=0/9921 bytes=7934
+[MD] editor projectM init | fboAPI=0 loadPresetData=1 likeLib=0 presets=9921 idx=0 tintPass=1
+[MD] fbo alloc 1916x757 fbo=10 tex=1 status=0x8cd5 (complete)
+[MD] screen blit src=11 srcRect=0,0,1916x757 dst=2,40 1916x757
+[MD] 5s | path=fallback(fbo0+blit) tint=1 … offErr 0 | screenBlit 59/s screenErr 0
+[MD] module paint state=ready(content transparent)
+```
+
+（`[GL] !! glBlitFramebuffer 失败 (0x502)` 仍在：那是 S3D 探测，已走纹理 quad 回退，与黑屏无关。）
+
+- 结论：同一份源码只差**编译配置（LTO）/日志开关** → **时序敏感，不是确定性逻辑错误**。
+  所以本轮按第 6 节做加固，并把"恢复权"从用户手里收回来：黑屏最多 3s 自愈，不再需要删模块/切布局。
+
+**本轮产出**
+
+| 包 | 用途 | 大小 |
+|---|---|---|
+| `dist\Y2Kmeter_Setup_3.0.5_x64.exe` | **正式对外包**（含第 6 节全部修复，诊断默认关） | 48.4 MB |
+| `dist\Y2Kmeter_Setup_3.0.5_DiagRel_x64.exe` | Release 配置 + 诊断默认开（现场排查首选） | 48.4 MB |
+| `dist\Y2Kmeter_Setup_3.0.5_Diag_x64.exe` | RelWithDebInfo（保留 PDB，可解析用户 minidump） | 53.9 MB |
+
+- 正式包产物时间戳：Standalone 18:57、两个 VST3 19:02~19:03，打包 19:07。
+- ⚠ **版本号仍是 3.0.5，但二进制已与 11-07 16:58 那版不同**（那版会黑屏）。对外说明里要写清"同版本重发"，
+  或者下次统一 bump 到 3.0.6。
+- 正式包诊断默认关；现场再出问题时可让用户放一个空文件 `%APPDATA%\Y2Kmeter\diag_on.txt`，
+  该包就会产出 `[MD]` 日志（唯一缺 `lumaMax`：这个采样按
+  `Y2K_ENABLE_LOGGING || Y2K_DIAG_LOG_DEFAULT` 编译，正式包里没有）。
+- 打包偶发 `Error: 另一个程序正在使用此文件`：刚链接完的 `.vst3` 被杀软/IDE 扫描独占，
+  等几秒重跑即可；注意 ISCC 会**先删同名旧包**，失败后旧包就没了。

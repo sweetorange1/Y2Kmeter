@@ -7289,7 +7289,7 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
                                    (float) openGLContext.getRenderingScale(),
                                    openGLContext.isAttached(),
                                    true,
-                                   milkdrop_render_ready_,
+                                   milkdrop_render_ready_.load(),
                                    (int) getNumChildComponents(),
                                    glFrameCounter.load (std::memory_order_relaxed));
     }
@@ -7621,6 +7621,110 @@ namespace {
   constexpr double kMilkdropSoftCut        = 1.0;
   // 进程内 projectM handle 计数（libprojectM Windows/GLEW 全局指针表限制）
   std::atomic<int> gEditorProjectMInstances{0};
+
+  // ----------------------------------------------------------------
+  // Milkdrop 现场诊断（v3.0.5 诊断包）
+  //   目的：一份用户日志就能判定"纯黑"卡在哪一环 ——
+  //     ① projectM 手里没有有效预设（LoadMilkdropPresetInternal 早退）
+  //     ② 渲染被 60fps 节流/预渲染复用跳过，离屏 FBO 里一直是分配时的空内容
+  //     ③ 渲染了但 FBO→FBO 的 glBlitFramebuffer 被驱动丢弃（0x502）
+  //     ④ 内容与 FBO 都正常，则问题在"搬到屏幕"那一步（矩形/GL 状态/组件层覆盖）
+  //   约束：只在 GL 线程访问（匿名命名空间、无锁）；只在诊断开启时写入，
+  //         关闭时每个埋点只剩一次 relaxed 原子读（Y2K_DIAG 宏内部）。
+  //         glReadPixels 这类会同步等 GPU 的采样额外用 Y2K_ENABLE_LOGGING 做
+  //         编译期隔离 —— 正式 Release 包里连代码都不存在。
+  // ----------------------------------------------------------------
+  struct MilkdropDiagState
+  {
+      double lastReportMs = 0.0;
+      double lastProbeMs  = 0.0;
+      int    rendered = 0, skipped = 0, blitErr = 0;        // 离屏渲染阶段
+      int    screenBlit = 0, screenBlitErr = 0;             // blit 到后缓冲阶段
+      int    allocCount = 0;                                // FBO 分配/重分配次数
+      int    reportRendered = 0, reportSkipped = 0;         // 上次统计窗口的基线
+      int    reportBlitErr = 0, reportScreenBlit = 0, reportScreenBlitErr = 0;
+      juce::Rectangle<int> lastScreenRect;
+      unsigned int lastScreenSrcFbo = 0xFFFFFFFFu;
+      juce::String lastProbe = "(none)";
+      int    lastFboW = 0, lastFboH = 0;
+      bool   lastTintActive = false;
+      bool   lastUseFboApi  = false;
+  };
+  MilkdropDiagState gMdDiag;
+
+  // 亮度采样：从 FBO 采 3x3 个 4x4 小块（共 144 像素）。
+  //   · 诊断用：把结果拼成字符串进日志；
+  //   · 自愈用：maxLuma == 0 即"整块全黑"，用来判定"是不是该自救了"。
+  //   glReadPixels 会同步等 GPU，调用方必须限流（渲染路径里 1Hz、诊断 2s）。
+  //   这个函数**不**做诊断开关隔离 —— 黑帧自愈在正式包里也要靠它。
+  struct MilkdropLumaSample
+  {
+      int maxLuma  = -1;
+      int nonBlack = 0;
+      int total    = 0;
+      bool valid   = false;
+  };
+
+  MilkdropLumaSample MilkdropSampleLuma (unsigned int fbo, int w, int h)
+  {
+      using namespace juce::gl;
+
+      MilkdropLumaSample out;
+      if (fbo == 0 || w <= 0 || h <= 0)
+          return out;
+
+      constexpr int kPatch = 4;
+      static constexpr double kPos[] = { 0.5, 0.2, 0.8 };
+
+      unsigned char buf[kPatch * kPatch * 4];
+
+      GLint prevRead = 0;
+      glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+      glBindFramebuffer (GL_READ_FRAMEBUFFER, fbo);
+
+      out.maxLuma = 0;
+      for (double py : kPos)
+      {
+          for (double px : kPos)
+          {
+              const int x = juce::jlimit (0, juce::jmax (0, w - kPatch), (int) (px * (double) w));
+              const int y = juce::jlimit (0, juce::jmax (0, h - kPatch), (int) (py * (double) h));
+              glReadPixels (x, y, kPatch, kPatch, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+
+              for (int i = 0; i < kPatch * kPatch; ++i)
+              {
+                  const int luma = (buf[i * 4 + 0] * 299
+                                    + buf[i * 4 + 1] * 587
+                                    + buf[i * 4 + 2] * 114) / 1000;
+                  out.maxLuma = juce::jmax (out.maxLuma, luma);
+                  if (luma > 2)
+                      ++out.nonBlack;
+                  ++out.total;
+              }
+          }
+      }
+
+      glBindFramebuffer (GL_READ_FRAMEBUFFER,
+                         (unsigned int) juce::jmax (0, (int) prevRead));
+      while (glGetError() != GL_NO_ERROR) {}   // 采样自身的错误不要污染帧级检查
+
+      out.valid = true;
+      return out;
+  }
+
+  // 诊断字符串（Release + Y2K_DIAG_LOG_DEFAULT 的 DiagRel 包也要有 —— 上一版只按
+  //   Y2K_ENABLE_LOGGING 隔离，导致那个包里 lumaMax 一直是 "(none)"，白丢一轮证据）。
+#if defined (Y2K_ENABLE_LOGGING) || (defined (Y2K_DIAG_LOG_DEFAULT) && Y2K_DIAG_LOG_DEFAULT)
+  juce::String MilkdropProbeFbo (unsigned int fbo, int w, int h)
+  {
+      const auto s = MilkdropSampleLuma (fbo, w, h);
+      if (! s.valid)
+          return "probe=skip(no fbo)";
+
+      return "lumaMax=" + juce::String (s.maxLuma)
+           + " nonBlack=" + juce::String (s.nonBlack) + "/" + juce::String (s.total);
+  }
+#endif
 }  // namespace
 
 juce::File Y2KmeterAudioProcessorEditor::FindMilkdropAssetsDir(
@@ -7832,20 +7936,20 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
   auto& api = projectm_api::Api::instance();
   if (!api.isAvailable()) {
-    milkdrop_error_ = api.loadError();
+    SetMilkdropError (api.loadError());
     return;
   }
 
   // 单实例防护
   int expected = 0;
   if (!gEditorProjectMInstances.compare_exchange_strong(expected, 1)) {
-    milkdrop_error_ = "Only 1 Milkdrop instance allowed (libprojectM limit).";
+    SetMilkdropError ("Only 1 Milkdrop instance allowed (libprojectM limit).");
     return;
   }
 
   // GLEW init（Editor GL 上下文中，一次性）
   if (!api.initGlew()) {
-    milkdrop_error_ = api.loadError();
+    SetMilkdropError (api.loadError());
     gEditorProjectMInstances.store(0);
     return;
   }
@@ -7855,7 +7959,7 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
           + juce::String(milkdrop_pm_handle_ != nullptr ? "OK" : "NULL")
           + " hasFboAPI=" + juce::String(api.hasOpenglRenderFrameFbo() ? 1 : 0));
   if (milkdrop_pm_handle_ == nullptr) {
-    milkdrop_error_ = "projectm_create() returned NULL.";
+    SetMilkdropError ("projectm_create() returned NULL.");
     gEditorProjectMInstances.store(0);
     return;
   }
@@ -7883,7 +7987,7 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
   //   已通过 RequestMilkdropPresetJump() 入队了跳转索引。
   //   这里 atomically 取出并清零，避免后续 renderOpenGL() 重复处理。
   int pending = milkdrop_requested_preset_jump_.exchange(-1);
-  if (pending >= 0 && pending < milkdrop_preset_paths_.size()) {
+  if (pending >= 0 && pending < MilkdropPresetCount()) {
     milkdrop_current_preset_ = pending;
   } else {
     milkdrop_current_preset_ = 0;
@@ -7914,14 +8018,29 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
     Y2K_LOG("[EditorGL] Milkdrop tint pass init OK");
   }
 
-  milkdrop_render_ready_ = true;
+  milkdrop_render_ready_.store (true, std::memory_order_release);
+
+  // 诊断：Editor 侧 projectM 的"底账" —— 一次就能看出是否走了降级路径、
+  //   扫的是内置库还是收藏库、预设总数、首个预设索引。
+  //   fboAPI=0 即 Windows 随包的 4.1.4 DLL（无 projectm_opengl_render_frame_fbo），
+  //   每帧都要 "projectM→FBO 0 → blit → 离屏 FBO → blit → 后缓冲"。
+  Y2K_DIAGC ("MD", juce::String ("editor projectM init | fboAPI=")
+                        + (api.hasOpenglRenderFrameFbo() ? "1" : "0")
+                        + " loadPresetData=" + (api.hasLoadPresetData() ? "1" : "0")
+                        + " likeLib=" + (milkdrop_use_like_library_.load() ? "1" : "0")
+                        + " presets=" + juce::String (MilkdropPresetCount())
+                        + " idx=" + juce::String (milkdrop_current_preset_)
+                        + " tintPass=" + (milkdrop_tint_pass_ != nullptr ? "1" : "0")
+                        + " mesh=" + juce::String (kMilkdropDefaultMeshW) + "x"
+                                   + juce::String (kMilkdropDefaultMeshH)
+                        + " fps=" + juce::String (kMilkdropTargetFps));
 
   } // 诊断计时作用域
 
   Y2K_DIAGC ("GL", juce::String ("newOpenGLContextCreated done | milkdropRenderReady=")
-                        + (milkdrop_render_ready_ ? "1" : "0")
+                        + (milkdrop_render_ready_.load() ? "1" : "0")
                         + " projectM=" + (milkdrop_pm_handle_ != nullptr ? "ok" : "null")
-                        + " presets=" + juce::String (milkdrop_preset_paths_.size()));
+                        + " presets=" + juce::String (MilkdropPresetCount()));
 }
 
 // ================================================================
@@ -8012,6 +8131,28 @@ unsigned int Y2KmeterAudioProcessorEditor::renderMilkdropFrameCore (int fbo_w, i
   milkdrop_last_fbo_w_ = fbo_w;
   milkdrop_last_fbo_h_ = fbo_h;
 
+  // 诊断：FBO 分配/重分配 —— 记录尺寸、对象 ID 与"帧缓冲是否完整"。
+  //   status 不是 0x8CD5(GL_FRAMEBUFFER_COMPLETE) 时，后面所有 blit 都会返回
+  //   GL_INVALID_FRAMEBUFFER_OPERATION，画面必然全黑，但旧日志一个字都看不到。
+  if ((need_realloc || need_resize) && Y2K_DIAG_ENABLED())
+  {
+    ++gMdDiag.allocCount;
+    juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
+    const auto st = juce::gl::glCheckFramebufferStatus (juce::gl::GL_FRAMEBUFFER);
+    juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+    while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+
+    Y2K_DIAG ("MD", juce::String (need_realloc ? "fbo alloc " : "fbo resize ")
+                          + juce::String (fbo_w) + "x" + juce::String (fbo_h)
+                          + " fbo=" + juce::String ((int) milkdrop_render_fbo_)
+                          + " tex=" + juce::String ((int) milkdrop_render_tex_)
+                          + " status=0x" + juce::String::toHexString ((int) st)
+                          + (st == juce::gl::GL_FRAMEBUFFER_COMPLETE ? " (complete)"
+                                                                    : " (!! INCOMPLETE)")
+                          + " scale=1/" + juce::String (milkdrop_render_scale_)
+                          + " alloc#=" + juce::String (gMdDiag.allocCount));
+  }
+
   bool use_fbo_api = api.hasOpenglRenderFrameFbo();
 
   // ================================================================
@@ -8071,13 +8212,49 @@ unsigned int Y2KmeterAudioProcessorEditor::renderMilkdropFrameCore (int fbo_w, i
     api.openglRenderFrame(milkdrop_pm_handle_);
     juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
 
-    // FBO 0 (0,0) → offscreen FBO（跨 FBO，安全）
+    // FBO 0 (0,0) → offscreen FBO。
+    // ⚠ 不用 glBlitFramebuffer：外网 RTX 3070 / NVIDIA 595.79 现场实测，
+    //   "默认后缓冲 → 纹理 FBO" 的 blit 会被驱动拒绝（GL_INVALID_OPERATION 0x502），
+    //   离屏 FBO 于是一直是分配时的空内容 → 模块纯黑，而 ready/timer/md 耗时全正常。
+    //   glCopyTexSubImage2D 是另一条拷贝路径（GL 1.1 起就有），同为 1:1 拷屏，且
+    //   对默认帧缓冲的多重采样会自动 resolve，不会碰 blit 的那些限制。
     juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
     juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER,
                                  milkdrop_render_fbo_);
-    juce::gl::glBlitFramebuffer(0, 0, fbo_w, fbo_h, 0, 0, fbo_w, fbo_h,
-                                 juce::gl::GL_COLOR_BUFFER_BIT,
-                                 juce::gl::GL_LINEAR);
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
+    juce::gl::glCopyTexSubImage2D(juce::gl::GL_TEXTURE_2D, 0,
+                                  0, 0,          // 目标偏移（纹理内）
+                                  0, 0,          // 源左下角（后缓冲内）
+                                  fbo_w, fbo_h);
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+  }
+
+  // 诊断：离屏渲染这一步（projectM 渲染 + 降级路径的 FBO 0 → 离屏 FBO 复制）。
+  //   降级路径的 blit 若被驱动拒绝（0x502），离屏 FBO 永远停在"分配时的空内容"，
+  //   而画面所有健康指标（ready / timer / md 耗时 / gl fps）都是正常的 —— 这正是
+  //   "纯黑但看不出异常"的典型现场。这里把它显式记下来。
+  if (Y2K_DIAG_ENABLED())
+  {
+    if (skipProjectMRender)
+      ++gMdDiag.skipped;
+    else
+      ++gMdDiag.rendered;
+
+    const GLenum e = juce::gl::glGetError();
+    if (e != juce::gl::GL_NO_ERROR)
+    {
+      ++gMdDiag.blitErr;
+      // 限流：前 10 次全记，之后每 300 次记一次，避免刷爆日志
+      if (gMdDiag.blitErr <= 10 || (gMdDiag.blitErr % 300) == 0)
+      {
+        Y2K_DIAG ("MD", juce::String ("!! offscreen stage GL error 0x")
+                              + juce::String::toHexString ((int) e)
+                              + " path=" + (use_fbo_api ? "renderFrameFbo" : "renderToFBO0+blit")
+                              + " fbo=" + juce::String (fbo_w) + "x" + juce::String (fbo_h)
+                              + " err#=" + juce::String (gMdDiag.blitErr));
+      }
+    }
   }
 
   // ================================================================
@@ -8136,10 +8313,26 @@ unsigned int Y2KmeterAudioProcessorEditor::renderMilkdropFrameCore (int fbo_w, i
       Y2K_DIAG_PHASE ("gl:milkdrop tint pass");
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
       juce::gl::glViewport(0, 0, fbo_w, fbo_h);
-      milkdrop_tint_pass_->apply(milkdrop_render_tex_, visual_state);
+
+      // 先清空错误队列：apply() 内部靠"画完查错"判断这一帧有没有真的落笔，
+      //   不能让 projectM / 前面步骤残留的错误污染判定。
+      while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+
+      const bool tintOk = milkdrop_tint_pass_->apply(milkdrop_render_tex_, visual_state);
       juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-      milkdrop_post_valid_ = true;
-      milkdrop_tint_applied_version_ = visualVersion;
+
+      // 只有真的画成功才把 post FBO 当"有效画面"。
+      //   旧实现无条件置 true：一旦 tint pass 没落笔，post FBO 里就是分配时的空内容，
+      //   而 blit 会把它当成当前帧 → 整块纯黑，且没有任何环节会自愈。
+      milkdrop_post_valid_ = tintOk;
+      if (tintOk) {
+        milkdrop_tint_applied_version_ = visualVersion;
+      } else if (Y2K_DIAG_ENABLED()) {
+        static int sTintFailLogs = 0;
+        if (++sTintFailLogs <= 5 || (sTintFailLogs % 300) == 0)
+          Y2K_DIAG ("MD", juce::String ("!! tint pass 未画成 → 回退到 projectM 原始输出 fail#=")
+                                + juce::String (sTintFailLogs));
+      }
     }
 
     if (milkdrop_post_valid_)
@@ -8151,7 +8344,178 @@ unsigned int Y2KmeterAudioProcessorEditor::renderMilkdropFrameCore (int fbo_w, i
     milkdrop_post_valid_ = false;
   }
 
+  // ================================================================
+  // 诊断：内容自检 + 5s 汇总
+  //   ① 采样 blit 源 FBO 的亮度 —— 直接回答"离屏 FBO 里到底是不是黑的"；
+  //   ② 5s 一行汇总渲染/跳过/错误计数，和 [PAINT]/[STATS] 对齐看时序。
+  //   采样会同步等 GPU，因此只在诊断构建（Y2K_ENABLE_LOGGING）里编译。
+  // ================================================================
+  if (Y2K_DIAG_ENABLED())
+  {
+    gMdDiag.lastFboW = fbo_w;
+    gMdDiag.lastFboH = fbo_h;
+    gMdDiag.lastTintActive = tint_active;
+    gMdDiag.lastUseFboApi  = use_fbo_api;
+
+   #if defined (Y2K_ENABLE_LOGGING) || (defined (Y2K_DIAG_LOG_DEFAULT) && Y2K_DIAG_LOG_DEFAULT)
+    {
+      const double nowMs = juce::Time::getMillisecondCounterHiRes();
+      if (nowMs - gMdDiag.lastProbeMs >= 2000.0)
+      {
+        gMdDiag.lastProbeMs = nowMs;
+        gMdDiag.lastProbe   = MilkdropProbeFbo (blit_source_fbo, fbo_w, fbo_h);
+      }
+    }
+   #endif
+
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (gMdDiag.lastReportMs <= 0.0)
+      gMdDiag.lastReportMs = nowMs;
+
+    if (nowMs - gMdDiag.lastReportMs >= 5000.0)
+    {
+      const double dt = juce::jmax (0.001, (nowMs - gMdDiag.lastReportMs) / 1000.0);
+      const int dRender   = gMdDiag.rendered         - gMdDiag.reportRendered;
+      const int dSkip     = gMdDiag.skipped          - gMdDiag.reportSkipped;
+      const int dBlitErr  = gMdDiag.blitErr          - gMdDiag.reportBlitErr;
+      const int dScreen   = gMdDiag.screenBlit       - gMdDiag.reportScreenBlit;
+      const int dScreenErr= gMdDiag.screenBlitErr    - gMdDiag.reportScreenBlitErr;
+
+      Y2K_DIAG ("MD", juce::String ("5s | path=")
+                            + (use_fbo_api ? "fboAPI" : "fallback(fbo0+blit)")
+                            + " tint=" + (tint_active ? "1" : "0")
+                            + " fbo=" + juce::String (fbo_w) + "x" + juce::String (fbo_h)
+                            + " src=" + juce::String ((int) blit_source_fbo)
+                            + " | render " + juce::String ((int) std::lround (dRender / dt)) + "/s"
+                            + " skip " + juce::String ((int) std::lround (dSkip / dt)) + "/s"
+                            + " | offErr " + juce::String (dBlitErr)
+                            + " | screenBlit " + juce::String ((int) std::lround (dScreen / dt)) + "/s"
+                            + " screenErr " + juce::String (dScreenErr)
+                            + " | " + gMdDiag.lastProbe
+                            + " | alloc=" + juce::String (gMdDiag.allocCount));
+
+      // 关键判定：屏幕 blit 在跑、但源 FBO 采样几乎全黑 → 内容侧（①②③）的问题；
+      //   采样有内容、屏幕仍黑 → 合成侧（④：矩形/GL 状态/组件层覆盖）的问题。
+      if (gMdDiag.lastProbe.contains ("lumaMax=0")
+          || gMdDiag.lastProbe.contains ("lumaMax=1 ")
+          || gMdDiag.lastProbe.contains ("lumaMax=2 "))
+      {
+        Y2K_DIAG ("MD", y2k::diag::u8 ("!! 源 FBO 采样接近全黑（")
+                              + gMdDiag.lastProbe
+                              + y2k::diag::u8 ("）→ 内容侧问题：无预设 / 渲染被跳过 / blit 被丢弃"));
+      }
+
+      gMdDiag.reportRendered         = gMdDiag.rendered;
+      gMdDiag.reportSkipped          = gMdDiag.skipped;
+      gMdDiag.reportBlitErr          = gMdDiag.blitErr;
+      gMdDiag.reportScreenBlit       = gMdDiag.screenBlit;
+      gMdDiag.reportScreenBlitErr    = gMdDiag.screenBlitErr;
+      gMdDiag.lastReportMs           = nowMs;
+    }
+  }
+
+  // ---- 黑帧自愈：判定需要时，本帧立刻改回 projectM 原始输出 ----
+  if (milkdropTickBlackFrameSelfHeal (blit_source_fbo, fbo_w, fbo_h)
+      && blit_source_fbo != milkdrop_render_fbo_)
+  {
+    blit_source_fbo = milkdrop_render_fbo_;
+  }
+
   return blit_source_fbo;
+}
+
+// ================================================================
+// 黑帧自愈
+//   现场症状："启动后 Milkdrop 纯黑，删掉模块重加 / 切一次布局就恢复"。
+//   这说明黑不是"每帧都在算错"，而是某个状态被固化了（离屏 FBO 没拿到数据、
+//   染色 post FBO 是空内容、预设根本没加载成功……）。与其让用户手动重建模块，
+//   不如按阶梯自动重建一次。
+//   安全阀（避免误伤"本来就很暗"的预设）：
+//     · 只在 projectM 就绪 + 有有效预设 + 收到过真实 PCM 时动作（排除静音黑屏）；
+//     · 判定用 maxLuma == 0（144 个采样点全黑），不是"很暗"；
+//     · 连续 3 次采样（≈3s）才动手，且最多 6s 一次；
+//     · 画面一旦有内容立刻清零，不会反复折腾。
+//   恢复阶梯：① 作废染色 post FBO → ② 重载当前预设 → ③ 重建离屏 FBO（循环）。
+// ================================================================
+bool Y2KmeterAudioProcessorEditor::milkdropTickBlackFrameSelfHeal (unsigned int blitSourceFbo,
+                                                                  int fboW, int fboH)
+{
+  const double nowMs = juce::Time::getMillisecondCounterHiRes();
+
+  // 采样限流 1Hz：glReadPixels 会同步等 GPU，不能每帧做。
+  if (nowMs - milkdrop_lastLumaProbeMs_ < 1000.0)
+    return false;
+  milkdrop_lastLumaProbeMs_ = nowMs;
+
+  const bool havePreset = milkdrop_current_preset_ >= 0
+                          && milkdrop_current_preset_ < MilkdropPresetCount();
+
+  if (! havePreset || ! milkdrop_has_ever_received_pcm_
+      || blitSourceFbo == 0 || fboW <= 0 || fboH <= 0)
+  {
+    milkdrop_blackStreak_ = 0;
+    return false;
+  }
+
+  const auto sample = MilkdropSampleLuma (blitSourceFbo, fboW, fboH);
+  if (! sample.valid)
+    return false;
+
+  if (sample.maxLuma > 0)
+  {
+    // 有内容 → 一切正常，复位阶梯
+    milkdrop_blackStreak_   = 0;
+    milkdrop_selfHealStage_ = 0;
+    return false;
+  }
+
+  ++milkdrop_blackStreak_;
+  if (milkdrop_blackStreak_ < 3)          // ≈3s 连续全黑才动手
+    return false;
+
+  if (nowMs - milkdrop_lastHealMs_ < 6000.0)   // 限流：最多 6s 一次
+    return false;
+
+  milkdrop_lastHealMs_  = nowMs;
+  milkdrop_blackStreak_ = 0;
+  ++milkdrop_selfHealCount_;
+
+  const juce::String tail = " idx=" + juce::String (milkdrop_current_preset_)
+                          + " fbo=" + juce::String ((int) blitSourceFbo)
+                          + " " + juce::String (fboW) + "x" + juce::String (fboH)
+                          + " heal#=" + juce::String (milkdrop_selfHealCount_);
+
+  switch (milkdrop_selfHealStage_)
+  {
+    case 0:
+      // ① 染色 pass 没落笔是"整块黑"的常见来源：作废 post FBO，立即改回原始输出
+      milkdrop_post_valid_ = false;
+      milkdrop_tint_applied_version_ = 0xFFFFFFFFu;
+      milkdrop_selfHealStage_ = 1;
+      Y2K_DIAGC ("MD", y2k::diag::u8 ("!! 源 FBO 全黑 → 自愈① 作废染色后处理") + tail);
+      return true;
+
+    case 1:
+      // ② 重载当前预设（等价于用户手动切一次预设）
+      LoadMilkdropPresetInternal();
+      milkdrop_post_valid_ = false;
+      milkdrop_last_preset_switch_ms_.store (
+          static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count()));
+      milkdrop_selfHealStage_ = 2;
+      Y2K_DIAGC ("MD", y2k::diag::u8 ("!! 源 FBO 仍全黑 → 自愈② 重载当前预设") + tail);
+      return true;
+
+    default:
+      // ③ 重建离屏 FBO：把尺寸标记清零，下一帧 need_realloc 会重新分配
+      //    （等价于"删掉模块重新加"，但不动模块/布局）
+      milkdrop_post_valid_ = false;
+      milkdrop_last_fbo_w_ = 0;
+      milkdrop_last_fbo_h_ = 0;
+      milkdrop_selfHealStage_ = 0;
+      Y2K_DIAGC ("MD", y2k::diag::u8 ("!! 源 FBO 依旧全黑 → 自愈③ 重建离屏 FBO") + tail);
+      return true;
+  }
 }
 
 // ================================================================
@@ -8164,7 +8528,7 @@ unsigned int Y2KmeterAudioProcessorEditor::renderMilkdropFrameCore (int fbo_w, i
 // ================================================================
 void Y2KmeterAudioProcessorEditor::renderOpenGLPreLock()
 {
-  if (! milkdrop_render_ready_ || milkdrop_pm_handle_ == nullptr
+  if (! milkdrop_render_ready_.load() || milkdrop_pm_handle_ == nullptr
       || milkdrop_pre_w_ <= 0 || milkdrop_pre_h_ <= 0)
     return;
 
@@ -8178,6 +8542,26 @@ void Y2KmeterAudioProcessorEditor::renderOpenGLPreLock()
   milkdrop_pre_blit_fbo_ = renderMilkdropFrameCore (milkdrop_pre_w_, milkdrop_pre_h_, false);
   milkdrop_pre_done_ = true;
   juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+
+  // 诊断：必须在返回前查一次 GL 错误。
+  //   JUCE 补丁 0006 在本函数返回后立刻 clearGLError()（避免旧错误拖到下一帧），
+  //   prelock 阶段产生的 0x502 会被它整段抹掉 —— 这正是"日志里一个 GL 错误都
+  //   没有、画面却全黑"的原因。这里先自己看一眼再放行。
+  if (Y2K_DIAG_ENABLED())
+  {
+    const GLenum e = juce::gl::glGetError();
+    if (e != juce::gl::GL_NO_ERROR)
+    {
+      ++gMdDiag.blitErr;
+      if (gMdDiag.blitErr <= 10 || (gMdDiag.blitErr % 300) == 0)
+        Y2K_DIAG ("MD", juce::String ("!! prelock GL error 0x")
+                              + juce::String::toHexString ((int) e)
+                              + " fbo=" + juce::String (milkdrop_pre_w_) + "x"
+                              + juce::String (milkdrop_pre_h_)
+                              + " src=" + juce::String ((int) milkdrop_pre_blit_fbo_)
+                              + " err#=" + juce::String (gMdDiag.blitErr));
+    }
+  }
 
   if (t0 > 0.0)
     milkdrop_pre_ms_ += juce::Time::getMillisecondCounterHiRes() - t0;
@@ -8224,7 +8608,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   float dpi_scale = static_cast<float>(openGLContext.getRenderingScale());
   int   editor_h  = getHeight();
 
-  if (milkdrop_render_ready_ && milkdrop_pm_handle_ != nullptr) {
+  if (milkdrop_render_ready_.load() && milkdrop_pm_handle_ != nullptr) {
 
   static bool editorMilkdropRenderLogged = false;
   if (! editorMilkdropRenderLogged)
@@ -8250,9 +8634,9 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     // 恢复到目标库（当前库）之前记录的索引，未记录或越界则用 0。
     int target = now_like ? milkdrop_like_preset_index_
                           : milkdrop_builtin_preset_index_;
-    if (target < 0 || target >= milkdrop_preset_paths_.size())
+    if (target < 0 || target >= MilkdropPresetCount())
       target = 0;
-    milkdrop_current_preset_ = milkdrop_preset_paths_.isEmpty() ? -1 : target;
+    milkdrop_current_preset_ = (MilkdropPresetCount() == 0) ? -1 : target;
 
     if (milkdrop_current_preset_ >= 0) {
       LoadMilkdropPresetInternal();
@@ -8268,14 +8652,14 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   // 越界则回绕到 0；若收藏库因此被删空，则回退到内置库。
   if (milkdrop_requested_rescan_.exchange(false)) {
     RescanMilkdropPresetPaths();
-    if (milkdrop_preset_paths_.isEmpty()) {
+    if ((MilkdropPresetCount() == 0)) {
       SetMilkdropUseLikeLibrary(false);
       RescanMilkdropPresetPaths();
       int target = milkdrop_builtin_preset_index_;
-      if (target < 0 || target >= milkdrop_preset_paths_.size())
+      if (target < 0 || target >= MilkdropPresetCount())
         target = 0;
-      milkdrop_current_preset_ = milkdrop_preset_paths_.isEmpty() ? -1 : target;
-    } else if (milkdrop_current_preset_ >= milkdrop_preset_paths_.size()) {
+      milkdrop_current_preset_ = (MilkdropPresetCount() == 0) ? -1 : target;
+    } else if (milkdrop_current_preset_ >= MilkdropPresetCount()) {
       milkdrop_current_preset_ = 0;
     }
 
@@ -8295,11 +8679,11 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   bool random  = milkdrop_requested_preset_random_.exchange(false);
   bool switched = false;
 
-  if (jump_idx >= 0 && jump_idx < milkdrop_preset_paths_.size()) {
+  if (jump_idx >= 0 && jump_idx < MilkdropPresetCount()) {
     milkdrop_current_preset_ = jump_idx;
     switched = true;
   } else if (random) {
-    const int n = milkdrop_preset_paths_.size();
+    const int n = MilkdropPresetCount();
     if (n <= 1) {
       // 特殊处理：目录里只有一个预设，无法排除当前，重新加载当前预设
       // （软切换刷新），给用户一次"有反馈"的随机点击。
@@ -8320,11 +8704,11 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
       }
       switched = true;
     }
-  } else if (delta != 0 && !milkdrop_preset_paths_.isEmpty()) {
+  } else if (delta != 0 && !(MilkdropPresetCount() == 0)) {
     milkdrop_current_preset_ = (milkdrop_current_preset_ + delta)
-        % milkdrop_preset_paths_.size();
+        % MilkdropPresetCount();
     if (milkdrop_current_preset_ < 0)
-      milkdrop_current_preset_ += milkdrop_preset_paths_.size();
+      milkdrop_current_preset_ += MilkdropPresetCount();
     switched = true;
   }
 
@@ -8543,7 +8927,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
                                (float) openGLContext.getRenderingScale(),
                                openGLContext.isAttached(),
                                true,
-                               milkdrop_render_ready_,
+                               milkdrop_render_ready_.load(),
                                (int) getNumChildComponents(),
                                glFrameCounter.load (std::memory_order_relaxed));
 
@@ -9275,6 +9659,45 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
             glBlitFramebuffer (0, 0, sw, sh,
                                gx, gy, gx + gw, gy + gh,
                                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+            // 诊断：搬运到后缓冲这一步。
+            //   ① 目标矩形只在变化时打一行 —— 能看到模块 content 矩形/源 FBO 是否异常；
+            //   ② 每次 blit 后查错误（限流）—— 驱动丢弃 blit 时画面就是黑的，
+            //      而旧日志里没有任何痕迹。
+            if (Y2K_DIAG_ENABLED())
+            {
+              ++gMdDiag.screenBlit;
+
+              const juce::Rectangle<int> dstRect (gx, gy, gw, gh);
+              if (dstRect != gMdDiag.lastScreenRect
+                  || milkdropBlitSourceFbo != gMdDiag.lastScreenSrcFbo)
+              {
+                gMdDiag.lastScreenRect   = dstRect;
+                gMdDiag.lastScreenSrcFbo = milkdropBlitSourceFbo;
+                Y2K_DIAG ("MD", juce::String ("screen blit src=")
+                                      + juce::String ((int) milkdropBlitSourceFbo)
+                                      + " srcRect=0,0," + juce::String (sw) + "x" + juce::String (sh)
+                                      + " dst=" + juce::String (gx) + "," + juce::String (gy)
+                                      + " " + juce::String (gw) + "x" + juce::String (gh)
+                                      + " | content=" + juce::String (lw) + "x" + juce::String (lh)
+                                      + " viewport=" + juce::String (vw) + "x" + juce::String (vh)
+                                      + " dpi=" + juce::String (dpiScale, 2));
+              }
+
+              const GLenum blitErr = glGetError();
+              if (blitErr != GL_NO_ERROR)
+              {
+                ++gMdDiag.screenBlitErr;
+                if (gMdDiag.screenBlitErr <= 10 || (gMdDiag.screenBlitErr % 300) == 0)
+                  Y2K_DIAG ("MD", juce::String ("!! screen blit GL error 0x")
+                                        + juce::String::toHexString ((int) blitErr)
+                                        + " src=" + juce::String ((int) milkdropBlitSourceFbo)
+                                        + " srcRect=" + juce::String (sw) + "x" + juce::String (sh)
+                                        + " dst=" + juce::String (gx) + "," + juce::String (gy)
+                                        + " " + juce::String (gw) + "x" + juce::String (gh)
+                                        + " err#=" + juce::String (gMdDiag.screenBlitErr));
+              }
+            }
           }
         }
       }
@@ -9346,12 +9769,15 @@ void Y2KmeterAudioProcessorEditor::destroyMilkdropEditorResources() {
     juce::gl::glDeleteTextures(1, &milkdrop_render_tex_);
     milkdrop_render_tex_ = 0;
   }
-  milkdrop_preset_paths_.clear();
+  {
+    const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+    milkdrop_preset_paths_.clear();
+  }
   milkdrop_current_preset_ = 0;
   milkdrop_current_preset_ui_.store(-1);
   milkdrop_last_fbo_w_ = 0;
   milkdrop_last_fbo_h_ = 0;
-  milkdrop_render_ready_ = false;
+  milkdrop_render_ready_.store (false, std::memory_order_release);
 }
 
 void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
@@ -9441,26 +9867,50 @@ void Y2KmeterAudioProcessorEditor::ResumeMilkdropEditorRendererAfterFloating() {
   if (editorBeingDestructed || !openGLContext.isAttached()) return;
 
   openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
-    if (!milkdrop_render_ready_ && milkdrop_pm_handle_ == nullptr)
+    if (!milkdrop_render_ready_.load() && milkdrop_pm_handle_ == nullptr)
       newOpenGLContextCreated();
   }, false);
 }
 
 void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {
-  milkdrop_preset_paths_.clear();
-  auto presetsDir = milkdrop_use_like_library_.load()
+  const bool useLike = milkdrop_use_like_library_.load();
+  auto presetsDir = useLike
                         ? FindMilkdropLikeDir()
                         : FindMilkdropAssetsDir("milkdrop_presets");
-  Y2K_LOG("[Rescan] useLike=" + juce::String(milkdrop_use_like_library_.load() ? 1 : 0)
+  Y2K_LOG("[Rescan] useLike=" + juce::String(useLike ? 1 : 0)
           + " dir=" + presetsDir.getFullPathName()
           + " exists=" + juce::String(presetsDir.exists() ? 1 : 0));
+
+  // 磁盘 IO 全部在锁外完成；最后一次性 swap 进成员表。
+  //   旧写法是"先 clear 再逐个 add"，而消息线程此刻可能正在读这张表
+  //   （预设名 / 总数 / 收藏按钮）→ 读到"清空到一半"的 StringArray。
+  juce::StringArray newPaths;
   if (presetsDir.exists()) {
     auto files = presetsDir.findChildFiles(juce::File::findFiles,
                                            false, "*.milk");
     for (auto& f : files)
-      milkdrop_preset_paths_.add(f.getFullPathName());
-    milkdrop_preset_paths_.sort(false);
+      newPaths.add(f.getFullPathName());
+    newPaths.sort(false);
   }
+
+  int count = 0;
+  {
+    const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+    milkdrop_preset_paths_.swapWith (newPaths);
+    count = milkdrop_preset_paths_.size();
+  }
+
+  // 诊断：扫的是哪个目录、扫到几个预设。
+  //   presets=0 时后续 LoadMilkdropPresetInternal 会早退（projectM 无预设 → 全黑），
+  //   这是"启动就纯黑、且只有重建模块/重启才会变"的第一嫌疑人。
+  Y2K_DIAG ("MD", juce::String ("rescan useLike=")
+                        + (useLike ? "1" : "0")
+                        + " dir=" + presetsDir.getFullPathName()
+                        + " exists=" + (presetsDir.exists() ? "1" : "0")
+                        + " count=" + juce::String (count)
+                        + (count == 0
+                               ? y2k::diag::u8 ("  << 空库！后续会渲染纯黑")
+                               : juce::String()));
 }
 
 void Y2KmeterAudioProcessorEditor::SetMilkdropUseLikeLibrary(bool use_like) {
@@ -9494,28 +9944,67 @@ bool Y2KmeterAudioProcessorEditor::HasMilkdropLikedPresets() const {
 }
 
 juce::String Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetFilePath() const {
-  const int idx = milkdrop_current_preset_ui_.load();
-  if (idx >= 0 && idx < milkdrop_preset_paths_.size())
-    return milkdrop_preset_paths_[idx];
-  return {};
+  // UI 线程：索引取原子镜像，路径走加锁访问器（GL 线程可能正在重扫）。
+  return MilkdropPresetPathAt (milkdrop_current_preset_ui_.load());
 }
 
 void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {
-  if (milkdrop_pm_handle_ == nullptr) return;
+  const bool dOn = Y2K_DIAG_ENABLED();
+
+  if (milkdrop_pm_handle_ == nullptr) {
+    if (dOn)
+      Y2K_DIAG ("MD", "loadPreset SKIP: handle=null（projectM 未创建）");
+    return;
+  }
   if (milkdrop_current_preset_ < 0
-      || milkdrop_current_preset_ >= milkdrop_preset_paths_.size()) return;
+      || milkdrop_current_preset_ >= MilkdropPresetCount()) {
+    // 这里早退 = projectM 手里没有任何有效预设 → 渲染出来必然全黑，
+    //   而且因为没有给 projectM playlist，它永远不会自己换预设（不会自愈）。
+    if (dOn)
+      Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: idx=")
+                            + juce::String (milkdrop_current_preset_)
+                            + " total=" + juce::String (MilkdropPresetCount())
+                            + " likeLib=" + (milkdrop_use_like_library_.load() ? "1" : "0")
+                            + y2k::diag::u8 (" → 无有效预设（projectM 会渲染纯黑且不会自愈）"));
+    return;
+  }
 
   auto& api = projectm_api::Api::instance();
-  auto path = milkdrop_preset_paths_[milkdrop_current_preset_];
+  // 锁内取一份路径拷贝，随后在锁外做 (可能很慢的) 预设加载 ——
+  //   实测某些预设编译要 128ms，绝不能占着 UI 也要用的锁。
+  const juce::String path = MilkdropPresetPathAt (milkdrop_current_preset_);
+  if (path.isEmpty()) {
+    if (dOn)
+      Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: path empty idx=")
+                            + juce::String (milkdrop_current_preset_));
+    return;
+  }
+
   if (api.hasLoadPresetData()) {
     juce::File f(path);
     if (f.existsAsFile()) {
       auto data = f.loadFileAsString().toStdString();
+      const auto rawBytes = data.size();
       // 注入 wave 样式覆盖（wave_mode/x/y/r/g/b/a/...），启用时才生效。
       data = ApplyWaveParamsToPresetText(data, GetMilkdropWaveState());
+      if (dOn)
+        Y2K_DIAG ("MD", juce::String ("loadPreset data idx=")
+                              + juce::String (milkdrop_current_preset_) + "/"
+                              + juce::String (MilkdropPresetCount())
+                              + " bytes=" + juce::String ((int) rawBytes)
+                              + " injected=" + juce::String ((int) data.size() - (int) rawBytes)
+                              + " file=" + f.getFileName());
       api.loadPresetData(milkdrop_pm_handle_, data, true);
+    } else if (dOn) {
+      // 文件不见了：projectM 保持旧预设（或黑），但界面上仍然显示这个名字
+      Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: file missing → ") + path);
     }
   } else {
+    if (dOn)
+      Y2K_DIAG ("MD", juce::String ("loadPreset file idx=")
+                            + juce::String (milkdrop_current_preset_) + "/"
+                            + juce::String (MilkdropPresetCount())
+                            + " file=" + path.fromLastOccurrenceOf("/", false, false));
     api.loadPresetFile(milkdrop_pm_handle_, path.toRawUTF8(), true);
   }
 }
@@ -9543,7 +10032,28 @@ void Y2KmeterAudioProcessorEditor::RequestMilkdropPresetRandom() {
 }
 
 juce::String Y2KmeterAudioProcessorEditor::GetMilkdropError() const {
+  // UI 线程读、GL 线程写 → 加锁取一份拷贝
+  const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
   return milkdrop_error_;
+}
+
+// ---- 预设表的加锁访问器（UI 线程与 GL 线程都可调用）----
+
+int Y2KmeterAudioProcessorEditor::MilkdropPresetCount() const {
+  const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+  return milkdrop_preset_paths_.size();
+}
+
+juce::String Y2KmeterAudioProcessorEditor::MilkdropPresetPathAt (int index) const {
+  const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+  if (index < 0 || index >= milkdrop_preset_paths_.size())
+    return {};
+  return milkdrop_preset_paths_[index];
+}
+
+void Y2KmeterAudioProcessorEditor::SetMilkdropError (const std::string& e) {
+  const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+  milkdrop_error_ = e;
 }
 
 HostPlayheadSnapshot Y2KmeterAudioProcessorEditor::getHostPlayheadSnapshot()
@@ -9557,19 +10067,17 @@ int Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetIndex()
 }
 
 int Y2KmeterAudioProcessorEditor::GetMilkdropTotalPresets() const noexcept {
-  return milkdrop_preset_paths_.size();
+  return MilkdropPresetCount();
 }
 
 juce::String Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetName()
     const {
-  int idx = milkdrop_current_preset_ui_.load();
-  if (idx >= 0 && idx < milkdrop_preset_paths_.size()) {
-    return milkdrop_preset_paths_[idx]
-        .fromLastOccurrenceOf("/", false, false)
-        .fromLastOccurrenceOf("\\", false, false)
-        .upToLastOccurrenceOf(".milk", false, false);
-  }
-  return {};
+  const juce::String path = MilkdropPresetPathAt (milkdrop_current_preset_ui_.load());
+  if (path.isEmpty())
+    return {};
+  return path.fromLastOccurrenceOf("/", false, false)
+             .fromLastOccurrenceOf("\\", false, false)
+             .upToLastOccurrenceOf(".milk", false, false);
 }
 
 int64_t Y2KmeterAudioProcessorEditor::GetMilkdropLastPresetSwitchTimeMs()

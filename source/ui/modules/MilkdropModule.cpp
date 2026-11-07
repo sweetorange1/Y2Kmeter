@@ -1535,10 +1535,12 @@ void MilkdropTintPass::shutdown()
     ready_ = false;
 }
 
-void MilkdropTintPass::apply (GLuint srcTex, const MilkdropVisualState& state)
+bool MilkdropTintPass::apply (GLuint srcTex, const MilkdropVisualState& state)
 {
+    // 返回 false = 这一帧没画成。调用方必须据此把 post FBO 判为无效，
+    //   回退到 projectM 原始输出；否则会把未被写入的空 FBO 当有效画面 blit（纯黑）。
     if (!ready_ || program_ == nullptr)
-        return;
+        return false;
 
     program_->use();
 
@@ -1626,6 +1628,10 @@ void MilkdropTintPass::apply (GLuint srcTex, const MilkdropVisualState& state)
     juce::gl::glActiveTexture (juce::gl::GL_TEXTURE0);
     juce::gl::glBindTexture (juce::gl::GL_TEXTURE_2D, 0);
     juce::gl::glUseProgram (0);
+
+    // 绘制是否真的落地：驱动拒绝（program 失效 / FBO 状态非法 / shader 被丢弃）时
+    //   这里会留下 GL 错误。调用方在调用前已清空错误队列，所以这条判定只反映本次绘制。
+    return juce::gl::glGetError() == juce::gl::GL_NO_ERROR;
 }
 
 // ==========================================================
@@ -1854,6 +1860,35 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
     g.drawText(y2k::tr ("MILKDROP"), content, juce::Justification::centred, false);
     return;
+  }
+
+  // ---- 诊断：模块自身是否在画"未就绪黑块" ----
+  //   用户看到的"纯黑"有两种完全不同的来源，必须分开：
+  //     a) 这里 —— 模块认为 projectM 没就绪 → 整块填黑 + 提示文字；
+  //     b) 模块内容区透明，但后缓冲里那块 GL 内容本身是黑的（Editor 侧 FBO/blit）。
+  //   只在状态切换时记一行（paintContent 30Hz 调用，不能逐帧刷日志）。
+  if (Y2K_DIAG_ENABLED())
+  {
+    static int sLastPaintState = -1;
+    const int paintState = (glView == nullptr) ? 0 : (glView->IsRenderReady() ? 2 : 1);
+
+    if (paintState != sLastPaintState)
+    {
+      sLastPaintState = paintState;
+
+      // 注：这里刻意用 ASCII —— juce::String 的 const char* 构造按 ASCII 解析，
+      //   拼接路径才是 UTF-8；状态文案放常量表里更不容易踩坑。
+      const char* stateText = (paintState == 2) ? "ready(content transparent)"
+                            : (paintState == 1) ? "notReady(fills black + hint)"
+                                                : "glView=null(fills black)";
+
+      Y2K_DIAG ("MD", juce::String ("module paint state=") + stateText
+                            + " floating=" + (isFloating() ? "1" : "0")
+                            + " content=" + juce::String (content.getWidth()) + "x"
+                                           + juce::String (content.getHeight())
+                            + " err=" + (glView != nullptr ? glView->GetError()
+                                                           : juce::String ("-")));
+    }
   }
 
   // 浮动态由 GLView 自己的 native OpenGL surface 直接渲染 projectM。
@@ -2580,12 +2615,18 @@ void MilkdropModule::GLView::renderOpenGL() {
       api.openglRenderFrame (local_pm_handle_);
       juce::gl::glDisable (juce::gl::GL_SCISSOR_TEST);
 
+      // ⚠ 这里不用 glBlitFramebuffer：外网 RTX 3070 / NVIDIA 595.79 现场实测
+      //   "默认后缓冲 → 纹理 FBO" 的 blit 会被驱动拒绝（GL_INVALID_OPERATION 0x502），
+      //   结果离屏 FBO 一直是空的 → 画面纯黑且所有健康指标正常。
+      //   glCopyTexSubImage2D 走的是另一条（1.1 时代就有、极稳的）拷贝路径，同为 1:1 拷屏。
       juce::gl::glBindFramebuffer (juce::gl::GL_READ_FRAMEBUFFER, 0);
       juce::gl::glBindFramebuffer (juce::gl::GL_DRAW_FRAMEBUFFER, scale_fbo_);
-      juce::gl::glBlitFramebuffer (0, 0, render_w, render_h,
-                                   0, 0, render_w, render_h,
-                                   juce::gl::GL_COLOR_BUFFER_BIT,
-                                   juce::gl::GL_LINEAR);
+      juce::gl::glBindTexture (juce::gl::GL_TEXTURE_2D, scale_texture_);
+      juce::gl::glCopyTexSubImage2D (juce::gl::GL_TEXTURE_2D, 0,
+                                     0, 0,          // 目标偏移（纹理内）
+                                     0, 0,          // 源左下角（后缓冲内）
+                                     render_w, render_h);
+      juce::gl::glBindTexture (juce::gl::GL_TEXTURE_2D, 0);
       juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
     }
 
@@ -2611,12 +2652,27 @@ void MilkdropModule::GLView::renderOpenGL() {
       // shadows 等效果均在单帧内完成，无需上一帧累积（与 MilkDrop3 注入语义一致）。
       juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
       juce::gl::glViewport (0, 0, surface_w, surface_h);
-      tint_pass_->apply (scale_texture_, visual_state);
 
-      const GLenum tint_err = juce::gl::glGetError();
-      if (tint_err != juce::gl::GL_NO_ERROR && logFrame)
-        Y2K_LOG("[MilkdropGLView] tint GL error=0x"
-            + juce::String::toHexString(static_cast<int>(tint_err)));
+      // apply() 内部已经"画完查错"：返回 false 表示这一帧没画成（program 失效 /
+      //   FBO 状态非法），此时后缓冲是空的 —— 必须退回"直接把离屏纹理搬上去"，
+      //   宁可丢染色也不能整块纯黑。
+      const bool tintOk = tint_pass_->apply (scale_texture_, visual_state);
+
+      if (! tintOk)
+      {
+        while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
+        juce::gl::glBindFramebuffer (juce::gl::GL_READ_FRAMEBUFFER, scale_fbo_);
+        juce::gl::glBindFramebuffer (juce::gl::GL_DRAW_FRAMEBUFFER, 0);
+        juce::gl::glBlitFramebuffer (
+            0, 0, render_w, render_h,
+            0, 0, surface_w, surface_h,
+            juce::gl::GL_COLOR_BUFFER_BIT,
+            juce::gl::GL_NEAREST);
+        juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+
+        if (logFrame)
+          Y2K_LOG("[MilkdropGLView] tint pass 未画成 → 回退为无染色输出");
+      }
     } else {
       // ---- 降分辨率无染色：blit 拉伸到默认 framebuffer ----
       // 注意：macOS OpenGL Core Profile 对拉伸 blit 有严格限制（须 GL_NEAREST）。
