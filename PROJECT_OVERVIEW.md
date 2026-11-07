@@ -6432,4 +6432,52 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 
 ---
 
+## v3.0.2 补充：Milkdrop / GL 模块压住拼豆图片（遮挡裁剪 + 透明洞）
+
+**现象**：外网那台机器上，把拼豆图片拖到 Milkdrop 模块上，视频会把图片"吃掉"，图片完全不显示；
+同一布局在开发者机器上正常。诊断包里的 `[PAINT]` 行给出了关键证据：
+
+```
+[PAINT] gl=60/s comp=… | z=spectrogram3d > … > waveform > IMG > milkdrop | …
+[PAINT] milkdrop ready=1 float=0 glAttached=0 onDesktop=0 timer=149
+```
+
+- `z` 序里 **IMG 在 milkdrop 之下**（`z` 按下→上输出）；
+- milkdrop 不是浮动态、没有原生子窗口（`float=0 glAttached=0 onDesktop=0`），
+  可排除"原生 GL 子窗口永久置顶"；
+- 30 Hz 重绘链正常（`timer=149`/5s ≈ 30/s），排除"定时器没跑"。
+
+**根因（两件事叠加，都在 JUCE 侧）**：
+
+1. **模块必须 `setOpaque(true)`**：Milkdrop / GL 直渲染模块的内容区是"透明洞"，
+   靠后缓冲里的 GL 内容填充；JUCE 的 `clipObscuredRegions()` 会把"不透明子组件"的区域
+   从**父级 paint 的 clip** 里剔除 —— 正是这一点让工作区底图不会盖住洞。
+   （若改成 `setOpaque(false)`，工作区底图会把洞填满 → 视频/可视化直接消失。）
+2. **`opaque` 的另一半语义**（`juce_Component.cpp::paintComponentAndChildren`）：
+   画第 i 个 child 时，会把 `j > i` 的 **opaque 兄弟**从 clip 里 `excludeClipRegion` 掉，
+   即"被不透明模块压住的下层兄弟**根本不会被绘制**"。
+
+于是：图片一旦落到模块下面 → 重叠区被裁掉 → 洞里透出的是 GL 视频 → 看起来"视频强制置顶"。
+更糟的是，一旦落到下面，点击重叠区会被上层模块接走，**再也无法把它点上来**（自锁）。
+
+**修法**：图片是"贴纸"语义，始终保持在模块之上（与 VirtuPet 同策略），
+新增 `ModuleWorkspace::raisePerlerLayersAboveModules()`，在 4 个时机调用：
+
+| 时机 | 为什么 |
+| --- | --- |
+| 模块 `onBroughtToFront`（点击模块置顶后） | 模块被点一下就会冒到图片之上，这里立刻抬回 |
+| `addModule()` 新增模块后 | 新模块 `toFront` 会盖住已有图片 |
+| `dockModule()` 停靠回来后 | 同上 |
+| 图片聚焦拖拽时 | 保持"最后点击的图片在最上"，只额外把 VirtuPet 抬回最顶 |
+
+**为什么不用"模块改 non-opaque + 工作区底图挖洞"**：那条路图形学上更"正确"
+（下层图片会从洞里透出来），但会让"图片放到模块后面时视频被图片挡住"，与用户直觉相反，
+且要改动 `ModuleWorkspace::paint` 的裁剪路径，风险更高。当前方案不改动任何渲染路径。
+
+**顺带修正诊断**：`[PAINT] comp=` 原来统计 `Editor::paint()`，而 Editor 自身的绘制会被
+**不透明子组件（模块）遮挡裁剪**掉，读数严重偏小（实测 1/s），会误导排查；
+现改为统计 `ModuleWorkspace::paint()`（`diagGetPaintTicks()`），更接近真实合成次数。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

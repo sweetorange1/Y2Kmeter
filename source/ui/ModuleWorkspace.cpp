@@ -1560,14 +1560,11 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
             repaint();
         }
 
-        // VirtuPet 始终置顶：其他模块 mouseDown → toFront(true) 会把自己冒到
-        // 所有子组件之上（包括 VirtuPet）。这里在模块冒前之后，再把所有
-        // VirtuPet 模块抬回最上层，保证宠物永远不被其他模块遮挡。
-        for (auto* m : modules)
-        {
-            if (m->getModuleType() == ModuleType::virtuPet)
-                m->toFront (false);
-        }
+        // 图片层 / VirtuPet 始终在模块之上：
+        //   · 图片：模块是"不透明洞"（见 raisePerlerLayersAboveModules 的注释），
+        //     图片一旦落到模块下面会被 JUCE 的遮挡裁剪直接吞掉；
+        //   · VirtuPet：宠物永远不被其他模块遮挡。
+        raisePerlerLayersAboveModules();
 
         // v2.9.6：已移除旧的"macOS Milkdrop 强制置顶"逻辑。
         //   旧原因（NSOpenGLView 物理层级高于 CG 绘制）已不存在——Milkdrop
@@ -1583,6 +1580,34 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
             hideBtn.toFront (false);
     };
 
+}
+
+// ----------------------------------------------------------
+// 拼豆图片层永远保持在模块之上
+//
+//   背景（外网 v3.0.1 反馈："Milkdrop 视频永久压住图片，图片拖上去也不显示"）：
+//     · Milkdrop / GL 直渲染模块的内容区是"透明洞"——靠后缓冲里的 GL 内容填充；
+//     · 它们同时又必须标 setOpaque(true)：JUCE 的 clipObscuredRegions 会把
+//       "不透明子组件"的区域从父级 paint 的 clip 里剔除，正是这一点让工作区底图
+//       不会盖住洞（否则视频/可视化会直接被底图挡住）；
+//     · 但 opaque 还有副作用（juce_Component.cpp paintComponentAndChildren）：
+//       对第 i 个 child，会把 j>i 的 opaque 兄弟从 clip 里 exclude 掉 —— 
+//       即"被不透明模块压住的下层兄弟根本不会被绘制"。
+//   → 图片一旦落到模块下面，就既被裁掉、又看不到（洞里透出的是视频），
+//     表现为"视频强制置顶、图片无法显示"。
+//   根治：图片是贴纸语义，永远保持在模块之上（与 VirtuPet 同一策略）；
+//   不要去放宽 opaque 标记（那会让 GL 内容被工作区底图覆盖，视频直接消失）。
+// ----------------------------------------------------------
+void ModuleWorkspace::raisePerlerLayersAboveModules()
+{
+    for (auto* layer : perlerLayers)
+        if (layer != nullptr && layer->isVisible())
+            layer->toFront (false);
+
+    // VirtuPet 仍然最顶（宠物压在贴纸之上）
+    for (auto* m : modules)
+        if (m != nullptr && m->getModuleType() == ModuleType::virtuPet)
+            m->toFront (false);
 }
 
 ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool autoPosition)
@@ -1609,6 +1634,9 @@ ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool
 
     modules.add(panel.release());
     raw->toFront(false);
+
+    // 新模块会冒到最顶，把图片/宠物抬回来（图片永远在模块之上）
+    raisePerlerLayersAboveModules();
 
     notifyLayoutChanged();
 
@@ -1722,6 +1750,9 @@ void ModuleWorkspace::dockModule(ModulePanel& panel, juce::Rectangle<int> savedB
 
     modules.add(&panel);
     panel.toFront(false);
+
+    // dock 回来的模块会冒到最顶，把图片/宠物抬回来
+    raisePerlerLayersAboveModules();
 
     // dock 后模块回到嵌入态，更新按钮外观
     panel.setFloating(false);
@@ -2370,9 +2401,8 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
             }
             if (auto* focusedLayer = perlerLayers[draggingPerlerIdx])
                 focusedLayer->toFront (true);
-            // VirtuPet 始终置顶：图片聚焦后 toFront(true) 会把 perlerLayer
-            //   冒到所有子组件之上（包括 VirtuPet 模块）。这里再把所有
-            //   VirtuPet 模块抬回最上层，保证宠物永远不被图片遮挡。
+            // VirtuPet / 其它图片层保持相对顺序：把宠物再抬回最顶
+            //   （图片层之间的顺序由上面的 toFront 决定，这里不动它们）
             for (auto* m : modules)
             {
                 if (m->getModuleType() == ModuleType::virtuPet)
@@ -2795,6 +2825,9 @@ void ModuleWorkspace::raiseToolbarOverlay()
 
 void ModuleWorkspace::paint(juce::Graphics& g)
 {
+    // 诊断：工作区自身被绘制的次数（≈ 组件层合成次数）
+    ++diagPaintTicks;
+
     Y2K_PERF_FRAME_SCOPE ("workspace");
 
     if (chromeVisible)
@@ -4537,6 +4570,12 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree, bool impor
     //   修复：加载完成后只做 repaint；夹紧留给后续真正的 resized() 回调
     //   （此时模块自己的 bounds 已是原始保存值，canvas 也已经是最终尺寸）。
     //   并且新版 resized() 的夹紧已改为"仅越界时回拉"，不会再误伤用户布局。
+    //
+    // v3.0.2：存档里的 z 序可能把图片恢复到了模块下面。模块是"不透明洞"，
+    //   下层兄弟会被 JUCE 的遮挡裁剪吞掉（图片完全不可见，且点击也被模块接走），
+    //   因此恢复后统一把图片层抬到模块之上。
+    raisePerlerLayersAboveModules();
+
     repaint();
     return true;
 }

@@ -4518,9 +4518,6 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    // 诊断：组件层（父层）真正被合成的次数，用于对比 GL 出帧数。
-    diagCompositeTicks.fetch_add (1, std::memory_order_relaxed);
-
 #ifdef Y2KMETER_MILKDROP_ONLY
     // Milkdrop-only：整个窗口由 projectM 帧（Editor GL 渲染）填充，
     // 不画桌面纹理 / 标题栏。
@@ -7186,7 +7183,10 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
             static double       lastReportMs  = 0.0;
 
             const juce::uint32 glT   = (juce::uint32) glNow;
-            const juce::uint32 compT = diagCompositeTicks.load (std::memory_order_relaxed);
+            // 用工作区的 paint 次数当"组件层合成次数"：
+            //   Editor 自身的 paint 会被不透明子组件（模块）遮挡裁剪掉，读数偏小，
+            //   工作区是模块的父级，几乎每次合成都会跑到。
+            const juce::uint32 compT = (workspace != nullptr) ? workspace->diagGetPaintTicks() : 0;
 
             if (lastReportMs <= 0.0)
             {

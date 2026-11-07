@@ -681,10 +681,7 @@ private:
     std::atomic<juce::int64> glFrameCounter { 0 };
     juce::int64              lastGlFrameCounterSample = 0;
 
-    // v3.0.1 诊断：组件层合成计数（Editor::paint 每次 +1）。
-    //   与 glFrameCounter 对比即可判断"GL 在出帧但组件层没重新合成" ——
-    //   这种情况下后缓冲里压着 GL 像素，图片/其它模块看起来被视频永久盖住。
-    std::atomic<juce::uint32> diagCompositeTicks { 0 };
+
 
     // —— 诊断（v3.0.x）：出帧流判定 ——
     //   只有"最近确实在出帧"时才监视 GL 卡死：窗口静止 / 空工作区 / 最小化等

@@ -528,6 +528,9 @@ public:
     //   paint 统计，读取并清零各模块的重绘/合成计数。
     juce::String diagDescribeZOrder() const;
     juce::String diagTakePaintStats();
+    // 工作区 paint() 的执行次数（≈ 组件层被合成的次数，比 Editor::paint 更可靠：
+    //   Editor 的自身绘制会被"不图子组件"（模块）遮挡裁剪掉，导致读数偏小）
+    juce::uint32 diagGetPaintTicks() const noexcept { return diagPaintTicks; }
 
     // 清空所有模块（含 OwnedArray 自动 delete）与拼豆贴画。
     //   · 用于布局预设切换：先清空再由外部重新填充。
@@ -939,6 +942,12 @@ private:
     juce::Rectangle<int> findNextSlot(int w, int h) const;
 
     void hookPanel(ModulePanel& panel);
+
+    // 把拼豆图片层抬到所有模块之上（图片=贴纸语义；详见实现处注释）
+    void raisePerlerLayersAboveModules();
+
+    // 诊断：工作区 paint 次数（见 diagGetPaintTicks）
+    juce::uint32 diagPaintTicks = 0;
 
     juce::OwnedArray<ModulePanel> modules;
 
