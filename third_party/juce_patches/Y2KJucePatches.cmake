@@ -22,6 +22,10 @@ set(Y2K_JUCE_PATCH_MARKERS
   # 0005 mac GL 组件重绘按显示器刷新合并（v3.0.2 mac 性能）
   "modules/juce_opengl/opengl/juce_OpenGLContext.h|setComponentRepaintsPacedToDisplay"
   "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|pacedRepaintPending"
+  # 0006 Win GL 渲染线程分段计时 + renderOpenGLPreLock 锁外钩子（Win 性能优化）
+  "modules/juce_opengl/opengl/juce_OpenGLContext.h|takeRenderStats"
+  "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|renderOpenGLPreLock"
+  "modules/juce_opengl/opengl/juce_OpenGLRenderer.h|renderOpenGLPreLock"
 )
 
 function(y2k_verify_juce_patches juce_dir)

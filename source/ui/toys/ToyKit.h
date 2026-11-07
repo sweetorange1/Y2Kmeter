@@ -24,6 +24,7 @@
 
 class ToyDirector;
 class ToyClock;
+
 class ToyOverlay;
 class EmojiAtlas;
 class ModuleToyState;
@@ -271,7 +272,17 @@ public:
     static constexpr int kRotBuckets = 12;
     static int bucketOf (float angleRad);                               // 纯角度量化（无锁）
     juce::Image rotatedCached (EmojiId id, Size size, float angleRad);  // 只查不烘焙
-    void ensureRotated (EmojiId id, Size size, float angleRad);          // step 阶段预热（查 + 烘焙）
+    // step 阶段预热（查 + 烘焙）。返回 true = 缓存里已有该条目（可用于 paint）；
+    //   false = 被烘焙节流 / 原图未就绪，调用方应在后续帧重试。
+    bool ensureRotated (EmojiId id, Size size, float angleRad);
+
+    // Win 性能优化：物理像素缩放恰为 1.0（Windows 100% 缩放）时，旋转分桶图直接烘焙成
+    //   drawSize×drawSize，paint 走 1:1 drawImageAt。原先图集是 2x+2 px、绘制尺寸
+    //   18/24/34，每个 emoji 都走 drawImageTransformed —— JUCE GL 后端对非平移
+    //   变换要建 Path→EdgeTable 光栅化（实测 0.07~0.5ms/个），是点击喷 emoji 掉帧主因。
+    //   缩放 != 1 时保持旧行为（图集 2x 分辨率，避免模糊）。由 ToyOverlay::paint 回写。
+    void setPhysicalScale (float s) noexcept { fitDrawSize_ = std::abs (s - 1.0f) < 0.01f; }
+    bool fitsDrawSize() const noexcept       { return fitDrawSize_; }
 
     static int logicalSize (Size s);
     int drawSize (Size s) const;
@@ -305,6 +316,7 @@ private:
     // 旋转分桶缓存（性能优化 P1）：key = id*12 + size*4 + bucket
     juce::CriticalSection rotLock_;
     std::unordered_map<size_t, juce::Image> rotCache_;
+    bool fitDrawSize_ = false;
 
     void timerCallback() override;      // 分帧预烘焙（每 tick ≤ 8 个）
     void bakeOne (EmojiId id, Size size);
@@ -389,6 +401,29 @@ public:
 
     ToyDirector& director;
 
+    /** 诊断快照（取走并清零窗口累计量；消息线程 / 持消息锁时调用）。 */
+    struct DiagSnapshot
+    {
+        int    freeActors = 0, fullEmoji = 0, emojiTarget = 0;
+        double smoothedFps = 0.0;
+        double overlayPaintMs = 0.0;
+        int    overlayPaints = 0, overlayActorsPainted = 0;
+    };
+    DiagSnapshot takeDiagSnapshot() noexcept
+    {
+        DiagSnapshot s;
+        s.freeActors = (int) freeActors.size();
+        s.fullEmoji = highDetailFreeActorCount_;
+        s.emojiTarget = targetFullEmojiCount_;
+        s.smoothedFps = smoothedFps_;
+        s.overlayPaintMs = overlayPaintTotalMs_;
+        s.overlayPaints = overlayPaintCalls_;
+        s.overlayActorsPainted = overlayActorsPainted_;
+        overlayPaintTotalMs_ = 0.0;
+        overlayPaintCalls_ = 0;
+        overlayActorsPainted_ = 0;
+        return s;
+    }
 private:
     std::vector<juce::Component::SafePointer<ModulePanel>> panels;
 

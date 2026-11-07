@@ -199,6 +199,26 @@ public:
     */
     void setComponentRepaintsPacedToDisplay (bool shouldPace) noexcept;
 
+    /** (Y2Kmeter patch) Per-phase timing of the render thread, accumulated since the last
+        call to takeRenderStats(). All times are in milliseconds, summed over `frames`.
+    */
+    struct RenderStats
+    {
+        int    frames = 0;          // frames that reached swapBuffers
+        int    paintedFrames = 0;   // frames that repainted the component layer
+        double sleepMs = 0;         // 2ms anti-hogging sleep before taking the message lock
+        double preLockMs = 0;       // OpenGLRenderer::renderOpenGLPreLock() (message thread free)
+        double lockWaitMs = 0;      // waiting for the message manager lock
+        double rendererMs = 0;      // OpenGLRenderer::renderOpenGL() (message lock held)
+        double paintMs = 0;         // paintComponent() (message lock held)
+        double drawMs = 0;          // compositing the component frame buffer
+        double swapMs = 0;          // swapBuffers (vsync wait)
+        double paintedMPix = 0;     // total invalidated area repainted, in mega-pixels
+    };
+
+    /** (Y2Kmeter patch) Returns the render thread timing accumulated so far and resets it. */
+    RenderStats takeRenderStats() noexcept;
+
     /** Asynchronously causes a repaint to be made. */
     void triggerRepaint();
 
@@ -383,6 +403,16 @@ private:
     bool renderComponents = true, useMultisampling = false, overrideCanAttach = false;
     std::atomic<bool> continuousRepaint { false };
     std::atomic<bool> componentRepaintsPacedToDisplay { false };
+
+    // Y2Kmeter patch: render thread phase timing (microseconds, written by the GL thread)
+    struct RenderStatsAccum
+    {
+        std::atomic<int64> frames { 0 }, paintedFrames { 0 };
+        std::atomic<int64> sleepUs { 0 }, preLockUs { 0 }, lockWaitUs { 0 }, rendererUs { 0 },
+                           paintUs { 0 }, drawUs { 0 }, swapUs { 0 }, paintedPixels { 0 };
+    };
+    RenderStatsAccum renderStatsAccum;
+
     TextureMagnificationFilter texMagFilter = linear;
 
     //==============================================================================

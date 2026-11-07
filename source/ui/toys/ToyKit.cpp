@@ -249,7 +249,9 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (elapsed > 0.0001)
     {
         const double instantaneousFps = juce::jlimit (1.0, 240.0, 1.0 / elapsed);
-        const double response = instantaneousFps < smoothedFps_ ? 0.35 : 0.06;
+        // Win 性能优化：下降响应 0.35 → 0.12。0.35 时单次 20~30ms 的偶发卡顿就能把平滑值
+        //   拽到 58 以下，触发粒子永久降级为小像素点；持续掉帧仍会在数帧内触发降级。
+        const double response = instantaneousFps < smoothedFps_ ? 0.12 : 0.06;
         smoothedFps_ += (instantaneousFps - smoothedFps_) * response;
     }
 
@@ -506,6 +508,8 @@ void ToyOverlay::paint (juce::Graphics& g)
 {
     const double t0 = juce::Time::getMillisecondCounterHiRes();
     const auto clip = g.getClipBounds();
+    if (clock.director.atlas != nullptr)
+        clock.director.atlas->setPhysicalScale (g.getInternalContext().getPhysicalPixelScaleFactor());
     for (auto& a : clock.freeActors)
         if (a->getBounds().getSmallestIntegerContainer().intersects (clip))
         {

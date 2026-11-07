@@ -279,6 +279,7 @@ public:
         juce::uint32 issued    = 0;   // 真正向 JUCE 请求了重绘
         juce::uint32 coalesced = 0;   // 被合并守卫丢弃
         juce::uint32 skipped   = 0;   // 因不可见 / 不在工作区被跳过
+        double       paintMs   = 0.0; // 窗口内 paint()+子组件 累计耗时（仅诊断开启时）
     };
     DiagPaintCounters diagTakePaintCounters() noexcept;
 
@@ -389,6 +390,7 @@ private:
 
     // 诊断计数（见 DiagPaintCounters）
     juce::uint32 diagPaints = 0, diagIssued = 0, diagCoalesced = 0, diagSkipped = 0;
+    double diagPaintStartMs = 0.0, diagPaintMsAccum = 0.0;   // paint()+子组件 耗时累计（仅诊断开启时）
 
     enum class DragMode { none, move, resize };
     DragMode dragMode = DragMode::none;

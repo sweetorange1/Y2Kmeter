@@ -175,14 +175,15 @@ struct EmojiParticle : public ToyActor
 
         // 性能优化 P1 + P14：step 阶段预热旋转分桶（烘焙不进 paint 回调）；
         //   bucket 未变化时零调用，省掉每帧每粒子的锁 + hash 查找。
-        if (std::abs (spin) > 0.02f)
+        //   Win 性能优化：fit 模式（物理缩放 1.0）下不旋转的粒子也走分桶图（bucket 0 = 屏幕尺寸直贴），
+        //   并且只有烘焙真正成功（或已存在）才记录 bucket —— 此前被节流/原图未就绪时也会记录，
+        //   导致该 bucket 永不重试。
+        if (std::abs (spin) > 0.02f || dir.atlas->fitsDrawSize())
         {
             const int b = EmojiAtlas::bucketOf (spin);
-            if (b != lastRotBucket_)
-            {
+            if (b != lastRotBucket_
+                && dir.atlas->ensureRotated (id, (EmojiAtlas::Size) sizeTier, spin))
                 lastRotBucket_ = b;
-                dir.atlas->ensureRotated (id, (EmojiAtlas::Size) sizeTier, spin);
-            }
         }
 
         // 平台碰撞（模块标题栏上沿，仅下落时，带 x 范围）
@@ -272,7 +273,7 @@ struct EmojiParticle : public ToyActor
 
         // 性能优化 P1：旋转且无挤压 → 查预烘焙角度分桶图（paint 内零烘焙、零风险），
         //   命中则整数坐标 blit；未命中走慢路径（step 阶段已预热，最多首帧 miss 一次）
-        if (std::abs (spin) > 0.02f && scaleY > 0.99f)
+        if (scaleY > 0.99f && (std::abs (spin) > 0.02f || dir.atlas->fitsDrawSize()))
         {
             const juce::Image rimg = dir.atlas->rotatedCached (id, (EmojiAtlas::Size) sizeTier, spin);
             if (rimg.isValid())

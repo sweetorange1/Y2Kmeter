@@ -7230,6 +7230,40 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
 
                 Y2K_DIAG ("PAINT", line);
 
+                // 渲染线程分段耗时（JUCE 补丁 0006）：定位 GL 帧时间花在哪。
+                //   每项为"每帧平均 ms"；paint 项按"实际重绘组件层的帧"平均。
+                {
+                    const auto rs = openGLContext.takeRenderStats();
+                    if (rs.frames > 0)
+                    {
+                        const double f  = (double) rs.frames;
+                        const double pf = (double) juce::jmax (1, rs.paintedFrames);
+                        juce::String ph;
+                        ph << "frames=" << rs.frames << " paint=" << rs.paintedFrames
+                           << " | per-frame ms: preLock " << juce::String (rs.preLockMs / f, 2)
+                           << " sleep " << juce::String (rs.sleepMs / f, 2)
+                           << " lockWait " << juce::String (rs.lockWaitMs / f, 2)
+                           << " renderOpenGL " << juce::String (rs.rendererMs / f, 2)
+                           << " paintComp " << juce::String (rs.paintMs / f, 2)
+                           << " draw " << juce::String (rs.drawMs / f, 2)
+                           << " swap " << juce::String (rs.swapMs / f, 2)
+                           << " | paintComp/painted-frame " << juce::String (rs.paintMs / pf, 2)
+                           << "ms, " << juce::String (rs.paintedMPix / pf, 3) << "Mpx";
+                        Y2K_DIAG ("GLPHASE", ph);
+                        if (toyDirector != nullptr && toyDirector->clock != nullptr)
+                        {
+                            const auto ts = toyDirector->clock->takeDiagSnapshot();
+                            juce::String tl;
+                            tl << "free=" << ts.freeActors << " fullEmoji=" << ts.fullEmoji
+                               << " target=" << ts.emojiTarget << " smoothedFps="
+                               << juce::String (ts.smoothedFps, 1)
+                               << " | overlay paints=" << ts.overlayPaints
+                               << " actors=" << ts.overlayActorsPainted
+                               << " ms=" << juce::String (ts.overlayPaintMs, 1);
+                            Y2K_DIAG ("TOY", tl);
+                        }
+                    }
+                }
                 if (workspace != nullptr)
                 {
                     for (int i = 0; i < workspace->getNumModules(); ++i)
@@ -7890,6 +7924,265 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
                         + " presets=" + juce::String (milkdrop_preset_paths_.size()));
 }
 
+// ================================================================
+// projectM 渲染一帧 + 整体染色后处理（GL 线程）
+//   Win 性能优化：从 renderOpenGL() 抽出，既可在 JUCE 补丁的 renderOpenGLPreLock()
+//   （未持消息锁、消息线程并行运行）里调用，也可在 renderOpenGL() 里同步调用。
+//   只触碰 GL 线程私有状态与 PCM 互斥量，禁止访问组件树。
+//   返回值：供各模块 blit 的源 FBO（染色后为 post FBO，否则为 render FBO）。
+//   forceRender：忽略 60fps 节流强制渲染（FBO 尺寸变化后需要立刻有有效内容）。
+// ================================================================
+unsigned int Y2KmeterAudioProcessorEditor::renderMilkdropFrameCore (int fbo_w, int fbo_h, bool forceRender)
+{
+  using namespace juce::gl;
+  auto& api = projectm_api::Api::instance();
+
+  // 消费 PCM
+  {
+    // 诊断：这把锁由 UI 线程（PushMilkdropPcm）与 GL 线程共同持有。
+    //   若 GL 线程卡在 "wait milkdrop_pcm_mutex_"，说明 UI 线程持锁未放。
+    Y2K_DIAG_PHASE ("gl:wait milkdrop_pcm_mutex_");
+    std::lock_guard<std::mutex> lock(milkdrop_pcm_mutex_);
+    Y2K_DIAG_PHASE ("gl:milkdrop pcm feed");
+    if (milkdrop_pending_frames_ > 0) {
+      api.addPcmFloat(milkdrop_pm_handle_,
+                      milkdrop_pending_pcm_.data(),
+                      milkdrop_pending_frames_, true);
+      milkdrop_has_ever_received_pcm_ = true;
+      milkdrop_last_real_pcm_ = milkdrop_pending_pcm_;
+      milkdrop_last_real_frames_ = milkdrop_pending_frames_;
+      milkdrop_pending_frames_ = 0;
+    } else {
+      // 无新音频 / 冷启动：送入静音，projectM 内部音频缓冲自然衰减，
+      // bass/mid/treb → 0，驱动动画逐渐趋近静止（或渲染 idle 预设）。
+      // v2.9：静音缓冲改为静态只读数组，避免 GL 线程每帧 16KB 堆分配 + 清零。
+      constexpr unsigned int kSilenceFrames = 2048;
+      static const std::array<float, kSilenceFrames * 2> kSilence {};
+      api.addPcmFloat(milkdrop_pm_handle_, kSilence.data(),
+                      kSilenceFrames, true);
+    }
+  }
+
+  // projectM 渲染: openglRenderFrameFbo → offscreen FBO → 跨FBO blit 到各模块
+  //   关键 API：openglRenderFrameFbo(fbo_id)——projectM 渲染到指定 FBO。
+  //   openglRenderFrame() 内部 glBindFramebuffer(0)，外部 FBO 被绕过。
+  //   使用 openglRenderFrameFbo 直接将 projectM 渲染到 offscreen FBO，
+  //   再跨 FBO blit 到各模块在 FBO 0 (CachedImage) 上的正确位置。
+
+  // 分配/重分配 offscreen FBO 纹理
+  bool need_realloc = (milkdrop_render_fbo_ != 0 && milkdrop_last_fbo_w_ == 0);
+  bool need_resize  = (milkdrop_render_fbo_ != 0
+                       && (fbo_w != milkdrop_last_fbo_w_
+                           || fbo_h != milkdrop_last_fbo_h_));
+  if (need_realloc || need_resize) {
+    // 诊断：projectM 离屏 FBO 的尺寸随最上层 Milkdrop 模块尺寸 × DPI / renderScale
+    //   变化而重分配。4K + 150% DPI 时这里可能是 5000×3000 级别，弱显卡上
+    //   glTexImage2D 会明显卡顿甚至失败。
+    Y2K_DIAG ("GL", "milkdrop FBO resize -> " + juce::String (fbo_w) + "x" + juce::String (fbo_h)
+                          + " (dpi=" + juce::String (openGLContext.getRenderingScale(), 2)
+                          + " renderScale=1/" + juce::String (milkdrop_render_scale_) + ")");
+    Y2K_DIAG_PHASE ("gl:TexImage2D (milkdrop render FBO)");
+  }
+  if (need_realloc) {
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
+    juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
+                           fbo_w, fbo_h, 0,
+                           juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                           nullptr);
+    juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                              juce::gl::GL_TEXTURE_MIN_FILTER,
+                              juce::gl::GL_LINEAR);
+    juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                              juce::gl::GL_TEXTURE_MAG_FILTER,
+                              juce::gl::GL_LINEAR);
+    juce::gl::glFramebufferTexture2D(juce::gl::GL_FRAMEBUFFER,
+                                     juce::gl::GL_COLOR_ATTACHMENT0,
+                                     juce::gl::GL_TEXTURE_2D,
+                                     milkdrop_render_tex_, 0);
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+  } else if (need_resize) {
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
+    juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
+                           fbo_w, fbo_h, 0,
+                           juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
+                           nullptr);
+    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
+  }
+  milkdrop_last_fbo_w_ = fbo_w;
+  milkdrop_last_fbo_h_ = fbo_h;
+
+  bool use_fbo_api = api.hasOpenglRenderFrameFbo();
+
+  // ================================================================
+  // 渲染 projectM
+  // v2.9.7：projectM 渲染按目标帧率（60fps）节流。Editor GL 单线程承担
+  //   Milkdrop 渲染 + 直渲染模块 + CPE 组件合成，120Hz 下每帧重复渲染
+  //   projectM 是纯浪费（projectM 内部动画按 setFps(60) 计时），尤其 mac
+  //   上 NSOpenGL 驱动 draw call 成本高。节流后 blit 仍每帧执行，画面位置
+  //   实时跟随模块拖动；FBO 保留上一帧内容，视觉无跳变。
+  const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
+  // Win 性能优化：节流改为"相位累加"。旧写法（距上次渲染 < 1/60s 就跳过）在帧周期不能整除
+  //   16.67ms 时会系统性偏低（例如 6.5ms 一帧 → 每 3 帧渲染一次 = 51fps）；
+  //   按下一次到期时刻累加，长期平均严格等于 kMilkdropTargetFps。
+  const double projectMIntervalSec = 1.0 / (double) kMilkdropTargetFps;
+  const bool skipProjectMRender =
+      ! forceRender && (nowSec + 0.0005 < milkdrop_next_render_sec_);
+  if (! skipProjectMRender) {
+    milkdrop_next_render_sec_ += projectMIntervalSec;
+    if (milkdrop_next_render_sec_ < nowSec)
+      milkdrop_next_render_sec_ = nowSec + projectMIntervalSec;   // 落后太多：重置相位
+  }
+
+  // ================================================================
+  if (use_fbo_api) {
+    // 主路径：projectM → offscreen FBO（openglRenderFrameFbo 接受 FBO ID）
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
+    juce::gl::glViewport(0, 0, fbo_w, fbo_h);
+    juce::gl::glScissor(0, 0, fbo_w, fbo_h);
+    juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
+    if (! skipProjectMRender) {
+      juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+      juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
+      api.setWindowSize(milkdrop_pm_handle_,
+                        static_cast<std::size_t>(fbo_w),
+                        static_cast<std::size_t>(fbo_h));
+      Y2K_DIAG_PHASE ("gl:projectM renderFrameFbo");
+      api.openglRenderFrameFbo(milkdrop_pm_handle_, milkdrop_render_fbo_);
+      milkdrop_last_render_sec_ = nowSec;
+    }
+    juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
+  } else if (! skipProjectMRender) {
+    // 降级路径：projectM → FBO 0 (0,0)（openglRenderFrame 内部绑定 FBO 0）
+    //   Win 性能优化：Windows 随包的 projectM-4.dll 没有 projectm_opengl_render_frame_fbo，
+    //   一直走本路径。此前降级路径"每个 GL 帧都真渲染"（88fps 下渲染 88 次/秒、每次 ~3ms），
+    //   现与主路径一样按 kMilkdropTargetFps 节流：跳过的帧 render FBO 保留上次内容
+    //   （blit 目标是离屏 FBO，不受 FBO 0 被 JUCE 覆盖影响），视觉无变化。
+    milkdrop_last_render_sec_ = nowSec;
+    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+    juce::gl::glViewport(0, 0, fbo_w, fbo_h);
+    juce::gl::glScissor(0, 0, fbo_w, fbo_h);
+    juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
+    juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
+    api.setWindowSize(milkdrop_pm_handle_,
+                      static_cast<std::size_t>(fbo_w),
+                      static_cast<std::size_t>(fbo_h));
+    api.openglRenderFrame(milkdrop_pm_handle_);
+    juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
+
+    // FBO 0 (0,0) → offscreen FBO（跨 FBO，安全）
+    juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
+    juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER,
+                                 milkdrop_render_fbo_);
+    juce::gl::glBlitFramebuffer(0, 0, fbo_w, fbo_h, 0, 0, fbo_w, fbo_h,
+                                 juce::gl::GL_COLOR_BUFFER_BIT,
+                                 juce::gl::GL_LINEAR);
+  }
+
+  // ================================================================
+  // 整体染色后处理（master output colors）：projectM → render FBO → post FBO → 各模块
+  // ================================================================
+  const auto visual_state = GetMilkdropVisualState();
+  const bool tint_active = !visual_state.isNeutral();
+
+  // v2.9.9：后处理与 projectM 渲染同节流。
+  //   · projectM 本帧被 60fps 节流跳过（skipProjectMRender）时，render FBO 内容
+  //     与上一帧逐像素相同，后处理结果也相同 → 直接复用上次的 post FBO，
+  //     省掉一次全屏采样 pass（120/144Hz 屏上相当于减半）。
+  //   · 视觉状态变化（拖滑块 / 切效果，版本号自增）必须立即重算，保证预览跟手。
+  //   · 降级路径（无 openglRenderFrameFbo）Win 性能优化 起同样节流。
+  const bool projectMRenderedThisFrame = ! skipProjectMRender;
+  const uint32_t visualVersion = milkdrop_visual_version_.load (std::memory_order_relaxed);
+
+  GLuint blit_source_fbo = milkdrop_render_fbo_;
+  if (tint_active) {
+    // 分配 / 重分配 post FBO（与 render FBO 同尺寸）
+    if (milkdrop_post_fbo_ == 0) {
+      juce::gl::glGenFramebuffers(1, &milkdrop_post_fbo_);
+      juce::gl::glGenTextures(1, &milkdrop_post_tex_);
+    }
+    if (milkdrop_post_w_ != fbo_w || milkdrop_post_h_ != fbo_h) {
+      juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_post_tex_);
+      juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
+                             fbo_w, fbo_h, 0,
+                             juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE, nullptr);
+      juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                                juce::gl::GL_TEXTURE_MIN_FILTER,
+                                juce::gl::GL_LINEAR);
+      juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
+                                juce::gl::GL_TEXTURE_MAG_FILTER,
+                                juce::gl::GL_LINEAR);
+      juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
+      juce::gl::glFramebufferTexture2D(juce::gl::GL_FRAMEBUFFER,
+                                       juce::gl::GL_COLOR_ATTACHMENT0,
+                                       juce::gl::GL_TEXTURE_2D,
+                                       milkdrop_post_tex_, 0);
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+      milkdrop_post_w_ = fbo_w;
+      milkdrop_post_h_ = fbo_h;
+      milkdrop_post_valid_ = false;   // 新分配的 FBO 内容无效
+    }
+
+    // 后处理：采样 render FBO 纹理 → post FBO，统一 pass 应用完整视觉状态。
+    const bool needTintPass =
+        milkdrop_tint_pass_ != nullptr && milkdrop_tint_pass_->isReady()
+        && (! milkdrop_post_valid_
+            || projectMRenderedThisFrame
+            || visualVersion != milkdrop_tint_applied_version_);
+
+    if (needTintPass) {
+      Y2K_DIAG_PHASE ("gl:milkdrop tint pass");
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
+      juce::gl::glViewport(0, 0, fbo_w, fbo_h);
+      milkdrop_tint_pass_->apply(milkdrop_render_tex_, visual_state);
+      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
+      milkdrop_post_valid_ = true;
+      milkdrop_tint_applied_version_ = visualVersion;
+    }
+
+    if (milkdrop_post_valid_)
+      blit_source_fbo = milkdrop_post_fbo_;
+  }
+  else
+  {
+    // 回到中性：post FBO 内容不再代表当前画面，下次启用时必须重算。
+    milkdrop_post_valid_ = false;
+  }
+
+  return blit_source_fbo;
+}
+
+// ================================================================
+// JUCE 补丁 renderOpenGLPreLock()（仅 Windows 调用）：未持消息锁时提前完成
+//   projectM 渲染 + 染色后处理。原先这 ~3ms 在持锁的 renderOpenGL() 里执行，
+//   整段时间消息线程（数据分发 / onFrame / 定时器）被迫停转；挪到锁外后
+//   两者并行，帧周期不再是"消息线程耗时 + GL 持锁耗时"的串行叠加。
+//   FBO 尺寸取自上一帧持锁阶段的测量结果（milkdrop_pre_w_/h_）；
+//   首帧或尺寸变化时由 renderOpenGL() 持锁阶段补渲染。
+// ================================================================
+void Y2KmeterAudioProcessorEditor::renderOpenGLPreLock()
+{
+  if (! milkdrop_render_ready_ || milkdrop_pm_handle_ == nullptr
+      || milkdrop_pre_w_ <= 0 || milkdrop_pre_h_ <= 0)
+    return;
+
+  auto& api = projectm_api::Api::instance();
+
+  y2k::diag::setThreadTag ("GL");
+  y2k::diag::setPhase ("Editor::renderOpenGLPreLock");
+
+  const double t0 = y2k::diag::isEnabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+
+  milkdrop_pre_blit_fbo_ = renderMilkdropFrameCore (milkdrop_pre_w_, milkdrop_pre_h_, false);
+  milkdrop_pre_done_ = true;
+  juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+
+  if (t0 > 0.0)
+    milkdrop_pre_ms_ += juce::Time::getMillisecondCounterHiRes() - t0;
+}
+
 void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   using namespace juce::gl;
 
@@ -8044,38 +8337,6 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
                 std::chrono::steady_clock::now().time_since_epoch()).count()));
   }
 
-  // 消费 PCM
-  {
-    // 诊断：这把锁由 UI 线程（PushMilkdropPcm）与 GL 线程共同持有。
-    //   若 GL 线程卡在 "wait milkdrop_pcm_mutex_"，说明 UI 线程持锁未放。
-    Y2K_DIAG_PHASE ("gl:wait milkdrop_pcm_mutex_");
-    std::lock_guard<std::mutex> lock(milkdrop_pcm_mutex_);
-    Y2K_DIAG_PHASE ("gl:milkdrop pcm feed");
-    if (milkdrop_pending_frames_ > 0) {
-      api.addPcmFloat(milkdrop_pm_handle_,
-                      milkdrop_pending_pcm_.data(),
-                      milkdrop_pending_frames_, true);
-      milkdrop_has_ever_received_pcm_ = true;
-      milkdrop_last_real_pcm_ = milkdrop_pending_pcm_;
-      milkdrop_last_real_frames_ = milkdrop_pending_frames_;
-      milkdrop_pending_frames_ = 0;
-    } else {
-      // 无新音频 / 冷启动：送入静音，projectM 内部音频缓冲自然衰减，
-      // bass/mid/treb → 0，驱动动画逐渐趋近静止（或渲染 idle 预设）。
-      // v2.9：静音缓冲改为静态只读数组，避免 GL 线程每帧 16KB 堆分配 + 清零。
-      constexpr unsigned int kSilenceFrames = 2048;
-      static const std::array<float, kSilenceFrames * 2> kSilence {};
-      api.addPcmFloat(milkdrop_pm_handle_, kSilence.data(),
-                      kSilenceFrames, true);
-    }
-  }
-
-  // projectM 渲染: openglRenderFrameFbo → offscreen FBO → 跨FBO blit 到各模块
-  //   关键 API：openglRenderFrameFbo(fbo_id)——projectM 渲染到指定 FBO。
-  //   openglRenderFrame() 内部 glBindFramebuffer(0)，外部 FBO 被绕过。
-  //   使用 openglRenderFrameFbo 直接将 projectM 渲染到 offscreen FBO，
-  //   再跨 FBO blit 到各模块在 FBO 0 (CachedImage) 上的正确位置。
-
   // 收集最大模块尺寸 → projectM 窗口和 offscreen FBO 大小
   int max_w = 256, max_h = 256;
   int floating_cw = 0, floating_ch = 0;  // 浮动 Milkdrop 模块 content 尺寸（独立追踪）
@@ -8124,173 +8385,23 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   fbo_w = std::max(fbo_w, 1);
   fbo_h = std::max(fbo_h, 1);
 
-  // 分配/重分配 offscreen FBO 纹理
-  bool need_realloc = (milkdrop_render_fbo_ != 0 && milkdrop_last_fbo_w_ == 0);
-  bool need_resize  = (milkdrop_render_fbo_ != 0
-                       && (fbo_w != milkdrop_last_fbo_w_
-                           || fbo_h != milkdrop_last_fbo_h_));
-  if (need_realloc || need_resize) {
-    // 诊断：projectM 离屏 FBO 的尺寸随最上层 Milkdrop 模块尺寸 × DPI / renderScale
-    //   变化而重分配。4K + 150% DPI 时这里可能是 5000×3000 级别，弱显卡上
-    //   glTexImage2D 会明显卡顿甚至失败。
-    Y2K_DIAG ("GL", "milkdrop FBO resize -> " + juce::String (fbo_w) + "x" + juce::String (fbo_h)
-                          + " (dpi=" + juce::String ((double) dpi_scale, 2)
-                          + " renderScale=1/" + juce::String (milkdrop_render_scale_) + ")");
-    Y2K_DIAG_PHASE ("gl:TexImage2D (milkdrop render FBO)");
-  }
-  if (need_realloc) {
-    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
-    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
-    juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
-                           fbo_w, fbo_h, 0,
-                           juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
-                           nullptr);
-    juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                              juce::gl::GL_TEXTURE_MIN_FILTER,
-                              juce::gl::GL_LINEAR);
-    juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                              juce::gl::GL_TEXTURE_MAG_FILTER,
-                              juce::gl::GL_LINEAR);
-    juce::gl::glFramebufferTexture2D(juce::gl::GL_FRAMEBUFFER,
-                                     juce::gl::GL_COLOR_ATTACHMENT0,
-                                     juce::gl::GL_TEXTURE_2D,
-                                     milkdrop_render_tex_, 0);
-    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-  } else if (need_resize) {
-    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_render_tex_);
-    juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
-                           fbo_w, fbo_h, 0,
-                           juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE,
-                           nullptr);
-    juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
-  }
-  milkdrop_last_fbo_w_ = fbo_w;
-  milkdrop_last_fbo_h_ = fbo_h;
 
-  bool use_fbo_api = api.hasOpenglRenderFrameFbo();
-
-  // ================================================================
-  // 渲染 projectM
-  // v2.9.7：projectM 渲染按目标帧率（60fps）节流。Editor GL 单线程承担
-  //   Milkdrop 渲染 + 直渲染模块 + CPE 组件合成，120Hz 下每帧重复渲染
-  //   projectM 是纯浪费（projectM 内部动画按 setFps(60) 计时），尤其 mac
-  //   上 NSOpenGL 驱动 draw call 成本高。节流后 blit 仍每帧执行，画面位置
-  //   实时跟随模块拖动；FBO 保留上一帧内容，视觉无跳变。
-  const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
-  const bool skipProjectMRender =
-      (nowSec - milkdrop_last_render_sec_ < (1.0 / (double) kMilkdropTargetFps));
-
-  // ================================================================
-  if (use_fbo_api) {
-    // 主路径：projectM → offscreen FBO（openglRenderFrameFbo 接受 FBO ID）
-    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_render_fbo_);
-    juce::gl::glViewport(0, 0, fbo_w, fbo_h);
-    juce::gl::glScissor(0, 0, fbo_w, fbo_h);
-    juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
-    if (! skipProjectMRender) {
-      juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-      juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
-      api.setWindowSize(milkdrop_pm_handle_,
-                        static_cast<std::size_t>(fbo_w),
-                        static_cast<std::size_t>(fbo_h));
-      Y2K_DIAG_PHASE ("gl:projectM renderFrameFbo");
-      api.openglRenderFrameFbo(milkdrop_pm_handle_, milkdrop_render_fbo_);
-      milkdrop_last_render_sec_ = nowSec;
-    }
-    juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
-  } else {
-    // 降级路径：projectM → FBO 0 (0,0)（openglRenderFrame 内部绑定 FBO 0）
-    juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-    juce::gl::glViewport(0, 0, fbo_w, fbo_h);
-    juce::gl::glScissor(0, 0, fbo_w, fbo_h);
-    juce::gl::glEnable(juce::gl::GL_SCISSOR_TEST);
-    juce::gl::glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    juce::gl::glClear(juce::gl::GL_COLOR_BUFFER_BIT);
-    api.setWindowSize(milkdrop_pm_handle_,
-                      static_cast<std::size_t>(fbo_w),
-                      static_cast<std::size_t>(fbo_h));
-    api.openglRenderFrame(milkdrop_pm_handle_);
-    juce::gl::glDisable(juce::gl::GL_SCISSOR_TEST);
-
-    // FBO 0 (0,0) → offscreen FBO（跨 FBO，安全）
-    juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
-    juce::gl::glBindFramebuffer(juce::gl::GL_DRAW_FRAMEBUFFER,
-                                 milkdrop_render_fbo_);
-    juce::gl::glBlitFramebuffer(0, 0, fbo_w, fbo_h, 0, 0, fbo_w, fbo_h,
-                                 juce::gl::GL_COLOR_BUFFER_BIT,
-                                 juce::gl::GL_LINEAR);
-  }
-
-  // ================================================================
-  // 整体染色后处理（master output colors）：projectM → render FBO → post FBO → 各模块
-  // ================================================================
-  const auto visual_state = GetMilkdropVisualState();
-  const bool tint_active = !visual_state.isNeutral();
-
-  // v2.9.9：后处理与 projectM 渲染同节流。
-  //   · projectM 本帧被 60fps 节流跳过（skipProjectMRender）时，render FBO 内容
-  //     与上一帧逐像素相同，后处理结果也相同 → 直接复用上次的 post FBO，
-  //     省掉一次全屏采样 pass（120/144Hz 屏上相当于减半）。
-  //   · 视觉状态变化（拖滑块 / 切效果，版本号自增）必须立即重算，保证预览跟手。
-  //   · 降级路径（无 openglRenderFrameFbo，projectM 每帧都真渲染）不节流。
-  const bool projectMRenderedThisFrame = use_fbo_api ? (! skipProjectMRender) : true;
-  const uint32_t visualVersion = milkdrop_visual_version_.load (std::memory_order_relaxed);
-
-  GLuint blit_source_fbo = milkdrop_render_fbo_;
-  if (tint_active) {
-    // 分配 / 重分配 post FBO（与 render FBO 同尺寸）
-    if (milkdrop_post_fbo_ == 0) {
-      juce::gl::glGenFramebuffers(1, &milkdrop_post_fbo_);
-      juce::gl::glGenTextures(1, &milkdrop_post_tex_);
-    }
-    if (milkdrop_post_w_ != fbo_w || milkdrop_post_h_ != fbo_h) {
-      juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, milkdrop_post_tex_);
-      juce::gl::glTexImage2D(juce::gl::GL_TEXTURE_2D, 0, juce::gl::GL_RGBA8,
-                             fbo_w, fbo_h, 0,
-                             juce::gl::GL_RGBA, juce::gl::GL_UNSIGNED_BYTE, nullptr);
-      juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                juce::gl::GL_TEXTURE_MIN_FILTER,
-                                juce::gl::GL_LINEAR);
-      juce::gl::glTexParameteri(juce::gl::GL_TEXTURE_2D,
-                                juce::gl::GL_TEXTURE_MAG_FILTER,
-                                juce::gl::GL_LINEAR);
-      juce::gl::glBindTexture(juce::gl::GL_TEXTURE_2D, 0);
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
-      juce::gl::glFramebufferTexture2D(juce::gl::GL_FRAMEBUFFER,
-                                       juce::gl::GL_COLOR_ATTACHMENT0,
-                                       juce::gl::GL_TEXTURE_2D,
-                                       milkdrop_post_tex_, 0);
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-      milkdrop_post_w_ = fbo_w;
-      milkdrop_post_h_ = fbo_h;
-      milkdrop_post_valid_ = false;   // 新分配的 FBO 内容无效
-    }
-
-    // 后处理：采样 render FBO 纹理 → post FBO，统一 pass 应用完整视觉状态。
-    const bool needTintPass =
-        milkdrop_tint_pass_ != nullptr && milkdrop_tint_pass_->isReady()
-        && (! milkdrop_post_valid_
-            || projectMRenderedThisFrame
-            || visualVersion != milkdrop_tint_applied_version_);
-
-    if (needTintPass) {
-      Y2K_DIAG_PHASE ("gl:milkdrop tint pass");
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, milkdrop_post_fbo_);
-      juce::gl::glViewport(0, 0, fbo_w, fbo_h);
-      milkdrop_tint_pass_->apply(milkdrop_render_tex_, visual_state);
-      juce::gl::glBindFramebuffer(juce::gl::GL_FRAMEBUFFER, 0);
-      milkdrop_post_valid_ = true;
-      milkdrop_tint_applied_version_ = visualVersion;
-    }
-
-    if (milkdrop_post_valid_)
-      blit_source_fbo = milkdrop_post_fbo_;
-  }
-  else
+  // Win 性能优化：projectM 渲染 + 染色后处理优先复用 renderOpenGLPreLock() 在锁外完成的结果；
+  //   首帧 / FBO 尺寸变化 / 非 Windows 平台则在这里同步渲染。
+  //   预渲染过但尺寸变了时必须强制渲染（否则 60fps 节流会让新 FBO 空一帧）。
+  GLuint blit_source_fbo = 0;
   {
-    // 回到中性：post FBO 内容不再代表当前画面，下次启用时必须重算。
-    milkdrop_post_valid_ = false;
+    const bool reusePre = milkdrop_pre_done_
+                          && fbo_w == milkdrop_pre_w_ && fbo_h == milkdrop_pre_h_;
+    if (reusePre)
+      blit_source_fbo = milkdrop_pre_blit_fbo_;
+    else
+      blit_source_fbo = renderMilkdropFrameCore (fbo_w, fbo_h, milkdrop_pre_done_);
+    milkdrop_pre_done_ = false;
+    milkdrop_pre_w_ = fbo_w;
+    milkdrop_pre_h_ = fbo_h;
   }
+
 
   // ================================================================
   // v2.9.3：GL 直渲染 z 序统一遍历（Milkdrop blit + S3D 条带按组件树
@@ -8415,8 +8526,10 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   //   注意：glGetError 每帧只查一次，避免逐模块查询带来的驱动往返开销。
   if (diagOn)
   {
-    const double totalMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs;
-    y2k::diag::addFrameSample (totalMs, diagMilkdropMs, diagDirectMs);
+    const double diagPreMs = milkdrop_pre_ms_;   // 锁外预渲染耗时也计入本帧统计
+    milkdrop_pre_ms_ = 0.0;
+    const double totalMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs + diagPreMs;
+    y2k::diag::addFrameSample (totalMs, diagMilkdropMs + diagPreMs, diagDirectMs);
 
     // 诊断埋点（GL）：单帧耗时超过阈值时即时落一行（带毫秒时间戳）。与 UIPOPUP
     //   的"点击 → 弹菜单"时间戳对齐后，可判断点击后的卡顿是否夹在一条慢 GL 帧

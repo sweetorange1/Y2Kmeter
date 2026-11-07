@@ -47,6 +47,8 @@ public:
     // ==============================================================
     void newOpenGLContextCreated() override;
     void renderOpenGL() override;
+    // Win 性能优化（JUCE 补丁，仅 Windows）：持消息锁之前调用，锁外完成 projectM 渲染
+    void renderOpenGLPreLock() override;
     void openGLContextClosing() override;
 
     // 只销毁 Editor 侧 Milkdrop 渲染资源（projectM handle + FBO + 染色后处理），
@@ -760,6 +762,8 @@ private:
     void renderGlDirectModulesZOrdered (float dpiScale, int editorLogicalHeight,
                                         int editorPhysHeight,
                                         bool milkdropReady, unsigned int milkdropBlitSourceFbo);
+    // Win 性能优化：projectM 渲染 + 染色后处理（GL 线程；可在锁外预渲染里调用）
+    unsigned int renderMilkdropFrameCore (int fboW, int fboH, bool forceRender);
     std::unique_ptr<juce::OpenGLShaderProgram> s3dShader;
     std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTransformUniform;
     std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dNdcUniform;
@@ -912,6 +916,14 @@ private:
     int    milkdrop_last_fbo_w_   = 0;
     int    milkdrop_last_fbo_h_   = 0;
     double milkdrop_last_render_sec_ = 0.0;  // 上次 projectM 渲染时刻（60fps 节流）
+    double milkdrop_next_render_sec_ = 0.0;  // Win 性能优化：下一次 projectM 渲染的到期时刻（相位累加节流）
+
+    // Win 性能优化：projectM 渲染 + 染色后处理的锁外预渲染（JUCE 补丁 renderOpenGLPreLock，
+    //   仅 Windows 调用）。全部只在 GL 线程读写。
+    unsigned int milkdrop_pre_blit_fbo_ = 0;    ///< 预渲染产出的 blit 源 FBO
+    bool         milkdrop_pre_done_     = false;///< 本帧是否已在锁外渲染过
+    int          milkdrop_pre_w_ = 0, milkdrop_pre_h_ = 0;  ///< 预渲染使用的 FBO 尺寸（上一帧持锁阶段测得）
+    double       milkdrop_pre_ms_       = 0.0;  ///< 预渲染耗时（仅诊断开启时累计，计入帧统计）
 
     // 整体染色后处理（master output colors）：projectM 渲染到 milkdrop_render_fbo_ 后，
     // 若染色增益非 (1,1,1)，先经着色器采样到 milkdrop_post_fbo_，再 blit 到各模块。

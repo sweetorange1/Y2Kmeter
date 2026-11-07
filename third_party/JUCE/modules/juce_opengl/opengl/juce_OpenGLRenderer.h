@@ -81,6 +81,16 @@ public:
     */
     virtual void renderOpenGL() = 0;
 
+    /** (Y2Kmeter patch, Windows only) Optional hook called on the render thread right
+        before the message manager lock is taken for a frame that repaints components.
+
+        The context is active but the MessageManager is NOT locked, so the message thread
+        keeps running while this executes. Only touch GL resources and data owned by the
+        render thread here; never access the component tree. Use it for GPU / CPU heavy work
+        that doesn't need the component tree (e.g. rendering to an offscreen FBO that
+        renderOpenGL() will composite afterwards). Default: does nothing.
+    */
+    virtual void renderOpenGLPreLock() {}
     /** Called when the current openGL context is about to close.
         You can use this opportunity to release any GL resources that you may have
         created.

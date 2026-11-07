@@ -15,6 +15,7 @@
 | 0003 | `juce_Font.cpp`、`juce_FontOptions.cpp` | Font 比较快速路径：同一共享实例直接判等；`FontOptions::tie()` 改为返回引用 tuple，不再拷贝 String / vector | v3.0.2（mac 性能） |
 | 0004 | `juce_OpenGLGraphicsContext.cpp` | mac 下 VBO orphaning（先 `glBufferData(nullptr)` 再 `glBufferSubData`），避免驱动隐式同步卡顿 | v3.0.2（mac 性能） |
 | 0005 | `juce_OpenGLContext.h/.cpp` | 新增 `OpenGLContext::setComponentRepaintsPacedToDisplay()`（仅 mac）：组件 repaint 合并到下一个 CVDisplayLink 刷新再出帧。显示器刷新信号超过 100ms 没来时自动退回立即渲染 | v3.0.2（mac 性能） |
+| 0006 | `juce_OpenGLContext.h/.cpp`、`juce_OpenGLRenderer.h` | `OpenGLContext::takeRenderStats()`：渲染线程分段耗时（sleep / 锁等待 / renderOpenGL / paintComponent / 合成 / swap / 重绘面积）；`OpenGLRenderer::renderOpenGLPreLock()`（仅 Windows 调用）：在拿消息锁之前执行，Editor 用它在锁外渲染 projectM，让消息线程与 GL 并行 | Win 性能优化 |
 
 ## 升级 JUCE 时
 

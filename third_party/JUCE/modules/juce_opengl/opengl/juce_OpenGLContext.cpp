@@ -394,6 +394,15 @@ public:
 
         const auto isUpdating = isFlagSet (stateToUse, StateFlags::paintComponents);
 
+        // Y2Kmeter patch: render thread phase timing
+        using StatsClock = std::chrono::steady_clock;
+        const auto usBetween = [] (StatsClock::time_point a, StatsClock::time_point b)
+        {
+            return (int64) std::chrono::duration_cast<std::chrono::microseconds> (b - a).count();
+        };
+        auto& stats = context.renderStatsAccum;
+        auto tMark = StatsClock::now();
+
         if (context.renderComponents && isUpdating)
         {
             bool abortScope = false;
@@ -401,8 +410,36 @@ public:
             // attempted again in the next time slice.
             const ScopeGuard scope { [&] { if (! abortScope) state |= stateToUse; } };
 
+            // Y2Kmeter patch (Windows): let the renderer do lock-free work (offscreen FBO
+            //   rendering that doesn't touch the component tree) while the message thread
+            //   keeps running. It also counts towards the anti-hogging delay below.
+           #if JUCE_WINDOWS
+            if (context.renderer != nullptr && ! renderThread->isListChanging()
+                && contextActivator.activate (context))
+            {
+                NativeContext::Locker locker (*nativeContext);
+                OpenGLRendering::SavedBinding<OpenGLRendering::TraitsVAO> vaoBinding;
+
+                const auto currentAreaAndScale = areaAndScale.get();
+                glViewport (0, 0, currentAreaAndScale.area.getWidth(), currentAreaAndScale.area.getHeight());
+                context.currentRenderScale = currentAreaAndScale.scale;
+                context.renderer->renderOpenGLPreLock();
+                clearGLError();
+
+                const auto tNow = StatsClock::now();
+                stats.preLockUs += usBetween (tMark, tNow);
+                tMark = tNow;
+            }
+           #endif
+
             // This avoids hogging the message thread when doing intensive rendering.
             std::this_thread::sleep_until (lastMMLockReleaseTime + std::chrono::milliseconds { 2 });
+
+            {
+                const auto tNow = StatsClock::now();
+                stats.sleepUs += usBetween (tMark, tNow);
+                tMark = tNow;
+            }
 
             if (renderThread->isListChanging())
                 return RenderStatus::messageThreadAborted;
@@ -420,6 +457,12 @@ public:
                 return RenderStatus::messageThreadAborted;
 
             abortScope = true;
+        }
+
+        {
+            const auto tNow = StatsClock::now();
+            stats.lockWaitUs += usBetween (tMark, tNow);
+            tMark = tNow;
         }
 
         {
@@ -445,6 +488,12 @@ public:
                 clearGLError();
             }
 
+            {
+                const auto tNow = StatsClock::now();
+                stats.rendererUs += usBetween (tMark, tNow);
+                tMark = tNow;
+            }
+
             if (context.renderComponents)
             {
                 if (isUpdating)
@@ -456,14 +505,27 @@ public:
 
                     scopedLock.reset();
                     lastMMLockReleaseTime = std::chrono::steady_clock::now();
+
+                    stats.paintedFrames += 1;
+                    stats.paintUs += usBetween (tMark, lastMMLockReleaseTime);
+                    tMark = lastMMLockReleaseTime;
                 }
 
                 glViewport (0, 0, viewportArea.getWidth(), viewportArea.getHeight());
                 drawComponentBuffer();
             }
+
+            {
+                const auto tNow = StatsClock::now();
+                stats.drawUs += usBetween (tMark, tNow);
+                tMark = tNow;
+            }
         }
 
         bufferSwapper.swap();
+
+        stats.swapUs += usBetween (tMark, StatsClock::now());
+        stats.frames += 1;
         return RenderStatus::nominal;
     }
 
@@ -557,6 +619,16 @@ public:
 
         if (! invalid.isEmpty())
         {
+            // Y2Kmeter patch: invalidated pixel count for the stats
+            {
+                int64 pixels = 0;
+
+                for (auto& r : invalid)
+                    pixels += (int64) r.getWidth() * (int64) r.getHeight();
+
+                context.renderStatsAccum.paintedPixels += pixels;
+            }
+
             clearRegionInFrameBuffer (invalid);
 
             {
@@ -1337,6 +1409,25 @@ void OpenGLContext::setComponentRepaintsPacedToDisplay (bool shouldPace) noexcep
     if (auto* cachedImage = getCachedImage())
         cachedImage->refreshDisplayLinkConnection();
    #endif
+}
+
+OpenGLContext::RenderStats OpenGLContext::takeRenderStats() noexcept
+{
+    RenderStats s;
+    auto& a = renderStatsAccum;
+    const auto ms = [] (std::atomic<int64>& v) { return (double) v.exchange (0) / 1000.0; };
+
+    s.frames        = (int) a.frames.exchange (0);
+    s.paintedFrames = (int) a.paintedFrames.exchange (0);
+    s.sleepMs       = ms (a.sleepUs);
+    s.preLockMs     = ms (a.preLockUs);
+    s.lockWaitMs    = ms (a.lockWaitUs);
+    s.rendererMs    = ms (a.rendererUs);
+    s.paintMs       = ms (a.paintUs);
+    s.drawMs        = ms (a.drawUs);
+    s.swapMs        = ms (a.swapUs);
+    s.paintedMPix   = (double) a.paintedPixels.exchange (0) / 1.0e6;
+    return s;
 }
 
 void OpenGLContext::setPixelFormat (const OpenGLPixelFormat& preferredPixelFormat) noexcept

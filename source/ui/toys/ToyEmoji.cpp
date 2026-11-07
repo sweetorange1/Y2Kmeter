@@ -648,9 +648,10 @@ int EmojiAtlas::bucketOf (float angleRad)
     return bucket;
 }
 
-static size_t rotKey (int id, int size, float angleRad)
+static size_t rotKey (int id, int size, float angleRad, bool fit)
 {
-    return ((size_t) id << 8) | ((size_t) size << 4) | (size_t) EmojiAtlas::bucketOf (angleRad);
+    return ((size_t) id << 8) | (fit ? (size_t) 0x40 : (size_t) 0) | ((size_t) size << 4)
+         | (size_t) EmojiAtlas::bucketOf (angleRad);
 }
 
 juce::Image EmojiAtlas::rotatedCached (EmojiId id, Size size, float angleRad)
@@ -660,7 +661,7 @@ juce::Image EmojiAtlas::rotatedCached (EmojiId id, Size size, float angleRad)
         return {};
 
     // paint 路径：只做无锁快查（值拷贝，引用计数，零烘焙、零风险）
-    const size_t key = rotKey (i, (int) size, angleRad);
+    const size_t key = rotKey (i, (int) size, angleRad, fitDrawSize_);
     const juce::ScopedLock sl (rotLock_);
     auto it = rotCache_.find (key);
     if (it != rotCache_.end())
@@ -668,17 +669,18 @@ juce::Image EmojiAtlas::rotatedCached (EmojiId id, Size size, float angleRad)
     return {};
 }
 
-void EmojiAtlas::ensureRotated (EmojiId id, Size size, float angleRad)
+bool EmojiAtlas::ensureRotated (EmojiId id, Size size, float angleRad)
 {
     const int i = (int) id;
     if (i < 0 || i >= (int) EmojiId::Count)
-        return;
+        return true;   // 无效 id：无需重试
 
-    const size_t key = rotKey (i, (int) size, angleRad);
+    const bool fit = fitDrawSize_;
+    const size_t key = rotKey (i, (int) size, angleRad, fit);
     {
         const juce::ScopedLock sl (rotLock_);
         if (rotCache_.find (key) != rotCache_.end())
-            return;
+            return true;
     }
 
     // 性能优化 P11：烘焙节流（每 16ms 窗口最多 2 张），
@@ -692,30 +694,31 @@ void EmojiAtlas::ensureRotated (EmojiId id, Size size, float angleRad)
             lastWindow = nowMs;
             bakedInWindow = 0;
         }
-        if (bakedInWindow >= 2)
-            return;
+        if (bakedInWindow >= 6)   // Win 性能优化：2 → 6（fit 模式单张 <0.1ms，一次点击要补 ~20 张）
+            return false;
         ++bakedInWindow;
     }
 
     // 原图尚未烘焙完成（预烘焙 timer 未走到该条目）→ 本轮跳过，
     //   绝不在这里触发 bakeOne（D2D 工厂是 SINGLE_THREADED，只能由消息线程 timer 独占使用）
     if (! isBaked (id, size))
-        return;
+        return false;
 
     // step 阶段烘焙（不嵌套在 paint 回调里）：以主题版（或原图）为源
     const juce::Image& src = themedImage (id, size);
     if (! src.isValid() || src.getWidth() <= 0)
-        return;
+        return true;
 
     // 自写最邻近采样旋转（固定 w×w 次循环，不依赖 JUCE 软件渲染的 transform 路径，
     //   从机制上杜绝渲染层死循环；24~48px 小图每次烘焙 ~百微秒级）
     const juce::Image srcCopy = src;   // BitmapData 需要非 const Image&
     const int w = srcCopy.getWidth();
-    juce::Image rotated (juce::Image::ARGB, w, w, true);
+    const int outW = fit ? juce::jmax (8, drawSize (size)) : w;
+    juce::Image rotated (juce::Image::ARGB, outW, outW, true);
     {
         const juce::Image::BitmapData sbd (const_cast<juce::Image&> (srcCopy), 0, 0, w, w,
                                            juce::Image::BitmapData::readOnly);
-        juce::Image::BitmapData dbd (rotated, 0, 0, w, w, juce::Image::BitmapData::writeOnly);
+        juce::Image::BitmapData dbd (rotated, 0, 0, outW, outW, juce::Image::BitmapData::writeOnly);
 
         const float step = 6.2831853f / (float) kRotBuckets;
         const int bucket = (int) (key & 0xF);
@@ -724,15 +727,47 @@ void EmojiAtlas::ensureRotated (EmojiId id, Size size, float angleRad)
         const float cs = std::cos (ang);
         const float sn = std::sin (ang);
 
-        for (int y = 0; y < w; ++y)
+        if (! fit)
         {
-            for (int x = 0; x < w; ++x)
+            for (int y = 0; y < w; ++y)
             {
-                const float dx = (float) x - h;
-                const float dy = (float) y - h;
-                const int sx = juce::jlimit (0, w - 1, juce::roundToInt (dx * cs + dy * sn + h));
-                const int sy = juce::jlimit (0, w - 1, juce::roundToInt (-dx * sn + dy * cs + h));
-                dbd.setPixelColour (x, y, sbd.getPixelColour (sx, sy));
+                for (int x = 0; x < w; ++x)
+                {
+                    const float dx = (float) x - h;
+                    const float dy = (float) y - h;
+                    const int sx = juce::jlimit (0, w - 1, juce::roundToInt (dx * cs + dy * sn + h));
+                    const int sy = juce::jlimit (0, w - 1, juce::roundToInt (-dx * sn + dy * cs + h));
+                    dbd.setPixelColour (x, y, sbd.getPixelColour (sx, sy));
+                }
+            }
+        }
+        else
+        {
+            // 直接烘焙成屏幕尺寸：每个目标像素 2×2 子采样（预乘空间平均）= 等价于原先
+            //   "2x 图 + GPU 线性缩小"的抗锯齿效果，且 paint 时无需任何缩放。
+            const float k = (float) w / (float) outW;
+            const float oh = (float) outW * 0.5f;
+            for (int y = 0; y < outW; ++y)
+            {
+                for (int x = 0; x < outW; ++x)
+                {
+                    int sa = 0, sr = 0, sg = 0, sb = 0;
+                    for (int sj = 0; sj < 2; ++sj)
+                    {
+                        for (int si = 0; si < 2; ++si)
+                        {
+                            const float dx = ((float) x + ((float) si + 0.5f) * 0.5f - oh) * k;
+                            const float dy = ((float) y + ((float) sj + 0.5f) * 0.5f - oh) * k;
+                            const int sx = juce::jlimit (0, w - 1, (int) std::floor (dx * cs + dy * sn + h));
+                            const int sy = juce::jlimit (0, w - 1, (int) std::floor (-dx * sn + dy * cs + h));
+                            const juce::PixelARGB p = sbd.getPixelColour (sx, sy).getPixelARGB();
+                            sa += p.getAlpha(); sr += p.getRed(); sg += p.getGreen(); sb += p.getBlue();
+                        }
+                    }
+                    const juce::PixelARGB avg ((juce::uint8) (sa / 4), (juce::uint8) (sr / 4),
+                                               (juce::uint8) (sg / 4), (juce::uint8) (sb / 4));
+                    dbd.setPixelColour (x, y, juce::Colour (avg));
+                }
             }
         }
     }
@@ -742,8 +777,8 @@ void EmojiAtlas::ensureRotated (EmojiId id, Size size, float angleRad)
     if (rotCache_.size() >= 4096)
         rotCache_.clear();
     rotCache_.emplace (key, std::move (rotated));
+    return true;
 }
-
 float EmojiAtlas::duotoneStrength()
 {
     using T = PinkXP::ThemeId;

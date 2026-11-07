@@ -1386,7 +1386,7 @@ juce::String ModuleWorkspace::diagTakePaintStats()
           << "[p" << (int) c.paints
           << "/i" << (int) c.issued
           << "/c" << (int) c.coalesced
-          << "/s" << (int) c.skipped << "]";
+          << "/s" << (int) c.skipped << "/" << juce::String (c.paintMs, 0) << "ms]";
     }
 
     return s.isEmpty() ? juce::String ("(none)") : s;

@@ -6503,3 +6503,51 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 ---
 
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*
+
+## v3.0.2 补充：Windows 端性能优化（模块全开 75fps → 110~136fps；Toybox 连点 55fps → 82fps）
+
+> 版本号保持 `3.0.2` 不变。测试机：RTX 5060 + 164Hz 屏，100% 缩放，模块全开。测量方法：`Y2K_DIAG_LOG=1` 启动 Release 版，看桌面 `Y2Kmeter_Diag` 下最新日志的 `[STATS]`（GL 帧率/耗时）、`[GLPHASE]`（GL 线程分段耗时）、`[TOY]`（粒子与 overlay 绘制耗时）三行。连点测试用脚本在窗口内随机位置每 60ms 点一次，持续 10 秒。
+
+### 1. 结果
+
+| 场景 | 优化前 | 优化后 |
+| --- | --- | --- |
+| 模块全开空闲 | 约 75 fps | 110~136 fps |
+| Toybox 连续点击 | 约 55 fps | 约 82 fps |
+| 连点时 overlay 绘制 | 约 1.9 ms/次 | 约 0.15 ms/次 |
+| 连点时 emoji 退化成像素点 | 很快出现 | 偶发卡顿不再触发 |
+
+### 2. 根因
+
+1. **projectM 每个 GL 帧都完整渲染**：Windows 随包的 `projectM-4.dll` 没有 `projectm_opengl_render_frame_fbo`，一直走"降级路径"（渲染到 FBO 0 再 blit）。降级路径当时不做 60fps 节流，每次约 3ms，而且发生在持有 JUCE 消息锁的 `renderOpenGL()` 里，消息线程（数据分发、`onFrame`、定时器）在这段时间被迫停转。
+2. **emoji 绘制走变换路径**：图集是 2x 分辨率（`logical*2+2`），绘制尺寸 18/24/34，每个 emoji 都走 `drawImageTransformed`。JUCE GL 后端遇到非平移变换会 Path → EdgeTable 光栅化，实测 0.07~0.5ms/个。
+3. **旋转分桶缓存形同虚设**：①`ensureRotated` 被烘焙节流（每 16ms 最多 2 张）跳过后，调用方仍把该 bucket 记为"已处理"，永不重试；②不旋转的粒子根本不进缓存。
+4. **emoji 容易永久退化**：`ToyClock::onFrame` 的帧率平滑值下降响应系数为 0.35，一次 20~30ms 偶发卡顿就能把平滑值拉到 58 以下，触发"永久简化为小像素点"，并按 `transitionBudget` 传染其他粒子。
+
+### 3. 改动
+
+- **projectM 渲染节流 + 锁外预渲染（`PluginEditor.cpp/.h`）**
+  - 渲染主体抽成 `renderMilkdropFrameCore(fbo_w, fbo_h, forceRender)`。降级路径同样按 `kMilkdropTargetFps` 相位累加节流；被节流的帧复用 render FBO 的上次内容，`projectMRenderedThisFrame = ! skipProjectMRender`。
+  - 新增 `renderOpenGLPreLock()`：在 JUCE 拿消息锁之前执行 projectM 渲染 + 染色后处理，与消息线程并行。FBO 尺寸取上一帧持锁阶段记录的 `milkdrop_pre_w_/h_`，结果通过 `milkdrop_pre_done_ / milkdrop_pre_blit_fbo_` 交给持锁阶段复用；首帧或尺寸变化时由持锁阶段补渲染。
+  - 新增诊断：`[GLPHASE]`（preLock / sleep / lockWait / renderOpenGL / paintComp / draw / swap 的每帧均值）和 `[TOY]`（空闲/活动粒子数、完整 emoji 数、平滑帧率、overlay 绘制次数与耗时）。
+- **JUCE 补丁 0006（`juce_OpenGLContext.h/.cpp`、`juce_OpenGLRenderer.h`）**
+  - `OpenGLContext::takeRenderStats()`：渲染线程分段计时。
+  - `OpenGLRenderer::renderOpenGLPreLock()`：默认空实现，仅 Windows 在拿消息锁之前调用。
+  - 补丁文件 `third_party/juce_patches/0006-win-gl-render-stats-prelock.patch`；`Y2KJucePatches.cmake` 增加 3 条校验标记；README 补表格行。
+- **ModulePanel 诊断（`ModulePanel.cpp`、`ModuleWorkspace.*`）**：`[PAINT]` 日志每个模块末尾增加窗口内累计 `paint()`+子组件耗时（`/Nms`），用来定位哪个模块的组件层绘制最重。仅诊断开启时计时。
+- **Toybox emoji 直贴（`ToyEmoji.cpp`、`ToyCanvasFx.cpp`、`ToyKit.cpp/.h`）**
+  - `EmojiAtlas::setPhysicalScale()` / `fitsDrawSize()`：`ToyOverlay::paint` 每次把 `getPhysicalPixelScaleFactor()` 回写给图集；缩放恰为 1.0 时进入 fit 模式。
+  - fit 模式下 `ensureRotated` 把旋转分桶图直接烘焙成 `drawSize×drawSize`（每目标像素 2×2 子采样做预乘平均，等价原来的"2x 图 + 线性缩小"抗锯齿），不旋转的粒子也走 bucket 0。缓存键增加 fit 位（`0x40`），与 2x 图互不混淆。`ToyActor::paintContent` 因此走 1:1 `drawImageAt`。
+  - `ensureRotated` 改为返回 `bool`（true = 缓存已有或无需重试，false = 被节流/原图未就绪）；调用方只有返回 true 才记录 `lastRotBucket_`，修复"节流后永不重试"。烘焙节流窗口上限 2 → 6 张/16ms（fit 模式单张 <0.1ms）。
+  - `ToyClock::onFrame` 帧率平滑下降响应 0.35 → 0.12：持续掉帧仍会在数帧内触发降级，偶发抖动不再触发。
+  - 非 100% 缩放（125%、150% 等）保持旧路径（2x 图集），不受影响。
+
+### 4. 试过但无效、已撤回
+
+- **EQ 拼豆网格**（当前最大的单项开销，约 1.3ms/帧）：位图缓存圆环（paint 更慢，约 2.0 → 3.1ms）、按行合并 Path + `fillRectList`（无改善）、复用 Path 模板 + 平移填充（无改善）。三种都已撤回。进一步要降只能换渲染方式（比如网格画进离屏纹理），改动较大，暂未做。
+- **缩短 JUCE GL 线程的 2ms sleep**（`Y2K_GL_SLEEP_US` 临时开关试 0 / 2000）：帧率无差别，开关已移除，保持固定 2ms。
+
+### 5. 注意事项
+
+- **构建目录**：`cmake-build-release-visual-studio` 使用 `third_party/JUCE`（含补丁 0001~0006）。`build/msvc` 的 `FETCHCONTENT_SOURCE_DIR_JUCE` 若仍指向 `D:/Code/_deps/JUCE`，那份没有补丁 0005 / 0006，需要重新配置指向 `third_party/JUCE`，否则校验或编译会失败。
+- **`renderOpenGLPreLock` 的约束**：只在 Windows 调用，运行在 GL 线程且未持消息锁。其中只能做 projectM 渲染和后处理，不得触碰 Component / 消息线程状态；新增逻辑放进去之前先确认线程安全。

@@ -288,6 +288,7 @@ void ModulePanel::paint(juce::Graphics& g)
     //   与 GL 直渲染卡死区分开（GL 卡死时日志会显示 GL 线程停摆而 paint 正常）。
     const bool diagPaint = y2k::diag::isEnabled();
     const double diagPaintStartMs = diagPaint ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+    this->diagPaintStartMs = diagPaintStartMs;
     if (diagPaint)
         y2k::diag::setPhase ("UI:ModulePanel::paint");
 
@@ -414,6 +415,13 @@ void ModulePanel::paint(juce::Graphics& g)
 
 void ModulePanel::paintOverChildren(juce::Graphics& g)
 {
+    // 诊断：paint() 起点 → 子组件绘制完毕（本函数入口）的耗时累计
+    if (diagPaintStartMs > 0.0)
+    {
+        diagPaintMsAccum += juce::Time::getMillisecondCounterHiRes() - diagPaintStartMs;
+        diagPaintStartMs = 0.0;
+    }
+
     // 诊断：组件层真正被合成的次数（与 GL 出帧数对比，即可判断"合成饥饿"）
     ++diagPaints;
 
@@ -480,8 +488,10 @@ ModulePanel::DiagPaintCounters ModulePanel::diagTakePaintCounters() noexcept
     c.issued    = diagIssued;
     c.coalesced = diagCoalesced;
     c.skipped   = diagSkipped;
+    c.paintMs   = diagPaintMsAccum;
 
     diagPaints = diagIssued = diagCoalesced = diagSkipped = 0;
+    diagPaintMsAccum = 0.0;
     return c;
 }
 
