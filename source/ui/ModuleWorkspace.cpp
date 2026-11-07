@@ -97,53 +97,20 @@ namespace
             if (shouldDrawButtonAsDown || button.getToggleState())
                 area.translate (1, 1);
 
-            // "∞FPS"（无上限档）单独排版：
-            //   · ∞ 用语言无关的专用字体（Arial Unicode MS 的 ∞ 比系统回退的
-            //     Apple Symbols 饱满得多），字号单独一档、比 FPS 略大；
-            //   · 整组宽度按**语言无关**的口径计算：FPS 的槽宽用英文 UI 字体量
-            //     （iconFont），各语言的 FPS 再在槽内居中 —— 中英文切换时 ∞ 的
-            //     位置逐像素不变（此前按实际宽度居中，Silkscreen 的 FPS 比中文
-            //     字体的 FPS 宽约 16px，∞ 会左右跳）；
-            //   · ∞ 直接按 JUCE 原生路径绘制（不走 SymbolGlyphs 的 run 拆分：
-            //     那里会把符号强行换成英文 UI 字体 + Apple Symbols 回退，中文
-            //     界面下会换成另一个更扁的字形，与英文界面不一致）；
-            //   · ∞ 上移 3px：居中在字面框里时，它的墨迹中心比大写字母低约 3px
-            //     （Arial Unicode 的 ∞ 笔画细、字面偏下）。
-            const juce::String infinity = juce::String::charToString ((juce::juce_wchar) 0x221E);
+            constexpr float kTextHeight = 12.0f;   // 与 GRID 等同级按钮一致
 
-            if (shown.startsWith (infinity))
-            {
-                const auto suffix = shown.substring (infinity.length());
+            // 各档文案宽度差别很大（"30FPS" / "120FPS" / "no limit"），按钮宽度固定：
+            //   放不下时按比例收紧字号，避免被裁剪（中文"不限制"很短，不受影响）。
+            float textHeight = kTextHeight;
+            const float availW   = (float) area.getWidth() - 4.0f;
+            const float naturalW = PinkXP::SymbolGlyphs::getTextWidth (
+                shown, PinkXP::SymbolGlyphs::buttonFont (shown, kTextHeight, juce::Font::bold));
 
-                constexpr float kTextHeight = 12.0f;   // 与 30/60/120 档一致
-                constexpr float kSymHeight  = 15.0f;   // ∞ 专用（语言无关）
-
-                const auto symFont  = PinkXP::SymbolGlyphs::infinityFont (kSymHeight, juce::Font::bold);
-                const auto textFont = PinkXP::SymbolGlyphs::buttonFont (suffix, kTextHeight, juce::Font::bold);
-                const auto refFont  = PinkXP::SymbolGlyphs::iconFont (kTextHeight, juce::Font::bold);
-
-                const int symW  = (int) std::ceil (juce::GlyphArrangement::getStringWidth (symFont, infinity));
-                const int slotW = (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (suffix, refFont));
-                const int textW = (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (suffix, textFont));
-
-                auto line     = area.withSizeKeepingCentre (symW + slotW, area.getHeight());
-                auto symArea  = line.withWidth (symW).translated (0, -PinkXP::ui (3));
-                auto slotArea = line.withTrimmedLeft (symW);
-                auto textArea = slotArea.withSizeKeepingCentre (textW, slotArea.getHeight());
-
-                g.setColour (PinkXP::ink);
-                g.setFont (symFont);
-                g.drawText (infinity, symArea, juce::Justification::centred, false);
-
-                PinkXP::drawCachedSymbolText (g, suffix, textArea, juce::Justification::centred,
-                                              kTextHeight, juce::Font::bold, PinkXP::ink,
-                                              PinkXP::StaticTextFont::button,
-                                              juce::Colours::transparentBlack, false);
-                return;
-            }
+            if (availW > 0.0f && naturalW > availW)
+                textHeight = juce::jmax (8.0f, kTextHeight * availW / naturalW);
 
             PinkXP::drawCachedSymbolText (g, shown, area, juce::Justification::centred,
-                                          12.0f, juce::Font::bold, PinkXP::ink,
+                                          textHeight, juce::Font::bold, PinkXP::ink,
                                           PinkXP::StaticTextFont::button,
                                           juce::Colours::transparentBlack, false);
         }
@@ -488,7 +455,7 @@ ModuleWorkspace::ModuleWorkspace()
     toolbarOverflowBtn.setVisible (false);
 
     // 左下角：FPS 限制按钮 + 实时 FPS 标签
-    //   · 按钮文案循环："30FPS" → "60FPS" → "120FPS" → "∞FPS"
+    //   · 按钮文案循环："30FPS" → "60FPS" → "120FPS" → "no limit"（中文：不限制）
     fpsBtn.setButtonText ("120FPS");
     fpsBtn.setTooltip    (y2k::help::make ("Frame rate cap",
         "Click to cycle 30 / 60 / 120 / Unlimited FPS. Lower values save CPU and GPU; "
@@ -503,7 +470,7 @@ ModuleWorkspace::ModuleWorkspace()
         setFpsLimit (next);
         if (onFpsLimitChanged) onFpsLimitChanged (fpsLimit);
     };
-    // 专用 mini LookAndFeel：把 "30FPS/60FPS/120FPS/∞FPS" 渲染得更紧凑（仅影响此按钮）
+    // 专用 mini LookAndFeel：把 "30FPS/60FPS/120FPS/no limit" 渲染得更紧凑（仅影响此按钮）
     fpsMiniLnf = std::make_unique<FpsMiniLookAndFeel>();
     fpsBtn.setLookAndFeel (fpsMiniLnf.get());
     // 文字色显式跟随主题 ink（与其他 toolbar 按钮一致，dark 下浅字可读）
@@ -3261,7 +3228,20 @@ void ModuleWorkspace::resized()
         const int sourceBoxW   = PinkXP::ui (180);
         const int sourceLabelW = PinkXP::ui (52);
         const int fpsLabelW    = PinkXP::ui (64);
-        const int fpsBtnW      = btnW + PinkXP::ui (12);
+        // FPS 按钮要放得下最宽的一档文案（"120FPS" / "no limit"，随界面语言变化），
+        //   否则无上限档的文字会被挤压或需要缩字号。
+        const int fpsBtnW      = [&]
+        {
+            float textW = 0.0f;
+            for (const char* s : { "30FPS", "60FPS", "120FPS", "no limit" })
+            {
+                const juce::String shown = y2k::tr (s);
+                textW = juce::jmax (textW, PinkXP::SymbolGlyphs::getTextWidth (
+                    shown, PinkXP::SymbolGlyphs::buttonFont (shown, 12.0f, juce::Font::bold)));
+            }
+            return juce::jmax (btnW + PinkXP::ui (12),
+                               (int) std::ceil (textW) + PinkXP::ui (8));
+        }();
         const int fftBtnW      = PinkXP::ui (60);
         const int fftLabelW    = PinkXP::ui (86);
         const int langBtnW     = PinkXP::ui (52);   // 放得下"中文"两个全角字
@@ -4118,7 +4098,9 @@ void ModuleWorkspace::setFpsLimit (int hz)
     if (fpsLimit == clamped) return;
     fpsLimit = clamped;
     if (clamped == 0)
-        fpsBtn.setButtonText (juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x9e")) + "FPS");
+        // 无上限档显示文字（不译时是英文源文案），译文由 zh-CN.lang 的
+        //   "no limit" 条目提供；绘制层（FpsMiniLookAndFeel）做延迟翻译。
+        fpsBtn.setButtonText ("no limit");
     else
         fpsBtn.setButtonText (juce::String (fpsLimit) + "FPS");
 }

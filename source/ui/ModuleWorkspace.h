@@ -704,7 +704,7 @@ public:
     void setSaveLoadUiVisible (bool shouldBeVisible);
 
 
-    //   · 点击可在 30 / 60 / 120 / ∞ FPS 之间循环切换（默认 60）
+    //   · 点击可在 30 / 60 / 120 / no limit（不限制）之间循环切换（默认 120）
     //   · 回调由 Editor 订阅，真正修改 AnalyserHub 的 FrameDispatcher 频率
     //   · 旁边显示实时帧率（由 Editor 统计后通过 setMeasuredFps 下发）
     // ======================================================
@@ -1065,7 +1065,7 @@ private:
     bool             chromeTransitionActive = false;
 
     // FPS 限制按钮 + 实时 FPS 标签（右下角，Hide 按钮左侧）
-    //   · 按钮文案循环："30FPS" → "60FPS" → "120FPS" → "∞FPS"
+    //   · 按钮文案循环："30FPS" → "60FPS" → "120FPS" → "no limit"（中文：不限制）
     juce::TextButton fpsBtn;
     juce::Label      fpsLabel;
     int              fpsLimit = 120; // 30 / 60 / 120 / 0（0=无上限）

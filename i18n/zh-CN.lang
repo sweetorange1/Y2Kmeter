@@ -88,6 +88,7 @@
 "Fold the extra toolbar controls away again." = "再次收起多出来的工具栏控件。"
 "Frame rate cap" = "帧率上限"
 "Click to cycle 30 / 60 / 120 / Unlimited FPS. Lower values save CPU and GPU; the number on the right is the real frame rate." = "点击在 30 / 60 / 120 / 无上限 FPS 之间切换。数值越低越省 CPU 和 GPU；右侧数字是实际帧率。"
+"no limit" = "不限制"
 "Real frame rate" = "实际帧率"
 "Frames actually drawn per second. If it stays well below the cap, try a lower cap, a smaller window or fewer heavy modules (3D / Milkdrop)." = "每秒实际绘制的帧数。如果长期明显低于上限，可降低上限、缩小窗口或减少重负载模块（3D / Milkdrop）。"
 "FFT Size:" = "FFT 大小："

@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.0.2`）
+- **产品名**：`Y2Kmeter` （版本：`3.0.5`）
   - 历史：`v2.9.9` 之后的功能曾以「v2.9.9 补充」形式入库、不 bump 版本号（`Stereo Map`、多屏混合 DPI 修复、
     实时 BPM / 调性模块），随后 `v2.9.10` 归拢了 Waveform 模块重构；**v3.0.0** 起恢复常规语义化版本号
     （见文末「v3.0.0：...」章节）；**v3.0.1** 为补丁版（GL 直渲染修复 / 全屏布局预设，见文末）。
@@ -18,6 +18,8 @@
     按钮字号收紧、翻译文案自查、多屏混合 DPI 下模块脱离窗口物理像素落位等），详见文末「v3.0.2」章节。
     v3.0.2 发布后的调整（Milkdrop 按钮等宽、示波器单按钮循环、调性点击反馈、macOS 编译修复、
     VST 响度 Integrated 跟随宿主播放重置、图标字符固定英文 UI 字体）均以 `v3.0.2补充` 形式入库、不再 bump 版本号。
+    **v3.0.5**（本轮）把 FPS 上限按钮的「无上限」档从 `∞FPS` 改为文字（中文「不限制」/ 英文 `no limit`），
+    并让按钮宽度按最宽档文案自适应，详见文末「v3.0.5」章节。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -6549,5 +6551,46 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 
 ### 5. 注意事项
 
-- **构建目录**：`cmake-build-release-visual-studio` 使用 `third_party/JUCE`（含补丁 0001~0006）。`build/msvc` 的 `FETCHCONTENT_SOURCE_DIR_JUCE` 若仍指向 `D:/Code/_deps/JUCE`，那份没有补丁 0005 / 0006，需要重新配置指向 `third_party/JUCE`，否则校验或编译会失败。
+- **构建目录**：`cmake-build-release-visual-studio` 使用 `third_party/JUCE`（含补丁 0001~0006）。`build/msvc` 原先的 `FETCHCONTENT_SOURCE_DIR_JUCE` 指向 `D:/Code/_deps/JUCE`（那份只打了补丁 0001），配置期校验会失败；v3.0.5 已重新配置为 `third_party/JUCE`（见文末「v3.0.5」章节）。
 - **`renderOpenGLPreLock` 的约束**：只在 Windows 调用，运行在 GL 线程且未持消息锁。其中只能做 projectM 渲染和后处理，不得触碰 Component / 消息线程状态；新增逻辑放进去之前先确认线程安全。
+
+---
+
+## v3.0.5：FPS 上限按钮「无上限」档改为文字
+
+> 版本号 `3.0.2 → 3.0.5`：`CMakeLists.txt`（`project()` + 两处 `juce_add_plugin VERSION`）、
+> `PluginEditor.cpp` 3 处版本显示字面量、`Y2Kmeter_installer.iss` 的 `MyAppVersion`、`README.md` 版本徽章、本文档。
+
+### 1. 需求
+
+底部控制台左下角的 FPS 上限按钮在 30 / 60 / 120 / 无上限 四档之间循环。无上限档此前显示 `∞FPS`
+（∞ 走 `SymbolGlyphs::infinityFont` 的 Arial Unicode MS 专用排版 + 上移 3px），实际观感不佳，
+改为文字描述：中文「不限制」、英文 `no limit`。
+
+### 2. 改动
+
+- **文案（`setFpsLimit()`）**：无上限档改为 `fpsBtn.setButtonText ("no limit")` —— 按钮里存的仍是
+  **英文源文案**，照项目既有的"延迟翻译"机制，由 `FpsMiniLookAndFeel::drawButtonText` 绘制时 `y2k::tr()`
+  翻译；`i18n/zh-CN.lang` 新增 `"no limit" = "不限制"`。
+- **删除 ∞ 专用排版（`FpsMiniLookAndFeel::drawButtonText`）**：整套 ∞ 分支（`infinityFont`、符号槽宽口径、
+  上移 3px、语言无关宽度计算）随文案改动一并移除，统一走 `drawCachedSymbolText`。保留一层兜底：
+  文字宽度超过按钮可用宽度时按比例收紧字号（最低 8px），避免被裁剪。
+  `SymbolGlyphs::infinityFont()` 本身保留（通用符号字体工具，不再被调用）。
+- **按钮宽度自适应（`ModuleWorkspace::resized()`）**：FPS 按钮宽度不再固定为 `btnW + 12`，改为量出
+  `30FPS / 60FPS / 120FPS / no limit` 四种文案（各自按**当前语言**翻译后，12px bold）中最宽的一档
+  + 8px 内边距，再与旧值取 `jmax`。中文界面「不限制」本来就放得下、布局不变；英文 `no limit` 比
+  `120FPS` 更宽，按钮相应变宽，四档字号因此完全一致（否则必须缩字号）。语言切换时 `resized()` 会重算。
+- **注释同步**：`ModuleWorkspace.h` 两处按钮文案说明、构造函数里的档位说明。
+
+### 3. 构建环境修复
+
+`build/msvc` 的 CMake 缓存原先把 `FETCHCONTENT_SOURCE_DIR_JUCE` 指向 `D:/Code/_deps/JUCE`，
+而那份只有补丁 0001，`Y2KJucePatches.cmake` 的配置期校验（补丁 0002~0006）直接报错，增量编译无法进行。
+已重新配置：
+
+```sh
+cmake -S . -B build/msvc -DFETCHCONTENT_SOURCE_DIR_JUCE=D:/Code/Y2KMeter/third_party/JUCE
+cmake --build build/msvc --config Release --target Y2Kmeter_Standalone -j 8
+```
+
+产物：`build/msvc/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.exe`。
