@@ -3922,6 +3922,8 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 //     统一吸附到 8px 网格 → 相邻模块共享同一条边界，密排无缝隙。
 //   · 只调用 createModule()：每个模块保持自己独立的默认设置，不套用存档
 //     里的显示模式 / 颜色 / 缩放 / Milkdrop 预设等任何内部状态。
+//     唯一例外：Preset 15（全部模块）里同类型波形模块各有三块，按出现顺序
+//     分配 波形 / X-Y / 李萨如 与 左 / 右 / 双声道，避免三块画面重复。
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
 {
@@ -4010,6 +4012,12 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
         return juce::jlimit (yT, yB, yT + juce::roundToInt (cells) * kGrid);
     };
 
+    // 「全屏：全部模块」里示波器 / 示波波形各出现三次：按出现顺序分别给
+    //   波形 / X-Y / 李萨如、左 / 右 / 双声道，避免三块画面完全一样
+    //   （按钮文字由各自的 refreshModeButton / refreshChannelButton 同步）。
+    int oscIndex  = 0;
+    int oscwIndex = 0;
+
     for (int i = 0; i < tileCount; ++i)
     {
         const auto& t = tiles[i];
@@ -4019,18 +4027,30 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
         auto panel = createModule (t.type);
         if (panel == nullptr) continue;
 
-        // 「全屏：全部模块」里两个波形模块同屏出现：给示波器 / 示波波形各选一个
-        // 与默认不同的显示模式，让画面更多样（示波器 → X-Y 立体声形状，
-        // 示波波形 → 左声道；按钮选中态由各自的 refreshModeButtons 同步）。
         if (presetId == (int) ModuleWorkspace::LayoutPreset::fullAllModules)
         {
             if (t.type == ModuleType::oscilloscope)
+            {
+                static const OscilloscopeModule::DisplayMode kOscModes[] = {
+                    OscilloscopeModule::DisplayMode::waveform,
+                    OscilloscopeModule::DisplayMode::xy,
+                    OscilloscopeModule::DisplayMode::lissajous
+                };
                 if (auto* osc = dynamic_cast<OscilloscopeModule*> (panel.get()))
-                    osc->setDisplayMode (OscilloscopeModule::DisplayMode::xy);
-
-            if (t.type == ModuleType::oscilloscopeWave)
+                    osc->setDisplayMode (kOscModes[juce::jlimit (0, 2, oscIndex)]);
+                ++oscIndex;
+            }
+            else if (t.type == ModuleType::oscilloscopeWave)
+            {
+                static const OscilloscopeWaveModule::ChannelMode kOscWaveModes[] = {
+                    OscilloscopeWaveModule::ChannelMode::left,
+                    OscilloscopeWaveModule::ChannelMode::right,
+                    OscilloscopeWaveModule::ChannelMode::both
+                };
                 if (auto* oscw = dynamic_cast<OscilloscopeWaveModule*> (panel.get()))
-                    oscw->setChannelMode (OscilloscopeWaveModule::ChannelMode::left);
+                    oscw->setChannelMode (kOscWaveModes[juce::jlimit (0, 2, oscwIndex)]);
+                ++oscwIndex;
+            }
         }
 
         const int x0 = mapX (t.x);
@@ -7043,9 +7063,9 @@ void Y2KmeterAudioProcessorEditor::restorePseudoFullScreen()
     if (top == nullptr || top == this) return;
 
    #if JUCE_MAC
-    // macOS 原生全屏的 Space 切换会打断启动期的布局 / 首帧恢复；且
-    //   saveMainWindowBounds 在原生全屏态下已经跳过窗口几何写入
-    //   （见该函数说明），因此本版本不在 mac 上自动恢复全屏。
+    // macOS 走系统原生全屏（不是本函数的伪全屏），恢复动作由
+    //   Y2KStandaloneApp::initialise() 在窗口上屏后按 window.nativeFullScreen
+    //   延迟调用 setFullScreen(true) —— 这里直接返回。
     return;
    #else
     toggleFakeFullScreen();

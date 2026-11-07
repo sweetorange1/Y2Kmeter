@@ -2,6 +2,7 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/UiPrefs.h"
+#include "PluginEditor.h"   // 提示窗口的宿主是 Editor：按屏幕坐标定位模块需要 workspace
 
 // ==========================================================
 // HoverHelp.cpp —— 悬停提示：文案库 / 开关持久化 / TooltipWindow 解析逻辑
@@ -196,7 +197,7 @@ namespace y2k::help
                 return make (name,
                     "An audio-powered pixel pet.\n"
                     "Play music to hatch the egg and keep it fed - long silence makes "
-                    "it hungry. Drag it around to carry it. Standalone only.");
+                    "it hungry. Drag it around to carry it.");
 
             case ModuleType::milkdrop:
                 return make (name,
@@ -204,7 +205,9 @@ namespace y2k::help
                     "- Click it to show the control bar: presets, auto, color, "
                     "effects, wave, tweak.\n"
                     "- Keys: Left / Right = prev / next preset, Space = random.\n"
-                    "- Heart (bottom right) saves the preset to your Likes.");
+                    "- Heart (bottom right) saves the preset to your Likes.\n"
+                    "- Switch button (bottom right) flips between all presets and your "
+                    "Likes folder (Y2Kmeter/milkdrop_presets_like in your user data folder).");
 
             case ModuleType::tempoKey:
                 return make (name,
@@ -255,11 +258,28 @@ Y2KTooltipWindow::Y2KTooltipWindow (juce::Component* parentComponent)
     //   · 避免出现在光标下时抢走 hover（TooltipWindow::mouseEnter 会立即隐藏自己）；
     //   · getComponentUnderMouse 永远不会命中提示框本身。
     setInterceptsMouseClicks (false, false);
+
+    // 低频回收"鼠标已离开本 peer"的旧提示（见 StaleTipGuard 注释）
+    staleTipGuard.startTimerHz (8);
 }
 
 Y2KTooltipWindow::~Y2KTooltipWindow()
 {
+    staleTipGuard.stopTimer();
     setLookAndFeel (nullptr);
+}
+
+void Y2KTooltipWindow::StaleTipGuard::timerCallback()
+{
+    if (! owner.isVisible())
+        return;
+
+    auto* under = juce::Desktop::getInstance().getMainMouseSource().getComponentUnderMouse();
+
+    // 鼠标在别的窗口（或已经不在任何组件上）：本提示窗口无法再被 JUCE
+    //   的定时器更新，直接收起，避免留下上一个组件 / 模块的说明。
+    if (under == nullptr || under->getPeer() != owner.getPeer())
+        owner.hideTip();
 }
 
 juce::String Y2KTooltipWindow::getTipFor (juce::Component& c)
@@ -289,6 +309,37 @@ juce::String Y2KTooltipWindow::getTipFor (juce::Component& c)
 
     auto* host = getParentComponent();
 
+    // 鼠标位置实际所在的模块：按屏幕坐标 + z-order 解析，**不依赖** JUCE 的
+    //   "鼠标下组件"。macOS 上 Milkdrop 的控制栏是一个独立的子 NSWindow，鼠标
+    //   落在它上面时主窗口收不到任何鼠标事件 → JUCE 的命中结果会一直停在
+    //   上一个模块 / 控件上，于是"悬停 Milkdrop 的画面/颜色按钮却弹出别的
+    //   模块介绍"（抬头的模块说明也一样）。
+    //   浮动态各自的提示窗口没有 workspace 上下文，panelAtMouse 保持 nullptr，
+    //   直接走组件链（浮动窗口本身就在鼠标下，命中是新鲜的）。
+    ModulePanel* panelAtMouse = nullptr;
+    if (auto* editor = dynamic_cast<Y2KmeterAudioProcessorEditor*> (host))
+        if (auto* ws = editor->getWorkspace())
+            panelAtMouse = ws->getModuleAtScreenPoint (mouse);
+
+    auto tipForPanel = [&] (ModulePanel& panel) -> juce::String
+    {
+        // 模块自带原生提示窗口（macOS Milkdrop）：内容区（含控制栏）由模块
+        //   自己的 overlay 轮询出提示 —— 这里再出只会重复，且 Editor 的提示
+        //   绘制在原生 GL 视图之下本来就看不见。标题栏不在此范围（照常出提示）。
+        if (panel.usesNativeOverlayTips()
+            && panel.getContentBounds().contains (panel.getLocalPoint (nullptr, mouse)))
+            return {};
+
+        const auto info = panel.getHoverHelp (panel.getLocalPoint (nullptr, mouse));
+        if (info.text.isEmpty())
+            return {};
+
+        if (info.contentZone && (now - stillSinceMs) < kContentStillMs)
+            return {};
+
+        return info.text;
+    };
+
     for (auto* p = &c; p != nullptr; p = p->getParentComponent())
     {
         // 模块面板（含其任意子组件，如 Milkdrop 的 GLView、EQ 的像素图）
@@ -296,26 +347,36 @@ juce::String Y2KTooltipWindow::getTipFor (juce::Component& c)
         //   先于面板命中；只有"没有文案的子组件 / 面板自身"才走到这里。
         if (auto* panel = dynamic_cast<ModulePanel*> (p))
         {
-            const auto info = panel->getHoverHelp (panel->getMouseXYRelative());
-            if (info.text.isEmpty())
-                return {};
+            // workspace 内有可信的坐标命中时以它为准（覆盖过期命中 / 模块重叠）
+            if (panelAtMouse != nullptr)
+                return tipForPanel (*panelAtMouse);
 
-            if (info.contentZone && (now - stillSinceMs) < kContentStillMs)
-                return {};
+            // 浮动窗口：面板必须真的在鼠标下才采信
+            if (panel->getScreenBounds().contains (mouse))
+                return tipForPanel (*panel);
 
-            return info.text;
+            return {};
         }
 
         if (auto* client = dynamic_cast<juce::TooltipClient*> (p))
         {
-            const auto tip = client->getTooltip();
-            if (tip.isNotEmpty())
-                return tip;
+            // 过期命中保护：起点控件已经不在鼠标下时不能采信它的文案
+            if (p->getScreenBounds().contains (mouse))
+            {
+                const auto tip = client->getTooltip();
+                if (tip.isNotEmpty())
+                    return tip;
+            }
         }
 
         if (p == host)
             break;
     }
+
+    // 组件链没走到模块（例如"鼠标下组件"仍停留在空白画布 / Editor 上）
+    //   时，用屏幕坐标命中的模块兜底。
+    if (panelAtMouse != nullptr)
+        return tipForPanel (*panelAtMouse);
 
     return {};
 }

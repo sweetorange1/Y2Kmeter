@@ -186,8 +186,6 @@ std::unique_ptr<ToyActor> makeConfettiRainParticle (juce::Point<float> at,
                                                     juce::Point<float> velocity,
                                                     ToyDirector& dir, bool rainbow,
                                                     juce::Rectangle<int> clipBounds);
-// 连击字幕（上浮淡出）
-std::unique_ptr<ToyActor> makeComboTextActor (const juce::String& text, juce::Point<float> at);
 // Oscilloscope 拍电视（模块内 actor，§8.3 / E.4.3 带真实读数）
 std::unique_ptr<ToyActor> makeTvStaticActor (juce::Point<float> at, juce::Rectangle<int> canvas,
                                              const juce::String& readout = {});

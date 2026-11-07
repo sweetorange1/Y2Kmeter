@@ -205,6 +205,12 @@ public:
     };
     virtual HoverHelp getHoverHelp (juce::Point<int> localPos) const;
 
+    // 该模块是否自己用原生窗口绘制悬停提示（目前仅 macOS Milkdrop：控制栏是
+    //   独立顶层 NSWindow 且覆盖整个内容区，Editor 的提示窗口在它上面既会被
+    //   遮挡也不会被 JUCE 的定时器刷新）。返回 true 时 Y2KTooltipWindow 不再
+    //   为它出提示，改由模块自己轮询绘制。
+    virtual bool usesNativeOverlayTips() const { return false; }
+
     // 统一拦截模块 repaint 请求（用于性能计数）
     void repaint();
     void repaint(juce::Rectangle<int> area);
@@ -505,6 +511,12 @@ public:
 
     int getNumModules() const noexcept { return modules.size(); }
     ModulePanel* getModule(int idx) const noexcept { return modules[idx]; }
+
+    // 悬停提示：按屏幕坐标取 z-order 最上层的可见模块。
+    //   不依赖 JUCE 的"鼠标下组件"——macOS 上 Milkdrop 的控制栏是独立的子
+    //   NSWindow，鼠标落在它上面时主窗口收不到鼠标事件，命中结果会一直停在
+    //   上一个模块 / 控件上（表现为"悬停 A 的按钮却显示 B 的说明"）。
+    ModulePanel* getModuleAtScreenPoint (juce::Point<int> screenPos) const;
 
     // ==========================================================
     // v3.0.1：抬头双击最大化（嵌入式）

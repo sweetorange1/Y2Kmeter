@@ -31,6 +31,42 @@
 #include <sstream>
 #include <vector>
 
+#if JUCE_MAC
+// 控制栏窗口内的提示气泡：完全由 updateOverlayHoverTip 的轮询驱动。
+//   控制栏是独立子 NSWindow，鼠标落在它上面时主窗口收不到鼠标事件，
+//   juce::TooltipWindow 自带的 123ms 定时解析在这里既不会更新也不会隐藏
+//   （还可能把轮询刚显示的提示立刻收掉）——这里直接禁用其定时器逻辑，
+//   只保留 displayTip / hideTip 两个手动接口。
+class MilkdropModule::OverlayTipWindow : public juce::TooltipWindow
+{
+public:
+    explicit OverlayTipWindow (juce::Component* parentComponent)
+        : juce::TooltipWindow (parentComponent, 500)
+    {
+        setInterceptsMouseClicks (false, false);
+        setLookAndFeel (&getPinkXPLookAndFeel());
+    }
+
+    ~OverlayTipWindow() override
+    {
+        setLookAndFeel (nullptr);
+    }
+
+    // TooltipWindow 的定时回调（私有虚函数）：轮询驱动模式下禁用
+    void timerCallback() override {}
+
+    void showTip (juce::Point<int> screenPos, const juce::String& text)
+    {
+        if (text.isNotEmpty())
+            displayTip (screenPos, text);
+    }
+
+    void hideTipNow() { hideTip(); }
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (OverlayTipWindow)
+};
+#endif
+
 // ==========================================================
 // v3.0.1：布局锁定只在基类 ModulePanel::mouseDown 内部拦截"拖拽/缩放/关闭"，
 //   模块内容按钮（预设切换 / color / 收藏 …）不再受锁定影响 —— 这里原先那份
@@ -1648,6 +1684,8 @@ MilkdropModule::~MilkdropModule()
 #if JUCE_MAC
     // macOS：先撚下顶层控制栏窗口（native peer），再销毁 unique_ptr。
     // 顺序保证：不会在 native peer 尚存活时被 unique_ptr 析构。
+    //   提示窗口是 overlayView_ 的子组件，必须先于它释放。
+    overlayTooltip_.reset();
     if (overlayView_ != nullptr && overlayView_->isOnDesktop())
         overlayView_->removeFromDesktop();
     overlayView_.reset();
@@ -1862,11 +1900,11 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     PaintLoadingIndicator(g, content);
 
   // 控制栏（overlay control bar）以 CPU paint 叠加方式绘制在 GL 帧之上。
-  // Windows：直接在 paintContent 绘制即可见（JUCE 能正确混合 CPU/GL 层）。
-  // macOS：此处绘制会被 native NSOpenGLView 遮挡（看不见），但必须保留
-  //   该调用，因为 paintOverlayControlBar 内部会更新 cachedNameArea_，
-  //   供 MilkdropModule::mouseDown/hitTestOverlayButton 使用。
-  //   真正可见的控制栏由顶层 overlayView_（NSWindow）另行绘制。
+  //   嵌入态（Editor GL 合成）：Editor 先把 projectM 帧 blit 到合成用的
+  //     CachedImage，再由此处 CPU 绘制覆盖 —— 与 Windows 完全同路径。
+  //   macOS 的 overlayView_（顶层子 NSWindow）同样绘制控制栏，只是用于保证
+  //     原生 NSOpenGLView（浮动态）/ 合成层之外的稳定可见性；同时它承载
+  //     自己的悬停提示窗口（见 OverlayView::getTooltip）。
   if (focused_ && glView != nullptr) {
     auto topBar = content.withHeight(26);
     paintOverlayControlBar(g, topBar);
@@ -2826,6 +2864,8 @@ void MilkdropModule::GLView::timerCallback() {
   // macOS：顶层控制栏悬浮窗需要跟随模块屏幕位置、可见性、hover/press 高亮实时刷新。
   // 与主 UI 重绘 30Hz 同步，既能跟踪窗口拖动/resize，又保证 hover 反馈及时。
   owner_.UpdateOverlayViewPlacement();
+  // 控制栏窗口会吞掉鼠标事件 → 提示只能用轮询（见 updateOverlayHoverTip 注释）
+  owner_.updateOverlayHoverTip();
   if (owner_.overlayView_ != nullptr && owner_.overlayView_->isOnDesktop())
       owner_.overlayView_->repaint();
 #endif
@@ -3569,7 +3609,11 @@ ModulePanel::HoverHelp MilkdropModule::getHoverHelp (juce::Point<int> pos) const
     const auto topBar  = content.withHeight (26);
 
     // ---- 顶部控制栏 + 右下角收藏 / 切换库 ----
-    if (focused_)
+    //   ★ 不按 focused_ 早退：macOS 的控制栏由顶层 overlay 窗口绘制，聚焦状态
+    //     与绘制之间只要有一帧错位，按 focused_ 早退就会把这些按钮位置的悬停
+    //     错落到基类的"模块说明"上（用户看到的正是"悬停画面/颜色却显示某个
+    //     模块的介绍"）。命中具体按钮就返回按钮说明；控制栏条带内未命中按钮
+    //     则不出提示（见本函数末尾），绝不把模块说明冒充成按钮说明。
     {
         auto btn = hitTestOverlayButton (pos, getOverlayBounds (content));
         if (btn == OverlayButton::kNone)
@@ -3623,6 +3667,11 @@ ModulePanel::HoverHelp MilkdropModule::getHoverHelp (juce::Point<int> pos) const
                 break;
         }
     }
+
+    // 控制栏条带内但没命中具体按钮（或控制栏当前未显示）：不出提示，
+    //   避免把基类的"模块说明"当成按钮说明显示出来。
+    if (getOverlayBounds (content).contains (pos))
+        return {};
 
     // ---- auto 展开行 ----
     if (isAutoRowExpanded_)
@@ -4804,6 +4853,7 @@ void MilkdropModule::showAutoIntervalDialog()
 // ==========================================================
 // OverlayView / UpdateOverlayViewPlacement —— macOS 顶层控制栏
 // ==========================================================
+
 void MilkdropModule::OverlayView::paint(juce::Graphics& g)
 {
     if (!owner_.focused_ || owner_.glView == nullptr)
@@ -4844,6 +4894,89 @@ void MilkdropModule::OverlayView::paint(juce::Graphics& g)
         owner_.paintWavePanel(g, moduleTopBar);
     if (owner_.isTweakPanelOpen_)
         owner_.paintTweakPanel(g, moduleTopBar);
+}
+
+juce::String MilkdropModule::OverlayView::getTooltip()
+{
+    if (! owner_.focused_ || ! owner_.isShowing() || owner_.glView == nullptr)
+        return {};
+
+    // 鼠标位置换算回 MilkdropModule 本地坐标：控制栏命中测试与绘制共用同一套
+    //   坐标（见 paint() 里的坐标平移说明）。
+    const auto pos = owner_.getLocalPoint (nullptr, juce::Desktop::getMousePosition());
+    const auto info = owner_.getHoverHelp (pos);
+
+    // 内容区（整块视频）说明会盖住画面；本窗口没有 TooltipWindow 的静止判定，
+    //   因此只提供按钮 / 展开面板等明确控件的文案。
+    return info.contentZone ? juce::String() : info.text;
+}
+
+bool MilkdropModule::usesNativeOverlayTips() const
+{
+    // 控制栏窗口覆盖整个内容区：Editor 的提示窗口在它上面会被遮挡，且 JUCE 的
+    //   提示定时器拿不到鼠标事件（不会刷新）。交给 updateOverlayHoverTip 轮询。
+    return overlayView_ != nullptr && overlayView_->isOnDesktop() && overlayView_->isVisible();
+}
+
+void MilkdropModule::hideOverlayHoverTip()
+{
+    if (overlayTooltip_ != nullptr && overlayTooltip_->isVisible())
+        overlayTooltip_->hideTipNow();
+}
+
+void MilkdropModule::updateOverlayHoverTip()
+{
+    if (overlayTooltip_ == nullptr || overlayView_ == nullptr
+        || ! overlayView_->isOnDesktop() || ! overlayView_->isVisible()
+        || ! isShowing())
+    {
+        tipPollState = 0;
+        hideOverlayHoverTip();
+        return;
+    }
+
+    const auto mouse = juce::Desktop::getMousePosition();
+
+    // 只接管控制栏窗口覆盖的区域（=整个内容区）；其余位置由 Editor 的提示窗口
+    //   正常处理，避免两边各弹一个。
+    if (! overlayView_->getScreenBounds().contains (mouse))
+    {
+        tipPollState = 0;
+        hideOverlayHoverTip();
+        return;
+    }
+
+    const auto now = juce::Time::getMillisecondCounter();
+
+    if (mouse != tipPollMousePos)
+    {
+        tipPollMousePos = mouse;
+        tipPollStillMs  = now;
+        tipPollState    = 0;   // 移动即收起，重新计时
+        hideOverlayHoverTip();
+        return;
+    }
+
+    // 0 = 未决；1 = 已显示提示；2 = 此处无提示。已决时不再解析（省 30Hz 文案开销）
+    if (tipPollState != 0)
+        return;
+
+    // 与普通提示同样的静止延迟：移动途中不弹，停住 500ms 才出现
+    constexpr juce::uint32 kStillMs = 500;
+    if (now - tipPollStillMs < kStillMs)
+        return;
+
+    const auto info = getHoverHelp (getLocalPoint (nullptr, mouse));
+
+    // 内容区说明会盖住画面；控制栏条带内没命中按钮时 getHoverHelp 已返回空文案。
+    if (info.text.isEmpty() || info.contentZone)
+    {
+        tipPollState = 2;
+        return;
+    }
+
+    tipPollState = 1;
+    overlayTooltip_->showTip (mouse, info.text);
 }
 
 void MilkdropModule::UpdateOverlayViewPlacement()
@@ -4929,6 +5062,9 @@ void MilkdropModule::UpdateOverlayViewPlacement()
         // 将 overlay NSWindow 绑定为父窗口（editor）的子窗口，
         // Z-order 高于主窗口内的 GL NSOpenGLView，但不高于其他应用。
         y2k::ui::MacAttachOverlayToParent(overlayView_.get(), this);
+
+        // 控制栏窗口自己的悬停提示宿主（独立 peer，Editor 的提示窗口管不到）。
+        overlayTooltip_ = std::make_unique<OverlayTipWindow> (overlayView_.get());
     }
 
     overlayView_->setBounds(barScreen);

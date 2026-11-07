@@ -6,6 +6,7 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 
 // ==========================================================
@@ -430,11 +431,21 @@ void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
         return (int) std::ceil (juce::GlyphArrangement::getStringWidth (btnFont, y2k::tr (juce::String (s))));
     };
 
+    // 按钮文字会随模式循环切换：宽度必须按"当前语言下所有可能文案"里最宽的
+    //   一条预留，否则中文下 "Semi" → "半平滑"（三字）会撑出按钮被裁掉。
+    auto widestTextW = [&] (std::initializer_list<const char*> labels)
+    {
+        int widest = 0;
+        for (const auto* s : labels)
+            widest = juce::jmax (widest, textW (s));
+        return widest;
+    };
+
     constexpr int gap = 4;
-    int w[4] = { textW ("Peak")   + 12,
-                 textW ("Sharp")  + 12,
-                 textW ("Smooth") + 12,
-                 textW ("M+S")    + 12 };
+    int w[4] = { widestTextW ({ "Peak" })                      + 12,
+                 widestTextW ({ "Sharp" })                     + 12,
+                 widestTextW ({ "Smooth", "Semi", "Raw" })     + 12,
+                 widestTextW ({ "MID", "M+S", "L/R" })         + 12 };
 
     // 模块太窄时按比例收缩（下限 26px，再窄就只能允许轻微裁字）
     const int avail = juce::jmax (1, tb.getWidth() - gap * 3);

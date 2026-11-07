@@ -67,6 +67,20 @@ private:
     juce::Point<int> lastPollPos { -100000, -100000 };
     juce::uint32     stillSinceMs = 0;
 
+    // 旧提示回收：鼠标移出本提示窗口所属 peer（浮动模块窗口、macOS 上
+    //   Milkdrop 的顶层控制栏窗口等）后，JUCE 的 TooltipWindow 会因
+    //   "鼠标下组件的 peer ≠ 提示窗口的 peer" 跳过整个更新分支 —— 旧提示
+    //   既不会刷新也不会隐藏，看起来就像"悬停按钮却显示别的模块的说明"。
+    //   这个低频守卫只负责把已经不属于本窗口的提示收起来。
+    struct StaleTipGuard : public juce::Timer
+    {
+        explicit StaleTipGuard (Y2KTooltipWindow& o) : owner (o) {}
+        void timerCallback() override;
+        Y2KTooltipWindow& owner;
+    };
+
+    StaleTipGuard staleTipGuard { *this };
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Y2KTooltipWindow)
 };
 

@@ -247,6 +247,12 @@ public:
     //   面板里的自绘控件逐个给出说明；未命中回落到基类（标题栏 / 模块说明）。
     HoverHelp getHoverHelp (juce::Point<int> localPos) const override;
 
+#if JUCE_MAC
+    // macOS：控制栏由独立顶层窗口覆盖整个内容区，Editor 的提示窗口会被原生
+    //   GL 视图 / 控制栏窗口遮挡 —— 提示改由模块自己的 overlay 轮询绘制。
+    bool usesNativeOverlayTips() const override;
+#endif
+
 private:
     // ------------------------------------------------------
     // GLView：嵌入态为纯 CPU 子组件，浮动态挂载独立 OpenGLContext。
@@ -441,7 +447,8 @@ private:
     //   透传到下方，由 MilkdropModule 的 mouseDown/Move/Up 处理。
     //   MilkdropModule 的 hit-test 走 JUCE 组件树，不受 native Z-order 影响。
     // ------------------------------------------------------
-    class OverlayView : public juce::Component
+    class OverlayView : public juce::Component,
+                        public juce::TooltipClient
     {
     public:
         explicit OverlayView(MilkdropModule& owner) : owner_(owner)
@@ -450,6 +457,13 @@ private:
             setOpaque(false);
         }
         void paint(juce::Graphics& g) override;
+
+        // 悬停提示：本窗口是独立顶层 NSWindow（peer 与主窗口不同），JUCE 的
+        //   TooltipWindow 不会为它解析提示 —— 实际由 MilkdropModule 的
+        //   updateOverlayHoverTip() 轮询后直接调用 overlayTooltip_->showTip()。
+        //   这里保留 TooltipClient 实现，兜底"真的收到鼠标事件"的路径。
+        juce::String getTooltip() override;
+
     private:
         MilkdropModule& owner_;
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OverlayView)
@@ -463,9 +477,25 @@ private:
     std::unique_ptr<GLView> glView;
 #if JUCE_MAC
     std::unique_ptr<OverlayView> overlayView_;  ///< macOS：顶层悬浮窗口，绘制控制栏
+
+    /// 控制栏窗口内的提示气泡（定义在 .cpp）：完全由 updateOverlayHoverTip
+    ///   的轮询驱动 —— 控制栏是独立 NSWindow，JUCE 的 TooltipWindow 定时器在
+    ///   它上面拿不到鼠标事件，自动解析/隐藏都不可靠。
+    class OverlayTipWindow;
+    std::unique_ptr<OverlayTipWindow> overlayTooltip_;
     /// 将 overlayView_ 的屏幕位置同步到 MilkdropModule 内容区顶部 26px 处；
     /// 若 !focused_ 或 !isShowing() 则隐藏。UI 线程调用（每帧、聚焦切换、resize 时）。
     void UpdateOverlayViewPlacement();
+
+    /// 控制栏窗口覆盖整个内容区且会吞掉鼠标事件（独立子 NSWindow），JUCE 的
+    ///   提示窗口在它上面既不会刷新也不会隐藏 —— 这里用 30Hz 轮询按实时鼠标
+    ///   位置解析文案，再由 overlayTooltip_ 在 overlay 窗口内绘制（可见于原生
+    ///   GL 画面之上）。GLView::timerCallback 调用。
+    void updateOverlayHoverTip();
+    void hideOverlayHoverTip();
+    juce::Point<int> tipPollMousePos { -1, -1 };
+    juce::uint32     tipPollStillMs = 0;
+    int              tipPollState   = 0;   ///< 0=未决 1=已显示 2=此处无提示
 #endif
 
     // 从布局存档恢复或浮动 renderer 同步来的预设索引（-1 = 无存档，首次启动）。

@@ -289,12 +289,13 @@
 "Hover for a ruler, click for a readout bubble." = "悬停显示标尺，点击弹出读数气泡。"
 
 "An audio-powered pixel pet." = "一只靠声音喂养的像素宠物。"
-"Play music to hatch the egg and keep it fed - long silence makes it hungry. Drag it around to carry it. Standalone only." = "播放音乐让蛋孵化并喂饱它 —— 长时间安静它会饿。可以拖着它到处走。仅限独立版。"
+"Play music to hatch the egg and keep it fed - long silence makes it hungry. Drag it around to carry it." = "播放音乐让蛋孵化并喂饱它 —— 长时间安静它会饿。可以拖着它到处走。"
 
 "MilkDrop visualiser (projectM) dancing to bass / mid / treble." = "随低 / 中 / 高频起舞的 MilkDrop 可视化（projectM）。"
 "- Click it to show the control bar: presets, auto, color, effects, wave, tweak." = "- 点击显示控制栏：预设、自动、颜色、效果、波形、画面。"
 "- Keys: Left / Right = prev / next preset, Space = random." = "- 按键：左 / 右 = 上 / 下一个预设，空格 = 随机。"
 "- Heart (bottom right) saves the preset to your Likes." = "- 右下角的爱心可把预设收藏到“喜欢”。"
+"- Switch button (bottom right) flips between all presets and your Likes folder (Y2Kmeter/milkdrop_presets_like in your user data folder)." = "- 右下角的切换按钮：在全部预设与“喜欢”文件夹之间切换（“喜欢”文件夹位于用户数据目录下的 Y2Kmeter/milkdrop_presets_like）。"
 
 "Real-time BPM and musical key detection." = "实时检测 BPM 和调性。"
 "- START / STOP, RESET the analysis window." = "- 开始 / 停止，重置分析窗口。"

@@ -6480,4 +6480,26 @@ Win 端同期提交 `1cb8c658`（Milkdrop 控制栏按钮等宽 / 示波器单�
 
 ---
 
+## v3.0.2 版本补充：本轮实测缺陷修复（6 项 + 3 轮跟进）
+
+> 版本号保持 `3.0.2`，全部来自用户实测反馈。表中记录的是**最终状态**（含后续两轮跟进），
+> 已被后续方案取代的中间实现不再赘述。
+
+| # | 现象 | 根因 | 最终处理 |
+| --- | --- | --- | --- |
+| 1 | macOS 全屏中退出软件，重启后不是全屏、下方模块被裁掉一截 | 原生全屏下 `saveMainWindowBounds()` 只跳过窗口几何写入（避免把全屏矩形当普通尺寸存档），但从未记录"当时是否全屏"，重启只能回到进全屏前的小窗口 | 新增 `window.nativeFullScreen`：退出时按 `mainWindow->isFullScreen()` 落盘（仍跳过几何写入）；启动时在窗口上屏后的 `callAsync` 里延迟 350 ms 调 `setFullScreen(true)` 恢复。与 Windows 伪全屏的 `window.fullscreen` 互不影响；`restorePseudoFullScreen()` 在 mac 上改为直接返回 |
+| 2 | 「全屏：全部模块」里三块示波器、三块示波波形显示同一模式 | 原实现对每个同类模块写死同一个值（示波器 → X-Y、示波波形 → 左声道） | 按出现顺序分配：示波器 **波形 / X-Y / 李萨如**，示波波形 **左 / 右 / 双声道**（按钮文字由各自 `refreshModeButton` / `refreshChannelButton` 同步） |
+| 3 | 悬停 Milkdrop 上**所有**按钮（画面 / 颜色 / 效果 / 波形 …）都显示同一个「别的模块说明」，每次重启还不一样；抬头提示也缺内容 | 控制栏 `OverlayView` 是**覆盖整个内容区**的独立子 NSWindow，会吞掉鼠标事件 → JUCE 的"鼠标下组件"一直停在进入模块前的模块 / 控件上，提示既不刷新也不隐藏；该窗口 peer 与主窗口不同，Editor 的提示窗口也不会为它解析（且提示绘制在原生 GL 视图之下，本来就被遮挡） | ① `Y2KTooltipWindow::getTipFor()` 改为按**屏幕坐标 + z-order** 定位模块（`ModuleWorkspace::getModuleAtScreenPoint()`），不再信任过期命中；起点控件不在鼠标下时不采信其 Tooltip；② 新增 `Y2KTooltipWindow::StaleTipGuard`（8 Hz），把已不属于本窗口的旧提示收起；③ `MilkdropModule::updateOverlayHoverTip()`（GLView 30 Hz 轮询）按**实时鼠标位置**解析文案，由 overlay 窗口内的专用气泡 `OverlayTipWindow` 绘制 —— 盖在原生 GL 画面之上，静止 500 ms 出现、移动即收起，并禁用 JUCE 自带的定时解析（否则会与轮询互抢）；④ `ModulePanel::usesNativeOverlayTips()` 让 Editor 的提示窗口在 Milkdrop 内容区让位（标题栏照常出提示），避免重复 / 互相遮挡；⑤ `MilkdropModule::getHoverHelp()` 不再按 `focused_` 早退，控制栏条带内未命中按钮时返回空文案（不把模块说明冒充成按钮说明） |
+| 3b | Milkdrop 抬头提示缺少「切换收藏文件夹」说明 | 文案缺项 | `moduleHelp(milkdrop)` 新增 `- Switch button (bottom right) ...` 一行（含 Likes 文件夹路径 `Y2Kmeter/milkdrop_presets_like`），并补 zh-CN 译文 |
+| 4 | `∞FPS` 档：中文下字特别小；英文下 ∞ 偏高；跟进后还有「切语言时 ∞ 左右跳」「符号本身偏小」 | 原实现把整串交给"符号字体"：中文下 `buttonFont` 先按 CJK 口径 ×0.9 再整串切到 Silkscreen（大写仅约 0.55 字高），明显小于数字档；改为分段排版后，整组按"实际宽度"居中，而 Silkscreen 的 `FPS`（38.25 px）比中文的（22.4 px）宽 16 px → ∞ 跳约 8 px；∞ 又落到 Apple Symbols（字面高仅约 0.19 em），比大写（约 0.31 em）小一半 | ① ∞ 用专用 `SymbolGlyphs::infinityFont()`：语言无关（口径同 `iconFont`：1.5x + uiScale，不套语言包 fontScale），主字体显式 `Arial Unicode MS`（∞ 字面高约 0.32 em；该字体无 bold 字型，固定 plain 以免被系统换字体），缺失时按 `symbolFallbackFamilies()` 回退；② 排版改用**语言无关的槽位** —— ∞ 宽 + `FPS` 槽宽（用英文 UI 字体 `iconFont` 量）整组居中，各语言的 `FPS` 再在槽内居中 → ∞ 在中英文下逐像素同位置（代价：中文下 ∞ 与 FPS 间留约 8 px 空隙）；③ ∞ 单独一档 `kSymHeight = 15`（≈22.5 px em，墨迹约 7 px，比原 18 px em ≈3.4 px 大一倍多），并上移 3 px 与 `FPS` 视觉居中；④ ∞ 不走 `SymbolGlyphs` 的 run 拆分（中文下会把符号换成英文 UI 字体 + Apple Symbols，字形不一致），直接 `Graphics::drawText` |
+| 5 | 连续点击 Toybox 会弹出 NICE! / COOL! / WOW! / Y2K MODE 短语 | 连击里程碑创建字幕 actor | 删除 `ComboTextActor` / `makeComboTextActor` 与里程碑里的文本生成（里程碑只保留 20/40 次的宠物反应与 40 次彩带雨彩蛋） |
+| 6 | 频谱模块曲线按钮切到「半平滑」时文字溢出按钮 | 按钮宽度只按英文最长词 `Smooth` 预留，中文 `Semi → 半平滑` 三字更宽 | 改为按当前语言下所有可能文案里最宽的一条预留（曲线 Smooth / Semi / Raw；通道 MID / M+S / L/R 同理） |
+| 7 | 电子宠物提示里的「仅限独立版 / Standalone only」 | 文案多余 | 删除该句（含 zh-CN 词条，`moduleHelp(virtuPet)` 同步） |
+
+**改动点**：`PluginEditor.cpp`（全屏磁贴预设的示波器模式分配 / `restorePseudoFullScreen` 注释）、`PluginEditor.h`（`getWorkspace()`）、`source/standalone/Y2KStandaloneApp.cpp`（`window.nativeFullScreen` 落盘与恢复）、`source/ui/HoverHelp.h/.cpp`（屏幕坐标命中 + StaleTipGuard + 文案）、`source/ui/ModuleWorkspace.h`（`getModuleAtScreenPoint` / `ModulePanel::usesNativeOverlayTips`）、`source/ui/ModuleWorkspace.cpp`（`FpsMiniLookAndFeel` ∞FPS 排版）、`source/ui/PinkXPStyle.h/.cpp`（`SymbolGlyphs::infinityFont`）、`source/ui/modules/MilkdropModule.h/.cpp`（overlay 提示轮询 / OverlayTipWindow / hover help 收口）、`source/ui/modules/SpectrumModule.cpp`（按钮宽度）、`source/ui/toys/ToyKit.h/.cpp`（连击字幕）、`i18n/zh-CN.lang`、本文档。
+
+**验证**：macOS Release `Y2Kmeter_Standalone` 与 `Y2Kmeter_VST3` 增量构建通过；`git diff --check` 无空白错误；∞FPS 的中英文布局用字体度量（Silkscreen / ChillBitmap / Arial Unicode MS）逐项核算过像素宽度与墨迹高度。运行时手感（全屏恢复、Milkdrop 提示、∞FPS 观感）以用户目测为准。
+
+---
+
 *本文档随着代码演进需要同步更新；若你（AI）在会话中发现文档描述与代码不一致，请以代码为准，并提示用户可能需要同步更新本文。*

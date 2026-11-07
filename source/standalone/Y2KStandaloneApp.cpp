@@ -788,6 +788,23 @@ public:
 
                 const bool savedChrome = s.getBoolValue("ui.chromeVisible", true);
                 cachedEditor->setChromeVisible(savedChrome);
+
+               #if JUCE_MAC
+                // macOS 原生全屏恢复：必须在窗口上屏（peer 就绪）之后执行；
+                //   再延后约 350ms，让首帧 GL / 布局恢复先完成，避免切换
+                //   Space 与初始化争抢造成黑屏或布局错位。
+                //   与 Windows 的 window.fullscreen（伪全屏）分开保存：
+                //   这里对应 setFullScreen 的系统原生全屏。
+                if (s.getBoolValue ("window.nativeFullScreen", false))
+                {
+                    juce::Component::SafePointer<juce::ResizableWindow> safeWindow (mainWindow.get());
+                    juce::Timer::callAfterDelay (350, [safeWindow]() mutable
+                    {
+                        if (safeWindow != nullptr && ! safeWindow->isFullScreen())
+                            safeWindow->setFullScreen (true);
+                    });
+                }
+               #endif
             });
         }
 
@@ -1078,7 +1095,14 @@ private:
         //   "铺满整屏但不是全屏"的坏存档，且是幂等覆盖（一旦写入就回不去）。
         //   这里直接跳过窗口几何写入，保留进入全屏前的合法存档；
         //   Windows 的伪全屏有自己的 preFullScreenBounds 路径，不受影响。
-        if (mainWindow->isFullScreen()) return;
+        //
+        //   ★ 另存 window.nativeFullScreen：旧版本只跳过几何、不记录状态，
+        //     导致"全屏中直接退出"后重启永远回到小窗口（用户看到的正是
+        //     布局按全屏铺好后下边被裁掉一截）。启动时由 initialise() 在
+        //     窗口上屏后按该值重新进入原生全屏。
+        const bool wasNativeFullScreen = mainWindow->isFullScreen();
+        getUserSettings().setValue ("window.nativeFullScreen", wasNativeFullScreen ? 1 : 0);
+        if (wasNativeFullScreen) return;
        #endif
 
         // 若窗口已经被 hide（shutdown 阶段的二次调用），跳过 —— 真正的 save

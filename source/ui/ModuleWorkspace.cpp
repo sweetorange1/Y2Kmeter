@@ -10,6 +10,7 @@
 #include "source/diag/Y2KDiagLog.h"
 #include "source/ui/HoverHelp.h"
 #include "source/i18n/Localisation.h"
+#include <cmath>
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
@@ -90,13 +91,57 @@ namespace
         void drawButtonText (juce::Graphics& g, juce::TextButton& button,
                              bool, bool shouldDrawButtonAsDown) override
         {
-            // "∞FPS" 的 ∞ 属于中文像素字体的空白符号：经 SymbolGlyphs 切英文字体
-            //   （字体 = SymbolGlyphs::buttonFont(shown, 12, bold)；静态位图缓存）
             const juce::String shown = y2k::tr (button.getButtonText());
 
             auto area = button.getLocalBounds();
             if (shouldDrawButtonAsDown || button.getToggleState())
                 area.translate (1, 1);
+
+            // "∞FPS"（无上限档）单独排版：
+            //   · ∞ 用语言无关的专用字体（Arial Unicode MS 的 ∞ 比系统回退的
+            //     Apple Symbols 饱满得多），字号单独一档、比 FPS 略大；
+            //   · 整组宽度按**语言无关**的口径计算：FPS 的槽宽用英文 UI 字体量
+            //     （iconFont），各语言的 FPS 再在槽内居中 —— 中英文切换时 ∞ 的
+            //     位置逐像素不变（此前按实际宽度居中，Silkscreen 的 FPS 比中文
+            //     字体的 FPS 宽约 16px，∞ 会左右跳）；
+            //   · ∞ 直接按 JUCE 原生路径绘制（不走 SymbolGlyphs 的 run 拆分：
+            //     那里会把符号强行换成英文 UI 字体 + Apple Symbols 回退，中文
+            //     界面下会换成另一个更扁的字形，与英文界面不一致）；
+            //   · ∞ 上移 3px：居中在字面框里时，它的墨迹中心比大写字母低约 3px
+            //     （Arial Unicode 的 ∞ 笔画细、字面偏下）。
+            const juce::String infinity = juce::String::charToString ((juce::juce_wchar) 0x221E);
+
+            if (shown.startsWith (infinity))
+            {
+                const auto suffix = shown.substring (infinity.length());
+
+                constexpr float kTextHeight = 12.0f;   // 与 30/60/120 档一致
+                constexpr float kSymHeight  = 15.0f;   // ∞ 专用（语言无关）
+
+                const auto symFont  = PinkXP::SymbolGlyphs::infinityFont (kSymHeight, juce::Font::bold);
+                const auto textFont = PinkXP::SymbolGlyphs::buttonFont (suffix, kTextHeight, juce::Font::bold);
+                const auto refFont  = PinkXP::SymbolGlyphs::iconFont (kTextHeight, juce::Font::bold);
+
+                const int symW  = (int) std::ceil (juce::GlyphArrangement::getStringWidth (symFont, infinity));
+                const int slotW = (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (suffix, refFont));
+                const int textW = (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (suffix, textFont));
+
+                auto line     = area.withSizeKeepingCentre (symW + slotW, area.getHeight());
+                auto symArea  = line.withWidth (symW).translated (0, -PinkXP::ui (3));
+                auto slotArea = line.withTrimmedLeft (symW);
+                auto textArea = slotArea.withSizeKeepingCentre (textW, slotArea.getHeight());
+
+                g.setColour (PinkXP::ink);
+                g.setFont (symFont);
+                g.drawText (infinity, symArea, juce::Justification::centred, false);
+
+                PinkXP::drawCachedSymbolText (g, suffix, textArea, juce::Justification::centred,
+                                              kTextHeight, juce::Font::bold, PinkXP::ink,
+                                              PinkXP::StaticTextFont::button,
+                                              juce::Colours::transparentBlack, false);
+                return;
+            }
+
             PinkXP::drawCachedSymbolText (g, shown, area, juce::Justification::centred,
                                           12.0f, juce::Font::bold, PinkXP::ink,
                                           PinkXP::StaticTextFont::button,
@@ -3172,6 +3217,22 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
     juce::Path dashed;
     juce::PathStrokeType (1.5f).createDashedStroke (dashed, frame, dashes, 2);
     g.strokePath (dashed, juce::PathStrokeType (1.5f));
+}
+
+ModulePanel* ModuleWorkspace::getModuleAtScreenPoint (juce::Point<int> screenPos) const
+{
+    // 子组件列表末尾 = z-order 最上层：从后往前找到第一个命中即可
+    for (int i = getNumChildComponents(); --i >= 0;)
+    {
+        auto* child = getChildComponent (i);
+        auto* panel = dynamic_cast<ModulePanel*> (child);
+        if (panel == nullptr || ! panel->isVisible() || ! panel->isShowing())
+            continue;
+
+        if (panel->getScreenBounds().contains (screenPos))
+            return panel;
+    }
+    return nullptr;
 }
 
 void ModuleWorkspace::resized()

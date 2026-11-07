@@ -569,6 +569,22 @@ namespace PinkXP
         return makeSymbolFont (h);
     }
 
+    juce::Font SymbolGlyphs::infinityFont (float height, int styleFlags)
+    {
+        // 字号口径与 iconFont 完全一致：语言无关（1.5x + uiScale），
+        //   这样中英文界面里 ∞ 的大小与位置逐像素相同。
+        const float scaled = (height >= 8.0f) ? height * 1.5f : height;
+        const float h = scaled * uiScale();
+
+        // 显式指定主字体：Arial Unicode MS 的 ∞ 字面高约为 0.32 字高，
+        //   比 symbolFallbackFamilies() 首选的 Apple Symbols（约 0.19）饱满得多。
+        //   忽略 styleFlags：Arial Unicode MS 没有 bold 字型，带 bold 去查会被
+        //   系统替换成别的字体（字形 / 字宽都会变），∞ 只需要一个固定字形。
+        juce::ignoreUnused (styleFlags);
+        return juce::Font (juce::FontOptions ("Arial Unicode MS", h, juce::Font::plain)
+                               .withFallbacks (symbolFallbackFamilies()));
+    }
+
     // ==========================================================
     // 混排文本 run 化
     //   Silkscreen 没有任何装饰符号字形（靠系统回退），ChillBitmap 没有任何

@@ -9,35 +9,6 @@
 
 namespace
 {
-    // ---- 连击字幕 ----
-    struct ComboTextActor : public ToyActor
-    {
-        juce::String text;
-        juce::Point<float> pos;
-
-        ComboTextActor (const juce::String& t, juce::Point<float> p)
-            : text (t), pos (p) { ttl = 1.2f; }
-
-        void step (float dt, ToyDirector&) override
-        {
-            age += dt;
-            pos.y -= 40.0f * dt;
-            if (age >= ttl) alive = false;
-        }
-        void paint (juce::Graphics& g, ToyDirector&) override
-        {
-            const float fade = 1.0f - age / ttl;
-            g.setFont (PinkXP::getFont (15.0f, juce::Font::bold));
-            g.setColour (PinkXP::ink.withAlpha (fade));
-            g.drawText (y2k::tr (text), juce::Rectangle<int> ((int) pos.x - 60, (int) pos.y - 14, 120, 28),
-                        juce::Justification::centred, false);
-        }
-        juce::Rectangle<float> getBounds() const override
-        {
-            return juce::Rectangle<float> (pos.x - 60, pos.y - 16, 120, 32);
-        }
-    };
-
     // 连续互动窗口与升级步长：间隔 < 3 s 视为连续，每满 5 次升一档；
     // 3 s 无互动（timerCallback）连击归零并降回 Chill。
     constexpr double kInteractionWindowSec = 3.0;
@@ -1004,24 +975,16 @@ void ToyDirector::registerComboClick (juce::Point<float> editorPos)
             setLevel ((ToyLevel) next);
     }
 
-    // 原有连击字幕（NICE!/COOL!/WOW!/Y2K MODE）与彩蛋继续保留。
-    if (comboCount_ == 5 || comboCount_ == 10 || comboCount_ == 20 || comboCount_ == 40)
+    // 连击里程碑（20 / 40 次）：只保留宠物反应与彩带雨彩蛋。
+    //   连击字幕 NICE!/COOL!/WOW!/Y2K MODE 已按用户反馈移除 —— 连续点击时
+    //   弹出的短语干扰操作、观感也不好。
+    if (comboCount_ == 20 || comboCount_ == 40)
         onComboMilestone (comboCount_, editorPos);
 }
 
 void ToyDirector::onComboMilestone (int count, juce::Point<float> pos)
 {
-    juce::String text;
-    switch (count)
-    {
-        case 5:  text = "NICE!"; break;
-        case 10: text = "COOL!"; break;
-        case 20: text = "WOW!";  break;
-        case 40: text = "Y2K MODE"; break;
-        default: return;
-    }
-
-    clock->freeActors.push_back (makeComboTextActor (text, pos));
+    juce::ignoreUnused (pos);
 
     if (count >= 20)
         notifyPetReaction (31);   // yell
@@ -1104,12 +1067,4 @@ void SparkBurstActor::paint (juce::Graphics& g, ToyDirector& dir)
 juce::Rectangle<float> SparkBurstActor::getBounds() const
 {
     return juce::Rectangle<float> (center.x - 60, center.y - 60, 120, 120);
-}
-
-// ==========================================================
-// 工厂
-// ==========================================================
-std::unique_ptr<ToyActor> makeComboTextActor (const juce::String& text, juce::Point<float> at)
-{
-    return std::make_unique<ComboTextActor> (text, at);
 }

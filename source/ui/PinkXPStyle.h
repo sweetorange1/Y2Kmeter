@@ -231,6 +231,15 @@ namespace PinkXP
         //   不应因中英文切换而跟着换字体变样。
         static juce::Font iconFont (float height, int styleFlags = juce::Font::plain);
 
+        // ∞ 专用：与语言无关的等比符号字体。
+        //   中文像素字体里 ∞ 是空白字形，英文 UI 字体（Silkscreen）也没有它，
+        //   会落到系统回退字体 —— 不同回退字体的 ∞ 字形大小差异极大
+        //   （Apple Symbols 只有约 0.19 字高，Arial Unicode MS 约 0.32 字高）。
+        //   这里显式以 Arial Unicode MS 为主字体，保证字形饱满、跨机器一致；
+        //   缺失时按 symbolFallbackFamilies() 回退。字号换算与 iconFont 相同
+        //   （1.5x + uiScale，不套语言包 fontScale），中英文界面完全一致。
+        static juce::Font infinityFont (float height, int styleFlags = juce::Font::plain);
+
         // 当前界面字体是否为 CJK 像素字体（非英文 Silkscreen）。
         //   CJK 方块字紧贴 em 顶部、descent 很小，垂直居中时视觉偏上；
         //   标题栏等关键位置用它决定是否做 1px 向下微调。

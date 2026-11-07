@@ -35,6 +35,10 @@ public:
     //   按当前 hover 状态返回对应说明（详见 source/ui/HoverHelp.h）。
     juce::String getTooltip() override;
 
+    // workspace 只在本头文件前置声明（完整定义在 .cpp）：悬停提示需要按屏幕
+    //   坐标定位模块时由此取用（调用方自行 include ModuleWorkspace.h）。
+    ModuleWorkspace* getWorkspace() const noexcept { return workspace.get(); }
+
     // ==============================================================
     // OpenGLRenderer —— projectM & GPU 模块在 Editor 上下文中渲染
     //   · newOpenGLContextCreated: GLEW init → 扫描预设/纹理路径 → create handle
