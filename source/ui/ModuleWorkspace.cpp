@@ -5530,8 +5530,25 @@ void ModuleWorkspace::syncPerlerLayerBounds (int idx)
 // ----------------------------------------------------------
 bool ModuleWorkspace::isInterestedInFileDrag (const juce::StringArray& files)
 {
+    // 诊断：拖入被拒时留一行（排查"完全拖不进图片"）—— 2s 限流，避免拖拽过程中刷屏
+    auto diagRejected = [] (const juce::String& why)
+    {
+        static double lastMs = 0.0;
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        if (now - lastMs < 2000.0)
+            return;
+        lastMs = now;
+        Y2K_DIAG ("DROP", "rejected: " + why);
+    };
+
     // 锁定态：拒绝任何拖入文件（避免新增拼豆贴画改变布局）
-    if (layoutLocked) return false;
+    //   ⚠ 这是"完全拖不进图片"的头号原因：L 处于按下态且被存档持久化，
+    //     表现就是拖任何图片都没反应，且界面上没有任何提示。
+    if (layoutLocked)
+    {
+        diagRejected ("layoutLocked=1 (L 锁定中)");
+        return false;
+    }
 
     for (const auto& f : files)
     {
@@ -5540,6 +5557,9 @@ bool ModuleWorkspace::isInterestedInFileDrag (const juce::StringArray& files)
             || ext == ".bmp" || ext == ".gif")
             return true;
     }
+
+    // 次号原因：扩展名不在白名单（webp / avif / heic / tif … 一律静默拒绝）
+    diagRejected ("unsupported ext: " + files.joinIntoString (", "));
     return false;
 }
 
