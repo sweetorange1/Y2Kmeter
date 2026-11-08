@@ -534,15 +534,18 @@ juce::String stripPresetLabel (int presetId)
 
 // ----------------------------------------------------------
 // 全屏磁贴预设（14~16）的静态布局表
-//   · 来源：用户用 Save 导出的三份自定义布局存档
-//       "频谱为主.settings" / "所有模块全部放到屏幕里.settings" / "多功能集合.settings"
-//   · 只取 <PBEQ_Layout> 里每个 <Module> 的 type + x/y/w/h（参考画布 2560×1328），
-//     刻意丢弃：
+//   · 来源：用户用 Save 导出的自定义布局存档（`<PBEQ_Layout>` 节点）
+//       "频谱为主" / "所有模块全部放到屏幕里"（= Y2Kmeter_all.settings）/
+//       "多功能集合"
+//   · 只取 <Module> 的 type + x/y/w/h（参考画布 2560×1328），刻意丢弃：
 //       a) VirtuPet 模块（存档里的宠物角色 / 饱食度 / 健康度是运行时数据，
 //          且它是浮在别的模块上的贴片，不该固化进预设）；
-//       b) 所有 <state> 子节点与模块额外属性（显示模式、颜色、缩放、
-//          Milkdrop 预设、瀑布参数等）—— 模块一律由 createModule() 以各自
-//          独立的构造默认值创建。
+//       b) Milkdrop 预设索引 / 瀑布滚动速度 / 颜色来源等"内容级"状态 ——
+//          模块一律由 createModule() 以各自构造默认值创建；
+//       c) 唯一例外是**显示模式**（波形 / X-Y / 李萨如、左右 / 双声道、
+//          PAN / MONO、Classic / Sharp / Sharper）：同类型模块在存档里
+//          本来就用不同模式（例如全部模块预设里的两块声像图），
+//          丢了这个信息画面就会重复。用 tile.mode 显式指定。
 //   · 坐标保留存档原值（本身已 8px 网格对齐），应用时按当前 canvas 归一化
 //     映射，因此换屏幕 / 换分辨率后相对排布不变。
 // ----------------------------------------------------------
@@ -550,6 +553,13 @@ struct FullScreenTile
 {
     ModuleType type;
     int x, y, w, h;
+
+    // 模块内部显示模式（-1 = 用模块自己构造默认值）
+    //   oscilloscope     → OscilloscopeModule::DisplayMode    (0 波形 / 1 X-Y / 2 李萨如)
+    //   oscilloscopeWave → OscilloscopeWaveModule::ChannelMode (0 左 / 1 右 / 2 双声道)
+    //   stereoMap        → StereoMapModule::Mode               (0 PAN / 1 MONO)
+    //   spectrogram      → SpectrogramModule::DisplayMode      (0 Classic / 1 Sharp / 2 Sharper)
+    int mode = -1;
 };
 
 // 14 FULL: SPECTRUM —— 频谱为主（左侧三块大图 + 顶部波形 + 右侧仪表列）
@@ -566,35 +576,39 @@ static const FullScreenTile kFullSpectrumTiles[] =
     { ModuleType::stereoMap,        0,  912, 1816, 416 }
 };
 
-// 15 FULL: ALL MODULES —— 所有模块全部放到屏幕里（26 块密排铺满整屏）
+// 15 FULL: ALL MODULES —— 所有模块全部放到屏幕里（25 块密排铺满整屏）
+//   · 布局完全取自用户存档 Y2Kmeter_all.settings（canvas 2560×1328，
+//     25 个模块，不含已下线的拼豆频谱）；
+//   · 3× oscilloscope（波形 / X-Y / 李萨如）、3× oscilloscope_wave
+//     （左 / 右 / 双声道）、2× stereo_map（PAN / MONO）、
+//     spectrogram（Sharp）都按存档里的**原始模式**还原。
 static const FullScreenTile kFullAllModulesTiles[] =
 {
-    { ModuleType::dynamics,         2176,  256, 384, 256 },
-    { ModuleType::phaseCorrelation, 1984,  256, 192, 128 },
-    { ModuleType::phaseBalance,     1984,  384, 192, 128 },
-    { ModuleType::oscilloscopeWave,  768,  256, 384, 256 },
+    { ModuleType::oscilloscopeWave,  768,  256, 384, 256, 0 },  // 左声道
     { ModuleType::dynamicsMeters,      0,  512, 256, 256 },
-    { ModuleType::oscilloscopeWave,    0,  256, 384, 256 },
-    { ModuleType::oscilloscopeWave,  384,  256, 384, 256 },
-    { ModuleType::phase,            1600,  256, 384, 256 },
-    { ModuleType::eq,               1152,  256, 448, 256 },
-    { ModuleType::oscilloscope,     2176,    0, 384, 256 },
-    { ModuleType::oscilloscope,     1792,    0, 384, 256 },
+    { ModuleType::oscilloscopeWave,    0,  256, 384, 256, 1 },  // 右声道
+    { ModuleType::oscilloscopeWave,  384,  256, 384, 256, 2 },  // 双声道
+    { ModuleType::oscilloscope,     2176,    0, 384, 256, 0 },  // 波形
+    { ModuleType::oscilloscope,     1792,    0, 384, 256, 1 },  // X-Y
     { ModuleType::vuMeter,          1064,    0, 344, 256 },
     { ModuleType::truePeak,          744,    0, 320, 256 },
     { ModuleType::lufsRealtime,      424,    0, 320, 256 },
     { ModuleType::loudness,            0,    0, 424, 256 },
-    { ModuleType::oscilloscope,     1408,    0, 384, 256 },
+    { ModuleType::oscilloscope,     1408,    0, 384, 256, 2 },  // 李萨如
     { ModuleType::stereoField,         0, 1064, 632, 264 },
     { ModuleType::waveform,         1800,  512, 760, 256 },
-    { ModuleType::stereoMap,        1288,  512, 512, 256 },
     { ModuleType::spectrogram3d,     824,  512, 464, 256 },
-    { ModuleType::spectrogram,       256,  512, 568, 256 },
-    { ModuleType::spectrum,            0,  768, 544, 296 },
-    { ModuleType::stereoMap,         544,  768, 664, 296 },
+    { ModuleType::spectrogram,       256,  512, 568, 256, 1 },  // Sharp
+    { ModuleType::stereoMap,         544,  768, 664, 296, 1 },  // MONO（单声道兼容度）
     { ModuleType::tempoKey,          632, 1064, 416, 264 },
     { ModuleType::recorder,         1048, 1064, 160, 264 },
-    { ModuleType::milkdrop,         1208,  768, 1352, 560 }
+    { ModuleType::milkdrop,         1208,  768, 1352, 560 },
+    { ModuleType::dynamics,         1288,  512, 512, 256 },
+    { ModuleType::phaseBalance,     2368,  384, 192, 128 },
+    { ModuleType::phase,            1984,  256, 384, 256 },
+    { ModuleType::phaseCorrelation, 2368,  256, 192, 128 },
+    { ModuleType::spectrum,         1152,  256, 832, 256 },
+    { ModuleType::stereoMap,           0,  768, 544, 296, 0 },  // PAN（逐频段声像）
 };
 
 // 16 FULL: MULTI COMBO —— 多功能集合（顶部通栏波形 + 中部频谱 + 右下可视化）
@@ -1037,8 +1051,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.0.5 debug"
-                                                                               : "v3.0.5"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.0.6 debug"
+                                                                               : "v3.0.6"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1080,7 +1094,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.0.5";
+        const juce::String versionBase = "v3.0.6";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -1739,6 +1753,11 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     {
         return createModule(t);
     });
+    // ⚠️ 这份列表才是"添加模块"菜单的**唯一事实来源**（会覆盖
+    //   ModuleWorkspace::availableTypes 的默认值）。
+    //   v3.0.6：拼豆频谱（ModuleType::eq）因性能问题暂时下线，不在此列表 ——
+    //   加回来时必须同时恢复 stringToModuleType("eq") 的映射（现在它被迁移成
+    //   spectrum，否则菜单里加出来的会是一块普通频谱）。
     workspace->setAvailableModuleTypes({
         ModuleType::loudness,
         ModuleType::lufsRealtime,
@@ -1751,7 +1770,6 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::oscilloscopeWave,
 
         ModuleType::spectrum,
-        ModuleType::eq,
 
         ModuleType::phase,
         ModuleType::phaseCorrelation,
@@ -3921,9 +3939,10 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 //   · 模块按静态表的参考画布（2560×1328）归一化映射到实际 canvas，边界
 //     统一吸附到 8px 网格 → 相邻模块共享同一条边界，密排无缝隙。
 //   · 只调用 createModule()：每个模块保持自己独立的默认设置，不套用存档
-//     里的显示模式 / 颜色 / 缩放 / Milkdrop 预设等任何内部状态。
-//     唯一例外：Preset 15（全部模块）里同类型波形模块各有三块，按出现顺序
-//     分配 波形 / X-Y / 李萨如 与 左 / 右 / 双声道，避免三块画面重复。
+//     里的颜色 / 缩放 / Milkdrop 预设等任何内部状态。
+//     唯一例外：静态表里 tile.mode >= 0 的磁贴会显式套用显示模式
+//     （波形 / X-Y / 李萨如、左 / 右 / 双声道、PAN / MONO、Classic / Sharp），
+//     因为同一预设里同类模块原本就用了不同模式，丢掉就会几块画面重复。
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
 {
@@ -4012,44 +4031,46 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
         return juce::jlimit (yT, yB, yT + juce::roundToInt (cells) * kGrid);
     };
 
-    // 「全屏：全部模块」里示波器 / 示波波形各出现三次：按出现顺序分别给
-    //   波形 / X-Y / 李萨如、左 / 右 / 双声道，避免三块画面完全一样
-    //   （按钮文字由各自的 refreshModeButton / refreshChannelButton 同步）。
-    int oscIndex  = 0;
-    int oscwIndex = 0;
-
     for (int i = 0; i < tileCount; ++i)
     {
         const auto& t = tiles[i];
 
-        // 只创建、只定位：不读存档 <state>，也不调任何 setDisplayMode / setXXX，
-        // 每个模块都是自己构造函数里的默认设置。
+        // 只创建、只定位：不读存档 <state>，模块一律以构造默认值出生；
+        //   唯一例外是静态表里显式写死的显示模式（t.mode >= 0）。
         auto panel = createModule (t.type);
         if (panel == nullptr) continue;
 
-        if (presetId == (int) ModuleWorkspace::LayoutPreset::fullAllModules)
+        // 显示模式（波形 / X-Y / 李萨如、左 / 右 / 双声道、PAN / MONO、
+        //   Classic / Sharp / Sharper）：按钮文字由各模块自己的
+        //   refreshModeButton / refreshChannelButton 同步。
+        if (t.mode >= 0)
         {
-            if (t.type == ModuleType::oscilloscope)
+            const int m = t.mode;
+
+            switch (t.type)
             {
-                static const OscilloscopeModule::DisplayMode kOscModes[] = {
-                    OscilloscopeModule::DisplayMode::waveform,
-                    OscilloscopeModule::DisplayMode::xy,
-                    OscilloscopeModule::DisplayMode::lissajous
-                };
-                if (auto* osc = dynamic_cast<OscilloscopeModule*> (panel.get()))
-                    osc->setDisplayMode (kOscModes[juce::jlimit (0, 2, oscIndex)]);
-                ++oscIndex;
-            }
-            else if (t.type == ModuleType::oscilloscopeWave)
-            {
-                static const OscilloscopeWaveModule::ChannelMode kOscWaveModes[] = {
-                    OscilloscopeWaveModule::ChannelMode::left,
-                    OscilloscopeWaveModule::ChannelMode::right,
-                    OscilloscopeWaveModule::ChannelMode::both
-                };
-                if (auto* oscw = dynamic_cast<OscilloscopeWaveModule*> (panel.get()))
-                    oscw->setChannelMode (kOscWaveModes[juce::jlimit (0, 2, oscwIndex)]);
-                ++oscwIndex;
+                case ModuleType::oscilloscope:
+                    if (auto* osc = dynamic_cast<OscilloscopeModule*> (panel.get()))
+                        osc->setDisplayMode ((OscilloscopeModule::DisplayMode) juce::jlimit (0, 2, m));
+                    break;
+
+                case ModuleType::oscilloscopeWave:
+                    if (auto* oscw = dynamic_cast<OscilloscopeWaveModule*> (panel.get()))
+                        oscw->setChannelMode ((OscilloscopeWaveModule::ChannelMode) juce::jlimit (0, 2, m));
+                    break;
+
+                case ModuleType::stereoMap:
+                    if (auto* sm = dynamic_cast<StereoMapModule*> (panel.get()))
+                        sm->setMode ((StereoMapModule::Mode) juce::jlimit (0, 1, m));
+                    break;
+
+                case ModuleType::spectrogram:
+                    if (auto* sg = dynamic_cast<SpectrogramModule*> (panel.get()))
+                        sg->setDisplayMode ((SpectrogramModule::DisplayMode) juce::jlimit (0, 2, m));
+                    break;
+
+                default:
+                    break;
             }
         }
 
@@ -4604,7 +4625,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.0.5";
+        const juce::String versionBase = "v3.0.6";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -9489,6 +9510,35 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
         glDrawArrays (GL_TRIANGLES, 0, 6);
       }
 
+      //   2.b) 残值清零 pass（v3.0.6）：dst -= eps（四通道同减）
+      //     trail FBO 是 8bit RGBA8，衰减 pass 的乘法是"×decay 后四舍五入"，
+      //     于是 alpha/RGB 只要落到 1~3/255 就成了不动点：
+      //         round(3 × 0.92) = 3   round(12 × 0.959@120Hz) = 12 ...
+      //     乘法永远无法把这些量化残值压到 0 —— 表现为雷达里那个永远擦不掉的
+      //     浅灰小点（高刷屏上残值更大，更明显）。
+      //     这里再走一遍减法：blend (REVERSE_SUBTRACT, ONE, ONE) → dst - src，
+      //     src 取 2/255，残值两帧内必归零；对满幅像素只相当于多衰减 0.8%。
+      //     四通道一起减：只减 alpha 会留下 alpha=0 但 RGB≈1 的像素，
+      //     合成（ONE, 1-SRC_ALPHA）时仍会叠出一层极淡的灰色。
+      {
+        constexpr float kFlush = 2.0f / 255.0f;
+        const float w = (float) snap->texW, h = (float) snap->texH;
+        const float quad[36] = {
+          0.0f, 0.0f, kFlush, kFlush, kFlush, kFlush,
+          w, 0.0f, kFlush, kFlush, kFlush, kFlush,
+          0.0f, h, kFlush, kFlush, kFlush, kFlush,
+          w, 0.0f, kFlush, kFlush, kFlush, kFlush,
+          w, h, kFlush, kFlush, kFlush, kFlush,
+          0.0f, h, kFlush, kFlush, kFlush, kFlush,
+        };
+        glBlendEquation (GL_FUNC_REVERSE_SUBTRACT);
+        glBlendFunc (GL_ONE, GL_ONE);
+        glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
+        glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
+        glDrawArrays (GL_TRIANGLES, 0, 6);
+        glBlendEquation (GL_FUNC_ADD);
+      }
+
       //   3) 点 pass：trail 段（叠加累积；点顶点为模块本地坐标，
       //      经 canvasLocal 偏移换算到 trail FBO 坐标）
       glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -9870,6 +9920,24 @@ void Y2KmeterAudioProcessorEditor::ResumeMilkdropEditorRendererAfterFloating() {
     if (!milkdrop_render_ready_.load() && milkdrop_pm_handle_ == nullptr)
       newOpenGLContextCreated();
   }, false);
+}
+
+// ----------------------------------------------------------
+// RequestGlFrame —— 只驱动 GL 出帧，不标脏组件层
+//   · 嵌入态 Milkdrop 的内容由 Editor GL 渲染，而 Editor 的 OpenGLContext
+//     是 setContinuousRepainting(false)：没有组件脏区就不出帧。
+//     整个界面只剩 Milkdrop 一块时，组件层唯一的重绘来源是 GLView 的
+//     30Hz 兜底 Timer → FPS 标签被钉在 30（外网反馈）。
+//   · triggerRepaint() 会置 pendingRender，GL 线程照常跑 renderOpenGL；
+//     组件层没有脏区时 paintComponent 的 invalid 为空，不会重新光栅化，
+//     所以这里比 repaint()（整块内容区重绘）便宜得多。
+// ----------------------------------------------------------
+void Y2KmeterAudioProcessorEditor::RequestGlFrame()
+{
+  if (editorBeingDestructed || !openGLContext.isAttached())
+    return;
+
+  openGLContext.triggerRepaint();
 }
 
 void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {

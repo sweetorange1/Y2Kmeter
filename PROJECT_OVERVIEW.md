@@ -8,7 +8,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.0.5`）
+- **产品名**：`Y2Kmeter` （版本：`3.0.6`）
   - 历史：`v2.9.9` 之后的功能曾以「v2.9.9 补充」形式入库、不 bump 版本号（`Stereo Map`、多屏混合 DPI 修复、
     实时 BPM / 调性模块），随后 `v2.9.10` 归拢了 Waveform 模块重构；**v3.0.0** 起恢复常规语义化版本号
     （见文末「v3.0.0：...」章节）；**v3.0.1** 为补丁版（GL 直渲染修复 / 全屏布局预设，见文末）。
@@ -18,8 +18,12 @@
     按钮字号收紧、翻译文案自查、多屏混合 DPI 下模块脱离窗口物理像素落位等），详见文末「v3.0.2」章节。
     v3.0.2 发布后的调整（Milkdrop 按钮等宽、示波器单按钮循环、调性点击反馈、macOS 编译修复、
     VST 响度 Integrated 跟随宿主播放重置、图标字符固定英文 UI 字体）均以 `v3.0.2补充` 形式入库、不再 bump 版本号。
-    **v3.0.5**（本轮）把 FPS 上限按钮的「无上限」档从 `∞FPS` 改为文字（中文「不限制」/ 英文 `no limit`），
+    **v3.0.5** 把 FPS 上限按钮的「无上限」档从 `∞FPS` 改为文字（中文「不限制」/ 英文 `no limit`），
     并让按钮宽度按最宽档文案自适应，详见文末「v3.0.5」章节。
+    **v3.0.6**（本轮）现场修复：Stereo Field 残影不消失、拼豆频谱下线（含存档迁移 +
+    菜单清单收敛为单来源）、FULL: ALL MODULES 预设按用户存档重排 + 逐块显示模式、
+    抬头双击最大化写入存档、Only Milkdrop 预设 30fps 上限、空白工程 Toybox emoji
+    定格 / 按住喷发断流，详见文末「v3.0.6」章节。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -30,7 +34,7 @@
 
 ### 1.2 主要功能一览
 
-**① 音频分析与计量**（23 个可组合模块，由 `AnalyserHub` 的 6 路分析统一驱动、按引用计数按需启用）
+**① 音频分析与计量**（22 个可组合模块 + 1 个已下线模块 `eq`(拼豆频谱)，由 `AnalyserHub` 的 6 路分析统一驱动、按引用计数按需启用）
 
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
@@ -44,7 +48,7 @@
 - **声像雷达**（Stereo Field，半圆雷达，幅度驱动声像位置）
 - **频谱声像图**（Stereo Map，按频率逐段对比 L/R：PAN 轴 ±1 声像偏向（上=L / 中=居中 / 下=R），MONO 轴为**倒置的单声道保留量**（上=100% 干净 / 下=50% 满幅抵消）；**未发布**）
 - **实时节拍 / 音乐调性**（Tempo / Key：BPM + 大调 / 自然小调 / 和声小调 / 旋律小调 + 关系调 + 可解释置信度；后台线程分析，未加载模块时完全不运行）
-- **EQ 频谱可视化**（Y2K 主题，**仅可视化，不做实际 EQ 处理**）
+- **（已下线）拼豆频谱**（`Spectrum Perlerbeads` / `ModuleType::eq`，Y2K 主题的拼豆格子频谱，**仅可视化，不做实际 EQ 处理**）：v3.0.6 起因性能问题暂时从产品中移除 —— 不进"添加模块"菜单，旧存档里的 `type="eq"` 节点在加载时**同位置同尺寸**迁移成 `spectrum`（详见文末「v3.0.6」）。
 
 > 细粒度拆分模块（实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest）复用同一路分析结果，后端零新增计算。
 
@@ -356,7 +360,7 @@
   - **Focus + Sidecar (7)**：左 65% `Spectrogram` 主视觉（普通瀑布，帧率友好）+ 右 35% `VU / StereoField / LUFS RT` 竖排。
   - **Broadcast Loudness (9)**：上排响度读数（`LUFS RT / TruePeak / Dynamics DR / Dynamics Crest`）+ 下排仪表（`VU / StereoField / Dynamics Meters`）。
   - **Only Milkdrop (10)**：全屏（Windows userArea / macOS 原生全屏）+ 单个最大化 `Milkdrop` 模块。
-  - **全屏磁贴预设 (14/15/16)**：由用户三份 Save 存档（`.settings` → `filterState` → `<PBEQ_Layout>`）提炼，静态表在 `PluginEditor.cpp` 匿名 namespace 的 `kFullSpectrumTiles / kFullAllModulesTiles / kFullMultiComboTiles`（9 / 26 / 10 块）。只取 `<Module>` 的 `type + x/y/w/h`（参考画布 2560×1328，均为 8px 网格对齐），**丢弃 VirtuPet 节点与全部 `<state>` 子节点**；`applyFullScreenTilePreset()` 复制 Preset 10 的全屏几何（Windows 物理口径 userArea / macOS totalArea + 原生全屏、resizeLimits 锁死），按当前 canvas 归一化映射并吸附 8px 网格后逐块 `createModule()` + `setBounds()` + `addModule(false)`，不调用任何模块 setter。切换预设时用户当前养着的 VirtuPet 仍按 `applyLayoutPreset` 末尾的既有机制保留到右下角（存档里的宠物状态不复刻）。
+  - **全屏磁贴预设 (14/15/16)**：由用户三份 Save 存档（`.settings` → `filterState` → `<PBEQ_Layout>`）提炼，静态表在 `PluginEditor.cpp` 匿名 namespace 的 `kFullSpectrumTiles / kFullAllModulesTiles / kFullMultiComboTiles`（9 / **25** / 10 块；v3.0.6 起 15 号按最新存档 `Y2Kmeter_all.settings` 重排并去掉已下线的拼豆频谱）。只取 `<Module>` 的 `type + x/y/w/h`（参考画布 2560×1328，均为 8px 网格对齐），**丢弃 VirtuPet 节点与除"显示模式"以外的全部 `<state>` 子节点**；显示模式由 `FullScreenTile::mode` 逐块指定（-1 = 用模块默认），覆盖 `oscilloscope`(波形/X-Y/李萨如) / `oscilloscopeWave`(左/右/双) / `stereoMap`(PAN/MONO) / `spectrogram`(Classic/Sharp/Sharper) —— 全部模块预设里三块示波器、三块示波波形、两块声像图在存档里本来就是**不同模式**。`applyFullScreenTilePreset()` 复制 Preset 10 的全屏几何（Windows 物理口径 userArea / macOS totalArea + 原生全屏、resizeLimits 锁死），按当前 canvas 归一化映射并吸附 8px 网格后逐块 `createModule()` + `setBounds()` + `addModule(false)`。切换预设时用户当前养着的 VirtuPet 仍按 `applyLayoutPreset` 末尾的既有机制保留到右下角（存档里的宠物状态不复刻）。
 - **拼豆像素画（PerlerImage）**：拖入图片 → 按 `cellSize`（默认 4，范围 1..15）降采样 + 每格取原图平均色 → 生成像素画 → 作为 canvas 底图；每张贴画对应一个 `PerlerImageLayer` 子 Component 与模块**同 z-order 层级**。
 - **P4 debounce**：`LayoutChangeCoalescer`（16ms 单发计时器），大量小改动只派发 1 次 `onLayoutChanged`。
 - **hit-test 挖洞**：`setHitTestHoles`，chrome 隐藏态下让浮层按钮的鼠标事件冒泡回 Editor。
@@ -6742,3 +6746,146 @@ cmake --build build/msvc --config Release --target Y2Kmeter_Standalone -j 8
   `Y2K_ENABLE_LOGGING || Y2K_DIAG_LOG_DEFAULT` 编译，正式包里没有）。
 - 打包偶发 `Error: 另一个程序正在使用此文件`：刚链接完的 `.vst3` 被杀软/IDE 扫描独占，
   等几秒重跑即可；注意 ISCC 会**先删同名旧包**，失败后旧包就没了。
+
+---
+
+## v3.0.6：现场修复（残影 / 拼豆频谱下线 / 全屏预设重排 / 最大化存档 / Only Milkdrop 30fps / 空白工程 Toybox）
+
+> 版本号 `3.0.5 → 3.0.6`：`CMakeLists.txt`（`project()` + 两处 `juce_add_plugin VERSION`）、
+> `Y2Kmeter_installer.iss`（`MyAppVersion`）、`README.md` 徽章、
+> `PluginEditor.cpp` 三处抬头文案（命中矩形宽度 / `paint()` / `drawTitleBar()`）。
+
+**本轮七个问题（前 5 个来自首轮反馈，6/7 来自同版本第二轮反馈）**
+
+| # | 问题 | 一句话根因 | 修复位置 |
+|---|---|---|---|
+| 1 | Stereo Field 浅灰残影永不消失 | trail FBO 是 RGBA8，`×decay` 的乘法在 1~3/255 处有量化不动点 | `PluginEditor.cpp` 残值清零 pass |
+| 2 | 拼豆频谱性能不达标 → 下线 | 每帧整块拼豆格子重绘 | `ModuleType::eq` 退出菜单 + `stringToModuleType("eq")→spectrum` 迁移 |
+| 3 | 「全屏：全部模块」预设与用户存档不符、两块声像图同模式 | 静态表是旧存档 + 丢弃了显示模式 | `kFullAllModulesTiles` 25 块重排 + `FullScreenTile::mode` |
+| 4 | 抬头双击最大化后重启变小 | 存档写的是"双击前的 bounds" | `saveLayoutTree/loadLayoutFromTree` 存 `maximized` + `rx/ry/rw/rh` |
+| 5 | Only Milkdrop 预设帧率被钉在 30fps | Editor GL 只在组件层有脏区时出帧，唯一驱动是 GLView 的 30Hz Timer | `Editor::RequestGlFrame()` + Milkdrop 逐帧驱动 |
+| 6 | 右键菜单仍能加出拼豆频谱 | 模块清单有两份（头文件默认值 + Editor 下发），只改了前者 | 清单收敛为单来源（Editor 下发） |
+| 7 | 空白工程 emoji 全定格 / 按住喷发一小会就断 | ① `mask==0` 时 FrameDispatcher 直接 return，ToyClock 不跑<br>② 3 s「无点击」超时把 `spraying_` 掐掉 | `AnalyserHub::dispatch` 分发空帧 + `ToyDirector::timerCallback` |
+
+**改动文件**：`CMakeLists.txt`、`PluginEditor.cpp/.h`、`source/analysis/AnalyserHub.cpp`、
+`source/ui/ModuleWorkspace.cpp/.h`、`source/ui/modules/MilkdropModule.cpp`、
+`source/ui/toys/ToyKit.cpp`、`Y2Kmeter_installer.iss`、`README.md`、本文件。
+
+**验证**：`cmake --build build/msvc --config Release --target Y2Kmeter_Standalone -j 8`
+（VS 2026 + 本地 `third_party/JUCE`），产物
+`build/msvc/Y2Kmeter_artefacts/Release/Standalone/Y2Kmeter.exe`；界面行为由用户实测确认
+（残影消失、存档迁移、预设排布/双模式、最大化持久、Milkdrop 满帧、空白工程 Toybox 正常）。
+
+### 1. Stereo Field 残影永不消失（嵌入式 GL 路径）
+
+- **现象**：非脱离态（Editor GL 直渲染）下，雷达里总有一个浅灰小点擦不掉。
+- **根因（8bit 量化不动点）**：`StereoFieldModule` 的 trail 走持久 FBO 累积，
+  每帧衰减 pass 用 `blend(ZERO, ONE_MINUS_SRC_ALPHA)` 做 `dst × trailDecay`
+  （`trailDecay = 0.92^(dt×60)`）。FBO 是 `GL_RGBA8`，乘法结果四舍五入到 8bit 后
+  **存在不动点**：`round(3 × 0.92) = 3`、120Hz 下 `round(12 × 0.959) = 12`、
+  240Hz 下 `round(24 × 0.98) = 24` —— 乘法永远压不到 0，残值就地常驻。
+  逐帧还有最多 512 个新点写进同一个 FBO，残值越积越多，合成
+  （`blend(ONE, ONE_MINUS_SRC_ALPHA)`，预乘）后就是那层"浅灰残影"，帧率越高越明显。
+- **修复**（`PluginEditor.cpp` 的 trail 分支）：在衰减 pass 之后追加一个
+  **残值清零 pass** —— `glBlendEquation(GL_FUNC_REVERSE_SUBTRACT)` +
+  `glBlendFunc(GL_ONE, GL_ONE)` + 全屏 quad 颜色 `2/255` → `dst -= 2/255`，
+  完事后恢复 `GL_FUNC_ADD`。四通道同减（只减 alpha 会留下 `alpha=0 / RGB≈1` 的
+  像素，合成时仍是一层极淡的灰）。代价：每帧多一个无纹理全屏 quad，满幅像素
+  只额外衰减 0.8%。
+- 浮动态（CPU 路径 `updateTrail`）本来就是 `multiplyAlpha` + 图像重建，不受影响。
+
+### 2. 拼豆频谱模块（`Spectrum Perlerbeads` / `ModuleType::eq`）下线
+
+- **原因**：该模块性能不达标（每帧整块拼豆格子重绘）。
+- **做法**（"暂时下线"，不是删除代码）：
+  - "添加模块"菜单里不再列出：Editor 下发的清单（唯一事实来源）删掉 `eq`，
+    头里的默认清单清空 —— 详见下面第 6 节（首版漏改过一次）；
+    hover 预览的兜底类型改成 `spectrum`。
+  - `stringToModuleType("eq")` → **返回 `ModuleType::spectrum`**：布局槽
+    （`<PBEQ_Layout>` / `StickTop` / `StickBottom`）、脱离态记录、预设文件里
+    所有 `type="eq"` 节点在加载时**同位置、同尺寸**换成普通频谱
+    （x/y/w/h 原样保留，`id` 也保留）。
+  - 枚举值 / `EqModule` 实现 / `createModule` 分支保留，日后可原样恢复。
+- **注意**：`moduleTypeToString(ModuleType::eq)` 仍返回 `"eq"`（对称性），
+  但正常路径已无法造出 eq 实例；未知类型解析失败的兜底也改成了 `spectrum`。
+
+### 3. FULL: ALL MODULES 预设按用户最新存档重排（25 块 + 逐块显示模式）
+
+- **来源**：`%APPDATA%\Y2Kmeter\Y2Kmeter_all.settings` 的
+  `filterState`（JUCE 自定义 base64 + `copyXmlToBinary` 8 字节头）里的
+  `<PBEQ_Layout>`，参考画布 2560×1328。
+- **表**：`kFullAllModulesTiles` 26 → **25** 块（去掉 eq），坐标全部按存档重排
+  （旧表的 dynamics / phase / phaseBalance / stereoMap 位置与最新存档不一致）。
+- **逐块显示模式**：`FullScreenTile` 新增 `int mode = -1`，`applyFullScreenTilePreset()`
+  按类型分发 `setDisplayMode / setChannelMode / setMode`：
+  - 3× `oscilloscope`：波形(2176,0) / X-Y(1792,0) / 李萨如(1408,0)
+  - 3× `oscilloscope_wave`：左(768,256) / 右(0,256) / 双声道(384,256)
+  - 2× `stereo_map`：**PAN**(0,768,544×296) / **MONO**(544,768,664×296)
+  - `spectrogram`(256,512)：Sharp
+  - 其余（waveform 120px/s、spectrogram3d TINT、spectrum peak/semi/mid）恰好都是
+    构造默认值，不需要额外 setter。
+- 旧的"按出现顺序给三块示波器分配模式"逻辑（`oscIndex / oscwIndex`）已删除。
+- 14 / 16 号预设的 `mode` 全为 `-1`，行为不变。
+
+### 4. 抬头双击最大化写入存档
+
+- **现象**：最大化某模块后退出，重开变成小尺寸。
+- **根因**：`saveLayoutTree()` 里对最大化模块刻意写的是
+  `maximizedRestoreBounds`（双击前的 bounds），即"最大化态不存档"。
+- **修复**：
+  - 存档：`x/y/w/h` = 当前**实际** bounds；处于最大化时额外写
+    `maximized="1"` + `rx/ry/rw/rh`（双击还原用的原始 bounds）。
+  - 加载：`loadLayoutFromTree()` 见到 `maximized="1"` 就把
+    `maximizedPanel / maximizedRestoreBounds / maximizedAppliedSize`
+    一起还原，`maximizedCanvasSize` 记当前 canvas —— 之后窗口尺寸真的变化时
+    `reapplyMaximizeIfNeeded()` 会把它重新贴到底；重启后再双击同一个抬头
+    能正常回到最大化之前的尺寸。
+  - 加载新布局前显式复位这四个成员（`SafePointer` 会因模块析构置空，
+    但还原 bounds / 画布快照是普通成员，不主动清会串到下一个布局）。
+
+### 5. Only Milkdrop 预设帧率骤降到 30fps
+
+- **根因**：Editor 的 `OpenGLContext` 是 `setContinuousRepainting(false)` ——
+  **只有组件层出现脏区才出帧**。整屏只有 Milkdrop 时，唯一的脏区来源是
+  `MilkdropModule::GLView` 的 `startTimerHz(30)` 兜底 Timer（它调
+  `owner_.repaint()`），于是 GL 帧被钉死在 30；随便加一个模块后，那个模块的
+  `onFrame → repaintFrameContent()` 又回来了，帧率立刻恢复。**projectM 本身
+  没有锁 30**（`kMilkdropTargetFps = 60`，只节流 projectM 渲染本身）。
+- **修复**：
+  - `Y2KmeterAudioProcessorEditor::RequestGlFrame()`（新增，public）：
+    `openGLContext.triggerRepaint()` —— 只置 `pendingRender` 让 GL 线程跑
+    `renderOpenGL`；组件层没有脏区时 `paintComponent()` 的 `invalid` 为空，
+    不会重新光栅化（比 `repaint()` 整块重绘便宜得多）。
+  - `MilkdropModule::onFrame()`：PushPcm 之后，非脱离态且 `editor_ != nullptr`
+    时调 `editor_->RequestGlFrame()`。浮动态由 GLView 自己的 native 上下文
+    `setContinuousRepainting(true)` 连续渲染，不额外驱动。
+  - GLView 的 30Hz Timer 保留（它还负责 auto-hide / auto 轮播 / 悬停刷新）。
+
+### 6. 拼豆频谱仍在右键菜单（同版本第二轮反馈）
+
+- 3.0.6 首版只改了 `ModuleWorkspace.h` 里的**默认清单**，但 Editor 构造时用
+  `setAvailableModuleTypes()` 整体覆盖了一遍，那份里还留着 `eq` → 菜单照样列出来。
+- 修复：Editor 下发的清单删掉 `eq`；头里的默认清单直接清空（只留注释指向
+  Editor），从此**只有一份清单**，避免"改一处漏一处"。
+
+### 7. 空白工程里 Toybox emoji 定格 / 按住喷发断流（同版本第二轮反馈）
+
+- **现象**：一个模块都没有时，点画布空白的 emoji 全部定格不动；按住鼠标持续喷
+  只喷第一下（或一小会）就没后续。
+- **根因 1（定格 + 不喷）**：`AnalyserHub::FrameDispatcher::dispatch()` 里
+  `if (mask == 0) return;` —— `mask` 由各路的 `refCounts` 组成，而 refCount 是
+  **模块**在构造里 `retain()` 的。空工程 = 没有任何 Kind 被 retain = mask == 0
+  = 直接 return，**listener 一个都不回调**。但 `ToyClock`（Toybox 的 actor 时钟）
+  是 `FrameListener` 而不是分析数据消费者，它只用到 `timeSec / dtSec`；帧一停，
+  粒子不再 `step()`（自然也不死，于是越堆越多），`sprayTick()` 也不再被调用。
+  一个模块都不加时正是唯一会踩到的场景。
+  修复：mask == 0 也照常分发**空帧**（`activeMask=0` + tick/time/dt 照写），
+  各模块一律先 `has(Kind)` 判定，不会误用快照池里的残留字段。
+- **根因 2（按住一小会就断）**：`ToyDirector::timerCallback()` 用
+  `lastComboTime_` 判断"3 s 无互动"，而它只在 `mouseDown` / `registerComboClick`
+  里刷新 —— 按住不放时没有任何新点击，3 s 一到就把 `spraying_` 掐掉（并降回
+  Chill）。修复：`spraying_` 期间视为持续互动（续窗口、不降级）；同时用
+  `ModifierKeys::getCurrentModifiersRealtime().isLeftButtonDown()` 兜底 ——
+  在窗口外松开收不到 `mouseUp` 时也能收掉 spraying_，不会永久喷。
+- 顺带：emoji 不再"喷一堆却不消失"（帧恢复后 `age/ttl` 正常推进，FIFO 400 上限也
+  正常工作）。

@@ -225,7 +225,11 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
 {
     struct KV { const char* k; ModuleType v; };
     static const KV kv[] = {
-        { "eq",                 ModuleType::eq },
+        // v3.0.6：拼豆频谱（"eq"）因性能问题暂时下线。
+        //   旧存档 / 旧预设里的 "eq" 节点在这里直接迁移成 spectrum ——
+        //   布局加载只认 type 字符串，x/y/w/h 原样保留，于是旧工程里那块
+        //   "拼豆频谱"会被换成同位置、同尺寸的普通频谱。
+        { "eq",                 ModuleType::spectrum },
         { "loudness",           ModuleType::loudness },
         { "oscilloscope",       ModuleType::oscilloscope },
         { "spectrum",           ModuleType::spectrum },
@@ -261,7 +265,9 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
             return p.v;
         }
     if (ok) *ok = false;
-    return ModuleType::eq;
+    // 未知类型：调用方通常会据 ok==false 跳过；这里回退到 spectrum 而不是
+    //   已下线的 eq，避免任何"意外造出一个拼豆频谱"的路径。
+    return ModuleType::spectrum;
 }
 
 // ==========================================================
@@ -4342,6 +4348,15 @@ static const juce::Identifier kPropVirtuPetRoleName ("virtuPetRoleName");
 static const juce::Identifier kPropVirtuPetHunger   ("virtuPetHunger");
 static const juce::Identifier kPropVirtuPetHealth   ("virtuPetHealth");
 static const juce::Identifier kPropFloating     ("floating");  // 脱离态标记（旧存档兼容）
+// v3.0.6：抬头双击"最大化"态
+//   · maximized="1" 标记该模块当前处于最大化；x/y/w/h 仍是**最大化后的实际
+//     几何**（存档里"看到什么就存什么"），双击还原用的原始 bounds 另存
+//     rx/ry/rw/rh 四个属性（缺省时用默认尺寸兜底）。
+static const juce::Identifier kPropMaximized ("maximized");
+static const juce::Identifier kPropRestoreX ("rx");
+static const juce::Identifier kPropRestoreY ("ry");
+static const juce::Identifier kPropRestoreW ("rw");
+static const juce::Identifier kPropRestoreH ("rh");
 static const juce::Identifier kPropScreenX  ("sx");  // 浮动窗口屏幕 X 坐标（独立存档用）
 static const juce::Identifier kPropScreenY  ("sy");  // 浮动窗口屏幕 Y 坐标（独立存档用）
 static const juce::Identifier kPropScreenW  ("sw");  // 浮动窗口屏幕宽度（独立存档用）
@@ -4379,14 +4394,28 @@ juce::ValueTree ModuleWorkspace::saveLayoutTree() const
             juce::ValueTree node(kLayoutModule);
             node.setProperty(kPropType, moduleTypeToString(m->getModuleType()), nullptr);
             node.setProperty(kPropId,   m->getModuleId(),                       nullptr);
-            // v3.0.1：最大化态不写入存档 —— 存的是双击前的原始 bounds，
-            //   重启后模块回到原位置，而不是"一开机就占满画布"。
-            const auto b = (maximizedPanel.getComponent() == m) ? maximizedRestoreBounds
-                                                                : m->getBounds();
+            // v3.0.6：最大化态按"看到的几何"存（x/y/w/h = 最大化后的 bounds），
+            //   另存 maximized 标记 + 双击还原用的原始 bounds。
+            //   旧实现只存还原 bounds，导致"最大化后退出 → 重开就变小"。
+            const bool isMaximized = (maximizedPanel.getComponent() == m);
+            const auto b = m->getBounds();
             node.setProperty(kPropX, b.getX(),      nullptr);
             node.setProperty(kPropY, b.getY(),      nullptr);
             node.setProperty(kPropW, b.getWidth(),  nullptr);
             node.setProperty(kPropH, b.getHeight(), nullptr);
+
+            if (isMaximized)
+            {
+                const auto rb = maximizedRestoreBounds;
+                if (! rb.isEmpty())
+                {
+                    node.setProperty (kPropMaximized, true, nullptr);
+                    node.setProperty (kPropRestoreX, rb.getX(),      nullptr);
+                    node.setProperty (kPropRestoreY, rb.getY(),      nullptr);
+                    node.setProperty (kPropRestoreW, rb.getWidth(),  nullptr);
+                    node.setProperty (kPropRestoreH, rb.getHeight(), nullptr);
+                }
+            }
 
             if (m->getModuleType() == ModuleType::virtuPet)
             {
@@ -4471,6 +4500,12 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree, bool impor
     //   脱离态模块由独立的浮动记录（loadFloatingModulesFromTree）维护。
     for (int i = modules.size(); --i >= 0;)
         modules.remove(i);
+    // 最大化态属于"上一个布局"，重建前先复位（SafePointer 会因模块析构置空，
+    //   但还原 bounds / 画布尺寸快照是普通成员，必须显式清掉）。
+    maximizedPanel = nullptr;
+    maximizedRestoreBounds = {};
+    maximizedAppliedSize   = {};
+    maximizedCanvasSize    = {};
     // 同步清理拼豆贴画：先清 layer（子 Component）再清数据结构
     perlerLayers.clear();
     perlerImages.clear();
@@ -4598,6 +4633,25 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree, bool impor
         auto stateChild = node.getChildWithName("state");
         if (stateChild.isValid())
             raw->restoreModuleSpecificState(stateChild);
+
+        // v3.0.6：恢复"抬头双击最大化"态
+        //   · bounds 已经是存档里的最大化几何（上面 setBounds 用过）；
+        //   · 这里把 maximizedPanel / maximizedRestoreBounds 一起还原，让
+        //     重启后再双击同一个抬头能回到最大化之前的尺寸；
+        //   · maximizedCanvasSize 记当前 canvas 尺寸 —— 后续 resized() 若画布
+        //     真的变了（插件首次恢复时 canvas 还很小），reapplyMaximizeIfNeeded()
+        //     会把它重新贴合到新的画布。
+        if ((bool) node.getProperty (kPropMaximized, false))
+        {
+            maximizedPanel = raw;
+            maximizedRestoreBounds = { (int) node.getProperty (kPropRestoreX, x),
+                                       (int) node.getProperty (kPropRestoreY, y),
+                                       juce::jmax (raw->getMinWidth(),  (int) node.getProperty (kPropRestoreW, raw->getDefaultWidth())),
+                                       juce::jmax (raw->getMinHeight(), (int) node.getProperty (kPropRestoreH, raw->getDefaultHeight())) };
+            maximizedAppliedSize = { raw->getWidth(), raw->getHeight() };
+            const auto canvasNow = getCanvasArea();
+            maximizedCanvasSize = { canvasNow.getWidth(), canvasNow.getHeight() };
+        }
 
         modules.add(panel.release());
 

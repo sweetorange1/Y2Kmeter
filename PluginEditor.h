@@ -105,6 +105,15 @@ public:
     void SuspendMilkdropEditorRendererForFloating();
     void ResumeMilkdropEditorRendererAfterFloating();
 
+    // 请求 Editor GL 出帧（只驱动 renderOpenGL，不标脏组件层）。
+    //   · Editor 的 OpenGLContext 是 setContinuousRepainting(false)：只有组件层
+    //     出现脏区时才会出帧。整屏只有 Milkdrop（其它模块一个都没有）时，
+    //     唯一的重绘来源是 GLView 的 30Hz 兜底 Timer → 帧率被钉死在 30fps。
+    //   · 这里用 OpenGLContext::triggerRepaint() 直接要一帧：GL 线程会跑
+    //     renderOpenGL（projectM + 直渲染模块），而组件层因为没有脏区不会
+    //     重新光栅化（paintComponent 的 invalid 为空）。
+    void RequestGlFrame();
+
     // 整体视觉状态（master output colors 染色 + bright/invert/shadows 等效果），
     // 全局共享（所有 Milkdrop 模块同一状态）。UI 线程调用 SetMilkdropVisualState 写，
     // GL 线程调用 GetMilkdropVisualState 读（内部加锁）；写时同步回 Processor 以便持久化。

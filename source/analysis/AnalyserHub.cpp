@@ -70,8 +70,14 @@ public:
             if (owner.refCounts[static_cast<size_t> (i)].load (std::memory_order_relaxed) > 0)
                 mask |= static_cast<juce::uint32> (1u << i);
 
-        if (mask == 0)
-            return; // 所有路都无人订阅 —— 不生成帧
+        // v3.0.6：mask == 0（**没有任何模块** retain 任何分析路）时仍然分发空帧。
+        //   · 旧实现在这里直接 return，等于"工程里没有模块 → 帧时钟停摆"。
+        //   · 但 FrameListener 并不都是分析数据消费者：ToyClock（Toybox 的 actor
+        //     时钟）只用 timeSec / dtSec，必须在空白工程里也跑 —— 否则空白画布上
+        //     喷出来的 emoji 全部定格不动、按住持续喷也不再生效（现场 bug）。
+        //   · 空帧依旧写入 activeMask=0 / tickCount / timeSec / dtSec，所有消费方
+        //     都先 has(Kind) 判定，不会误用池里残留的旧字段。
+        //   · 代价：空白工程每帧多做一次快照池取用 + 一次 listener fanout（µs 级）。
 
         // v2.9：快照池复用。FrameSnapshot ≈ 37KB，120Hz 下每 tick make_shared
         //   等于每秒 4.5MB 的 malloc + 清零；池里找一个"只被池持有"的旧快照复用。

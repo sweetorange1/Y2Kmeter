@@ -1992,7 +1992,17 @@ void MilkdropModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     }
 
     glView->PushPcm (tmp, (unsigned int) N);
-    // triggerRepaint removed: Editor GL drives rendering;
+
+    // 嵌入态（非脱离）：内容由 Editor GL 渲染，必须逐帧向 Editor 要一帧。
+    //   · Editor 的 OpenGLContext 是 setContinuousRepainting(false) → 组件层没有
+    //     脏区就不出帧；整个界面只剩 Milkdrop 时（布局预设 Only Milkdrop），
+    //     唯一的重绘来源曾是 GLView 的 30Hz 兜底 Timer，帧率被钉死在 30fps。
+    //   · RequestGlFrame 只驱动 renderOpenGL，不重新光栅化组件层 —— 比
+    //     repaintFrameContent()（整块内容区每帧重绘）便宜。
+    //   · 浮动态由 GLView 自己的 native 上下文 setContinuousRepainting(true)
+    //     连续渲染，不需要额外驱动。
+    if (! isFloating() && editor_ != nullptr)
+        editor_->RequestGlFrame();
 }
 
 void MilkdropModule::nextPreset()

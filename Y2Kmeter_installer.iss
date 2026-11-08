@@ -9,7 +9,7 @@
 ;   用 #ifndef 保护，保证直接编译本脚本时行为与以前完全一致。
 ; -----------------------------------------------------------------------
 #ifndef MyAppVersion
-#define MyAppVersion   "3.0.5"
+#define MyAppVersion   "3.0.6"
 #endif
 
 ; 打包产物来源目录：默认使用用户自己编译的 VS 工程输出（而非 AI 编译的 build\msvc）

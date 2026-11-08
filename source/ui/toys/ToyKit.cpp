@@ -598,17 +598,35 @@ void ToyDirector::setLevel (ToyLevel l)
 
 void ToyDirector::timerCallback()
 {
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+    // v3.0.6：按住持续喷（C-2）期间不能走"3 s 无点击 → 收摊"逻辑。
+    //   · 旧实现只看 lastComboTime_（只在 mouseDown 时刷新），按住不放超过 3 s
+    //     就会被这里掐掉 spraying_ → "鼠标按住一小会之后就不喷了"（现场 bug）。
+    //   · 先用实时按键状态兜底：在窗口外松开鼠标时 mouseUp 可能收不到，
+    //     不能让 spraying_ 永久挂着（否则会一直喷、档位也永不降级）。
+    if (spraying_ && ! juce::ModifierKeys::getCurrentModifiersRealtime().isLeftButtonDown())
+    {
+        spraying_ = false;
+        hasLastMousePos_ = false;   // 力场起点作废，避免下次移动算出巨大速度
+    }
+
+    if (spraying_)
+    {
+        // 鼠标确实还按着 = 持续互动：续上组合窗口，且不降级。
+        lastComboTime_ = now;
+        return;
+    }
+
     if (lastComboTime_ <= 0.0)
         return;
 
-    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
     if (now - lastComboTime_ < kInteractionWindowSec)
         return;
 
-    // 3 s 没有互动：连击归零、停掉按住持续喷 / 彩带雨，并降回 Chill。
+    // 3 s 没有互动：连击归零、停掉彩带雨，并降回 Chill。
     lastComboTime_ = 0.0;
     comboCount_ = 0;
-    spraying_ = false;
     confettiRainRemaining_ = 0;
     setLevel (ToyLevel::Chill);
 }

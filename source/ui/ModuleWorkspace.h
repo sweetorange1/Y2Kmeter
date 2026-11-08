@@ -20,6 +20,10 @@ class ModuleToyState;
 
 enum class ModuleType
 {
+    // v3.0.6：拼豆频谱（Spectrum Perlerbeads）暂时下线 —— 性能不达标。
+    //   · 不进 availableTypes（添加模块菜单里看不到）；
+    //   · 旧存档里的 "eq" 由 stringToModuleType() 迁移成 spectrum（同位同尺寸）；
+    //   · 枚举值 / EqModule 实现保留（枚举只追加不重排，也方便日后重新上线）。
     eq,
     loudness,
     oscilloscope,
@@ -479,7 +483,7 @@ public:
     void setFloatingModuleStates(const std::map<juce::String, juce::Rectangle<int>>& states) {
         floatingModuleStates_.clear();
         for (const auto& [id, bounds] : states)
-            floatingModuleStates_[id] = { ModuleType::eq, bounds, {}, {} };
+            floatingModuleStates_[id] = { ModuleType::spectrum, bounds, {}, {} };
     }
 
     // 更新脱离态模块的浮动窗口屏幕位置，供 FloatingModuleWindow::handleAsyncUpdate 调用
@@ -1244,7 +1248,9 @@ private:
     //     "放下去后大概长这样"的直觉提示。
     //   · 一旦菜单关闭（用户选中 / 取消）就清空，不残留在画面上。
     bool          hoverPreviewActive = false;
-    ModuleType    hoverPreviewType   = ModuleType::eq;
+    // 兜底类型（菜单刚弹出、还没 hover 任何一项时用它算预览框尺寸）。
+    //   v3.0.6：拼豆频谱下线后改用 spectrum。
+    ModuleType    hoverPreviewType   = ModuleType::spectrum;
     juce::Point<int> hoverPreviewPos { 0, 0 };
 
     // hover 预览 —— 每个 ModuleType 缓存一张"空态快照"（含完整子组件），
@@ -1295,22 +1301,17 @@ private:
     int overflowDividerX3 = -1;
 
     ModuleFactory factory;
-    juce::Array<ModuleType> availableTypes {
-        ModuleType::loudness, ModuleType::lufsRealtime, ModuleType::truePeak,
-        ModuleType::vuMeter,
-        ModuleType::oscilloscope, ModuleType::oscilloscopeWave,
-        ModuleType::waveform,
-        ModuleType::spectrum, ModuleType::eq, ModuleType::spectrogram, ModuleType::spectrogram3d,
-        ModuleType::stereoField,
-        ModuleType::stereoMap,
-        ModuleType::virtuPet,
-        ModuleType::phase, ModuleType::phaseCorrelation, ModuleType::phaseBalance,
-
-        ModuleType::dynamics, ModuleType::dynamicsMeters, ModuleType::dynamicsDr, ModuleType::dynamicsCrest,
-        ModuleType::milkdrop,
-        ModuleType::tempoKey,
-        ModuleType::recorder
-    };
+    // 添加模块菜单里按本表顺序列出；**不在本表里的类型 = 产品里不可添加**。
+    //
+    //   ⚠️ 本表默认是空的，真正的清单由 Editor 在构造时用
+    //   setAvailableModuleTypes() 下发（见 PluginEditor.cpp，那里是唯一事实来源）。
+    //   v3.0.6 教训：此前这里存了一份"默认清单"，Editor 又下发了一份 —— 拼豆
+    //   频谱下线时只改了其中一份，结果右键菜单里照样能加出来。现在只保留一份。
+    //
+    //   拼豆频谱（ModuleType::eq / "Spectrum Perlerbeads"）v3.0.6 起因性能问题
+    //   暂时下线：不进菜单；旧存档里的 "eq" 节点由 stringToModuleType() 统一迁移
+    //   成 spectrum（同位同尺寸）。枚举值与 EqModule 实现保留，方便日后重新上线。
+    juce::Array<ModuleType> availableTypes;
 
     int nextIdCounter = 1;
 
