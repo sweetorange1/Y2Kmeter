@@ -71,6 +71,17 @@ endif()
 project(Y2Kmeter VERSION 3.0.6 LANGUAGES C CXX)
 
 # ==========================================================
+# Steam 构建开关（默认 OFF，绝不影响官网 / Inno Setup 流水线）
+#   · OFF（默认）：不编译 Steamworks 后端、不链接 steam_api64.lib、
+#     产物不含任何 Steam 导入 → 没有 steam_api64.dll 的机器也能正常启动。
+#   · ON：只给 Y2Kmeter_Standalone 编入真实 Steamworks 后端（成就），
+#     必须配合独立的 binaryDir（见 CMakePresets 的 steam preset），
+#     **绝不能**在 cmake-build-release-visual-studio/ 里打开。
+#   · 打包脚本：build_steam.ps1（产物只写 dist-steam/）。
+# ==========================================================
+option(Y2K_STEAM_BUILD "Build the Steam version (achievements + cloud). Never enable for installer builds." OFF)
+
+# ==========================================================
 # v2.9.2：帧耗时统计日志（仅开发者诊断构建，默认 OFF）
 #   开启方式：cmake ... -DY2K_ENABLE_FRAME_PERF_LOG=ON
 #   关闭时零开销、不产生任何产物，不影响对外 Release 版本。
@@ -758,6 +769,17 @@ source/ui/modules/OscilloscopeWaveModule.cpp
   source/network/TelemetryClient.cpp
   source/network/UpdateChecker.h
   source/network/UpdateChecker.cpp
+
+  # === Steam 薄封装（成就）===
+  #   · Y2KSteam.h/.cpp：只持有后端函数表，零 Steamworks 依赖 → 进共享清单安全。
+  #   · Y2KAchievements.h/.cpp：成就触发逻辑 + 跨会话累计值。
+  #   · 真实 Steamworks 后端 Y2KSteamSteamworks.cpp **不**在这里 —— 它只被
+  #     Y2K_STEAM_BUILD=ON 时的 Y2Kmeter_Standalone 单独编译（见文件末尾
+  #     的 Steamworks 段），保证 VST3 目标永远链接不到 Steam。
+  source/steam/Y2KSteam.h
+  source/steam/Y2KSteam.cpp
+  source/steam/Y2KAchievements.h
+  source/steam/Y2KAchievements.cpp
 )
 
 target_sources(Y2Kmeter PRIVATE ${Y2KM_PLUGIN_SOURCES})
@@ -1009,6 +1031,108 @@ if (WIN32 AND TARGET Y2Kmeter_Standalone)
     GENERATED TRUE
   )
   target_sources(Y2Kmeter_Standalone PRIVATE "${Y2KM_APP_ICON_RES}")
+endif()
+
+# ==========================================================
+# Steamworks（仅 Y2K_STEAM_BUILD=ON，仅 Windows，仅 Standalone）
+#
+#   隔离保证：
+#     · 默认构建不进入本块 → 不编译后端、不链接 steam_api64.lib、
+#       产物不产生任何 Steam 导入（可在没有 steam_api64.dll 的机器上启动）。
+#     · 只有 Y2Kmeter_Standalone 获得 Y2K_STEAM 宏与后端源码；
+#       Y2Kmeter / Y2Kmeter_milkdrop（VST3/AU 共享代码）完全不参与，
+#       因此插件宿主里永远不会加载 Steam DLL。
+#     · 共享代码里的成就埋点通过 y2k::steam 的函数表转发：未注册后端时
+#       全部走空实现，所以"没有 Steam 后端"与"Steam 不可用"是同一条代码路径。
+#
+#   SDK 路径处理：
+#     官方 SDK 常放在含中文的目录（如 I:/Steam相关/SteamSdk）。MSVC 的链接器
+#     对非 ASCII 路径偶发解析失败，因此这里把用得到的头文件 / .lib / .dll
+#     先复制到 ${CMAKE_BINARY_DIR}/steam_sdk（纯 ASCII）再使用。
+# ==========================================================
+if (Y2K_STEAM_BUILD)
+  if (NOT WIN32)
+    message(FATAL_ERROR "Y2K_STEAM_BUILD 仅支持 Windows")
+  endif()
+  if (NOT TARGET Y2Kmeter_Standalone)
+    message(FATAL_ERROR "Y2K_STEAM_BUILD 需要 Y2Kmeter_Standalone 目标")
+  endif()
+
+  set(Y2KM_STEAM_SDK "" CACHE PATH "Steamworks SDK 根目录（含 public/ 与 redistributable_bin/）")
+  if (Y2KM_STEAM_SDK STREQUAL "")
+    set(Y2KM_STEAM_SDK "I:/Steam相关/SteamSdk")
+  endif()
+
+  set(_steam_src_inc "${Y2KM_STEAM_SDK}/public/steam")
+  set(_steam_src_lib "${Y2KM_STEAM_SDK}/redistributable_bin/win64/steam_api64.lib")
+  set(_steam_src_dll "${Y2KM_STEAM_SDK}/redistributable_bin/win64/steam_api64.dll")
+
+  foreach(_f "${_steam_src_inc}/steam_api.h" "${_steam_src_lib}" "${_steam_src_dll}")
+    if (NOT EXISTS "${_f}")
+      message(FATAL_ERROR
+        "Steamworks SDK 文件缺失：${_f}\n"
+        "请检查 -DY2KM_STEAM_SDK=<SDK 根目录>（当前 '${Y2KM_STEAM_SDK}'）")
+    endif()
+  endforeach()
+
+  # ---- 复制到 ASCII 暂存目录（构建目录内，不进产物）----
+  set(_steam_stage "${CMAKE_BINARY_DIR}/steam_sdk")
+  file(MAKE_DIRECTORY "${_steam_stage}/public" "${_steam_stage}/lib")
+  # copy_directory 复制的是"目录内容"，结果固定为 <stage>/public/steam/*.h，
+  #   与官方 SDK 的 #include <steam/steam_api.h> 路径一致。
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_steam_src_inc}" "${_steam_stage}/public/steam"
+    RESULT_VARIABLE _steam_copy_result)
+  if (NOT _steam_copy_result EQUAL 0)
+    message(FATAL_ERROR "复制 Steamworks 头文件失败：${_steam_src_inc}")
+  endif()
+  file(COPY "${_steam_src_lib}" "${_steam_src_dll}" DESTINATION "${_steam_stage}/lib")
+
+  set(_steam_inc "${_steam_stage}/public")
+  set(_steam_lib "${_steam_stage}/lib/steam_api64.lib")
+  set(_steam_dll "${_steam_stage}/lib/steam_api64.dll")
+
+  target_compile_definitions(Y2Kmeter_Standalone PRIVATE Y2K_STEAM=1)
+  target_include_directories(Y2Kmeter_Standalone PRIVATE "${_steam_inc}")
+
+  # 本目标会编译 source/steam/Y2KSteamSteamworks.cpp（含中文注释），
+  #   必须显式按 UTF-8 解析，避免 MSVC 按本地 ANSI 代码页误读注释。
+  #   /wd4828：官方 SDK 的部分头文件里带有非 UTF-8 字节（Latin-1 注释），
+  #     /utf-8 下会对它们报 C4828 警告；这些内容只在注释里，直接静音。
+  if (MSVC)
+    target_compile_options(Y2Kmeter_Standalone PRIVATE /utf-8 /wd4828)
+  endif()
+
+  # 真实后端只在这里出现：静态初始化阶段把函数表注册给 y2k::steam
+  target_sources(Y2Kmeter_Standalone PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/steam/Y2KSteamSteamworks.cpp"
+  )
+
+  target_link_libraries(Y2Kmeter_Standalone PRIVATE "${_steam_lib}")
+
+  add_custom_command(TARGET Y2Kmeter_Standalone POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_steam_dll}"
+            "$<TARGET_FILE_DIR:Y2Kmeter_Standalone>/steam_api64.dll"
+    COMMENT "Y2Kmeter[Steam]: copy steam_api64.dll"
+    VERBATIM
+  )
+
+  # 开发期专用：steam_appid.txt 放在构建产物目录，便于脱离 Steam 客户端调试。
+  #   ★ 只存在于 build-steam 产物目录，build_steam.ps1 打包时会显式排除。
+  set(Y2KM_STEAM_APPID_TXT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/steam_appid.txt")
+  if (EXISTS "${Y2KM_STEAM_APPID_TXT}")
+    add_custom_command(TARGET Y2Kmeter_Standalone POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${Y2KM_STEAM_APPID_TXT}"
+              "$<TARGET_FILE_DIR:Y2Kmeter_Standalone>/steam_appid.txt"
+      COMMENT "Y2Kmeter[Steam]: write dev-only steam_appid.txt (never shipped)"
+      VERBATIM
+    )
+  endif()
+
+  message(STATUS "Y2Kmeter: Steam build ENABLED  (SDK: ${Y2KM_STEAM_SDK})")
+  message(STATUS "Y2Kmeter: Steam backend target  = Y2Kmeter_Standalone only")
+else()
+  message(STATUS "Y2Kmeter: Steam build disabled (normal installer build)")
 endif()
 
 # ==========================================================

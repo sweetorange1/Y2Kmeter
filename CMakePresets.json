@@ -42,6 +42,29 @@
       }
     },
     {
+      "name": "steam",
+      "displayName": "MSVC — Steam build (achievements + cloud)",
+      "description": "Isolated Steam build tree (build-steam). Never use for installer builds.",
+      "inherits": "msvc",
+      "binaryDir": "${sourceDir}/build-steam",
+      "cacheVariables": {
+        "Y2K_STEAM_BUILD": "ON"
+      }
+    },
+    {
+      "name": "steam-ninja",
+      "displayName": "Ninja (MSVC cl) — Steam build (achievements + cloud)",
+      "description": "Same isolated Steam build, but with the Ninja generator + cl, for CLion toolchains configured as 'Visual Studio + Ninja'. Separate tree from the 'steam' preset; never reuse one binaryDir across different generators.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-steam-ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "Y2K_STEAM_BUILD": "ON",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
       "name": "clangd-msvc",
       "displayName": "clangd index database (MSVC + Ninja)",
       "description": "Generates build-clangd/compile_commands.json for clangd without touching the normal MSVC build directory.",
@@ -102,6 +125,22 @@
       "displayName": "MSVC MinSizeRel",
       "configurePreset": "msvc",
       "configuration": "MinSizeRel"
+    },
+    {
+      "name": "steam-release",
+      "displayName": "Steam Release (Standalone only)",
+      "description": "Steam 版只构建 Standalone。VST3 不参与，避免把 Steam 依赖带进插件产物。",
+      "configurePreset": "steam",
+      "configuration": "Release",
+      "targets": [ "Y2Kmeter_Standalone" ]
+    },
+    {
+      "name": "steam-ninja-release",
+      "displayName": "Steam Release — Ninja (Standalone only)",
+      "description": "Ninja 版本，供 CLion 的 Visual Studio + Ninja 工具链使用；构建目录 build-steam-ninja。",
+      "configurePreset": "steam-ninja",
+      "configuration": "Release",
+      "targets": [ "Y2Kmeter_Standalone" ]
     },
     {
       "name": "clangd-msvc",

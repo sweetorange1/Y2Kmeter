@@ -63,6 +63,12 @@
 #include "../network/TelemetryClient.h"
 #include "../network/UpdateChecker.h"
 
+// Steam（仅 Steam 版 exe 注册了后端；默认构建里所有调用都是空实现）
+//   · Y2KSteam.h 自身不含任何 Steamworks 头 → 默认构建零依赖
+//   · Y2KAchievements.h 集中管理成就触发与跨会话累计值
+#include "../steam/Y2KSteam.h"
+#include "../steam/Y2KAchievements.h"
+
 // WASAPI Loopback 采集器（捕捉系统混音输出）
 #include "WasapiLoopbackCapture.h"
 
@@ -437,7 +443,8 @@ public:
 //     - 创建 Y2KMainWindow 并把 Editor setContentOwned 进去
 // ----------------------------------------------------------
 class Y2KStandaloneApp  : public juce::JUCEApplication,
-                         public juce::ChangeListener
+                         public juce::ChangeListener,
+                         public juce::Timer   // 200ms 心跳：Steam 回调泵（RunCallbacks）
 {
 public:
     Y2KStandaloneApp()
@@ -472,6 +479,30 @@ public:
         y2k::diag::setThreadTag ("UI");
         y2k::diag::setPhase ("App::initialise");
         Y2K_DIAGC ("BOOT", "Y2KStandaloneApp::initialise begin");
+
+        // 0.05) Steam 初始化（仅 Steam 版 exe 里有后端）
+        //   · 默认构建 / VST3：backendLinked() == false → initialise() 立刻返回
+        //     false，不产生任何 Steam 调用，也没有任何 Steam DLL 依赖（C1）。
+        //   · 返回 false 时程序必须继续以"无 Steam"模式完整工作（C7）：
+        //     成就与云同步静默不可用，其余功能完全正常。
+        //   · restartRequested()：从 steamapps 目录直接双击 exe 时，Steam 要求
+        //     经由客户端重启本进程；这里立刻退出，避免和 Steam 拉起的新实例
+        //     抢同一份 settings / 回环音频设备。
+        const bool steamReady = y2k::steam::initialise();
+        if (! steamReady && y2k::steam::restartRequested())
+        {
+            Y2K_DIAGC ("BOOT", "Steam requested restart via client -> quit this process");
+            // 标记"初始化被中止"：此时窗口 / Editor / processor 都还不存在，
+            //   shutdown() 里那条 persistAllSettings() 会访问 cachedEditor，
+            //   必须跳过（什么都不该写，本次进程本来就要被新实例取代）。
+            bootAborted = true;
+            setApplicationReturnValue (0);
+            quit();
+            return;
+        }
+        Y2K_DIAGC ("BOOT", juce::String ("steam backend=")
+                               + (y2k::steam::backendLinked() ? "1" : "0")
+                               + " ready=" + (steamReady ? "1" : "0"));
 
        #if JUCE_MAC
         // 0) macOS：若检测到 App 版本已升级（或首次启动），主动重置
@@ -523,6 +554,21 @@ public:
         //      异步写 muteInput；在第一次回调到来前我们直接写原子位以绝后患）。
         pluginHolder->shouldMuteInput.setValue (false);
         pluginHolder->muteInput.store (false);
+
+        // 1.05) 云存档安全网：校验 settings 里的 audioSetup
+        //       Auto-Cloud 会把 %APPDATA%\Y2Kmeter\*.settings 从别的机器同步过来，
+        //       其中的 audioOutputDeviceName 是**具体设备名**（如「扬声器 (Volt 1)」），
+        //       目标机器很可能没有该设备。
+        //       JUCE 自身在打开失败时会回退到默认设备（不会弹窗、不会崩），
+        //       但回退后的真实设备名不会立刻写回 settings —— 崩溃 / 强杀后
+        //       下次启动又要再回退一遍。这里在设备已打开之后对账并静默修正。
+        //       ★ 对非云存档用户同样有收益：换声卡 / 拔设备后不再静默失声。
+        reconcileAudioSetupAfterRestore();
+
+        // 1.06) 成就会话：读入跨会话累计值（运行时长 / 见过的预设），
+        //       并补一次"初次启动"成就（unlock 幂等，离线没记上的会在下次补上）。
+        y2k::ach::attach (getUserSettings());
+        y2k::ach::reportFirstBoot();
 
         // 1.1) 防止 processor 的输出回路造成反馈：Holder 默认把 processor 的输出直接送回
         //      默认扬声器。我们用 muteInput=true 让 Holder 静音"送进 processor 的输入"，
@@ -771,6 +817,11 @@ public:
         mainWindow->setVisible(true);
         Y2K_DIAGC ("BOOT", "mainWindow visible (首帧 GL 渲染即将开始)");
 
+        // 6.5) 200ms 心跳（Steam 官方要求 RunCallbacks 至少 1Hz）
+        //      y2k::steam::tick()：驱动 Steam 回调（成就通知 / 云状态）。
+        //      非 Steam 构建里是空实现，定时器本身成本可忽略。
+        startTimer (200);
+
         if (cachedEditor != nullptr)
         {
             juce::MessageManager::callAsync([this]() {
@@ -855,12 +906,25 @@ public:
     // --------------------------------------------------
     void shutdown() override
     {
+        // -3) 停掉心跳（Steam 回调在 SteamAPI_Shutdown 之后再泵会崩）
+        stopTimer();
+
         // -2) 先把所有可持久化的 UI/音频状态写入 settings
         //     persistAllSettings 带幂等守卫：若 systemRequestedQuit 已经跑过一次，
         //     这里就是 no-op；否则（例如直接 quit 路径）兜底保存一次。
         //     绝对不能在这里只 sanitize 不 save —— 否则会把上一次写好的 filterState
         //     擦掉却没人补写，导致下次启动恢复到默认布局。
-        persistAllSettings();
+        //     bootAborted（Steam 要求重启 / 初始化中途退出）时窗口与 Editor
+        //     都不存在，跳过保存，避免访问空指针。
+        if (bootAborted)
+            alreadyPersisted = true;
+        else
+            persistAllSettings();
+
+        // -2.1) 成就累计值（运行时长 / 见过的预设）写回 settings。
+        //       必须早于下面的 appProperties.saveIfNeeded()，否则本次进度丢失。
+        y2k::ach::detach();
+        appProperties.saveIfNeeded();
 
         // -1) 停掉 Loopback 采集线程（若在跑）
         stopLoopbackCapture();
@@ -900,6 +964,10 @@ public:
         juce::Logger::setCurrentLogger (nullptr);
         runtimeFileLogger.reset();
        #endif
+
+        // 5.5) Steam 收尾：必须在所有 Steam 调用结束之后（成就 / 云均已停工）。
+        //      未初始化时是安全的 no-op，非 Steam 构建里同样安全。
+        y2k::steam::shutdown();
 
         // 6) 诊断日志收尾：写 session end + 刷盘。放在最后，
         //    前面的析构过程（GL 资源/编辑器销毁）也会被完整记录下来。
@@ -951,6 +1019,99 @@ private:
     {
         // PropertiesFile 保证在 setStorageParameters 后始终返回有效指针
         return *appProperties.getUserSettings();
+    }
+
+    // ----------------------------------------------------
+    // 200ms 心跳
+    //   · y2k::steam::tick()：Steam 回调泵（成就弹窗 / 云状态刷新）。
+    //     非 Steam 构建里是空实现，等于什么都不做。
+    //   · 官方要求 RunCallbacks 至少 1Hz；200ms 留足余量。
+    // ----------------------------------------------------
+    void timerCallback() override
+    {
+        y2k::steam::tick();
+    }
+
+    // ----------------------------------------------------
+    // 云存档安全网：audioSetup 设备存在性校验
+    //
+    //   Auto-Cloud 同步过来的 settings 里，audioOutputDeviceName /
+    //   audioInputDeviceName 是**源机器**的具体设备名。目标机器没有该设备时：
+    //     1) JUCE StandalonePluginHolder 打开设备会失败（不弹窗），随后
+    //        initialise(..., selectDefaultDeviceOnFailure=true) 回退到默认设备；
+    //     2) 但回退结果不会立刻写回 settings —— 崩溃/强杀后下次启动又走一遍。
+    //   这里在设备已经打开之后与 settings 对账：
+    //     · 名字/类型对得上 → 什么都不做；
+    //     · 对不上 → 把实际设备名、设备类型、通道掩码写回去（静默，无提示）。
+    //   对非云存档用户同样受益：换声卡 / 拔掉 USB 声卡后不再需要手动重选。
+    // ----------------------------------------------------
+    void reconcileAudioSetupAfterRestore()
+    {
+        if (pluginHolder == nullptr)
+            return;
+
+        auto* settings = appProperties.getUserSettings();
+        if (settings == nullptr)
+            return;
+
+        auto xml = settings->getXmlValue ("audioSetup");
+        if (xml == nullptr)
+            return;
+
+        auto& adm  = pluginHolder->deviceManager;
+        const auto live = adm.getAudioDeviceSetup();
+
+        // 一个设备都没打开 → 保留原存档，等用户下次带设备启动再说。
+        if (live.outputDeviceName.isEmpty() && live.inputDeviceName.isEmpty())
+            return;
+
+        const juce::String savedOut  = xml->getStringAttribute ("audioOutputDeviceName");
+        const juce::String savedIn   = xml->getStringAttribute ("audioInputDeviceName");
+        const juce::String savedType = xml->getStringAttribute ("deviceType");
+
+        bool repaired = false;
+
+        if (savedOut.isNotEmpty() && live.outputDeviceName.isNotEmpty()
+            && live.outputDeviceName != savedOut)
+        {
+            xml->setAttribute ("audioOutputDeviceName", live.outputDeviceName);
+            repaired = true;
+        }
+
+        if (savedIn.isNotEmpty() && live.inputDeviceName.isNotEmpty()
+            && live.inputDeviceName != savedIn)
+        {
+            xml->setAttribute ("audioInputDeviceName", live.inputDeviceName);
+            repaired = true;
+        }
+
+        if (auto* dev = adm.getCurrentAudioDevice())
+        {
+            const auto typeName = dev->getTypeName();
+            if (typeName.isNotEmpty() && typeName != savedType)
+            {
+                xml->setAttribute ("deviceType", typeName);
+                repaired = true;
+            }
+        }
+
+        if (! repaired)
+            return;
+
+        // 通道掩码按"实际打开的设备"重写，避免下次启动又因旧设备的通道数不匹配
+        //   再回退一次（例如源机器 8 通道声卡 → 目标机器 2 通道板载）。
+        if (! live.useDefaultOutputChannels)
+            xml->setAttribute ("audioDeviceOutChans", live.outputChannels.toString (2));
+        if (! live.useDefaultInputChannels)
+            xml->setAttribute ("audioDeviceInChans", live.inputChannels.toString (2));
+
+        settings->setValue ("audioSetup", xml.get());
+        settings->saveIfNeeded();
+
+        Y2K_DIAGC ("AUDIO", "audioSetup repaired -> out='" + live.outputDeviceName
+                                + "' in='" + live.inputDeviceName + "'");
+        Y2K_LOG ("[audio] audioSetup repaired after restore: out="
+                     + live.outputDeviceName + " in=" + live.inputDeviceName);
     }
 
     // ----------------------------------------------------
@@ -1205,7 +1366,11 @@ private:
         //        示例：
         //          s.removeValue ("ui.oldFoo");
         //          s.removeValue ("audio.oldBar");
-        // （本版本暂无需要淘汰的老 key）
+        //
+        // 成就精简（16 → 7）后，"置顶时长"不再有对应成就：
+        //   把老存档里残留的累计键清掉（幂等；不存在时是 no-op，
+        //   不影响「长跑选手 / 深潜」仍在使用的 runtimeSeconds / presetCount）。
+        s.removeValue ("steam.topmostSeconds");
 
         // ---- 2) 清除本版本管理的 key —— 随后会由保存函数写入最新值 ----
         //   ★ v2.9.9 补充：window.* / window.fullscreen 已从本名单移出。
@@ -2227,6 +2392,10 @@ private:
     // 基础上再 sanitize 一遍 filterState，而 pluginHolder 可能已经被析构
     // → 没人把 filterState 写回，settings 里就只剩空值，下次启动回到默认布局。
     bool                                            alreadyPersisted = false;
+
+    // initialise() 中途退出（Steam 要求通过客户端重启）时置位：
+    //   此时窗口 / Editor / processor 都没建起来，shutdown() 不能再做状态快照。
+    bool                                            bootAborted = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Y2KStandaloneApp)
 };

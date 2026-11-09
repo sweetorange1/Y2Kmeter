@@ -35,6 +35,7 @@
 #include "source/ui/toys/ToyKit.h"
 #include "source/perf/FramePerfLog.h"
 #include "source/diag/Y2KDiagLog.h"
+#include "source/steam/Y2KAchievements.h"
 #include "source/Y2KLogging.h"
 
 #if JUCE_WINDOWS
@@ -6500,6 +6501,18 @@ void Y2KmeterAudioProcessorEditor::mouseExit(const juce::MouseEvent& e)
     mouseInsideEditor = false;
 }
 
+// ==========================================================
+// 标题文字点击 → 打开官网 + 成就 #7（ACH_ISAAC_DEPT_STORE）
+//   三处调用点（插件宿主 / chrome 隐藏态 / 常规态）行为完全一致：
+//   先起浏览器、再解锁。即使用户的系统没默认浏览器（launchInDefaultBrowser
+//   返回 false），用户意图已经发生，成就照样给。
+// ==========================================================
+void Y2KmeterAudioProcessorEditor::openWebsiteFromTitleClick()
+{
+    juce::URL ("https://iisaacbeats.cn").launchInDefaultBrowser();
+    y2k::ach::reportWebsiteVisited();
+}
+
 void Y2KmeterAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
 {
     // 插件宿主模式：不处理右侧按钮（因为根本没画）和窗口拖拽（宿主负责），
@@ -6511,7 +6524,7 @@ void Y2KmeterAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
         juce::Rectangle<int> hotspot (tt.getX(), tt.getY(), textW, tt.getHeight());
         if (textW > 0 && hotspot.contains (e.getPosition()))
         {
-            juce::URL ("https://iisaacbeats.cn").launchInDefaultBrowser();
+            openWebsiteFromTitleClick();
         }
         return;
     }
@@ -6540,7 +6553,7 @@ void Y2KmeterAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
                                       titleBarHeight);
         if (textW > 0 && textRc.contains (p))
         {
-            juce::URL ("https://iisaacbeats.cn").launchInDefaultBrowser();
+            openWebsiteFromTitleClick();
         }
         return;
     }
@@ -6583,7 +6596,7 @@ void Y2KmeterAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
         juce::Rectangle<int> hotspot (tt.getX(), tt.getY(), textW, tt.getHeight());
         if (textW > 0 && hotspot.contains (e.getPosition()))
         {
-            juce::URL ("https://iisaacbeats.cn").launchInDefaultBrowser();
+            openWebsiteFromTitleClick();
             return;
         }
     }
@@ -7179,6 +7192,16 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
     y2k::perflog::dumpIfDue();
    #endif
 
+    // 成就 #3（深潜）：每 ≈300ms 采样一次当前 Milkdrop 预设。
+    //   · 采样而不是挂钩 GL 线程的切换点 —— 预设切换发生在 GL 线程，
+    //     那里不能碰 Steam；而"当前预设路径"这个 getter 本身是线程安全的。
+    //   · 未 attach（插件宿主 / 非 Steam 版）时 isActive() 为 false，直接跳过。
+    if (y2k::ach::isActive() && ++achPresetPollTicks >= 3)
+    {
+        achPresetPollTicks = 0;
+        y2k::ach::reportMilkdropPreset (GetMilkdropCurrentPresetFilePath());
+    }
+
     // ---- 诊断：消息线程心跳 ----
     //   这个 Timer 是 10Hz 消息线程存活的最可靠标志。它停了 = 消息线程
     //   被卡住（无论是死在 GL 锁、音频锁还是绘制里），看门狗据此报警。
@@ -7474,6 +7497,11 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
 
         workspace->setMeasuredFps (displayedFps);
         applyAdaptiveFrameRate (fps);
+
+        // 成就心跳：#2 长跑选手（累计运行 10h）。
+        //   · 用真实 dt 而不是固定 1.0，掉帧 / 系统睡眠时不会虚增时长；
+        //   · 非 Steam 版 / 插件宿主内 ach 未 attach → 立即返回，零开销。
+        y2k::ach::sessionTick (deltaMs * 0.001);
 
         lastFrameCounterSample = cur;
         lastFpsTimeMs          = nowMs;

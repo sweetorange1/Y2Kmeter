@@ -3,6 +3,7 @@
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/steam/Y2KAchievements.h"
 #include <cmath>
 
 // ==========================================================
@@ -66,6 +67,12 @@ void LoudnessModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     barI.update(snap.lufsI, deltaMs);
     barL.update(snap.rmsL,  deltaMs);
     barR.update(snap.rmsR,  deltaMs);
+
+    // 成就：响度达标的判定**已移到** AnalyserHub::dispatch()（fanout 之前统一判一次）。
+    //   原因：本文件里只有 LoudnessModule 会走到 onFrame，但 lufsRealtime / vuMeter
+    //   等模块同样在消费 Loudness 数据 —— 玩家用那些模块看读数时成就永远不触发。
+    //   放 hub 里可以做到"只要有响度数据就判定"，与具体模块无关。
+    //   ⚠️ 这里**不要**再调用，否则会重复累计。
 
     // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）。
     //   60Hz 屏上读数/柱高 30Hz 刷新肉眼无差，光栅化成本减半。

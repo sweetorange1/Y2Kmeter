@@ -9,6 +9,7 @@
 // ==========================================================
 #include "source/ui/palette/ThemeLibrary.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/steam/Y2KAchievements.h"
 
 namespace PinkXP
 {
@@ -83,6 +84,11 @@ namespace PinkXP
 
         themes_.push_back({ name.trim(), spec });
         persistAfterChange();
+
+        // 成就：#6 调色师（保存主题成功）/ #7 主题收藏家（总数 ≥5）。
+        //   只统计"新增"分支：覆盖同名主题不算新收藏（上面已提前 return）。
+        y2k::ach::reportThemeSaved ((int) themes_.size());
+
         return true;
     }
 

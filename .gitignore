@@ -2,6 +2,8 @@
 /cmake-build-*/
 /out/
 /dist/
+# Steam 渠道产物（build_steam.ps1 输出，只上传到 Steam depot，不入库）
+/dist-steam/
 build
 # 放行 JUCE 的 extras/Build（包含 CMake 构建支撑文件，不可忽略）
 !/third_party/JUCE/extras/Build/

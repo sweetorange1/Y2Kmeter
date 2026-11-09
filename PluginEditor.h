@@ -355,6 +355,12 @@ private:
     // 标题栏左侧"可点击标题文字"区域（含软件名 + 版本号），点击后跳转官网
     juce::Rectangle<int> getTitleTextBounds() const;
 
+    // 打开官网（iisaacbeats.cn）并解锁「艾萨克百货大楼」成就。
+    //   三处标题点击（插件宿主 / chrome 隐藏态 / 常规态）统一走这里，
+    //   避免将来新增入口时漏掉埋点。
+    //   注：VST3 宿主里 y2k::ach 从未 attach()，内部是 no-op，不会误解锁。
+    void openWebsiteFromTitleClick();
+
     // 右上角四个按钮的几何（从右到左：关闭 × / 固定 ★ / 最小化 _ / 锁定 ⮌ ）
     //   样式完全复用 ModulePanel 的 × 按钮（drawRaised + pink200 hover）
     juce::Rectangle<int> getCloseButtonBounds()    const;
@@ -691,6 +697,11 @@ private:
     std::atomic<juce::int64> frameCounter { 0 };
     juce::int64              lastFrameCounterSample = 0;
     double                   lastFpsTimeMs          = 0.0;
+
+    // 成就 #3（深潜）：Milkdrop 当前预设的采样节拍。
+    //   10Hz 定时器下每 3 次（≈300ms）取一次当前预设路径，内部按文件名去重；
+    //   嵌入态与浮动态都走 GetMilkdropCurrentPresetFilePath()，覆盖两条渲染路径。
+    int                      achPresetPollTicks     = 0;
 
     // —— v2.9 真实出帧统计 ——
     //   frameCounter 统计的是"分发次数"，GL 线程跟不上时多个 repaint 会被合并成

@@ -4,6 +4,7 @@
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/perf/FramePerfLog.h"
 #include "source/diag/Y2KDiagLog.h"
+#include "source/steam/Y2KAchievements.h"
 
 // ==========================================================
 // Phase F —— FrameDispatcher 内部实现类
@@ -293,6 +294,14 @@ public:
             y2k::perf::ThreadRole::ui,
             static_cast<juce::int64> (activeListeners.size()));
 #endif
+        // 成就：响度达标 —— 在这里统一判定一次，**与"哪个模块正在看响度"解耦**。
+        //   原先挂在 LoudnessModule::onFrame 上，只有「响度」模块在屏上时才走到；
+        //   而 lufsRealtime / vuMeter 等模块同样消费 Loudness 数据，
+        //   玩家用那些模块看读数时成就永远不触发（真实踩过的坑，2026-11-09）。
+        //   ⚠️ 各模块的 onFrame 里**不得**再调用，否则会按模块数量重复累计。
+        if (frame->has (Kind::Loudness))
+            y2k::ach::reportShortTermLufs (frame->loudness.lufsS, frame->dtSec);
+
         for (auto* lst : activeListeners)
         {
 #if Y2K_ENABLE_PERF_COUNTERS

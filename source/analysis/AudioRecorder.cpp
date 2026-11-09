@@ -1,4 +1,5 @@
 #include "source/analysis/AudioRecorder.h"
+#include "source/steam/Y2KAchievements.h"
 
 #include <algorithm>
 #include <cmath>
@@ -599,7 +600,14 @@ void AudioRecorder::closeTakeWriter()
     {
         const auto folder = saved.getParentDirectory();
         if (juce::MessageManager::getInstanceWithoutCreating() != nullptr)
-            juce::MessageManager::callAsync ([folder] { AudioRecorder::openDirectory (folder); });
+            juce::MessageManager::callAsync ([folder]
+            {
+                // 成就：录下来 —— 手动录制的片段已完整落盘。
+                //   本函数跑在采集线程，成就只能在消息线程触发，故搭在这条 callAsync 上。
+                //   自动触发（1 小时上限收尾）与手动停止走同一路径，一并覆盖。
+                y2k::ach::reportClipSaved();
+                AudioRecorder::openDirectory (folder);
+            });
     }
 }
 
@@ -740,6 +748,10 @@ bool AudioRecorder::exportLastSeconds (double seconds)
         lastSavedFile = file;
         statusText    = "SAVED";
     }
+
+    // 成就：#5 录下来 —— 片段已完整落盘，且本函数只在消息线程执行，
+    //   可以直接触发（音频线程里的 pushRaw 不碰成就）。
+    y2k::ach::reportClipSaved();
 
     // 3) 打开保存目录（已打开则不重复开窗）
     openDirectory (dir);
