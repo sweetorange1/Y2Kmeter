@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
 #include <vector>
 
 #include "source/analysis/AnalyserHub.h"
@@ -155,6 +156,24 @@ private:
     // 从 oscilloscope 快照末尾追加 numToAppend 个新样本；用"倒计时"推进列，
     // 保证长期平均列率精确且不丢样本（旧实现的余数回填会被直接丢弃）
     void pushHistorySamples (const float* L, const float* R, int snapshotLen, int numToAppend);
+
+    // ---- 列写入节流（突发平滑）----
+    //   数据是按块到达的：主机块大小、loopback 补零块、甚至"静音后突然补齐"，
+    //   一次可能带来几十毫秒的样本。若在同一个分发帧里把它们全写成列，画面会
+    //   从"每帧 1px 顺滑左移"变成"几十毫秒不动，然后一下跳好几像素"的闪现。
+    //   所以 pushHistorySamples 只负责把完整的列放进待写队列，真正写入环形缓冲
+    //   由 drainPendingColumns() 按每帧预算（≈ pixelsPerSecond × dt + 1 列）
+    //   分几帧吃掉 —— 稳态下预算从不成为瓶颈（列率仍严格由样本数决定），
+    //   突发时则把"跳好几像素"摊成 1~2 px 的连续推进。
+    static constexpr int kPendingColumnCap = 128;
+    std::array<Column, (size_t) kPendingColumnCap> pendingColumns {};
+    int pendingHead  = 0;   // 最旧待写列
+    int pendingCount = 0;   // 待写列数
+
+    void queueColumn (const Column& c);
+    int  drainPendingColumns (int maxColumns);
+    int  columnBudgetForDt (float dtSec) const;
+    void clearPendingColumns();
 
     void rebuildColumnBuffer (int newCanvasWidth);
     void updateSamplesPerColumn();

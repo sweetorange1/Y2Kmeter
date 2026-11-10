@@ -10,7 +10,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.0.6`）
+- **产品名**：`Y2Kmeter` （版本：`3.0.7`）
   - 历史：`v2.9.9` 之后的功能曾以「v2.9.9 补充」形式入库、不 bump 版本号（`Stereo Map`、多屏混合 DPI 修复、
     实时 BPM / 调性模块），随后 `v2.9.10` 归拢了 Waveform 模块重构；**v3.0.0** 起恢复常规语义化版本号
     （见文末「v3.0.0：...」章节）；**v3.0.1** 为补丁版（GL 直渲染修复 / 全屏布局预设，见文末）。
@@ -26,6 +26,9 @@
     菜单清单收敛为单来源）、FULL: ALL MODULES 预设按用户存档重排 + 逐块显示模式、
     抬头双击最大化写入存档、Only Milkdrop 预设 30fps 上限、空白工程 Toybox emoji
     定格 / 按住喷发断流，详见文末「v3.0.6」章节。
+    **v3.0.7**（本轮）修复 Waveform 静音后的滚动缺陷：静音几秒后由顺滑左移变成每
+    100 ms 跳一格（WASAPI loopback 静音兜底脉冲式供数 + 列写入未按帧摊平），以及进入
+    静音瞬间的定格顿挫（判定窗口 100 ms 内不供数），详见文末「v3.0.7」章节。
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -6891,3 +6894,100 @@ cmake --build build/msvc --config Release --target Y2Kmeter_Standalone -j 8
   在窗口外松开收不到 `mouseUp` 时也能收掉 spraying_，不会永久喷。
 - 顺带：emoji 不再"喷一堆却不消失"（帧恢复后 `age/ttl` 正常推进，FIFO 400 上限也
   正常工作）。
+
+---
+
+## v3.0.7：Waveform 静音后滚动跳动修复（每 100 ms 跳一格 + 进入静音顿挫）
+
+> 版本号 `3.0.6 → 3.0.7`：`CMakeLists.txt`（`project()` + 两处 `juce_add_plugin VERSION`）、
+> `Y2Kmeter_installer.iss`（`MyAppVersion`）、`README.md` 徽章、
+> `PluginEditor.cpp` 三处抬头文案（命中矩形宽度 / `paint()` / `drawTitleBar()`）。
+> 本轮**无新增源文件**，CMake 源文件列表不变。
+
+| # | 问题 | 一句话根因 | 修复位置 |
+|---|---|---|---|
+| 1 | 系统无声一段时间后（几秒），Waveform 从顺滑左移变成每 100 ms 跳一格 | WASAPI loopback 静音兜底每 100 ms 一次灌 0.1 s 全 0（4800 样本），脉冲式供数 | `WasapiLoopbackCapture.cpp` 改墙钟小步补零 |
+| 2 | 同一现象的通用放大因素：一大块样本一次到达时，同一分发帧里写入多列 | 列写入与数据到达同步，没有按帧预算摊平 | `WaveformModule` 待写列队列 + 每帧预算 |
+| 3 | 第二轮反馈：**刚进入静音时仍顿一下**，之后才连贯 | 静音判定窗口 100 ms 内一个样本都不产出 → 波形硬定格 12 px | 窗口收到 20 ms + 回填窗口内空白（见 §4） |
+
+### 1. 现象与定位
+
+- **现象**：audio 有信号时波形一点点向左平移、非常顺滑；系统/输入彻底静音约几秒后，
+  突然变成"定住 → 闪一下前移几像素 → 定住"的跳格运动。
+- **关键观察**：静音本身不会改变渲染路径（静音列 `alpha<0.02` 直接丢弃，不画），
+  所以画面变化只可能来自**列推进节奏**的变化 —— 也就是 `oscTotalSamples` 的增量变脉冲。
+- **根因（Standalone 默认音频源 = `loopback:default`）**：
+  `WasapiLoopbackCapture::runCaptureThread()` 在 `GetNextPacketSize()==0`（系统无声、
+  Windows 把渲染端点挂起后不再产生 loopback packet）时，旧实现是**每 100 ms 喂一整段
+  0.1 s 的 0**（48 kHz 下 4800 样本）。于是：
+  ```
+  100 ms 内：0 个新样本（Waveform 的 available==0 → 直接 return，不重绘）
+  到点瞬间：4800 个新样本 → 示波器环形缓冲只有 2048，先丢一半，
+            剩下的 2048 / 400 = 5 列在同一个分发帧里一次写入 → 画面横跳 5 px
+  ```
+  这就是"一跳一跳的闪现"，而且因为每 100 ms 只消费到 2048/4800 的样本，平均滚动速度
+  还会掉到标称 SPEED 的 ~42%。Windows 需要几秒才把静音端点挂起，所以用户感知是
+  "静音一段时间之后才突然变卡"。
+
+### 2. 修复 A：静音补零改成"墙钟小步"（`source/standalone/WasapiLoopbackCapture.cpp`）
+
+- 新增 `silenceFeeding` / `lastSilenceTopUp` / `silenceFramesOwed`：
+  - 判定窗口 `kSilenceGraceMs = 20 ms`（loopback 正常 packet 间隔 ~10 ms）：窗口内不产出
+    任何数据，避免把真实音频替换成 0（旧实现是 100 ms）；
+  - 窗口到期确认静音时**把 `lastDataTime` 起的整段空白一次补齐**（时间轴不丢），
+    之后每个 poll 只补这段时间真实流逝的帧数（`elapsedSec × sampleRate`，不足 1 帧的
+    余量累积防漂移）；
+  - 单块上限 `kMaxSilenceChunk = 1024` 帧：始终小于示波器 2048 样本快照，任何采样率下都
+    不会因为"一帧只能消费快照"而丢样本（丢样本 = 滚动变慢 + 跳格）；
+  - 时间累积上限 100 ms：采集线程被调度延迟 / 调试断点 / 系统卡顿时不一次性灌大段数据。
+- 效果：静音期间 `oscTotalSamples` 按实时匀速递增，Waveform（以及 VU / Loudness /
+  Spectrum 等所有按块或按样本推进的模块）不再收到脉冲，波形匀速继续左移。
+
+### 3. 修复 B：列写入按帧预算摊平（`source/ui/modules/WaveformModule.h/.cpp`）
+
+数据源修好之后仍然需要一层保护：主机块大小、设备回调抖动、macOS 采集、静音补零的
+"整段补齐"等都可能让"一大块样本"在单个分发帧到达。
+
+- `pushHistorySamples()` 不再直接写环形缓冲，改为 `queueColumn()` 进定长环队列
+  （`kPendingColumnCap = 128`，满了丢最旧，延迟有界）。
+- 新增 `drainPendingColumns(n)`：每帧最多写入 `columnBudgetForDt(dt)` 列，预算为
+  `ceil(pixelsPerSecond × dt)`（≥1，上限 32）：
+  - `ceil` 保证预算**永远不小于**名义供给速率 → 队列每帧清空，列率与滚动速度完全不变，
+    但写入被摊成 1 px 步进；
+  - 突发时多出来的列按 1 列/帧推进 → 视觉上是连续滑动，而不是横跳几像素；
+  - `pendingCount > 8` 时额外放宽最多 +4 列/帧，防止极端情况下延迟无限增长；
+  - 长帧（窗口恢复，dt 被钳到 0.1 s）也不会一帧写进几百列。
+- `onFrame()` 尾部改为"先 push 样本，再 drain 队列"；**没有新样本时也 drain**（吃掉上一帧
+  突发的积压），只有真正写入了列才 `buildGlSnapshot()` + 重绘 —— 顺带省掉"数据没变也重建
+  快照并重绘"的空转帧。
+- `resetAccumulator()`（切 SPEED / 采样率变化 / 画布重建）同时清空待写队列，避免旧队列
+  在新参数下补画。
+
+### 4. 第二轮反馈：进入静音的瞬间仍会顿一下
+
+- **现象**：静音持续之后波形是连贯的（第一轮修复生效），但**刚跨进静音时**仍有一次
+  卡顿，之后才恢复顺滑。
+- **根因**：判定窗口内"一个样本都不产出"。旧实现的窗口是 **100 ms** —— 所以数据流在
+  真正静音后还要空转 100 ms，`available == 0` → `onFrame` 直接 return → 波形硬定格
+  （120 px/s 下 12 px），窗口到期后补零才开始。第二轮修复把窗口从 100 ms 收到
+  **20 ms**，并在确认静音时**回填窗口内的空白**，因此定格只剩 20 ms（≈2.4 px）。
+- **配套微调（模块侧）**：预算由 `ceil(dt×px) + 1` 改为 `ceil(dt×px)` —— 补零回填的第一块
+  约 20 ms（~2.5 列）不再一帧写进缓冲，而是按 1 列/帧摊开；积压 >8 列时才放宽（+最多 4 列/帧）。
+- **为什么不能把窗口压到 0**：loopback 正常 packet 间隔约 10 ms，窗口过短会把"包还没到"
+  误判成静音，往真实音频里插 0（波形出现 1~2 px 静音缺口 + 电平表瞬时掉格），比 20 ms
+  的迟疑更难看。
+
+### 5. 涉及文件与验证
+
+| 文件 | 改动 |
+| --- | --- |
+| `source/standalone/WasapiLoopbackCapture.cpp` | 静音兜底：100 ms/4800 样本的脉冲 → 20 ms 判定 + 回填空白 + 每 poll 小步补零（单块 ≤1024） |
+| `source/ui/modules/WaveformModule.h/.cpp` | `queueColumn` / `drainPendingColumns` / `columnBudgetForDt`，`pushHistorySamples` 改为入队 |
+
+- 静态诊断 0 错误；构建由用户执行（本轮不自行编译）。
+- **验证状态**：用户实测通过 —— 第一轮修复消除了"静音一段时间后每 100 ms 跳一格"，
+  第二轮修复后"进入静音瞬间的顿挫"也消失（用户确认「ok 没问题了」）。
+- 回归自检点（后续改动需保持）：① 有声 → 静音的过渡处没有可感知定格，静音期间持续匀速左移；
+  ② 静音数分钟后波形仍不跳格；③ 有声时 SPEED 10…800 px/s 观感与修复前一致（列率仍由真实
+  样本数决定）；④ 切换 SPEED / 拖动窗口尺寸后波形连续，无重影或空白；⑤ Freeze 期间不动、
+  解冻后继续。

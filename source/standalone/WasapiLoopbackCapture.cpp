@@ -307,8 +307,23 @@ void WasapiLoopbackCapture::runCaptureThread()
 
     // 记录"上次有真实数据"的时间：系统静音时 WASAPI loopback 可能不再产生
     //   packet（GetNextPacketSize 返回 0），onAudio 不再触发 → 分析器冻结。
-    //   这里在静音超过 100ms 后主动喂一段全 0 数据，让 LoudnessMeter 等持续归零。
-    auto lastDataTime = std::chrono::steady_clock::now();
+    //   这里在确认静音后主动补全 0 数据，让 LoudnessMeter 等持续归零。
+    //
+    //   ★ 补零的两个节奏细节都直接决定 Waveform 的观感：
+    //     1) 补零必须是"墙钟小步"，不能一次灌一大段（旧实现每 100ms 灌 0.1s）：
+    //        下游按样本数推进的模块会被脉冲带偏，画面变成"定格 → 横跳"；
+    //     2) 判定窗口不能太长。旧实现要等 100ms 才开始补零 —— 这 100ms 里
+    //        一个样本都不进，波形硬定格，就是"刚进入静音时顿一下"。
+    //        现在窗口收到 20ms（loopback 正常 packet 间隔 ~10ms），并且窗口
+    //        到期时**从最后一个真实 packet 起把整段空白一次补齐**，
+    //        时间轴不丢，只剩 20ms（120px/s 下 ≈2px）的极小迟疑。
+    constexpr double kSilenceGraceMs  = 20.0;   // 判定静音前的等待窗口
+    constexpr int    kMaxSilenceChunk = 1024;   // 单次补零上限（< 示波器 2048 快照）
+
+    auto   lastDataTime      = std::chrono::steady_clock::now();
+    auto   lastSilenceTopUp  = lastDataTime;   // 已经补到的时刻
+    bool   silenceFeeding    = false;          // 是否已越过判定窗口、进入补零
+    double silenceFramesOwed = 0.0;            // 不足 1 帧的余量累积，避免长期漂移
 
     while (! shouldStop.load (std::memory_order_acquire))
     {
@@ -319,21 +334,52 @@ void WasapiLoopbackCapture::runCaptureThread()
         if (packetLength == 0)
         {
             const auto now = std::chrono::steady_clock::now();
-            const auto silentMs = std::chrono::duration_cast<std::chrono::milliseconds> (now - lastDataTime).count();
-            if (silentMs >= 100)
+
+            if (! silenceFeeding)
             {
-                const int frames = juce::jmax (1, (int) (sampleRate * 0.1));
+                // 判定窗口：正常 loopback packet 间隔约 10ms，只有明显超过它才认为
+                //   引擎真的停了（窗口内不产出任何数据，避免把真实音频替换成 0）。
+                const double gapMs = std::chrono::duration<double, std::milli> (now - lastDataTime).count();
+                if (gapMs < kSilenceGraceMs)
+                {
+                    Sleep (pollMs);
+                    continue;
+                }
+
+                // 确认静音：从"最后一个真实 packet"开始补，把窗口里的空白一起补上
+                silenceFeeding   = true;
+                lastSilenceTopUp = lastDataTime;
+            }
+
+            const double elapsedSec = std::chrono::duration<double> (now - lastSilenceTopUp).count();
+            lastSilenceTopUp = now;
+
+            // 单次上限 100ms：采集线程被调度延迟（睡眠 / 调试断点 / 系统卡顿）后
+            //   不要一次性灌进大段数据 —— 那正是本函数要消除的脉冲。
+            silenceFramesOwed += juce::jlimit (0.0, 0.1, elapsedSec) * sampleRate;
+
+            int frames = (int) silenceFramesOwed;
+            if (frames > 0)
+            {
+                // 单块上限 1024：始终小于示波器 2048 样本快照，任何采样率下都不会
+                //   因为"一帧只能消费快照"而丢样本（丢样本 = 滚动变慢 + 跳格）。
+                frames = juce::jmin (frames, kMaxSilenceChunk);
+                silenceFramesOwed -= (double) frames;
+
                 bufL.assign ((size_t) frames, 0.0f);
                 bufR.assign ((size_t) frames, 0.0f);
                 if (onAudio)
                     onAudio (bufL.data(), bufR.data(), frames, sampleRate);
-                lastDataTime = now;
             }
+
             Sleep (pollMs);
             continue;
         }
 
-        lastDataTime = std::chrono::steady_clock::now();
+        silenceFeeding    = false;
+        lastDataTime      = std::chrono::steady_clock::now();
+        lastSilenceTopUp  = lastDataTime;
+        silenceFramesOwed = 0.0;
 
         while (packetLength != 0)
         {

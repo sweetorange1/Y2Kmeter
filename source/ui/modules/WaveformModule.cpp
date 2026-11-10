@@ -294,6 +294,71 @@ void WaveformModule::resetAccumulator()
     accSibMax = 0.0f;
     accCount = 0;
     samplesUntilNextColumn = samplesPerColumn;
+    clearPendingColumns();
+}
+
+// ----------------------------------------------------------
+// 列写入节流（突发平滑）
+//   pushHistorySamples 只把完整列塞进待写队列，drainPendingColumns 每帧
+//   按预算写入环形缓冲。这样"一大块样本一次到达"不会变成"一次跳好几像素"。
+// ----------------------------------------------------------
+void WaveformModule::clearPendingColumns()
+{
+    pendingHead  = 0;
+    pendingCount = 0;
+}
+
+void WaveformModule::queueColumn (const Column& c)
+{
+    // 队列满：丢最旧的（与"落后太多就放弃旧数据"同语义，避免延迟无限增长）
+    if (pendingCount >= kPendingColumnCap)
+    {
+        pendingHead = (pendingHead + 1) % kPendingColumnCap;
+        --pendingCount;
+    }
+
+    pendingColumns[(size_t) ((pendingHead + pendingCount) % kPendingColumnCap)] = c;
+    ++pendingCount;
+}
+
+int WaveformModule::drainPendingColumns (int maxColumns)
+{
+    const int colCap = (int) columnHistory.size();
+    if (colCap <= 0 || maxColumns <= 0 || pendingCount <= 0)
+        return 0;
+
+    const int n = juce::jmin (maxColumns, pendingCount);
+
+    for (int i = 0; i < n; ++i)
+    {
+        columnHistory[(size_t) writeCol] = pendingColumns[(size_t) pendingHead];
+        pendingHead = (pendingHead + 1) % kPendingColumnCap;
+        --pendingCount;
+
+        writeCol = (writeCol + 1) % colCap;
+        if (validCols < colCap) ++validCols;
+    }
+
+    return n;
+}
+
+int WaveformModule::columnBudgetForDt (float dtSec) const
+{
+    // 每帧允许写入的列数 = 本帧"本应推进的列数"向上取整（≥ 1）。
+    //   · ceil 保证预算**永远不小于**名义供给速率，稳态下队列每帧清空，
+    //     列率与滚动速度完全不变（只是写入被摊成 1px 步进）；
+    //   · 突发（一大块样本一次到达，例如静音补零的第一段）多出来的列按
+    //     1 列/帧推进 → 视觉上是连续滑动，而不是"一下跳好几像素"；
+    //   · 上限 32：极端长帧（窗口刚从最小化恢复，dt 被钳到 0.1s）也不至于
+    //     一帧写进几百列把缓冲刷掉。
+    const float nominal = pixelsPerSecond * juce::jmax (0.0f, dtSec);
+    int budget = juce::jmax (1, (int) std::ceil (nominal));
+
+    // 积压保护：极端情况下（帧率骤降 / 采样率与列率解算不一致）不让延迟无限增长
+    if (pendingCount > 8)
+        budget += juce::jmin (4, pendingCount / 8);
+
+    return juce::jlimit (1, 32, budget);
 }
 
 // ----------------------------------------------------------
@@ -395,14 +460,19 @@ void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     const juce::uint64 available = total - lastOscTotal;
     lastOscTotal = total;
 
-    if (available == 0)
-        return;
+    if (available > 0)
+    {
+        // 环形缓冲只保留最近 snapshotLen 个样本：超出的部分只能丢弃（否则会
+        //   落后于实时）。正常帧率下 available 远小于 2048，不会触发。
+        const int numToAppend = (int) juce::jmin<juce::uint64> (available, (juce::uint64) snapshotLen);
 
-    // 环形缓冲只保留最近 snapshotLen 个样本：超出的部分只能丢弃（否则会
-    //   落后于实时）。正常帧率下 available 远小于 2048，不会触发。
-    const int numToAppend = (int) juce::jmin<juce::uint64> (available, (juce::uint64) snapshotLen);
+        pushHistorySamples (frame.oscL.data(), frame.oscR.data(), snapshotLen, numToAppend);
+    }
 
-    pushHistorySamples (frame.oscL.data(), frame.oscR.data(), snapshotLen, numToAppend);
+    // 把待写列按本帧预算推进环形缓冲（突发数据分几帧摊开，见 columnBudgetForDt）。
+    //   没有新样本时也要 drain：上一帧突发留下的积压要继续吃掉，否则会"停一拍再跳"。
+    if (drainPendingColumns (columnBudgetForDt (frame.dtSec)) <= 0)
+        return;   // 本帧画面没有任何变化，不必重建快照 / 重绘
 
     buildGlSnapshot();
 
@@ -466,9 +536,8 @@ void WaveformModule::pushHistorySamples (const float* L, const float* R,
         col.pitchNote = currentPitchNote;
         col.pitchConf = currentPitchConf;
 
-        columnHistory[(size_t) writeCol] = col;
-        writeCol = (writeCol + 1) % colCap;
-        if (validCols < colCap) ++validCols;
+        // 不直接写环形缓冲：交给每帧预算摊开（见 drainPendingColumns）
+        queueColumn (col);
 
         accMin = 1.0f; accMax = -1.0f;
         accSumSq = 0.0f; accSibMax = 0.0f; accCount = 0;
