@@ -7,8 +7,26 @@
 #include <cmath>
 
 // ==========================================================
-// OscilloscopeModule —— Pink XP 像素风立体声示波器
+// OscilloscopeModule —— Pink XP 像素风立体声示波器（示波器模块）
 // ==========================================================
+
+namespace
+{
+    juce::Colour keepAlpha (juce::Colour tinted, float alpha)
+    {
+        return tinted.withAlpha (alpha);
+    }
+
+    void pushQuadVerts (std::vector<float>& v, float x0, float y0, float x1, float y1, juce::Colour c)
+    {
+        const float r = c.getFloatRed(), g = c.getFloatGreen(), b = c.getFloatBlue(), a = c.getFloatAlpha();
+        const float q[36] = {
+            x0, y0, r, g, b, a,  x1, y0, r, g, b, a,  x0, y1, r, g, b, a,
+            x1, y0, r, g, b, a,  x1, y1, r, g, b, a,  x0, y1, r, g, b, a,
+        };
+        v.insert (v.end(), q, q + 36);
+    }
+}
 
 OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
     : GlDirectModuleBase(ModuleType::oscilloscope),
@@ -20,6 +38,7 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
 
     setMinSize(64, 64);
     setDefaultSize(384, 256); // oscilloscope 6×4 大格
+    setControlPanelEnabled (true);
 
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
@@ -28,29 +47,6 @@ OscilloscopeModule::OscilloscopeModule(AnalyserHub& h)
         buildGlSnapshot();   // GL 快照含底色/几何颜色，主题切换必须重建
         repaint();
     });
-    // ---- 显示模式：单按钮循环 Wave → X-Y → Liss（参考 Waveform 的颜色循环按钮）----
-    //   按钮文字即当前模式，tooltip 里写明完整循环顺序
-    btnMode.setClickingTogglesState (false);
-    btnMode.setTooltip (y2k::help::make ("Display mode",
-        "Click to cycle:\n"
-        "- Wave: classic time-domain waveform\n"
-        "- X-Y: left vs right plot (stereo shape)\n"
-        "- Liss: Lissajous figure"));
-    btnMode.onClick = [this]()
-    {
-        switch (displayMode)
-        {
-            case DisplayMode::waveform:  setDisplayMode (DisplayMode::xy);        break;
-            case DisplayMode::xy:        setDisplayMode (DisplayMode::lissajous); break;
-            case DisplayMode::lissajous: setDisplayMode (DisplayMode::waveform);  break;
-        }
-    };
-    addAndMakeVisible (btnMode);
-
-    btnFreeze.setClickingTogglesState(true);
-    btnFreeze.setTooltip (y2k::help::make ("Freeze", "Hold the current picture so you can study it. Click again to resume."));
-    btnFreeze.onClick = [this]() { setFrozen(btnFreeze.getToggleState()); };
-    addAndMakeVisible(btnFreeze);
 }
 
 OscilloscopeModule::~OscilloscopeModule()
@@ -66,7 +62,7 @@ OscilloscopeModule::~OscilloscopeModule()
 }
 
 // ----------------------------------------------------------
-// Toybox（v3.0.0）：拍电视（§8.3）—— 仅屏幕区（按钮条排除）
+// Toybox（v3.0.0）：拍电视（§8.3）
 // ----------------------------------------------------------
 bool OscilloscopeModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
 {
@@ -88,8 +84,6 @@ void OscilloscopeModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
         return;
     lastToyPokeTime_ = now;
 
-    // 性能日志：快照生成耗时（烘焙一次，paint 每帧只 blit）
-    //   仅 RelWithDebInfo；Release 下宏展开为空，连字符串拼接都不发生
     TOYPERF_SCOPED_TIMER ("osc snapshot (" + juce::String (displayMode == DisplayMode::waveform ? "wave" : "xy") + ")");
 
     // 反馈 C1：与 OscilloscopeWave 一致的"拍立得快照"——定格当前真实波形/散点。
@@ -111,129 +105,278 @@ void OscilloscopeModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
     ctx.promoteToFree (makePolaroidActor (hit.pos, l, r, {}, scatter));
 }
 
+// ----------------------------------------------------------
+// 持久化 / 控制面板
+// ----------------------------------------------------------
 juce::ValueTree OscilloscopeModule::saveModuleSpecificState() const
 {
     juce::ValueTree s("state");
     s.setProperty("displayMode", (int) displayMode, nullptr);
-    s.setProperty("frozen", frozen, nullptr);
+    s.setProperty("waveChannel", waveChannel, nullptr);
+    s.setProperty("waveColour",  waveColour, nullptr);
+    s.setProperty("bandColour",  bandColour, nullptr);
+    s.setProperty("crossLow",    (double) crossLowHz, nullptr);
+    s.setProperty("crossHigh",   (double) crossHighHz, nullptr);
+    s.setProperty("autoGain",    autoGain, nullptr);
+    s.setProperty("showRings",   showRings, nullptr);
     return s;
 }
 
 void OscilloscopeModule::restoreModuleSpecificState(const juce::ValueTree& state)
 {
-    if (state.hasProperty("displayMode"))
-        setDisplayMode((DisplayMode) (int) state.getProperty("displayMode"));
-    if (state.hasProperty("frozen"))
-        setFrozen((bool) state.getProperty("frozen"));
+    // 缺键 = 保持当前值（构造默认 = 旧 Oscilloscope 外观）。
+    //   frozen 键（v3.0 及以前的 Freeze 按钮）被忽略：没有锁存式冻结了，按未冻结加载。
+    if (state.hasProperty ("displayMode"))
+        displayMode = (DisplayMode) juce::jlimit (0, 2, (int) state.getProperty ("displayMode"));
+
+    // oscilloscope_wave 旧存档的 channelMode 与 waveChannel 同义（0 左 / 1 右 / 2 双）
+    if (state.hasProperty ("waveChannel"))
+        waveChannel = juce::jlimit (0, 2, (int) state.getProperty ("waveChannel"));
+    else if (state.hasProperty ("channelMode"))
+        waveChannel = juce::jlimit (0, 2, (int) state.getProperty ("channelMode"));
+
+    if (state.hasProperty ("waveColour")) waveColour = juce::jlimit (0, 1, (int) state.getProperty ("waveColour"));
+    if (state.hasProperty ("bandColour")) bandColour = (bool) state.getProperty ("bandColour");
+    if (state.hasProperty ("crossLow"))   crossLowHz  = juce::jlimit (80.0f, 1000.0f, (float) (double) state.getProperty ("crossLow"));
+    if (state.hasProperty ("crossHigh"))  crossHighHz = juce::jlimit (2000.0f, 10000.0f, (float) (double) state.getProperty ("crossHigh"));
+    if (state.hasProperty ("autoGain"))   autoGain    = (bool) state.getProperty ("autoGain");
+    if (state.hasProperty ("showRings"))  showRings   = (bool) state.getProperty ("showRings");
+
+    if (! autoGain) autoGainFactor = 1.0f;
+    splitter.setCrossover (crossLowHz, crossHighHz);
+
+    invalidateStaticLayer();
+    invalidateDynamicLayer();
+    buildGlSnapshot();
+    refreshControlPanel();
+    repaint();
+}
+
+void OscilloscopeModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    const auto isWave = [this] { return displayMode == DisplayMode::waveform; };
+    const auto isScatter = [this] { return displayMode != DisplayMode::waveform; };
+
+    out.push_back (ParamDef::choice ("displayMode", "Display type",
+        { "Waveform", "X-Y", "Lissajous" },
+        "Waveform: signal against time. X-Y: left against right. Lissajous: the same turned 45 degrees (mid / side).")
+        .in ("View"));
+
+    out.push_back (ParamDef::choice ("waveChannel", "Channels",
+        { "Left", "Right", "Both" },
+        "Which channel traces to draw.").in ("Waveform").when (isWave));
+    out.push_back (ParamDef::choice ("waveColour", "Trace colours",
+        { "Classic", "Pink" },
+        "Classic follows the theme palette. Pink is the colour set of the former Oscilloscope Wave module.")
+        .in ("Waveform").when (isWave));
+
+    out.push_back (ParamDef::toggle ("bandColour", "Colour by frequency",
+        "Dots turn red for lows, green for mids and blue for highs, blended by how much energy each band has.")
+        .in ("Scatter").when (isScatter));
+    out.push_back (ParamDef::slider ("crossLow", "Low / mid split", 80.0, 1000.0, 10.0, " Hz",
+        "Below this frequency counts as low (red).", 250.0)
+        .in ("Scatter").when ([this] { return xyBandActive(); }));
+    out.push_back (ParamDef::slider ("crossHigh", "Mid / high split", 2000.0, 10000.0, 100.0, " Hz",
+        "Above this frequency counts as high (blue).", 4000.0)
+        .in ("Scatter").when ([this] { return xyBandActive(); }));
+    out.push_back (ParamDef::toggle ("autoGain", "Auto zoom",
+        "Scales the picture so the loudest point stays inside the screen.").in ("Scatter").when (isScatter));
+    out.push_back (ParamDef::toggle ("showRings", "Level rings",
+        "Concentric rings with dB labels behind the dots.").in ("Scatter").when (isScatter));
+}
+
+double OscilloscopeModule::getParamValue (const juce::String& id) const
+{
+    if (id == "displayMode") return (double) (int) displayMode;
+    if (id == "waveChannel") return (double) waveChannel;
+    if (id == "waveColour")  return (double) waveColour;
+    if (id == "bandColour")  return bandColour ? 1.0 : 0.0;
+    if (id == "crossLow")    return (double) crossLowHz;
+    if (id == "crossHigh")   return (double) crossHighHz;
+    if (id == "autoGain")    return autoGain ? 1.0 : 0.0;
+    if (id == "showRings")   return showRings ? 1.0 : 0.0;
+    return 0.0;
+}
+
+void OscilloscopeModule::setParamValue (const juce::String& id, double v)
+{
+    if (id == "displayMode")
+    {
+        setDisplayMode ((DisplayMode) juce::jlimit (0, 2, juce::roundToInt (v)));
+        return;
+    }
+
+    if      (id == "waveChannel") waveChannel = juce::jlimit (0, 2, juce::roundToInt (v));
+    else if (id == "waveColour")  waveColour  = juce::jlimit (0, 1, juce::roundToInt (v));
+    else if (id == "bandColour")  bandColour  = v >= 0.5;
+    else if (id == "crossLow")    { crossLowHz  = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); }
+    else if (id == "crossHigh")   { crossHighHz = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); }
+    else if (id == "autoGain")    { autoGain = v >= 0.5; if (! autoGain) autoGainFactor = 1.0f; }
+    else if (id == "showRings")   showRings = v >= 0.5;
+    else return;
+
+    invalidateDynamicLayer();
+    buildGlSnapshot();
+    repaint();
 }
 
 void OscilloscopeModule::setDisplayMode(DisplayMode m)
 {
     if (displayMode == m) return;
     displayMode = m;
-    refreshModeButton();
     invalidateStaticLayer();
     invalidateDynamicLayer();
     // v2.9.3：三种模式都支持 GL 直渲染；切换后立即重建快照，避免旧模式闪一帧
     buildGlSnapshot();
+    refreshControlPanel();
     repaint();
-}
-
-void OscilloscopeModule::setFrozen(bool b)
-{
-    if (frozen == b) return;
-    frozen = b;
-    btnFreeze.setToggleState(frozen, juce::dontSendNotification);
-    invalidateDynamicLayer(); // 冻结状态右上角红点 + FROZEN 文本需要重绘
-    repaint();
-}
-
-void OscilloscopeModule::refreshModeButton()
-{
-    switch (displayMode)
-    {
-        case DisplayMode::waveform:  btnMode.setButtonText ("Wave"); break;
-        case DisplayMode::xy:        btnMode.setButtonText ("X-Y");  break;
-        case DisplayMode::lissajous: btnMode.setButtonText ("Liss"); break;
-    }
 }
 
 // ----------------------------------------------------------
-// onFrame：Hub 分发器回调（除非冻结）
+// 按住慢放（参照 SpectrumModule 的子弹时间，状态机见 HoldSlowMo）
+// ----------------------------------------------------------
+void OscilloscopeModule::mouseDown (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDown (e);   // 保留基类行为（toFront / 右键菜单 / 边缘拖拽）
+
+    // 只在"左键按在画布内部（避开边缘缩放热区）"时进入慢放；抽屉是子组件，
+    //   点击它不会走到这里。
+    if (e.mods.isLeftButtonDown()
+        && getCanvasBounds (getContentBounds()).reduced (6).contains (e.getPosition())
+        && ! getControlDrawerBounds().contains (e.getPosition()))
+    {
+        hold.press();
+        holdPendingStart = true;   // 下一帧到达时用当前帧窗口作为历史起点
+        invalidateDynamicLayer();
+        buildGlSnapshot();
+        repaint();
+    }
+}
+
+void OscilloscopeModule::mouseUp (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseUp (e);
+
+    if (hold.active || holdPendingStart)
+        endHold();
+}
+
+void OscilloscopeModule::beginHold (const AnalyserHub::FrameSnapshot& frame)
+{
+    history.begin (frame);
+    holdPlayPos = (double) history.totalWritten();   // 读指针从"实时"出发
+    holdPendingStart = false;
+}
+
+void OscilloscopeModule::endHold()
+{
+    // 松手直接回到实时：下一帧 onFrame 走实时分支；残影色由 HoldSlowMo::tick 渐隐
+    hold.release();
+    holdPendingStart = false;
+    history.end();
+    invalidateDynamicLayer();
+}
+
+// ----------------------------------------------------------
+// onFrame：Hub 分发器回调
 // ----------------------------------------------------------
 void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 {
     if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Oscilloscope)) return;
 
-    if (! frozen)
+    hold.tick (frame.dtSec);
+
+    const int n = (int) frame.oscL.size();
+
+    if (hold.active)
+    {
+        // ---- 慢放：从长历史里按"被拉长 50 倍的时间"推进读指针 ----
+        if (holdPendingStart || ! history.isRecording())
+            beginHold (frame);
+        else
+            history.feed (frame);
+
+        holdPlayPos += (double) hold.dilate (frame.dtSec) * hub.getSampleRate();
+        const double hi = (double) history.totalWritten();
+        const double lo = (double) history.oldestReadable() + (double) n;
+        holdPlayPos = juce::jlimit (lo < hi ? lo : hi, hi, holdPlayPos);
+
+        readBufL.resize ((size_t) n);
+        readBufR.resize ((size_t) n);
+        history.read ((std::uint64_t) holdPlayPos, n, readBufL.data(), readBufR.data());
+
+        snapshotL.resize (n);
+        snapshotR.resize (n);
+        std::memcpy (snapshotL.getRawDataPointer(), readBufL.data(), (size_t) n * sizeof (float));
+        std::memcpy (snapshotR.getRawDataPointer(), readBufR.data(), (size_t) n * sizeof (float));
+    }
+    else
     {
         // Phase F 优化：std::array → juce::Array 改 memcpy 批量拷贝
-        const int n = (int) frame.oscL.size();
         snapshotL.resize(n);
         snapshotR.resize(n);
         std::memcpy (snapshotL.getRawDataPointer(), frame.oscL.data(), (size_t) n * sizeof (float));
         std::memcpy (snapshotR.getRawDataPointer(), frame.oscR.data(), (size_t) n * sizeof (float));
+    }
 
-        // 方案 A：只有数据真正变化才标脏动态层，避免每帧 4 次 strokePath
-        if (snapshotChangedSinceLastDraw())
-            dynamicLayerDirty = true;
+    // 方案 A：只有数据真正变化才标脏动态层，避免每帧 4 次 strokePath
+    if (snapshotChangedSinceLastDraw() || std::abs (hold.ghostMix - lastDrawnGhost) > 0.001f)
+        dynamicLayerDirty = true;
 
-        // v1.8.5 XY/Lissajous 自动缩放：峰值驱动（避免 RMS 过度补偿）
-        //   · 每帧取样本最大欧氏距离 sqrt(L²+R²)，累积到 periodicMaxAccum
-        //   · 每秒结算一次：gain = 0.80 / periodicMaxAccum → 峰值落在边界 80%
-        //   · 与上周期的 gain 差 <10% 则不缩放，避免频繁抖动
-        if ((displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous) && n > 0)
+    const bool scatter = (displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous);
+
+    // v1.8.5 XY/Lissajous 自动缩放：峰值驱动（避免 RMS 过度补偿）
+    //   · 每帧取样本最大欧氏距离 sqrt(L²+R²)，累积到 periodicMaxAccum
+    //   · 每秒结算一次：gain = 1.0 / periodicMaxAccum → 峰值落在边界
+    //   · 与上周期的 gain 差 <10% 则不缩放，避免频繁抖动
+    if (scatter && autoGain && n > 0)
+    {
+        float frameMax = 0.0f;
+        const int nr = juce::jmin (snapshotL.size(), snapshotR.size());
+        for (int i = 0; i < nr; ++i)
         {
-            // 本帧峰值：取 sqrt(L²+R²) 的最大值
-            {
-                float frameMax = 0.0f;
-                const int nR = snapshotR.size();
-                const int nr = juce::jmin(n, nR);
-                for (int i = 0; i < nr; ++i)
-                {
-                    const float l = snapshotL.getUnchecked(i);
-                    const float r = snapshotR.getUnchecked(i);
-                    const float dist = std::sqrt (l * l + r * r);
-                    if (dist > frameMax) frameMax = dist;
-                }
-                // 仅右声道样本（若快照不对称）
-                for (int i = nr; i < nR; ++i)
-                {
-                    const float r = snapshotR.getUnchecked(i);
-                    if (std::abs (r) > frameMax) frameMax = std::abs (r);
-                }
-                for (int i = nr; i < n; ++i)
-                {
-                    const float l = snapshotL.getUnchecked(i);
-                    if (std::abs (l) > frameMax) frameMax = std::abs (l);
-                }
-                if (frameMax > periodicMaxAccum)
-                    periodicMaxAccum = frameMax;
-            }
-
-            // 每秒结算一次
-            const double nowMs2 = juce::Time::getMillisecondCounterHiRes();
-            constexpr double kPeriodMs       = 1000.0;  // 1 秒周期
-            constexpr float  kTargetFraction = 1.00f;   // 峰值目标：边界 80%
-            constexpr float  kDeadZone       = 0.10f;   // 死区：波动 <10% 不更新
-
-            if ((nowMs2 - lastPeriodicGainUpdateMs) >= kPeriodMs)
-            {
-                const float safeMax = juce::jmax (periodicMaxAccum, 0.001f);  // 防除零
-                const float targetGain = juce::jlimit (0.1f, 10.0f, kTargetFraction / safeMax);
-
-                if (std::abs (targetGain - autoGainFactor) > autoGainFactor * kDeadZone)
-                {
-                    autoGainFactor = targetGain;
-                    dynamicLayerDirty = true;
-                }
-
-                prevPeriodicMax            = periodicMaxAccum;
-                periodicMaxAccum           = 0.0f;
-                lastPeriodicGainUpdateMs   = nowMs2;
-            }
+            const float l = snapshotL.getUnchecked(i);
+            const float r = snapshotR.getUnchecked(i);
+            const float dist = std::sqrt (l * l + r * r);
+            if (dist > frameMax) frameMax = dist;
         }
+        if (frameMax > periodicMaxAccum)
+            periodicMaxAccum = frameMax;
+
+        const double nowMs2 = juce::Time::getMillisecondCounterHiRes();
+        constexpr double kPeriodMs       = 1000.0;
+        constexpr float  kTargetFraction = 1.00f;
+        constexpr float  kDeadZone       = 0.10f;
+
+        if ((nowMs2 - lastPeriodicGainUpdateMs) >= kPeriodMs)
+        {
+            const float safeMax = juce::jmax (periodicMaxAccum, 0.001f);
+            const float targetGain = juce::jlimit (0.1f, 10.0f, kTargetFraction / safeMax);
+
+            if (std::abs (targetGain - autoGainFactor) > autoGainFactor * kDeadZone)
+            {
+                autoGainFactor = targetGain;
+                dynamicLayerDirty = true;
+            }
+
+            prevPeriodicMax            = periodicMaxAccum;
+            periodicMaxAccum           = 0.0f;
+            lastPeriodicGainUpdateMs   = nowMs2;
+        }
+    }
+
+    // 频段染色：对当前显示窗口算三频段权重（仅 X-Y / Lissajous + 开启时才付费）
+    if (xyBandActive() && snapshotL.size() > 1 && snapshotR.size() == snapshotL.size())
+    {
+        const double fs = hub.getSampleRate();
+        if (fs != splitterRate)
+        {
+            splitter.prepare (fs, crossLowHz, crossHighHz);
+            splitterRate = fs;
+        }
+        splitter.compute (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(),
+                          snapshotL.size(), wLow, wMid, wHigh);
     }
 
     // v2.9：去掉 15ms×DPI 硬编码节流（高 DPI 下会锁到 ≤33fps），每个分发帧重绘
@@ -243,12 +386,96 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 }
 
 // ----------------------------------------------------------
+// 配色 / 散点几何（GL 与 CPU 回退共用）
+// ----------------------------------------------------------
+OscilloscopeModule::WaveColours OscilloscopeModule::waveColours() const
+{
+    WaveColours c;
+    if (waveColour == 1)   // Pink：旧 Oscilloscope Wave
+    {
+        c.lGlow = PinkXP::pink300.withAlpha (0.35f); c.lMain = PinkXP::pink400;
+        c.rGlow = PinkXP::pink500.withAlpha (0.35f); c.rMain = PinkXP::pink600;
+    }
+    else                   // Classic：chartRamp 阶梯（S4 调色板重构）
+    {
+        c.lGlow = PinkXP::chartRamp[3].withAlpha (0.35f); c.lMain = PinkXP::chartRamp[4];
+        c.rGlow = PinkXP::chartRamp[5].withAlpha (0.35f); c.rMain = PinkXP::chartRamp[6];
+    }
+
+    if (hold.ghostMix > 0.0f)
+    {
+        c.lGlow = keepAlpha (hold.tint (c.lGlow), c.lGlow.getFloatAlpha());
+        c.lMain = keepAlpha (hold.tint (c.lMain), c.lMain.getFloatAlpha());
+        c.rGlow = keepAlpha (hold.tint (c.rGlow), c.rGlow.getFloatAlpha());
+        c.rMain = keepAlpha (hold.tint (c.rMain), c.rMain.getFloatAlpha());
+    }
+    return c;
+}
+
+void OscilloscopeModule::collectXYPoints (juce::Rectangle<int> canvas, bool rotate45,
+                                          std::vector<XYPoint>& out) const
+{
+    out.clear();
+    const int N = juce::jmin (snapshotL.size(), snapshotR.size());
+    if (N <= 1) return;
+
+    auto inner = canvas.reduced (6);
+    if (inner.getWidth() <= 0 || inner.getHeight() <= 0) return;
+
+    const float cx = (float) inner.getCentreX();
+    const float cy = (float) inner.getCentreY();
+    const float baseRadius = (float) juce::jmin (inner.getWidth(), inner.getHeight()) * 0.45f;
+    const float effectiveRadius = baseRadius * autoGainFactor;
+    const float denom = (float) juce::jmax (1, N - 1);
+    const auto innerF = inner.toFloat().expanded (1.0f);
+
+    const bool useBand = xyBandActive() && (int) wLow.size() == N;
+    const auto baseCol = hold.tint (PinkXP::chartRamp[5]);
+
+    out.reserve ((size_t) N);
+    for (int i = 0; i < N; ++i)
+    {
+        const float rawL = snapshotL.getUnchecked (i);
+        const float rawR = snapshotR.getUnchecked (i);
+        if (! std::isfinite (rawL) || ! std::isfinite (rawR))
+            continue;
+
+        // v1.8.5：样本直接限幅到 ±1，autoGain 在像素映射阶段生效
+        const float lx = juce::jlimit (-1.0f, 1.0f, rawL);
+        const float ry = juce::jlimit (-1.0f, 1.0f, rawR);
+
+        float px, py;
+        if (rotate45)
+        {
+            const float mid  = (lx + ry) * 0.7071067f;
+            const float side = (lx - ry) * 0.7071067f;
+            px = cx + side * effectiveRadius;
+            py = cy - mid  * effectiveRadius;
+        }
+        else
+        {
+            px = cx + lx * effectiveRadius;
+            py = cy - ry * effectiveRadius;
+        }
+
+        if (! innerF.contains (px, py))
+            continue;
+
+        juce::Colour col = baseCol;
+        if (useBand)
+        {
+            const auto rgb = y2k::bands::mix (wLow[(size_t) i], wMid[(size_t) i], wHigh[(size_t) i]);
+            col = hold.tint (juce::Colour::fromFloatRGBA (rgb.r, rgb.g, rgb.b, 1.0f));
+        }
+
+        // 越新的点（i 越大）越亮
+        out.push_back ({ px, py, 0.25f + 0.6f * ((float) i / denom), col });
+    }
+}
+
+// ----------------------------------------------------------
 // buildGlSnapshot —— GL 直渲染快照（v2.9.3，覆盖三种显示模式；
 //   v2.9.4 迁移到统一框架，单段 GL_TRIANGLES 顶点流）
-//   顶点流（模块本地坐标）：
-//     [背景 drawSunken + 点阵 + 十字线 + 虚线]
-//     waveform： [L glow strip][L main strip][R glow strip][R main strip]
-//     xy/lissajous：[标尺环 4×64 段] [点云 2×2 quad × N]
 // ----------------------------------------------------------
 void OscilloscopeModule::buildGlSnapshot()
 {
@@ -271,27 +498,18 @@ void OscilloscopeModule::buildGlSnapshot()
     snap->logicalH = canvas.getHeight();
     snap->canvasLocal = canvas;
 
-    // 预估容量：背景 ~1500 quad + 波形 4×(N-1) 段
     const int maxPts = juce::jmax (64, inner.getWidth());
     snap->vertices.reserve ((size_t) (1500 * 6 * 6 + (size_t) 4 * maxPts * 6 * 6));
 
     auto pushRect = [&] (juce::Rectangle<float> r, juce::Colour c)
     {
-        const float x0 = r.getX(), y0 = r.getY(), x1 = r.getRight(), y1 = r.getBottom();
-        const float rr = c.getFloatRed(), gg = c.getFloatGreen(),
-                    bb = c.getFloatBlue(), aa = c.getFloatAlpha();
-        const float quad[36] = {
-            x0, y0, rr, gg, bb, aa,  x1, y0, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
-            x1, y0, rr, gg, bb, aa,  x1, y1, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
-        };
-        snap->vertices.insert (snap->vertices.end(), quad, quad + 36);
+        pushQuadVerts (snap->vertices, r.getX(), r.getY(), r.getRight(), r.getBottom(), c);
     };
 
     // ---- 背景：凹陷底（框架 helper）+ 点阵 + 十字 + 虚线 ----
     {
         appendSunkenFrame (snap->vertices, canvas);
 
-        // 点阵（8px 间距、行错位）
         const auto dot = PinkXP::pink200.withAlpha (0.35f);
         constexpr int dotStep = 8;
         for (int y = inner.getY(); y < inner.getBottom(); y += dotStep)
@@ -299,14 +517,12 @@ void OscilloscopeModule::buildGlSnapshot()
                  x < inner.getRight(); x += dotStep)
                 pushRect ({ (float) x, (float) y, 1.0f, 1.0f }, dot);
 
-        // 中心十字线（1px 宽）
         const auto cross = PinkXP::pink300.withAlpha (0.6f);
         const int cx = inner.getCentreX();
         const int cy = inner.getCentreY();
         pushRect ({ (float) inner.getX(), (float) cy, (float) inner.getWidth(), 1.0f }, cross);
         pushRect ({ (float) cx, (float) inner.getY(), 1.0f, (float) inner.getHeight() }, cross);
 
-        // 1/4 / 3/4 虚线
         const auto dash = PinkXP::pink200.withAlpha (0.5f);
         const int q1x = inner.getX() + inner.getWidth() / 4;
         const int q3x = inner.getX() + inner.getWidth() * 3 / 4;
@@ -328,7 +544,6 @@ void OscilloscopeModule::buildGlSnapshot()
                          juce::Colour glowCol, float glowHalfW,
                          juce::Colour mainCol, float mainHalfW)
     {
-        // 抽稀采样点序列（与 buildWaveformPath 一致）
         std::vector<float> xs, ys;
         xs.reserve ((size_t) (N / stride + 4));
         ys.reserve ((size_t) (N / stride + 4));
@@ -348,20 +563,13 @@ void OscilloscopeModule::buildGlSnapshot()
             ys.push_back (cy - s * halfH);
         }
 
-        const float gr = glowCol.getFloatRed(),   gg = glowCol.getFloatGreen(),
-                    gb = glowCol.getFloatBlue(),  ga = glowCol.getFloatAlpha();
-        const float mr = mainCol.getFloatRed(),   mg = mainCol.getFloatGreen(),
-                    mb = mainCol.getFloatBlue(),  ma = mainCol.getFloatAlpha();
-
-        // 每段生成一个 quad（沿线段法线偏移 ±halfW），glow 与 main 顺序叠加
         const size_t ptCount = xs.size();
         for (int layer = 0; layer < 2; ++layer)
         {
             const float hw = (layer == 0) ? glowHalfW : mainHalfW;
-            const float r  = (layer == 0) ? gr : mr;
-            const float gg2= (layer == 0) ? gg : mg;
-            const float b  = (layer == 0) ? gb : mb;
-            const float a  = (layer == 0) ? ga : ma;
+            const auto col = (layer == 0) ? glowCol : mainCol;
+            const float r = col.getFloatRed(), g2 = col.getFloatGreen(),
+                        b = col.getFloatBlue(), a = col.getFloatAlpha();
 
             for (size_t i = 0; i + 1 < ptCount; ++i)
             {
@@ -373,12 +581,12 @@ void OscilloscopeModule::buildGlSnapshot()
                 const float ny =  dx / len * hw;
 
                 const float q[36] = {
-                    xs[i] + nx,     ys[i] + ny,     r, gg2, b, a,
-                    xs[i + 1] + nx, ys[i + 1] + ny, r, gg2, b, a,
-                    xs[i] - nx,     ys[i] - ny,     r, gg2, b, a,
-                    xs[i + 1] + nx, ys[i + 1] + ny, r, gg2, b, a,
-                    xs[i + 1] - nx, ys[i + 1] - ny, r, gg2, b, a,
-                    xs[i] - nx,     ys[i] - ny,     r, gg2, b, a,
+                    xs[i] + nx,     ys[i] + ny,     r, g2, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, g2, b, a,
+                    xs[i] - nx,     ys[i] - ny,     r, g2, b, a,
+                    xs[i + 1] + nx, ys[i + 1] + ny, r, g2, b, a,
+                    xs[i + 1] - nx, ys[i + 1] - ny, r, g2, b, a,
+                    xs[i] - nx,     ys[i] - ny,     r, g2, b, a,
                 };
                 snap->vertices.insert (snap->vertices.end(), q, q + 36);
             }
@@ -389,108 +597,63 @@ void OscilloscopeModule::buildGlSnapshot()
     if (displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous)
     {
         const bool rotate45 = (displayMode == DisplayMode::lissajous);
-        const int  nXY = juce::jmin (snapshotL.size(), snapshotR.size());
-        if (nXY > 1)
+        auto innerXY = canvas.reduced (6);
+        const float cxx = (float) innerXY.getCentreX();
+        const float cyy = (float) innerXY.getCentreY();
+        const float baseRadius = (float) juce::jmin (innerXY.getWidth(), innerXY.getHeight()) * 0.45f;
+        const float gain = autoGainFactor;
+
+        // 标尺环：4 个同心 1px 圆环 → 64 段细 quad
+        if (showRings)
         {
-            auto innerXY = canvas.reduced (6);
-            const float cx = (float) innerXY.getCentreX();
-            const float cy = (float) innerXY.getCentreY();
-            const float baseRadius = (float) juce::jmin (innerXY.getWidth(), innerXY.getHeight()) * 0.45f;
-            const float gain = autoGainFactor;
-            const float effectiveRadius = baseRadius * gain;
-
-            // 标尺环：4 个同心 1px 圆环 → 64 段细 quad（与 drawXY 的 drawEllipse 对应）
+            const auto ringCol = PinkXP::pink200.withAlpha (0.30f);
+            const float rr0 = ringCol.getFloatRed(), rg0 = ringCol.getFloatGreen(),
+                        rb0 = ringCol.getFloatBlue(), ra0 = ringCol.getFloatAlpha();
+            const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
+            constexpr int ringSegs = 64;
+            for (int ri = 0; ri < 4; ++ri)
             {
-                const auto ringCol = PinkXP::pink200.withAlpha (0.30f);
-                const float rr0 = ringCol.getFloatRed(), rg0 = ringCol.getFloatGreen(),
-                            rb0 = ringCol.getFloatBlue(), ra0 = ringCol.getFloatAlpha();
-                const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
-                constexpr int ringSegs = 64;
-                for (int ri = 0; ri < 4; ++ri)
+                const float rr = baseRadius * gain * ringFrac[ri];
+                if (rr < 2.0f) continue;
+                for (int s = 0; s < ringSegs; ++s)
                 {
-                    const float rr = baseRadius * gain * ringFrac[ri];
-                    if (rr < 2.0f) continue;
-                    for (int s = 0; s < ringSegs; ++s)
-                    {
-                        const float a0 = juce::MathConstants<float>::twoPi * (float) s       / (float) ringSegs;
-                        const float a1 = juce::MathConstants<float>::twoPi * (float) (s + 1) / (float) ringSegs;
-                        const float x0 = cx + rr * std::cos (a0), y0 = cy + rr * std::sin (a0);
-                        const float x1 = cx + rr * std::cos (a1), y1 = cy + rr * std::sin (a1);
-                        const float dx = x1 - x0, dy = y1 - y0;
-                        const float len = std::sqrt (dx * dx + dy * dy);
-                        if (len < 1.0e-6f) continue;
-                        const float nx = -dy / len * 0.5f;
-                        const float ny =  dx / len * 0.5f;
-                        const float q[36] = {
-                            x0 + nx, y0 + ny, rr0, rg0, rb0, ra0,
-                            x1 + nx, y1 + ny, rr0, rg0, rb0, ra0,
-                            x0 - nx, y0 - ny, rr0, rg0, rb0, ra0,
-                            x1 + nx, y1 + ny, rr0, rg0, rb0, ra0,
-                            x1 - nx, y1 - ny, rr0, rg0, rb0, ra0,
-                            x0 - nx, y0 - ny, rr0, rg0, rb0, ra0,
-                        };
-                        snap->vertices.insert (snap->vertices.end(), q, q + 36);
-                    }
-                }
-            }
-
-            // 点云：全点 2×2 quad（旧软件路径按 8 档 alpha 分桶；GPU 直画直接
-            //   每点带 alpha，无需分桶）。alpha = 0.25 + 0.6×(i/(N-1))，越新越亮。
-            {
-                const auto dotCol = PinkXP::chartRamp[5];
-                const float dr = dotCol.getFloatRed(), dg = dotCol.getFloatGreen(),
-                            db = dotCol.getFloatBlue();
-                const float denom = (float) juce::jmax (1, nXY - 1);
-                const juce::Rectangle<float> innerF = innerXY.toFloat().expanded (1.0f);
-
-                for (int i = 0; i < nXY; ++i)
-                {
-                    const float rawL = snapshotL.getUnchecked (i);
-                    const float rawR = snapshotR.getUnchecked (i);
-                    if (! std::isfinite (rawL) || ! std::isfinite (rawR))
-                        continue;
-
-                    const float lx = juce::jlimit (-1.0f, 1.0f, rawL);
-                    const float ry = juce::jlimit (-1.0f, 1.0f, rawR);
-
-                    float px, py;
-                    if (rotate45)
-                    {
-                        const float mid  = (lx + ry) * 0.7071067f;
-                        const float side = (lx - ry) * 0.7071067f;
-                        px = cx + side * effectiveRadius;
-                        py = cy - mid  * effectiveRadius;
-                    }
-                    else
-                    {
-                        px = cx + lx * effectiveRadius;
-                        py = cy - ry * effectiveRadius;
-                    }
-
-                    if (! innerF.contains (px, py))
-                        continue;
-
-                    const float a = 0.25f + 0.6f * ((float) i / denom);
+                    const float a0 = juce::MathConstants<float>::twoPi * (float) s       / (float) ringSegs;
+                    const float a1 = juce::MathConstants<float>::twoPi * (float) (s + 1) / (float) ringSegs;
+                    const float x0 = cxx + rr * std::cos (a0), y0 = cyy + rr * std::sin (a0);
+                    const float x1 = cxx + rr * std::cos (a1), y1 = cyy + rr * std::sin (a1);
+                    const float dx = x1 - x0, dy = y1 - y0;
+                    const float len = std::sqrt (dx * dx + dy * dy);
+                    if (len < 1.0e-6f) continue;
+                    const float nx = -dy / len * 0.5f;
+                    const float ny =  dx / len * 0.5f;
                     const float q[36] = {
-                        px - 1.0f, py - 1.0f, dr, dg, db, a,
-                        px + 1.0f, py - 1.0f, dr, dg, db, a,
-                        px - 1.0f, py + 1.0f, dr, dg, db, a,
-                        px + 1.0f, py - 1.0f, dr, dg, db, a,
-                        px + 1.0f, py + 1.0f, dr, dg, db, a,
-                        px - 1.0f, py + 1.0f, dr, dg, db, a,
+                        x0 + nx, y0 + ny, rr0, rg0, rb0, ra0,
+                        x1 + nx, y1 + ny, rr0, rg0, rb0, ra0,
+                        x0 - nx, y0 - ny, rr0, rg0, rb0, ra0,
+                        x1 + nx, y1 + ny, rr0, rg0, rb0, ra0,
+                        x1 - nx, y1 - ny, rr0, rg0, rb0, ra0,
+                        x0 - nx, y0 - ny, rr0, rg0, rb0, ra0,
                     };
                     snap->vertices.insert (snap->vertices.end(), q, q + 36);
                 }
             }
         }
+
+        // 点云：全点 2×2 quad，每点带 alpha（越新越亮）与频段色
+        std::vector<XYPoint> pts;
+        collectXYPoints (canvas, rotate45, pts);
+        for (const auto& p : pts)
+            pushQuadVerts (snap->vertices, p.x - 1.0f, p.y - 1.0f, p.x + 1.0f, p.y + 1.0f,
+                           p.col.withAlpha (p.alpha));
     }
     else
     {
         // L 声道：glow 2.2px 半透明 → main 1.4px 实线；R 声道同理（与 drawWaveform 同序）
-        //   调色板重构（S4）：声道色改用 chartRamp 阶梯（预设下与旧 pinkXXX 完全一致）
-        pushWave (snapshotL, PinkXP::chartRamp[3].withAlpha (0.35f), 1.1f, PinkXP::chartRamp[4], 0.7f);
-        if (snapshotR.size() == N)
-            pushWave (snapshotR, PinkXP::chartRamp[5].withAlpha (0.35f), 1.1f, PinkXP::chartRamp[6], 0.7f);
+        const auto wc = waveColours();
+        if (drawsL())
+            pushWave (snapshotL, wc.lGlow, 1.1f, wc.lMain, 0.7f);
+        if (drawsR() && snapshotR.size() == N)
+            pushWave (snapshotR, wc.rGlow, 1.1f, wc.rMain, 0.7f);
     }
 
     // 单段：全部为 GL_TRIANGLES
@@ -500,28 +663,15 @@ void OscilloscopeModule::buildGlSnapshot()
 }
 
 // ----------------------------------------------------------
-// 布局
+// 布局：v3.1 起没有工具栏，整块内容区都是画布
 // ----------------------------------------------------------
-juce::Rectangle<int> OscilloscopeModule::getToolbarBounds(juce::Rectangle<int> content) const
-{
-    return content.withHeight(toolbarH);
-}
-
 juce::Rectangle<int> OscilloscopeModule::getCanvasBounds(juce::Rectangle<int> content) const
 {
-    return content.withTrimmedTop(toolbarH + 4);
+    return content;
 }
 
-void OscilloscopeModule::layoutContent(juce::Rectangle<int> contentBounds)
+void OscilloscopeModule::layoutContent(juce::Rectangle<int>)
 {
-    auto tb = getToolbarBounds(contentBounds).reduced(2);
-
-    // 左侧：单按钮模式循环（文字在 Wave / X-Y / Liss 之间切换）
-    const int modeBtnW = 72;
-    btnMode.setBounds (tb.getX(), tb.getY(), modeBtnW, tb.getHeight());
-
-    const int freezeW = 64;
-    btnFreeze.setBounds(tb.getRight() - freezeW, tb.getY(), freezeW, tb.getHeight());
 }
 
 // ----------------------------------------------------------
@@ -529,11 +679,8 @@ void OscilloscopeModule::layoutContent(juce::Rectangle<int> contentBounds)
 // ----------------------------------------------------------
 //
 // P5 平台分流：
-//   · Windows：CoreGraphics 不在 JUCE7 默认链路，Path 每帧 rasterize 昂贵
-//              → 保留动态层 Image 缓存（方案 A），dirty 时才重绘。
-//   · macOS：CoreGraphics Path stroke 由系统硬件加速，反而是 Image 像素
-//              合成（软件 blit / 跨 NSWindow 提交）慢 → 跳过 dynamicLayer，
-//              直接把波形/XY 画到屏幕 Graphics，省掉一次 Image 往返。
+//   · Windows：保留动态层 Image 缓存（方案 A），dirty 时才重绘。
+//   · macOS：CoreGraphics Path stroke 由系统硬件加速，直接画到屏幕 Graphics。
 //
 namespace
 {
@@ -544,7 +691,7 @@ namespace
 #endif
 }
 
-// ---- GlDirectModuleBase 钩子（v2.9.4 迁移自 v2.9.3 直渲染样板）----
+// ---- GlDirectModuleBase 钩子 ----
 juce::Rectangle<int> OscilloscopeModule::getGlCanvasBounds (juce::Rectangle<int> contentBounds)
 {
     return getCanvasBounds (contentBounds);
@@ -552,22 +699,36 @@ juce::Rectangle<int> OscilloscopeModule::getGlCanvasBounds (juce::Rectangle<int>
 
 void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
 {
-    // 接管时只画图例/说明文字与 FROZEN 标记（GL 内容之上的 overlay）
+    // 接管时只画图例/说明文字（GL 内容之上的 overlay）
     g.setColour (PinkXP::ink.withAlpha (0.85f));
     g.setFont   (PinkXP::getAxisFont (9.0f, juce::Font::plain));
 
     if (displayMode == DisplayMode::waveform)
     {
-        PinkXP::drawCachedText (g, "L", juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 14, 24, 12),
-                                juce::Justification::centredLeft, 9.0f, juce::Font::plain,
-                                PinkXP::ink.withAlpha (0.85f), true);
-        g.setColour (PinkXP::pink400);
-        g.fillRect  (canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
-        PinkXP::drawCachedText (g, "R", juce::Rectangle<int> (canvas.getX() + 32, canvas.getBottom() - 14, 24, 12),
-                                juce::Justification::centredLeft, 9.0f, juce::Font::plain,
-                                PinkXP::ink.withAlpha (0.85f), true);
-        g.setColour (PinkXP::pink600);
-        g.fillRect  (canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
+        const bool legend = (waveColour == 0 && waveChannel == 2);
+        if (legend)
+        {
+            // 旧 Oscilloscope 的 L / R 双色图例
+            PinkXP::drawCachedText (g, "L", juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 14, 24, 12),
+                                    juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                                    PinkXP::ink.withAlpha (0.85f), true);
+            g.setColour (PinkXP::pink400);
+            g.fillRect  (canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
+            PinkXP::drawCachedText (g, "R", juce::Rectangle<int> (canvas.getX() + 32, canvas.getBottom() - 14, 24, 12),
+                                    juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                                    PinkXP::ink.withAlpha (0.85f), true);
+            g.setColour (PinkXP::pink600);
+            g.fillRect  (canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
+        }
+        else
+        {
+            // 旧 Oscilloscope Wave 的通道文字标签
+            const juce::String modeLabel = (waveChannel == 0) ? "L" : (waveChannel == 1) ? "R" : "L+R";
+            PinkXP::drawCachedText (g, modeLabel,
+                                    juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 14, 40, 12),
+                                    juce::Justification::centredLeft, 9.0f, juce::Font::plain,
+                                    PinkXP::ink.withAlpha (0.85f), true);
+        }
     }
     else
     {
@@ -582,10 +743,10 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
                         42, 12, juce::Justification::centredRight, false);
         }
 
-        // 标尺环 dB 标签（与软件路径 drawXY 一致）
+        // 标尺环 dB 标签
         auto innerXY = canvas.reduced (6);
         const float baseRadius = (float) juce::jmin (innerXY.getWidth(), innerXY.getHeight()) * 0.45f;
-        if (baseRadius * autoGainFactor >= 20.0f)
+        if (showRings && baseRadius * autoGainFactor >= 20.0f)
         {
             const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
             const char* labels[4] = { "-12", "-6", "-2.5", "0 dB" };
@@ -602,21 +763,10 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
             }
         }
     }
-
-    if (frozen)
-    {
-        auto dot = juce::Rectangle<int> (canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
-        g.setColour (PinkXP::sel);
-        g.fillEllipse (dot.toFloat());
-        PinkXP::drawCachedText (g, "FROZEN", juce::Rectangle<int> (canvas.getRight() - 60, canvas.getY() + 4, 42, 12),
-                                juce::Justification::centredRight, 9.0f, juce::Font::bold,
-                                PinkXP::ink);
-    }
 }
 
 void OscilloscopeModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
-    // 内容区底色（深色主题下也保持浅色，保证按钮文字可读）
     g.setColour(PinkXP::btnFace);
     g.fillRect(contentBounds);
 
@@ -629,33 +779,17 @@ void OscilloscopeModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<
 
     if (kOscUseImageCache)
     {
-        // 方案 A：动态层缓存
-        //   · 只有尺寸变化 / 模式变化 / 冻结状态变化 / snapshot 有新数据时才重绘动态层
-        //   · 否则直接 drawImageAt，避开 4 次 strokePath 与上千次 fillRect
         redrawDynamicLayerIfNeeded(canvas);
         if (dynamicLayer.isValid())
             g.drawImageAt(dynamicLayer, canvas.getX(), canvas.getY());
     }
     else
     {
-        // macOS 直绘分支：波形/XY 直接画到屏幕 Graphics（canvas 绝对坐标）
-        // 省去一次 width×height×4B 的 Image 分配 + 一次像素合成
         switch (displayMode)
         {
             case DisplayMode::waveform:  drawWaveform(g, canvas);        break;
             case DisplayMode::xy:        drawXY      (g, canvas, false); break;
             case DisplayMode::lissajous: drawXY      (g, canvas, true);  break;
-        }
-
-        if (frozen)
-        {
-            auto dot = juce::Rectangle<int>(canvas.getRight() - 12, canvas.getY() + 6, 8, 8);
-            g.setColour(PinkXP::sel);
-            g.fillEllipse(dot.toFloat());
-            g.setColour(PinkXP::ink);
-            g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-            g.drawText(y2k::tr ("FROZEN"), canvas.getRight() - 60, canvas.getY() + 4,
-                       42, 12, juce::Justification::centredRight, false);
         }
     }
 }
@@ -670,7 +804,6 @@ void OscilloscopeModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> 
     auto inner = canvas.reduced(2);
     if (inner.isEmpty()) return;
 
-    // 像素点阵（8px 间距淡粉点阵）
     g.setColour(PinkXP::pink200.withAlpha(0.35f));
     const int dotStep = 8;
     for (int y = inner.getY(); y < inner.getBottom(); y += dotStep)
@@ -678,14 +811,12 @@ void OscilloscopeModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> 
              x < inner.getRight(); x += dotStep)
             g.fillRect(x, y, 1, 1);
 
-    // 中心十字线
     g.setColour(PinkXP::pink300.withAlpha(0.6f));
     const int cx = inner.getCentreX();
     const int cy = inner.getCentreY();
     g.drawHorizontalLine(cy, (float) inner.getX(), (float) inner.getRight());
     g.drawVerticalLine  (cx, (float) inner.getY(), (float) inner.getBottom());
 
-    // 1/4 / 3/4 虚线（垂直）
     g.setColour(PinkXP::pink200.withAlpha(0.5f));
     const int q1x = inner.getX() + inner.getWidth() / 4;
     const int q3x = inner.getX() + inner.getWidth() * 3 / 4;
@@ -697,7 +828,7 @@ void OscilloscopeModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> 
 }
 
 // ----------------------------------------------------------
-// Waveform 模式：时域 L（粉色）+ R（深粉）叠加
+// Waveform 模式：时域 L / R 叠加（声道、配色可选）
 // ----------------------------------------------------------
 void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> canvas)
 {
@@ -710,38 +841,48 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
     const float h  = (float) inner.getHeight();
     const float cy = (float) inner.getCentreY();
     const float halfH = h * 0.45f;
+    const auto wc = waveColours();
 
-    // L 声道：浅粉描边（先淡描 glow，再实线）
-    //   v2.9.2：glow 宽度 3.0 → 2.2（光栅化面积 ∝ 宽度，省 ~27%，视觉几乎无差）
-    auto pathL = buildWaveformPath(snapshotL, inner, cy, halfH);
-    g.setColour(PinkXP::chartRamp[3].withAlpha(0.35f));
-    g.strokePath(pathL, juce::PathStrokeType(2.2f));
-    g.setColour(PinkXP::chartRamp[4]);
-    g.strokePath(pathL, juce::PathStrokeType(1.4f));
+    if (drawsL())
+    {
+        auto pathL = buildWaveformPath(snapshotL, inner, cy, halfH);
+        g.setColour(wc.lGlow);
+        g.strokePath(pathL, juce::PathStrokeType(2.2f));
+        g.setColour(wc.lMain);
+        g.strokePath(pathL, juce::PathStrokeType(1.4f));
+    }
 
-    // R 声道：深粉描边
-    if (snapshotR.size() == N)
+    if (drawsR() && snapshotR.size() == N)
     {
         auto pathR = buildWaveformPath(snapshotR, inner, cy, halfH);
-        g.setColour(PinkXP::chartRamp[5].withAlpha(0.35f));
+        g.setColour(wc.rGlow);
         g.strokePath(pathR, juce::PathStrokeType(2.2f));
-        g.setColour(PinkXP::chartRamp[6]);
+        g.setColour(wc.rMain);
         g.strokePath(pathR, juce::PathStrokeType(1.4f));
     }
 
-    // 左下角说明
+    // 左下角说明（与 GL overlay 一致）
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-    g.drawText(y2k::tr ("L"), canvas.getX() + 4, canvas.getBottom() - 14,
-               24, 12, juce::Justification::centredLeft, false);
-    g.setColour(PinkXP::chartRamp[4]);
-    g.fillRect(canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
+    if (waveColour == 0 && waveChannel == 2)
+    {
+        g.drawText(y2k::tr ("L"), canvas.getX() + 4, canvas.getBottom() - 14,
+                   24, 12, juce::Justification::centredLeft, false);
+        g.setColour(PinkXP::pink400);
+        g.fillRect(canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
 
-    g.setColour(PinkXP::ink.withAlpha(0.85f));
-    g.drawText(y2k::tr ("R"), canvas.getX() + 32, canvas.getBottom() - 14,
-               24, 12, juce::Justification::centredLeft, false);
-    g.setColour(PinkXP::chartRamp[6]);
-    g.fillRect(canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
+        g.setColour(PinkXP::ink.withAlpha(0.85f));
+        g.drawText(y2k::tr ("R"), canvas.getX() + 32, canvas.getBottom() - 14,
+                   24, 12, juce::Justification::centredLeft, false);
+        g.setColour(PinkXP::pink600);
+        g.fillRect(canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
+    }
+    else
+    {
+        const juce::String modeLabel = (waveChannel == 0) ? "L" : (waveChannel == 1) ? "R" : "L+R";
+        g.drawText(y2k::tr (modeLabel), canvas.getX() + 4, canvas.getBottom() - 14,
+                   40, 12, juce::Justification::centredLeft, false);
+    }
 }
 
 // ----------------------------------------------------------
@@ -758,11 +899,10 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     const float cx = (float) inner.getCentreX();
     const float cy = (float) inner.getCentreY();
     const float baseRadius = (float) juce::jmin(inner.getWidth(), inner.getHeight()) * 0.45f;
-
-    // v1.8.5 自动缩放：样本值 × autoGainFactor 后映射到像素
     const float gain = autoGainFactor;
 
-    // ---- 标尺环（淡粉同心圆，位于 baseRadius * gain 的 25% / 50% / 75% / 100%）----
+    // ---- 标尺环 ----
+    if (showRings)
     {
         const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
         g.setColour(PinkXP::pink200.withAlpha(0.30f));
@@ -773,7 +913,6 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
             g.drawEllipse(cx - rr, cy - rr, rr * 2.0f, rr * 2.0f, 1.0f);
         }
 
-        // 标尺环 dB 标签（贴在顶部环右侧）
         if (baseRadius * gain * 1.0f >= 20.0f)
         {
             g.setColour(PinkXP::ink.withAlpha(0.55f));
@@ -790,64 +929,41 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
         }
     }
 
-    const float effectiveRadius = baseRadius * gain;
+    std::vector<XYPoint> pts;
+    collectXYPoints (canvas, rotate45, pts);
 
-    const int targetPoints = juce::jmax(96, inner.getWidth() * 2);
-    const int stride = juce::jmax(1, N / targetPoints);
-
-    // 方案 C：按 alpha 分桶，合并 setColour + fillRect 调用
-    //   原本每个点都要 setColour + fillRect，600px 宽画布 ~1200 次状态切换；
-    //   按 8 档 alpha 把点汇总到 RectangleList，一次 fillRectList 提交 → 最多 8 次状态切换。
-    constexpr int kAlphaBuckets = 8;
-    juce::RectangleList<float> buckets[kAlphaBuckets];
-    for (int b = 0; b < kAlphaBuckets; ++b)
-        buckets[b].ensureStorageAllocated(targetPoints / kAlphaBuckets + 8);
-
-    const float denom = (float) juce::jmax(1, N - 1);
-    const juce::Rectangle<float> innerF = inner.toFloat().expanded(1.0f);
-
-    for (int i = 0; i < N; i += stride)
+    if (xyBandActive())
     {
-        const float rawL = snapshotL.getUnchecked(i);
-        const float rawR = snapshotR.getUnchecked(i);
-        if (! std::isfinite(rawL) || ! std::isfinite(rawR))
-            continue;
-
-        // v1.8.5：样本直接限幅到 ±1，autoGain 在像素映射阶段生效
-        const float lx = juce::jlimit(-1.0f, 1.0f, rawL);
-        const float ry = juce::jlimit(-1.0f, 1.0f, rawR);
-
-        float px, py;
-        if (rotate45)
+        // 频段染色：每点颜色不同，逐点绘制
+        for (const auto& p : pts)
         {
-            const float mid  = (lx + ry) * 0.7071067f;
-            const float side = (lx - ry) * 0.7071067f;
-            px = cx + side * effectiveRadius;
-            py = cy - mid  * effectiveRadius;
+            g.setColour (p.col.withAlpha (p.alpha));
+            g.fillRect (p.x - 0.5f, p.y - 0.5f, 2.0f, 2.0f);
         }
-        else
-        {
-            px = cx + lx * effectiveRadius;
-            py = cy - ry * effectiveRadius;
-        }
-
-        if (! innerF.contains(px, py))
-            continue;
-
-        // 越新的点（i 越大）越亮 —— 0.25f ~ 0.85f 之间映射到 8 档桶
-        const float normAlpha = (float) i / denom;               // 0..1
-        int bucket = (int) (normAlpha * (float) kAlphaBuckets);
-        bucket = juce::jlimit(0, kAlphaBuckets - 1, bucket);
-
-        buckets[bucket].addWithoutMerging({ px - 0.5f, py - 0.5f, 2.0f, 2.0f });
     }
-
-    for (int b = 0; b < kAlphaBuckets; ++b)
+    else
     {
-        if (buckets[b].isEmpty()) continue;
-        const float bucketAlpha = 0.25f + 0.6f * (((float) b + 0.5f) / (float) kAlphaBuckets);
-        g.setColour(PinkXP::chartRamp[5].withAlpha(bucketAlpha));
-        g.fillRectList(buckets[b]);
+        // 方案 C：按 alpha 分桶，合并 setColour + fillRect 调用
+        constexpr int kAlphaBuckets = 8;
+        juce::RectangleList<float> buckets[kAlphaBuckets];
+        for (int b = 0; b < kAlphaBuckets; ++b)
+            buckets[b].ensureStorageAllocated((int) pts.size() / kAlphaBuckets + 8);
+
+        for (const auto& p : pts)
+        {
+            const float normAlpha = (p.alpha - 0.25f) / 0.6f;
+            const int bucket = juce::jlimit(0, kAlphaBuckets - 1, (int) (normAlpha * (float) kAlphaBuckets));
+            buckets[bucket].addWithoutMerging({ p.x - 0.5f, p.y - 0.5f, 2.0f, 2.0f });
+        }
+
+        const auto baseCol = hold.tint (PinkXP::chartRamp[5]);
+        for (int b = 0; b < kAlphaBuckets; ++b)
+        {
+            if (buckets[b].isEmpty()) continue;
+            const float bucketAlpha = 0.25f + 0.6f * (((float) b + 0.5f) / (float) kAlphaBuckets);
+            g.setColour(baseCol.withAlpha(bucketAlpha));
+            g.fillRectList(buckets[b]);
+        }
     }
 
     // 左下角模式说明 + 当前增益
@@ -856,7 +972,6 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     const juce::String hint = rotate45 ? "M/S" : "X=L  Y=R";
     g.drawText(y2k::tr (hint), canvas.getX() + 4, canvas.getBottom() - 14,
                80, 12, juce::Justification::centredLeft, false);
-    // 当前增益倍数
     if (std::abs(gain - 1.0f) > 0.05f)
     {
         juce::String gainText = juce::String(gain, 1) + "x";
@@ -875,8 +990,6 @@ juce::Path OscilloscopeModule::buildWaveformPath(const juce::Array<float>& sampl
     if (len <= 1 || inner.getWidth() <= 1)
         return path;
 
-    // v2.9.2：目标点数从 width×2 降到 width —— 1px 列 1 个采样点，
-    //   高频细节在 1px 宽度下不可见，光栅化段数直接减半。
     const int targetPoints = juce::jmax(64, inner.getWidth());
     const int stride = juce::jmax(1, len / targetPoints);
 
@@ -980,7 +1093,6 @@ bool OscilloscopeModule::snapshotChangedSinceLastDraw() const noexcept
     if (n <= 0)
         return false;
 
-    // 取 6 个代表点（首、1/4、1/2、3/4、末 L + 末 R）做快速指纹
     const int i0 = 0;
     const int i1 = juce::jlimit(0, n - 1, n / 4);
     const int i2 = juce::jlimit(0, n - 1, n / 2);
@@ -1014,9 +1126,9 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
                           || dynamicLayer.getWidth()  != canvas.getWidth()
                           || dynamicLayer.getHeight() != canvas.getHeight();
 
-    const bool modeChanged   = (lastDrawnMode   != displayMode);
-    const bool frozenChanged = (lastDrawnFrozen != frozen);
-    const bool gainChanged   = (std::abs(autoGainFactor - lastDrawnAutoGain) > 0.005f);
+    const bool modeChanged  = (lastDrawnMode != displayMode);
+    const bool gainChanged  = (std::abs(autoGainFactor - lastDrawnAutoGain) > 0.005f);
+    const bool ghostChanged = (std::abs(hold.ghostMix - lastDrawnGhost) > 0.001f);
 
     if (sizeChanged)
     {
@@ -1027,7 +1139,7 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
         dynamicLayerDirty = true;
     }
 
-    if (modeChanged || frozenChanged || gainChanged)
+    if (modeChanged || gainChanged || ghostChanged)
         dynamicLayerDirty = true;
 
     dynamicLayerCanvasBounds = canvas;
@@ -1035,7 +1147,6 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
     if (! dynamicLayerDirty)
         return;
 
-    // 清空整张动态层（ARGB 透明底），再在 "局部 canvas 坐标系" 里重绘波形
     dynamicLayer.clear(dynamicLayer.getBounds(), juce::Colours::transparentBlack);
 
     juce::Graphics dg(dynamicLayer);
@@ -1048,19 +1159,6 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
         case DisplayMode::lissajous: drawXY      (dg, localCanvas, true);  break;
     }
 
-    // 冻结标记（右上角小红点 + "FROZEN"）也画进动态层
-    if (frozen)
-    {
-        auto dot = juce::Rectangle<int>(localCanvas.getRight() - 12, localCanvas.getY() + 6, 8, 8);
-        dg.setColour(PinkXP::sel);
-        dg.fillEllipse(dot.toFloat());
-        dg.setColour(PinkXP::ink);
-        dg.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        dg.drawText(y2k::tr ("FROZEN"), localCanvas.getRight() - 60, localCanvas.getY() + 4,
-                    42, 12, juce::Justification::centredRight, false);
-    }
-
-    // 更新指纹 / 状态缓存
     lastDrawnSampleCount = snapshotL.size();
     if (lastDrawnSampleCount > 0)
     {
@@ -1078,7 +1176,7 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
                                     : 0.0f;
     }
     lastDrawnMode     = displayMode;
-    lastDrawnFrozen   = frozen;
     lastDrawnAutoGain = autoGainFactor;
+    lastDrawnGhost    = hold.ghostMix;
     dynamicLayerDirty = false;
 }

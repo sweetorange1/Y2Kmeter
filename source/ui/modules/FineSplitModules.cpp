@@ -5,878 +5,6 @@
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 
-namespace
-{
-    float mapDbToNorm(float db, float minDb = -60.0f, float maxDb = 0.0f)
-    {
-        return juce::jlimit(0.0f, 1.0f, juce::jmap(db, minDb, maxDb, 0.0f, 1.0f));
-    }
-
-    juce::Colour meterColour(float db)
-    {
-        if (db > -3.0f)  return PinkXP::sel;      // accent：过载/削波警告
-        if (db > -9.0f)  return PinkXP::pink500;  // 基色中阶：接近临界
-        return PinkXP::pink200;                     // 基色浅阶：安全区
-    }
-
-    // LUFS 值 → 颜色（与 LoudnessModule::lufsToColour 同分区，供点击互动碎片用）
-    juce::Colour lufsColour(float lufs)
-    {
-        if (lufs > -9.0f)  return PinkXP::sel;      // accent：过响警告
-        if (lufs > -14.0f) return PinkXP::pink500;  // 基色中阶：适中
-        return PinkXP::pink200;                      // 基色浅阶：正常
-    }
-
-    // 画一条横向像素风进度条（Y2K XP 风）：sunken 槽 + 像素格填充 + 右端高亮像素
-    //   · tNorm 已归一化到 [0,1]
-    //   · 改用"像素格"填充 + 脱离格流动高光——让用户明显看到"数据在跑"
-    void drawReadoutBar(juce::Graphics& g, juce::Rectangle<int> bar, float tNorm,
-                        float pulsePhase = 0.0f)
-    {
-        if (bar.getWidth() <= 4 || bar.getHeight() <= 3) return;
-        tNorm = juce::jlimit(0.0f, 1.0f, tNorm);
-
-        // 槽（下沉效果）
-        PinkXP::drawSunken(g, bar, PinkXP::content.darker(0.04f));
-        auto inner = bar.reduced(2);
-        if (inner.getWidth() <= 2 || inner.getHeight() <= 1) return;
-
-        // 像素格填充：每格 5px 宽 1px 间隙，达到"像素 LED 条"视觉
-        const int cellW = 5;
-        const int gap   = 1;
-        const int step  = cellW + gap;
-        const int totalCells = juce::jmax(1, (inner.getWidth() + gap) / step);
-        const int litCells   = juce::jlimit(0, totalCells,
-                                             (int) std::round(tNorm * (float) totalCells));
-
-        for (int i = 0; i < totalCells; ++i)
-        {
-            const int x = inner.getX() + i * step;
-            const float t = (float) i / (float) juce::jmax(1, totalCells - 1);
-            // 颜色：低值→基色浅阶，中高→基色深阶，峰值→accent（广播表观感）
-            juce::Colour base;
-            if (t < 0.7f)       base = PinkXP::pink300.interpolatedWith(PinkXP::pink600, t / 0.7f);
-            else if (t < 0.9f)  base = PinkXP::pink500;
-            else                base = PinkXP::sel;
-
-            if (i < litCells)
-            {
-                // 最右一个点亮的格叠加脂点亮度（每帧 pulsePhase 变化→身活跳动感）
-                if (i == litCells - 1)
-                {
-                    const float pulse = 0.75f + 0.25f * std::sin(pulsePhase);
-                    g.setColour(base.brighter(0.15f * pulse).withAlpha(1.0f));
-                }
-                else
-                {
-                    g.setColour(base);
-                }
-            }
-            else
-            {
-                g.setColour(base.withAlpha(0.15f));
-            }
-            g.fillRect(x, inner.getY(), cellW, inner.getHeight());
-        }
-    }
-
-    // 重载：带"进度条"的读数面板。tNorm ∈ [0,1]；<0 表示不画条
-    //   flash ∈ [0,1]: 数值刚变化时走 1 然后衰减，用于数值文字的"闪光"高亮
-    //   pulsePhase ∈ [0, 2π]: 进度条右端心跳脂点、以及右上角活性方块
-    void drawReadout(juce::Graphics& g, juce::Rectangle<int> r, const juce::String& label,
-                     float v, const juce::String& unit, float tNorm,
-                     float flash = 0.0f, float pulsePhase = 0.0f)
-    {
-        PinkXP::drawSunken(g, r, PinkXP::content);
-        auto inner = r.reduced(6);
-
-        // 底部预留 8px 画进度条（比之前 5px 高）
-        juce::Rectangle<int> barArea;
-        if (tNorm >= 0.0f && inner.getHeight() >= 24)
-        {
-            constexpr int barH = 8;
-            barArea = inner.removeFromBottom(barH);
-            inner.removeFromBottom(2);
-        }
-
-        // 标题行：标签 + 右上角"活性心跳"方块（闪烁抖动→证明数据在跑）
-        auto titleRow = inner.removeFromTop(12);
-        g.setColour(PinkXP::ink.withAlpha(0.85f));
-        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        PinkXP::drawCachedText(g, label, titleRow, juce::Justification::centredLeft,
-                               9.0f, juce::Font::bold, PinkXP::ink.withAlpha(0.85f));
-
-        // 右上角信号灯 6x6：有信号（tNorm>0）时呼吸脉动，静音时熄灭
-        {
-            const int sz = 6;
-            auto dot = juce::Rectangle<int>(titleRow.getRight() - sz - 2,
-                                             titleRow.getY() + (titleRow.getHeight() - sz) / 2,
-                                             sz, sz);
-            const bool hasSignal = (tNorm > 0.005f);
-            if (hasSignal)
-            {
-                // 常亮：亮度随信号强度 tNorm 变化（不再正弦闪烁）
-                const float bright = 0.35f + 0.65f * juce::jlimit(0.0f, 1.0f, tNorm);
-                g.setColour(PinkXP::pink500.withAlpha(bright));
-            }
-            else
-            {
-                g.setColour(PinkXP::pink500.withAlpha(0.08f));  // 静音：几乎熄灭
-            }
-            g.fillRect(dot);
-            g.setColour(PinkXP::pink700.withAlpha(0.6f));
-            g.drawRect(dot, 1);
-        }
-
-        // 数值：刚变化时颜色闪白 + 高亮（flash 从 1 衰减到 0）
-        const auto baseNumCol = PinkXP::pink600;
-        const auto flashCol   = juce::Colour(0xffffffff); // 纯白高光
-        g.setColour(baseNumCol.interpolatedWith(flashCol, juce::jlimit(0.0f, 1.0f, flash) * 0.65f));
-        g.setFont(PinkXP::getFont(20.0f, juce::Font::bold));
-        const juce::String numStr = (v <= -60.0f)
-            ? juce::String("-144")
-            : juce::String(v, 1);
-        g.drawText(y2k::tr (numStr), inner, juce::Justification::centredLeft, false);
-
-        g.setColour(PinkXP::ink.withAlpha(0.7f));
-        g.setFont(PinkXP::getFont(10.0f, juce::Font::plain));
-        PinkXP::drawCachedText(g, unit, inner, juce::Justification::centredRight,
-                               10.0f, juce::Font::plain, PinkXP::ink.withAlpha(0.7f));
-
-        if (! barArea.isEmpty())
-            drawReadoutBar(g, barArea, tNorm, pulsePhase);
-    }
-
-    // 兼容旧签名（其它模块若不需要进度条仍可直接调用）
-    void drawReadout(juce::Graphics& g, juce::Rectangle<int> r, const juce::String& label, float v, const juce::String& unit)
-    {
-        drawReadout(g, r, label, v, unit, -1.0f, 0.0f, 0.0f);
-    }
-}
-
-LufsRealtimeModule::LufsRealtimeModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::lufsRealtime), hub(h)
-{
-    // Phase F：订阅 Loudness + 注册 FrameListener
-    hub.retain(AnalyserHub::Kind::Loudness);
-    hub.addFrameListener(this);
-
-    setMinSize(64, 64);
-    setDefaultSize(320, 256); // LufsRealtime → loudness 5×4 大格
-    setTitleText("LUFS Real-time");
-}
-
-LufsRealtimeModule::~LufsRealtimeModule()
-{
-    hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Loudness);
-}
-
-void LufsRealtimeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
-{
-    if (! frame.has (AnalyserHub::Kind::Loudness)) return;
-
-    const auto& s = frame.loudness;
-    const float dt = frame.dtSec;
-    using namespace y2k::pacing;
-
-    // 记录上一帧值用于"显著变化"检测→吸打闪烁
-    //   v2.9：平滑 / 闪烁衰减 / 心跳相位均按 dt 换算（120Hz 标定，与旧版 120Hz 下观感一致）
-    prevM = lufsM; prevS = lufsS; prevI = lufsI;
-    lufsM = lufsM + alphaForDt (0.30f, dt) * (s.lufsM - lufsM);
-    lufsS = lufsS + alphaForDt (0.20f, dt) * (s.lufsS - lufsS);
-    lufsI = lufsI + alphaForDt (0.08f, dt) * (s.lufsI - lufsI);
-
-    // 变化阈值按"每 120Hz 帧"标定，换算到本帧间隔
-    const float th = juce::jmax (0.05f, dt * kRefHz);
-    if (std::abs(lufsM - prevM) > 0.3f * th) flashM = 1.0f;
-    if (std::abs(lufsS - prevS) > 0.3f * th) flashS = 1.0f;
-    if (std::abs(lufsI - prevI) > 0.2f * th) flashI = 1.0f;
-    flashM = juce::jmax(0.0f, flashM - stepForDt (0.08f, dt));
-    flashS = juce::jmax(0.0f, flashS - stepForDt (0.08f, dt));
-    flashI = juce::jmax(0.0f, flashI - stepForDt (0.06f, dt));
-
-    pulsePhase += stepForDt (0.24f, dt);
-    while (pulsePhase > juce::MathConstants<float>::twoPi)
-        pulsePhase -= juce::MathConstants<float>::twoPi;
-
-    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
-    if ((frame.tickCount & 1ull) != 0)
-        return;
-    repaintFrameContent();
-}
-
-void LufsRealtimeModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
-{
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
-
-    auto area = content.reduced(6);
-    const int h = juce::jmax(44, area.getHeight() / 3 - 3);
-
-    auto lufsToNorm = [](float l) { return juce::jlimit(0.0f, 1.0f, juce::jmap(l, -40.0f, 0.0f, 0.0f, 1.0f)); };
-    drawReadout(g, area.removeFromTop(h), "LUFS-M", lufsM, "LUFS", lufsToNorm(lufsM), flashM, pulsePhase);
-    area.removeFromTop(3);
-    drawReadout(g, area.removeFromTop(h), "LUFS-S", lufsS, "LUFS", lufsToNorm(lufsS), flashS, pulsePhase + 2.0f);
-    area.removeFromTop(3);
-    drawReadout(g, area, "LUFS-I", lufsI, "LUFS", lufsToNorm(lufsI), flashI, pulsePhase + 4.0f);
-}
-
-TruePeakModule::TruePeakModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::truePeak), hub(h)
-{
-    // Phase F：订阅 Loudness（True Peak / RMS 都在 LoudnessMeter里）+ 注册 FrameListener
-    hub.retain(AnalyserHub::Kind::Loudness);
-    hub.addFrameListener(this);
-
-    setMinSize(64, 64);
-    setDefaultSize(256, 192); // truepeak 4×3 大格
-    setTitleText("True Peak");
-}
-
-TruePeakModule::~TruePeakModule()
-{
-    hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Loudness);
-}
-
-void TruePeakModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
-{
-    if (! frame.has (AnalyserHub::Kind::Loudness)) return;
-
-    const auto& s = frame.loudness;
-    const float dt = frame.dtSec;
-    using namespace y2k::pacing;
-    const float prevTpShown = tpDisplay;
-    const float prevRmsMax  = juce::jmax(rmsL, rmsR);
-    prevTp = prevTpShown;
-    prevRms = prevRmsMax;
-
-    // RMS 维持原有轻平滑（v2.9：按 dt 换算，120Hz 标定）
-    const float aRms = alphaForDt (0.12f, dt);
-    rmsL = rmsL + aRms * (s.rmsL - rmsL);
-    rmsR = rmsR + aRms * (s.rmsR - rmsR);
-
-    // TP-L/TP-R：短保持 + 自动回落（避免长时间钉在历史最大值）
-    //   v2.9：保持时长 / 回落速度按时间计（数值取旧版 120Hz 分发下的实际表现：
-    //   60 帧 = 0.5s 保持，0.28 dB/帧 = 33.6 dB/s 回落）
-    const float tpInstantMax = juce::jmax (s.truePeakL, s.truePeakR);
-    constexpr float holdSec = framesToSec (60.0f);
-
-    if (tpInstantMax >= tpDisplay - 0.0001f)
-    {
-        tpDisplay = tpInstantMax;
-        tpHoldSec = holdSec;
-    }
-    else if (tpHoldSec > 0.0f)
-    {
-        tpHoldSec -= dt;
-    }
-    else
-    {
-        tpDisplay = juce::jmax (tpInstantMax, tpDisplay - stepForDt (0.28f, dt));
-    }
-
-    const float rmsMax = juce::jmax(rmsL, rmsR);
-    const float th = juce::jmax (0.05f, dt * kRefHz);
-    if (std::abs(tpDisplay - prevTp)  > 0.3f * th) flashTp  = 1.0f;
-    if (std::abs(rmsMax    - prevRms) > 0.3f * th) flashRms = 1.0f;
-    flashTp  = juce::jmax(0.0f, flashTp  - stepForDt (0.08f, dt));
-    flashRms = juce::jmax(0.0f, flashRms - stepForDt (0.08f, dt));
-
-    pulsePhase += stepForDt (0.24f, dt);
-    while (pulsePhase > juce::MathConstants<float>::twoPi)
-        pulsePhase -= juce::MathConstants<float>::twoPi;
-
-    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
-    if ((frame.tickCount & 1ull) != 0)
-        return;
-    repaintFrameContent();
-}
-
-void TruePeakModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
-{
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
-
-    auto area = content.reduced(6);
-    auto top = area.removeFromTop(area.getHeight() / 2 - 2);
-    area.removeFromTop(4);
-
-    auto dbToNorm = [](float d) { return juce::jlimit(0.0f, 1.0f, juce::jmap(d, -40.0f, 0.0f, 0.0f, 1.0f)); };
-    const float tpShown = tpDisplay;
-    const float rmsMax  = juce::jmax(rmsL, rmsR);
-    drawReadout(g, top,  "TP-L / TP-R",   tpShown, "dBTP", dbToNorm(tpShown), flashTp,  pulsePhase);
-    drawReadout(g, area, "RMS-L / RMS-R", rmsMax,  "dBFS", dbToNorm(rmsMax),  flashRms, pulsePhase + 3.0f);
-}
-
-// SpectrumOverviewModule 已在 2026-04 版本移除（完整的 SpectrumModule 已足够）
-
-PhaseCorrelationModule::PhaseCorrelationModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::phaseCorrelation), hub(h)
-{
-    // Phase F：订阅 Phase + 注册 FrameListener
-    hub.retain(AnalyserHub::Kind::Phase);
-    hub.addFrameListener(this);
-
-    setMinSize(64, 64);
-    setDefaultSize(192, 128); // phase correlation 3×2 大格
-    setTitleText("Phase Correlation");
-}
-
-PhaseCorrelationModule::~PhaseCorrelationModule()
-{
-    hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Phase);
-}
-
-void PhaseCorrelationModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
-{
-    if (! frame.has (AnalyserHub::Kind::Phase)) return;
-
-    const auto& s = frame.phase;
-    corr = corr + y2k::pacing::alphaForDt (0.25f, frame.dtSec) * (s.correlation - corr);
-
-    // v2.9.2：读数类模块 30Hz 重绘
-    if ((frame.tickCount & 1ull) != 0)
-        return;
-    repaintFrameContent();
-}
-
-void PhaseCorrelationModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
-{
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
-
-    PinkXP::drawSunken(g, content, PinkXP::content);
-    auto inner = content.reduced(10);
-    if (inner.getWidth() <= 8 || inner.getHeight() <= 8) return;
-
-    // 规范化：标准 0°~180° 上半圆仪表
-    //   · 圆心 = 模块显示窗口的"正下方中点"（底边中点）
-    //   · corr = -1  → 指针指向正左  (θ = 0°)
-    //   · corr =  0  → 指针指向正上  (θ = 90°)
-    //   · corr = +1  → 指针指向正右  (θ = 180°)
-    const float cx = (float) inner.getCentreX();
-    const float cy = (float) inner.getBottom();
-    const int   readoutReserve = 24;
-    const float R  = juce::jmin((float) inner.getWidth() * 0.44f,
-                                 (float) inner.getHeight() - (float) readoutReserve);
-    if (R < 8.0f) return;
-
-    // 弧形轨（上半圆）
-    const float arcStart = -juce::MathConstants<float>::halfPi;
-    const float arcEnd   =  juce::MathConstants<float>::halfPi;
-    juce::Path arc;
-    arc.addCentredArc(cx, cy, R, R, 0.0f, arcStart, arcEnd, true);
-    g.setColour(PinkXP::pink300.withAlpha(0.55f));
-    g.strokePath(arc, juce::PathStrokeType(5.0f));
-
-    // 指针
-    const float t  = juce::jlimit(-1.0f, 1.0f, corr) * 0.5f + 0.5f;
-    const float th = t * juce::MathConstants<float>::pi; // 0..π
-    const float nx = cx - std::cos(th) * (R - 4.0f);
-    const float ny = cy - std::sin(th) * (R - 4.0f);
-
-    g.setColour(corr < 0.0f ? PinkXP::sel : PinkXP::pink600);
-    g.drawLine(cx, cy, nx, ny, 2.0f);
-    g.setColour(PinkXP::dark);
-    g.fillEllipse(cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
-
-    // 顶部数值读数
-    g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::getFont(16.0f, juce::Font::bold));
-    auto txt = juce::String(corr, 2);
-    if (corr >= 0.0f) txt = "+" + txt;
-    g.drawText(y2k::tr (txt), inner.removeFromTop(20), juce::Justification::centred, false);
-}
-
-PhaseBalanceModule::PhaseBalanceModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::phaseBalance), hub(h)
-{
-    // Phase F：订阅 Phase + 注册 FrameListener
-    hub.retain(AnalyserHub::Kind::Phase);
-    hub.addFrameListener(this);
-
-    setMinSize(64, 64);
-    setDefaultSize(192, 128); // phase balance 3×2 大格
-    setTitleText("Phase Width / Balance");
-}
-
-PhaseBalanceModule::~PhaseBalanceModule()
-{
-    hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Phase);
-}
-
-void PhaseBalanceModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
-{
-    if (! frame.has (AnalyserHub::Kind::Phase)) return;
-
-    const auto& s = frame.phase;
-    const float a = y2k::pacing::alphaForDt (0.20f, frame.dtSec);
-    width = width + a * (s.width - width);
-    balance = balance + a * (s.balance - balance);
-
-    // v2.9.2：读数类模块 30Hz 重绘
-    if ((frame.tickCount & 1ull) != 0)
-        return;
-    repaintFrameContent();
-}
-
-void PhaseBalanceModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
-{
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
-
-    auto area = content.reduced(8);
-    auto wBar = area.removeFromTop(area.getHeight() / 2 - 2);
-    area.removeFromTop(4);
-
-    PinkXP::drawSunken(g, wBar, PinkXP::content);
-    auto wi = wBar.reduced(4);
-    const int ww = (int) std::round(width * wi.getWidth());
-    g.setColour(PinkXP::pink400.withAlpha(0.35f));
-    g.fillRect(wi.withWidth(ww));
-    g.setColour(PinkXP::pink600);
-    g.drawRect(wi, 1);
-    g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    g.drawText(y2k::tr ("WIDTH " + juce::String((int) std::round(width * 100.0f)) + "%"), wBar.reduced(4), juce::Justification::centredLeft, false);
-
-    PinkXP::drawSunken(g, area, PinkXP::content);
-    auto bi = area.reduced(4);
-    const int cx = bi.getCentreX();
-    g.setColour(PinkXP::pink300.withAlpha(0.6f));
-    g.drawVerticalLine(cx, (float) bi.getY(), (float) bi.getBottom());
-    const int x = cx + (int) std::round(balance * (float) bi.getWidth() * 0.5f);
-    g.setColour(PinkXP::pink600);
-    g.fillRect(x - 2, bi.getY(), 4, bi.getHeight());
-
-    juce::String btxt;
-    if (std::abs(balance) < 0.02f) btxt = "BAL C";
-    else if (balance < 0.0f) btxt = "BAL L" + juce::String((int) std::round(-balance * 100.0f));
-    else btxt = "BAL R" + juce::String((int) std::round(balance * 100.0f));
-
-    g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::getFont(10.0f, juce::Font::bold));
-    g.drawText(y2k::tr (btxt), area.reduced(4), juce::Justification::centredLeft, false);
-}
-
-DynamicsMetersModule::DynamicsMetersModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::dynamicsMeters), hub(h)
-{
-    // Phase F：订阅 Dynamics + 注册 FrameListener
-    hub.retain(AnalyserHub::Kind::Dynamics);
-    hub.addFrameListener(this);
-
-    setMinSize(64, 64);
-    setDefaultSize(256, 256); // dynamics meters 4×4 大格
-    setTitleText("Dynamics Meters");
-}
-
-DynamicsMetersModule::~DynamicsMetersModule()
-{
-    hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Dynamics);
-}
-
-void DynamicsMetersModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
-{
-    if (! frame.has (AnalyserHub::Kind::Dynamics)) return;
-
-    const auto& s = frame.dynamics;
-    const float aPk  = y2k::pacing::alphaForDt (0.25f, frame.dtSec);
-    const float aRms = y2k::pacing::alphaForDt (0.18f, frame.dtSec);
-    meterDb[0] = meterDb[0] + aPk  * (s.peakL - meterDb[0]);
-    meterDb[1] = meterDb[1] + aPk  * (s.peakR - meterDb[1]);
-    meterDb[2] = meterDb[2] + aRms * (s.rmsL  - meterDb[2]);
-    meterDb[3] = meterDb[3] + aRms * (s.rmsR  - meterDb[3]);
-
-    // v2.9.2：读数类模块 30Hz 重绘
-    if ((frame.tickCount & 1ull) != 0)
-        return;
-    repaintFrameContent();
-}
-
-void DynamicsMetersModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
-{
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
-
-    auto area = content.reduced(8);
-    const int n = 4;
-    const int gap = 5;
-    const int w = juce::jmax(12, (area.getWidth() - gap * (n - 1)) / n);
-    const int labelH = 14;
-    static const char* labels[] = { "PK-L", "PK-R", "RMS-L", "RMS-R" };
-
-    // ---- 与 DynamicsModule::drawSingleBar 对齐的像素方格柱 ----
-    //   · 凹陷槽 + 每 4px 一行像素格（cellGap=1）
-    //   · 底部绿 / 中段黄 / 顶部红（通过行 dB → meterColour 插值）
-    //   · 未点亮的格子：同色 withAlpha(0.15) 保留底色提示（而不是全空白）
-    //   · 峰值保持线：当前值色彩 brighter(0.2) 2px 亮线
-    constexpr int cellH   = 4;
-    constexpr int cellGap = 1;
-    constexpr int step    = cellH + cellGap;
-
-    for (int i = 0; i < n; ++i)
-    {
-        auto bar = juce::Rectangle<int>(area.getX() + i * (w + gap),
-                                         area.getY(), w, area.getHeight() - labelH);
-
-        // 凹陷槽（底色比 content 再深一点，突出灯带）
-        PinkXP::drawSunken(g, bar, PinkXP::content.darker(0.05f));
-        auto inner = bar.reduced(3);
-        if (inner.getWidth() > 0 && inner.getHeight() > 0)
-        {
-            const int rows    = juce::jmax(1, (inner.getHeight() + cellGap) / step);
-            const float db    = meterDb[(size_t) i];
-            const float norm  = mapDbToNorm(db);
-            const int   litRows = (int) std::round(norm * (float) rows);
-
-            for (int row = 0; row < rows; ++row)
-            {
-                // row=0 屏幕顶（0 dB 红色），row=rows-1 屏幕底（-60 dB 绿色）
-                const float rowNorm = (float) row / (float) juce::jmax(1, rows - 1);
-                const float rowDb   = juce::jmap(rowNorm, 0.0f, 1.0f, 0.0f, -60.0f);
-                const bool  lit     = (rows - 1 - row) < litRows;
-
-                const int y = inner.getY() + row * step;
-                const auto base = meterColour(rowDb);
-                g.setColour(lit ? base : base.withAlpha(0.15f));
-                g.fillRect(inner.getX(), y, inner.getWidth(), cellH);
-            }
-
-            // 缓降峰值线：这里 DynamicsMetersModule 没有单独 peakHold 状态，
-            //   直接用 smoothed db 作为"瞬时峰值"绘制一条 2px 亮线，视觉上
-            //   与 DynamicsModule 的 peakHold 线保持一致。
-            const int peakY = inner.getBottom() - (int) std::round(norm * inner.getHeight());
-            if (peakY >= inner.getY() && peakY <= inner.getBottom())
-            {
-                g.setColour(meterColour(db).brighter(0.2f));
-                g.fillRect(inner.getX(), peakY - 1, inner.getWidth(), 2);
-            }
-        }
-
-        // 标签（跟随主题 ink 色，已由 PinkXPStyle 全局主题控制）
-        g.setColour(PinkXP::ink);
-        g.setFont(PinkXP::getFont(8.5f, juce::Font::bold));
-        PinkXP::drawCachedText(g, labels[i],
-                               juce::Rectangle<int>(area.getX() + i * (w + gap), area.getBottom() - (labelH - 2), w, 12),
-                               juce::Justification::centred, 8.5f, juce::Font::bold, PinkXP::ink);
-    }
-}
-
-DynamicsDrModule::DynamicsDrModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::dynamicsDr), hub(h)
-{
-    // Phase F：订阅 Dynamics + 注册 FrameListener
-    hub.retain(AnalyserHub::Kind::Dynamics);
-    hub.addFrameListener(this);
-
-    setMinSize(64, 64);
-    setDefaultSize(320, 256); // dynamics DR 5×4 大格
-    setTitleText("Dynamics DR");
-}
-
-DynamicsDrModule::~DynamicsDrModule()
-{
-    hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Dynamics);
-}
-
-void DynamicsDrModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
-{
-    if (! frame.has (AnalyserHub::Kind::Dynamics)) return;
-
-    const auto& s = frame.dynamics;
-    const float dt = frame.dtSec;
-    using namespace y2k::pacing;
-    prevShort = shortDR; prevInteg = integDR; prevCrest = crest;
-    shortDR = shortDR + alphaForDt (0.20f, dt) * (s.shortDR - shortDR);
-    integDR = integDR + alphaForDt (0.08f, dt) * (s.integratedDR - integDR);
-    crest   = crest   + alphaForDt (0.25f, dt) * (s.crest - crest);
-
-    const float th = juce::jmax (0.05f, dt * kRefHz);
-    if (std::abs(shortDR - prevShort) > 0.3f * th) flashShort = 1.0f;
-    if (std::abs(integDR - prevInteg) > 0.2f * th) flashInteg = 1.0f;
-    if (std::abs(crest   - prevCrest) > 0.3f * th) flashCrest = 1.0f;
-    flashShort = juce::jmax(0.0f, flashShort - stepForDt (0.08f, dt));
-    flashInteg = juce::jmax(0.0f, flashInteg - stepForDt (0.07f, dt));
-    flashCrest = juce::jmax(0.0f, flashCrest - stepForDt (0.08f, dt));
-
-    pulsePhase += stepForDt (0.24f, dt);
-    while (pulsePhase > juce::MathConstants<float>::twoPi)
-        pulsePhase -= juce::MathConstants<float>::twoPi;
-
-    // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
-    if ((frame.tickCount & 1ull) != 0)
-        return;
-    repaintFrameContent();
-}
-
-void DynamicsDrModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
-{
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
-
-    auto area = content.reduced(6);
-    const int h = juce::jmax(42, area.getHeight() / 3 - 3);
-
-    auto drToNorm = [](float d) { return juce::jlimit(0.0f, 1.0f, juce::jmap(d, 0.0f, 24.0f, 0.0f, 1.0f)); };
-    drawReadout(g, area.removeFromTop(h), "DR SHORT", shortDR, "dB", drToNorm(shortDR), flashShort, pulsePhase);
-    area.removeFromTop(3);
-    drawReadout(g, area.removeFromTop(h), "DR INTEG", integDR, "dB", drToNorm(integDR), flashInteg, pulsePhase + 2.0f);
-    area.removeFromTop(3);
-    drawReadout(g, area, "CREST", crest, "dB", drToNorm(crest), flashCrest, pulsePhase + 4.0f);
-}
-
-DynamicsCrestModule::DynamicsCrestModule(AnalyserHub& h)
-    : ModulePanel(ModuleType::dynamicsCrest), hub(h)
-{
-    // Phase F：订阅 Dynamics + 注册 FrameListener
-    hub.retain(AnalyserHub::Kind::Dynamics);
-    hub.addFrameListener(this);
-
-    setMinSize(64, 64);
-    setDefaultSize(384, 256); // dynamics crest 6×4 大格
-    setTitleText("Dynamics Crest History");
-
-    // 初始化：默认 8 秒跨度，缓冲按 histMaxLen 点 × "每几帧采样一次"
-    crestHist.assign((size_t) histMaxLen, 0.0f);
-
-    // ---- 右侧颗粒度滑条（风格与 EqModule 的 SIZE 滑条保持一致）----
-    //   · 垂直滑条，范围 [2, 120] 秒（常用动态范围场景够用）
-    //   · 现在方案：滑条只控制显示窗口大小，不再改变"几帧采样一次"
-    //     → 调大颜粒度时图像仍按每帧 1 像素流畅推进，不会卡顿
-    spanSlider.setSliderStyle(juce::Slider::LinearVertical);
-    spanSlider.setRange(1.0, 35.0, 1.0);
-    spanSlider.setValue((double) spanSeconds, juce::dontSendNotification);
-    // TextBox 只读：拿掉"点数字改值"的交互入口，数字只做展示
-    spanSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, true, 40, 16);
-    // 数字文字颜色跟随主题 ink（浅色主题下是深色 → 可读）
-    spanSlider.setColour (juce::Slider::textBoxTextColourId,       PinkXP::ink);
-    spanSlider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-    spanSlider.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-    spanSlider.setTextValueSuffix("s");
-    spanSlider.onValueChange = [this]()
-    {
-        spanSeconds = juce::jlimit(1, 35, (int) spanSlider.getValue());
-        // 无需再重算 framesPerSample：始终保持每帧写入；
-        //   窗口变小时只是"显示更少的点"，数据不需清零，
-        //   窗口变大时旧点仍可用（不足部分显示为 0）
-        repaint();
-    };
-
-    spanLabel.setJustificationType(juce::Justification::centred);
-    spanLabel.setColour(juce::Label::textColourId, PinkXP::ink);
-    spanLabel.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-    spanLabel.setText("SPAN", juce::dontSendNotification);
-    spanSlider.setTooltip (y2k::help::make ("Span",
-        "How many seconds of crest-factor history fit on screen (1 - 35 s)."));
-    spanLabel.setTooltip (spanSlider.getTooltip());
-
-    addAndMakeVisible(spanSlider);
-    addAndMakeVisible(spanLabel);
-
-    // 主题切换时重新下发 "SPAN" 标签的 textColourId —— 与标题栏墨色保持一致。
-    //   Label 的 textColour 是缓存值，主题切换后需要手动刷新。
-    //   Slider 的 textBoxTextColourId 同样需要显式刷新（同样的缓存语义）。
-    themeSubToken = PinkXP::subscribeThemeChanged ([this]()
-    {
-        spanLabel.setColour (juce::Label::textColourId, PinkXP::ink);
-        spanSlider.setColour (juce::Slider::textBoxTextColourId, PinkXP::ink);
-        spanLabel.repaint();
-        spanSlider.repaint();
-    });
-
-    // 固定每帧写入：保持 framesPerSample = 1 / frameCounter = 0
-    framesPerSample = 1;
-    frameCounter    = 0;
-}
-
-DynamicsCrestModule::~DynamicsCrestModule()
-{
-    // 解绑主题订阅，避免析构后仍然回调到已销毁的 this
-    if (themeSubToken >= 0)
-    {
-        PinkXP::unsubscribeThemeChanged (themeSubToken);
-        themeSubToken = -1;
-    }
-
-    hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Dynamics);
-}
-
-void DynamicsCrestModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
-{
-    if (! frame.has (AnalyserHub::Kind::Dynamics)) return;
-
-    const auto& s = frame.dynamics;
-
-    // v2.9：按时间以固定 30 样本/秒写入（与 spanSeconds × 30 的显示窗口约定一致）。
-    //   旧实现"每次 onFrame 写一个点"，分发 120Hz 时 "20s history" 实际只覆盖 5 秒。
-    //   两次写入之间取 crest 最大值，避免丢失短促尖峰。
-    pendingCrestMax  = juce::jmax (pendingCrestMax, juce::jlimit (0.0f, 40.0f, s.crest));
-    crestSampleAccum += frame.dtSec * 30.0f;
-    int pushes = juce::jmin ((int) crestSampleAccum, 8);
-    crestSampleAccum -= (float) (int) crestSampleAccum;
-    if (pushes <= 0)
-        return; // 本帧没有新样本，曲线不变，无需重绘
-
-    while (pushes-- > 0)
-    {
-        crestHist[(size_t) writePos] = pendingCrestMax;
-        writePos = (writePos + 1) % histMaxLen;
-        writePosFloat += 1.0;
-    }
-    pendingCrestMax = 0.0f;
-
-    repaintFrameContent();
-}
-
-void DynamicsCrestModule::layoutContent(juce::Rectangle<int> contentBounds)
-{
-    auto area = contentBounds.reduced(6);
-
-    // 右侧 SPAN 滑条（样式与 EqModule 的 SIZE 滑条相同）
-    const int sliderWidth = 42;
-    auto rightPanel = area.removeFromRight(sliderWidth);
-    area.removeFromRight(6);
-
-    auto labelArea = rightPanel.removeFromTop(14);
-    spanLabel.setBounds(labelArea);
-    spanSlider.setBounds(rightPanel);
-    // 注：area 是左侧绘图区，不再作为子组件 bounds，由 paintContent 自己计算
-    //    我们通过成员不存，paintContent 每次重算
-    juce::ignoreUnused(area);
-}
-
-void DynamicsCrestModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
-{
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
-
-    // 与 layoutContent 保持同步：从内容区裁掉右侧滑条栏和间距
-    auto area = content.reduced(6);
-    const int sliderWidth = 42;
-    area.removeFromRight(sliderWidth + 6);
-
-    PinkXP::drawSunken(g, area, PinkXP::content);
-    auto plot = area.reduced(6);
-    if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
-        return;
-
-    // 横线网格：0/10/20/30 dB
-    g.setColour(PinkXP::pink200.withAlpha(0.45f));
-    for (int db = 0; db <= 30; db += 10)
-    {
-        const float t = 1.0f - (float) db / 30.0f;
-        const int y = plot.getY() + (int) std::round(t * plot.getHeight());
-        g.drawHorizontalLine(y, (float) plot.getX(), (float) plot.getRight());
-    }
-
-    // 曲线：最旧在左、最新在右
-    //   • 缓冲是 histMaxLen = 3600 点（足够装下 120s × 30fps）
-    //   • span 只决定"取最新 N 点显示"： N = min(spanSeconds × 30, histMaxLen)
-    //   • 最新点 = crestHist[(writePos - 1 + histMaxLen) % histMaxLen]
-    //     最旧点 = crestHist[(writePos - N + histMaxLen) % histMaxLen]
-    const int N = juce::jmin (spanSeconds * 30, histMaxLen);
-    const int denom = juce::jmax (1, N - 1);
-
-    // v2.9.2：恢复"全样本点绘制"（N ≤ 1050 点，路径光栅化 ~1ms 可接受）。
-    //   上一版按像素列做 max 抽稀：尖峰（单样本）在相邻列间来回跳变，
-    //   span 越大列聚合样本越多、混叠越明显 —— 这是"尖尖闪现再消失"的根因，
-    //   已确认修复方向。全点绘制下每个样本都是路径顶点，尖峰稳定连续。
-    //   滚动相位：写入 30 样本/秒、显示 ~37fps 不同步，用累计写入数的小数部分
-    //   做亚像素平移，滚动连续不抖动。
-    const double frac = writePosFloat - std::floor (writePosFloat);
-    const float  invN = 1.0f / (float) juce::jmax (1, N - 1);
-    auto& p    = crestPath;
-    auto& fill = crestFillPath;
-    p.clear();
-    p.preallocateSpace ((size_t) N * 3 + 8);
-    for (int i = 0; i < N; ++i)
-    {
-        const int idx = ((writePos - N + i) % histMaxLen + histMaxLen) % histMaxLen;
-        const float v = crestHist[(size_t) idx];
-        const float x = (float) plot.getX() + ((float) i - (float) frac) * invN * (float) plot.getWidth();
-        const float y = (float) plot.getBottom() - juce::jlimit(0.0f, 1.0f, v / 30.0f) * (float) plot.getHeight();
-        if (i == 0) p.startNewSubPath(x, y);
-        else        p.lineTo(x, y);
-    }
-
-    fill = p;
-    fill.lineTo((float) plot.getRight(), (float) plot.getBottom());
-    fill.lineTo((float) plot.getX(),     (float) plot.getBottom());
-    fill.closeSubPath();
-
-    g.setColour(PinkXP::pink300.withAlpha(0.28f));
-    g.fillPath(fill);
-    g.setColour(PinkXP::pink600);
-    g.strokePath(p, juce::PathStrokeType(1.4f));
-
-    // 左下角跨度提示
-    g.setColour(PinkXP::ink.withAlpha(0.85f));
-    g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-    g.drawText(y2k::tr (juce::String(spanSeconds) + "s  history"),
-               plot.getX() + 2, plot.getBottom() - 12, 120, 12,
-               juce::Justification::centredLeft, false);
-
-    // 鼠标悬停标尺（时间 + crest 读数）
-    if (hoverActive)
-        drawHoverRuler(g, plot);
-}
-
-void DynamicsCrestModule::mouseMove(const juce::MouseEvent& e)
-{
-    ModulePanel::mouseMove(e);
-
-    // 与 paintContent 完全一致的绘图区计算
-    auto area = getContentBounds().reduced(6);
-    area.removeFromRight(42 + 6);
-    auto plot = area.reduced(6);
-
-    const auto pos = e.getPosition();
-    const bool inside = plot.contains(pos);
-    if (inside != hoverActive || (inside && pos != hoverPos))
-    {
-        hoverActive = inside;
-        hoverPos = pos;
-        repaint();
-    }
-}
-
-void DynamicsCrestModule::mouseExit(const juce::MouseEvent& e)
-{
-    ModulePanel::mouseExit(e);
-    if (hoverActive)
-    {
-        hoverActive = false;
-        repaint();
-    }
-}
-
-void DynamicsCrestModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> plot)
-{
-    if (!hoverActive || !plot.contains(hoverPos))
-        return;
-
-    // X → 相对时间（负=过去，最右=当前）
-    const float t = (float)(hoverPos.x - plot.getX()) / juce::jmax(1, plot.getWidth());
-    const float timeSec = (t - 1.0f) * (float) spanSeconds;
-
-    // Y → crest 值（0 ~ 30 dB）
-    const float norm = juce::jlimit(0.0f, 1.0f,
-        (float)(plot.getBottom() - hoverPos.y) / juce::jmax(1, plot.getHeight()));
-    const float crestDb = norm * 30.0f;
-
-    const juce::String readout = juce::String(timeSec, 1) + " s  "
-                               + juce::String(crestDb, 1) + " dB";
-    PinkXP::drawHoverRuler(g, plot, hoverPos, readout);
-}
-
 // ==========================================================
 // VuMeterModule —— 指针式模拟 VU 表
 //
@@ -904,6 +32,7 @@ VuMeterModule::VuMeterModule(AnalyserHub& h)
     setMinSize(96, 80);
     setDefaultSize(320, 224);
     setTitleText("VU Meter");
+    setControlPanelEnabled (true);
 
     // v2.9：主路径改为 onFrame 推进弹道 + 重绘（跟随帧分发频率，可达 120fps）；
     //   Timer 仅作 10Hz 兜底 —— onFrame 超过 100ms 未到达时主动拉最新帧推进。
@@ -1166,212 +295,6 @@ void VuMeterModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
     }
 }
 
-// ==========================================================
-// Toybox（v3.0.0）：FineSplit 各模块专属玩法（§8.2）
-// ==========================================================
-bool LufsRealtimeModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
-{
-    const auto area = getContentBounds().reduced (6);
-    if (! area.contains (panelPos)) return false;
-    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
-    return true;
-}
-
-void LufsRealtimeModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
-{
-    // 点中的读数框（M/S/I 垂直堆叠）→ 对应真实值
-    const float frac = (hit.pos.y - hit.rect.getY()) / juce::jmax (1.0f, hit.rect.getHeight());
-    const char* tag = "I";
-    float val = lufsI;
-    if (frac < 0.33f)      { tag = "M"; val = lufsM; }
-    else if (frac < 0.66f) { tag = "S"; val = lufsS; }
-
-    // 本轮反馈：与 Loudness 一致 —— 炸碎片 + 小 emoji 气泡文案
-    ctx.addModuleActor (makeBrickShardsActor (hit.pos, lufsColour (val), 8));
-    ctx.bubble (hit.pos.translated (0.0f, -24.0f),
-                juce::String (tag) + " " + juce::String (val, 1) + " LUFS",
-                ToyRole::Burst);
-}
-
-bool TruePeakModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
-{
-    const auto area = getContentBounds().reduced (6);
-    if (! area.contains (panelPos)) return false;
-    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
-    return true;
-}
-
-void TruePeakModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
-{
-    // 内容如实反映状态（E.4.2，娱乐性提示，非限幅判定）
-    juce::String text;
-    ToyRole role;
-    if (tpDisplay >= -1.0f)
-    {
-        text = "INTER-SAMPLE PEAK " + juce::String (tpDisplay, 1) + " dBTP";
-        role = ToyRole::Alert;
-    }
-    else if (tpDisplay >= -6.0f)
-    {
-        text = "CLOSE TO CEILING " + juce::String (tpDisplay, 1) + " dBTP";
-        role = ToyRole::Alert;
-    }
-    else
-    {
-        text = "ALL CLEAR " + juce::String (tpDisplay, 1) + " dBTP";
-        role = ToyRole::Clear;
-    }
-
-    // 本轮反馈：与 Loudness 一致 —— 炸碎片 + 小 emoji 气泡文案
-    ctx.addModuleActor (makeBrickShardsActor (hit.pos, meterColour (tpDisplay), 8));
-    ctx.bubble (hit.pos.translated (0.0f, -24.0f), text, role);
-}
-
-bool PhaseCorrelationModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
-{
-    const auto area = getContentBounds().reduced (6);
-    if (! area.contains (panelPos)) return false;
-    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
-    return true;
-}
-
-void PhaseCorrelationModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
-{
-    // 反算点击处角度 → 相关度 + 判语（E.4.2）
-    const float cx = hit.rect.getCentreX();
-    const float cy = hit.rect.getBottom();
-    const float dx = hit.pos.x - cx;
-    const float dy = cy - hit.pos.y;                       // 向上为正
-    const float angle = std::atan2 (dy, dx);               // 0..π 上半圆
-    const float corrAtClick = juce::jlimit (-1.0f, 1.0f, angle / 3.14159f * 2.0f - 1.0f);
-
-    juce::String verdict;
-    ToyRole role = ToyRole::Reward;
-    if (corrAtClick >= 0.7f)       { verdict = "MONO SAFE";   role = ToyRole::Clear; }
-    else if (corrAtClick >= 0.2f)  verdict = "WIDE";
-    else                           { verdict = "OUT OF PHASE"; role = ToyRole::Alert; }
-
-    // 反馈 A3 + 问题 1：几何与 paintContent 完全一致
-    //   paintContent 里 inner = content.reduced(10)；而 toyHitTest 的 rect 已是
-    //   content.reduced(6)，所以这里只需再 reduced(4)，轴才能与真实表针重合。
-    const auto inner = hit.rect.toNearestInt().reduced (4);
-    const float px = (float) inner.getCentreX();
-    const float py = (float) inner.getBottom();
-    const float R  = juce::jmin ((float) inner.getWidth() * 0.44f,
-                                 (float) inner.getHeight() - 24.0f);
-    const float th = (juce::jlimit (-1.0f, 1.0f, corr) * 0.5f + 0.5f)
-                     * juce::MathConstants<float>::pi;
-    ctx.addModuleActor (makeGhostNeedleActor ({ px, py }, juce::jmax (4.0f, R), th));
-
-    ctx.bubble (hit.pos.translated (0.0f, -24.0f), juce::String (corrAtClick, 2) + " " + verdict, role);
-}
-
-bool PhaseBalanceModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
-{
-    auto area = getContentBounds().reduced (8);
-    if (! area.contains (panelPos)) return false;
-    auto wBar = area.removeFromTop (area.getHeight() / 2 - 2);
-    if (wBar.contains (panelPos))
-    {
-        out.kind = 1; out.rect = wBar.toFloat();   // WIDTH → 橡皮筋
-    }
-    else
-    {
-        out.kind = 2; out.rect = area.toFloat();   // BAL → 弹珠
-    }
-    out.pos = panelPos.toFloat();
-    return true;
-}
-
-void PhaseBalanceModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
-{
-    if (hit.kind == 1)
-    {
-        ctx.addModuleActor (makeRubberBandActor (hit.rect, hit.pos));
-        ctx.bubble (hit.pos.translated (0.0f, -22.0f),
-                    "WIDTH " + juce::String (juce::roundToInt (width * 100.0f)) + "%", ToyRole::Orb);
-    }
-    else
-    {
-        ctx.addModuleActor (makeBallActor (hit.rect, hit.pos));
-        juce::String txt;
-        if (std::abs (balance) < 0.02f)      txt = "BAL CENTER";
-        else if (balance < 0.0f)             txt = "BAL L" + juce::String (juce::roundToInt (-balance * 100.0f));
-        else                                 txt = "BAL R" + juce::String (juce::roundToInt (balance * 100.0f));
-        ctx.bubble (hit.pos.translated (0.0f, -22.0f), txt, ToyRole::Orb);
-    }
-}
-
-bool DynamicsMetersModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
-{
-    const auto area = getContentBounds().reduced (6);
-    if (! area.contains (panelPos)) return false;
-    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
-    return true;
-}
-
-void DynamicsMetersModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
-{
-    // 柱索引按 x 位置（4 柱水平排列）
-    const float w = juce::jmax (1.0f, hit.rect.getWidth());
-    const int i = juce::jlimit (0, 3, (int) ((hit.pos.x - hit.rect.getX()) / (w / 4.0f)));
-    static const char* names[] = { "PK L", "PK R", "RMS L", "RMS R" };
-
-    ctx.addModuleActor (makeCoinPopActor (hit.pos));
-    ctx.bubble (hit.pos.translated (0.0f, -26.0f),
-                juce::String (names[i]) + " " + juce::String (meterDb[(size_t) i], 1) + " dB",
-                ToyRole::Reward);
-}
-
-bool DynamicsDrModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
-{
-    const auto area = getContentBounds().reduced (6);
-    if (! area.contains (panelPos)) return false;
-    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
-    return true;
-}
-
-void DynamicsDrModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
-{
-    // 点中的读数框 → 对应 DR 值 + 白话判语（E.4.2）
-    const float frac = (hit.pos.y - hit.rect.getY()) / juce::jmax (1.0f, hit.rect.getHeight());
-    float dr = 0.0f;
-    juce::String label;
-    if (frac < 0.33f)          { dr = shortDR; label = "DR SHORT"; }
-    else if (frac < 0.66f)     { dr = integDR; label = "DR INTEG"; }
-    else                       { dr = crest;   label = "CREST"; }
-
-    juce::String verdict;
-    ToyRole role = ToyRole::Reward;
-    if (dr >= 14.0f)           { verdict = "DYNAMIC";    role = ToyRole::Cheer; }
-    else if (dr >= 10.0f)      verdict = "BALANCED";
-    else if (dr >= 6.0f)       verdict = "COMPRESSED";
-    else                       { verdict = "SQUASHED";   role = ToyRole::Burst; }
-
-    ctx.addModuleActor (makeSquashActor (hit.pos));
-    ctx.bubble (hit.pos.translated (0.0f, -28.0f),
-                label + " " + juce::String (dr, 1) + "dB " + verdict, role);
-}
-
-bool DynamicsCrestModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
-{
-    auto area = getContentBounds().reduced (6);
-    area.removeFromRight (42 + 6);
-    if (! area.contains (panelPos)) return false;
-    out.kind = 1; out.rect = area.toFloat(); out.pos = panelPos.toFloat();
-    return true;
-}
-
-void DynamicsCrestModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
-{
-    // 反算点击处的 crest 值（与 paintContent 的 y 映射一致）
-    const float v = juce::jlimit (0.0f, 30.0f,
-        (hit.rect.getBottom() - hit.pos.y) / juce::jmax (1.0f, hit.rect.getHeight()) * 30.0f);
-
-    ctx.addModuleActor (makeCrestBallActor (hit.pos));
-    ctx.bubble (hit.pos.translated (0.0f, -20.0f), "CF " + juce::String (v, 1) + " dB", ToyRole::Orb);
-}
-
 void VuMeterModule::drawDial(juce::Graphics& g,
                              juce::Rectangle<int> dialArea,
                              juce::Point<float>&  outPivot,
@@ -1402,7 +325,7 @@ void VuMeterModule::drawDial(juce::Graphics& g,
     outRadius = R;
 
     // 表盘深色前景统一用主题 ink（在浅粉底上有良好对比度）
-    const juce::Colour inkCol = PinkXP::ink;
+    const juce::Colour inkCol = (dialStyle == 1) ? juce::Colour(0xffe9dfe6) : PinkXP::ink;
 
     // ---- 弧形主刻度轨（0°~180° 上半圆） ----
     juce::Path arc;
@@ -1472,6 +395,9 @@ void VuMeterModule::drawDial(juce::Graphics& g,
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::bold));
     for (const auto& t : ticks)
     {
+        if (dialStyle == 2 && ! t.major)
+            continue;   // Minimal：只留带数字的主刻度
+
         const float ang = vuToAngle(t.db);
         const float sinA = std::sin(ang);
         const float cosA = std::cos(ang);
@@ -1500,6 +426,7 @@ void VuMeterModule::drawDial(juce::Graphics& g,
     }
 
     // ---- 表盘面文字 "dBFS" ----
+    if (dialStyle != 2)
     {
         g.setColour(inkCol.withAlpha(0.75f));
         g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
@@ -1521,7 +448,8 @@ void VuMeterModule::drawNeedle(juce::Graphics& g,
                                float              radius,
                                float              vuDb,
                                juce::Colour       colour,
-                               float              thickness) const
+                               float              thickness,
+                               bool               wedge) const
 {
     const float ang = vuToAngle(vuDb);
     const float sinA = std::sin(ang);
@@ -1536,6 +464,24 @@ void VuMeterModule::drawNeedle(juce::Graphics& g,
     const float y1 = pivot.y + cosA * tailR;
     const float x2 = pivot.x + sinA * tipR;
     const float y2 = pivot.y - cosA * tipR;
+
+    if (wedge)
+    {
+        // 锥形指针：根部宽 (thickness * 2.4)、尖端收到一点
+        const float nx = cosA * thickness * 1.2f;
+        const float ny = sinA * thickness * 1.2f;
+        juce::Path p;
+        p.startNewSubPath(x1 + nx, y1 + ny);
+        p.lineTo(x2, y2);
+        p.lineTo(x1 - nx, y1 - ny);
+        p.closeSubPath();
+
+        g.setColour(juce::Colour(0xff2a1a08).withAlpha(0.35f));
+        g.fillPath(p, juce::AffineTransform::translation(1.0f, 1.5f));
+        g.setColour(colour);
+        g.fillPath(p);
+        return;
+    }
 
     // 阴影 (在指针下方偏移 1.5 px 画一根半透明深色)
     g.setColour(juce::Colour(0xff2a1a08).withAlpha(0.35f));
@@ -1629,7 +575,7 @@ void VuMeterModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content
     auto area = content.reduced(6);
     if (area.getWidth() < 40 || area.getHeight() < 40) return;
 
-    PinkXP::drawSunken(g, area, PinkXP::content);
+    PinkXP::drawSunken(g, area, dialStyle == 1 ? juce::Colour(0xff2b2430) : PinkXP::content);
 
     // 表盘区域 = sunken 卡片内部（再减去一点内描边余量，和 drawDial 保持一致）
     auto dialArea = area;
@@ -1644,18 +590,83 @@ void VuMeterModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content
         // 指针和 LED 共用的"单声道总电平"（dBFS）
         const float monoDb = currentMonoDbfs();
 
-        // 单一指针（总电平），主题粉色系 pink600，稍粗一点
-        drawNeedle(g, pivot, radius, monoDb, PinkXP::pink600, 2.2f);
+        if (needleStyle == 2)
+        {
+            // Stereo：L / R 各一根细指针（取已平滑的 displayedL/R）
+            drawNeedle(g, pivot, radius, displayedL, PinkXP::pink500, 1.6f);
+            drawNeedle(g, pivot, radius, displayedR, PinkXP::pink700, 1.6f);
+        }
+        else
+        {
+            // 单一指针（总电平），主题粉色系 pink600，稍粗一点
+            drawNeedle(g, pivot, radius, monoDb, PinkXP::pink600, 2.2f, needleStyle == 1);
+        }
     }
 
     // ---- LED 信号灯：放到表盘旁边（sunken 卡片内的右上角空白） ----
     //   VU 表盘是 0°~180° 的上半圆，所以卡片的左上角和右上角天然是空白，
     //   把 LED 塞在右上角可避免和指针/刻度重叠，也不再占用模块边框。
-    const int ledSz = juce::jlimit(10, 18,
-                                    juce::jmin(area.getWidth(), area.getHeight()) / 12);
-    // 相对 sunken 内沿再缩 6px，给 drawSunken 的阴影/内描边一点呼吸
-    auto ledArea = juce::Rectangle<int>(area.getRight() - ledSz - 6,
-                                         area.getY()      + 6,
-                                         ledSz, ledSz);
-    drawLed(g, ledArea);
+    if (showLed)
+    {
+        const int ledSz = juce::jlimit(10, 18,
+                                        juce::jmin(area.getWidth(), area.getHeight()) / 12);
+        // 相对 sunken 内沿再缩 6px，给 drawSunken 的阴影/内描边一点呼吸
+        auto ledArea = juce::Rectangle<int>(area.getRight() - ledSz - 6,
+                                             area.getY()      + 6,
+                                             ledSz, ledSz);
+        drawLed(g, ledArea);
+    }
+}
+
+// ----------------------------------------------------------
+// 持久化 / 控制面板（v3.1）
+// ----------------------------------------------------------
+juce::ValueTree VuMeterModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s ("state");
+    s.setProperty ("dialStyle",   dialStyle, nullptr);
+    s.setProperty ("needleStyle", needleStyle, nullptr);
+    s.setProperty ("showLed",     showLed, nullptr);
+    return s;
+}
+
+void VuMeterModule::restoreModuleSpecificState (const juce::ValueTree& state)
+{
+    // 缺键 = 保持当前值（构造默认 = 旧 VU 外观）
+    if (state.hasProperty ("dialStyle"))   dialStyle   = juce::jlimit (0, 2, (int) state.getProperty ("dialStyle"));
+    if (state.hasProperty ("needleStyle")) needleStyle = juce::jlimit (0, 2, (int) state.getProperty ("needleStyle"));
+    if (state.hasProperty ("showLed"))     showLed     = (bool) state.getProperty ("showLed");
+    refreshControlPanel();
+    repaint();
+}
+
+void VuMeterModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::choice ("dialStyle", "Dial style",
+        { "Classic", "Dark", "Minimal" },
+        "Classic: the usual pink dial. Dark: dark face with light marks. Minimal: no small ticks and no unit text.")
+        .in ("Dial"));
+    out.push_back (ParamDef::choice ("needleStyle", "Needle style",
+        { "Line", "Wedge", "Stereo L/R" },
+        "Line: thin needle. Wedge: tapered needle. Stereo L/R: two thin needles, one per channel.")
+        .in ("Dial"));
+    out.push_back (ParamDef::toggle ("showLed", "Signal LED",
+        "Round lamp in the corner: dark = no signal, green = signal, red = at or above 0 dBFS.").in ("Dial"));
+}
+
+double VuMeterModule::getParamValue (const juce::String& id) const
+{
+    if (id == "dialStyle")   return (double) dialStyle;
+    if (id == "needleStyle") return (double) needleStyle;
+    if (id == "showLed")     return showLed ? 1.0 : 0.0;
+    return 0.0;
+}
+
+void VuMeterModule::setParamValue (const juce::String& id, double v)
+{
+    if      (id == "dialStyle")   dialStyle   = juce::jlimit (0, 2, juce::roundToInt (v));
+    else if (id == "needleStyle") needleStyle = juce::jlimit (0, 2, juce::roundToInt (v));
+    else if (id == "showLed")     showLed     = v >= 0.5;
+    else return;
+    repaint();
 }

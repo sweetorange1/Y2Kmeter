@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 3.0.7 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 3.1.0 LANGUAGES C CXX)
 
 # ==========================================================
 # Steam 构建开关（默认 OFF，绝不影响官网 / Inno Setup 流水线）
@@ -427,7 +427,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 3.0.7
+        VERSION 3.1.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -480,7 +480,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 3.0.7
+        VERSION 3.1.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -673,6 +673,9 @@ set(Y2KM_PLUGIN_SOURCES
   source/ui/PinkXPStyle.cpp
   source/ui/ModulePanel.h
   source/ui/ModulePanel.cpp
+  # 模块控制面板（v3.1 参数系统）：齿轮按钮展开的覆盖式参数抽屉
+  source/ui/ModuleControlDrawer.h
+  source/ui/ModuleControlDrawer.cpp
   source/ui/ModuleWorkspace.h
   source/ui/ModuleWorkspace.cpp
   # 悬停提示（HoverHelp）：按钮 / 仪表模块详细说明 + Pink XP 风格提示窗口
@@ -723,10 +726,12 @@ set(Y2KM_PLUGIN_SOURCES
   source/ui/modules/EqModule.cpp
   source/ui/modules/LoudnessModule.h
   source/ui/modules/LoudnessModule.cpp
+  source/ui/modules/MeterWidgets.h
 source/ui/modules/OscilloscopeModule.h
 source/ui/modules/OscilloscopeModule.cpp
-source/ui/modules/OscilloscopeWaveModule.h
-source/ui/modules/OscilloscopeWaveModule.cpp
+  source/ui/HoldSlowMo.h
+  source/analysis/BandSplit.h
+  source/analysis/OscHistory.h
   source/ui/modules/SpectrumModule.h
   source/ui/modules/SpectrumModule.cpp
   source/ui/modules/PhaseModule.h
@@ -1539,6 +1544,18 @@ if (MSVC)
   target_compile_options(Y2Kmeter_music_test PRIVATE /utf-8)
 endif()
 add_test(NAME Y2Kmeter_music_test COMMAND Y2Kmeter_music_test)
+
+# ==========================================================
+# 参数系统纯算法测试（v3.1）：频率刻度映射（log / mel / linear）+ 三频段分离
+#   不依赖 JUCE / 音频设备。
+# ==========================================================
+add_executable(Y2Kmeter_param_test tests/param_system_test.cpp)
+target_compile_features(Y2Kmeter_param_test PRIVATE cxx_std_17)
+target_include_directories(Y2Kmeter_param_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if (MSVC)
+  target_compile_options(Y2Kmeter_param_test PRIVATE /utf-8)
+endif()
+add_test(NAME Y2Kmeter_param_test COMMAND Y2Kmeter_param_test)
 
 # ==========================================================
 # emoji 渲染诊断（Windows only，仅本地排查用）

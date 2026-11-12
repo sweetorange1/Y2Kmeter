@@ -1,41 +1,35 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <vector>
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoldSlowMo.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/analysis/OscHistory.h"
+#include "source/analysis/BandSplit.h"
 
 // ==========================================================
-// OscilloscopeModule —— Pink XP 像素风立体声示波器
+// OscilloscopeModule —— Pink XP 像素风立体声示波器（v3.1：示波器模块）
 //
-// 支持三种显示模式：
-//   * Waveform  ：时域波形（L 粉 / R 深粉 叠加）
-//   * XY        ：李萨如 XY 模式（L→X，R→Y，点阵）
-//   * Lissajous ：Mid/Side 模式（旋转 45° 的 XY）
+//   合并了旧的 Oscilloscope / Oscilloscope Wave（含 oscilloscope_left / _right）：
+//   同一路 Kind::Oscilloscope 的 2048 样本窗口，用「显示类型」+ 参数还原每一种旧外观。
 //
-// v1.8.5 自动缩放（XY / Lissajous 模式）：
-//   · 每秒统计样本最大欧氏距离 sqrt(L²+R²)
-//   · gain = 0.80 / maxDistance → 峰值落在边界 80%，避免过度补偿
-//   · 10% 死区：波动不大不缩放，减少抖动
+//   显示类型（displayMode）：
+//     · Waveform  —— 时域波形；声道 L / R / 双（waveChannel），配色 Classic / Pink（waveColour）
+//     · X-Y       —— 李萨如 XY（L→X，R→Y，点阵）
+//     · Lissajous —— Mid/Side（旋转 45° 的 XY）
+//   X-Y / Lissajous 可开启「频段染色」：低 / 中 / 高频的点分别着红 / 绿 / 蓝
+//   （固定色，按三频段能量权重混色；分频点可调，见 BandSplit.h）。
 //
-// 顶部工具栏：
-//   ┌──────────────────────────────────────┐
-//   │ [Wave] [X-Y] [Liss]   [Freeze]       │
-//   ├──────────────────────────────────────┤
-//   │         同心标尺环（淡粉）           │
-//   │       ╭──────────────────╮           │
-//   │       │   ·· 点阵 ··    │           │
-//   │       │  · ╭──○──╮ ·   │           │
-//   │       │  · │ 十字  │ ·  │           │
-//   │       │  · ╰──○──╯ ·   │           │
-//   │       │   ·· ·· ··    │           │
-//   │       ╰──────────────────╯           │
-//   │  M/S                          3.2x  │
-//   └──────────────────────────────────────┘
+//   v3.1 交互变化：
+//     · 顶部工具栏（模式按钮 + Freeze 按钮）取消，整块内容区都是画布；
+//     · 旧的 Freeze 按钮取消，改为「按住画布左键 = 慢放」：时间被拉长 50 倍，
+//       曲线混向残影色，松手直接回到实时（参照频谱的子弹时间，见 HoldSlowMo.h）；
+//     · 慢放期间从 OscHistory 读取更长的历史，所以画面是真的在慢速滚动，而不是定格。
 //
-// 数据来源：AnalyserHub::getOscilloscopeSnapshot（立体声）
-// 刷新率：30Hz（juce::Timer）
-// 冻结时 Timer 继续跑，但不再拉取新快照，保留当前内容。
+//   旧存档兼容：displayMode 键不变；frozen 键被忽略（按未冻结加载）；
+//   oscilloscope_wave 的 channelMode 键作为 waveChannel 的别名读取。
 // ==========================================================
 
 class OscilloscopeModule : public GlDirectModuleBase,
@@ -53,8 +47,9 @@ public:
     void setDisplayMode(DisplayMode m);
     DisplayMode getDisplayMode() const noexcept { return displayMode; }
 
-    void setFrozen(bool b);
-    bool isFrozen() const noexcept { return frozen; }
+    // 按住慢放：按住画布（非标题栏 / 抽屉）左键开始，松手回到实时
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseUp   (const juce::MouseEvent& e) override;
 
     // ---- Toybox：拍立得快照（反馈 C1，GL 代表 L1 效果）----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
@@ -62,9 +57,12 @@ public:
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
     double lastToyPokeTime_ = 0.0;   // 防连点冷却
 
-    // v1.8.4 持久化：保存/恢复 displayMode + frozen
+    // ---- 持久化 + 控制面板 ----
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
 
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
@@ -76,6 +74,11 @@ protected:
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
+    // 一个 XY 散点（GL 与 CPU 回退路径共用同一份几何/配色）
+    struct XYPoint { float x, y, alpha; juce::Colour col; };
+
+    // 波形声道配色（glow / main），已含残影色
+    struct WaveColours { juce::Colour lGlow, lMain, rGlow, rMain; };
 
     // ---- 各模式绘制 ----
     void drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const;
@@ -86,33 +89,55 @@ private:
                                  float yCenter,
                                  float halfHeight) const;
 
+    void collectXYPoints (juce::Rectangle<int> canvas, bool rotate45, std::vector<XYPoint>& out) const;
+    WaveColours waveColours() const;
+    bool drawsL() const noexcept { return waveChannel == 0 || waveChannel == 2; }
+    bool drawsR() const noexcept { return waveChannel == 1 || waveChannel == 2; }
+    bool xyBandActive() const noexcept { return bandColour && displayMode != DisplayMode::waveform; }
+
     void rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds);
     void drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const;
     void invalidateStaticLayer();
 
     // 方案 A：动态波形 / XY 点图缓存层
-    //   · 只有数据变化（snapshot 有新内容）或尺寸变化时才重绘
-    //   · paintContent 只做一次 drawImageAt，把 4 次 strokePath 的成本摊到"有新数据的帧"
     void redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas);
     void invalidateDynamicLayer();
     bool snapshotChangedSinceLastDraw() const noexcept;
 
-    // 顶部工具栏布局
-    juce::Rectangle<int> getToolbarBounds (juce::Rectangle<int> content) const;
     juce::Rectangle<int> getCanvasBounds  (juce::Rectangle<int> content) const;
 
-    // 模式按钮点击 / 刷新外观
-    void refreshModeButton();
+    // 慢放
+    void beginHold (const AnalyserHub::FrameSnapshot& frame);
+    void endHold();
 
     // ---- 成员 ----
     AnalyserHub& hub;
 
+    // 参数（构造默认 = 旧 Oscilloscope 外观）
     DisplayMode displayMode = DisplayMode::waveform;
-    bool        frozen      = false;
+    int   waveChannel = 2;        // 0 L / 1 R / 2 双
+    int   waveColour  = 0;        // 0 Classic（chartRamp）/ 1 Pink（旧 Oscilloscope Wave）
+    bool  bandColour  = false;    // X-Y / Lissajous 频段染色
+    float crossLowHz  = 250.0f;
+    float crossHighHz = 4000.0f;
+    bool  autoGain    = true;     // X-Y / Lissajous 自动缩放
+    bool  showRings   = true;     // X-Y / Lissajous 标尺环
 
-    // 快照（UI 线程独占使用）
+    // 快照（UI 线程独占使用）：实时窗口，或慢放时从历史读出的窗口
     juce::Array<float> snapshotL;
     juce::Array<float> snapshotR;
+
+    // 频段权重（与 snapshot 同长；仅 xyBandActive 时有效）
+    y2k::bands::BandSplitter splitter;
+    std::vector<float> wLow, wMid, wHigh;
+    double splitterRate = 0.0;
+
+    // 按住慢放
+    HoldSlowMo hold;
+    OscHistory history;
+    bool   holdPendingStart = false;
+    double holdPlayPos = 0.0;      // 读指针（绝对样本位置，窗口末端）
+    std::vector<float> readBufL, readBufR;
 
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
@@ -127,25 +152,14 @@ private:
     int   lastDrawnSampleCount = -1;
     float lastDrawnFingerprint[6] { 0, 0, 0, 0, 0, 0 };
     DisplayMode lastDrawnMode = DisplayMode::waveform;
-    bool        lastDrawnFrozen = false;
+    float       lastDrawnGhost = 0.0f;
 
     // XY / Lissajous 自动缩放（v1.8.5）
-    //   · 每秒统计样本最大欧氏距离 sqrt(L²+R²)，计算增益使峰值落在边界 80% 处
-    //   · 避免 RMS 过度补偿：峰值驱动确保不出界
-    //   · 更新频率限制：每秒最多 1 次实际缩放；波动 <10% 不更新
-    float autoGainFactor              = 1.0f;    // 当前增益系数 [0.25, 8.0]
+    float autoGainFactor              = 1.0f;    // 当前增益系数 [0.1, 10]
     float periodicMaxAccum            = 0.0f;    // 当前周期内累积的样本最大距离
-    float prevPeriodicMax             = 1.0f;    // 上一周期的最大距离（初始 1.0 = 0dBFS）
+    float prevPeriodicMax             = 1.0f;
     float lastDrawnAutoGain           = 1.0f;    // 上次绘制时的 autoGainFactor，用于动态层脏标记
-    double lastPeriodicGainUpdateMs   = 0.0;     // 上次周期性增益更新的时间戳（ms，HiRes）
-
-    // 顶部工具栏按钮
-    // 显示模式：单按钮循环 Wave → X-Y → Liss（参考 Waveform 的颜色循环按钮），
-    //   按钮文字即当前模式
-    juce::TextButton btnMode   { "Wave"   };
-    juce::TextButton btnFreeze { "Freeze" };
-
-    static constexpr int toolbarH = 26;
+    double lastPeriodicGainUpdateMs   = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OscilloscopeModule)
 };

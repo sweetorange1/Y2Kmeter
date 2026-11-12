@@ -7,6 +7,7 @@
 #include <deque>
 
 #include "source/analysis/AudioRecorder.h"
+#include "source/analysis/FreqScale.h"
 #include "source/analysis/PitchTracker.h"
 #include "source/analysis/music/MusicAnalysisEngine.h"
 
@@ -553,7 +554,8 @@ public:
                                        int   numPoints,
                                        float fMin,
                                        float fMax,
-                                       bool  perBin = false);
+                                       bool  perBin = false,
+                                       y2k::fscale::Scale scale = y2k::fscale::Scale::log);
 
     // 双通道对数频率轴幅度快照（L/R 分开）：
     //   与 getSpectrumMagnitudesBlended 使用同一频率轴与带宽聚合逻辑，
@@ -563,7 +565,8 @@ public:
                                          int   numPoints,
                                          float fMin,
                                          float fMax,
-                                         bool  perBin = false);
+                                         bool  perBin = false,
+                                         y2k::fscale::Scale scale = y2k::fscale::Scale::log);
 
     // side 路（(L-R)/2）对数频率轴幅度快照：
     //   与 getSpectrumMagnitudesBlended 同一频率轴与带宽聚合逻辑，
@@ -573,7 +576,8 @@ public:
                                            int   numPoints,
                                            float fMin,
                                            float fMax,
-                                           bool  perBin = false);
+                                           bool  perBin = false,
+                                           y2k::fscale::Scale scale = y2k::fscale::Scale::log);
 
     // ======================================================
     // 逐 bin 幅度快照（v3.1，Spectrum 的 Semi / Raw 模式使用）
@@ -603,7 +607,8 @@ public:
     void getSpectrumReassignedBlended (juce::Array<float>& dest,
                                        int   numPoints,
                                        float fMin,
-                                       float fMax);
+                                       float fMax,
+                                       y2k::fscale::Scale scale = y2k::fscale::Scale::log);
 
     // ======================================================
     // 重分配谱峰（Spectrum 模块 Sharper 模式用）——

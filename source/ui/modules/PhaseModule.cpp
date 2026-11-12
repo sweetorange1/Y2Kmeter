@@ -13,13 +13,13 @@ PhaseModule::PhaseModule(AnalyserHub& h)
     : GlDirectModuleBase(ModuleType::phase),
       hub(h)
 {
-    // Phase F：本模块同时需要 Oscilloscope（Lissajous 点云）和 Phase（相关/宽度/平衡）
-    hub.retain(AnalyserHub::Kind::Oscilloscope);
-    hub.retain(AnalyserHub::Kind::Phase);
+    // 订阅按项开关：相位图需要 Oscilloscope（点云），相关/宽度/平衡需要 Phase
+    updateSubscriptions();
     hub.addFrameListener(this);
 
     setMinSize(64, 64);
     setDefaultSize(320, 192); // phase 5×3 大格
+    setControlPanelEnabled (true);
 
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
@@ -39,8 +39,189 @@ PhaseModule::~PhaseModule()
 
     // Phase F：先解绑 FrameListener
     hub.removeFrameListener(this);
-    hub.release(AnalyserHub::Kind::Phase);
-    hub.release(AnalyserHub::Kind::Oscilloscope);
+    if (phaseRetained) hub.release(AnalyserHub::Kind::Phase);
+    if (oscRetained)   hub.release(AnalyserHub::Kind::Oscilloscope);
+}
+
+// 按当前启用项增减 Hub 订阅（引用计数为 0 的分析路径 pushStereo 会直接跳过）
+void PhaseModule::updateSubscriptions()
+{
+    const bool wantOsc   = items.gonio;
+    const bool wantPhase = items.corr || items.width || items.bal;
+
+    if (wantOsc != oscRetained)
+    {
+        if (wantOsc) hub.retain(AnalyserHub::Kind::Oscilloscope);
+        else         hub.release(AnalyserHub::Kind::Oscilloscope);
+        oscRetained = wantOsc;
+    }
+    if (wantPhase != phaseRetained)
+    {
+        if (wantPhase) hub.retain(AnalyserHub::Kind::Phase);
+        else           hub.release(AnalyserHub::Kind::Phase);
+        phaseRetained = wantPhase;
+    }
+}
+
+// ----------------------------------------------------------
+// 持久化 / 控制面板
+// ----------------------------------------------------------
+juce::ValueTree PhaseModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s ("state");
+    s.setProperty ("itemGonio", items.gonio, nullptr);
+    s.setProperty ("itemCorr",  items.corr,  nullptr);
+    s.setProperty ("itemWidth", items.width, nullptr);
+    s.setProperty ("itemBal",   items.bal,   nullptr);
+    s.setProperty ("gonioStyle", (int) gonioStyle, nullptr);
+    s.setProperty ("barStyle",   (int) barStyle,   nullptr);
+    return s;
+}
+
+void PhaseModule::restoreModuleSpecificState (const juce::ValueTree& state)
+{
+    // 缺键 = 保持当前值；构造默认 = 旧 Phase 外观
+    auto getB = [&] (const char* k, bool& dst)
+    {
+        if (state.hasProperty (k)) dst = (bool) state.getProperty (k);
+    };
+
+    Items it = items;
+    getB ("itemGonio", it.gonio); getB ("itemCorr", it.corr);
+    getB ("itemWidth", it.width); getB ("itemBal", it.bal);
+    if (! it.any()) it = Items();
+    items = it;
+
+    if (state.hasProperty ("gonioStyle"))
+        gonioStyle = (int) state.getProperty ("gonioStyle") == 1 ? GonioStyle::trace : GonioStyle::dots;
+    if (state.hasProperty ("barStyle"))
+        barStyle = (int) state.getProperty ("barStyle") == 1 ? BarStyle::solid : BarStyle::segmented;
+
+    updateSubscriptions();
+    invalidateStaticLayer();
+    layoutContent (getContentBounds());
+    buildGlSnapshot();
+    refreshControlPanel();
+    repaint();
+}
+
+void PhaseModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::toggle ("itemGonio", "Goniometer (M/S scope)",
+        "Left against right as a mid/side vector scope. A tall thin shape is mono, a wide cloud is stereo.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemCorr", "Correlation dial",
+        "+1 = mono-safe, 0 = very wide, -1 = out of phase. A needle below 0 means parts cancel in mono.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemWidth", "Width bar",
+        "How much of the signal lives in the side channel, 0 - 100%.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemBal", "Balance bar",
+        "Left / right level balance. C = centred.").in ("Show"));
+
+    out.push_back (ParamDef::choice ("gonioStyle", "Goniometer style",
+        { "Dots", "Trace" },
+        "Dots: each sample is a pixel. Trace: neighbouring samples are joined by a thin line.")
+        .in ("Style").when ([this] { return items.gonio; }));
+    out.push_back (ParamDef::choice ("barStyle", "Bar style",
+        { "Segmented", "Solid" },
+        "Segmented: pixel cells. Solid: one continuous filled bar.")
+        .in ("Style").when ([this] { return items.width || items.bal; }));
+}
+
+double PhaseModule::getParamValue (const juce::String& id) const
+{
+    if (id == "itemGonio")   return items.gonio ? 1.0 : 0.0;
+    if (id == "itemCorr")    return items.corr ? 1.0 : 0.0;
+    if (id == "itemWidth")   return items.width ? 1.0 : 0.0;
+    if (id == "itemBal")     return items.bal ? 1.0 : 0.0;
+    if (id == "gonioStyle")  return (double) (int) gonioStyle;
+    if (id == "barStyle")    return (double) (int) barStyle;
+    return 0.0;
+}
+
+void PhaseModule::setParamValue (const juce::String& id, double v)
+{
+    if (id == "gonioStyle")
+    {
+        gonioStyle = juce::roundToInt (v) == 1 ? GonioStyle::trace : GonioStyle::dots;
+        buildGlSnapshot(); repaint();
+        return;
+    }
+    if (id == "barStyle")
+    {
+        barStyle = juce::roundToInt (v) == 1 ? BarStyle::solid : BarStyle::segmented;
+        buildGlSnapshot(); repaint();
+        return;
+    }
+
+    const bool on = v >= 0.5;
+    Items it = items;
+    if      (id == "itemGonio") it.gonio = on;
+    else if (id == "itemCorr")  it.corr = on;
+    else if (id == "itemWidth") it.width = on;
+    else if (id == "itemBal")   it.bal = on;
+    else return;
+
+    if (! it.any())
+        return;   // 至少保留一项
+
+    items = it;
+    updateSubscriptions();
+    invalidateStaticLayer();
+    layoutContent (getContentBounds());
+    buildGlSnapshot();
+    repaint();
+}
+
+// ----------------------------------------------------------
+// 区域划分（layoutContent / GL 快照 / overlay / 静态层共用同一份几何）
+//   四项全开：与旧 Phase 逐像素相同。
+// ----------------------------------------------------------
+PhaseModule::Areas PhaseModule::computeAreas (juce::Rectangle<int> content) const
+{
+    Areas a;
+
+    const int barH    = 20;
+    const int barGap  = 2;
+    const bool hasUpper = items.gonio || items.corr;
+    const int  barRows  = (items.width ? 1 : 0) + (items.bal ? 1 : 0);
+
+    juce::Rectangle<int> upper, lower;
+    if (hasUpper && barRows > 0)
+    {
+        const int footer = barH * barRows + barGap * (barRows - 1);
+        upper = content.withTrimmedBottom(footer + 6);
+        lower = content.withTop(upper.getBottom() + 6);
+    }
+    else if (hasUpper)
+    {
+        upper = content;
+    }
+    else
+    {
+        // 只有条形：每条拉高一些并整体垂直居中，避免两条细线贴在顶端
+        const int rowH = juce::jlimit (barH, 44, (content.getHeight() - barGap * (barRows - 1)) / juce::jmax (1, barRows));
+        const int totalH = rowH * barRows + barGap * (barRows - 1);
+        lower = content.withTrimmedTop (juce::jmax (0, (content.getHeight() - totalH) / 2)).withHeight (totalH);
+    }
+
+    if (items.gonio && items.corr)
+    {
+        const int gonioSize = juce::jmin(upper.getWidth() * 5 / 9, upper.getHeight());
+        a.gonio = upper.withWidth(gonioSize);
+        a.dial  = upper.withTrimmedLeft(gonioSize + 8);
+    }
+    else if (items.gonio) a.gonio = upper;
+    else if (items.corr)  a.dial  = upper;
+
+    if (barRows > 0)
+    {
+        const int rowH = hasUpper ? barH
+                                  : juce::jlimit (barH, 44, (content.getHeight() - barGap * (barRows - 1)) / barRows);
+        int y = lower.getY();
+        if (items.width)   { a.width   = lower.withY (y).withHeight (rowH); y += rowH + barGap; }
+        if (items.bal)     { a.balance = lower.withY (y).withHeight (rowH); }
+    }
+
+    return a;
 }
 
 // ----------------------------------------------------------
@@ -51,7 +232,7 @@ void PhaseModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! isShowing()) return;
 
     // Oscilloscope 点云数据（从聚合帧内的 oscL/oscR 直接 memcpy 入 juce::Array）
-    if (frame.has (AnalyserHub::Kind::Oscilloscope))
+    if (items.gonio && frame.has (AnalyserHub::Kind::Oscilloscope))
     {
         const int n = (int) frame.oscL.size();
         oscL.resize(n);
@@ -79,6 +260,7 @@ void PhaseModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     buildGlSnapshot();
     repaintFrameContent();
 }
+
 
 // ----------------------------------------------------------
 // Toybox（v3.0.0）：Gonio 声呐 + 幽灵指针（§8.3）
@@ -137,19 +319,11 @@ void PhaseModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 // ----------------------------------------------------------
 void PhaseModule::layoutContent(juce::Rectangle<int> content)
 {
-    const int barH    = 20;
-    const int barGap  = 2;
-    const int footer  = barH * 2 + barGap;
-
-    auto upper = content.withTrimmedBottom(footer + 6);
-    auto lower = content.withTop(upper.getBottom() + 6);
-
-    const int gonioSize = juce::jmin(upper.getWidth() * 5 / 9, upper.getHeight());
-    areaGonio = upper.withWidth(gonioSize);
-    areaDial  = upper.withTrimmedLeft(gonioSize + 8);
-
-    areaWidth   = lower.withHeight(barH);
-    areaBalance = lower.withTrimmedTop(barH + barGap).withHeight(barH);
+    const auto a = computeAreas (content);
+    areaGonio   = a.gonio;
+    areaDial    = a.dial;
+    areaWidth   = a.width;
+    areaBalance = a.balance;
 
     // v2.9.5：尺寸守卫（防 layoutContent 每帧触发导致的交互卡顿）
     if (glCanvasSizeChanged (getGlCanvasBounds (content)))
@@ -168,18 +342,14 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
 {
     // 接管时只画文字（几何全部由 GL 快照绘制）：轴标签、CORR 读数与刻度、
     //   WIDTH/BAL 标签与数值。
-    const int barH    = 20;
-    const int barGap  = 2;
-    const int footer  = barH * 2 + barGap;
-    auto upper = canvas.withTrimmedBottom (footer + 6);
-    auto lower = canvas.withTop (upper.getBottom() + 6);
-    const int gonioSize = juce::jmin (upper.getWidth() * 5 / 9, upper.getHeight());
-    const auto areaGonio = upper.withWidth (gonioSize);
-    const auto areaDial  = upper.withTrimmedLeft (gonioSize + 8);
-    const auto areaWidth = lower.withHeight (barH);
-    const auto areaBalance = lower.withTrimmedTop (barH + barGap).withHeight (barH);
+    const auto areas = computeAreas (canvas);
+    const auto areaGonio = areas.gonio;
+    const auto areaDial = areas.dial;
+    const auto areaWidth = areas.width;
+    const auto areaBalance = areas.balance;
 
     // ---- Gonio 轴标签 ----
+    if (! areaGonio.isEmpty())
     {
         auto inner = areaGonio.reduced (6);
         const float cx = (float) inner.getCentreX();
@@ -198,6 +368,7 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
     }
 
     // ---- Dial 刻度 + CORR 读数 ----
+    if (! areaDial.isEmpty())
     {
         auto inner = areaDial.reduced (6);
         const float cx = (float) inner.getCentreX();
@@ -243,24 +414,31 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
     // ---- Width / Balance 标签与数值 ----
     {
         const int labelW = 56;
-        PinkXP::drawCachedText (g, "WIDTH", areaWidth.withWidth (labelW), juce::Justification::centredLeft,
-                                9.0f, juce::Font::bold, PinkXP::ink);
-        PinkXP::drawCachedText (g, "BAL", areaBalance.withWidth (labelW), juce::Justification::centredLeft,
-                                9.0f, juce::Font::bold, PinkXP::ink);
+        if (! areaWidth.isEmpty())
+        {
+            PinkXP::drawCachedText (g, "WIDTH", areaWidth.withWidth (labelW), juce::Justification::centredLeft,
+                                    9.0f, juce::Font::bold, PinkXP::ink);
+            g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
+            g.drawText (y2k::tr (juce::String ((int) std::round (smoothedWidth * 100.0f)) + "%"),
+                        areaWidth.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
+                        juce::Justification::centredRight, false);
+        }
 
-        g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
-        g.drawText (y2k::tr (juce::String ((int) std::round (smoothedWidth * 100.0f)) + "%"),
-                    areaWidth.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
-                    juce::Justification::centredRight, false);
+        if (! areaBalance.isEmpty())
+        {
+            PinkXP::drawCachedText (g, "BAL", areaBalance.withWidth (labelW), juce::Justification::centredLeft,
+                                    9.0f, juce::Font::bold, PinkXP::ink);
+            g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
 
-        const float b = juce::jlimit (-1.0f, 1.0f, smoothedBalance);
-        juce::String txt;
-        if (std::abs (b) < 0.02f)      txt = "C";
-        else if (b < 0)                txt = "L" + juce::String ((int) std::round (-b * 100.0f));
-        else                           txt = "R" + juce::String ((int) std::round ( b * 100.0f));
-        g.drawText (y2k::tr (txt),
-                    areaBalance.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
-                    juce::Justification::centredRight, false);
+            const float b = juce::jlimit (-1.0f, 1.0f, smoothedBalance);
+            juce::String txt;
+            if (std::abs (b) < 0.02f)      txt = "C";
+            else if (b < 0)                txt = "L" + juce::String ((int) std::round (-b * 100.0f));
+            else                           txt = "R" + juce::String ((int) std::round ( b * 100.0f));
+            g.drawText (y2k::tr (txt),
+                        areaBalance.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
+                        juce::Justification::centredRight, false);
+        }
     }
 }
 
@@ -293,16 +471,11 @@ void PhaseModule::buildGlSnapshot()
         return;
 
     // 子区域（与 layoutContent 相同划分）
-    const int barH    = 20;
-    const int barGap  = 2;
-    const int footer  = barH * 2 + barGap;
-    auto upper = content.withTrimmedBottom (footer + 6);
-    auto lower = content.withTop (upper.getBottom() + 6);
-    const int gonioSize = juce::jmin (upper.getWidth() * 5 / 9, upper.getHeight());
-    const auto areaGonio = upper.withWidth (gonioSize);
-    const auto areaDial  = upper.withTrimmedLeft (gonioSize + 8);
-    const auto areaWidth = lower.withHeight (barH);
-    const auto areaBalance = lower.withTrimmedTop (barH + barGap).withHeight (barH);
+    const auto areas = computeAreas (content);
+    const auto areaGonio = areas.gonio;
+    const auto areaDial = areas.dial;
+    const auto areaWidth = areas.width;
+    const auto areaBalance = areas.balance;
 
     auto snap = beginGlSnapshot();
     snap->renderToLogical = true;
@@ -330,6 +503,7 @@ void PhaseModule::buildGlSnapshot()
     appendQuad (snap->vertices, content.toFloat(), PinkXP::content);
 
     // ---- Goniometer ----
+    if (! areaGonio.isEmpty())
     {
         pushSunken (areaGonio, PinkXP::content);
         auto inner = areaGonio.reduced (6);
@@ -370,6 +544,30 @@ void PhaseModule::buildGlSnapshot()
                 const float denom = (float) juce::jmax (1, N - 1);
                 const auto innerF = inner.toFloat().expanded (1.0f);
 
+                if (gonioStyle == GonioStyle::trace)
+                {
+                    // 轨迹样式：相邻样本连成细线，越新越亮
+                    float lastX = 0.0f, lastY = 0.0f;
+                    bool haveLast = false;
+                    for (int i = 0; i < N; i += stride)
+                    {
+                        const float L = oscL.getUnchecked (i);
+                        const float Rs = oscR.getUnchecked (i);
+                        if (! std::isfinite (L) || ! std::isfinite (Rs)) { haveLast = false; continue; }
+                        const float Lc = juce::jlimit (-1.0f, 1.0f, L);
+                        const float Rc = juce::jlimit (-1.0f, 1.0f, Rs);
+                        const float px = cx + (Lc - Rc) * 0.7071067f * R;
+                        const float py = cy - (Lc + Rc) * 0.7071067f * R;
+                        if (! innerF.contains (px, py)) { haveLast = false; continue; }
+                        if (haveLast)
+                        {
+                            const float a = 0.2f + 0.6f * ((float) i / denom);
+                            appendLineSegment (snap->vertices, lastX, lastY, px, py, 0.5f, dotC.withAlpha (a));
+                        }
+                        lastX = px; lastY = py; haveLast = true;
+                    }
+                }
+                else
                 for (int i = 0; i < N; i += stride)
                 {
                     const float L = oscL.getUnchecked (i);
@@ -398,6 +596,7 @@ void PhaseModule::buildGlSnapshot()
     }
 
     // ---- Correlation Dial ----
+    if (! areaDial.isEmpty())
     {
         pushSunken (areaDial, PinkXP::content);
         auto inner = areaDial.reduced (6);
@@ -462,12 +661,29 @@ void PhaseModule::buildGlSnapshot()
     }
 
     // ---- Width bar ----
+    if (! areaWidth.isEmpty())
     {
         const int labelW = 56;
         auto barArea = areaWidth.withTrimmedLeft (labelW + 4);
         pushSunken (barArea, PinkXP::content.darker (0.05f));
         auto innerBar = barArea.reduced (2);
-        if (! innerBar.isEmpty())
+        if (! innerBar.isEmpty() && barStyle == BarStyle::solid)
+        {
+            // 实心样式：一条连续填充，颜色随长度分段（与像素格同一色阶）
+            const float fillW = (float) innerBar.getWidth() * juce::jlimit (0.0f, 1.0f, smoothedWidth);
+            const float y = (float) innerBar.getY() + 1.0f, h = (float) innerBar.getHeight() - 2.0f;
+            const float x0 = (float) innerBar.getX();
+            const float seg[4] = { 0.0f, 0.6f, 0.85f, 1.0f };
+            const juce::Colour cols[3] = { PinkXP::pink200, PinkXP::pink500, PinkXP::sel };
+            for (int s = 0; s < 3; ++s)
+            {
+                const float a = seg[s] * (float) innerBar.getWidth();
+                const float b = juce::jmin (fillW, seg[s + 1] * (float) innerBar.getWidth());
+                if (b > a)
+                    appendQuad (snap->vertices, { x0 + a, y, b - a, h }, cols[s]);
+            }
+        }
+        else if (! innerBar.isEmpty())
         {
             const int cellSize = 6, cellGap = 1, step = cellSize + cellGap;
             const int N = juce::jmax (1, (innerBar.getWidth() + cellGap) / step);
@@ -490,6 +706,7 @@ void PhaseModule::buildGlSnapshot()
     }
 
     // ---- Balance bar ----
+    if (! areaBalance.isEmpty())
     {
         const int labelW = 56;
         auto barArea = areaBalance.withTrimmedLeft (labelW + 4);
@@ -503,21 +720,34 @@ void PhaseModule::buildGlSnapshot()
                                (float) cx, (float) innerBar.getBottom(),
                                0.5f, PinkXP::pink300.withAlpha (0.6f));
 
-            const int cellSize = 4, cellGap = 1, step = cellSize + cellGap;
-            const int halfCells = juce::jmax (1, (innerBar.getWidth() / 2) / step);
             const float b = juce::jlimit (-1.0f, 1.0f, smoothedBalance);
-            const int litCells = (int) std::round (std::abs (b) * halfCells);
-            const int y = innerBar.getY() + 2;
-            const int h = innerBar.getHeight() - 4;
-            const auto offC = PinkXP::pink200.withAlpha (0.25f);
-            for (int i = 0; i < halfCells; ++i)
+
+            if (barStyle == BarStyle::solid)
             {
-                const int xL = cx - (i + 1) * step;
-                const int xR = cx + i * step + cellGap;
-                appendQuad (snap->vertices, { (float) xL, (float) y, (float) cellSize, (float) h },
-                            (b < 0 && i < litCells) ? PinkXP::pink500 : offC);
-                appendQuad (snap->vertices, { (float) xR, (float) y, (float) cellSize, (float) h },
-                            (b > 0 && i < litCells) ? PinkXP::pink600 : offC);
+                // 实心样式：从中线向偏向的一侧连续填充
+                const float halfW = (float) innerBar.getWidth() * 0.5f;
+                const float len = std::abs (b) * halfW;
+                const float y = (float) innerBar.getY() + 2.0f, h = (float) innerBar.getHeight() - 4.0f;
+                if (b < 0.0f)      appendQuad (snap->vertices, { (float) cx - len, y, len, h }, PinkXP::pink500);
+                else if (b > 0.0f) appendQuad (snap->vertices, { (float) cx, y, len, h }, PinkXP::pink600);
+            }
+            else
+            {
+                const int cellSize = 4, cellGap = 1, step = cellSize + cellGap;
+                const int halfCells = juce::jmax (1, (innerBar.getWidth() / 2) / step);
+                const int litCells = (int) std::round (std::abs (b) * halfCells);
+                const int y = innerBar.getY() + 2;
+                const int h = innerBar.getHeight() - 4;
+                const auto offC = PinkXP::pink200.withAlpha (0.25f);
+                for (int i = 0; i < halfCells; ++i)
+                {
+                    const int xL = cx - (i + 1) * step;
+                    const int xR = cx + i * step + cellGap;
+                    appendQuad (snap->vertices, { (float) xL, (float) y, (float) cellSize, (float) h },
+                                (b < 0 && i < litCells) ? PinkXP::pink500 : offC);
+                    appendQuad (snap->vertices, { (float) xR, (float) y, (float) cellSize, (float) h },
+                                (b > 0 && i < litCells) ? PinkXP::pink600 : offC);
+                }
             }
         }
     }
@@ -584,6 +814,32 @@ void PhaseModule::drawGonio(juce::Graphics& g, juce::Rectangle<int> area) const
 
     const int targetPoints = juce::jmax(96, inner.getWidth() * 2);
     const int stride = juce::jmax(1, N / targetPoints);
+
+    if (gonioStyle == GonioStyle::trace)
+    {
+        float lastX = 0.0f, lastY = 0.0f;
+        bool haveLast = false;
+        const auto innerF = inner.toFloat().expanded(1.0f);
+        for (int i = 0; i < N; i += stride)
+        {
+            const float L = oscL.getUnchecked(i);
+            const float Rs = oscR.getUnchecked(i);
+            if (! std::isfinite(L) || ! std::isfinite(Rs)) { haveLast = false; continue; }
+            const float Lc = juce::jlimit(-1.0f, 1.0f, L);
+            const float Rc = juce::jlimit(-1.0f, 1.0f, Rs);
+            const float px = cx + (Lc - Rc) * 0.7071067f * R;
+            const float py = cy - (Lc + Rc) * 0.7071067f * R;
+            if (! innerF.contains(px, py)) { haveLast = false; continue; }
+            if (haveLast)
+            {
+                const float alpha = 0.2f + 0.6f * ((float) i / (float) juce::jmax(1, N - 1));
+                g.setColour(PinkXP::pink500.withAlpha(alpha));
+                g.drawLine(lastX, lastY, px, py, 1.0f);
+            }
+            lastX = px; lastY = py; haveLast = true;
+        }
+        return;
+    }
 
     for (int i = 0; i < N; i += stride)
     {
@@ -738,13 +994,31 @@ void PhaseModule::drawWidthBar(juce::Graphics& g, juce::Rectangle<int> area) con
     auto innerBar = barArea.reduced(2);
     if (innerBar.isEmpty()) return;
 
-    // 像素单元（cell=6, gap=1），从左到右填充 width（0..1）
+    // 像素单元（cell=6, gap=1），从左到右填充 width（0..1）；实心样式则连续填充
     const int cellSize = 6;
     const int cellGap  = 1;
     const int step = cellSize + cellGap;
     const int N = juce::jmax(1, (innerBar.getWidth() + cellGap) / step);
     const int litN = juce::jlimit(0, N, (int) std::round(smoothedWidth * N));
 
+    if (barStyle == BarStyle::solid)
+    {
+        const float fillW = (float) innerBar.getWidth() * juce::jlimit(0.0f, 1.0f, smoothedWidth);
+        const float seg[4] = { 0.0f, 0.6f, 0.85f, 1.0f };
+        const juce::Colour cols[3] = { PinkXP::pink200, PinkXP::pink500, PinkXP::sel };
+        for (int s = 0; s < 3; ++s)
+        {
+            const float a = seg[s] * (float) innerBar.getWidth();
+            const float b = juce::jmin(fillW, seg[s + 1] * (float) innerBar.getWidth());
+            if (b > a)
+            {
+                g.setColour(cols[s]);
+                g.fillRect((float) innerBar.getX() + a, (float) innerBar.getY() + 1.0f, b - a,
+                           (float) innerBar.getHeight() - 2.0f);
+            }
+        }
+    }
+    else
     for (int i = 0; i < N; ++i)
     {
         const int x = innerBar.getX() + i * step;
@@ -791,15 +1065,32 @@ void PhaseModule::drawBalanceBar(juce::Graphics& g, juce::Rectangle<int> area) c
     g.setColour(PinkXP::pink300.withAlpha(0.6f));
     g.drawVerticalLine(cx, (float) innerBar.getY(), (float) innerBar.getBottom());
 
+    const float b = juce::jlimit(-1.0f, 1.0f, smoothedBalance);
+
+    if (barStyle == BarStyle::solid)
+    {
+        const float len = std::abs(b) * (float) innerBar.getWidth() * 0.5f;
+        const float y = (float) innerBar.getY() + 2.0f, h = (float) innerBar.getHeight() - 4.0f;
+        if (b < 0.0f)
+        {
+            g.setColour(PinkXP::pink500);
+            g.fillRect((float) cx - len, y, len, h);
+        }
+        else if (b > 0.0f)
+        {
+            g.setColour(PinkXP::pink600);
+            g.fillRect((float) cx, y, len, h);
+        }
+    }
+
     // 像素指示块：从中心向偏移方向填充
     const int cellSize = 4;
     const int cellGap  = 1;
     const int step = cellSize + cellGap;
     const int halfCells = juce::jmax(1, (innerBar.getWidth() / 2) / step);
-    const float b = juce::jlimit(-1.0f, 1.0f, smoothedBalance);
     const int litCells = (int) std::round(std::abs(b) * halfCells);
 
-    for (int i = 0; i < halfCells; ++i)
+    for (int i = 0; i < halfCells && barStyle == BarStyle::segmented; ++i)
     {
         const int xL = cx - (i + 1) * step;
         const int xR = cx + i * step + cellGap;
@@ -858,23 +1149,17 @@ void PhaseModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
     sg.fillRect(staticLayer.getBounds());
 
     auto localContent = juce::Rectangle<int>(0, 0, contentBounds.getWidth(), contentBounds.getHeight());
-    const int barH    = 20;
-    const int barGap  = 2;
-    const int footer  = barH * 2 + barGap;
+    const auto staticAreas = computeAreas (localContent);
+    const auto staticAreaGonio = staticAreas.gonio;
+    const auto staticAreaDial  = staticAreas.dial;
+    const auto staticAreaWidth = staticAreas.width;
+    const auto staticAreaBalance = staticAreas.balance;
 
-    auto upper = localContent.withTrimmedBottom(footer + 6);
-    auto lower = localContent.withTop(upper.getBottom() + 6);
-
-    const int gonioSize = juce::jmin(upper.getWidth() * 5 / 9, upper.getHeight());
-    const auto staticAreaGonio = upper.withWidth(gonioSize);
-    const auto staticAreaDial  = upper.withTrimmedLeft(gonioSize + 8);
-    const auto staticAreaWidth = lower.withHeight(barH);
-    const auto staticAreaBalance = lower.withTrimmedTop(barH + barGap).withHeight(barH);
-
-    PinkXP::drawSunken(sg, staticAreaGonio, PinkXP::content);
+    if (! staticAreaGonio.isEmpty())
+        PinkXP::drawSunken(sg, staticAreaGonio, PinkXP::content);
 
     auto inner = staticAreaGonio.reduced(6);
-    if (inner.getWidth() > 4 && inner.getHeight() > 4)
+    if (! staticAreaGonio.isEmpty() && inner.getWidth() > 4 && inner.getHeight() > 4)
     {
         const float cx = (float) inner.getCentreX();
         const float cy = (float) inner.getCentreY();
@@ -913,9 +1198,12 @@ void PhaseModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
                     juce::Justification::centredLeft, false);
     }
 
-    PinkXP::drawSunken(sg, staticAreaDial, PinkXP::content);
-    PinkXP::drawSunken(sg, staticAreaWidth.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
-    PinkXP::drawSunken(sg, staticAreaBalance.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
+    if (! staticAreaDial.isEmpty())
+        PinkXP::drawSunken(sg, staticAreaDial, PinkXP::content);
+    if (! staticAreaWidth.isEmpty())
+        PinkXP::drawSunken(sg, staticAreaWidth.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
+    if (! staticAreaBalance.isEmpty())
+        PinkXP::drawSunken(sg, staticAreaBalance.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
 }
 
 void PhaseModule::drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const

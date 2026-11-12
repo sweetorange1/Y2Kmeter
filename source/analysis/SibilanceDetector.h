@@ -36,8 +36,15 @@ namespace y2k::sibilance
 class Detector
 {
 public:
+    static constexpr float kDefaultThresholdDb = -35.0f;   // 旧版固定值，作为默认保持行为不变
+
     void prepare (double newSampleRate) noexcept;
     void reset() noexcept;
+
+    // 识别阈值（dBFS，带内包络超过它开门；关门 = 阈值 - 4 dB 迟滞）。
+    //   可在运行时随时改，不重置滤波器 / 包络状态。
+    void  setThresholdDb (float db) noexcept { thresholdDb = db; }
+    float getThresholdDb() const noexcept    { return thresholdDb; }
 
     // 逐样本推进（立体声），返回该样本的齿音强度 0..1
     float pushSample (float left, float right) noexcept;
@@ -80,6 +87,7 @@ private:
     void designFilters() noexcept;
 
     double sampleRate = 48000.0;
+    float  thresholdDb = kDefaultThresholdDb;
 
     Channel ch[2];
 

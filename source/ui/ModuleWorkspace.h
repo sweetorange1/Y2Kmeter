@@ -152,6 +152,66 @@ private:
 };
 
 // ------------------------------------------------------------
+// 退役模块类型 → 存活模块类型 + 外观种子（v3.1 参数系统重构）
+//   · 8 个被合并的 ModuleType 枚举值保留（枚举只追加不重排），但不再有对应的
+//     ModulePanel 实现，也不再进"添加模块"菜单、不再被写出；
+//   · 旧存档 / 旧预设里的退役类型字符串经 stringToModuleType 仍解析成退役枚举，
+//     再由 Editor::createModule 调用本函数换成存活类型，并把 seed 作为"初始参数"
+//     喂给 restoreModuleSpecificState —— 这样合并后的模块能用参数还原旧外观。
+//   · 非退役类型原样返回，seed 保持无效。
+// ------------------------------------------------------------
+ModuleType resolveRetiredModuleType (ModuleType t, juce::ValueTree& seedOut);
+bool       isRetiredModuleType (ModuleType t) noexcept;
+
+// ------------------------------------------------------------
+// ParamDef —— 模块控制面板里的一个参数（v3.1）
+//   模块只需声明参数表 + 提供 getParamValue / setParamValue，面板控件、
+//   布局、悬停提示、窄模块下的排布全部由 ModuleControlDrawer 统一生成。
+//   值一律用 double 传递：choice = 选项下标，toggle = 0/1，slider = 实际值。
+// ------------------------------------------------------------
+struct ParamDef
+{
+    enum class Kind { choice, toggle, slider };
+
+    juce::String id;                 // 稳定标识（同时用作存档键，改名即破坏兼容）
+    juce::String label;              // 英文原文，显示时经 y2k::tr
+    Kind         kind = Kind::toggle;
+    juce::StringArray choices;       // choice：选项原文（经 y2k::tr）
+    double minV = 0.0, maxV = 1.0, step = 0.0;
+    double skewMid = 0.0;            // slider：>0 时把该值放在行程中点
+    juce::String suffix;             // slider 数值后缀（如 " px/s"）
+    juce::String group;              // 分组标题（与上一项不同时画一条标题）
+    juce::String tip;                // 悬停提示正文
+    std::function<bool()> visibleIf; // 为空 = 恒可见
+
+    static ParamDef choice (const juce::String& id, const juce::String& label,
+                            const juce::StringArray& options, const juce::String& tip = {})
+    {
+        ParamDef d; d.id = id; d.label = label; d.kind = Kind::choice;
+        d.choices = options; d.maxV = (double) juce::jmax (0, options.size() - 1);
+        d.step = 1.0; d.tip = tip; return d;
+    }
+    static ParamDef toggle (const juce::String& id, const juce::String& label,
+                            const juce::String& tip = {})
+    {
+        ParamDef d; d.id = id; d.label = label; d.kind = Kind::toggle; d.tip = tip; return d;
+    }
+    static ParamDef slider (const juce::String& id, const juce::String& label,
+                            double lo, double hi, double step, const juce::String& suffix = {},
+                            const juce::String& tip = {}, double skewMid = 0.0)
+    {
+        ParamDef d; d.id = id; d.label = label; d.kind = Kind::slider;
+        d.minV = lo; d.maxV = hi; d.step = step; d.suffix = suffix; d.tip = tip;
+        d.skewMid = skewMid; return d;
+    }
+
+    ParamDef& in (const juce::String& g)              { group = g; return *this; }
+    ParamDef& when (std::function<bool()> f)          { visibleIf = std::move (f); return *this; }
+};
+
+class ModuleControlDrawer; // 定义见 ModulePanel 之后
+
+// ------------------------------------------------------------
 // ModulePanel —— 所有分析模块的 Pink XP 像素窗口基类
 // ------------------------------------------------------------
 class ModulePanel : public juce::Component
@@ -174,6 +234,24 @@ public:
     // 默认实现返回空/无操作 → 不持久化任何状态 = 兼容旧行为及旧存档。
     virtual juce::ValueTree saveModuleSpecificState() const    { return {}; }
     virtual void restoreModuleSpecificState(const juce::ValueTree& state) { juce::ignoreUnused(state); }
+
+    // ---- 模块控制面板（v3.1 参数系统）----
+    //   标题栏的齿轮按钮点开后，在内容区顶部以"覆盖式抽屉"展开参数面板：
+    //   · 抽屉盖在内容之上，不改变画布尺寸（Spectrogram 等改尺寸会清历史）；
+    //   · 展开状态不进存档，加载后一律收起 = 只剩仪表内容；
+    //   · 派生类在构造里 setControlPanelEnabled(true)，并覆写下面三个函数：
+    //       buildParamDefs  —— 声明参数表（id 同时是存档键）
+    //       getParamValue   —— 读当前值（choice=下标，toggle=0/1，slider=实际值）
+    //       setParamValue   —— 写值（模块自己负责存档/重绘/订阅变更）
+    //   · 参数在模块外部被改动（restore / 预设）后调用 refreshControlPanel() 同步控件。
+    bool hasControlPanel() const noexcept { return controlPanelEnabled_ && ! bareMode_; }
+    bool isControlPanelOpen() const noexcept { return controlPanelOpen_; }
+    void setControlPanelOpen (bool open);
+    void refreshControlPanel();
+
+    virtual void   buildParamDefs (std::vector<ParamDef>& out) const { juce::ignoreUnused (out); }
+    virtual double getParamValue  (const juce::String& id) const     { juce::ignoreUnused (id); return 0.0; }
+    virtual void   setParamValue  (const juce::String& id, double v) { juce::ignoreUnused (id, v); }
 
     // 下发当前插件 CPU 占用率（[0..1]），UI 线程调用；
     //   改变足够大时会触发右下角小字区域的局部 repaint。
@@ -290,6 +368,8 @@ public:
     std::function<void(ModulePanel&)> onBoundsChangedByUser;
     std::function<void(ModulePanel&)> onBoundsDragging;   // 拖拽过程中持续回调（吸附预览用）
     std::function<void(ModulePanel&)> onCloseClicked;
+    // v3.1：用户通过控制面板改了某个参数（workspace 订阅 → 触发布局存档）
+    std::function<void(ModulePanel&)> onParamChangedByUser;
     std::function<void(ModulePanel&)> onBroughtToFront;
     std::function<void(ModulePanel&, juce::Point<int> localPos)> onRightClick;  // 右键模块任意位置 → 弹出添加菜单
     std::function<void(ModulePanel&)> onPopOutClicked;  // 弹出/停靠按钮被点击
@@ -328,7 +408,13 @@ protected:
 
     juce::Rectangle<int> getCloseButtonBounds() const;
     juce::Rectangle<int> getPopOutButtonBounds() const;  // 弹出/停靠按钮边界
+    juce::Rectangle<int> getControlButtonBounds() const; // 控制面板（齿轮）按钮边界
     juce::Rectangle<int> getTitleBarBounds()   const;
+
+    // 派生类在构造里调用：声明本模块有控制面板（标题栏出现齿轮按钮）
+    void setControlPanelEnabled (bool enabled) noexcept;
+    // 抽屉当前占用的区域（模块本地坐标；收起时为空）
+    juce::Rectangle<int> getControlDrawerBounds() const;
 
     juce::String titleText;  // 模块标题文字（protected，子类 paint() 可读取）
 
@@ -337,12 +423,19 @@ protected:
     bool closeButtonPressed = false;
     bool popOutButtonHovered_ = false;
     bool popOutButtonPressed_ = false;
+    bool controlButtonHovered_ = false;
+    bool controlButtonPressed_ = false;
 
 private:
     enum class Edge { none, left, right, top, bottom, topLeft, topRight, bottomLeft, bottomRight };
 
     Edge detectEdge(juce::Point<int> pos) const;
     void updateCursorFor(Edge e);
+    void layoutControlDrawer();
+
+    bool controlPanelEnabled_ = false;
+    bool controlPanelOpen_    = false;
+    std::unique_ptr<ModuleControlDrawer> controlDrawer_;
 
     ModuleType   moduleType;
     juce::String moduleId;

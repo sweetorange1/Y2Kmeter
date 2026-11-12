@@ -5,8 +5,10 @@
 #include <vector>
 
 #include "source/analysis/AnalyserHub.h"
+#include "source/analysis/OscHistory.h"
 #include "source/analysis/SibilanceDetector.h"
 #include "source/ui/GlDirectModule.h"
+#include "source/ui/HoldSlowMo.h"
 
 // ==========================================================
 // WaveformModule —— Pink XP 像素风"滚动波形历史"
@@ -76,12 +78,22 @@ public:
     void setColorSource (ColorSource s);
     ColorSource getColorSource() const noexcept { return colorSource; }
 
-    void setFrozen (bool b);
-    bool isFrozen() const noexcept { return frozen; }
+    // ---- v3.1：按住慢放（取代 Freeze 按钮）----
+    //   按住画布左键 → 时间被拉长 50 倍（读指针从长历史里按 1/50 速度喂给列聚合），
+    //   曲线混向残影色；松手直接跳回实时（参照频谱的子弹时间，见 HoldSlowMo.h）。
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseUp   (const juce::MouseEvent& e) override;
 
-    // 持久化：pixelsPerSecond + colorSource + frozen
+    // 持久化：pixelsPerSecond + colorSource + dual + sibThreshold（旧存档的 frozen 键被忽略）
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
+
+    // ---- 控制面板（v3.1）----
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
+    void setDualChannel (bool b);
+    void setSibilanceThresholdDb (float db);
 
     // ---- Toybox（v3.0.0）：人浪（§8.3 / 反馈 C3 加电平读数）----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
@@ -113,6 +125,8 @@ protected:
 
 private:
     // 每个像素列的聚合数据
+    //   单声道模式：A 组 = (L+R)/2 混音（旧外观）。
+    //   双声道模式：A 组 = 左声道，B 组 = 右声道（minV2/maxV2/db2/sib2）。
     struct Column
     {
         float minV  = 0.0f;
@@ -122,6 +136,7 @@ private:
         float sib   = 0.0f;       // 本列齿音强度 0..1（带通 + 包络 + 迟滞门限检测器输出）
         float pitchNote = 60.0f;  // 产出该列时的平滑 MIDI 音高（音域 → 主题色阶位置）
         float pitchConf = 0.0f;   // 产出该列时的音高置信度
+        float minV2 = 0.0f, maxV2 = 0.0f, db2 = -96.0f, sib2 = 0.0f;   // 双声道 B 组（右声道）
     };
 
     // 单列的绘制参数 —— GL 与 legacy 两条路径共用同一套解算，保证观感一致
@@ -132,8 +147,13 @@ private:
         juce::Colour colour { juce::Colours::transparentBlack };
     };
 
+    // chanB = true 取 B 组（双声道的右声道）
     bool resolveColumn (int xi, int w, int innerY, int innerH, int centreY,
-                        ColumnPaint& out) const;
+                        ColumnPaint& out, bool chanB = false) const;
+
+    // 把 inner 区域划分成要绘制的声道区域（单声道 = 1 个，双声道 = 上下 2 个）
+    struct Lane { int y; int h; int cy; bool chanB; };
+    int computeLanes (juce::Rectangle<int> inner, Lane (&lanes)[2]) const;
 
     // ---- 颜色映射 ----
     //   PITCH / LOUD 的透明度由电平 dB 决定；SIB 的"存在感"由齿音强度决定
@@ -179,15 +199,9 @@ private:
     void updateSamplesPerColumn();
     void resetAccumulator();
 
-    // 颜色来源循环：PITCH → LOUD → SIB → PITCH（单一按钮，单击切换）
-    static ColorSource  nextColorSource (ColorSource s) noexcept;
-    static const char*  colorSourceName (ColorSource s) noexcept;
-    void refreshColourButton();
-
     void drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawWaveform  (juce::Graphics& g, juce::Rectangle<int> canvas) const;
 
-    juce::Rectangle<int> getToolbarBounds (juce::Rectangle<int> content) const;
     juce::Rectangle<int> getCanvasBounds  (juce::Rectangle<int> content) const;
 
 
@@ -205,10 +219,15 @@ private:
     float accSumSq = 0.0f;
     float accSibMax = 0.0f;      // 本列内齿音强度的峰值保持
     int   accCount = 0;
+    float accMin2 = 1.0f, accMax2 = -1.0f, accSibMax2 = 0.0f;   // 双声道 B 组
 
     // 齿音检测（带通 + 包络 + 迟滞门限）
     //   逐样本推进，时间常数固定 —— 不随 SPEED / 列宽变化。
+    //   单声道模式用立体声联动的 sibDetector（旧外观）；双声道模式左右各一个，
+    //   各自只看自己的声道。
     y2k::sibilance::Detector sibDetector;
+    y2k::sibilance::Detector sibDetectorL, sibDetectorR;
+    float sibThresholdDb = y2k::sibilance::Detector::kDefaultThresholdDb;
 
     // 列推进
     float samplesPerColumn       = 0.0f;   // = sampleRate / pixelsPerSecond（≥ 1）
@@ -225,34 +244,28 @@ private:
     // 颜色来源 + Spectrum 订阅状态（PITCH 模式才需要频谱）
     ColorSource colorSource      = ColorSource::pitch;
     bool        spectrumRetained = false;
+    bool        dualChannel      = false;   // 双声道：上 L / 下 R 两条波形
 
     // 最近一帧的音高估计（新产出的列会带上它）
     float currentPitchNote = 60.0f;
     float currentPitchConf = 0.0f;
 
-    bool   frozen = false;
+    // 按住慢放
+    HoldSlowMo hold;
+    OscHistory history;
+    bool          holdPendingStart = false;
+    double        holdPlayPos      = 0.0;      // 读指针（绝对样本位置）
+    juce::uint64  holdConsumed     = 0;        // 已喂给列聚合的绝对样本位置
+    std::vector<float> holdBufL, holdBufR;
+
     double cachedSampleRate = 48000.0;   // 缓存 hub 的采样率（避免每帧查询）
-
-    // 顶部按钮
-    //   颜色来源合并为一个按钮：单击循环 PITCH → LOUD → SIB，
-    //   按钮文字始终显示当前模式（省出工具栏宽度）
-    juce::TextButton btnColourMode { "PITCH" };
-    juce::TextButton btnFreeze     { "Freeze" };
-
-    // 右侧 SPEED 滑条（垂直）：单位 px/s（像素列/秒），顶 = 快，底 = 慢
-    juce::Slider speedSlider;
-    juce::Label  speedLabel;
-
-    static constexpr int toolbarH       = 26;
-    static constexpr int speedPanelW    = 48;
-    static constexpr int speedLabelH    = 14;
 
     // ---- 鼠标悬停标尺 ----
     void drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> canvas);
     juce::Point<int> hoverPos;
     bool             hoverActive = false;
 
-    // 主题订阅 token：切换主题时重新下发 SPEED 标签 / 滑条文字颜色
+    // 主题订阅 token（保留：切换主题时 GL 快照要重建）
     int themeSubToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformModule)

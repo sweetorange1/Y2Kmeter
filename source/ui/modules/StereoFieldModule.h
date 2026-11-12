@@ -4,6 +4,7 @@
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/analysis/BandSplit.h"
 
 // ==========================================================
 // StereoFieldModule —— Pink XP 像素风"声相指示"（半圆雷达）
@@ -51,6 +52,14 @@ public:
     // ---- Toybox（v3.0.0）：入侵者（§8.3）----
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
+    // ---- 持久化 + 控制面板（v3.1）----
+    //   dotSize（px）· fadeSpeed（1 = 旧版衰减速度，越大点消失越快）· bandColour（低/中/高 = 红/绿/蓝）
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState (const juce::ValueTree& state) override;
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
 
 protected:
     // ---- GlDirectModuleBase 钩子（v2.9.5 迁移，trail 累积通道）----
@@ -114,8 +123,23 @@ private:
     // 每帧 alpha 衰减系数（越大尾巴越长；1.0 = 永不消失）
     //   v2.9：该值按 60Hz 标定（旧版 15ms 节流下的实际刷新率），实际衰减
     //   = pow(kDecayPerFrame, 累计 dt × 60)，残影时长与帧率无关。
+    //   v3.1：再乘 fadeSpeed 作指数（pow(0.92, dt×60×fadeSpeed)），fadeSpeed=1 即旧行为。
     static constexpr float kDecayPerFrame = 0.92f;
     float trailDtAccumSec = 0.0f;
+
+    // ---- 控制面板参数（构造默认 = 旧外观）----
+    float dotSize    = 2.0f;     // 点边长（px），旧版固定 2×2
+    float fadeSpeed  = 1.0f;     // 点消失速度倍率
+    bool  bandColour = false;    // 频段染色：低 / 中 / 高 = 红 / 绿 / 蓝
+    float crossLowHz = 250.0f, crossHighHz = 4000.0f;
+
+    // 一个待绘的点（GL 与 CPU 回退共用同一份几何 / 配色）
+    struct Pt { float x, y; juce::Colour col; };
+    void collectPoints (const juce::Rectangle<int>& plot, std::vector<Pt>& out) const;
+
+    y2k::bands::BandSplitter splitter;
+    std::vector<float> wLow, wMid, wHigh;
+    double splitterRate = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StereoFieldModule)
 };

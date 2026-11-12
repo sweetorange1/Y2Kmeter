@@ -24,60 +24,17 @@ Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
     setMinSize     (128, 96);
     setDefaultSize (384, 256);
     setTitleText   ("Spectrogram 3D");
-
-    // ---------- 右侧 SPEED 滑条（样式对齐 SpectrogramModule）----------
-    speedSlider.setSliderStyle (juce::Slider::LinearVertical);
-    speedSlider.setRange (10.0, 200.0, 1.0);
-    speedSlider.setValue ((double) pixelsPerSecond, juce::dontSendNotification);
-    speedSlider.setTextBoxStyle (juce::Slider::TextBoxBelow, true, 40, 16);
-    speedSlider.setColour (juce::Slider::textBoxTextColourId,       PinkXP::ink);
-    speedSlider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-    speedSlider.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-    speedSlider.onValueChange = [this]()
-    {
-        pixelsPerSecond = (float) speedSlider.getValue();
-    };
-
-    speedLabel.setJustificationType (juce::Justification::centred);
-    speedLabel.setColour (juce::Label::textColourId, PinkXP::ink);
-    speedLabel.setFont   (PinkXP::getFont (11.0f, juce::Font::bold));
-    speedLabel.setText   ("SPEED", juce::dontSendNotification);
-    speedSlider.setTooltip (y2k::help::make ("Speed",
-        "How fast the landscape rolls back (10 - 200). Slower keeps a longer history."));
-    speedLabel.setTooltip (speedSlider.getTooltip());
-
-    // ---------- 山峰着色按钮（默认按下：跟随主题着色）----------
-    themeColourBtn.setClickingTogglesState (true);
-    themeColourBtn.setToggleState (true, juce::dontSendNotification);
-    themeColourBtn.setTooltip (y2k::help::make ("Tint",
-        "ON: peaks are coloured with the current theme.\n"
-        "OFF: classic blue-to-red heat map."));
-    themeColourBtn.onClick = [this]()
-    {
-        useThemeColours = themeColourBtn.getToggleState();
-        depthPalettesDirty = true;
-        imageCacheDirty    = true;
-        repaint();
-    };
+    setControlPanelEnabled (true);   // v3.1：SPEED 滑条与 TINT 按钮搬进控制面板
 
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
-        speedLabel.setColour  (juce::Label::textColourId,          PinkXP::ink);
-        speedSlider.setColour (juce::Slider::textBoxTextColourId,  PinkXP::ink);
-        speedLabel.repaint();
-        speedSlider.repaint();
         // GL 快照底色跟随主题（瀑布图基色走下方 depthPalettesDirty 重建）
         buildGlSnapshot();
-        themeColourBtn.repaint();
         // 主题切换 → 山峰主题色与背景 fade 目标变化 → 重建色板 + 重绘
         depthPalettesDirty = true;
         imageCacheDirty    = true;
         repaint();
     });
-
-    addAndMakeVisible (speedSlider);
-    addAndMakeVisible (speedLabel);
-    addAndMakeVisible (themeColourBtn);
 
     // 预分配历史缓冲 + 幅度→色板 LUT
     buildMagLut();
@@ -98,25 +55,70 @@ Spectrogram3DModule::~Spectrogram3DModule()
 }
 
 // ----------------------------------------------------------
-// v2.9.3 持久化：TINT（山峰着色模式）按钮状态
+// 持久化 + 控制面板（v3.1）
+//   旧存档只有 useThemeColours（TINT 按钮）：true → Theme，false → Heat。
 // ----------------------------------------------------------
 juce::ValueTree Spectrogram3DModule::saveModuleSpecificState() const
 {
     juce::ValueTree s ("state");
-    s.setProperty ("useThemeColours", useThemeColours, nullptr);
+    s.setProperty ("useThemeColours", useThemeColours(), nullptr);   // 保留旧键，降级打开仍能还原着色
+    s.setProperty ("colourMode", colourMode, nullptr);
+    s.setProperty ("depthDir",   depthDir, nullptr);
+    s.setProperty ("speed",      (double) pixelsPerSecond, nullptr);
     return s;
 }
 
 void Spectrogram3DModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
-    if (! state.hasProperty ("useThemeColours"))
-        return;
+    if (state.hasProperty ("colourMode"))
+        colourMode = juce::jlimit (0, 3, (int) state.getProperty ("colourMode"));
+    else if (state.hasProperty ("useThemeColours"))
+        colourMode = (bool) state.getProperty ("useThemeColours") ? 0 : 1;
 
-    useThemeColours = (bool) state.getProperty ("useThemeColours");
-    themeColourBtn.setToggleState (useThemeColours, juce::dontSendNotification);
-    // 着色模式变化 → 色板与缓存重建
+    if (state.hasProperty ("depthDir")) depthDir = juce::jlimit (0, 1, (int) state.getProperty ("depthDir"));
+    if (state.hasProperty ("speed"))
+        pixelsPerSecond = juce::jlimit (10.0f, 200.0f, (float) (double) state.getProperty ("speed"));
+
+    // 着色模式 / 深度方向变化 → 色板、投影与缓存重建
     depthPalettesDirty = true;
     imageCacheDirty    = true;
+    lastCanvasW = -1;
+    refreshControlPanel();
+    repaint();
+}
+
+void Spectrogram3DModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::choice ("colourMode", "Colours",
+        { "Theme", "Heat", "Grey", "Ice" },
+        "Theme follows the current colour theme. Heat is the classic blue-to-red map. "
+        "Grey is black to white. Ice runs dark blue to white.").in ("Look"));
+    out.push_back (ParamDef::choice ("depthDir", "Depth direction",
+        { "Back-right", "Back-left" },
+        "Which way older slices recede. Back-right is the classic view; Back-left mirrors the landscape.")
+        .in ("Look"));
+    out.push_back (ParamDef::slider ("speed", "Speed", 10.0, 200.0, 1.0, " px/s",
+        "How fast the landscape rolls back. Slower keeps a longer history.").in ("Look"));
+}
+
+double Spectrogram3DModule::getParamValue (const juce::String& id) const
+{
+    if (id == "colourMode") return (double) colourMode;
+    if (id == "depthDir")   return (double) depthDir;
+    if (id == "speed")      return (double) pixelsPerSecond;
+    return 0.0;
+}
+
+void Spectrogram3DModule::setParamValue (const juce::String& id, double v)
+{
+    if (id == "colourMode")      { colourMode = juce::jlimit (0, 3, juce::roundToInt (v)); depthPalettesDirty = true; }
+    else if (id == "depthDir")   { depthDir = juce::jlimit (0, 1, juce::roundToInt (v)); lastCanvasW = -1; }
+    else if (id == "speed")      { pixelsPerSecond = juce::jlimit (10.0f, 200.0f, (float) v); return; }
+    else return;
+
+    imageCacheDirty = true;
+    buildGlSnapshot();
+    repaint();
 }
 
 // ----------------------------------------------------------
@@ -149,16 +151,6 @@ void Spectrogram3DModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 
 void Spectrogram3DModule::layoutContent (juce::Rectangle<int> contentBounds)
 {
-    auto area = contentBounds;
-    auto rightPanel = area.removeFromRight (sliderPanelW);
-    juce::ignoreUnused (area);
-
-    auto labelArea = rightPanel.removeFromTop (14);
-    speedLabel.setBounds  (labelArea);
-    auto btnArea = rightPanel.removeFromBottom (18);
-    speedSlider.setBounds (rightPanel);
-    themeColourBtn.setBounds (btnArea);
-
     // v2.9.5：尺寸守卫 —— 拖动窗口/dock 时 layoutContent 每帧调用，
     //   无条件重建（S3D ~2ms）会把消息线程打满导致交互卡顿
     if (glCanvasSizeChanged (getGlCanvasBounds (contentBounds)))
@@ -266,11 +258,15 @@ void Spectrogram3DModule::recomputeProjection (int canvasW, int canvasH)
     const float originY = (float) canvasH - 4.0f;  // 底部留 4px 给标签
 
     // 写入成员
+    //   Back-left：最新切片靠右、深度向左后方退远 —— 原点右移整段斜移量、斜移取负，
+    //   其余用到 projSlantX / projOriginX 的绘制（GL / Image / 悬停标尺）无需改动。
+    const bool  mirrored = (depthDir == 1);
+    const float slantAbs = juce::jmax (0.3f, slantX);
     projBinWidth = juce::jmax (0.5f, binWidth);
-    projSlantX   = juce::jmax (0.3f, slantX);
+    projSlantX   = mirrored ? -slantAbs : slantAbs;
     projSlantY   = juce::jmax (0.1f, slantY);
     projMaxH     = juce::jmax (1.0f, maxH);
-    projOriginX  = originX;
+    projOriginX  = mirrored ? originX + slantAbs * depthSpanX : originX;
     projOriginY  = originY;
 
     lastCanvasW = canvasW;
@@ -294,7 +290,20 @@ float Spectrogram3DModule::freqToScreenX (int binIndex, int totalBins) const
 juce::Colour Spectrogram3DModule::valueToColour (float t) const noexcept
 {
     t = juce::jlimit (0.0f, 1.0f, t);
-    return useThemeColours ? themeValueToColour (t) : heatValueToColour (t);
+    switch (colourMode)
+    {
+        case 2: return juce::Colour::fromFloatRGBA (t, t, t, 1.0f);   // Grey
+        case 3:                                                        // Ice
+        {
+            const juce::Colour stops[] = { juce::Colour (0xff04081c), juce::Colour (0xff1c4aa0),
+                                           juce::Colour (0xff4cc0e8), juce::Colour (0xfff2fbff) };
+            const float pos = t * 3.0f;
+            const int   i   = juce::jmin (2, (int) pos);
+            return stops[i].interpolatedWith (stops[i + 1], pos - (float) i);
+        }
+        case 1:  return heatValueToColour (t);
+        default: return themeValueToColour (t);
+    }
 }
 
 // ----------------------------------------------------------
@@ -762,7 +771,7 @@ void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
         depthPalettes.resize ((size_t) nRows);
 
     // 深度 fade 目标：主题模式向画布底色融合，热力图模式向深蓝黑融合
-    const juce::Colour fadeTarget = useThemeColours ? PinkXP::content : juce::Colour (8, 8, 24);
+    const juce::Colour fadeTarget = useThemeColours() ? PinkXP::content : juce::Colour (8, 8, 24);
     // 先算基准色板（无深度 fade）
     std::array<juce::Colour, 256> basePalette;
     for (int i = 0; i < 256; ++i)

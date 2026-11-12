@@ -12,7 +12,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.0.7`）
+- **产品名**：`Y2Kmeter` （版本：`3.1.0`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -23,7 +23,9 @@
 
 ### 1.2 主要功能一览
 
-**① 音频分析与计量**（22 个可组合模块 + 1 个已下线模块 `eq`(拼豆频谱)，由 `AnalyserHub` 的 6 路分析统一驱动、按引用计数按需启用）
+**① 音频分析与计量**（可组合模块见 §3.4；v3.1 起响度 / 示波器 / 相位 / 动态四类各合并为一个模块，另有 1 个已下线模块 `eq`(拼豆频谱)；由 `AnalyserHub` 的 6 路分析统一驱动、按引用计数按需启用）
+
+> **v3.1 模块控制面板**：每个模块标题栏有齿轮按钮，点开在模块内展开可收起的参数抽屉（显示项、样式、速度、FFT scale、频段染色、齿音阈值等）；**收起时模块外观与旧版一致**，旧存档与布局预设照常加载。示波器 / 波形历史去掉 Freeze 按钮，改为**按住鼠标慢放 50 倍、松手回实时**。详见 [docs/analysis-modules.md](docs/analysis-modules.md) §7。
 
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
@@ -39,7 +41,7 @@
 - **实时节拍 / 音乐调性**（Tempo / Key：BPM + 大调 / 自然小调 / 和声小调 / 旋律小调 + 关系调 + 可解释置信度；后台线程分析，未加载模块时完全不运行）
 - **（已下线）拼豆频谱**（`Spectrum Perlerbeads` / `ModuleType::eq`，Y2K 主题的拼豆格子频谱，**仅可视化，不做实际 EQ 处理**）：v3.0.6 起因性能问题暂时从产品中移除 —— 不进"添加模块"菜单，旧存档里的 `type="eq"` 节点在加载时**同位置同尺寸**迁移成 `spectrum`。
 
-> 细粒度拆分模块（实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest）复用同一路分析结果，后端零新增计算。
+> v3.1 起，实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest 已作为"项目开关"并入响度 / 相位 / 动态模块，复用同一路分析结果，后端零新增计算。旧存档里的这些类型字符串仍可加载。
 
 **② Milkdrop 可视化**（libprojectM 4 原生 OpenGL）
 
@@ -192,11 +194,11 @@
 ├────────────────────────────────────────────────────────────────┤
 │  Modules 层（source/ui/modules）                                 │
 │    EqModule / LoudnessModule / OscilloscopeModule /             │
-│    OscilloscopeWaveModule / SpectrumModule / PhaseModule /      │
-│    DynamicsModule / WaveformModule / SpectrogramModule /        │
-│    VuMeterModule / VirtuPetModule /                           │
-│    FineSplitModules（LUFS / TruePeak / PhaseCorr / PhaseBal /   │
-│    DynamicsMeters / DynamicsDr / DynamicsCrest）                  │
+│    SpectrumModule / PhaseModule / DynamicsModule /              │
+│    WaveformModule / SpectrogramModule / Spectrogram3DModule /   │
+│    VuMeterModule / StereoField / StereoMap / VirtuPetModule     │
+│    （v3.1：响度 / 示波器 / 相位 / 动态各自合并为单一模块，          │
+│     旧细分类型仅作存档别名保留；每个模块有齿轮「控制面板」）        │
 ├────────────────────────────────────────────────────────────────┤
 │  Perf 层（source/perf）                                          │
 │    PerformanceCounterSystem —— 性能计数系统（默认关闭）           │
@@ -237,13 +239,19 @@
 | [music/KeyEstimator.h/.cpp](/I:/Y2KMeter/source/analysis/music/KeyEstimator.cpp) | `KeyEstimator`：186ms/25% hop 分帧 → 55Hz–5kHz bin 折 12 音级 chroma → 20s 滑动窗口 → KK 轮廓 Pearson 相关（大调 / 自然 / 和声 / 旋律小调共 48 候选）+ 关系调迟滞 + 置信度 |
 | [music/MusicAnalysisEngine.h/.cpp](/I:/Y2KMeter/source/analysis/music/MusicAnalysisEngine.cpp) | 音频线程降混 + 无锁 SPSC 环形缓冲（131072 采样）；后台 `juce::Thread` 消费并发布 `Result`；**首次订阅才分配缓冲/建线程**，无模块时零资源 |
 | [music/MusicAnalysisTypes.h](/I:/Y2KMeter/source/analysis/music/MusicAnalysisTypes.h) | `Result` / `Status` / `Mode` / `KeySpelling`（按调式选常用拼写）/ `RelativeKey`（关系调）—— 纯 C++，供 UI 与测试共用 |
+| [FreqScale.h](/I:/Y2KMeter/source/analysis/FreqScale.h) | **v3.1** `y2k::fscale`：log / mel / linear 频率轴正反映射（"FFT scale"），Hub 取样与 UI 坐标共用，纯 C++ |
+| [BandSplit.h](/I:/Y2KMeter/source/analysis/BandSplit.h) | **v3.1** `y2k::bands::BandSplitter`：LR4 三频段分离 + 固定红绿蓝混色（示波器 X-Y / 立体声场的频段染色），仅开启时计算，纯 C++ |
+| [OscHistory.h](/I:/Y2KMeter/source/analysis/OscHistory.h) | **v3.1** 示波器样本长环形历史（2^18），按住慢放用，仅按住期间分配 / 录制 |
+| [SibilanceDetector.h/.cpp](/I:/Y2KMeter/source/analysis/SibilanceDetector.h) | 齿音检测（5–12 kHz 带通 + 包络 + 迟滞门限）；v3.1 起阈值可设（`setThresholdDb`，默认 -35 dB），供波形历史使用 |
 
 ### 3.3 `source/ui`（UI 框架）
 | 文件 | 关键内容 |
 | --- | --- |
 | [ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | `ModuleType` 枚举 / `ModulePanel` 基类 / `ModuleWorkspace` 主类 / `ThemeSwatchBar` / `HideChromeButton`（**同一个头包含多个类**，同样为绕过 MSVC 串扰）|
 | [ModuleWorkspace.cpp](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | 拖拽 / 网格吸附 / 布局持久化 / 拼豆图片 / 底部 toolbar / 添加菜单 / 鼠标事件 |
-| [ModulePanel.cpp](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 各模块统一的像素窗口：标题栏 + 关闭按钮 + 边缘/角拖拽缩放 + 右下 CPU 小字 |
+| [ModulePanel.cpp](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 各模块统一的像素窗口：标题栏 + 齿轮（控制面板）/ 弹出 / 关闭按钮 + 边缘/角拖拽缩放 + 右下 CPU 小字 |
+| [ModuleControlDrawer.h/.cpp](/I:/Y2KMeter/source/ui/ModuleControlDrawer.h) | **v3.1** 模块控制面板抽屉：覆盖式盖在内容区顶部，由 `ModulePanel::buildParamDefs()` 的参数表生成控件（choice / toggle / slider，分组、条件可见、窄模块换行、超高滚动），自己不存状态 |
+| [HoldSlowMo.h](/I:/Y2KMeter/source/ui/HoldSlowMo.h) | **v3.1** "按住鼠标 = 慢放 50 倍，松手回实时"共享状态机（示波器、波形历史用；频谱保留自己的实现） |
 | [ModulePanel.h](/I:/Y2KMeter/source/ui/ModulePanel.h) | **只是一个兼容 shim**，内部只 `#include "source/ui/ModuleWorkspace.h"` |
 | [PinkXPStyle.h/.cpp](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 主题系统（12 预设 + 生成器 custom）+ 19 色槽位 + 扩展槽（`accent2`/`chartRamp[8]`/`danger`/`warn`/`ok`）+ OKLab 渐变采样 + 桌面纹理 + `PinkXPLookAndFeel` |
 | [source/ui/palette/](/I:/Y2KMeter/source/ui/palette/) | 调色板重构模块：`OkLchUtils`（OKLCH/色域裁剪/WCAG）、`ThemeSpec`（意图参数+分享码）、`PaletteGenerator`（Recipe+护栏，纯 C++）、`ThemeLibrary`（我的主题）、`PalettePanel`（新面板 UI） |
@@ -258,18 +266,17 @@
 | 文件 | 模块 | 数据源 |
 | --- | --- | --- |
 | [EqModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/EqModule.h) | `EqModule`（Y2K 像素频谱可视化，非真实 EQ） | `Spectrum` |
-| [LoudnessModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/LoudnessModule.h) | `LoudnessModule`（LUFS-M/S/I + Peak L/R 五柱） | `Loudness` |
-| [OscilloscopeModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/OscilloscopeModule.h) | `OscilloscopeModule`（Wave / XY / Lissajous，v1.8.4 新增 XY/Lissajous 峰值驱动自动缩放 + 同心标尺环） | `Oscilloscope` |
-| [OscilloscopeWaveModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/OscilloscopeWaveModule.h) | `OscilloscopeWaveModule`（纯波形，L / R / Both 通道选择，v1.8.4 新增合并原 OSc L+R） | `Oscilloscope` |
-| [SpectrumModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrumModule.h) | `SpectrumModule`（对数频谱 + peak hold + slope） | `Spectrum` |
-| [PhaseModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/PhaseModule.h) | `PhaseModule`（Goniometer + Correlation Dial + Width/Balance Bar） | `Phase` + `Oscilloscope` |
-| [DynamicsModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | `DynamicsModule`（Peak/RMS 四柱 + DR + Crest 历史） | `Dynamics` |
-| [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列；左上角**单个按钮循环** PITCH → LOUD → SIB，按钮文字即当前模式） | `Oscilloscope` |
-| [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成） | `Spectrum` |
-| [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
-| [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | 细粒度拆分：`LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` / `VuMeter`（v1.8.4 移除 `OscilloscopeChannel`，由 `OscilloscopeWave` 替代） | 视模块而定 |
-| [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向；**自动缩放**：1 s 周期峰值归一 + 10% 死区，雷达轮廓固定、dB 标签按增益换算 + 渐隐残影） | `Oscilloscope` |
-| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式由顶部按钮切换 —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；工具条右侧一行模式说明；对数频率轴 20Hz–20kHz，384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡） | `Spectrum`（L/R 分路 + mid 单声道路） |
+| [LoudnessModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/LoudnessModule.h) | `LoudnessModule`（**v3.1 合并**原 实时 LUFS / 真峰值 / 响度主表：项目开关 M / S / I / TP / RMS + 样式「灯条 / 数字读数」） | `Loudness` |
+| [OscilloscopeModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/OscilloscopeModule.h) | `OscilloscopeModule`（**v3.1 合并**原 OscilloscopeWave：显示类型 波形 / X-Y / 李萨如，波形可选 L / R / 双声道与配色；X-Y / 李萨如可开**频段染色**；Freeze 按钮取消，改**按住画布慢放 50 倍**；v1.8.4 起 XY/Lissajous 峰值驱动自动缩放 + 同心标尺环） | `Oscilloscope` |
+| [SpectrumModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrumModule.h) | `SpectrumModule`（频谱 + peak hold + slope；**v3.1** 顶部四按钮（Peak / Sharp / 曲线 / 通道）搬进控制面板，另加 **FFT scale**（log / mel / linear）） | `Spectrum` |
+| [PhaseModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/PhaseModule.h) | `PhaseModule`（Goniometer + Correlation Dial + Width/Balance Bar；**v3.1 合并**原相位相关 / 相位平衡：四个项目可独立开关，相位图 / 条形各有样式；按启用项动态订阅 Phase / Oscilloscope） | `Phase` + `Oscilloscope` |
+| [DynamicsModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | `DynamicsModule`（Peak/RMS 柱 + DR short / integrated + Crest 值 + Crest 历史；**v3.1 合并**原 DynamicsMeters / DR / Crest：六个项目可独立开关，读数样式，历史跨度 1–35 s 可调且持久化） | `Dynamics` |
+| [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列；**v3.1** 工具栏 / SPEED 栏 / Freeze 取消：着色来源（Pitch / Loudness / Sibilance）、速度、**双声道上下分轨**、**齿音识别阈值**都在控制面板，按住画布慢放 50 倍） | `Oscilloscope` |
+| [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成；**v3.1** 控制面板：滚动方向 上 / 下 / 左 / 右、shaper、速度、颜色、FFT scale；上 / 下方向走"展开成无环形纹理"路径） | `Spectrum` |
+| [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（**v3.1** 控制面板：颜色模式 Theme / Heat / Grey / Ice、深度方向 右后 / 左后、速度；v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
+| [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | `VuMeterModule`（表盘样式 Classic / Dark / Minimal、指针样式 Line / Wedge / Stereo L/R、信号灯开关）。**v3.1：原 `LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` 类已并入 Loudness / Phase / Dynamics 模块，只剩枚举值作为旧存档别名** | 视模块而定 |
+| [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向；**自动缩放**：1 s 周期峰值归一 + 10% 死区，雷达轮廓固定、dB 标签按增益换算 + 渐隐残影；**v3.1** 控制面板：点大小 1–6 px、点消失速度、频段染色） | `Oscilloscope` |
+| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式在 v3.1 起由控制面板切换（顶部按钮取消），并新增 FFT scale —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；频率轴 20Hz–20kHz（对数 / 梅尔 / 线性），384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡） | `Spectrum`（L/R 分路 + mid 单声道路） |
 | [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET（未启动时 RESET 会自动 START，连续 3 s 无信号自动 reset）；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
@@ -361,6 +368,8 @@
 - 派生类通过 `paintContent` / `layoutContent` 定制绘制与布局；基类负责标题栏/关闭按钮/拖拽缩放/CPU 小字。
 - 尺寸约束：`minSize`（默认 64×64）与 `defaultSize`（每个派生类通过 `setDefaultSize` 声明）。
 - `isVisuallyActiveInWorkspace()`：判断模块是否真的在 workspace 可见区，用于跳过重绘。
+- **控制面板（v3.1）**：`setControlPanelEnabled(true)` 使标题栏出现齿轮；模块覆写 `buildParamDefs / getParamValue / setParamValue`，由 `ModuleControlDrawer` 生成控件；`refreshControlPanel()` 在外部改参数后同步；`ParamDef.id` 即存档键。详见 [docs/analysis-modules.md](docs/analysis-modules.md) §7。
+- **退役类型迁移（v3.1）**：`isRetiredModuleType()` / `resolveRetiredModuleType(type, seedOut)`（`ModuleWorkspace.cpp`）把旧细分类型映射成存活类型 + 外观种子；`Editor::createModule` 是唯一漏斗。`restoreModuleSpecificState` 一律"缺键不覆盖"。
 - `setSoftwarePaintTarget(bool) / isSoftwarePaintTarget()`（v2.9.9 补充）：声明"本次绘制目标是软件 Image"（如 `createComponentSnapshot` 的 hover 预览）。绘制内部持有 GL 纹理 Image 缓存的模块（目前只有 `Spectrogram3DModule`）必须读这个标志并回退软件 Image，否则 macOS 必崩 —— 详见 [docs/rendering-gl.md](docs/rendering-gl.md)「GL Image 消费规则」。
 
 ### 4.6 `PinkXP`（[PinkXPStyle.h](/I:/Y2KMeter/source/ui/PinkXPStyle.h)）
@@ -590,7 +599,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.0.7`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"v3.0.x"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处）。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.1.0`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"v3.0.x"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处）。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定
@@ -612,6 +621,9 @@ main
 | --- | --- |
 | 新增一种分析计算 | `AnalyserHub` 里加 `Kind`、加 pushStereo 分支、加 FrameSnapshot 字段 |
 | 新增一个模块类型 | 1) `ModuleWorkspace.h` 的 `ModuleType` 枚举扩展；2) `moduleTypeToString`/`stringToModuleType`（含向后兼容旧字符串→新类型映射）；3) `getModuleDisplayName`；4) `PluginEditor.cpp` 的 `createModule` 工厂加 case + `availableTypes` 补录；5) `PerformanceCounterSystem.cpp` 的 `moduleTypeNameById` 追加条目（ID 按枚举序数编排）；6) `CMakeLists.txt` 加新 `.h/.cpp`；7) `PROJECT_OVERVIEW.md` 同步更新。**若删除旧类型，参见 [docs/analysis-modules.md](docs/analysis-modules.md)「新模块注册清单」** |
+| 给模块加/改参数（控制面板） | 覆写 `buildParamDefs / getParamValue / setParamValue`，存档读写用"缺键不覆盖"，默认值 = 旧外观；`ParamDef.id` 即存档键不能改名；文案补 `i18n/zh-CN.lang`。步骤见 [docs/analysis-modules.md](docs/analysis-modules.md) §7.11 |
+| 合并 / 退役一个模块类型 | `ModuleType` 枚举保留不删；`ModuleWorkspace.cpp` 的 `isRetiredModuleType` + `resolveRetiredModuleType` 登记"旧类型 → 存活类型 + 外观种子"；从 `availableTypes` 移除。预设表无需改，都经 `createModule` |
+| 改频率轴刻度 | `source/analysis/FreqScale.h`（唯一事实来源）；Hub 取样函数 `scale` 参数 + UI 坐标换算要同步 |
 | 加一个主题 | `PinkXPStyle.h` `ThemeId` 加枚举；`PinkXPStyle.cpp` `getAllThemes()` 追加 `Theme` 结构；`ThemeSwatchBar` 会自动展现 |
 | 自定义主题持久化 | 保存：`Y2KStandaloneApp::saveUiAndAudioState()` 写 `ui.customPrimary`/`ui.customSecondary`；加载：`initialise()` 1.15) 分支检测 `ThemeId::custom` → 读回 `Colour::fromString()` → `applyCustomTheme()` |
 | 修改音频前置增益范围 | `PluginProcessor.cpp` 的 `clampGainDb`（当前 -10..+36 dB）+ `ModuleWorkspace` 里 gainSlider 的 setRange |

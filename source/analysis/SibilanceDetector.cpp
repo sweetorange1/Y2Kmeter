@@ -13,10 +13,10 @@ namespace
     constexpr float kLowPassHz    = 12000.0f;   // 齿音上界（挡掉 12k 以上的"空气声"）
     constexpr float kAttackSec    = 0.001f;     // 1 ms：抓住 's' / 't' 的起振
     constexpr float kReleaseSec   = 0.050f;     // 50 ms：齿音是 50–150 ms 的爆发
-    constexpr float kThresholdDb  = -35.0f;     // 绝对门限（dBFS）
-    constexpr float kHysteresisDb = 4.0f;       // 迟滞：开 -35 / 关 -39，避免边界抖动
+    constexpr float kHysteresisDb = 4.0f;       // 迟滞：开 thr / 关 thr-4，避免边界抖动
     constexpr float kRangeDb      = 12.0f;      // 过门限 12 dB 映射到满色
     constexpr float kSmoothSec    = 0.015f;     // 输出平滑（显示用，避免逐样本跳变）
+    // 绝对门限（dBFS）不再是常量：见 Detector::setThresholdDb（默认 kDefaultThresholdDb = -35）
 
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kButterworthQ = 0.70710678118654752;
@@ -113,16 +113,16 @@ float Detector::pushSample (float left, float right) noexcept
     // 迟滞门限：开门 / 关门两个阈值
     if (! gateOpen)
     {
-        if (bandDb > kThresholdDb)
+        if (bandDb > thresholdDb)
             gateOpen = true;
     }
-    else if (bandDb < kThresholdDb - kHysteresisDb)
+    else if (bandDb < thresholdDb - kHysteresisDb)
     {
         gateOpen = false;
     }
 
     const float target = gateOpen
-        ? std::clamp ((bandDb - kThresholdDb) / kRangeDb, 0.0f, 1.0f)
+        ? std::clamp ((bandDb - thresholdDb) / kRangeDb, 0.0f, 1.0f)
         : 0.0f;
 
     drive += smoothCoeff * (target - drive);

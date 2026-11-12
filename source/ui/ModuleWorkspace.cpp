@@ -271,6 +271,87 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
 }
 
 // ==========================================================
+// 退役类型 → 存活类型 + 外观种子（v3.1 参数系统重构）
+//   种子里的键 = 存活模块 restoreModuleSpecificState 认的键，缺省键保持模块
+//   构造默认值（= 存活类型自己的旧外观）。键名约定见各模块的 buildParamDefs。
+// ==========================================================
+bool isRetiredModuleType (ModuleType t) noexcept
+{
+    switch (t)
+    {
+        case ModuleType::lufsRealtime:
+        case ModuleType::truePeak:
+        case ModuleType::oscilloscopeWave:
+        case ModuleType::phaseCorrelation:
+        case ModuleType::phaseBalance:
+        case ModuleType::dynamicsMeters:
+        case ModuleType::dynamicsDr:
+        case ModuleType::dynamicsCrest:
+            return true;
+        default:
+            return false;
+    }
+}
+
+ModuleType resolveRetiredModuleType (ModuleType t, juce::ValueTree& seedOut)
+{
+    auto seed = [&] (std::initializer_list<std::pair<const char*, juce::var>> kv)
+    {
+        seedOut = juce::ValueTree ("state");
+        for (const auto& p : kv)
+            seedOut.setProperty (p.first, p.second, nullptr);
+    };
+
+    switch (t)
+    {
+        // ---- 响度类 → loudness ----
+        case ModuleType::lufsRealtime:
+            seed ({ { "style", 1 }, { "itemM", true }, { "itemS", true }, { "itemI", true },
+                    { "itemTp", false }, { "itemRms", false } });
+            return ModuleType::loudness;
+        case ModuleType::truePeak:
+            seed ({ { "style", 1 }, { "itemM", false }, { "itemS", false }, { "itemI", false },
+                    { "itemTp", true }, { "itemRms", true } });
+            return ModuleType::loudness;
+
+        // ---- 示波器类 → oscilloscope ----
+        case ModuleType::oscilloscopeWave:
+            seed ({ { "displayMode", 0 }, { "waveChannel", 2 }, { "waveColour", 1 } });
+            return ModuleType::oscilloscope;
+
+        // ---- 相位类 → phase ----
+        case ModuleType::phaseCorrelation:
+            seed ({ { "itemGonio", false }, { "itemCorr", true }, { "itemWidth", false },
+                    { "itemBal", false } });
+            return ModuleType::phase;
+        case ModuleType::phaseBalance:
+            seed ({ { "itemGonio", false }, { "itemCorr", false }, { "itemWidth", true },
+                    { "itemBal", true }, { "barStyle", 1 } });
+            return ModuleType::phase;
+
+        // ---- 动态类 → dynamics ----
+        case ModuleType::dynamicsMeters:
+            seed ({ { "itemPeak", true }, { "itemRms", true }, { "itemDrShort", false },
+                    { "itemDrInt", false }, { "itemCrest", false }, { "itemHist", false } });
+            return ModuleType::dynamics;
+        case ModuleType::dynamicsDr:
+            seed ({ { "itemPeak", false }, { "itemRms", false }, { "itemDrShort", true },
+                    { "itemDrInt", true }, { "itemCrest", true }, { "itemHist", false },
+                    { "style", 1 } });
+            return ModuleType::dynamics;
+        case ModuleType::dynamicsCrest:
+            seed ({ { "itemPeak", false }, { "itemRms", false }, { "itemDrShort", false },
+                    { "itemDrInt", false }, { "itemCrest", false }, { "itemHist", true },
+                    { "histSpan", 20.0 } });
+            return ModuleType::dynamics;
+
+        default:
+            seedOut = {};
+            return t;
+    }
+}
+
+// ==========================================================
 // PerlerImageLayer —— 每张拼豆贴画对应一个子 Component
 //   · 与 ModulePanel 平级参与 z-order，从而实现"图片与模块平级的图层关系"
 //   · 鼠标事件由 layer 拦截（setInterceptsMouseClicks(true, false)），
@@ -1528,6 +1609,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
         updateDragPreview(p);
     };
     panel.onCloseClicked   = [this](ModulePanel& p) { removeModule(p); };
+    panel.onParamChangedByUser = [this](ModulePanel&) { notifyLayoutChanged(); };
     // v3.0.1：抬头双击 —— 浮动态交给 Editor（浮动窗口伪全屏），嵌入式就地最大化
     panel.onTitleDoubleClicked = [this](ModulePanel& p)
     {

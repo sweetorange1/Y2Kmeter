@@ -72,11 +72,20 @@ public:
     void setSharpEnabled(bool b);
     bool isSharpEnabled() const noexcept { return sharpEnabled; }
 
-    // 持久化：peakHold / sharp / smooth / channel
+    // 持久化：peakHold / sharp / curve / channel / fftScale
     //   Slope 已固定为常开（按钮移除）：旧存档里的 "slope" 属性一律忽略，
     //   直接按新版行为（始终做 4.5dB/oct 补偿）强制适应。
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
+
+    // ---- 控制面板（v3.1）：原顶部四个按钮 + FFT scale 都搬进参数面板 ----
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
+
+    // ---- FFT scale（横坐标刻度）：Log（默认，旧外观）/ Mel / Linear ----
+    void setFftScale (y2k::fscale::Scale s);
+    y2k::fscale::Scale getFftScale() const noexcept { return fftScale; }
 
     // ---- Toybox（v3.0.0）：拨弦与音名（§8.3 / E.4.1）----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
@@ -121,13 +130,19 @@ private:
     void drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canvas) const;
 
     // ---- 布局 ----
-    juce::Rectangle<int> getToolbarBounds(juce::Rectangle<int> content) const;
     juce::Rectangle<int> getCanvasBounds (juce::Rectangle<int> content) const;
 
-    // 频率 → X 像素坐标（对数）
-    static float freqToX(float freqHz, juce::Rectangle<int> canvas);
+    // 频率 → X 像素坐标（按 fftScale：Log / Mel / Linear）
+    float freqToX(float freqHz, juce::Rectangle<int> canvas) const;
     // X 像素坐标 → 频率
-    static float xToFreq(float x, juce::Rectangle<int> canvas);
+    float xToFreq(float x, juce::Rectangle<int> canvas) const;
+    // 频率 → [0,1] 的横向位置（freqToX / 曲线定位共用）
+    float unitOfHz(float freqHz) const noexcept
+    {
+        return (float) y2k::fscale::toUnit (fftScale, (double) freqHz, (double) minFreqHz, (double) maxFreqHz);
+    }
+    // 当前刻度下的纵向网格频率（major 带实线/标签，minor 为淡线）
+    void gridFreqs (std::vector<float>& major, std::vector<float>& minor) const;
     // dBFS → Y 像素坐标
     float dbToY(float db, juce::Rectangle<int> canvas) const;
 
@@ -166,6 +181,7 @@ private:
     std::vector<float> slopeOffsetDb;
     int    slopeCacheSize = 0;
     double slopeCacheSampleRate = 0.0;
+    y2k::fscale::Scale slopeCacheScale = y2k::fscale::Scale::log;
 
     // paintContent 是 const 路径，使用 mutable 缓存承接曲线点数组。
     mutable std::vector<juce::Point<float>> curvePts;
@@ -234,14 +250,8 @@ private:
     void renderStaticLayer (juce::Rectangle<int> content, float physicalScale) const;
     static juce::uint32 computeThemeColourKey() noexcept;
 
-    // ---- 顶部工具栏 ----
-    juce::TextButton btnPeak    { "Peak"   };
-    juce::TextButton btnSharp   { "Sharp"  };
-    juce::TextButton btnSmooth  { "Smooth" };
-    juce::TextButton btnChannel { "MID"    };   // 文字随模式变化：MID / M+S / L/R
-    static constexpr int toolbarH = 26;
-    void updateChannelButton();
-    void updateCurveButton();                    // Smooth / Semi / Raw 文字
+    // ---- 控制面板参数 ----
+    y2k::fscale::Scale fftScale = y2k::fscale::Scale::log;   // 构造默认 = 旧外观
 
     // ---- 鼠标悬停标尺 ----
     void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);

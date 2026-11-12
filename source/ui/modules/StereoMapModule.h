@@ -4,6 +4,7 @@
 #include <vector>
 #include "source/ui/GlDirectModule.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/analysis/FreqScale.h"
 
 // ==========================================================
 // StereoMapModule
@@ -40,9 +41,15 @@ public:
     void setMode (Mode m);
     Mode getMode() const noexcept { return mode; }
 
-    // 模式写入布局存档（"pan" / "cancel"）
+    // 模式 + FFT scale 写入布局存档（mode: "pan" / "cancel"；fftScale: 0 Log / 1 Mel / 2 Linear）
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
+
+    // ---- 控制面板（v3.1）：原顶部 PAN/MONO 按钮 + FFT scale ----
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
+    void setFftScale (y2k::fscale::Scale s);
 
     // 鼠标悬停标尺：绘图区内十字线 + 频率/纵轴坐标读数
     void mouseMove (const juce::MouseEvent& e) override;
@@ -63,11 +70,8 @@ protected:
 
 private:
     void computeStereoMap (float dtSec);
-    void applyModeToButton();
     void drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawCurve (juce::Graphics& g, juce::Rectangle<int> plot) const;
-    // 工具条右侧的一行模式说明（字号按可用宽度收缩，窄模块不裁字）
-    void drawToolbarHint (juce::Graphics& g) const;
 
     // 悬停标尺 / 点击读数
     void drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> canvas);
@@ -75,8 +79,11 @@ private:
     juce::String makeDataReadout (float x, juce::Rectangle<int> plot) const;
     int  bandIndexForX (float x, juce::Rectangle<int> plot) const;
 
-    static float freqAt (float norm01) noexcept;
-    static float normFromFreq (float freqHz) noexcept;
+    // 频率轴（按 fftScale：Log / Mel / Linear，范围 kMinFreq ~ kMaxFreq）
+    float freqAt (float norm01) const noexcept;
+    float normFromFreq (float freqHz) const noexcept;
+    // 纵向网格线频率 / 底部标签频率（随刻度变化；Log 下与旧版逐项一致）
+    void gridFreqs (std::vector<float>& lines, std::vector<float>& labels) const;
     static float xForNorm (float norm01, juce::Rectangle<int> plot) noexcept;
     static float normForX (float x, juce::Rectangle<int> plot) noexcept;
     static float panForY (float y, juce::Rectangle<int> plot) noexcept;
@@ -89,10 +96,7 @@ private:
     static juce::String formatPan (float pan);
     static juce::String formatPercent (float v);
 
-    // 工具条：位于凹陷画布之上，画布太矮时隐藏（把空间留给曲线）
-    static int toolbarHeightFor (juce::Rectangle<int> contentBounds) noexcept;
-    juce::Rectangle<int> getToolbarBounds (juce::Rectangle<int> contentBounds) const;
-
+    // v3.1：顶部工具条取消，画布 = 整个内容区（留 2px 边距）
     static juce::Rectangle<int> canvasFromContent (juce::Rectangle<int> contentBounds) noexcept;
     juce::Rectangle<int> canvasBounds() const;
     juce::Rectangle<int> getPlotBounds (juce::Rectangle<int> canvas) const;
@@ -109,15 +113,13 @@ private:
     std::vector<float> cancelByBand;   // 0 = mono 兼容 / 1 = 完全抵消（真实值，绘制时再放大）
 
     Mode mode = Mode::pan;
-    juce::TextButton btnMode { "PAN" };
+    y2k::fscale::Scale fftScale = y2k::fscale::Scale::log;   // 构造默认 = 旧外观
 
     // 鼠标悬停态（标尺）
     juce::Point<int> hoverPos;
     bool             hoverActive = false;
 
     int cachedBandCount = 0;
-
-    static constexpr int kToolbarH = 18;   // 逻辑像素（按 UI 密度缩放）
 
     // MONO 模式的满幅标定：真实抵消量达到这个比例时曲线就顶到天花板。
     //   0.5 = "抵消一半就满"。调小 → 更敏感（更容易顶满），调大 → 更迟钝。

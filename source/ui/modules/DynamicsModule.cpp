@@ -1,12 +1,18 @@
 #include "source/ui/modules/DynamicsModule.h"
+#include "source/ui/modules/MeterWidgets.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
-// DynamicsModule
+// DynamicsModule（动态模块）
 // ==========================================================
+
+juce::Colour DynamicsModule::dbToColour (float db)
+{
+    return y2k::meter::dbColour (db);
+}
 
 DynamicsModule::DynamicsModule(AnalyserHub& h)
     : ModulePanel(ModuleType::dynamics),
@@ -18,20 +24,156 @@ DynamicsModule::DynamicsModule(AnalyserHub& h)
 
     setMinSize(64, 64);
     setDefaultSize(384, 256); // dynamics 6×4 大格
+    setControlPanelEnabled (true);
 
     bPeakL.label = "PK L";
     bPeakR.label = "PK R";
     bRmsL .label = "RMS L";
     bRmsR .label = "RMS R";
 
-    crestHist.fill(0.0f);
-    lastTickTime = juce::Time::getCurrentTime();
+    crestHist.assign ((size_t) crestHistLen, 0.0f);
 }
 
 DynamicsModule::~DynamicsModule()
 {
     hub.removeFrameListener(this);
     hub.release(AnalyserHub::Kind::Dynamics);
+}
+
+// ----------------------------------------------------------
+// 持久化 / 控制面板
+// ----------------------------------------------------------
+juce::ValueTree DynamicsModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s ("state");
+    s.setProperty ("itemPeak",    items.peak,    nullptr);
+    s.setProperty ("itemRms",     items.rms,     nullptr);
+    s.setProperty ("itemDrShort", items.drShort, nullptr);
+    s.setProperty ("itemDrInt",   items.drInteg, nullptr);
+    s.setProperty ("itemCrest",   items.crest,   nullptr);
+    s.setProperty ("itemHist",    items.hist,    nullptr);
+    s.setProperty ("style",       (int) readoutStyle, nullptr);
+    s.setProperty ("histSpan",    (double) histSpanSec, nullptr);
+    return s;
+}
+
+void DynamicsModule::restoreModuleSpecificState (const juce::ValueTree& state)
+{
+    // 缺键 = 保持当前值（构造默认 = 旧 Dynamics 外观；种子只覆盖它关心的键）
+    auto getB = [&] (const char* k, bool& dst)
+    {
+        if (state.hasProperty (k)) dst = (bool) state.getProperty (k);
+    };
+
+    Items it = items;
+    getB ("itemPeak", it.peak);       getB ("itemRms", it.rms);
+    getB ("itemDrShort", it.drShort); getB ("itemDrInt", it.drInteg);
+    getB ("itemCrest", it.crest);     getB ("itemHist", it.hist);
+    if (! it.any()) it = Items();   // 防御：存档里全关 → 回到默认
+
+    if (it.hist && ! items.hist)
+    {
+        std::fill (crestHist.begin(), crestHist.end(), 0.0f);
+        crestHistWrite = 0;
+        crestHistAccum = 0.0f;
+    }
+    items = it;
+
+    if (state.hasProperty ("style"))
+        readoutStyle = (int) state.getProperty ("style") == 1 ? ReadoutStyle::barReadout
+                                                              : ReadoutStyle::bigDigits;
+    if (state.hasProperty ("histSpan"))
+        histSpanSec = juce::jlimit (1.0f, kMaxSpanSec, (float) (double) state.getProperty ("histSpan"));
+
+    layoutContent (getContentBounds());
+    refreshControlPanel();
+    repaint();
+}
+
+void DynamicsModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::toggle ("itemPeak", "Peak bars (L / R)",
+        "Sample-peak level bars for the left and right channel, with a slowly falling hold line.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemRms", "RMS bars (L / R)",
+        "Average (RMS) level bars for the left and right channel.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemDrShort", "DR short-term",
+        "Dynamic range of the recent programme: loudest 20% against the average.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemDrInt", "DR integrated",
+        "Dynamic range over the whole programme. Resets after a long silence.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemCrest", "Crest factor",
+        "Peak minus RMS in dB right now. Low = squashed, high = punchy.").in ("Show"));
+    out.push_back (ParamDef::toggle ("itemHist", "Crest history graph",
+        "Scrolling graph of the crest factor over time.").in ("Show"));
+
+    out.push_back (ParamDef::choice ("style", "DR readout style",
+        { "Big digits", "Bars + digits" },
+        "Big digits: large numbers that fill the cell. Bars + digits: smaller numbers with a progress bar.")
+        .in ("Style").when ([this] { return items.drCount() > 0; }));
+    out.push_back (ParamDef::slider ("histSpan", "History span", 1.0, kMaxSpanSec, 1.0, " s",
+        "How much time the crest history graph covers.")
+        .in ("Style").when ([this] { return items.hist; }));
+}
+
+double DynamicsModule::getParamValue (const juce::String& id) const
+{
+    if (id == "itemPeak")    return items.peak ? 1.0 : 0.0;
+    if (id == "itemRms")     return items.rms ? 1.0 : 0.0;
+    if (id == "itemDrShort") return items.drShort ? 1.0 : 0.0;
+    if (id == "itemDrInt")   return items.drInteg ? 1.0 : 0.0;
+    if (id == "itemCrest")   return items.crest ? 1.0 : 0.0;
+    if (id == "itemHist")    return items.hist ? 1.0 : 0.0;
+    if (id == "style")       return (double) (int) readoutStyle;
+    if (id == "histSpan")    return (double) histSpanSec;
+    return 0.0;
+}
+
+void DynamicsModule::setParamValue (const juce::String& id, double v)
+{
+    const bool on = v >= 0.5;
+    Items it = items;
+
+    if      (id == "itemPeak")    it.peak = on;
+    else if (id == "itemRms")     it.rms = on;
+    else if (id == "itemDrShort") it.drShort = on;
+    else if (id == "itemDrInt")   it.drInteg = on;
+    else if (id == "itemCrest")   it.crest = on;
+    else if (id == "itemHist")    it.hist = on;
+    else if (id == "style")
+    {
+        readoutStyle = juce::roundToInt (v) == 1 ? ReadoutStyle::barReadout : ReadoutStyle::bigDigits;
+        repaint();
+        return;
+    }
+    else if (id == "histSpan")
+    {
+        histSpanSec = juce::jlimit (1.0f, kMaxSpanSec, (float) v);
+        repaint();
+        return;
+    }
+    else return;
+
+    if (! it.any())
+        return;   // 至少保留一项，避免出现空白模块
+
+    if (it.hist && ! items.hist)
+    {
+        std::fill (crestHist.begin(), crestHist.end(), 0.0f);
+        crestHistWrite = 0;
+        crestHistAccum = 0.0f;
+    }
+    items = it;
+    layoutContent (getContentBounds());
+    repaint();
+}
+
+bool DynamicsModule::drRowEnabled (int row) const noexcept
+{
+    return row == rowShort ? items.drShort : row == rowInteg ? items.drInteg : items.crest;
+}
+
+float DynamicsModule::drRowValue (int row) const noexcept
+{
+    return row == rowShort ? smoothedShortDR : row == rowInteg ? smoothedIntegDR : smoothedCrest;
 }
 
 // ----------------------------------------------------------
@@ -42,16 +184,12 @@ void DynamicsModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! isShowing()) return;
     if (! frame.has (AnalyserHub::Kind::Dynamics)) return;
 
-    // v2.9：使用分发器提供的高精度帧间隔（旧实现用 Time::getCurrentTime 整数毫秒，
-    //   120Hz 下在 8/9ms 间跳动，平滑会抖）
+    // v2.9：使用分发器提供的高精度帧间隔
     const float dtSec = frame.dtSec;
-    lastTickTime = juce::Time::getCurrentTime();
 
     const auto& s = frame.dynamics;
-    bPeakL.update(s.peakL, dtSec);
-    bPeakR.update(s.peakR, dtSec);
-    bRmsL .update(s.rmsL,  dtSec);
-    bRmsR .update(s.rmsR,  dtSec);
+    if (items.peak) { bPeakL.update(s.peakL, dtSec); bPeakR.update(s.peakR, dtSec); }
+    if (items.rms)  { bRmsL .update(s.rmsL,  dtSec); bRmsR .update(s.rmsR,  dtSec); }
 
     auto smoothNum = [dtSec](float cur, float target, float a)
     {
@@ -62,15 +200,34 @@ void DynamicsModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     smoothedIntegDR = smoothNum(smoothedIntegDR, s.integratedDR, 0.05f);
     smoothedCrest   = smoothNum(smoothedCrest,   s.crest,        0.3f);
 
-    // 历史带写入（按时间推进，帧率无关）
-    crestHistAccum += dtSec * y2k::pacing::kRefHz;
-    int pushes = juce::jmin ((int) crestHistAccum, crestHistLen);
-    crestHistAccum -= (float) (int) crestHistAccum;
-    const float crestVal = juce::jlimit(0.0f, 40.0f, s.crest);
-    while (pushes-- > 0)
+    // 带进度条读数样式的闪白 / 心跳（数值刚变化时闪一下）
+    if (readoutStyle == ReadoutStyle::barReadout && items.drCount() > 0)
     {
-        crestHist[(size_t) crestHistWrite] = crestVal;
-        crestHistWrite = (crestHistWrite + 1) % crestHistLen;
+        const float th = juce::jmax (0.05f, dtSec * y2k::pacing::kRefHz);
+        for (int r = 0; r < numDrRows; ++r)
+        {
+            const float cur = drRowValue (r);
+            if (std::abs (cur - prevDr[r]) > 0.3f * th) flash[r] = 1.0f;
+            prevDr[r] = cur;
+            flash[r] = juce::jmax (0.0f, flash[r] - y2k::pacing::stepForDt (0.08f, dtSec));
+        }
+        pulsePhase += y2k::pacing::stepForDt (0.24f, dtSec);
+        while (pulsePhase > juce::MathConstants<float>::twoPi)
+            pulsePhase -= juce::MathConstants<float>::twoPi;
+    }
+
+    // 历史带写入（按时间推进，帧率无关；仅历史开启时）
+    if (items.hist)
+    {
+        crestHistAccum += dtSec * (float) kHistRate;
+        int pushes = juce::jmin ((int) crestHistAccum, crestHistLen);
+        crestHistAccum -= (float) (int) crestHistAccum;
+        const float crestVal = juce::jlimit(0.0f, 40.0f, s.crest);
+        while (pushes-- > 0)
+        {
+            crestHist[(size_t) crestHistWrite] = crestVal;
+            crestHistWrite = (crestHistWrite + 1) % crestHistLen;
+        }
     }
 
     // v2.9.2：读数类模块 30Hz 重绘（数据每帧更新，仅重绘分频）
@@ -80,32 +237,59 @@ void DynamicsModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 }
 
 // ----------------------------------------------------------
-// layoutContent
+// layoutContent —— 只排启用的区段（四项全开 = 旧 Dynamics 布局）
 // ----------------------------------------------------------
 void DynamicsModule::layoutContent(juce::Rectangle<int> content)
 {
-    // 布局优先级（窗口拉大时）：
-    //   · 左侧 Meters 固定 160px（四柱表够用即可）
-    //   · 中间 DR 数字区固定约 180px（容纳 22pt 大数字 + 单位，再大没有视觉收益）
-    //   · 右侧 CREST HISTORY 图吃掉所有剩余宽度 —— 这样拉宽窗口时优先放大右侧图
-    //   · 两处 6px 间隙
-    const int metersW = 160;
-    const int drW     = 180;
+    areaMeters = areaDr = areaCrest = {};
+
+    const bool hasM = items.barCount() > 0;
+    const bool hasD = items.drCount() > 0;
+    const bool hasH = items.hist;
+    const int  n    = (hasM ? 1 : 0) + (hasD ? 1 : 0) + (hasH ? 1 : 0);
+    if (n == 0) return;
+
     constexpr int gap = 6;
 
-    // 兜底：窗口极窄时至少给 Crest 120px
-    const int minCrestW = 120;
-    int crestW = content.getWidth() - metersW - drW - gap * 2;
-    if (crestW < minCrestW)
+    if (n == 1)
     {
-        // 窗口不够宽时退化：按原"DR 吸收剩余"策略，但已被 setMinSize 保障不太会触发
-        crestW = juce::jmax(minCrestW, content.getWidth() * 3 / 10);
+        (hasM ? areaMeters : hasD ? areaDr : areaCrest) = content;
+        return;
     }
 
-    areaMeters = content.withWidth(metersW);
-    areaCrest  = content.withX(content.getRight() - crestW).withWidth(crestW);
-    areaDr     = content.withTrimmedLeft(metersW + gap)
-                        .withTrimmedRight(crestW + gap);
+    // 每根柱 40px（四柱 = 旧版 160px），DR 区 180px
+    const int metersW = 40 * juce::jmax (1, items.barCount());
+    const int drW     = 180;
+
+    if (hasH)
+    {
+        // 与旧 Dynamics 同一套：历史带吃剩余宽度，窗口过窄时兜底 120px 或 30%
+        const int leftW = (hasM ? metersW : 0) + (hasD ? drW : 0) + ((hasM && hasD) ? gap : 0);
+        const int minCrestW = 120;
+        int crestW = content.getWidth() - leftW - gap;
+        if (crestW < minCrestW)
+            crestW = juce::jmax (minCrestW, content.getWidth() * 3 / 10);
+
+        areaCrest = content.withX (content.getRight() - crestW).withWidth (crestW);
+
+        if (hasM && hasD)
+        {
+            areaMeters = content.withWidth (metersW);
+            areaDr     = content.withTrimmedLeft (metersW + gap).withTrimmedRight (crestW + gap);
+        }
+        else
+        {
+            auto left = content.withTrimmedRight (crestW + gap);
+            (hasM ? areaMeters : areaDr) = left;
+        }
+        return;
+    }
+
+    // 没有历史带：柱组与 DR 区按权重瓜分
+    const int total = content.getWidth() - gap;
+    const int mW = juce::jmax (30, total * metersW / (metersW + drW));
+    areaMeters = content.withWidth (mW);
+    areaDr     = content.withTrimmedLeft (mW + gap);
 }
 
 // ----------------------------------------------------------
@@ -149,7 +333,8 @@ void DynamicsModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     g.fillRect(content);
 
     drawMeterGroup(g, areaMeters);
-    drawDrPanel   (g, areaDr);
+    if (readoutStyle == ReadoutStyle::barReadout) drawDrReadouts (g, areaDr);
+    else                                          drawDrBigDigits (g, areaDr);
     drawCrestBand (g, areaCrest);
 
     // 鼠标悬停标尺（Crest 历史带）
@@ -162,7 +347,7 @@ void DynamicsModule::mouseMove(const juce::MouseEvent& e)
     ModulePanel::mouseMove(e);
 
     const auto pos    = e.getPosition();
-    const bool inside = areaCrest.contains(pos);
+    const bool inside = items.hist && areaCrest.contains(pos) && ! getControlDrawerBounds().contains (pos);
     if (inside != hoverActive || (inside && pos != hoverPos))
     {
         hoverActive = inside;
@@ -192,10 +377,10 @@ void DynamicsModule::drawHoverRuler(juce::Graphics& g)
     if (plot.isEmpty() || !plot.contains(hoverPos))
         return;
 
-    // X → 相对时间（120 帧 × 30Hz ≈ 4s，最右=当前，负=过去）
+    // X → 相对时间（最右=当前，负=过去；横轴跨度 = 历史跨度参数）
     const float t = (float)(hoverPos.x - plot.getX())
                   / juce::jmax(1, plot.getWidth());
-    const float timeSec = (t - 1.0f) * 4.0f;
+    const float timeSec = (t - 1.0f) * histSpanSec;
 
     // Y → crest 值（0 ~ 30 dB）
     const float norm = juce::jlimit(0.0f, 1.0f,
@@ -208,20 +393,23 @@ void DynamicsModule::drawHoverRuler(juce::Graphics& g)
 }
 
 // ----------------------------------------------------------
-// 四柱 Meter
+// 柱组（按启用项取 PK L/R、RMS L/R）
 // ----------------------------------------------------------
 void DynamicsModule::drawMeterGroup(juce::Graphics& g, juce::Rectangle<int> area) const
 {
     if (area.isEmpty()) return;
 
+    const MeterBar* bars[4];
+    int barCount = 0;
+    if (items.peak) { bars[barCount++] = &bPeakL; bars[barCount++] = &bPeakR; }
+    if (items.rms)  { bars[barCount++] = &bRmsL;  bars[barCount++] = &bRmsR;  }
+    if (barCount == 0) return;
+
     const int gap = 4;
-    const int barCount = 4;
     const int labelH = 14;
 
     auto barRow = area.withTrimmedBottom(labelH);
     const int barW = juce::jmax(8, (barRow.getWidth() - gap * (barCount - 1)) / barCount);
-
-    const MeterBar* bars[4] = { &bPeakL, &bPeakR, &bRmsL, &bRmsR };
 
     for (int i = 0; i < barCount; ++i)
     {
@@ -229,7 +417,6 @@ void DynamicsModule::drawMeterGroup(juce::Graphics& g, juce::Rectangle<int> area
                                barRow.getY(), barW, barRow.getHeight());
         drawSingleBar(g, r, *bars[i]);
 
-        // 标签
         g.setColour(PinkXP::ink);
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
         PinkXP::drawCachedText(g, bars[i]->label,
@@ -254,9 +441,7 @@ void DynamicsModule::drawSingleBar(juce::Graphics& g, juce::Rectangle<int> r, co
 
     for (int row = 0; row < rows; ++row)
     {
-        // row=0 在屏幕顶部（高电平区）→ 0 dB → 红色；
-        // row=rows-1 在屏幕底部（低电平区）→ -60 dB → 绿色。
-        // 之前 rowDb 的 jmap 方向写反了，导致上绿下红，这里翻转一下。
+        // row=0 在屏幕顶部（高电平区）→ 0 dB → 红色；row=rows-1 → -60 dB → 绿色
         const float rowNorm = (float) row / (float) juce::jmax(1, rows - 1);
         const float rowDb   = juce::jmap(rowNorm, 0.0f, 1.0f, 0.0f, -60.0f);
         const bool  lit     = (rows - 1 - row) < litRows;
@@ -278,52 +463,42 @@ void DynamicsModule::drawSingleBar(juce::Graphics& g, juce::Rectangle<int> r, co
 }
 
 // ----------------------------------------------------------
-// DR 面板：SHORT / INTEG 两个大数字 + CREST 小数字
+// DR 面板·大数字样式（旧 Dynamics）：启用行等分高度
 // ----------------------------------------------------------
-void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) const
+void DynamicsModule::drawDrBigDigits(juce::Graphics& g, juce::Rectangle<int> area) const
 {
-    if (area.isEmpty()) return;
+    if (area.isEmpty() || items.drCount() == 0) return;
 
     PinkXP::drawSunken(g, area, PinkXP::content);
 
     auto inner = area.reduced(8);
     if (inner.getWidth() <= 0 || inner.getHeight() <= 0) return;
 
-    const int rowH = inner.getHeight() / 3;
+    const int rowH = inner.getHeight() / items.drCount();
 
-    auto drawRow = [&](int rowIdx, const juce::String& title, float value,
+    auto drawRow = [&](int slot, int rowIdx, const juce::String& title, float value,
                        const juce::String& unit, float big)
     {
-        juce::Rectangle<int> row(inner.getX(), inner.getY() + rowIdx * rowH,
+        juce::Rectangle<int> row(inner.getX(), inner.getY() + slot * rowH,
                                  inner.getWidth(), rowH);
 
-        // ① 标题：DR 面板默认只有 ~92px 宽（layoutContent 的兜底分支），标题按
-        //    getFont(9) 放大后的字宽会越过本行右边界，越过部分随后被绘制顺序更晚
-        //    的 CREST 面板整段盖掉（表现为 "DR SHORT" 只看到 "DR SHOR"）。
-        //    改用 drawFittedText 自动横向压缩，标题永远收在本行宽度内。
+        // ① 标题：窄面板下按行宽压缩，避免被右侧区段盖掉
         const int titleH = juce::jlimit(8, 12, row.getHeight() / 4);
         g.setColour(PinkXP::ink.withAlpha(0.85f));
         g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
         g.drawFittedText(y2k::tr (title), row.removeFromTop(titleH),
                          juce::Justification::topLeft, 1, 0.8f);
 
-        // ② 单位 "dB" 移到数值下方（原实现占用右侧 28px，把大数字挤得只剩整数位）。
-        //    面板被拖得很矮时不再单独留单位行，优先保证数值本身还有高度可用。
-        const int unitH = (row.getHeight() >= 26) ? juce::jlimit(8, 12, row.getHeight() / 4)
-                                                  : 0;
-        auto unitRect = (unitH > 0) ? row.removeFromBottom(unitH)
-                                    : juce::Rectangle<int>();
+        // ② 单位 "dB" 在数值下方；面板被拖得很矮时不再单独留单位行
+        const int unitH = (row.getHeight() >= 26) ? juce::jlimit(8, 12, row.getHeight() / 4) : 0;
+        auto unitRect = (unitH > 0) ? row.removeFromBottom(unitH) : juce::Rectangle<int>();
 
-        // ③ 数值：整行宽度都可用来画大数字（1 位小数），字号按可用宽度收缩。
-        //    · 固定样本 "88.8" 推算字号，避免读数位数变化时字号/基线抖动；
-        //    · axisFont=true 走不放大路径，位图高度 ≈ px+2，可直接按行高约束。
+        // ③ 数值：整行宽度都可用来画大数字，字号按可用宽度收缩（样本 "88.8" 保证稳定）
         const juce::String numText = juce::String(value, 1);
 
         float px = big;
         {
             const juce::Font probeFont = PinkXP::getAxisFont(px, juce::Font::bold);
-            // 以固定样本决定字号（稳定、不随位数抖动）；万一实际读数比样本更长，
-            // 再按实际宽度补一次收缩，保证末位小数不被裁掉。
             const float needW = juce::jmax(probeFont.getStringWidthFloat(y2k::tr ("88.8")),
                                            probeFont.getStringWidthFloat(y2k::tr (numText)));
             if (needW > 1.0f && needW > (float) row.getWidth())
@@ -345,7 +520,6 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
                 juce::Colours::transparentBlack, true);
         }
 
-        // 裁剪到数值区：即使字号推算有偏差，也绝不会溢出去压到单位/标题/别的面板
         {
             juce::Graphics::ScopedSaveState ss (g);
             g.reduceClipRegion (row);
@@ -365,7 +539,7 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
             }
         }
 
-        // ④ 单位（静态 → 位图缓存，紧贴数值下方的空余空间，左对齐）
+        // ④ 单位（位图缓存，紧贴数值下方，左对齐）
         if (unitRect.isEmpty())
             return;
 
@@ -382,24 +556,50 @@ void DynamicsModule::drawDrPanel(juce::Graphics& g, juce::Rectangle<int> area) c
         }
     };
 
-    // 三行读数用同一字号（getAxisFont 口径，不再 1.5× 放大）
-    drawRow(0, "DR SHORT", smoothedShortDR, "dB", 28.0f);
-    drawRow(1, "DR INTEG", smoothedIntegDR, "dB", 28.0f);
-    drawRow(2, "CREST",    smoothedCrest,   "dB", 28.0f);
+    static const char* titles[numDrRows] = { "DR SHORT", "DR INTEG", "CREST" };
+    int slot = 0;
+    for (int r = 0; r < numDrRows; ++r)
+        if (drRowEnabled (r))
+            drawRow (slot++, r, titles[r], drRowValue (r), "dB", 28.0f);
 }
 
 // ----------------------------------------------------------
-// Crest 历史带
+// DR 面板·带进度条读数样式（旧 Dynamics DR）：启用行垂直堆叠
+// ----------------------------------------------------------
+void DynamicsModule::drawDrReadouts(juce::Graphics& g, juce::Rectangle<int> area) const
+{
+    if (area.isEmpty() || items.drCount() == 0) return;
+
+    auto a = area;
+    const int n = items.drCount();
+    const int h = juce::jmax(44, a.getHeight() / n - 3);
+    auto drToNorm = [](float d) { return juce::jlimit(0.0f, 1.0f, d / 24.0f); };
+
+    static const char* titles[numDrRows] = { "DR SHORT", "DR INTEG", "CREST" };
+    int slot = 0;
+    for (int r = 0; r < numDrRows; ++r)
+    {
+        if (! drRowEnabled (r)) continue;
+        const bool last = (slot == n - 1);
+        auto cell = last ? a : a.removeFromTop (h);
+        y2k::meter::drawReadout (g, cell, titles[r], drRowValue (r), "dB", drToNorm (drRowValue (r)),
+                                 flash[r], pulsePhase + 2.0f * (float) slot);
+        if (! last) a.removeFromTop (3);
+        ++slot;
+    }
+}
+
+// ----------------------------------------------------------
+// Crest 历史带：取最近 span 秒，过密时按像素列取最大值
 // ----------------------------------------------------------
 void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area) const
 {
-    if (area.isEmpty()) return;
+    if (area.isEmpty() || ! items.hist) return;
 
     PinkXP::drawSunken(g, area, PinkXP::content);
     auto inner = area.reduced(4);
     if (inner.getWidth() <= 4 || inner.getHeight() <= 4) return;
 
-    // 标题
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     PinkXP::drawCachedText(g, "CREST HISTORY", inner.withHeight(12), juce::Justification::topLeft,
@@ -417,26 +617,33 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
         g.drawHorizontalLine(y, (float) plot.getX(), (float) plot.getRight());
     }
 
-    // 数据路径
-    juce::Path path;
-    const int N = crestHistLen;
+    const int N = juce::jlimit (8, crestHistLen, juce::roundToInt (histSpanSec * (float) kHistRate));
+    const int drawN = juce::jmin (N, juce::jmax (2, plot.getWidth()));
     const float w = (float) plot.getWidth();
     const float h = (float) plot.getHeight();
 
-    for (int i = 0; i < N; ++i)
+    juce::Path path;
+    for (int j = 0; j < drawN; ++j)
     {
-        const int idx = (crestHistWrite + i) % N;
-        const float v = crestHist[(size_t) idx];
-        const float t = (float) i / (float) juce::jmax(1, N - 1);
+        // 每个绘制点覆盖 [j*N/drawN, (j+1)*N/drawN) 个样本，取最大值
+        const int k0 = (int) ((int64_t) j * N / drawN);
+        const int k1 = juce::jmax (k0 + 1, (int) ((int64_t) (j + 1) * N / drawN));
+        float v = 0.0f;
+        for (int k = k0; k < k1; ++k)
+        {
+            const int idx = ((crestHistWrite - N + k) % crestHistLen + crestHistLen) % crestHistLen;
+            v = juce::jmax (v, crestHist[(size_t) idx]);
+        }
+
+        const float t = (float) j / (float) juce::jmax(1, drawN - 1);
         const float x = (float) plot.getX() + t * w;
         const float norm = juce::jlimit(0.0f, 1.0f, v / 30.0f);
         const float y = (float) plot.getBottom() - norm * h;
 
-        if (i == 0) path.startNewSubPath(x, y);
+        if (j == 0) path.startNewSubPath(x, y);
         else        path.lineTo(x, y);
     }
 
-    // 填充
     juce::Path fill = path;
     fill.lineTo((float) plot.getRight(),  (float) plot.getBottom());
     fill.lineTo((float) plot.getX(),      (float) plot.getBottom());
@@ -444,7 +651,6 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
     g.setColour(PinkXP::pink300.withAlpha(0.3f));
     g.fillPath(fill);
 
-    // 主曲线
     g.setColour(PinkXP::pink500.withAlpha(0.4f));
     g.strokePath(path, juce::PathStrokeType(2.5f));
     g.setColour(PinkXP::pink600);

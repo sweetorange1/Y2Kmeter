@@ -14,7 +14,6 @@
 #include "source/ui/modules/EqModule.h"
 #include "source/ui/modules/LoudnessModule.h"
 #include "source/ui/modules/OscilloscopeModule.h"
-#include "source/ui/modules/OscilloscopeWaveModule.h"
 #include "source/ui/modules/SpectrumModule.h"
 #include "source/ui/modules/PhaseModule.h"
 #include "source/ui/modules/DynamicsModule.h"
@@ -1052,8 +1051,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.0.7 debug"
-                                                                               : "v3.0.7"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.1.0 debug"
+                                                                               : "v3.1.0"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1095,7 +1094,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.0.7";
+        const juce::String versionBase = "v3.1.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -1760,26 +1759,20 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   加回来时必须同时恢复 stringToModuleType("eq") 的映射（现在它被迁移成
     //   spectrum，否则菜单里加出来的会是一块普通频谱）。
     workspace->setAvailableModuleTypes({
+        // v3.1：响度 / 示波器 / 相位 / 动态四类已合并，旧的细分类型不再出现在菜单里
+        //   （旧存档里的细分类型字符串仍能加载，见 resolveRetiredModuleType）。
         ModuleType::loudness,
-        ModuleType::lufsRealtime,
-        ModuleType::truePeak,
 
         // 模拟 VU 指针表（复用 Loudness 路的 RMS L/R，后端零新增计算）
         ModuleType::vuMeter,
 
         ModuleType::oscilloscope,
-        ModuleType::oscilloscopeWave,
 
         ModuleType::spectrum,
 
         ModuleType::phase,
-        ModuleType::phaseCorrelation,
-        ModuleType::phaseBalance,
 
         ModuleType::dynamics,
-        ModuleType::dynamicsMeters,
-        ModuleType::dynamicsDr,
-        ModuleType::dynamicsCrest,
 
         // 持续滚动瀑布波形（复用 Oscilloscope 原始样本，后端零新增计算）
         ModuleType::waveform,
@@ -4056,8 +4049,9 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
                     break;
 
                 case ModuleType::oscilloscopeWave:
-                    if (auto* oscw = dynamic_cast<OscilloscopeWaveModule*> (panel.get()))
-                        oscw->setChannelMode ((OscilloscopeWaveModule::ChannelMode) juce::jlimit (0, 2, m));
+                    // 退役类型：createModule 已换成示波器；声道 0 左 / 1 右 / 2 双
+                    if (auto* oscw = dynamic_cast<OscilloscopeModule*> (panel.get()))
+                        oscw->setParamValue ("waveChannel", (double) juce::jlimit (0, 2, m));
                     break;
 
                 case ModuleType::stereoMap:
@@ -4233,6 +4227,19 @@ int Y2KmeterAudioProcessorEditor::placeModuleRow (juce::Rectangle<int> canvas,
 // ----------------------------------------------------------
 std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleType type)
 {
+    // v3.1：退役类型（lufs_realtime / true_peak / oscilloscope_wave / phase_correlation /
+    //   phase_balance / dynamics_* ）统一在这里换成存活类型，并把"旧外观种子"喂给新模块。
+    //   旧存档、旧布局预设、全屏 tile 表都经过这个唯一漏斗，所以无需逐个改写。
+    if (isRetiredModuleType (type))
+    {
+        juce::ValueTree seed;
+        const auto survivor = resolveRetiredModuleType (type, seed);
+        auto panel = createModule (survivor);
+        if (panel != nullptr && seed.isValid())
+            panel->restoreModuleSpecificState (seed);
+        return panel;
+    }
+
     switch (type)
     {
         case ModuleType::eq:
@@ -4247,23 +4254,6 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
             return std::make_unique<PhaseModule>(processor.getAnalyserHub());
         case ModuleType::dynamics:
             return std::make_unique<DynamicsModule>(processor.getAnalyserHub());
-
-        case ModuleType::lufsRealtime:
-            return std::make_unique<LufsRealtimeModule>(processor.getAnalyserHub());
-        case ModuleType::truePeak:
-            return std::make_unique<TruePeakModule>(processor.getAnalyserHub());
-        case ModuleType::oscilloscopeWave:
-            return std::make_unique<OscilloscopeWaveModule>(processor.getAnalyserHub());
-        case ModuleType::phaseCorrelation:
-            return std::make_unique<PhaseCorrelationModule>(processor.getAnalyserHub());
-        case ModuleType::phaseBalance:
-            return std::make_unique<PhaseBalanceModule>(processor.getAnalyserHub());
-        case ModuleType::dynamicsMeters:
-            return std::make_unique<DynamicsMetersModule>(processor.getAnalyserHub());
-        case ModuleType::dynamicsDr:
-            return std::make_unique<DynamicsDrModule>(processor.getAnalyserHub());
-        case ModuleType::dynamicsCrest:
-            return std::make_unique<DynamicsCrestModule>(processor.getAnalyserHub());
 
         case ModuleType::waveform:
             return std::make_unique<WaveformModule>(processor.getAnalyserHub());
@@ -4626,7 +4616,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.0.7";
+        const juce::String versionBase = "v3.1.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";

@@ -24,46 +24,7 @@ SpectrumModule::SpectrumModule(AnalyserHub& h)
     setMinSize(64, 64);
     setDefaultSize(384, 256); // spectrum 6×4 大格
     setTitleText("Spectrum");
-
-    btnPeak.setClickingTogglesState(true);
-    btnPeak.setToggleState(peakHoldEnabled, juce::dontSendNotification);
-    btnPeak.setTooltip (y2k::help::make ("Peak hold",
-        "Keep a slowly falling line at the highest level each frequency has reached."));
-    btnPeak.onClick = [this]() { setPeakHoldEnabled(btnPeak.getToggleState()); };
-    addAndMakeVisible(btnPeak);
-
-    // Sharper 模式（重分配谱线）：乐音收束成竖线
-    btnSharp.setClickingTogglesState(true);
-    btnSharp.setToggleState(sharpEnabled, juce::dontSendNotification);
-    btnSharp.setTooltip (y2k::help::make ("Sharp",
-        "Reassign spectral energy to its true frequency so notes and harmonics collapse "
-        "into crisp lines instead of wide humps."));
-    btnSharp.onClick = [this]() { setSharpEnabled(btnSharp.getToggleState()); };
-    addAndMakeVisible(btnSharp);
-
-    // 曲线模式（三档循环）：Smooth → Semi → Raw
-    btnSmooth.setClickingTogglesState(false);
-    btnSmooth.onClick = [this]()
-    {
-        const auto next = (curveMode == CurveMode::smooth) ? CurveMode::semi
-                        : (curveMode == CurveMode::semi)   ? CurveMode::raw
-                                                           : CurveMode::smooth;
-        setCurveMode (next);
-    };
-    updateCurveButton();
-    addAndMakeVisible(btnSmooth);
-
-    // 通道轮换：MID → MID+SIDE → LEFT+RIGHT → MID（点击切换，不做 toggle 外观）
-    btnChannel.setClickingTogglesState(false);
-    btnChannel.onClick = [this]()
-    {
-        const auto next = (channelMode == ChannelMode::mid)       ? ChannelMode::midSide
-                        : (channelMode == ChannelMode::midSide)   ? ChannelMode::leftRight
-                                                                  : ChannelMode::mid;
-        setChannelMode (next);
-    };
-    updateChannelButton();
-    addAndMakeVisible(btnChannel);
+    setControlPanelEnabled (true);   // v3.1：Peak / Sharp / 曲线 / 通道 / FFT scale 都在参数面板里
 
     rawMags.ensureStorageAllocated (256);
     rawMagsSide.ensureStorageAllocated (256);
@@ -98,6 +59,9 @@ juce::ValueTree SpectrumModule::saveModuleSpecificState() const
                                          : channelMode == ChannelMode::midSide   ? "midside"
                                                                                  : "lr"), nullptr);
     // 不写 "slope"：Slope 已固定常开，旧存档里的值不再有意义
+    s.setProperty("fftScale", juce::String (fftScale == y2k::fscale::Scale::mel    ? "mel"
+                                          : fftScale == y2k::fscale::Scale::linear ? "linear"
+                                                                                   : "log"), nullptr);
     return s;
 }
 
@@ -122,7 +86,17 @@ void SpectrumModule::restoreModuleSpecificState(const juce::ValueTree& state)
                   : ch == "lr"      ? ChannelMode::leftRight
                                     : ChannelMode::mid);
 
+    // FFT scale：缺键 = 保持当前（旧存档没有这个键 → 构造默认的 Log = 旧外观）
+    if (state.hasProperty("fftScale"))
+    {
+        const juce::String fs = state.getProperty("fftScale").toString();
+        setFftScale (fs == "mel" ? y2k::fscale::Scale::mel
+                   : fs == "linear" ? y2k::fscale::Scale::linear
+                                    : y2k::fscale::Scale::log);
+    }
+
     // 旧存档兼容：即使记录了 "slope"=false 也忽略 —— Slope 恒开（强制适应新版本）
+    refreshControlPanel();
 }
 
 void SpectrumModule::setCurveMode (CurveMode m)
@@ -131,22 +105,8 @@ void SpectrumModule::setCurveMode (CurveMode m)
     curveMode = m;
 
     // 切换列数会重置平滑/峰值状态（尺寸变化），立刻重建一次快照
-    updateCurveButton();
     buildGlSnapshot();
     repaint();
-}
-
-void SpectrumModule::updateCurveButton()
-{
-    const char* text = (curveMode == CurveMode::smooth) ? "Smooth"
-                     : (curveMode == CurveMode::semi)   ? "Semi"
-                                                        : "Raw";
-    btnSmooth.setButtonText (text);
-    btnSmooth.setTooltip (curveMode == CurveMode::smooth
-        ? y2k::help::make ("Curve: Smooth", "256 columns, spline + column blur - calm and readable. Click for Semi.")
-        : curveMode == CurveMode::semi
-        ? y2k::help::make ("Curve: Semi", "512 columns, spline, no blur - keeps more spikes. Click for Raw.")
-        : y2k::help::make ("Curve: Raw", "One column per FFT bin, straight lines - maximum spike detail. Click for Smooth."));
 }
 
 void SpectrumModule::setChannelMode (ChannelMode m)
@@ -158,29 +118,74 @@ void SpectrumModule::setChannelMode (ChannelMode m)
     secondaryDb.clear();
     secondaryBlurDb.clear();
 
-    updateChannelButton();
     buildGlSnapshot();
     repaint();
 }
 
-void SpectrumModule::updateChannelButton()
+void SpectrumModule::setFftScale (y2k::fscale::Scale s)
 {
-    const char* text = (channelMode == ChannelMode::mid)      ? "MID"
-                     : (channelMode == ChannelMode::midSide)  ? "M+S"
-                                                              : "L/R";
-    btnChannel.setButtonText (text);
-    btnChannel.setTooltip (channelMode == ChannelMode::mid
-        ? y2k::help::make ("Channel: MID", "Analyse (L+R)/2 - what a mono speaker hears. Click for MID + SIDE.")
-        : channelMode == ChannelMode::midSide
-        ? y2k::help::make ("Channel: MID + SIDE", "Solid = mid, faint = side (L-R)/2 - shows what lives only in the stereo width. Click for LEFT + RIGHT.")
-        : y2k::help::make ("Channel: LEFT + RIGHT", "Solid = left, faint = right - spot channel imbalances. Click for MID."));
+    if (fftScale == s) return;
+    fftScale = s;
+
+    // 横轴映射变了：列频率不同 → 平滑状态、斜率补偿缓存、静态层（网格 + 轴标签）全部作废
+    smoothedDb.clear();
+    secondaryDb.clear();
+    peakDb.clear();
+    slopeCacheSize = 0;
+    staticLayerBounds_ = {};
+    curve_cache_dirty_ = true;
+    buildGlSnapshot();
+    repaint();
+}
+
+// ----------------------------------------------------------
+// 控制面板参数
+// ----------------------------------------------------------
+void SpectrumModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::toggle ("peakHold", "Peak hold",
+        "Keep a slowly falling line at the highest level each frequency has reached.").in ("Display"));
+    out.push_back (ParamDef::toggle ("sharp", "Sharp (reassigned lines)",
+        "Reassign spectral energy to its true frequency so notes and harmonics collapse "
+        "into crisp lines instead of wide humps.").in ("Display"));
+    out.push_back (ParamDef::choice ("curve", "Curve",
+        { "Smooth", "Semi", "Raw" },
+        "Smooth: 256 columns with blur - calm. Semi: one point per FFT bin with a spline. "
+        "Raw: one point per bin joined by straight lines - maximum spike detail.").in ("Display"));
+    out.push_back (ParamDef::choice ("channel", "Channels",
+        { "Mid", "Mid + Side", "Left + Right" },
+        "Mid: (L+R)/2, what a mono speaker hears. Mid + Side: solid mid, faint side (L-R)/2. "
+        "Left + Right: solid left, faint right.").in ("Display"));
+    out.push_back (ParamDef::choice ("fftScale", "FFT scale",
+        { "Log", "Mel", "Linear" },
+        "How frequency is laid out left to right. Log: every octave is equally wide. "
+        "Mel: follows pitch perception. Linear: equal Hz per pixel, so highs get most of the room.")
+        .in ("Axis"));
+}
+
+double SpectrumModule::getParamValue (const juce::String& id) const
+{
+    if (id == "peakHold") return peakHoldEnabled ? 1.0 : 0.0;
+    if (id == "sharp")    return sharpEnabled ? 1.0 : 0.0;
+    if (id == "curve")    return (double) (int) curveMode;
+    if (id == "channel")  return (double) (int) channelMode;
+    if (id == "fftScale") return (double) (int) fftScale;
+    return 0.0;
+}
+
+void SpectrumModule::setParamValue (const juce::String& id, double v)
+{
+    if      (id == "peakHold") setPeakHoldEnabled (v >= 0.5);
+    else if (id == "sharp")    setSharpEnabled (v >= 0.5);
+    else if (id == "curve")    setCurveMode ((CurveMode) juce::jlimit (0, 2, juce::roundToInt (v)));
+    else if (id == "channel")  setChannelMode ((ChannelMode) juce::jlimit (0, 2, juce::roundToInt (v)));
+    else if (id == "fftScale") setFftScale (y2k::fscale::fromIndex (juce::roundToInt (v)));
 }
 
 void SpectrumModule::setSharpEnabled(bool b)
 {
     if (sharpEnabled == b) return;
     sharpEnabled = b;
-    btnSharp.setToggleState(sharpEnabled, juce::dontSendNotification);
 
     // 关闭时清空谱线；开启时从下一帧开始重新追踪（避免陈旧线残留）
     if (! sharpEnabled)
@@ -291,7 +296,6 @@ void SpectrumModule::setPeakHoldEnabled(bool b)
     // 关闭时清空峰值，再次开启从当前值重新开始
     if (! peakHoldEnabled)
         std::fill(peakDb.begin(), peakDb.end(), minDb);
-    btnPeak.setToggleState(peakHoldEnabled, juce::dontSendNotification);
     buildGlSnapshot();
     repaint();
 }
@@ -299,20 +303,38 @@ void SpectrumModule::setPeakHoldEnabled(bool b)
 // ----------------------------------------------------------
 // 频率/dB 坐标换算
 // ----------------------------------------------------------
-float SpectrumModule::freqToX(float freqHz, juce::Rectangle<int> canvas)
+float SpectrumModule::freqToX(float freqHz, juce::Rectangle<int> canvas) const
 {
-    const float f   = juce::jlimit(minFreqHz, maxFreqHz, freqHz);
-    const float t   = (std::log10(f) - std::log10(minFreqHz))
-                    / (std::log10(maxFreqHz) - std::log10(minFreqHz));
-    return (float) canvas.getX() + t * (float) canvas.getWidth();
+    return (float) canvas.getX() + unitOfHz(freqHz) * (float) canvas.getWidth();
 }
 
-float SpectrumModule::xToFreq(float x, juce::Rectangle<int> canvas)
+float SpectrumModule::xToFreq(float x, juce::Rectangle<int> canvas) const
 {
     const float t = (x - (float) canvas.getX()) / juce::jmax(1.0f, (float) canvas.getWidth());
-    return std::pow(10.0f, std::log10(minFreqHz)
-                         + juce::jlimit(0.0f, 1.0f, t)
-                           * (std::log10(maxFreqHz) - std::log10(minFreqHz)));
+    return (float) y2k::fscale::fromUnit (fftScale, (double) juce::jlimit(0.0f, 1.0f, t),
+                                          (double) minFreqHz, (double) maxFreqHz);
+}
+
+// 纵向网格频率：Log 沿用旧的 decade + 2/5 次线；Mel / Linear 换成各自刻度下好读的位置
+void SpectrumModule::gridFreqs (std::vector<float>& major, std::vector<float>& minor) const
+{
+    switch (fftScale)
+    {
+        case y2k::fscale::Scale::mel:
+            major = { 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f };
+            minor = { 100.0f, 200.0f, 300.0f, 700.0f, 1500.0f, 3000.0f, 7000.0f, 15000.0f };
+            break;
+        case y2k::fscale::Scale::linear:
+            major = { 5000.0f, 10000.0f, 15000.0f };
+            minor = { 1000.0f, 2000.0f, 3000.0f, 4000.0f, 6000.0f, 7000.0f, 8000.0f, 9000.0f,
+                      11000.0f, 12000.0f, 13000.0f, 14000.0f, 16000.0f, 17000.0f, 18000.0f, 19000.0f };
+            break;
+        case y2k::fscale::Scale::log:
+        default:
+            major = { 100.0f, 1000.0f, 10000.0f };
+            minor = { 30.0f, 50.0f, 200.0f, 300.0f, 500.0f, 2000.0f, 3000.0f, 5000.0f, 15000.0f };
+            break;
+    }
 }
 
 float SpectrumModule::dbToY(float db, juce::Rectangle<int> canvas) const
@@ -403,15 +425,11 @@ void SpectrumModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 // ----------------------------------------------------------
 // 布局
 // ----------------------------------------------------------
-juce::Rectangle<int> SpectrumModule::getToolbarBounds(juce::Rectangle<int> content) const
-{
-    return content.withHeight(toolbarH);
-}
-
 juce::Rectangle<int> SpectrumModule::getCanvasBounds(juce::Rectangle<int> content) const
 {
-    // 左侧留 36 给 dB 标签，底部留 16 给 Hz 标签
-    return content.withTrimmedTop(toolbarH + 4)
+    // v3.1：顶部工具栏取消（参数搬进控制面板），整块内容区都是画布。
+    //   左侧留 32 给 dB 标签，底部留 16 给 Hz 标签
+    return content.withTrimmedTop(4)
                   .withTrimmedLeft(32)
                   .withTrimmedBottom(16)
                   .withTrimmedRight(6);
@@ -419,55 +437,6 @@ juce::Rectangle<int> SpectrumModule::getCanvasBounds(juce::Rectangle<int> conten
 
 void SpectrumModule::layoutContent(juce::Rectangle<int> contentBounds)
 {
-    auto tb = getToolbarBounds(contentBounds).reduced(2);
-
-    // 4 个按钮：Peak / Sharp / 曲线模式 / 通道。
-    //   宽度按**最宽可能的文字**实测（与 PinkXP LookAndFeel 的按钮字体一致），
-    //   这样 "Smooth"（6 字符）不会再被裁掉最后一个字母；曲线/通道按钮文字
-    //   会随模式变化，这里统一按各自最长文案（Smooth / M+S）预留，切换后不跳动。
-    const auto btnFont = PinkXP::getFont (12.0f, juce::Font::bold);
-    auto textW = [&] (const char* s)
-    {
-        return (int) std::ceil (juce::GlyphArrangement::getStringWidth (btnFont, y2k::tr (juce::String (s))));
-    };
-
-    // 按钮文字会随模式循环切换：宽度必须按"当前语言下所有可能文案"里最宽的
-    //   一条预留，否则中文下 "Semi" → "半平滑"（三字）会撑出按钮被裁掉。
-    auto widestTextW = [&] (std::initializer_list<const char*> labels)
-    {
-        int widest = 0;
-        for (const auto* s : labels)
-            widest = juce::jmax (widest, textW (s));
-        return widest;
-    };
-
-    constexpr int gap = 4;
-    int w[4] = { widestTextW ({ "Peak" })                      + 12,
-                 widestTextW ({ "Sharp" })                     + 12,
-                 widestTextW ({ "Smooth", "Semi", "Raw" })     + 12,
-                 widestTextW ({ "MID", "M+S", "L/R" })         + 12 };
-
-    // 模块太窄时按比例收缩（下限 26px，再窄就只能允许轻微裁字）
-    const int avail = juce::jmax (1, tb.getWidth() - gap * 3);
-    const int need  = w[0] + w[1] + w[2] + w[3];
-    if (need > avail)
-    {
-        const float k = (float) avail / (float) need;
-        for (auto& v : w)
-            v = juce::jmax (26, juce::roundToInt ((float) v * k));
-    }
-
-    int x = tb.getX();
-    auto place = [&] (juce::Component& c, int i)
-    {
-        c.setBounds (x, tb.getY(), w[i], tb.getHeight());
-        x += w[i] + gap;
-    };
-    place (btnPeak,    0);
-    place (btnSharp,   1);
-    place (btnSmooth,  2);
-    place (btnChannel, 3);
-
     // v2.9.5：尺寸守卫（防 layoutContent 每帧触发导致的交互卡顿）
     if (glCanvasSizeChanged (getGlCanvasBounds (contentBounds)))
         buildGlSnapshot();
@@ -535,16 +504,16 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         switch (channelMode)
         {
             case ChannelMode::mid:
-                hub.getSpectrumMagnitudesBlended (rawMags, N, minFreqHz, fHi);
+                hub.getSpectrumMagnitudesBlended (rawMags, N, minFreqHz, fHi, false, fftScale);
                 break;
 
             case ChannelMode::midSide:
-                hub.getSpectrumMagnitudesBlended (rawMags, N, minFreqHz, fHi);
-                hub.getSpectrumMagnitudesBlendedSide (rawMagsSide, N, minFreqHz, fHi);
+                hub.getSpectrumMagnitudesBlended (rawMags, N, minFreqHz, fHi, false, fftScale);
+                hub.getSpectrumMagnitudesBlendedSide (rawMagsSide, N, minFreqHz, fHi, false, fftScale);
                 break;
 
             case ChannelMode::leftRight:
-                hub.getSpectrumMagnitudesBlendedLR (rawMags, rawMagsSide, N, minFreqHz, fHi);
+                hub.getSpectrumMagnitudesBlendedLR (rawMags, rawMagsSide, N, minFreqHz, fHi, false, fftScale);
                 break;
         }
         binHz = 0.0;
@@ -717,14 +686,10 @@ void SpectrumModule::processBinSeries (const juce::Array<float>& mags, double hz
     const auto  canvas  = getCanvasBounds (getContentBounds());
     const float innerX0 = (float) canvas.getX() + 2.0f;
     const float innerW  = (float) juce::jmax (1, canvas.getWidth() - 4);
-    const float logMinF = std::log10 (minFreqHz);
-    const float logSpanF = juce::jmax (1.0e-6f, std::log10 (maxFreqHz) - logMinF);
 
     auto xOfHz = [&] (double f) noexcept
     {
-        const float t = juce::jlimit (0.0f, 1.0f,
-            ((float) std::log10 (juce::jmax (20.0, f)) - logMinF) / logSpanF);
-        return innerX0 + t * innerW;
+        return innerX0 + unitOfHz ((float) f) * innerW;
     };
 
     // 相邻输出点的最小像素间距：线带全宽 + 0.15px 余量。
@@ -863,6 +828,7 @@ void SpectrumModule::ensureDisplayCache (int numPoints)
 
     const double sampleRate = hub.getSampleRate();
     if (slopeCacheSize == numPoints
+        && slopeCacheScale == fftScale
         && std::abs (slopeCacheSampleRate - sampleRate) <= 0.5
         && (int) slopeOffsetDb.size() == numPoints)
     {
@@ -872,19 +838,18 @@ void SpectrumModule::ensureDisplayCache (int numPoints)
     slopeOffsetDb.resize ((size_t) numPoints);
 
     const double fMin   = (double) minFreqHz;
-    const double fMax   = juce::jmin ((double) maxFreqHz, sampleRate * 0.5);
-    const double logMin = std::log10 (fMin);
-    const double logMax = std::log10 (juce::jmax (fMin, fMax));
+    const double fMax   = juce::jmax (fMin, juce::jmin ((double) maxFreqHz, sampleRate * 0.5));
 
     for (int col = 0; col < numPoints; ++col)
     {
         const double t = (double) col / (double) juce::jmax (1, numPoints - 1);
-        const double f = std::pow (10.0, logMin + t * (logMax - logMin));
+        const double f = y2k::fscale::fromUnit (fftScale, t, fMin, fMax);
         const double octaves = std::log2 (juce::jmax (20.0, f) / 1000.0);
         slopeOffsetDb[(size_t) col] = (float) (4.5 * octaves);
     }
 
     slopeCacheSize = numPoints;
+    slopeCacheScale = fftScale;
     slopeCacheSampleRate = sampleRate;
 }
 
@@ -989,10 +954,9 @@ void SpectrumModule::buildGlSnapshot()
                                0.5f, c);
         }
 
-        // 纵线（次 2/5 + 主 decade）
-        const float minorFreqs[] = { 30.0f, 50.0f, 200.0f, 300.0f, 500.0f,
-                                     2000.0f, 3000.0f, 5000.0f, 15000.0f };
-        const float majorFreqs[] = { 100.0f, 1000.0f, 10000.0f };
+        // 纵线（次 + 主；Log 为 2/5 次线 + decade，Mel / Linear 见 gridFreqs）
+        std::vector<float> majorFreqs, minorFreqs;
+        gridFreqs (majorFreqs, minorFreqs);
         const auto minorC = PinkXP::pink200.withAlpha (0.3f);
         const auto majorC = PinkXP::pink300.withAlpha (0.6f);
         for (float f : minorFreqs)
@@ -1025,16 +989,12 @@ void SpectrumModule::buildGlSnapshot()
     const float invMax = 1.0f / (float) juce::jmax (1, N - 1);
     const float yTop = (float) inner.getY();
     const float yBot = (float) inner.getBottom();
-    const float logMinF = std::log10 (minFreqHz);
-    const float logSpanF = std::log10 (maxFreqHz) - logMinF;
 
-    // 频率 → 画布内 x（对数轴）。Semi/Raw 的采样点在频率上**不等距**
+    // 频率 → 画布内 x（按 fftScale）。Semi/Raw 的采样点在频率上**不等距**
     // （每个 FFT bin 一个点，低频稀疏、高频密集），必须按频率定位。
     auto xForFreq = [&] (float f) noexcept
     {
-        const float lf = std::log10 (juce::jmax (minFreqHz, f));
-        const float t  = juce::jlimit (0.0f, 1.0f, (lf - logMinF) / juce::jmax (1.0e-6f, logSpanF));
-        return (float) inner.getX() + t * (float) inner.getWidth();
+        return (float) inner.getX() + unitOfHz (f) * (float) inner.getWidth();
     };
 
     auto samplePts = [&] (const std::vector<float>& dbVals,
@@ -1522,11 +1482,9 @@ void SpectrumModule::drawGrid(juce::Graphics& g, juce::Rectangle<int> canvas) co
         g.drawHorizontalLine(y, (float) inner.getX(), (float) inner.getRight());
     }
 
-    // 纵线（主 decade + 次 2/5）
-    const float majorFreqs[]   = { 100.0f, 1000.0f, 10000.0f };
-    const float minorFreqs[]   = { 30.0f, 50.0f, 200.0f, 300.0f, 500.0f,
-                                   2000.0f, 3000.0f, 5000.0f, 15000.0f };
-
+    // 纵线（主 + 次，刻度相关）
+    std::vector<float> majorFreqs, minorFreqs;
+    gridFreqs (majorFreqs, minorFreqs);
     g.setColour(PinkXP::pink200.withAlpha(0.3f));
     for (float f : minorFreqs)
     {
@@ -1568,17 +1526,11 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
     const float x0   = (float) inner.getX();
     const float xLen = (float) inner.getWidth();
     const float invMax = 1.0f / (float) juce::jmax (1, N - 1);
-    const float logMinF  = std::log10 (minFreqHz);
-    const float logSpanF = juce::jmax (1.0e-6f, std::log10 (maxFreqHz) - logMinF);
 
     auto xAt = [&] (int i, const std::vector<float>& hz) noexcept
     {
         if ((int) hz.size() == N)
-        {
-            const float lf = std::log10 (juce::jmax (minFreqHz, hz[(size_t) i]));
-            return (float) inner.getX()
-                 + juce::jlimit (0.0f, 1.0f, (lf - logMinF) / logSpanF) * (float) inner.getWidth();
-        }
+            return (float) inner.getX() + unitOfHz (hz[(size_t) i]) * (float) inner.getWidth();
         return x0 + (float) i * invMax * xLen;
     };
 
@@ -1803,18 +1755,26 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
         }
     }
 
-    // 底部 Hz 标签
-    struct L { float hz; const char* label; };
-    const L labels[] = {
-        { 20.0f, "20" }, { 100.0f, "100" }, { 1000.0f, "1k" },
-        { 10000.0f, "10k" }, { 20000.0f, "20k" }
-    };
-    for (auto& l : labels)
+    // 底部 Hz 标签（20 / 20k 两端 + 当前刻度的主网格线；Log 下与旧版逐项一致）
+    auto hzLabel = [] (float hz) -> juce::String
     {
-        const int x = (int) std::round(freqToX(l.hz, canvas));
+        return hz >= 1000.0f ? juce::String (hz / 1000.0f, 0) + "k" : juce::String ((int) hz);
+    };
+
+    std::vector<float> majorHz, minorHz;
+    gridFreqs (majorHz, minorHz);
+    std::vector<float> labelHz;
+    labelHz.push_back (20.0f);
+    for (float f : majorHz) labelHz.push_back (f);
+    labelHz.push_back (20000.0f);
+
+    for (float hz : labelHz)
+    {
+        const int x = (int) std::round(freqToX(hz, canvas));
         if (x < canvas.getX() - 4 || x > canvas.getRight() + 4) continue;
+        const juce::String text = hzLabel (hz);
         const auto img = PinkXP::cachedStaticText (
-            g, l.label, 9.0f, juce::Font::plain, labelColour,
+            g, text, 9.0f, juce::Font::plain, labelColour,
             juce::Colours::transparentBlack, true);
         if (img.isValid())
         {
@@ -1824,7 +1784,7 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
         {
             g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
             g.setColour(labelColour);
-            g.drawText(y2k::tr (l.label), x - 18, canvas.getBottom() + 2, 36, 12,
+            g.drawText(y2k::tr (text), x - 18, canvas.getBottom() + 2, 36, 12,
                        juce::Justification::centred, false);
         }
     }

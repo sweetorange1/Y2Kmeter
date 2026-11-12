@@ -125,16 +125,7 @@ StereoMapModule::StereoMapModule (AnalyserHub& h)
     setMinSize (96, 80);
     setDefaultSize (384, 240);
     setTitleText ("Stereo Map");
-
-    // 模式开关：按钮文字显示当前模式，切到 MONO 时按钮呈按下态
-    //   （PinkXP 的 drawButtonBackground 对 toggle 态画凹陷 + 抖动点阵）
-    btnMode.setClickingTogglesState (true);
-    btnMode.onClick = [this]()
-    {
-        setMode (btnMode.getToggleState() ? Mode::cancel : Mode::pan);
-    };
-    addAndMakeVisible (btnMode);
-    applyModeToButton();
+    setControlPanelEnabled (true);   // v3.1：PAN/MONO 模式切换与 FFT scale 都在参数面板里
 }
 
 StereoMapModule::~StereoMapModule()
@@ -155,87 +146,74 @@ void StereoMapModule::setMode (Mode m)
     if (mode == Mode::cancel)
         cancelByBand.clear();
 
-    applyModeToButton();
     buildGlSnapshot();
     repaint();
 }
 
-void StereoMapModule::applyModeToButton()
+void StereoMapModule::setFftScale (y2k::fscale::Scale s)
 {
-    btnMode.setToggleState (mode == Mode::cancel, juce::dontSendNotification);
-    btnMode.setButtonText (mode == Mode::pan ? "PAN" : "MONO");
-    btnMode.setTooltip (mode == Mode::pan
-        ? y2k::help::make ("Mode: PAN",
-                           "Where each frequency band sits in the stereo field: up = left, "
-                           "middle = centre, down = right. Click for MONO.")
-        : y2k::help::make ("Mode: MONO",
-                           "How much of each band survives when summed to mono.\nTop = 100% (safe), bottom = "
-                           + formatPercent (1.0f - kCancelFullScale)
-                           + " (heavy cancellation).\nLower is worse. Click for PAN."));
-}
-
-// ==========================================================
-// 工具条右侧的模式说明
-//   与模式按钮同一行、靠右对齐；字号先按行高取，再按实测字宽收缩，
-//   模块被拉窄时不裁字（窄到放不下就整体不画）。
-// ==========================================================
-void StereoMapModule::drawToolbarHint (juce::Graphics& g) const
-{
-    const auto tb = getToolbarBounds (getContentBounds());
-
-    if (tb.isEmpty() || tb.getHeight() < 8)
+    if (fftScale == s)
         return;
 
-    const int btnW = juce::jmin (tb.getWidth(), PinkXP::ui (58));
-    auto area = tb.withTrimmedLeft (btnW + PinkXP::ui (6)).reduced (PinkXP::ui (2), 0);
+    fftScale = s;
 
-    if (area.getWidth() < 36 || area.getHeight() < 6)
-        return;
+    // 每个频段对应的频率变了：平滑缓存全部作废，第一帧直接对齐目标
+    panByBand.clear();
+    strengthByBand.clear();
+    levelDbByBand.clear();
+    cancelByBand.clear();
 
-    // 纯 ASCII：Silkscreen 只保证拉丁字形，中文/箭头会落到缺字方框
-    const juce::String text = (mode == Mode::pan)
-        ? juce::String ("L/R PER BAND   UP=L  DOWN=R")
-        : juce::String ("MONO SUM   UP=CLEAN  DOWN=LOSS");
-
-    float h = juce::jlimit (6.5f, 9.0f, (float) area.getHeight() * 0.58f);
-    const float avail = (float) area.getWidth() - 2.0f;
-
-    for (int pass = 0; pass < 4; ++pass)
-    {
-        const juce::Font f = PinkXP::getAxisFont (h, juce::Font::plain);
-        const float w = juce::GlyphArrangement::getStringWidth (f, y2k::tr (text));
-
-        if (w <= avail || h <= 6.0f)
-            break;
-
-        h = juce::jmax (6.0f, h * avail / w);
-    }
-
-    g.setFont (PinkXP::getAxisFont (h, juce::Font::plain));
-    g.setColour (PinkXP::ink.withAlpha (0.62f));
-    g.drawText (y2k::tr (text), area, juce::Justification::centredRight, false);
+    buildGlSnapshot();
+    repaint();
 }
 
 juce::ValueTree StereoMapModule::saveModuleSpecificState() const
 {
     juce::ValueTree s ("state");
     s.setProperty ("mode", mode == Mode::cancel ? "cancel" : "pan", nullptr);
+    s.setProperty ("fftScale", (int) fftScale, nullptr);
     return s;
 }
 
 void StereoMapModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
-    const auto m = state.getProperty ("mode").toString();
-    setMode (m == "cancel" ? Mode::cancel : Mode::pan);
+    // 缺键 = 保持当前值（旧存档只有 mode；没有 fftScale → Log = 旧外观）
+    if (state.hasProperty ("mode"))
+        setMode (state.getProperty ("mode").toString() == "cancel" ? Mode::cancel : Mode::pan);
+    if (state.hasProperty ("fftScale"))
+        setFftScale (y2k::fscale::fromIndex ((int) state.getProperty ("fftScale")));
+
+    refreshControlPanel();
+}
+
+void StereoMapModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::choice ("mode", "Mode",
+        { "Pan", "Mono check" },
+        "Pan: where each frequency band sits in the stereo field - up = left, middle = centre, down = right. "
+        "Mono check: how much of each band survives when summed to mono - top is safe, bottom is heavy cancellation.")
+        .in ("View"));
+    out.push_back (ParamDef::choice ("fftScale", "FFT scale",
+        { "Log", "Mel", "Linear" },
+        "How frequency is laid out left to right. Log gives every octave equal room, "
+        "Mel follows pitch perception, Linear gives equal Hz per pixel.").in ("View"));
+}
+
+double StereoMapModule::getParamValue (const juce::String& id) const
+{
+    if (id == "mode")     return mode == Mode::cancel ? 1.0 : 0.0;
+    if (id == "fftScale") return (double) (int) fftScale;
+    return 0.0;
+}
+
+void StereoMapModule::setParamValue (const juce::String& id, double v)
+{
+    if      (id == "mode")     setMode (juce::roundToInt (v) == 1 ? Mode::cancel : Mode::pan);
+    else if (id == "fftScale") setFftScale (y2k::fscale::fromIndex (juce::roundToInt (v)));
 }
 
 void StereoMapModule::layoutContent (juce::Rectangle<int> contentBounds)
 {
-    const auto tb = getToolbarBounds (contentBounds);
-    btnMode.setVisible (! tb.isEmpty());
-    if (! tb.isEmpty())
-        btnMode.setBounds (tb.withWidth (juce::jmin (tb.getWidth(), PinkXP::ui (58))));
-
     // 尺寸守卫：只在画布尺寸变化时重建快照（避免 layout 每帧触发重建）
     if (glCanvasSizeChanged (getGlCanvasBounds (contentBounds)))
         buildGlSnapshot();
@@ -254,7 +232,7 @@ void StereoMapModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 void StereoMapModule::computeStereoMap (float dtSec)
 {
     const int bandCount = juce::jlimit (96, 512, cachedBandCount > 0 ? cachedBandCount : 256);
-    hub.getSpectrumMagnitudesBlendedLR (magsL, magsR, bandCount, kMinFreq, kMaxFreq);
+    hub.getSpectrumMagnitudesBlendedLR (magsL, magsR, bandCount, kMinFreq, kMaxFreq, false, fftScale);
     if (magsL.size() != bandCount || magsR.size() != bandCount)
         return;
 
@@ -264,7 +242,7 @@ void StereoMapModule::computeStereoMap (float dtSec)
     const bool wantCancel = (mode == Mode::cancel);
     if (wantCancel)
     {
-        hub.getSpectrumMagnitudesBlended (magsM, bandCount, kMinFreq, kMaxFreq);
+        hub.getSpectrumMagnitudesBlended (magsM, bandCount, kMinFreq, kMaxFreq, false, fftScale);
         if (magsM.size() != bandCount)
             return;
     }
@@ -388,35 +366,10 @@ void StereoMapModule::computeStereoMap (float dtSec)
     }
 }
 
-int StereoMapModule::toolbarHeightFor (juce::Rectangle<int> contentBounds) noexcept
-{
-    const int h = PinkXP::ui (kToolbarH);
-
-    // 模块被拉得很矮时隐藏工具条：否则按钮会吃掉曲线一半的高度。
-    if (contentBounds.getHeight() < h * 5)
-        return 0;
-    return h;
-}
-
-juce::Rectangle<int> StereoMapModule::getToolbarBounds (juce::Rectangle<int> contentBounds) const
-{
-    const int h = toolbarHeightFor (contentBounds);
-    if (h <= 0)
-        return {};
-
-    return contentBounds.reduced (2).withHeight (h);
-}
-
 juce::Rectangle<int> StereoMapModule::canvasFromContent (juce::Rectangle<int> contentBounds) noexcept
 {
-    auto c = contentBounds.reduced (2);
-
-    // 工具条在凹陷画布之上（与 Spectrum 的 Peak/Slope/Sharp 同一套布局语言）
-    const int h = toolbarHeightFor (contentBounds);
-    if (h > 0)
-        c = c.withTrimmedTop (h + 2);
-
-    return c;
+    // v3.1：顶部工具条（PAN/MONO 按钮 + 说明文字）取消，画布占满内容区
+    return contentBounds.reduced (2);
 }
 
 juce::Rectangle<int> StereoMapModule::canvasBounds() const
@@ -483,7 +436,9 @@ void StereoMapModule::buildGlSnapshot()
                                sampleRamp (sev, 0.98f).withAlpha (0.35f));
         }
 
-        for (const float f : { 100.0f, 1000.0f, 10000.0f })
+        std::vector<float> gridLines, gridLabels;
+        gridFreqs (gridLines, gridLabels);
+        for (const float f : gridLines)
         {
             const float x = xForNorm (normFromFreq (f), plot);
             appendLineSegment (snap->vertices, x, yTop, x, yBot, 0.5f, PinkXP::pink100.withAlpha (0.25f));
@@ -594,9 +549,6 @@ void StereoMapModule::buildGlSnapshot()
 
 void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
 {
-    // 工具条右侧的模式说明（两条绘制路径共用：paintLegacyContent 末尾也会调本函数）
-    drawToolbarHint (g);
-
     const auto plot = getPlotBounds (canvas);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
         return;
@@ -637,7 +589,9 @@ void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> ca
 
     g.setColour (PinkXP::ink.withAlpha (0.58f));
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
-    for (const float f : { 20.0f, 100.0f, 1000.0f, 10000.0f, 20000.0f })
+    std::vector<float> gridLines, gridLabels;
+    gridFreqs (gridLines, gridLabels);
+    for (const float f : gridLabels)
     {
         const float x = xForNorm (normFromFreq (f), plot);
         juce::String label;
@@ -814,7 +768,9 @@ void StereoMapModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> ca
     g.drawHorizontalLine (plot.getCentreY(), (float) plot.getX(), (float) plot.getRight());
 
     g.setColour (PinkXP::pink100.withAlpha (0.25f));
-    for (const float f : { 100.0f, 1000.0f, 10000.0f })
+    std::vector<float> bgLines, bgLabels;
+    gridFreqs (bgLines, bgLabels);
+    for (const float f : bgLines)
     {
         const float x = xForNorm (normFromFreq (f), plot);
         g.drawVerticalLine (juce::roundToInt (x), (float) plot.getY(), (float) plot.getBottom());
@@ -931,16 +887,36 @@ void StereoMapModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int
     paintGlOverlay (g, canvas);
 }
 
-float StereoMapModule::freqAt (float norm01) noexcept
+float StereoMapModule::freqAt (float norm01) const noexcept
 {
-    norm01 = juce::jlimit (0.0f, 1.0f, norm01);
-    return kMinFreq * std::pow (kMaxFreq / kMinFreq, norm01);
+    return (float) y2k::fscale::fromUnit (fftScale, (double) juce::jlimit (0.0f, 1.0f, norm01),
+                                          (double) kMinFreq, (double) kMaxFreq);
 }
 
-float StereoMapModule::normFromFreq (float freqHz) noexcept
+float StereoMapModule::normFromFreq (float freqHz) const noexcept
 {
-    const float f = juce::jlimit (kMinFreq, kMaxFreq, freqHz);
-    return std::log (f / kMinFreq) / std::log (kMaxFreq / kMinFreq);
+    return (float) y2k::fscale::toUnit (fftScale, (double) freqHz, (double) kMinFreq, (double) kMaxFreq);
+}
+
+// 纵向网格线 + 底部标签的频率：Log 下与旧版逐项一致（线 100/1k/10k，标签 20/100/1k/10k/20k）
+void StereoMapModule::gridFreqs (std::vector<float>& lines, std::vector<float>& labels) const
+{
+    switch (fftScale)
+    {
+        case y2k::fscale::Scale::mel:
+            lines  = { 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f };
+            labels = { 20.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f };
+            break;
+        case y2k::fscale::Scale::linear:
+            lines  = { 5000.0f, 10000.0f, 15000.0f };
+            labels = { 20.0f, 5000.0f, 10000.0f, 15000.0f, 20000.0f };
+            break;
+        case y2k::fscale::Scale::log:
+        default:
+            lines  = { 100.0f, 1000.0f, 10000.0f };
+            labels = { 20.0f, 100.0f, 1000.0f, 10000.0f, 20000.0f };
+            break;
+    }
 }
 
 float StereoMapModule::xForNorm (float norm01, juce::Rectangle<int> plot) noexcept

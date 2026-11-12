@@ -964,7 +964,8 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
                                                 int   numPoints,
                                                 float fMin,
                                                 float fMax,
-                                                bool  perBin)
+                                                bool  perBin,
+                                                y2k::fscale::Scale scale)
 {
     numPoints = juce::jmax (2, numPoints);
     dest.resize (numPoints);
@@ -997,8 +998,6 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
                          sizeof (float) * magSnapshot.size());
     }
 
-    const double logMin = std::log10 (fLo2);
-    const double logMax = std::log10 (fHi2);
 
     // "Hz → bin" 因子（bin 数 = 当前主路 FFT size / 2）
     const double hzToBin = (magSnapshot.size() > 1)
@@ -1025,12 +1024,12 @@ void AnalyserHub::getSpectrumMagnitudesBlended (juce::Array<float>& dest,
     {
         // 以点 i 为中心的频率带宽 [f0, f1]（几何平均法）
         const double t   = static_cast<double> (i) / static_cast<double> (numPoints - 1);
-        const double f   = std::pow (10.0, logMin + t * (logMax - logMin));
+        const double f   = y2k::fscale::fromUnit (scale, t, fLo2, fHi2);
 
         const double tPrev = static_cast<double> (i - 1) / static_cast<double> (numPoints - 1);
         const double tNext = static_cast<double> (i + 1) / static_cast<double> (numPoints - 1);
-        const double fPrev = (i == 0)               ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
-        const double fNext = (i == numPoints - 1)   ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
+        const double fPrev = (i == 0)               ? f : y2k::fscale::fromUnit (scale, tPrev, fLo2, fHi2);
+        const double fNext = (i == numPoints - 1)   ? f : y2k::fscale::fromUnit (scale, tNext, fLo2, fHi2);
         const double f0    = std::sqrt (fPrev * f);
         const double f1    = std::sqrt (f * fNext);
 
@@ -1062,7 +1061,8 @@ void AnalyserHub::getSpectrumMagnitudesBlendedLR (juce::Array<float>& destL,
                                                   int   numPoints,
                                                   float fMin,
                                                   float fMax,
-                                                  bool  perBin)
+                                                  bool  perBin,
+                                                  y2k::fscale::Scale scale)
 {
     numPoints = juce::jmax (2, numPoints);
     destL.resize (numPoints);
@@ -1095,8 +1095,6 @@ void AnalyserHub::getSpectrumMagnitudesBlendedLR (juce::Array<float>& destL,
             std::memcpy (magSnapshotR.data(), magDataR.data(), sizeof (float) * magSnapshotR.size());
     }
 
-    const double logMin = std::log10 (fLo2);
-    const double logMax = std::log10 (fHi2);
     const double hzToBin = (magSnapshotL.size() > 1)
         ? (static_cast<double> (magSnapshotL.size() - 1) / nyquist)
         : 0.0;
@@ -1118,11 +1116,11 @@ void AnalyserHub::getSpectrumMagnitudesBlendedLR (juce::Array<float>& destL,
     for (int i = 0; i < numPoints; ++i)
     {
         const double t     = static_cast<double> (i) / static_cast<double> (numPoints - 1);
-        const double f     = std::pow (10.0, logMin + t * (logMax - logMin));
+        const double f     = y2k::fscale::fromUnit (scale, t, fLo2, fHi2);
         const double tPrev = static_cast<double> (i - 1) / static_cast<double> (numPoints - 1);
         const double tNext = static_cast<double> (i + 1) / static_cast<double> (numPoints - 1);
-        const double fPrev = (i == 0) ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
-        const double fNext = (i == numPoints - 1) ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
+        const double fPrev = (i == 0) ? f : y2k::fscale::fromUnit (scale, tPrev, fLo2, fHi2);
+        const double fNext = (i == numPoints - 1) ? f : y2k::fscale::fromUnit (scale, tNext, fLo2, fHi2);
         const double f0    = std::sqrt (fPrev * f);
         const double f1    = std::sqrt (f * fNext);
 
@@ -1159,7 +1157,8 @@ void AnalyserHub::getSpectrumMagnitudesBlendedSide (juce::Array<float>& dest,
                                                     int   numPoints,
                                                     float fMin,
                                                     float fMax,
-                                                    bool  perBin)
+                                                    bool  perBin,
+                                                    y2k::fscale::Scale scale)
 {
     numPoints = juce::jmax (2, numPoints);
     dest.resize (numPoints);
@@ -1185,8 +1184,6 @@ void AnalyserHub::getSpectrumMagnitudesBlendedSide (juce::Array<float>& dest,
             std::memcpy (magSnapshotS.data(), magDataS.data(), sizeof (float) * magSnapshotS.size());
     }
 
-    const double logMin = std::log10 (fLo2);
-    const double logMax = std::log10 (fHi2);
     const double hzToBin = (magSnapshotS.size() > 1)
         ? (static_cast<double> (magSnapshotS.size() - 1) / nyquist)
         : 0.0;
@@ -1208,11 +1205,11 @@ void AnalyserHub::getSpectrumMagnitudesBlendedSide (juce::Array<float>& dest,
     for (int i = 0; i < numPoints; ++i)
     {
         const double t     = static_cast<double> (i) / static_cast<double> (numPoints - 1);
-        const double f     = std::pow (10.0, logMin + t * (logMax - logMin));
+        const double f     = y2k::fscale::fromUnit (scale, t, fLo2, fHi2);
         const double tPrev = static_cast<double> (i - 1) / static_cast<double> (numPoints - 1);
         const double tNext = static_cast<double> (i + 1) / static_cast<double> (numPoints - 1);
-        const double fPrev = (i == 0) ? f : std::pow (10.0, logMin + tPrev * (logMax - logMin));
-        const double fNext = (i == numPoints - 1) ? f : std::pow (10.0, logMin + tNext * (logMax - logMin));
+        const double fPrev = (i == 0) ? f : y2k::fscale::fromUnit (scale, tPrev, fLo2, fHi2);
+        const double fNext = (i == numPoints - 1) ? f : y2k::fscale::fromUnit (scale, tNext, fLo2, fHi2);
         const double f0    = std::sqrt (fPrev * f);
         const double f1    = std::sqrt (f * fNext);
 
@@ -1300,7 +1297,8 @@ void AnalyserHub::copySpectrumBins (juce::Array<float>& dest,
 void AnalyserHub::getSpectrumReassignedBlended (juce::Array<float>& dest,
                                                 int   numPoints,
                                                 float fMin,
-                                                float fMax)
+                                                float fMax,
+                                                y2k::fscale::Scale scale)
 {
     numPoints = juce::jmax (2, numPoints);
     dest.resize (numPoints);
@@ -1348,10 +1346,6 @@ void AnalyserHub::getSpectrumReassignedBlended (juce::Array<float>& dest,
 
     fhat.resize ((size_t) nBins);
     mag2.resize ((size_t) nBins);
-
-    const double logMin   = std::log10 (fLo);
-    const double logMax   = std::log10 (fHi);
-    const double logRange = juce::jmax (1.0e-9, logMax - logMin);
 
     // 绝对能量阈值：对应约 -90 dBFS（与 UI 显示下限 minDb 一致）
     constexpr float kMag2Threshold = 1.0e-9f;
@@ -1425,7 +1419,7 @@ void AnalyserHub::getSpectrumReassignedBlended (juce::Array<float>& dest,
         // 落到对应对数行（clamp 到 [fLo, fHi]）
         //   dest 顺序与 getSpectrumMagnitudesBlended 一致：index 0=低频 → 末尾=高频
         const double f   = juce::jlimit (fLo, fHi, static_cast<double> (fk));
-        const double t   = (std::log10 (f) - logMin) / logRange;   // 0=低频, 1=高频
+        const double t   = y2k::fscale::toUnit (scale, f, fLo, fHi);   // 0=低频, 1=高频
         const int    row = static_cast<int> (std::round (t * static_cast<double> (numPoints - 1)));
         const int    rr  = juce::jlimit (0, numPoints - 1, row);
 

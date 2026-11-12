@@ -40,6 +40,7 @@ StereoFieldModule::StereoFieldModule (AnalyserHub& h)
     setMinSize     (64, 64);
     setDefaultSize (320, 220);
     setTitleText   ("Stereo Field");
+    setControlPanelEnabled (true);
 
     // 自动缩放：首个结算周期从"现在"起算，用满 1 s 的真实数据再定增益
     lastPeriodicGainUpdateMs = juce::Time::getMillisecondCounterHiRes();
@@ -65,6 +66,123 @@ StereoFieldModule::~StereoFieldModule()
 }
 
 // ----------------------------------------------------------
+// 持久化 + 控制面板（v3.1）
+// ----------------------------------------------------------
+juce::ValueTree StereoFieldModule::saveModuleSpecificState() const
+{
+    juce::ValueTree s ("state");
+    s.setProperty ("dotSize",    (double) dotSize, nullptr);
+    s.setProperty ("fadeSpeed",  (double) fadeSpeed, nullptr);
+    s.setProperty ("bandColour", bandColour, nullptr);
+    s.setProperty ("crossLow",   (double) crossLowHz, nullptr);
+    s.setProperty ("crossHigh",  (double) crossHighHz, nullptr);
+    return s;
+}
+
+void StereoFieldModule::restoreModuleSpecificState (const juce::ValueTree& state)
+{
+    // 缺键 = 保持当前值（构造默认 = 旧外观）
+    if (state.hasProperty ("dotSize"))    dotSize    = juce::jlimit (1.0f, 6.0f, (float) (double) state.getProperty ("dotSize"));
+    if (state.hasProperty ("fadeSpeed"))  fadeSpeed  = juce::jlimit (0.2f, 4.0f, (float) (double) state.getProperty ("fadeSpeed"));
+    if (state.hasProperty ("bandColour")) bandColour = (bool) state.getProperty ("bandColour");
+    if (state.hasProperty ("crossLow"))   crossLowHz  = juce::jlimit (80.0f, 1000.0f, (float) (double) state.getProperty ("crossLow"));
+    if (state.hasProperty ("crossHigh"))  crossHighHz = juce::jlimit (2000.0f, 10000.0f, (float) (double) state.getProperty ("crossHigh"));
+    splitter.setCrossover (crossLowHz, crossHighHz);
+
+    invalidateTrail();
+    refreshControlPanel();
+    repaint();
+}
+
+void StereoFieldModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::slider ("dotSize", "Dot size", 1.0, 6.0, 1.0, " px",
+        "Side length of each dot.").in ("Dots"));
+    out.push_back (ParamDef::slider ("fadeSpeed", "Fade speed", 0.2, 4.0, 0.1, "x",
+        "How fast old dots disappear. 1.0 is the classic trail; higher is shorter, lower leaves long tails.")
+        .in ("Dots"));
+    out.push_back (ParamDef::toggle ("bandColour", "Colour by frequency",
+        "Dots turn red for lows, green for mids and blue for highs, blended by how much energy each band has.")
+        .in ("Colour"));
+    out.push_back (ParamDef::slider ("crossLow", "Low / mid split", 80.0, 1000.0, 10.0, " Hz",
+        "Below this frequency counts as low (red).", 250.0)
+        .in ("Colour").when ([this] { return bandColour; }));
+    out.push_back (ParamDef::slider ("crossHigh", "Mid / high split", 2000.0, 10000.0, 100.0, " Hz",
+        "Above this frequency counts as high (blue).", 4000.0)
+        .in ("Colour").when ([this] { return bandColour; }));
+}
+
+double StereoFieldModule::getParamValue (const juce::String& id) const
+{
+    if (id == "dotSize")    return (double) dotSize;
+    if (id == "fadeSpeed")  return (double) fadeSpeed;
+    if (id == "bandColour") return bandColour ? 1.0 : 0.0;
+    if (id == "crossLow")   return (double) crossLowHz;
+    if (id == "crossHigh")  return (double) crossHighHz;
+    return 0.0;
+}
+
+void StereoFieldModule::setParamValue (const juce::String& id, double v)
+{
+    if      (id == "dotSize")    dotSize    = (float) v;
+    else if (id == "fadeSpeed")  fadeSpeed  = (float) v;
+    else if (id == "bandColour") { bandColour = v >= 0.5; invalidateTrail(); }
+    else if (id == "crossLow")   { crossLowHz  = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); }
+    else if (id == "crossHigh")  { crossHighHz = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); }
+    else return;
+    repaint();
+}
+
+// 把当前快照映射成点（GL 与 CPU 回退共用）：几何 / 过滤 / 抽稀 / 配色只有这一份
+void StereoFieldModule::collectPoints (const juce::Rectangle<int>& plot, std::vector<Pt>& out) const
+{
+    out.clear();
+    constexpr float kPi = juce::MathConstants<float>::pi;
+
+    const int N = juce::jmin (snapshotL.size(), snapshotR.size());
+    if (N <= 1 || plot.getWidth() <= 8 || plot.getHeight() <= 8)
+        return;
+
+    const auto geo = computeRadarGeometry (plot);
+    const float cx = (float) geo.cx, baseY = (float) geo.baseY, R = (float) geo.radius;
+    const float effR = R * autoGainFactor;   // 自动缩放：半径乘当前增益，瞬时超峰压到圆弧上
+
+    constexpr int kMaxPoints = 512;
+    const int stride = juce::jmax (1, N / kMaxPoints);
+    const juce::Rectangle<float> plotF = plot.toFloat();
+    const auto baseCol = PinkXP::pink500.withAlpha (0.9f);
+    const bool useBand = bandColour && (int) wLow.size() == N;
+
+    out.reserve ((size_t) (N / stride + 1));
+    for (int i = 0; i < N; i += stride)
+    {
+        const float rawL = snapshotL.getUnchecked (i);
+        const float rawR = snapshotR.getUnchecked (i);
+        if (! std::isfinite (rawL) || ! std::isfinite (rawR)) continue;
+
+        const float l = std::abs (rawL);
+        const float r = std::abs (rawR);
+        const float sum = l + r;
+        if (sum < 1.0e-4f) continue;   // 静音点不画，避免在圆心堆积
+
+        const float balance = (r - l) / sum;   // [-1,1]：-1 纯左，+1 纯右
+        const float rho = juce::jmin (juce::jmax (l, r) * effR, R);
+        const float ang = balance * (kPi * 0.5f);
+        const float px = cx + rho * std::sin (ang);
+        const float py = baseY - rho * std::cos (ang);
+        if (! plotF.contains (px, py)) continue;
+
+        juce::Colour col = baseCol;
+        if (useBand)
+        {
+            const auto rgb = y2k::bands::mix (wLow[(size_t) i], wMid[(size_t) i], wHigh[(size_t) i]);
+            col = juce::Colour::fromFloatRGBA (rgb.r, rgb.g, rgb.b, 0.9f);
+        }
+        out.push_back ({ px, py, col });
+    }
+}
+
+// ----------------------------------------------------------
 // onFrame：Hub 分发器回调
 // ----------------------------------------------------------
 void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
@@ -78,6 +196,19 @@ void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     snapshotR.resize (n);
     std::memcpy (snapshotL.getRawDataPointer(), frame.oscL.data(), (size_t) n * sizeof (float));
     std::memcpy (snapshotR.getRawDataPointer(), frame.oscR.data(), (size_t) n * sizeof (float));
+
+    // 频段染色：只在开启时才付费算三频段权重（与示波器 X-Y 共用 BandSplitter）
+    if (bandColour && n > 1)
+    {
+        const double fs = hub.getSampleRate();
+        if (fs != splitterRate)
+        {
+            splitter.prepare (fs, crossLowHz, crossHighHz);
+            splitterRate = fs;
+        }
+        splitter.compute (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(), n,
+                          wLow, wMid, wHigh);
+    }
 
     // 自动缩放：累积本帧峰值，每 1 s 结算一次增益（与 XY / Lissajous 同策略）
     updateAutoGain (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(),
@@ -317,7 +448,7 @@ void StereoFieldModule::buildGlSnapshot()
 
     // ---- trail 通道参数 ----
     snap->trailFbo = true;
-    snap->trailDecay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f);
+    snap->trailDecay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f * fadeSpeed);
     trailDtAccumSec = 0.0f;
     snap->texW = canvas.getWidth();
     snap->texH = canvas.getHeight();
@@ -382,45 +513,23 @@ void StereoFieldModule::buildGlSnapshot()
 
     // ---- trail 点段（segments[1..]）：当前帧新点 ----
     {
-        const int N = juce::jmin (snapshotL.size(), snapshotR.size());
-        if (N > 1 && plot.getWidth() > 8 && plot.getHeight() > 8)
+        std::vector<Pt> pts;
+        collectPoints (plot, pts);
+        if (! pts.empty())
         {
-            const auto geo = computeRadarGeometry (plot);
-            const float cx = (float) geo.cx, baseY = (float) geo.baseY, R = (float) geo.radius;
-            // 自动缩放：半径乘当前增益，瞬时超峰压到圆弧上（方向仍由 balance 决定）
-            const float effR = R * autoGainFactor;
-
-            constexpr int kMaxPoints = 512;
-            const int stride = juce::jmax (1, N / kMaxPoints);
-            const juce::Rectangle<float> plotF = plot.toFloat();
-            const auto dotC = PinkXP::pink500.withAlpha (0.9f);
-            const float dr = dotC.getFloatRed(), dg = dotC.getFloatGreen(),
-                        db = dotC.getFloatBlue(), da = dotC.getFloatAlpha();
-
+            const float hs = dotSize * 0.5f;   // 点半边长（旧版固定 2×2 → hs = 1）
             const int trailStartIdx = (int) snap->vertices.size() / 6;
-            for (int i = 0; i < N; i += stride)
+            for (const auto& p : pts)
             {
-                const float rawL = snapshotL.getUnchecked (i);
-                const float rawR = snapshotR.getUnchecked (i);
-                if (! std::isfinite (rawL) || ! std::isfinite (rawR)) continue;
-                const float l = std::abs (rawL);
-                const float r = std::abs (rawR);
-                const float sum = l + r;
-                if (sum < 1.0e-4f) continue;
-                const float balance = (r - l) / sum;
-                const float peak = juce::jmax (l, r);
-                const float rho = juce::jmin (peak * effR, R);
-                const float ang = balance * (kPi * 0.5f);
-                const float px = cx + rho * std::sin (ang);
-                const float py = baseY - rho * std::cos (ang);
-                if (! plotF.contains (px, py)) continue;
+                const float dr = p.col.getFloatRed(), dg = p.col.getFloatGreen(),
+                            db = p.col.getFloatBlue(), da = p.col.getFloatAlpha();
                 const float q[36] = {
-                    px - 1.0f, py - 1.0f, dr, dg, db, da,
-                    px + 1.0f, py - 1.0f, dr, dg, db, da,
-                    px - 1.0f, py + 1.0f, dr, dg, db, da,
-                    px + 1.0f, py - 1.0f, dr, dg, db, da,
-                    px + 1.0f, py + 1.0f, dr, dg, db, da,
-                    px - 1.0f, py + 1.0f, dr, dg, db, da,
+                    p.x - hs, p.y - hs, dr, dg, db, da,
+                    p.x + hs, p.y - hs, dr, dg, db, da,
+                    p.x - hs, p.y + hs, dr, dg, db, da,
+                    p.x + hs, p.y - hs, dr, dg, db, da,
+                    p.x + hs, p.y + hs, dr, dg, db, da,
+                    p.x - hs, p.y + hs, dr, dg, db, da,
                 };
                 snap->vertices.insert (snap->vertices.end(), q, q + 36);
             }
@@ -626,7 +735,7 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
 
     // 1) 衰减旧点：所有像素 alpha *= decay（跳过透明像素加速）
     //    v2.9：decay 由累计 dt 换算（60Hz 标定），残影时长与帧率无关
-    const float decay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f);
+    const float decay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f * fadeSpeed);
     trailDtAccumSec = 0.0f;
     {
         juce::Image::BitmapData bd (trailImage, juce::Image::BitmapData::readWrite);
@@ -649,67 +758,32 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
     auto plot = juce::Rectangle<int> (0, 0, cw, ch).reduced (6);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
 
-    constexpr float kPi = juce::MathConstants<float>::pi;
-    const auto geo   = computeRadarGeometry (plot);
-    const int  cx    = geo.cx;
-    const int  baseY = geo.baseY;
-    const int  R     = geo.radius;
-    // 自动缩放：散点半径乘当前增益（背景半圆/能量环保持固定）
-    const float effR = (float) R * autoGainFactor;
+    std::vector<Pt> pts;
+    collectPoints (plot, pts);
+    if (pts.empty()) return;
 
-    const int N = juce::jmin (snapshotL.size(), snapshotR.size());
-    if (N <= 1) return;
+    const float ds = dotSize;   // 点边长（旧版固定 2）
 
-    // 固定点数量上限：无论画布多大，每帧最多绘制 kMaxPoints 个点，
-    //   避免模块拉大后每帧绘制上千个点（旧的 targetPoints = cw*2 随宽度
-    //   线性增长）导致拖拽/脱离模式下严重卡顿。
-    constexpr int kMaxPoints = 512;
-    const int stride = juce::jmax (1, N / kMaxPoints);
-
-    const juce::Rectangle<float> plotF = plot.toFloat();
+    if (bandColour)
+    {
+        // 频段染色：每点颜色不同，逐点绘制
+        for (const auto& p : pts)
+        {
+            tg.setColour (p.col);
+            tg.fillRect (p.x - ds * 0.5f, p.y - ds * 0.5f, ds, ds);
+        }
+        return;
+    }
 
     // v2.9.2：所有点同色同 alpha —— 收集进 RectangleList 后一次 fillRectList 提交，
     //   省掉最多 512 次 fillRect 调用 + 软光栅状态切换（每帧确定性的微省）。
     juce::RectangleList<float> rects;
-    rects.ensureStorageAllocated (kMaxPoints);
+    rects.ensureStorageAllocated ((int) pts.size());
+    for (const auto& p : pts)
+        rects.addWithoutMerging ({ p.x - ds * 0.5f, p.y - ds * 0.5f, ds, ds });
 
-    for (int i = 0; i < N; i += stride)
-    {
-        const float rawL = snapshotL.getUnchecked (i);
-        const float rawR = snapshotR.getUnchecked (i);
-        if (! std::isfinite (rawL) || ! std::isfinite (rawR))
-            continue;
-
-        const float l = std::abs (rawL);
-        const float r = std::abs (rawR);
-        const float sum = l + r;
-        if (sum < 1.0e-4f) continue;  // 静音点不画，避免在圆心堆积
-
-        const float balance = (r - l) / sum;   // [-1,1]：-1 纯左，+1 纯右
-        // 半径由"主导声道幅度"驱动（max(|L|,|R|)），再乘自动增益：
-        //   · 增益归一化后，本周期峰值正好落在半径 90% 处
-        //   · 瞬时超峰（增益还没跟上）压到圆弧上，方向仍由 balance 决定
-        //     —— 纯左/纯右落在左右直径端点，居中落在顶部
-        const float peak = juce::jmax (l, r);
-        const float rho  = juce::jmin (peak * effR, (float) R);
-        // 角度范围 ±90°：balance=-1 纯左 → 左水平线（直径线左端）；
-        // balance=+1 纯右 → 右水平线（直径线右端）；0 = 顶部。覆盖完整上半圆。
-        const float ang  = balance * (kPi * 0.5f);
-
-        const float px = (float) cx + rho * std::sin (ang);
-        const float py = (float) baseY - rho * std::cos (ang);
-
-        if (! plotF.contains (px, py))
-            continue;
-
-        rects.addWithoutMerging ({ px - 1.0f, py - 1.0f, 2.0f, 2.0f });
-    }
-
-    if (! rects.isEmpty())
-    {
-        tg.setColour (PinkXP::pink500.withAlpha (0.9f));
-        tg.fillRectList (rects);
-    }
+    tg.setColour (PinkXP::pink500.withAlpha (0.9f));
+    tg.fillRectList (rects);
 }
 
 void StereoFieldModule::invalidateTrail()

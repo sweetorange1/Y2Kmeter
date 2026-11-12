@@ -23,57 +23,13 @@ SpectrogramModule::SpectrogramModule (AnalyserHub& h)
     setMinSize     (96, 80);
     setDefaultSize (384, 224); // 6×3.5 大格，宽胜于高——强调"时间轴"铺展
     setTitleText   ("Spectrogram");
-
-    // ---------- 右侧 SPEED 滑条（样式与 EqModule 的 SIZE 滑条完全一致）----------
-    //   · 垂直滑条，范围 [5, 120] px/s，步长 1；默认 30 px/s
-    //   · TextBox 只读（与 EqModule 一致），数字只用于展示
-    //   · 切换主题时重新下发 textColour（与 EqModule 一致）
-    speedSlider.setSliderStyle (juce::Slider::LinearVertical);
-    speedSlider.setRange (5.0, 120.0, 1.0);
-    speedSlider.setValue ((double) pixelsPerSecond, juce::dontSendNotification);
-    speedSlider.setTextBoxStyle (juce::Slider::TextBoxBelow, true, 40, 16);
-    speedSlider.setColour (juce::Slider::textBoxTextColourId,       PinkXP::ink);
-    speedSlider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-    speedSlider.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-    speedSlider.onValueChange = [this]()
-    {
-        pixelsPerSecond = (float) speedSlider.getValue();
-    };
-
-    speedLabel.setJustificationType (juce::Justification::centred);
-    speedLabel.setColour (juce::Label::textColourId, PinkXP::ink);
-    speedLabel.setFont   (PinkXP::getFont (11.0f, juce::Font::bold));
-    speedLabel.setText   ("SPEED", juce::dontSendNotification);
-    speedSlider.setTooltip (y2k::help::make ("Speed",
-        "Scroll speed in pixels per second (5 - 120). Slower keeps a longer history on screen."));
-    speedLabel.setTooltip (speedSlider.getTooltip());
-
-    // ---------- 右下角显示模式切换按钮（样式对齐 Spectrogram3DModule 的 TINT）----------
-    //   · 三态循环：Classic → Sharp → Sharper → Classic，默认 Sharp
-    //   · 不是 toggle（三选一循环），点击一次切到下一档
-    modeBtn.setClickingTogglesState (false);
-    modeBtn.setButtonText (displayModeText (displayMode));
-    modeBtn.setTooltip (y2k::help::make ("Display mode",
-        "Click to cycle:\n"
-        "-  Classic: raw FFT magnitude\n"
-        "+  Sharp: frequency reassignment - thinner, clearer note lines\n"
-        "++ Sharper: time + frequency reassignment - also tighter transients"));
-    modeBtn.onClick = [this]()
-    {
-        const int next = ((int) displayMode + 1) % 3;
-        setDisplayMode ((DisplayMode) next);
-    };
+    setControlPanelEnabled (true);   // v3.1：右侧 SPEED 滑条与显示模式按钮搬进控制面板
 
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
-        speedLabel.setColour  (juce::Label::textColourId,          PinkXP::ink);
-        speedSlider.setColour (juce::Slider::textBoxTextColourId,  PinkXP::ink);
-        speedLabel.repaint();
-        speedSlider.repaint();
         // 频谱 base/accent 色 + GL 快照底色跟随主题
         refreshSpectrogramColours();
         buildGlSnapshot();
-        modeBtn.repaint();
 
         // 刷新 Spectrogram 瀑布图 base/accent 颜色并失效 Image 缓存，
         // 下一帧 paint 会全量重绘为新配色。
@@ -84,10 +40,6 @@ SpectrogramModule::SpectrogramModule (AnalyserHub& h)
 
     // 根据初始主题设置 Spectrogram 瀑布图配色
     refreshSpectrogramColours();
-
-    addAndMakeVisible (speedSlider);
-    addAndMakeVisible (speedLabel);
-    addAndMakeVisible (modeBtn);
 }
 
 SpectrogramModule::~SpectrogramModule()
@@ -112,33 +64,117 @@ void SpectrogramModule::setCellPx (int px)
     repaint();
 }
 
-const char* SpectrogramModule::displayModeText (DisplayMode m) noexcept
-{
-    switch (m)
-    {
-        case DisplayMode::Classic:  return "-";
-        case DisplayMode::Sharper:  return "++";
-        case DisplayMode::Sharp:
-        default:                    return "+";
-    }
-}
-
 // ----------------------------------------------------------
-// v2.9.3 持久化：显示模式（Classic / Sharp / Sharper）按钮状态
+// 持久化 + 控制面板（v3.1）
+//   键：displayMode（旧，Classic / Sharp / Sharper）· speed · direction · colour · fftScale
+//   缺键 = 保持当前值（构造默认 = 旧外观）。
 // ----------------------------------------------------------
 juce::ValueTree SpectrogramModule::saveModuleSpecificState() const
 {
     juce::ValueTree s ("state");
     s.setProperty ("displayMode", (int) displayMode, nullptr);
+    s.setProperty ("speed",       (double) pixelsPerSecond, nullptr);
+    s.setProperty ("direction",   (int) direction, nullptr);
+    s.setProperty ("colour",      (int) colourScheme, nullptr);
+    s.setProperty ("fftScale",    (int) fftScale, nullptr);
     return s;
 }
 
 void SpectrogramModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
-    if (! state.hasProperty ("displayMode"))
-        return;
+    if (state.hasProperty ("displayMode"))
+        setDisplayMode ((DisplayMode) juce::jlimit (0, 2, (int) state.getProperty ("displayMode")));
+    if (state.hasProperty ("speed"))
+        setScrollSpeed ((float) (double) state.getProperty ("speed"));
+    if (state.hasProperty ("direction"))
+        setDirection ((Direction) juce::jlimit (0, 3, (int) state.getProperty ("direction")));
+    if (state.hasProperty ("colour"))
+        setColourScheme ((ColourScheme) juce::jlimit (0, 3, (int) state.getProperty ("colour")));
+    if (state.hasProperty ("fftScale"))
+        setFftScale (y2k::fscale::fromIndex ((int) state.getProperty ("fftScale")));
 
-    setDisplayMode ((DisplayMode) (int) state.getProperty ("displayMode"));
+    refreshControlPanel();
+}
+
+void SpectrogramModule::buildParamDefs (std::vector<ParamDef>& out) const
+{
+    out.push_back (ParamDef::choice ("direction", "Scroll direction",
+        { "Left", "Right", "Up", "Down" },
+        "Which way the picture moves. Left: new sound enters on the right (classic). "
+        "Up and Down turn the picture so time runs vertically and frequency runs left to right.")
+        .in ("Scrolling"));
+    out.push_back (ParamDef::slider ("speed", "Speed", 5.0, 120.0, 1.0, " px/s",
+        "Scroll speed in pixels per second. Slower keeps a longer history on screen.")
+        .in ("Scrolling"));
+
+    out.push_back (ParamDef::choice ("shaper", "Sharpening",
+        { "Classic", "Sharp", "Sharper" },
+        "Classic: raw FFT magnitude. Sharp: frequency reassignment - thinner, clearer note lines. "
+        "Sharper: Sharp plus tighter transients.").in ("Image"));
+    out.push_back (ParamDef::choice ("colour", "Colours",
+        { "Theme", "Heat", "Grey", "Ice" },
+        "Theme follows the current colour theme. Heat runs black - red - yellow - white. "
+        "Grey is black to white. Ice runs dark blue to white.").in ("Image"));
+    out.push_back (ParamDef::choice ("fftScale", "FFT scale",
+        { "Log", "Mel", "Linear" },
+        "How frequency is laid out along the frequency axis. Log gives every octave equal room, "
+        "Mel follows pitch perception, Linear gives equal Hz per pixel.").in ("Image"));
+}
+
+double SpectrogramModule::getParamValue (const juce::String& id) const
+{
+    if (id == "direction") return (double) (int) direction;
+    if (id == "speed")     return (double) pixelsPerSecond;
+    if (id == "shaper")    return (double) (int) displayMode;
+    if (id == "colour")    return (double) (int) colourScheme;
+    if (id == "fftScale")  return (double) (int) fftScale;
+    return 0.0;
+}
+
+void SpectrogramModule::setParamValue (const juce::String& id, double v)
+{
+    if      (id == "direction") setDirection ((Direction) juce::jlimit (0, 3, juce::roundToInt (v)));
+    else if (id == "speed")     setScrollSpeed ((float) v);
+    else if (id == "shaper")    setDisplayMode ((DisplayMode) juce::jlimit (0, 2, juce::roundToInt (v)));
+    else if (id == "colour")    setColourScheme ((ColourScheme) juce::jlimit (0, 3, juce::roundToInt (v)));
+    else if (id == "fftScale")  setFftScale (y2k::fscale::fromIndex (juce::roundToInt (v)));
+}
+
+void SpectrogramModule::setScrollSpeed (float pxPerSec)
+{
+    pixelsPerSecond = juce::jlimit (5.0f, 120.0f, pxPerSec);
+}
+
+// 方向 / FFT scale 变化会改变网格的行列含义：清历史重建（与改变模块尺寸时一致）
+void SpectrogramModule::setDirection (Direction d)
+{
+    if (direction == d) return;
+    direction = d;
+    lastCanvasW = lastCanvasH = 0;      // 强制 ensureGrid 重建
+    texCacheValid_ = false;
+    lastBuiltWriteCol_ = -1;
+    imageBuf = juce::Image();
+    repaint();
+}
+
+void SpectrogramModule::setFftScale (y2k::fscale::Scale s)
+{
+    if (fftScale == s) return;
+    fftScale = s;
+    lastCanvasW = lastCanvasH = 0;      // 旧列按旧刻度采样，不可复用
+    texCacheValid_ = false;
+    lastBuiltWriteCol_ = -1;
+    imageBuf = juce::Image();
+    repaint();
+}
+
+void SpectrogramModule::setColourScheme (ColourScheme c)
+{
+    if (colourScheme == c) return;
+    colourScheme = c;
+    texCacheValid_ = false;
+    imageBuf = juce::Image();
+    repaint();
 }
 
 void SpectrogramModule::setDisplayMode (DisplayMode m)
@@ -146,7 +182,6 @@ void SpectrogramModule::setDisplayMode (DisplayMode m)
     if (displayMode == m) return;
 
     displayMode = m;
-    modeBtn.setButtonText (displayModeText (m));
 
     // v2.9.5：纹理缓存失效（颜色调色随模式/主题变化）
     texCacheValid_ = false;
@@ -165,12 +200,10 @@ void SpectrogramModule::setDisplayMode (DisplayMode m)
 // ----------------------------------------------------------
 juce::Rectangle<int> SpectrogramModule::getCanvasBounds (juce::Rectangle<int> content) const
 {
-    // 布局风格对齐 WaveformModule（去掉顶部工具栏后的情形）：
-    //   · 画布贴着 content 的左/上/下边框，只扣掉右侧 SPEED 滑条面板
-    //   · 不再做对称 pad 和 axisLeft/axisBottom 切割
-    //     —— Hz 刻度文字会直接浮绘在画布内部左侧（半透明在频谱上色块上），
-    //        older/newer 提示同样浮绘在画布内部底部，无需抠占画布空间。
-    return content.withTrimmedRight (sliderPanelW);
+    // v3.1：右侧 SPEED 滑条面板取消，整块内容区都是画布。
+    //   Hz 刻度文字直接浮绘在画布内部（半透明在频谱色块上），
+    //   older/newer 提示同样浮绘在画布内部，无需抠占画布空间。
+    return content;
 }
 
 // ----------------------------------------------------------
@@ -200,19 +233,9 @@ void SpectrogramModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
                 ToyRole::Pin);
 }
 
-void SpectrogramModule::layoutContent (juce::Rectangle<int> contentBounds)
+void SpectrogramModule::layoutContent (juce::Rectangle<int>)
 {
-    // 右侧 SPEED 滑条面板（样式与 EqModule、DynamicsCrestModule 完全一致）
-    auto area = contentBounds;
-    auto rightPanel = area.removeFromRight (sliderPanelW);
-    // sliderPanelGap 像素留白在画布右缘与面板左缘之间（由 getCanvasBounds 顺带扣掉）
-    juce::ignoreUnused (area);
-
-    auto labelArea = rightPanel.removeFromTop (14);
-    speedLabel.setBounds  (labelArea);
-    auto btnArea = rightPanel.removeFromBottom (18);   // 右下角模式按钮（与 3D TINT 一致）
-    speedSlider.setBounds (rightPanel);
-    modeBtn.setBounds    (btnArea);
+    // v3.1：没有侧栏控件，画布 = 整个内容区
 }
 
 void SpectrogramModule::resized()
@@ -239,8 +262,10 @@ void SpectrogramModule::ensureGrid (int canvasW, int canvasH)
     canvasW = juce::jmax (1, canvasW);
     canvasH = juce::jmax (1, canvasH);
 
-    const int newCols = juce::jmax (1, canvasW / cellPx);
-    const int newRows = juce::jmax (1, canvasH / cellPx);
+    // 横向滚动（Left / Right）：频率纵向 → rows 跟随高度，cols（时间）跟随宽度；
+    // 纵向滚动（Up / Down）：频率横向 → rows 跟随宽度，cols（时间）跟随高度。
+    const int newCols = juce::jmax (1, (isVertical() ? canvasH : canvasW) / cellPx);
+    const int newRows = juce::jmax (1, (isVertical() ? canvasW : canvasH) / cellPx);
 
     // 画布尺寸 & cellPx 都没变时不重建
     if (canvasW == lastCanvasW && canvasH == lastCanvasH
@@ -280,9 +305,36 @@ void SpectrogramModule::refreshSpectrogramColours()
     }
 }
 
-juce::Colour SpectrogramModule::intensityToColour (float t) noexcept
+juce::Colour SpectrogramModule::intensityToColour (float t) const noexcept
 {
     t = juce::jlimit (0.0f, 1.0f, t);
+
+    // v3.1 固定色阶（颜色参数 ≠ Theme）：不随主题变化
+    switch (colourScheme)
+    {
+        case ColourScheme::Heat:
+        {
+            // 黑 → 深红 → 橙黄 → 白
+            const juce::Colour stops[] = { juce::Colour (0xff080406), juce::Colour (0xffb01818),
+                                           juce::Colour (0xfff6b020), juce::Colour (0xfffffff0) };
+            const float pos = t * 3.0f;
+            const int   i   = juce::jmin (2, (int) pos);
+            return stops[i].interpolatedWith (stops[i + 1], pos - (float) i);
+        }
+        case ColourScheme::Grey:
+            return juce::Colour::fromFloatRGBA (t, t, t, 1.0f);
+        case ColourScheme::Ice:
+        {
+            const juce::Colour stops[] = { juce::Colour (0xff04081c), juce::Colour (0xff1c4aa0),
+                                           juce::Colour (0xff4cc0e8), juce::Colour (0xfff2fbff) };
+            const float pos = t * 3.0f;
+            const int   i   = juce::jmin (2, (int) pos);
+            return stops[i].interpolatedWith (stops[i + 1], pos - (float) i);
+        }
+        case ColourScheme::Theme:
+        default:
+            break;
+    }
 
     // 调色板重构（A3/S4）：生成器主题的强度色阶与 Waveform 保持完全一致的
     //   色谱映射 —— chartRamp 8 阶本身横跨"主题色相 → accent2 色相"，
@@ -375,9 +427,9 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // 显示模式选择数据源：
     //   Classic → 原始幅度谱；Sharp/Sharper → 频率重分配（粒子凝聚）
     if (displayMode == DisplayMode::Classic)
-        hub.getSpectrumMagnitudesBlended (rowMagBuf, rows, fMin, fMax);
+        hub.getSpectrumMagnitudesBlended (rowMagBuf, rows, fMin, fMax, false, fftScale);
     else
-        hub.getSpectrumReassignedBlended (rowMagBuf, rows, fMin, fMax);
+        hub.getSpectrumReassignedBlended (rowMagBuf, rows, fMin, fMax, fftScale);
 
     // ---------- 速度解耦：按"真实流逝时间"累计推进列数 ----------
     //   旧行为：每帧 push 1 列 → 滚动速度 = 分发 fps（Hub 30/60Hz 直接体现在速度上）。
@@ -461,13 +513,35 @@ void SpectrogramModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<i
 
     const int cw = plot.getWidth();
     const int ch = plot.getHeight();
-    const float sx = (float) cw / (float) cols;
-    const float sy = (float) ch / (float) rows;
 
-    // 双拷贝环形瀑布图：截取 [writeCol, writeCol+cols) 子区映射到 plot
-    const auto xform = juce::AffineTransform::translation (- (float) writeCol, 0.0f)
-                          .scaled (sx, sy)
-                          .translated ((float) plot.getX(), (float) plot.getY());
+    // 方向变换：图像坐标 (u = 时间列 0..2*cols，v = 频率行 0..rows，行 0 = 高频) → 屏幕。
+    //   Left（旧外观）：u→x 向右增长，截取 [writeCol, writeCol+cols) 窗口，新数据在右。
+    //   其余方向见下，窗口同样是 [writeCol, writeCol+cols)，只是轴与朝向不同。
+    const float wc = (float) writeCol;
+    const float px = (float) plot.getX(), py = (float) plot.getY();
+    juce::AffineTransform xform;
+    if (! isVertical())
+    {
+        const float sx = (float) cw / (float) cols;
+        const float sy = (float) ch / (float) rows;
+        if (direction == Direction::Left)
+            xform = juce::AffineTransform (sx, 0.0f, px - wc * sx,
+                                           0.0f, sy, py);
+        else   // Right：新数据在左，时间轴反向
+            xform = juce::AffineTransform (-sx, 0.0f, px + (wc + (float) cols) * sx,
+                                           0.0f, sy, py);
+    }
+    else
+    {
+        const float sx = (float) cw / (float) rows;   // 频率沿 x（低频在左）
+        const float sy = (float) ch / (float) cols;   // 时间沿 y
+        if (direction == Direction::Up)   // 新数据在底部，画面向上移动
+            xform = juce::AffineTransform (0.0f, -sx, px + (float) rows * sx,
+                                           sy, 0.0f, py - wc * sy);
+        else                               // Down：新数据在顶部，画面向下移动
+            xform = juce::AffineTransform (0.0f, -sx, px + (float) rows * sx,
+                                           -sy, 0.0f, py + (wc + (float) cols) * sy);
+    }
     g.drawImageTransformed (imageBuf, xform, false);
 
     drawAxisLabels (g, plot);
@@ -496,6 +570,22 @@ void SpectrogramModule::buildGlSnapshot()
 
     auto snap = beginGlSnapshot();
     snap->canvasLocal = canvas;
+
+    if (direction != Direction::Left)
+    {
+        // ---- Right / Up / Down：展开成无环形的纹理（每帧重排；用 256 级调色板查表）----
+        snap->texDirty = true;
+        snap->texScrollU = 0.0f;
+        snap->texWinW = 1.0f;
+        snap->texTargetRect = plot;
+        buildUnrolledTexture (snap->texPixels, snap->texW, snap->texH);
+        texCacheValid_ = false;   // 环形路径的缓存与此无关，切回 Left 时需要重建
+
+        appendSunkenFrame (snap->vertices, canvas);
+        snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+        publishGlSnapshot (std::move (snap));
+        return;
+    }
 
     // ---- 纹理：gridData 着色（双拷贝环形）----
     snap->texW = cols * 2;
@@ -556,6 +646,82 @@ void SpectrogramModule::buildGlSnapshot()
     publishGlSnapshot (std::move (snap));
 }
 
+// ----------------------------------------------------------
+// 展开纹理（Right / Up / Down）
+//   时间序 τ：0 = 最老，cols-1 = 最新；环形列 c = (writeCol + τ) % cols。
+//   纹理内存行 0 = 画面底部（v=0 = 底）。gridData 行 0 = 高频。
+//     Right：W = cols, H = rows。x = cols-1-τ（最新在左），m = rows-1-r。
+//     Up   ：W = rows, H = cols。x = rows-1-r（低频在左），m = cols-1-τ（最新在底）。
+//     Down ：W = rows, H = cols。x = rows-1-r，m = τ（最新在顶）。
+// ----------------------------------------------------------
+void SpectrogramModule::buildUnrolledTexture (std::vector<juce::uint32>& out, int& outW, int& outH) const
+{
+    const bool vertical = isVertical();
+    outW = vertical ? rows : cols;
+    outH = vertical ? cols : rows;
+    out.assign ((size_t) outW * (size_t) outH, 0u);
+
+    std::array<juce::uint32, 256> palette;
+    for (int i = 0; i < 256; ++i)
+        palette[(size_t) i] = intensityToColour ((float) i * (1.0f / 255.0f)).getARGB();
+
+    auto idxOf = [] (float t) { return juce::jlimit (0, 255, (int) std::lround (t * 255.0f)); };
+
+    for (int tau = 0; tau < cols; ++tau)
+    {
+        const int c = (writeCol + tau) % cols;
+        for (int r = 0; r < rows; ++r)
+        {
+            const juce::uint32 argb = palette[(size_t) idxOf (gridData[(size_t) (r * cols + c)])];
+            int x = 0, m = 0;
+            switch (direction)
+            {
+                case Direction::Right: x = cols - 1 - tau; m = rows - 1 - r; break;
+                case Direction::Up:    x = rows - 1 - r;   m = cols - 1 - tau; break;
+                case Direction::Down:  x = rows - 1 - r;   m = tau; break;
+                case Direction::Left:  default: break;
+            }
+            out[(size_t) m * (size_t) outW + (size_t) x] = argb;
+        }
+    }
+}
+
+// 悬停点 → 频率 + 距今秒数（方向 / FFT scale 感知）
+void SpectrogramModule::hoverToFreqAndAge (juce::Rectangle<int> canvas, juce::Point<int> p,
+                                           float& freqHz, float& secondsAgo) const
+{
+    const double sampleRate = hub.getSampleRate();
+    const double nyquist    = (sampleRate > 0.0) ? sampleRate * 0.5 : 24000.0;
+    const double fMin       = (double) minFreqHz;
+    const double fMax       = juce::jmin ((double) maxFreqHz, nyquist);
+
+    float freqT = 0.0f, ageFrac = 0.0f;   // freqT: 0 = 低频；ageFrac: 0 = 最新
+    switch (direction)
+    {
+        case Direction::Left:
+            freqT   = 1.0f - (float) (p.y - canvas.getY()) / (float) juce::jmax (1, canvas.getHeight());
+            ageFrac = (float) (canvas.getRight() - p.x) / (float) juce::jmax (1, canvas.getWidth());
+            break;
+        case Direction::Right:
+            freqT   = 1.0f - (float) (p.y - canvas.getY()) / (float) juce::jmax (1, canvas.getHeight());
+            ageFrac = (float) (p.x - canvas.getX()) / (float) juce::jmax (1, canvas.getWidth());
+            break;
+        case Direction::Up:
+            freqT   = (float) (p.x - canvas.getX()) / (float) juce::jmax (1, canvas.getWidth());
+            ageFrac = (float) (p.y - canvas.getY()) / (float) juce::jmax (1, canvas.getHeight());
+            ageFrac = 1.0f - ageFrac;
+            break;
+        case Direction::Down:
+            freqT   = (float) (p.x - canvas.getX()) / (float) juce::jmax (1, canvas.getWidth());
+            ageFrac = (float) (p.y - canvas.getY()) / (float) juce::jmax (1, canvas.getHeight());
+            break;
+    }
+
+    freqHz = (float) y2k::fscale::fromUnit (fftScale, juce::jlimit (0.0, 1.0, (double) freqT), fMin, fMax);
+    const float spanPx = isVertical() ? (float) canvas.getHeight() : (float) canvas.getWidth();
+    secondsAgo = juce::jlimit (0.0f, 1.0f, ageFrac) * spanPx / juce::jmax (1.0f, pixelsPerSecond);
+}
+
 void SpectrogramModule::mouseMove(const juce::MouseEvent& e)
 {
     ModulePanel::mouseMove(e);
@@ -586,22 +752,8 @@ void SpectrogramModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> c
     if (!hoverActive || !canvas.contains(hoverPos))
         return;
 
-    const double sampleRate = hub.getSampleRate();
-    const double nyquist    = (sampleRate > 0.0) ? sampleRate * 0.5 : 24000.0;
-    const double fMin       = (double) minFreqHz;
-    const double fMax       = juce::jmin((double) maxFreqHz, nyquist);
-
-    // Y → 频率（对数；顶=高频，底=低频）
-    const float t = 1.0f - (float)(hoverPos.y - canvas.getY())
-                  / juce::jmax(1, canvas.getHeight());
-    const double logA   = std::log10(fMin);
-    const double logB   = std::log10(fMax);
-    const float  freqHz = (float) std::pow(10.0,
-        logA + juce::jlimit(0.0, 1.0, (double) t) * (logB - logA));
-
-    // X → 相对时间（过去为负，越右越新）
-    const float secondsAgo = (float)(canvas.getRight() - hoverPos.x)
-                           / juce::jmax(1.0f, pixelsPerSecond);
+    float freqHz = 0.0f, secondsAgo = 0.0f;
+    hoverToFreqAndAge (canvas, hoverPos, freqHz, secondsAgo);
 
     const juce::String readout = PinkXP::formatFreqHz(freqHz)
                                + "  " + juce::String(-secondsAgo, 1) + " s";
@@ -738,29 +890,42 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
     const double fMax       = juce::jmin ((double) maxFreqHz, nyquist);
 
     struct L { float hz; const char* label; };
-    const L labels[] = {
-        {   100.0f, "100" },
-        {  1000.0f,  "1k" },
-        { 10000.0f, "10k" },
-    };
+    static const L logLabels[]    = { { 100.0f, "100" }, { 1000.0f, "1k" }, { 10000.0f, "10k" } };
+    static const L melLabels[]    = { { 500.0f, "500" }, { 1000.0f, "1k" }, { 2000.0f, "2k" },
+                                      { 5000.0f, "5k" }, { 10000.0f, "10k" } };
+    static const L linearLabels[] = { { 5000.0f, "5k" }, { 10000.0f, "10k" }, { 15000.0f, "15k" } };
+    const L* labels = logLabels;
+    int numLabels = (int) std::size (logLabels);
+    if (fftScale == y2k::fscale::Scale::mel)    { labels = melLabels;    numLabels = (int) std::size (melLabels); }
+    if (fftScale == y2k::fscale::Scale::linear) { labels = linearLabels; numLabels = (int) std::size (linearLabels); }
 
-    // Hz 刻度文字直接浮绘在画布内部左侧（不再从画布外留白区取空间）：
+    // Hz 刻度文字直接浮绘在画布内部（不再从画布外留白区取空间）：
+    //   · 横向滚动：贴左侧；纵向滚动：频率沿 x，贴顶部
     //   · 文字上面给一小块半透明的暗色背板（不被频谱色块干扰可读）
     //   · 文字用浅色 hl（反白）保证在深色背景上高对比
-    for (auto& l : labels)
+    for (int li = 0; li < numLabels; ++li)
     {
+        const auto& l = labels[li];
         if ((double) l.hz < fMin || (double) l.hz > fMax) continue;
 
-        const double logA = std::log10 (fMin);
-        const double logB = std::log10 (fMax);
-        const double t    = (std::log10 ((double) l.hz) - logA) / juce::jmax (1.0e-9, logB - logA);
-        const int    y    = canvas.getY() + (int) std::round ((1.0 - t) * (double) canvas.getHeight());
+        const double t = y2k::fscale::toUnit (fftScale, (double) l.hz, fMin, fMax);
 
-        // 文字小背板（半透明墨色）—— 让文字从纷杂色块里跳出来
-        const int bx = canvas.getX() + 2;
-        const int by = y - 6;
         const int bw = 22;
         const int bh = 12;
+        int bx, by;
+        if (isVertical())
+        {
+            bx = canvas.getX() + (int) std::round (t * (double) canvas.getWidth()) - bw / 2;
+            by = canvas.getY() + 2;
+        }
+        else
+        {
+            const int y = canvas.getY() + (int) std::round ((1.0 - t) * (double) canvas.getHeight());
+            bx = canvas.getX() + 2;
+            by = y - 6;
+        }
+
+        // 文字小背板（半透明墨色）—— 让文字从纷杂色块里跳出来
         g.setColour (PinkXP::ink.withAlpha (0.55f));
         g.fillRect (bx, by, bw, bh);
         // 静态标签位图缓存（v2.9.6 性能，见 SpectrumModule::drawAxisLabels）
@@ -779,22 +944,36 @@ void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> 
         }
     }
 
-    // 底部 older/newer 提示：同样浮绘在画布内部底边，带半透明暗背板
+    // older / newer 提示：同样浮绘在画布内部，带半透明暗背板。位置与箭头随滚动方向变化：
+    //   Left（旧外观）左 "← older"、右 "newer →"；Right 对调；Up / Down 放在右侧上下两端。
     {
-        const int by = canvas.getBottom() - 13;
-        const int bh = 11;
-        g.setColour (PinkXP::ink.withAlpha (0.45f));
-        g.fillRect (canvas.getX() + 2,              by, 56, bh);
-        g.fillRect (canvas.getRight() - 58,         by, 56, bh);
+        const int bh = 11, bw = 56;
+        auto slot = [&] (juce::Rectangle<int> r, const juce::String& text)
+        {
+            g.setColour (PinkXP::ink.withAlpha (0.45f));
+            g.fillRect (r);
+            PinkXP::drawCachedSymbolText (g, text, r, juce::Justification::centred,
+                                          8.5f, juce::Font::plain, PinkXP::hl);
+        };
+        const juce::String older = juce::String::fromUTF8 ("older");
+        const juce::String newer = juce::String::fromUTF8 ("newer");
+        const juce::String arrL  = juce::String::fromUTF8 ("\xe2\x86\x90 ");
+        const juce::String arrR  = juce::String::fromUTF8 (" \xe2\x86\x92");
+        const juce::String arrU  = juce::String::fromUTF8 ("\xe2\x86\x91 ");
+        const juce::String arrD  = juce::String::fromUTF8 ("\xe2\x86\x93 ");
 
-        g.setColour (PinkXP::hl);
-        // "← older" / "newer →" 含箭头符号：按 run 绘制（中文译文是
-        //   "← 较早" —— 整串换英文 UI 字体会让 CJK 在 mac 上消失）
-        PinkXP::drawCachedSymbolText (g, juce::String::fromUTF8 ("\xe2\x86\x90 older"),
-                                      juce::Rectangle<int> (canvas.getX() + 2, by, 56, bh),
-                                      juce::Justification::centred, 8.5f, juce::Font::plain, PinkXP::hl);
-        PinkXP::drawCachedSymbolText (g, juce::String::fromUTF8 ("newer \xe2\x86\x92"),
-                                      juce::Rectangle<int> (canvas.getRight() - 58, by, 56, bh),
-                                      juce::Justification::centred, 8.5f, juce::Font::plain, PinkXP::hl);
+        const int by = canvas.getBottom() - 13;
+        const juce::Rectangle<int> left  (canvas.getX() + 2,      by, bw, bh);
+        const juce::Rectangle<int> right (canvas.getRight() - 58, by, bw, bh);
+        const juce::Rectangle<int> top   (canvas.getRight() - 58, canvas.getY() + 2, bw, bh);
+        const juce::Rectangle<int> bot   (canvas.getRight() - 58, by, bw, bh);
+
+        switch (direction)
+        {
+            case Direction::Left:  slot (left, arrL + older); slot (right, newer + arrR); break;
+            case Direction::Right: slot (left, arrL + newer); slot (right, older + arrR); break;
+            case Direction::Up:    slot (top,  arrU + older); slot (bot,   newer + juce::String (" ") + arrD.trim()); break;
+            case Direction::Down:  slot (top,  arrU + newer); slot (bot,   older + juce::String (" ") + arrD.trim()); break;
+        }
     }
 }

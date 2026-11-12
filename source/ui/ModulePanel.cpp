@@ -1,4 +1,5 @@
 #include "source/ui/ModulePanel.h"
+#include "source/ui/ModuleControlDrawer.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/HoverHelp.h"
@@ -22,6 +23,29 @@ namespace
         if (auto* ws = dynamic_cast<const ModuleWorkspace*> (panel.getParentComponent()))
             return ws->isLayoutLocked();
         return false;
+    }
+
+    // 像素风小齿轮：4 根交叉齿条 + 圆盘 + 中心孔，按按钮尺寸自适应
+    void drawGearIcon (juce::Graphics& g, juce::Rectangle<float> r,
+                       juce::Colour ink, juce::Colour hole)
+    {
+        const float cx = r.getCentreX(), cy = r.getCentreY();
+        const float R  = juce::jmin (r.getWidth(), r.getHeight()) * 0.5f;
+        const float toothW = juce::jmax (1.6f, R * 0.42f);
+
+        g.setColour (ink);
+        for (int i = 0; i < 4; ++i)
+        {
+            juce::Path tooth;
+            tooth.addRectangle (-toothW * 0.5f, -R, toothW, R * 2.0f);
+            g.fillPath (tooth, juce::AffineTransform::rotation (juce::MathConstants<float>::pi * 0.25f * (float) i)
+                                   .translated (cx, cy));
+        }
+        g.fillEllipse (cx - R * 0.74f, cy - R * 0.74f, R * 1.48f, R * 1.48f);
+
+        g.setColour (hole);
+        const float h = R * 0.36f;
+        g.fillEllipse (cx - h, cy - h, h * 2.0f, h * 2.0f);
     }
 }
 
@@ -134,6 +158,90 @@ juce::Rectangle<int> ModulePanel::getPopOutButtonBounds() const
                                  cb.getY(), s, s);
 }
 
+// 控制面板（齿轮）按钮：紧挨在弹出按钮左侧；弹出按钮不显示时紧挨关闭按钮
+juce::Rectangle<int> ModulePanel::getControlButtonBounds() const
+{
+    constexpr int gap = 2;
+    const int s = PinkXP::ui(popOutButtonSize);
+    const auto anchor = (popOutEnabled_ || isFloating_) ? getPopOutButtonBounds()
+                                                        : getCloseButtonBounds();
+    return juce::Rectangle<int>(anchor.getX() - gap - s, anchor.getY(), s, s);
+}
+
+// ----------------------------------------------------------
+// 控制面板（v3.1）：开关 / 抽屉布局
+// ----------------------------------------------------------
+void ModulePanel::setControlPanelEnabled (bool enabled) noexcept
+{
+    controlPanelEnabled_ = enabled;
+}
+
+juce::Rectangle<int> ModulePanel::getControlDrawerBounds() const
+{
+    return (controlDrawer_ != nullptr && controlPanelOpen_) ? controlDrawer_->getBounds()
+                                                            : juce::Rectangle<int>();
+}
+
+void ModulePanel::layoutControlDrawer()
+{
+    if (controlDrawer_ == nullptr || ! controlPanelOpen_)
+        return;
+
+    const auto content = getContentBounds();
+    if (content.getWidth() < 24 || content.getHeight() < 24)
+    {
+        controlDrawer_->setBounds ({});
+        return;
+    }
+
+    const int wantH = controlDrawer_->getContentHeight (content.getWidth() - 4) + 4;
+    const int maxH  = juce::jmax (40, (int) ((float) content.getHeight() * 0.8f));
+    controlDrawer_->setBounds (content.getX(), content.getY(),
+                               content.getWidth(), juce::jmin (wantH, maxH));
+    controlDrawer_->toFront (false);
+}
+
+void ModulePanel::setControlPanelOpen (bool open)
+{
+    if (! hasControlPanel())
+        open = false;
+    if (controlPanelOpen_ == open)
+        return;
+
+    controlPanelOpen_ = open;
+
+    if (open)
+    {
+        if (controlDrawer_ == nullptr)
+        {
+            controlDrawer_ = std::make_unique<ModuleControlDrawer> (*this);
+            addChildComponent (*controlDrawer_);
+        }
+        else
+        {
+            controlDrawer_->syncFromModule();
+        }
+        controlDrawer_->setVisible (true);
+        layoutControlDrawer();
+    }
+    else if (controlDrawer_ != nullptr)
+    {
+        controlDrawer_->setVisible (false);
+    }
+
+    // 抽屉出现 / 消失会改变内容区的遮挡关系：整块重绘一次
+    repaint();
+}
+
+void ModulePanel::refreshControlPanel()
+{
+    if (controlDrawer_ != nullptr && controlPanelOpen_)
+    {
+        controlDrawer_->syncFromModule();
+        layoutControlDrawer();
+    }
+}
+
 // ==========================================================
 // 悬停提示（HoverHelp）默认实现
 // ==========================================================
@@ -159,6 +267,14 @@ ModulePanel::HoverHelp ModulePanel::getHoverHelp (juce::Point<int> pos) const
                 ? y2k::help::make ("Dock", "Put this module back into the main window at its old place.")
                 : y2k::help::make ("Pop out", "Detach this module into its own floating window "
                                               "(great for a second screen). Its settings travel with it.");
+            return h;
+        }
+
+        if (hasControlPanel() && getControlButtonBounds().contains (pos))
+        {
+            h.text = y2k::help::make ("Controls",
+                "Open the settings drawer for this module: display modes, items shown and speed. "
+                "Click again to fold it away. Closed, the module looks exactly like before.");
             return h;
         }
 
@@ -368,6 +484,21 @@ void ModulePanel::paint(juce::Graphics& g)
             popBtnText.translate(0, -1);
             if (popOutButtonPressed_) popBtnText.translate(1, 1);
             g.drawText(y2k::tr (isFloating_ ? "=" : "-"), popBtnText, juce::Justification::centred, false);
+        }
+
+        // 3.6. 控制面板（齿轮）按钮：仅声明了控制面板的模块显示
+        if (hasControlPanel())
+        {
+            auto ctl = getControlButtonBounds();
+            const bool down = controlButtonPressed_ || controlPanelOpen_;
+            if (down)
+                PinkXP::drawPressed(g, ctl, PinkXP::pink100);
+            else
+                PinkXP::drawRaised(g, ctl, controlButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
+
+            auto icon = ctl.toFloat().reduced (3.0f);
+            if (down) icon.translate (1.0f, 1.0f);
+            drawGearIcon (g, icon, PinkXP::ink, down ? PinkXP::pink100 : PinkXP::btnFace);
         }
     } // 标题栏区域
 
@@ -604,6 +735,7 @@ void ModulePanel::repaintFrameContent()
 void ModulePanel::resized()
 {
     layoutContent(getContentBounds());
+    layoutControlDrawer();
 }
 
 // ----------------------------------------------------------
@@ -654,10 +786,13 @@ void ModulePanel::mouseExit(const juce::MouseEvent&)
 {
     closeButtonHovered = false;
     popOutButtonHovered_ = false;
+    controlButtonHovered_ = false;
     setMouseCursor(juce::MouseCursor::NormalCursor);
     repaint(getCloseButtonBounds());
     if (popOutEnabled_ || isFloating_)
         repaint(getPopOutButtonBounds());
+    if (hasControlPanel())
+        repaint(getControlButtonBounds());
 }
 
 void ModulePanel::mouseMove(const juce::MouseEvent& e)
@@ -686,6 +821,18 @@ void ModulePanel::mouseMove(const juce::MouseEvent& e)
         }
     }
 
+    // 控制按钮悬浮（控制面板不是布局操作：锁定态下也可用）
+    bool ctlHovered = false;
+    if (hasControlPanel())
+    {
+        ctlHovered = getControlButtonBounds().contains(e.getPosition());
+        if (ctlHovered != controlButtonHovered_)
+        {
+            controlButtonHovered_ = ctlHovered;
+            repaint(getControlButtonBounds());
+        }
+    }
+
     // 边缘缩放 cursor（锁定态下不变光标；浮动态下也不启用模块自身 resize —— 由窗口边框处理）
     if (locked || isFloating_)
     {
@@ -693,7 +840,7 @@ void ModulePanel::mouseMove(const juce::MouseEvent& e)
         return;
     }
 
-    if (!hovered && !popHovered)
+    if (!hovered && !popHovered && !ctlHovered)
         updateCursorFor(detectEdge(e.getPosition()));
     else
         setMouseCursor(juce::MouseCursor::NormalCursor);
@@ -716,6 +863,14 @@ void ModulePanel::mouseDown(const juce::MouseEvent& e)
         onBroughtToFront(*this);
 
     const auto pos = e.getPosition();
+
+    // 0) 控制按钮：不是布局操作，锁定态下也允许（放在锁定早退之前）
+    if (hasControlPanel() && getControlButtonBounds().contains(pos))
+    {
+        controlButtonPressed_ = true;
+        repaint(getControlButtonBounds());
+        return;
+    }
 
     // 布局锁定态：关闭 / resize / move 均不启动（锁定不允许删除子组件）。
     if (isPanelLayoutLocked (*this))
@@ -852,6 +1007,17 @@ void ModulePanel::mouseDrag(const juce::MouseEvent& e)
 
 void ModulePanel::mouseUp(const juce::MouseEvent& e)
 {
+    // 控制按钮点击判定（锁定态下同样有效，所以放在锁定早退之前）
+    if (controlButtonPressed_)
+    {
+        controlButtonPressed_ = false;
+        const bool stillOnBtn = hasControlPanel() && getControlButtonBounds().contains(e.getPosition());
+        repaint(getTitleBarBounds());
+        if (stillOnBtn)
+            setControlPanelOpen (! controlPanelOpen_);
+        return;
+    }
+
     if (isPanelLayoutLocked(*this))
     {
         closeButtonPressed = false;
@@ -924,6 +1090,8 @@ void ModulePanel::mouseDoubleClick (const juce::MouseEvent& e)
     if (getCloseButtonBounds().contains (pos))
         return;
     if ((popOutEnabled_ || isFloating_) && getPopOutButtonBounds().contains (pos))
+        return;
+    if (hasControlPanel() && getControlButtonBounds().contains (pos))
         return;
 
     // 双击前的 mouseDown 已经启动过拖拽（浮动态拖窗口 / 嵌入态移动），

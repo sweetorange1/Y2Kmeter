@@ -2,27 +2,27 @@
 
 #include <JuceHeader.h>
 #include <cmath>
+#include <vector>
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 
 // ==========================================================
-// LoudnessModule —— Pink XP 像素风响度计模块
+// LoudnessModule —— 响度模块（v3.1：合并了 Loudness / LUFS Real-time / True Peak）
 //
-// 布局（内容区从左到右）：
-//   ┌──────────────────────────────────────────────────────┐
-//   │  [LUFS-M 柱] [LUFS-S 柱] [LUFS-I 柱]  [Peak 柱×2]  │
-//   │   数字读数    数字读数    数字读数      L/R 数字读数  │
-//   │                                                      │
-//   │  右侧 dBFS 刻度尺（-60 ~ 0 dBFS）                   │
-//   └──────────────────────────────────────────────────────┘
+//   同一路 Kind::Loudness 分析结果，用「项」+「样式」还原每一种旧外观：
+//     项：M（瞬时 LUFS）· S（短时 LUFS）· I（积分 LUFS）· True Peak · RMS
+//     样式：
+//       LED 灯条     —— 旧 Loudness：像素柱 + 右侧 dB 刻度尺 + 底部标签/读数
+//       数字读数     —— 旧 LUFS Real-time / True Peak：大数字 + 进度条
 //
-// 每条柱状表：
-//   - 像素格子（cellSize = 6px，gap = 1px）
-//   - 颜色分区：绿（< -14 LUFS）→ 黄（-14 ~ -9）→ 红（> -9）
-//   - 峰值保持线（3s 衰减）
-//   - 底部数字读数（Pink XP 字体，11px）
+//   旧外观对应的配置：
+//     loudness     → 灯条，M S I RMS（构造默认）
+//     lufs_realtime→ 读数，M S I
+//     true_peak    → 读数，True Peak + RMS
+//
+//   灯条样式里 RMS / True Peak 各占 L、R 两根柱；读数样式里各占一行（取 L/R 较大者）。
 // ==========================================================
 
 class LoudnessModule : public ModulePanel,
@@ -32,26 +32,33 @@ public:
     explicit LoudnessModule(AnalyserHub& hub);
     ~LoudnessModule() override;
 
-    // Phase F：由 Hub 的 30Hz 分发器在 UI 线程调用
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
+
+    // ---- 持久化 + 控制面板 ----
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState (const juce::ValueTree& state) override;
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
 
     // ---- Toybox（v3.0.0）：打砖块（§8.2）----
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
+    enum class Style { ledBars = 0, readouts = 1 };
 
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
 
 private:
-
     // ---- 单条像素柱状表 ----
     struct MeterBar
     {
-        juce::String label;       // 标签文字（如 "M"、"S"、"I"、"L"、"R"）
-        float        value       = -144.0f;  // 当前值（dBFS / LUFS）
+        juce::String label;       // 标签文字
+        float        value       = -144.0f;
         float        peakValue   = -144.0f;  // 峰值保持
-        float        peakHoldMs  = 0.0f;     // 峰值保持计时（ms）
+        float        peakHoldMs  = 0.0f;
         float        smoothed    = -144.0f;  // 平滑后的显示值
 
         static constexpr float peakHoldDuration = 3000.0f; // 3s
@@ -59,19 +66,15 @@ private:
 
         void update(float newValue, float deltaMs)
         {
-            // 防御：非有限值（NaN / Inf）归为底噪 -144dB，避免污染 smoothed
             if (! std::isfinite(newValue))
                 newValue = -144.0f;
 
-            // 平滑：上升快，下降慢（v2.9：按 dt 换算，120Hz 标定）
+            // 平滑：上升快，下降慢（按 dt 换算，120Hz 标定）
             const float dtSec = deltaMs * 0.001f;
             const float alpha = y2k::pacing::alphaForDt ((newValue > smoothed) ? 0.5f : 0.05f, dtSec);
             smoothed = smoothed + alpha * (newValue - smoothed);
-
-            // 再夹一次，严防浮点累计误差飘出合理区间
             smoothed = juce::jlimit(-200.0f, 60.0f, smoothed);
 
-            // 峰值保持
             if (smoothed > peakValue)
             {
                 peakValue  = smoothed;
@@ -87,54 +90,69 @@ private:
         }
     };
 
-    // ---- 绘制辅助 ----
-    void drawMeterBar(juce::Graphics& g,
-                      juce::Rectangle<int> barArea,
-                      const MeterBar& bar,
-                      bool isLUFS) const;
+    // 灯条样式的一根柱：指向 MeterBar + 是否 LUFS 配色
+    struct BarSlot { MeterBar* bar; bool isLufs; };
 
-    void drawScale(juce::Graphics& g,
-                   juce::Rectangle<int> scaleArea,
-                   bool isLUFS) const;
+    struct Items
+    {
+        bool m = true, s = true, i = true, tp = false, rms = true;
+        bool any() const noexcept { return m || s || i || tp || rms; }
+    };
 
-    void drawMeterBarStaticLayer(juce::Graphics& g,
-                                 juce::Rectangle<int> barArea,
-                                 bool isLUFS) const;
+    // ---- 灯条样式 ----
+    void rebuildBarSlots();
+    // 把 content 区拆成各柱区域 + 刻度尺（layoutContent 与静态层共用同一份几何）
+    void computeBarGeometry(juce::Rectangle<int> content,
+                            std::vector<juce::Rectangle<int>>& bars,
+                            juce::Rectangle<int>& scale) const;
+    void paintLedBars(juce::Graphics& g, juce::Rectangle<int> contentBounds);
+    void paintReadouts(juce::Graphics& g, juce::Rectangle<int> contentBounds);
 
-    static int firstVisibleRowForValue(float value, int numRows, bool isLUFS) noexcept;
+    void drawMeterBar(juce::Graphics& g, juce::Rectangle<int> barArea, const MeterBar& bar, bool isLUFS) const;
+    void drawScale(juce::Graphics& g, juce::Rectangle<int> scaleArea) const;
+    void drawMeterBarStaticLayer(juce::Graphics& g, juce::Rectangle<int> barArea, bool isLUFS) const;
+    static int firstVisibleRowForValue(float value, int numRows) noexcept;
 
     void rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds);
     void drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const;
     void invalidateStaticLayer();
 
-    // dBFS / LUFS 值 → 柱高比例 [0,1]
-    static float valueToNorm(float val, bool isLUFS) noexcept;
-
-    // 根据 LUFS 值返回颜色
+    static float valueToNorm(float val) noexcept;
     static juce::Colour lufsToColour(float lufs) noexcept;
-    // 根据 dBFS 值返回颜色
     static juce::Colour dbToColour(float db) noexcept;
 
     // ---- 成员 ----
     AnalyserHub& hub;
 
-    // 5 条柱：M / S / I / L / R
-    MeterBar barM, barS, barI, barL, barR;
+    Items items;
+    Style style = Style::ledBars;
 
-    // 读数位图缓存（v2.9.6 性能）：数字读数每帧变化，mac GL 下逐帧 drawText
-    //   开销大；缓存位图 + 100ms 节流刷新（10Hz，人眼无感知）。
-    mutable PinkXP::StaticText readoutCache_[5];
-    mutable juce::String readoutCacheText_[5];
-    mutable double       readoutCacheTimeMs_[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 灯条：M S I TP-L TP-R RMS-L RMS-R（按项过滤后排进 slots）
+    MeterBar barM, barS, barI, barTpL, barTpR, barRmsL, barRmsR;
+    std::vector<BarSlot> slots;
 
-    // 上次 tick 时间（用于峰值保持计时）
-    juce::Time lastTickTime;
+    // 读数：平滑值 + 闪白 + 心跳
+    enum ReadRow { rM = 0, rS, rI, rTp, rRms, numReadRows };
+    float rdValue[numReadRows] = { -144.0f, -144.0f, -144.0f, -144.0f, -144.0f };
+    float rdFlash[numReadRows] = {};
+    float rdPrev [numReadRows] = {};
+    float rmsSmoothL = -144.0f, rmsSmoothR = -144.0f;
+    float tpHoldSec = 0.0f;
+    float pulsePhase = 0.0f;
 
-    // 布局缓存（在 layoutContent 中计算，在 paintContent 中使用）
-    juce::Rectangle<int> areaM, areaS, areaI, areaL, areaR, areaScale;
+    // 灯条读数位图缓存（v2.9.6 性能：100ms 节流刷新）
+    mutable PinkXP::StaticText readoutCache_[7];
+    mutable juce::String readoutCacheText_[7];
+    mutable double       readoutCacheTimeMs_[7] = {};
+
+    // 布局缓存（layoutContent 计算，paintContent 使用）
+    std::vector<juce::Rectangle<int>> barAreas;
+    juce::Rectangle<int> areaScale;
+    std::vector<std::pair<int, juce::Rectangle<int>>> readoutRects;   // 读数样式：(行号, 区域)
 
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
+    int staticLayerBarCount = -1;
     int themeSubToken = -1;
 
     static constexpr int cellSize  = 6;

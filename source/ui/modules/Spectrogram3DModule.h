@@ -39,9 +39,14 @@ public:
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
 
-    // v2.9.3：持久化 TINT 按钮状态（山峰跟随主题着色开关）
+    // v2.9.3：持久化着色模式；v3.1：另存 colourMode / depthDir / speed（缺键保持默认 = 旧外观）
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
+
+    // ---- 控制面板（v3.1）----
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
 
     // ---- Toybox（v3.0.0）：火山与旗帜（§8.3）----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
@@ -118,12 +123,13 @@ private:
     double lastPushMs       = 0.0;    // v2.9.2：滚动更新门控（~30Hz）
     float  columnAccumulator = 0.0f;
 
-    // ---- 右侧控制条 ----
-    juce::Slider     speedSlider;
-    juce::Label      speedLabel;
-    juce::TextButton themeColourBtn { "TINT" };
-    bool             useThemeColours = true;  // 默认按下：山峰跟随主题着色
-    static constexpr int sliderPanelW = 42;
+    // ---- 控制面板参数（v3.1，构造默认 = 旧外观：Theme 着色 / 向右后方退远）----
+    //   colourMode: 0 Theme（旧 TINT 按下）/ 1 Heat（旧 TINT 弹起）/ 2 Grey / 3 Ice
+    //   depthDir  : 0 Back-right（旧外观）/ 1 Back-left（切片向左后方退远，投影镜像）
+    int  colourMode = 0;
+    int  depthDir   = 0;
+    bool useThemeColours() const noexcept { return colourMode == 0; }
+    static constexpr int sliderPanelW = 0;   // v3.1：右侧控制条取消，画布 = 整个内容区
 
     int themeSubToken = -1;
 

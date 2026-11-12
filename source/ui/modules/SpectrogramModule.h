@@ -50,9 +50,26 @@ public:
     void        setDisplayMode (DisplayMode m);
     DisplayMode getDisplayMode() const noexcept { return displayMode; }
 
-    // v2.9.3：持久化显示模式（Classic / Sharp / Sharper 按钮状态）
+    // v2.9.3：持久化显示模式（Classic / Sharp / Sharper）
+    // v3.1：另存 speed / direction / colour / fftScale（均为缺键保持默认 = 旧外观）
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
+
+    // ---- 控制面板（v3.1）：滚动方向 / shaper 模式 / 速度 / 颜色 / FFT scale ----
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
+
+    // 滚动方向 = 画面内容移动的方向。Left（默认，旧外观）：新数据从右侧进入、画面向左移动，
+    //   时间横向、频率纵向。Up / Down：时间纵向、频率横向（低频在左）。
+    enum class Direction : int { Left = 0, Right = 1, Up = 2, Down = 3 };
+    // 颜色：Theme 跟随主题（旧外观）；其余是固定色阶
+    enum class ColourScheme : int { Theme = 0, Heat = 1, Grey = 2, Ice = 3 };
+
+    void setDirection (Direction d);
+    void setColourScheme (ColourScheme c);
+    void setFftScale (y2k::fscale::Scale s);
+    void setScrollSpeed (float pxPerSec);
 
     // ---- Toybox（v3.0.0）：贴纸炸弹（§8.3）----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
@@ -100,7 +117,7 @@ private:
     //   pixelsPerSecond 列/秒。
 
     // 强度 t∈[0,1] → 色彩：从 base 色（无信号）到 accent 色（满信号）的线性渐变
-    juce::Colour intensityToColour (float t) noexcept;
+    juce::Colour intensityToColour (float t) const noexcept;
 
     // 频率 → 网格行号（0 = 顶 = 高频；rows-1 = 底 = 低频）
     static int freqToGridRow (double freqHz, double minHz, double maxHz, int rows) noexcept;
@@ -162,19 +179,25 @@ private:
     double lastFrameMs      = 0.0;     // 上一次 onFrame 时刻（毫秒）
     float  columnAccumulator = 0.0f;   // 累计的小数列值，⏲外部当 1 列抽走
 
-    // ---- 右侧控制条（样式与 EqModule 的 SIZE 滑条一致）----
-    juce::Slider speedSlider;
-    juce::Label  speedLabel;
-    juce::TextButton modeBtn { "+" };   // 右下角显示模式切换（样式对齐 3D 模块的 TINT）
-    static constexpr int sliderPanelW = 42;  // 右侧滑条面板宽度（各模块独立，不要求与 WaveformModule 的 SPEED 面板同宽）
+    // ---- 控制面板参数（构造默认 = 旧外观）----
+    Direction    direction    = Direction::Left;
+    ColourScheme colourScheme = ColourScheme::Theme;
+    y2k::fscale::Scale fftScale = y2k::fscale::Scale::log;
+    bool isVertical() const noexcept { return direction == Direction::Up || direction == Direction::Down; }
+
+    // 把 gridData 的最近 cols 列按当前方向展开成无环形的纹理像素（Right / Up / Down 用；
+    //   Left 走原来的双拷贝环形零 memmove 路径）。W×H 写入 outW/outH。
+    void buildUnrolledTexture (std::vector<juce::uint32>& out, int& outW, int& outH) const;
+    // 当前方向 + FFT scale 下，屏幕上的位置（plot 内 [0,1] 的频率轴位置）→ 频率；
+    //   以及悬停点 → (频率, 距今秒数)
+    void hoverToFreqAndAge (juce::Rectangle<int> canvas, juce::Point<int> p,
+                            float& freqHz, float& secondsAgo) const;
 
     // ---- 显示模式状态 ----
     //   Classic : 原始幅度谱（getSpectrumMagnitudesBlended）
     //   Sharp   : 频率重分配（getSpectrumReassignedBlended，能量凝聚成粒子）
     //   Sharper : 频率重分配（时间重分配作为后续增强）
     DisplayMode displayMode = DisplayMode::Sharp;   // 默认 Sharp
-    static const char* displayModeText (DisplayMode m) noexcept;
-
     // 主题订阅 token：切换主题时重新下发 Label / Slider textBox 的墨色
     int themeSubToken = -1;
 
