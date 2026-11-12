@@ -110,7 +110,7 @@ tools/MilkDrop 3.33
 
 # 本地文档目录：只在本地保留，不再入库
 #   （已跟踪的历史 docs 文件已用 git rm -r --cached docs 移出版本控制）
-/docs/
+
 
 # v3.0.0 补充：根目录一次性杂物（诊断文本 / 临时 diff / 散落预设 / 转储）
 #   仓库只保留 PROJECT_OVERVIEW.md 一份文档，其余临时产物一律不入库。
