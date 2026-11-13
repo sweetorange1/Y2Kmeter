@@ -357,7 +357,7 @@ void DynamicsModule::mouseMove(const juce::MouseEvent& e)
     {
         hoverActive = inside;
         hoverPos    = pos;
-        repaint();
+        repaintHover (areaCrest);
     }
 }
 
@@ -367,7 +367,8 @@ void DynamicsModule::mouseExit(const juce::MouseEvent& e)
     if (hoverActive)
     {
         hoverActive = false;
-        repaint();
+        // 标尺只画在 Crest 历史带内，擦除只需失效该区域（不走浮动态限流）
+        repaint (areaCrest);
     }
 }
 

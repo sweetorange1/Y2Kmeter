@@ -744,7 +744,7 @@ void SpectrogramModule::mouseMove(const juce::MouseEvent& e)
     {
         hoverActive = inside;
         hoverPos    = pos;
-        repaint();
+        repaintHover (canvas);
     }
 }
 
@@ -761,7 +761,7 @@ void SpectrogramModule::mouseDrag(const juce::MouseEvent& e)
     {
         hoverActive = inside;
         hoverPos    = pos;
-        repaint();
+        repaintHover (canvas);
     }
 }
 
@@ -798,7 +798,8 @@ void SpectrogramModule::mouseExit(const juce::MouseEvent& e)
     if (hoverActive)
     {
         hoverActive = false;
-        repaint();
+        // 标尺只画在画布内，擦除只需失效画布（不走浮动态限流）
+        repaint (getCanvasBounds (getContentBounds()));
     }
 }
 

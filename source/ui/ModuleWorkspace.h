@@ -314,6 +314,21 @@ public:
     //   结构性变化（尺寸 / 主题 / 标题 / 按钮状态）仍应调用 repaint()。
     void repaintFrameContent();
 
+    // 悬停标尺等"跟随鼠标"的高频局部重绘入口：
+    //   鼠标事件频率由硬件回报率决定（高回报率鼠标拖拽可达数百 Hz），浮动态下
+    //   每次都会触发消息线程上的 CPU 软件光栅化。此入口只失效传入区域，并在
+    //   浮动态按 floatingRepaintHz 与逐帧重绘共享同一个预算（嵌入态下等价于
+    //   repaint(area)，行为不变）。
+    void repaintHover (juce::Rectangle<int> area);
+
+    // 浮动态重绘上限（Hz）：
+    //   浮动态模块被移出 Editor 组件树后不再走 GL 直渲染（Editor 的 GL 遍历不
+    //   覆盖它，见 GlDirectModuleBase::wantsGlSnapshot），每帧都退化成消息线程上
+    //   的 CPU 软件光栅化；叠加"按住子弹时间 + 悬停标尺"的高频鼠标事件后消息
+    //   线程被打满，表现为整个进程卡顿（频谱 / 语谱图 / 立体声频段图 / 波形历史）。
+    //   → 浮动态把"逐帧内容重绘 + 悬停重绘"统一限流到该帧率；嵌入态不生效。
+    static constexpr int floatingRepaintHz = 30;
+
     // 模块是否处于"可见且在父容器可视区域内"状态（用于 onFrame/重绘裁剪）
     bool isVisuallyActiveInWorkspace() const noexcept;
 
@@ -492,6 +507,15 @@ private:
     //   再也不会重新合成组件层，GL 内容（Milkdrop 视频 / GL 直渲染）就会"永远
     //   压在所有组件之上"，且表现为永久性。见 ModulePanel::repaint()。
     juce::uint32 pendingRepaintStampMs = 0;
+
+    // 浮动态重绘限流时间戳（见 floatingRepaintHz / floatingRepaintThrottled）
+    juce::uint32 lastFloatingRepaintMs = 0;
+    bool floatingRepaintThrottled() noexcept;
+
+    // 悬停重绘被限流时的"补齐"状态：快速拖拽停下后必须在节流窗口结束时补一次，
+    //   否则十字线/读数会停在上一帧的位置（最后一次鼠标事件被丢弃）。
+    juce::Rectangle<int> pendingHoverArea_;
+    bool hoverCatchUpScheduled_ = false;
 
     // 诊断计数（见 DiagPaintCounters）
     juce::uint32 diagPaints = 0, diagIssued = 0, diagCoalesced = 0, diagSkipped = 0;

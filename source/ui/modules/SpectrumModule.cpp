@@ -9,6 +9,19 @@
 #include <initializer_list>
 #include <limits>
 
+namespace
+{
+    // ---- 坐标轴标签留白（画布边距与标签绘制共用的单一事实来源）----
+    //   底部 Hz 行与左侧 dB 列用同一口径：文字厚度 + 与画布边缘的间隙。
+    //     · 底部：轴字体行高 12 + 间隙 2 + 余量 2 = 16
+    //     · 左侧：最宽刻度 "-80" 在 9px 轴字体下实测约 15px（Silkscreen 14.9 /
+    //       ChillBitmap 14.6）+ 间隙 2 + 余量 3 = 20
+    //   旧值 32（28 文字盒 + 4 间隙）比文字实际所需宽了近一倍，白白吃掉画布宽度。
+    constexpr int axisLabelGap   = 2;   // 文字与画布边缘的间隙
+    constexpr int dbLabelColumnW = 20;  // 左侧 dB 刻度列宽
+    constexpr int hzLabelRowH    = 16;  // 底部 Hz 刻度行高
+}
+
 // ==========================================================
 // SpectrumModule
 // ==========================================================
@@ -463,10 +476,10 @@ void SpectrumModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 juce::Rectangle<int> SpectrumModule::getCanvasBounds(juce::Rectangle<int> content) const
 {
     // v3.1：顶部工具栏取消（参数搬进控制面板），整块内容区都是画布。
-    //   左侧留 32 给 dB 标签，底部留 16 给 Hz 标签
+    //   左侧留 dbLabelColumnW 给 dB 标签，底部留 hzLabelRowH 给 Hz 标签
     return content.withTrimmedTop(4)
-                  .withTrimmedLeft(32)
-                  .withTrimmedBottom(16)
+                  .withTrimmedLeft(dbLabelColumnW)
+                  .withTrimmedBottom(hzLabelRowH)
                   .withTrimmedRight(6);
 }
 
@@ -1371,7 +1384,7 @@ void SpectrumModule::mouseMove(const juce::MouseEvent& e)
     {
         hoverActive = inside;
         hoverPos    = pos;
-        repaint();
+        repaintHover (canvas);
     }
 }
 
@@ -1388,7 +1401,7 @@ void SpectrumModule::mouseDrag (const juce::MouseEvent& e)
     {
         hoverActive = inside;
         hoverPos    = pos;
-        repaint();
+        repaintHover (canvas);
     }
 }
 
@@ -1432,7 +1445,8 @@ void SpectrumModule::mouseExit(const juce::MouseEvent& e)
     if (hoverActive)
     {
         hoverActive = false;
-        repaint();
+        // 标尺只画在画布内：擦除只需要失效画布（且不走浮动态限流，必须立刻生效）
+        repaint (getCanvasBounds (getContentBounds()));
     }
 }
 
@@ -1778,7 +1792,9 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
     // glyph GL 调用（mac NSOpenGL 下开销是 Windows 约 10 倍）。
     const juce::Colour labelColour = PinkXP::ink.withAlpha(0.85f);
 
-    // 左侧 dB 标签
+    // 左侧 dB 标签（右对齐，文字右缘与画布左边界留 axisLabelGap）
+    const int dbLabelLeft = canvas.getX() - dbLabelColumnW;
+    const int dbLabelW    = dbLabelColumnW - axisLabelGap;
     for (int db = (int) minDb; db <= (int) maxDb; db += 20)
     {
         const int y = (int) std::round(dbToY((float) db, canvas));
@@ -1789,14 +1805,14 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
         if (img.isValid())
         {
             img.drawAt (g,
-                        (float) (canvas.getX() - 32 + (28 - img.getWidth())),
+                        (float) (dbLabelLeft + dbLabelW - img.getWidth()),
                         (float) (y - img.getHeight() / 2));
         }
         else
         {
             g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
             g.setColour(labelColour);
-            g.drawText(y2k::tr (s), canvas.getX() - 32, y - 6, 28, 12,
+            g.drawText(y2k::tr (s), dbLabelLeft, y - 6, dbLabelW, 12,
                        juce::Justification::centredRight, false);
         }
     }
@@ -1814,6 +1830,7 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
     for (float f : majorHz) labelHz.push_back (f);
     labelHz.push_back (20000.0f);
 
+    const int hzLabelTop = canvas.getBottom() + axisLabelGap;
     for (float hz : labelHz)
     {
         const int x = (int) std::round(freqToX(hz, canvas));
@@ -1824,13 +1841,13 @@ void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canv
             juce::Colours::transparentBlack, true);
         if (img.isValid())
         {
-            img.drawAt (g, (float) (x - img.getWidth() / 2), (float) (canvas.getBottom() + 2));
+            img.drawAt (g, (float) (x - img.getWidth() / 2), (float) hzLabelTop);
         }
         else
         {
             g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
             g.setColour(labelColour);
-            g.drawText(y2k::tr (text), x - 18, canvas.getBottom() + 2, 36, 12,
+            g.drawText(y2k::tr (text), x - 18, hzLabelTop, 36, 12,
                        juce::Justification::centred, false);
         }
     }

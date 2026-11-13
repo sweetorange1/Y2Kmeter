@@ -239,3 +239,6 @@ GL 直渲染模块的顶点是**模块本地坐标**，渲染器只设 `glViewpo
 - **响度灯条读数**：底部数字改用 `PinkXP::pink600`（与「数字读数」样式的大数字同色；深色主题下 pink 阶梯越靠后越亮，所以更清楚）。灯条布局由 `barLayoutArea()` 统一计算：左/上 6px、右/下 2px，刻度列 30 → 22px；静态层、柱区、刻度、标签共用同一份几何。
 - **抽屉滚动条**：`PinkXPLookAndFeel` 补了 `drawScrollbar / drawScrollbarButton`（此前继承 V4 默认的蓝灰滑块 + V2 蓝灰箭头，不跟主题）。轨道 = content 略深 + ink 1px 内框；滑块 pink400 / 500 / 600（常态 / 悬停 / 按下）+ 左上 1px 高光；箭头按钮同色系。全局生效。
 - **悬停说明**：`y2k::help::moduleHelp` 全面校对 —— 响度补 TP / RMS 两行，各模块补上 v3.1 新增参数与"都在齿轮面板里"的位置说明；已合并的旧类型条目保留但永不显示。语言包逐行对齐（91 行帮助文案 0 缺译、938 键 0 重复）。
+- **轴刻度 / 标签留白走常量，别再写字面魔数**：
+  - 频谱（`SpectrumModule.cpp` 顶层匿名 namespace）：`axisLabelGap / dbLabelColumnW / hzLabelRowH` 是画布边距与标签绘制的**唯一事实来源**。左侧 dB 列与底部 Hz 行同一口径（文字厚度 + 2px 间隙）：底部 16，左侧 20 —— 最宽刻度 `-80` 在 9px 轴字体下实测 ≈15px（Silkscreen 14.9 / ChillBitmap 14.6）。`getCanvasBounds()` 与 `drawAxisLabels()` 必须同时引用它；旧版 `withTrimmedLeft(32)` + `canvas.getX() - 32 + (28 - w)` 是同一数值手工抄了三遍，改边距漏改一处就会错位。
+  - 相位（`PhaseModule.cpp` 顶层匿名 namespace）：`barLabelW(44) / barLabelGap(4) / barLeftInset` —— WIDTH / BAL 标签在条形左侧的整块空白列内**水平居中**，列宽按最宽标签实测 ≈36px + 两侧各 6px 取；GL overlay、GL 快照、CPU 回退绘制、静态层四条路径共用 `barLeftInset`（旧版 4 处 `labelW = 56` + 2 处 `withTrimmedLeft(60)` 各自抄一份）。

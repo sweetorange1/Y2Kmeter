@@ -6,6 +6,14 @@
 - **GL 直渲染模块框架 `GlDirectModuleBase`**（v2.9.4 引入）：派生类实现 4 个纯虚 `buildGlSnapshot` / `getGlCanvasBounds` / `paintGlOverlay` / `paintLegacyContent`，GL 直渲染 + CPU 回退双路径，**两条路径绘制内容必须一致**。
 - **Milkdrop**（libprojectM 4 native OpenGL）用**独立** GL context（`componentPaintingEnabled=false`），单实例互斥（`std::atomic gActiveProjectMInstances`）。
 - **Spectrogram3D** 最终是**纯 CPU**（曾 GPU shader 迁移，15+ 轮调试后回退）。
+- **浮动态模块（pop-out 窗口）= 纯 CPU 软件绘制**：模块被移出 Editor 组件树后，
+  Editor 的 GL 遍历不再覆盖它（`GlDirectModuleBase::wantsGlSnapshot()` 浮动态返回
+  false），每帧都退化成消息线程上的整区软件光栅化。再叠加"按住拖拽 + 悬停标尺"的
+  高频鼠标事件（高回报率鼠标可达数百 Hz）就会把消息线程打满，表现为**整个进程**
+  卡顿 → `ModulePanel` 把浮动态的逐帧重绘（`repaintFrameContent`）与悬停重绘
+  （`repaintHover`）统一限流到 `floatingRepaintHz`（30Hz）；被限流丢掉的悬停帧由
+  `repaintHover` 的补齐定时器兜底，避免十字线停在上一帧位置。嵌入态（GL 直渲染）
+  不节流，行为与旧版逐像素一致。
 
 ## 2. GL Image 消费规则（macOS 崩溃高发区）
 

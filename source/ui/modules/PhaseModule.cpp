@@ -5,6 +5,19 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 
+namespace
+{
+    // Width / Balance 条左侧的文字列（GL 快照 / overlay / 旧绘制路径共用）：
+    //   标签在整列内水平居中，列右缘再留 barLabelGap 给凹陷条形的起点。
+    //   列宽取「最宽标签 "WIDTH" 在 9px bold 下实测约 36px（Silkscreen 35.6 /
+    //   ChillBitmap 36.3）+ 两侧各 6px 呼吸」= 48 —— 旧值 60 时左右各空 12px，
+    //   文字看着离两侧都太远；缩小后条形顺带加宽 12px。
+    constexpr int barLabelW   = 44;   // 纯文字列（不含右侧间隙）
+    constexpr int barLabelGap = 4;
+    // 条形本体的左边界 = 标签的居中范围（文字列 + 间隙一起参与居中）
+    constexpr int barLeftInset = barLabelW + barLabelGap;
+}
+
 // ==========================================================
 // PhaseModule
 // ==========================================================
@@ -412,21 +425,21 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
     }
 
     // ---- Width / Balance 标签与数值 ----
+    //   标签在条形左侧的空列内水平居中（列宽 = 条形左边界 barLeftInset）
     {
-        const int labelW = 56;
         if (! areaWidth.isEmpty())
         {
-            PinkXP::drawCachedText (g, "WIDTH", areaWidth.withWidth (labelW), juce::Justification::centredLeft,
+            PinkXP::drawCachedText (g, "WIDTH", areaWidth.withWidth (barLeftInset), juce::Justification::centred,
                                     9.0f, juce::Font::bold, PinkXP::ink);
             g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
             g.drawText (y2k::tr (juce::String ((int) std::round (smoothedWidth * 100.0f)) + "%"),
-                        areaWidth.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
+                        areaWidth.withTrimmedLeft (barLeftInset).withTrimmedRight (4),
                         juce::Justification::centredRight, false);
         }
 
         if (! areaBalance.isEmpty())
         {
-            PinkXP::drawCachedText (g, "BAL", areaBalance.withWidth (labelW), juce::Justification::centredLeft,
+            PinkXP::drawCachedText (g, "BAL", areaBalance.withWidth (barLeftInset), juce::Justification::centred,
                                     9.0f, juce::Font::bold, PinkXP::ink);
             g.setFont (PinkXP::getFont (9.0f, juce::Font::plain));
 
@@ -436,7 +449,7 @@ void PhaseModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas
             else if (b < 0)                txt = "L" + juce::String ((int) std::round (-b * 100.0f));
             else                           txt = "R" + juce::String ((int) std::round ( b * 100.0f));
             g.drawText (y2k::tr (txt),
-                        areaBalance.withTrimmedLeft (labelW + 4).withTrimmedRight (4),
+                        areaBalance.withTrimmedLeft (barLeftInset).withTrimmedRight (4),
                         juce::Justification::centredRight, false);
         }
     }
@@ -663,8 +676,7 @@ void PhaseModule::buildGlSnapshot()
     // ---- Width bar ----
     if (! areaWidth.isEmpty())
     {
-        const int labelW = 56;
-        auto barArea = areaWidth.withTrimmedLeft (labelW + 4);
+        auto barArea = areaWidth.withTrimmedLeft (barLeftInset);
         pushSunken (barArea, PinkXP::content.darker (0.05f));
         auto innerBar = barArea.reduced (2);
         if (! innerBar.isEmpty() && barStyle == BarStyle::solid)
@@ -708,8 +720,7 @@ void PhaseModule::buildGlSnapshot()
     // ---- Balance bar ----
     if (! areaBalance.isEmpty())
     {
-        const int labelW = 56;
-        auto barArea = areaBalance.withTrimmedLeft (labelW + 4);
+        auto barArea = areaBalance.withTrimmedLeft (barLeftInset);
         pushSunken (barArea, PinkXP::content.darker (0.05f));
         auto innerBar = barArea.reduced (2);
         if (! innerBar.isEmpty())
@@ -980,14 +991,13 @@ void PhaseModule::drawWidthBar(juce::Graphics& g, juce::Rectangle<int> area) con
 {
     if (area.isEmpty()) return;
 
-    // 左侧标签
-    const int labelW = 56;
-    auto labelArea = area.withWidth(labelW);
-    auto barArea   = area.withTrimmedLeft(labelW + 4);
+    // 左侧标签（在条形左侧的空列内居中）
+    auto labelArea = area.withWidth(barLeftInset);
+    auto barArea   = area.withTrimmedLeft(barLeftInset);
 
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(y2k::tr ("WIDTH"), labelArea, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr ("WIDTH"), labelArea, juce::Justification::centred, false);
 
     // 凹陷背景
     PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
@@ -1048,13 +1058,13 @@ void PhaseModule::drawBalanceBar(juce::Graphics& g, juce::Rectangle<int> area) c
 {
     if (area.isEmpty()) return;
 
-    const int labelW = 56;
-    auto labelArea = area.withWidth(labelW);
-    auto barArea   = area.withTrimmedLeft(labelW + 4);
+    // 左侧标签（在条形左侧的空列内居中）
+    auto labelArea = area.withWidth(barLeftInset);
+    auto barArea   = area.withTrimmedLeft(barLeftInset);
 
     g.setColour(PinkXP::ink);
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(y2k::tr ("BAL"), labelArea, juce::Justification::centredLeft, false);
+    g.drawText(y2k::tr ("BAL"), labelArea, juce::Justification::centred, false);
 
     PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
     auto innerBar = barArea.reduced(2);
@@ -1201,9 +1211,9 @@ void PhaseModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
     if (! staticAreaDial.isEmpty())
         PinkXP::drawSunken(sg, staticAreaDial, PinkXP::content);
     if (! staticAreaWidth.isEmpty())
-        PinkXP::drawSunken(sg, staticAreaWidth.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
+        PinkXP::drawSunken(sg, staticAreaWidth.withTrimmedLeft(barLeftInset), PinkXP::content.darker(0.05f));
     if (! staticAreaBalance.isEmpty())
-        PinkXP::drawSunken(sg, staticAreaBalance.withTrimmedLeft(60), PinkXP::content.darker(0.05f));
+        PinkXP::drawSunken(sg, staticAreaBalance.withTrimmedLeft(barLeftInset), PinkXP::content.darker(0.05f));
 }
 
 void PhaseModule::drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const

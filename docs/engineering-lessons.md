@@ -23,6 +23,8 @@
 
 - **事件驱动不可靠时加兜底**：mouseEnter/Exit 可能因焦点切换/多屏/DPI 变化丢失，叠加 timer 轮询、多层监听。
 - **异步事件需要计时器窗口保护**：`setBounds()` 产生的异步 WM_SIZE/mouse 事件在回调返回后才抵达，同步 `bool` 挡不住，用计数器 + timer 递减覆盖窗口期。
+- **浮动态（pop-out）模块 = CPU 软件路径，高频重绘必须限流**：模块脱离后不在 Editor 组件树里，GL 直渲染不再覆盖它，每帧都是消息线程上的整区软件光栅化；再叠加高频鼠标事件（高回报率鼠标拖拽可达数百 Hz）就会把消息线程打满，症状是**整个进程**卡顿而不只是该模块掉帧。统一入口是 `ModulePanel::repaintFrameContent / repaintHover`（浮动态限流，见 rendering-gl.md §1），新写跟随鼠标的绘制不要直接 `repaint()`。
+- **节流必须带"最后一帧补齐"**：只按时间窗口丢弃重绘，拖拽停下的瞬间会丢掉最后一次事件，UI 定格在上一帧位置（悬停十字线尤其明显）。做法是累积区域 + 一次 `juce::Timer::callAfterDelay` 补发（见 `ModulePanel::repaintHover`）。
 - **头文件合并绕过 MSVC include-guard 串扰**：多类合并到同一头（`AnalyserHub.h`、`ModuleWorkspace.h`），不要拆散（详见 PROJECT_OVERVIEW.md §6.1）。
 - **音频线程约束**：`pushStereo`/`processBlock`/`registerLoopbackRenderTime` 必须无锁/无堆分配/无系统调用（详见 PROJECT_OVERVIEW.md §6.3）。
 

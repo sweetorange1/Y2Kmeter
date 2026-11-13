@@ -851,11 +851,66 @@ juce::Rectangle<int> ModulePanel::getFrameRepaintBounds()
 
 void ModulePanel::repaintFrameContent()
 {
+    // 浮动态：整帧内容都要在消息线程上软件重绘 → 与悬停重绘共享限流预算
+    if (floatingRepaintThrottled())
+        return;
+
     const auto area = getFrameRepaintBounds();
     if (area.isEmpty())
         repaint();
     else
         repaint (area);
+}
+
+void ModulePanel::repaintHover (juce::Rectangle<int> area)
+{
+    if (area.isEmpty())
+        return;
+
+    // 浮动态：鼠标事件（尤其按住拖拽）频率远高于刷新率，限流后可省掉大量
+    //   重复的整区软件光栅化；嵌入态（GL 直渲染）保持逐事件即时刷新。
+    if (! floatingRepaintThrottled())
+    {
+        repaint (area);
+        return;
+    }
+
+    // 被限流掉的这一帧不能丢：累积区域，等节流窗口结束补一次 —— 否则鼠标
+    //   快速拖拽后停住时，标尺会定格在上一帧的位置（最后一次事件被丢弃）。
+    pendingHoverArea_ = pendingHoverArea_.getUnion (area);
+    if (hoverCatchUpScheduled_)
+        return;
+
+    hoverCatchUpScheduled_ = true;
+    juce::Component::SafePointer<ModulePanel> safeThis (this);
+    const int delayMs = juce::jmax (1, 1000 / juce::jmax (1, floatingRepaintHz));
+
+    juce::Timer::callAfterDelay (delayMs, [safeThis]() mutable
+    {
+        if (auto* p = safeThis.getComponent())
+        {
+            p->hoverCatchUpScheduled_ = false;
+            const auto pending = p->pendingHoverArea_;
+            p->pendingHoverArea_ = {};
+            if (! pending.isEmpty())
+                p->repaint (pending);
+        }
+    });
+}
+
+bool ModulePanel::floatingRepaintThrottled() noexcept
+{
+    if (! isFloating_)
+        return false;
+
+    const auto now = juce::Time::getMillisecondCounter();
+    const auto minGapMs = (juce::uint32) juce::jmax (1, 1000 / juce::jmax (1, floatingRepaintHz));
+
+    if (lastFloatingRepaintMs != 0 && now - lastFloatingRepaintMs < minGapMs)
+        return true;
+
+    lastFloatingRepaintMs = juce::jmax ((juce::uint32) 1, now);
+    return false;
 }
 
 void ModulePanel::resized()
