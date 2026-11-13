@@ -121,7 +121,7 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 | 模块 | 参数 |
 | --- | --- |
 | 响度 `loudness` | `style`（灯条 / 数字读数）、`itemM` `itemS` `itemI` `itemTp` `itemRms` |
-| VU `vuMeter` | `dialStyle`（**三种结构不同的表盘**：Half circle / Arc / Trapezoid=楔形刻度）、`needleStyle`（Thin line / Wedge / Stereo L/R）、`showLed` |
+| VU `vuMeter` | `dialStyle`（**六种表盘**：Half circle / Vintage fan / Bar scale / LED ladder / Minimal / Mirror，0..5）、`needleStyle`（Thin line / Wedge / Stereo L/R；横向式表盘里改为指示器形态：发丝 / 填充楔形 / L、R 分轨）、`showLed` |
 | 示波器 `oscilloscope` | `displayMode`（波形 / X-Y / 李萨如）、`waveChannel`（L / R / 双）、`bandColour`（三路点云染色，仅 X-Y / 李萨如）、`crossLow` `crossHigh`（默认 200 / 2000 Hz）、`dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`autoGain`、`showRings`（波形配色固定跟随主题 `chartRamp`；旧存档的 `waveColour` 键被忽略） |
 | 频谱 `spectrum` | `peakHold`、`sharp`、`slope`（0–12 dB/oct，默认 4.5 = 旧 SLOPE 开关"开"；0 = 关；旧存档的布尔 `slope` 读档时迁移为 4.5 / 0）、`curve`（Smooth / Semi / Raw）、`channel`（Mid / Mid+Side / L+R）、`fftScale` |
 | 相位 `phase` | `itemGonio` `itemCorr` `itemWidth` `itemBal`、`gonioStyle`（点阵 / 轨迹）、`barStyle`（像素格 / 实心） |
@@ -209,11 +209,33 @@ GL 直渲染模块的顶点是**模块本地坐标**，渲染器只设 `glViewpo
 
 ### 7.15 v3.2 视觉与交互收尾
 
-- **VU 三种表盘**（`dialStyle` 0/1/2，索引与旧存档一致）：
-  - `0` 半圆：底边为直径的 180° 上半圆（原经典外观）；
-  - `1` 弧形：240° 圆表，轴心居中，9px 粗弧轨 + 内外细描边，刻度朝内；
-  - `2` 楔形刻度：老式 VU 扇形 —— 数字在刻度线上方，刻度线**低电平侧长、高电平侧短**（外轮廓即梯形），粗基线沿刻度末端走（警戒段转红），长指针从底边中点扫过；刻度长度按模块高度缩放（`dialGeom.tickLenHi`）。
-  - 指针几何由 `drawDial` 写进 `dialGeom` 缓存，`needleAngleFor / needleLengthFor` 按样式换算（楔形是"尖端位置反算角度 + 距离"）；楔形样式的 LED 挪到右下角（顶部被数字占满）。三种表盘颜色全部取主题（只有警戒红是固定语义色）。
+- **VU 六种表盘**（`dialStyle` 0..5，上限 = `VuMeterModule::numDialStyles - 1`；读档 / setter 的 `jlimit` 都用它）：
+  - `0` 半圆：底边为直径的 180° 上半圆（原经典外观，旧存档默认，**不要动**）；
+  - `1` 复古扇形：**窄开口小扇形**（±`fanHalfAngle` ≈ ±47°，不是半圆）—— 先画一块扇形表窗（两条放射直边 + 外弧 + 盖板处内弧，淡底 + 墨色轮廓），再画粗弧轨（刻度朝外、dB 数字在最外圈）+ 内侧细副刻度弧挂百分比圆点（100% = 0 dBFS），0 dB 之后弧轨 / 副弧 / 刻度整段 `PinkXP::danger`；"VU" 字标默认左上角，与扇形相交（窄高模块）时挪进扇形中部；扇形按可用宽高的 0.92 缩放后居中；根部盖半圆盖板 `drawFanCap`（画在指针之后）；
+  - `2` 横向刻度条：粗横杆按 `ok / warn / danger` 分段（-6 / 0 dBFS 分界，`kVuCautionDb`），上排斜刻度（向两侧外撇）+ 数字，下排百分比小圆点（数字从右往左贪心排、挤不下跳过），0 dB 竖直分界线贯穿三排；
+  - `3` LED 梯柱：1 dB 一格，柱高从左到右逐格加高，三色分段，未亮格子留淡底 + 段色细框；
+  - `4` 极简游标：大号读数（动态文本直接 `drawText`，不进静态文本缓存）+ 发丝刻度线 + 5 个稀疏刻度；
+  - `5` 镜像刻度：dB 数字走中脊，上下对称刻度，外侧上下两条填充条（未亮部分淡色显示三色分区）。
+  - 所有样式共用 `dialTFor` 的 dBFS 线性映射（-36 … +3），横向式的"-20 … +3 / 百分比"只借经典 VU 的视觉形式，量纲不变。
+  - 指针式（0 / 1）几何由 `drawDial` 写进 `dialGeom`，`vuToAngle` 按样式分支（半圆 ±90°、复古扇形 ±`fanHalfAngle`）；横向式（`isLinearStyle()` = 2..5）用 `linearXFor` / `linearDbForX`，指示器在各自 `draw*Dial` 里画完，`paintContent` 不再画针；`needleAngleFor` 对横向式返回 0、`needleLengthFor` 返回指示区高度。
+  - **`needleStyle` = 指示器形态**，每种表盘三档都要一眼可分（半圆保持旧线宽不动）：
+
+    | 表盘 | Thin line | Wedge | Stereo L/R |
+    |---|---|---|---|
+    | 复古扇形 | 1.2px 发丝长针 | 矛形宽针（根宽 ≈ 1.4 × 盖板半径） | 两根细针 + 针身 L / R 圆标（错开半径） |
+    | 横向刻度条 | 横杆常亮 + 贯穿三排的发丝针 + 骑杆圆珠 | 横杆变填充条（之后淡色）+ 上下大三角箭头 + 3px 前沿线 | 横杆劈成 L / R 两条轨道，各自填充 + 滑块 |
+    | LED 梯柱 | 细针 LED（格宽 ≈ 间距 38%） | 实心楔形（每 3 dB 一道细缝）+ 前沿线与小三角 | 上下镜像两排（L 往上长、R 往下挂） |
+    | 极简游标 | 2px 进度线 + 发丝游标 | 越往右越厚的实心楔形（0 dB 后转红）+ 大三角游标 | 两根独立发丝线（上 L 下 R）+ 左右两格读数 |
+    | 镜像刻度 | 两条贴刻度的窄条 + 贯穿中脊的发丝针 | 两条楔形条（外沿张开成喇叭口）+ 前沿线 + 指向中脊的三角 | 满高矩形条 + 声道色粗端帽 |
+
+    三色分区填充统一走 `fillZonedShape`（竖条裁剪），任意形状（矩形 / 楔形 / 梯形）共用。
+  - **Toybox**：LED 处点击 = 迪斯科灯（六种共用）；指针式（0 / 1）其余区域 = 指针虚影（未改）；横向式走 `toyPokeLinear`，每种表盘一个专属玩具（几何取 `dialGeom.bandTop/bandBottom/rowTop/rowBot`，实现在 `ToyModuleFx.cpp`）：
+    - 横向刻度条 = **弹簧游标** `makeSliderFlickActor`：幽灵游标被拽到点击处，拖一根锯齿弹簧、带过冲弹回真实电平，身后残影；气泡 `dB + %`；
+    - LED 梯柱 = **跑马冲顶** `makeLedChaseActor`：从最左一格跑马点亮到点击那格，顶帽弹飞后落回弹三下（倒挂行往下飞）；气泡 `PEAK x dB`；
+    - 极简游标 = **卷尺** `makeMeasureTapeActor`：从当前游标拉出卷尺量到点击处，标出相差多少 dB，最后卷回；
+    - 镜像刻度 = **水滴涟漪** `makeMirrorRippleActor`：水滴落到中脊，以中脊为水面上下对称荡开三圈（裁在两条填充条外沿之间）；气泡 `dB + %`。
+  - LED 六种样式统一右上角（`ledBounds` 不再按样式分支）；横向式由 `linearBody` 在顶部让出"标题小字 + LED"一行。
+  - 新样式颜色全部取 `PinkXP::` 主题变量（`ink / ok / warn / danger / pink500~700 / btnFace / hl`）；旧存档里的 `dialStyle = 1 / 2`（原弧形 / 梯形）原地显示为复古扇形 / 横向刻度条。
 - **响度灯条读数**：底部数字改用 `PinkXP::pink600`（与「数字读数」样式的大数字同色；深色主题下 pink 阶梯越靠后越亮，所以更清楚）。灯条布局由 `barLayoutArea()` 统一计算：左/上 6px、右/下 2px，刻度列 30 → 22px；静态层、柱区、刻度、标签共用同一份几何。
 - **抽屉滚动条**：`PinkXPLookAndFeel` 补了 `drawScrollbar / drawScrollbarButton`（此前继承 V4 默认的蓝灰滑块 + V2 蓝灰箭头，不跟主题）。轨道 = content 略深 + ink 1px 内框；滑块 pink400 / 500 / 600（常态 / 悬停 / 按下）+ 左上 1px 高光；箭头按钮同色系。全局生效。
 - **悬停说明**：`y2k::help::moduleHelp` 全面校对 —— 响度补 TP / RMS 两行，各模块补上 v3.1 新增参数与"都在齿轮面板里"的位置说明；已合并的旧类型条目保留但永不显示。语言包逐行对齐（91 行帮助文案 0 缺译、938 键 0 重复）。

@@ -10,10 +10,16 @@
 // ==========================================================
 // VuMeterModule —— Pink XP 像素风"模拟 VU 表"指针仪表
 //
-//   · 与其它矩形柱状/数字模块视觉差异化：指针式表盘，三种结构完全不同的样式
-//       · 0 半圆（经典）—— 底边为直径的 180° 上半圆
-//       · 1 弧形        —— 240° 圆表 + 粗弧轨
-//       · 2 梯形        —— 老式扇形刻度：刻度线左长右短（轮廓成梯形），长指针横扫
+//   · 六种表盘（dialStyle 0..5，0 = 旧存档默认外观）：
+//       指针式
+//       · 0 半圆（经典）  —— 底边为直径的 180° 上半圆
+//       · 1 复古扇形      —— 窄开口小扇形（±47°）+ 粗弧轨 + 内侧细百分比副刻度弧，细长直针，0 dB 后整段转红，"VU" 字标
+//       横向式（不旋转，游标 / 灯格 / 填充条沿同一条 dBFS 线性轴移动）
+//       · 2 横向刻度条    —— 绿→黄→红分段粗横杆 + 上排斜刻度数字 + 下排百分比圆点，骑杆竖直游标
+//       · 3 LED 梯柱      —— 一排逐格加高的 LED 柱（阶梯剪影），按电平点亮
+//       · 4 极简游标      —— 大号数字读数 + 一根发丝刻度线 + 小游标
+//       · 5 镜像刻度      —— 刻度数字走中脊，上下两条镜像填充条（Stereo 时上 L 下 R）
+//     所有样式共用同一条 dBFS 线性映射（minDisplayDb … maxDisplayDb）。
 //   · 单指针（总电平：L/R 功率合成），订阅 Oscilloscope 从原始波形算瞬时 RMS
 //     → 后端零新增计算
 //   · 右上角圆形 LED 信号灯：
@@ -37,15 +43,18 @@ public:
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
     // ---- 持久化 + 控制面板（v3.1）----
-    //   dialStyle:   0 半圆（旧外观）/ 1 弧形（240° 圆表，深色面）/ 2 梯形（顶边直线刻度）
+    //   dialStyle:   0 半圆（旧外观）/ 1 复古扇形 / 2 横向刻度条 / 3 LED 梯柱 / 4 极简游标 / 5 镜像刻度
     //   needleStyle: 0 Line（旧外观）/ 1 Wedge（锥形）/ 2 Stereo（L、R 双指针）
+    //                横向式里统一成三种"指示器形态"：
+    //                0 细线 = 发丝游标 / 细柱；1 楔形 = 填充 + 锥形（楔形实体、大箭头）；
+    //                2 立体声 = L / R 分成两条独立轨道
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
     void   buildParamDefs (std::vector<ParamDef>& out) const override;
     double getParamValue  (const juce::String& id) const override;
     void   setParamValue  (const juce::String& id, double v) override;
 
-    // ---- Toybox（v3.0.0）：玻璃裂 + 迪斯科灯（§8.2）----
+    // ---- Toybox（v3.0.0）：迪斯科灯 + 指针虚影（§8.2）；横向式各有专属互动（toyPokeLinear）----
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
@@ -59,7 +68,7 @@ private:
     //   做子步插值，指针看起来是连续扫过的。
     void timerCallback() override;
 
-    // 画一条指针（几何取自最近一次 drawDial 的结果，三种表盘自适应）
+    // 画一条指针（几何取自最近一次 drawDial 的结果；只用于指针式样式 0 / 1）
     void drawNeedle (juce::Graphics& g,
                      float              valueDb,       // 当前 dBFS 值
                      juce::Colour       colour,
@@ -67,50 +76,74 @@ private:
                      bool               wedge = false) const;
 
     // ---- 控制面板参数（构造默认 = 旧外观）----
+    static constexpr int numDialStyles = 6;   // dialStyle 取值 0 .. numDialStyles-1
+    // 复古扇形的半开口角（弧度，≈ 47°）：窄扇形，和样式 0 的 180° 半圆拉开剪影差异
+    static constexpr float fanHalfAngle = 0.82f;
     int  dialStyle   = 0;
     int  needleStyle = 0;
     bool showLed     = true;
 
-    // 画表盘底色 + 刻度 + 数字（三种结构完全不同的表盘）
+    // 样式 2..5 是横向式：不旋转指针，指示器在各自的 draw*Dial 里一并画完
+    bool isLinearStyle() const noexcept { return dialStyle >= 2; }
+
+    // 画表盘底色 + 刻度 + 数字（按 dialStyle 分派）
     void drawDial   (juce::Graphics& g,
                      juce::Rectangle<int> dialArea,
                      juce::Point<float>&  outPivot,
                      float&               outRadius) const;
-    void drawArcDial        (juce::Graphics& g, juce::Rectangle<int> dialArea,
+    void drawVintageFanDial (juce::Graphics& g, juce::Rectangle<int> dialArea,
                              juce::Point<float>& outPivot, float& outRadius) const;
-    void drawTrapezoidDial  (juce::Graphics& g, juce::Rectangle<int> dialArea,
-                             juce::Point<float>& outPivot, float& outRadius) const;
+    void drawFanCap         (juce::Graphics& g) const;   // 复古扇形：盖在指针根部的半圆盖板
+    void drawStripDial      (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawLedLadderDial  (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawMinimalDial    (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawMirrorDial     (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
 
     // dB → 表盘归一化位置 [0,1]（minDisplayDb … maxDisplayDb）
     float dialTFor (float db) const noexcept;
-    // 半圆 / 弧形：指针角度（弧度，0 = 正上，顺时针为正）；梯形按尖端位置反算
+    // 指针角度（弧度，0 = 正上，顺时针为正）；横向式恒为 0（玩具虚影竖直立在游标处）
     float needleAngleFor  (float db) const noexcept;
-    // 当前样式下指针长度（像素）
+    // 当前样式下指针长度（像素）；横向式 = 游标 / 指示区高度
     float needleLengthFor (float db) const noexcept;
 
     // 最近一次 drawDial 产出的几何（指针 / 玩具虚影共用）
     struct DialGeom
     {
+        bool  valid  = false;               // 本帧表盘是否成功画出
         juce::Point<float> pivot { 0.0f, 0.0f };
-        float radius  = 0.0f;    // 半圆 / 弧形：指针长度基准
-        // 楔形刻度（样式 2）：刻度带的左右端、刻度线起点与最长刻度
-        float leftX    = 0.0f;
-        float rightX   = 0.0f;
-        float tickTopY = 0.0f;
-        float tickLenHi = 0.0f;
+        float radius    = 0.0f;             // 指针式：表盘基准半径；横向式：指示区高度
+        float needleLen = 0.0f;             // 复古扇形：指针长度（刺进刻度圈）
+        float capR      = 0.0f;             // 复古扇形：根部盖板半径
+        // 横向式：刻度轴两端与指示区纵向范围
+        float leftX       = 0.0f;
+        float rightX      = 0.0f;
+        float trackTop    = 0.0f;
+        float trackBottom = 0.0f;
+        // 横向式：主指示带（刻度条横杆 / 梯柱 / 发丝线 / 镜像中脊）的纵向范围，玩具互动定位用
+        float bandTop     = 0.0f;
+        float bandBottom  = 0.0f;
+        // LED 梯柱：柱行（Stereo 两行；rowHang = 该行从顶部往下倒挂）
+        int   ladderRows  = 0;
+        float rowTop[2]   { 0.0f, 0.0f };
+        float rowBot[2]   { 0.0f, 0.0f };
+        bool  rowHang[2]  { false, false };
     };
     mutable DialGeom dialGeom;
 
-    // 楔形刻度：dB → 横向位置 / 刻度线长度（左长右短，警戒段再抬高一档）
-    float wedgeXFor         (float db) const noexcept;
-    float wedgeTickLengthFor(float db) const noexcept;
-    float wedgeBaselineY    (float db) const noexcept;
+    // 横向式：dB → 横向位置（与指针式同一条 dialTFor 线性映射）；以及反向（玩具读数用）
+    float linearXFor  (float db) const noexcept;
+    float linearDbForX(float x)  const noexcept;
+    // 横向式：扣掉顶部"标题 + LED"一行后的绘制区
+    juce::Rectangle<float> linearBody (juce::Rectangle<int> dialArea) const;
+
+    // 横向式的 Toybox 点击互动（每种表盘一种专属效果，见 toyPoke）
+    void toyPokeLinear (const ToyHit& hit, ToyContext& ctx);
 
     // 画 LED 信号灯（位置见 ledBounds）
     void drawLed    (juce::Graphics& g,
                      juce::Rectangle<int> ledArea) const;
-    // LED 位置：半圆 / 弧形放右上角（盘面顶部是空的）；楔形刻度占满顶部，
-    //   灯改放右下角，避免压住刻度数字。绘制与玩具点击共用这一份。
+    // LED 位置：六种样式统一放右上角 —— 指针式的盘面顶角本来就空，横向式在
+    //   linearBody 里给顶部留了一行。绘制与玩具点击共用这一份。
     juce::Rectangle<int> ledBounds(juce::Rectangle<int> area) const;
 
     // dBFS 值 → 指针角度（弧度）

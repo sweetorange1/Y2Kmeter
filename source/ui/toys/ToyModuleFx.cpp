@@ -871,6 +871,268 @@ namespace
                                            (float) clampRect.getWidth(), (float) clampRect.getHeight());
         }
     };
+
+    // ======================================================
+    // VU 横向式表盘的点击互动（无旋转指针的 4 种表盘，各一种）
+    // ======================================================
+
+    // ---- VU 横向刻度条：弹簧游标 ----
+    //   点哪儿就把一只"幽灵游标"拽到哪儿，松开后它拖着一根弹簧、带过冲地弹回
+    //   真实电平位置；身后留一串渐隐残影。
+    struct SliderFlickActor : public ToyActor
+    {
+        float y0, y1, fromX, restX;
+        std::array<float, 8> trail {};
+        int   trailCount = 0;
+        float x = 0.0f;
+
+        SliderFlickActor (float top, float bottom, float clickX, float rest)
+            : y0 (top), y1 (bottom), fromX (clickX), restX (rest), x (clickX)
+        {
+            ttl = 1.5f;
+            trail.fill (clickX);
+        }
+        void step (float dt, ToyDirector&) override
+        {
+            age += dt;
+            // 欠阻尼弹簧：从点击处出发，带 2~3 次过冲收敛到真实游标
+            x = restX + (fromX - restX) * std::exp (-4.2f * age) * std::cos (13.0f * age);
+            for (int i = (int) trail.size() - 1; i > 0; --i) trail[(size_t) i] = trail[(size_t) i - 1];
+            trail[0] = x;
+            trailCount = juce::jmin ((int) trail.size(), trailCount + 1);
+            if (age >= ttl) alive = false;
+        }
+        void paint (juce::Graphics& g, ToyDirector&) override
+        {
+            const float fade = 1.0f - juce::jlimit (0.0f, 1.0f, (age - 1.1f) / 0.4f);
+            const float mid  = (y0 + y1) * 0.5f;
+
+            // 弹簧：真实游标 → 幽灵游标之间的锯齿线，越拉越密
+            const float span = x - restX;
+            if (std::abs (span) > 3.0f)
+            {
+                const int   n   = juce::jlimit (4, 24, (int) (std::abs (span) / 6.0f));
+                const float amp = (y1 - y0) * 0.22f;
+                juce::Path spring;
+                spring.startNewSubPath (restX, mid);
+                for (int i = 1; i < n; ++i)
+                    spring.lineTo (restX + span * (float) i / (float) n, mid + ((i & 1) ? -amp : amp));
+                spring.lineTo (x, mid);
+                g.setColour (PinkXP::ink.withAlpha (0.55f * fade));
+                g.strokePath (spring, juce::PathStrokeType (1.2f));
+            }
+
+            // 残影
+            for (int i = trailCount - 1; i >= 1; --i)
+            {
+                const float a = fade * 0.35f * (1.0f - (float) i / (float) trail.size());
+                g.setColour (PinkXP::sel.withAlpha (a));
+                g.fillRect (juce::Rectangle<float> (trail[(size_t) i] - 2.0f, y0, 4.0f, y1 - y0));
+            }
+
+            // 幽灵游标本体
+            const juce::Rectangle<float> r (x - 3.0f, y0 - 2.0f, 6.0f, y1 - y0 + 4.0f);
+            g.setColour (PinkXP::sel.withAlpha (0.9f * fade));
+            g.fillRect (r);
+            g.setColour (PinkXP::ink.withAlpha (fade));
+            g.drawRect (r, 1.0f);
+        }
+        juce::Rectangle<float> getBounds() const override
+        {
+            const float l = juce::jmin (fromX, restX) - std::abs (fromX - restX) - 8.0f;
+            const float w = std::abs (fromX - restX) * 3.0f + 16.0f;
+            return { l, y0 - 6.0f, w, y1 - y0 + 12.0f };
+        }
+    };
+
+    // ---- VU LED 梯柱：跑马冲顶 ----
+    //   从最左一格开始一路点亮到点击的那一格（跑马灯），冲到顶后顶帽被弹飞、
+    //   落回来弹两下停住，像峰值保持格。
+    struct LedChaseActor : public ToyActor
+    {
+        std::vector<juce::Rectangle<float>> cols;
+        std::vector<juce::Colour>           colours;
+        float dir;              // -1 = 顶帽往上飞（普通行），+1 = 往下（倒挂行）
+        float capY = 0.0f, capV = 0.0f, capRest = 0.0f;
+        bool  launched = false;
+        int   bounces  = 0;
+        static constexpr float sweepSec = 0.32f;
+
+        LedChaseActor (std::vector<juce::Rectangle<float>> c, std::vector<juce::Colour> col, float d)
+            : cols (std::move (c)), colours (std::move (col)), dir (d)
+        {
+            ttl = 1.9f;
+            if (! cols.empty())
+            {
+                const auto& top = cols.back();
+                capRest = (dir < 0.0f) ? top.getY() - 5.0f : top.getBottom() + 1.0f;
+                capY    = capRest;
+            }
+        }
+        void step (float dt, ToyDirector&) override
+        {
+            age += dt;
+            if (! launched && age >= sweepSec)
+            {
+                launched = true;
+                capV = dir * 260.0f;
+            }
+            if (launched && bounces < 3)
+            {
+                capV -= dir * 900.0f * dt;                 // 重力指回柱子
+                capY += capV * dt;
+                const bool back = (dir < 0.0f) ? capY >= capRest : capY <= capRest;
+                if (back)
+                {
+                    capY = capRest;
+                    capV = -capV * 0.35f;
+                    if (++bounces >= 3) capV = 0.0f;
+                }
+            }
+            if (age >= ttl) alive = false;
+        }
+        void paint (juce::Graphics& g, ToyDirector&) override
+        {
+            if (cols.empty()) return;
+            const float fade = 1.0f - juce::jlimit (0.0f, 1.0f, (age - 1.3f) / 0.6f);
+            const int   n    = (int) cols.size();
+            const int   lit  = juce::jmin (n, (int) std::ceil ((age / sweepSec) * (float) n));
+
+            for (int i = 0; i < lit; ++i)
+            {
+                // 刚扫过的几格最亮，像跑马灯的头
+                const float head = juce::jlimit (0.0f, 1.0f, 1.0f - (float) (lit - 1 - i) / 6.0f);
+                g.setColour (colours[(size_t) i].brighter (0.2f + 0.4f * head).withAlpha ((0.55f + 0.4f * head) * fade));
+                g.fillRect (cols[(size_t) i]);
+            }
+
+            if (launched)
+            {
+                const auto& top = cols.back();
+                const juce::Rectangle<float> cap (top.getX(), capY, top.getWidth(), 4.0f);
+                g.setColour (colours.back().brighter (0.5f).withAlpha (fade));
+                g.fillRect (cap);
+                g.setColour (PinkXP::ink.withAlpha (fade));
+                g.drawRect (cap, 1.0f);
+            }
+        }
+        juce::Rectangle<float> getBounds() const override
+        {
+            if (cols.empty()) return {};
+            auto b = cols.front();
+            for (const auto& c : cols) b = b.getUnion (c);
+            return b.expanded (4.0f, 80.0f);
+        }
+    };
+
+    // ---- VU 极简游标：卷尺 ----
+    //   从当前游标拉出一截卷尺量到点击处，中间标出"差多少 dB"，停一会儿再"嗖"地卷回去。
+    struct MeasureTapeActor : public ToyActor
+    {
+        float y, fromX, toX;
+        juce::String label;
+        MeasureTapeActor (float lineY, float from, float to, const juce::String& text)
+            : y (lineY), fromX (from), toX (to), label (text) { ttl = 2.2f; }
+        void step (float dt, ToyDirector&) override { age += dt; if (age >= ttl) alive = false; }
+        void paint (juce::Graphics& g, ToyDirector&) override
+        {
+            // 0~0.25 s 拉出，最后 0.3 s 卷回
+            const float outT  = juce::jlimit (0.0f, 1.0f, age / 0.25f);
+            const float backT = juce::jlimit (0.0f, 1.0f, (age - (ttl - 0.3f)) / 0.3f);
+            const float ease  = 1.0f - std::pow (1.0f - outT, 3.0f);
+            const float len   = (toX - fromX) * ease * (1.0f - backT * backT);
+            const float x1    = fromX + len;
+            const float l = juce::jmin (fromX, x1), r = juce::jmax (fromX, x1);
+            const float h = 6.0f;
+            const juce::Rectangle<float> tape (l, y - h * 0.5f, r - l, h);
+
+            // 尺身 + 每 4px 一道小刻度
+            g.setColour (PinkXP::warn.withAlpha (0.9f));
+            g.fillRect (tape);
+            g.setColour (PinkXP::ink.withAlpha (0.8f));
+            for (float xx = fromX; (toX >= fromX) ? xx <= x1 : xx >= x1; xx += (toX >= fromX ? 4.0f : -4.0f))
+                g.fillRect (juce::Rectangle<float> (xx - 0.5f, y - h * 0.5f, 1.0f, (std::fmod (std::abs (xx - fromX), 20.0f) < 2.0f) ? h : h * 0.5f));
+            g.drawRect (tape, 1.0f);
+
+            // 尺头（金属卡扣）+ 尺盒
+            g.setColour (PinkXP::ink);
+            g.fillRect (juce::Rectangle<float> (x1 - 1.5f, y - h, 3.0f, h * 2.0f));
+            const juce::Rectangle<float> box (fromX - 6.0f, y - 7.0f, 12.0f, 14.0f);
+            g.setColour (PinkXP::sel);
+            g.fillRoundedRectangle (box, 3.0f);
+            g.setColour (PinkXP::ink);
+            g.drawRoundedRectangle (box, 3.0f, 1.0f);
+
+            // 读数：完全拉出后才显示
+            if (outT >= 1.0f && backT <= 0.0f)
+            {
+                g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
+                const float w = 70.0f;
+                const juce::Rectangle<int> b ((int) ((fromX + toX) * 0.5f - w * 0.5f), (int) (y - h - 18.0f), (int) w, 16);
+                PinkXP::drawRaised (g, b, PinkXP::face);
+                g.setColour (PinkXP::readableInkOn (PinkXP::face));
+                g.drawText (label, b, juce::Justification::centred, false);
+            }
+        }
+        juce::Rectangle<float> getBounds() const override
+        {
+            const float l = juce::jmin (fromX, toX) - 40.0f;
+            return { l, y - 34.0f, std::abs (toX - fromX) + 80.0f, 48.0f };
+        }
+    };
+
+    // ---- VU 镜像刻度：水滴涟漪 ----
+    //   把中脊当水面：一滴水落在点击处，以中脊为对称轴荡开三圈涟漪，
+    //   上半圈和下半圈互为倒影；涟漪只在两条填充条的外沿之间扩散。
+    struct MirrorRippleActor : public ToyActor
+    {
+        float x, spineY, top, bottom, xMin, xMax;
+        MirrorRippleActor (float atX, float spine, float t, float b, float l, float r)
+            : x (atX), spineY (spine), top (t), bottom (b), xMin (l), xMax (r) { ttl = 1.6f; }
+        void step (float dt, ToyDirector&) override { age += dt; if (age >= ttl) alive = false; }
+        void paint (juce::Graphics& g, ToyDirector&) override
+        {
+            constexpr float dropSec = 0.16f;
+            juce::Graphics::ScopedSaveState ss (g);
+            g.reduceClipRegion (juce::Rectangle<float> (xMin, top - 4.0f, xMax - xMin, bottom - top + 8.0f)
+                                    .getSmallestIntegerContainer());
+
+            if (age < dropSec)
+            {
+                // 水滴从上沿落向中脊，同时在下方画它的倒影
+                const float t  = age / dropSec;
+                const float dy = (spineY - top) * (1.0f - t * t);
+                g.setColour (PinkXP::sel.withAlpha (0.9f));
+                g.fillEllipse (x - 2.5f, spineY - dy - 4.0f, 5.0f, 7.0f);
+                g.setColour (PinkXP::sel.withAlpha (0.35f));
+                g.fillEllipse (x - 2.5f, spineY + dy - 3.0f, 5.0f, 7.0f);
+                return;
+            }
+
+            const float halfH = juce::jmax (4.0f, juce::jmax (spineY - top, bottom - spineY));
+            for (int i = 0; i < 3; ++i)
+            {
+                const float t = (age - dropSec - (float) i * 0.14f) / (ttl - dropSec - 0.3f);
+                if (t <= 0.0f || t >= 1.0f) continue;
+                const float rx = 6.0f + t * 90.0f;
+                const float ry = 3.0f + t * halfH;
+                g.setColour (PinkXP::sel.withAlpha (0.7f * (1.0f - t)));
+                g.drawEllipse (x - rx, spineY - ry, rx * 2.0f, ry * 2.0f, 2.0f - t);
+            }
+
+            // 落点处中脊上闪一下
+            const float flash = juce::jlimit (0.0f, 1.0f, 1.0f - (age - dropSec) / 0.25f);
+            if (flash > 0.0f)
+            {
+                g.setColour (PinkXP::hl.withAlpha (0.8f * flash));
+                g.fillRect (juce::Rectangle<float> (x - 10.0f * flash - 1.0f, spineY - 1.0f, 20.0f * flash + 2.0f, 2.0f));
+            }
+        }
+        juce::Rectangle<float> getBounds() const override
+        {
+            return { x - 100.0f, top - 6.0f, 200.0f, bottom - top + 12.0f };
+        }
+    };
 }
 
 // ==========================================================
@@ -896,6 +1158,15 @@ std::unique_ptr<ToyActor> makeVolcanoActor (juce::Point<float> at, juce::Point<f
                                                                         { return std::make_unique<VolcanoActor> (at, slant); }
 std::unique_ptr<ToyActor> makeGhostNeedleActor (juce::Point<float> pivot, float radius, float thetaRad)
                                                                         { return std::make_unique<GhostNeedleActor> (pivot, radius, thetaRad); }
+std::unique_ptr<ToyActor> makeSliderFlickActor (float top, float bottom, float clickX, float restX)
+                                                                        { return std::make_unique<SliderFlickActor> (top, bottom, clickX, restX); }
+std::unique_ptr<ToyActor> makeLedChaseActor (std::vector<juce::Rectangle<float>> cols,
+                                             std::vector<juce::Colour> colours, float capDir)
+                                                                        { return std::make_unique<LedChaseActor> (std::move (cols), std::move (colours), capDir); }
+std::unique_ptr<ToyActor> makeMeasureTapeActor (float lineY, float fromX, float toX, const juce::String& label)
+                                                                        { return std::make_unique<MeasureTapeActor> (lineY, fromX, toX, label); }
+std::unique_ptr<ToyActor> makeMirrorRippleActor (float x, float spineY, float top, float bottom, float xMin, float xMax)
+                                                                        { return std::make_unique<MirrorRippleActor> (x, spineY, top, bottom, xMin, xMax); }
 std::unique_ptr<ToyActor> makeBrickShardsActor (juce::Point<float> at, juce::Colour c, int count)
                                                                         { return std::make_unique<BrickShardsActor> (at, c, count); }
 std::unique_ptr<ToyActor> makeCrackActor (juce::Point<float> at, float radius)

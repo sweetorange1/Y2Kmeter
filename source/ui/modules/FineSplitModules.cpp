@@ -244,61 +244,45 @@ float VuMeterModule::dialTFor(float db) const noexcept
 
 float VuMeterModule::vuToAngle(float valueDb) const noexcept
 {
-    // 半圆：-90° ~ +90°（水平左 → 水平右）
-    // 弧形：-120° ~ +120°（240° 圆表，两端落在轴心下方）
-    const float half = (dialStyle == 1)
-                         ? juce::MathConstants<float>::pi * 2.0f / 3.0f
-                         : juce::MathConstants<float>::halfPi;
+    // 指针式：0 半圆 = 180° 上半圆（-90° ~ +90°）；1 复古扇形 = 窄开口小扇形（±fanHalfAngle）。
+    //   横向式（2..5）不走角度，位置见 linearXFor。
+    const float half = (dialStyle == 1) ? fanHalfAngle
+                                        : juce::MathConstants<float>::halfPi;
     return juce::jmap(dialTFor(valueDb), 0.0f, 1.0f, -half, half);
 }
 
-float VuMeterModule::wedgeXFor(float db) const noexcept
+float VuMeterModule::linearXFor(float db) const noexcept
 {
     return juce::jmap(dialTFor(db), 0.0f, 1.0f, dialGeom.leftX, dialGeom.rightX);
 }
 
-float VuMeterModule::wedgeTickLengthFor(float db) const noexcept
+float VuMeterModule::linearDbForX(float x) const noexcept
 {
-    // 楔形剪影：低电平一侧刻度长、高电平一侧短；警戒段再抬高一档形成浅 V 形基线。
-    //   具体像素长度按模块高度缩放（dialGeom.tickLenHi），小模块里不会顶到底边。
-    const float t  = dialTFor(db);
-    const float tw = dialTFor(warnDbfs);
-    const float f  = (t <= tw)
-                       ? juce::jmap(t, 0.0f, juce::jmax(1.0e-4f, tw), 1.00f, 0.46f)
-                       : juce::jmap(t, tw, 1.0f, 0.38f, 0.12f);
-    return dialGeom.tickLenHi * f;
-}
-
-float VuMeterModule::wedgeBaselineY(float db) const noexcept
-{
-    return dialGeom.tickTopY + wedgeTickLengthFor(db);
+    if (dialGeom.rightX <= dialGeom.leftX + 1.0f) return minDisplayDb;
+    const float t = juce::jlimit(0.0f, 1.0f, (x - dialGeom.leftX) / (dialGeom.rightX - dialGeom.leftX));
+    return juce::jmap(t, minDisplayDb, maxDisplayDb);
 }
 
 float VuMeterModule::needleAngleFor(float db) const noexcept
 {
-    if (dialStyle == 2 && dialGeom.rightX > dialGeom.leftX + 1.0f)
-    {
-        // 楔形刻度：尖端落在刻度基线上，角度由尖端位置反算（方向 = (sinθ, -cosθ)）
-        const float dx = wedgeXFor(db) - dialGeom.pivot.x;
-        const float dy = wedgeBaselineY(db) - dialGeom.pivot.y;
-        return std::atan2(dx, -dy);
-    }
+    // 横向式没有旋转指针；玩具虚影按"竖直立在游标处"处理（0 = 正上）
+    if (isLinearStyle())
+        return 0.0f;
     return vuToAngle(db);
 }
 
 float VuMeterModule::needleLengthFor(float db) const noexcept
 {
-    if (dialStyle == 2 && dialGeom.rightX > dialGeom.leftX + 1.0f)
-    {
-        const float dx = wedgeXFor(db) - dialGeom.pivot.x;
-        const float dy = wedgeBaselineY(db) - dialGeom.pivot.y;
-        return juce::jmax(8.0f, std::sqrt(dx * dx + dy * dy));
-    }
-    return juce::jmax(8.0f, dialGeom.radius - 10.0f);
+    juce::ignoreUnused(db);
+    if (isLinearStyle())
+        return juce::jmax(8.0f, dialGeom.trackBottom - dialGeom.trackTop);
+    if (dialStyle == 1)
+        return juce::jmax(8.0f, dialGeom.needleLen);   // 复古扇形：细长针刺进刻度圈
+    return juce::jmax(8.0f, dialGeom.radius - 10.0f);  // 半圆：R-10，避开刻度数字
 }
 
 // ----------------------------------------------------------
-// Toybox（v3.0.0）：玻璃裂 + 迪斯科灯（§8.2）
+// Toybox（v3.0.0）：迪斯科灯 + 指针虚影（§8.2）；横向式表盘各有专属互动（toyPokeLinear）
 // ----------------------------------------------------------
 bool VuMeterModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
 {
@@ -308,7 +292,8 @@ bool VuMeterModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
 
     const auto ledArea = ledBounds (area);
 
-    out.kind = ledArea.contains (panelPos) ? 1 : 2;   // 1=迪斯科灯 2=玻璃裂
+    // 1 = 迪斯科灯；2 = 指针虚影（指针式）；3 = 横向式专属互动
+    out.kind = ledArea.contains (panelPos) ? 1 : (isLinearStyle() ? 3 : 2);
     out.rect = area.toFloat();
     out.pos  = panelPos.toFloat();
     return true;
@@ -325,13 +310,18 @@ void VuMeterModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
                               : (ledLevelDb >= ledSignalDbfs) ? "SIGNAL > -25 dBFS" : "NO SIGNAL";
         ctx.bubble (hit.pos.translated (0.0f, -18.0f), th, ToyRole::Reward);
     }
+    else if (isLinearStyle() && dialGeom.valid)
+    {
+        toyPokeLinear (hit, ctx);
+    }
     else
     {
-        // 反馈 A6：碎屏改为指针虚影 —— 几何直接取上一帧 drawDial 的结果，
-        //   三种表盘（半圆 / 弧形 / 梯形）的轴心与半径都正确。
-        const float th = needleAngleFor (currentMonoDbfs())
+        // 反馈 A6：碎屏改为指针虚影 —— 几何直接取上一帧 drawDial 的结果
+        //   （半圆 / 复古扇形的轴心 + 半径）。
+        const float monoDb = currentMonoDbfs();
+        const float th = needleAngleFor (monoDb)
                            + juce::MathConstants<float>::halfPi;
-        const bool haveGeom = dialGeom.radius > 4.0f;
+        const bool haveGeom = dialGeom.valid && ! isLinearStyle() && dialGeom.radius > 4.0f;
         const juce::Point<float> piv = haveGeom
             ? dialGeom.pivot
             : juce::Point<float> ((float) hit.rect.getCentreX(), (float) hit.rect.getBottom() - 8.0f);
@@ -341,14 +331,14 @@ void VuMeterModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
                                             hit.rect.getHeight()) - 14.0f);
         ctx.addModuleActor (makeGhostNeedleActor (piv, R, th));
         ctx.bubble (hit.pos.translated (0.0f, -20.0f),
-                    "VU " + juce::String (currentMonoDbfs(), 1) + " dB", ToyRole::Reward);
+                    "VU " + juce::String (monoDb, 1) + " dB", ToyRole::Reward);
     }
 }
 
 namespace
 {
     // VU 表盘刻度：-36 … +3 dBFS，每 1 dB 一根；主刻度带数字。
-    //   三种表盘共用同一张表（半圆 / 弧形按角度排布，梯形按顶边线性排布）。
+    //   六种表盘共用同一张表（指针式按角度排布，横向式按 linearXFor 线性排布）。
     struct VuTick { float db; const char* label; bool major; };
 
     const VuTick kVuTicks[] = {
@@ -367,6 +357,174 @@ namespace
         {   0.0f,  "0",  true  }, {  +1.0f, nullptr, false }, {  +2.0f, nullptr, false },
         {  +3.0f,  "+3", true  },
     };
+
+    // 横向式三色段的黄段起点（dBFS）。红段起点仍是 VuMeterModule::warnDbfs（0 dBFS）。
+    constexpr float kVuCautionDb = -6.0f;
+
+    // 横向式分段着色：绿（安全）/ 黄（临界）/ 红（过载），全部取主题语义色
+    juce::Colour vuZoneColour (float db, float warnDb) noexcept
+    {
+        if (db >= warnDb)       return PinkXP::danger;
+        if (db >= kVuCautionDb) return PinkXP::warn;
+        return PinkXP::ok;
+    }
+
+    // 经典 VU 下排百分比刻度：p% ↔ 20·log10(p/100) dBFS（100% = 0 dBFS，0% 落到表底）
+    float vuPercentToDb (int pct) noexcept
+    {
+        return pct <= 0 ? -144.0f : 20.0f * std::log10 ((float) pct / 100.0f);
+    }
+
+    // 三色分区的 x 边界：表底 / 黄段起点 / 红段起点 / 表顶
+    struct VuZoneX { float x0, xCaution, xWarn, x1; };
+
+    // 任意形状按 绿 / 黄 / 红 三段上色：x < xLit 的部分实色，其余淡色（dimAlpha=0 则不画）。
+    //   用竖条裁剪实现，所以楔形 / 梯形 / 矩形都能共用。
+    void fillZonedShape (juce::Graphics& g, const juce::Path& shape,
+                         const VuZoneX& z, float xLit, float dimAlpha)
+    {
+        const float xs[4] = { z.x0, z.xCaution, z.xWarn, z.x1 };
+        const juce::Colour cs[3] = { PinkXP::ok, PinkXP::warn, PinkXP::danger };
+        const auto b  = shape.getBounds();
+        const int  y0 = (int) std::floor (b.getY()) - 1;
+        const int  h  = (int) std::ceil  (b.getHeight()) + 3;
+
+        auto clipFill = [&](float l, float r, juce::Colour c)
+        {
+            const int il = juce::roundToInt (l), ir = juce::roundToInt (r);
+            if (ir <= il) return;
+            juce::Graphics::ScopedSaveState ss (g);
+            g.reduceClipRegion (juce::Rectangle<int> (il, y0, ir - il, h));
+            g.setColour (c);
+            g.fillPath (shape);
+        };
+
+        for (int i = 0; i < 3; ++i)
+        {
+            const float a = xs[i], c = xs[i + 1];
+            if (c <= a) continue;
+            if (dimAlpha > 0.0f) clipFill (juce::jmax (a, xLit), c, cs[i].withAlpha (dimAlpha));
+            clipFill (a, juce::jmin (c, xLit), cs[i]);
+        }
+    }
+
+    // 横向式里的 L / R 小字（轨道左侧留白处）
+    void drawVuChannelTag (juce::Graphics& g, const char* tag, float x, float centreY)
+    {
+        PinkXP::drawCachedText (g, tag, juce::Rectangle<float> (x, centreY - 6.0f, 11.0f, 12.0f),
+                                juce::Justification::centredLeft, 9.0f, juce::Font::bold,
+                                PinkXP::ink.withAlpha (0.75f), true);
+    }
+
+    // 玩具读数："-12.0 dB · 25%"（百分比 = 经典 VU 的 100% = 0 dBFS）
+    juce::String vuDbPctText (float db)
+    {
+        const int pct = juce::roundToInt (100.0f * std::pow (10.0f, db / 20.0f));
+        return (db > 0.05f ? "+" : "") + juce::String (db, 1) + " dB  " + juce::String (pct) + "%";
+    }
+}
+
+// ----------------------------------------------------------
+// 横向式的 Toybox 互动：每种表盘一个专属小玩具（坐标取上一帧 drawDial 的几何）
+//   2 横向刻度条 = 弹簧游标：幽灵游标被拽到点击处，拖着弹簧带过冲弹回真实电平
+//   3 LED 梯柱   = 跑马冲顶：从左逐格点亮到点击那格，顶帽弹飞再落回
+//   4 极简游标   = 卷尺：从当前游标量到点击处，标出相差多少 dB
+//   5 镜像刻度   = 水滴涟漪：以中脊为水面，上下对称荡开三圈
+// ----------------------------------------------------------
+void VuMeterModule::toyPokeLinear (const ToyHit& hit, ToyContext& ctx)
+{
+    const float clickX  = juce::jlimit (dialGeom.leftX, dialGeom.rightX, hit.pos.x);
+    const float clickDb = linearDbForX (clickX);
+    const float monoDb  = currentMonoDbfs();
+    const float restX   = linearXFor (monoDb);          // dialTFor 已夹紧：静音时在左端
+
+    switch (dialStyle)
+    {
+        case 2:
+        {
+            ctx.addModuleActor (makeSliderFlickActor (dialGeom.bandTop - 5.0f, dialGeom.bandBottom + 5.0f,
+                                                      clickX, restX));
+            ctx.bubble ({ clickX, dialGeom.bandTop - 16.0f }, vuDbPctText (clickDb), ToyRole::Reward);
+            break;
+        }
+        case 3:
+        {
+            // 点击落在哪一行（立体声两行）
+            int row = 0;
+            if (dialGeom.ladderRows == 2 && hit.pos.y > dialGeom.rowBot[0])
+                row = 1;
+            const float rTop = dialGeom.rowTop[row], rBot = dialGeom.rowBot[row];
+            const bool  hang = dialGeom.rowHang[row];
+
+            const int   nCols = juce::roundToInt (maxDisplayDb - minDisplayDb);
+            const float pitch = (dialGeom.rightX - dialGeom.leftX) / (float) nCols;
+            const float gap   = (needleStyle == 0) ? pitch * 0.62f      // 与 drawLedLadderDial 同一套格宽
+                              : (pitch >= 3.0f ? juce::jlimit (1.0f, 3.0f, pitch * 0.3f) : 0.0f);
+            const float colW  = juce::jmax (1.0f, pitch - gap);
+            const float hMax  = rBot - rTop;
+            const float hMin  = hMax * 0.28f;
+            const int   last  = juce::jlimit (0, nCols - 1, (int) std::floor (clickDb - minDisplayDb));
+
+            std::vector<juce::Rectangle<float>> cols;
+            std::vector<juce::Colour>           colours;
+            cols.reserve ((size_t) last + 1);
+            colours.reserve ((size_t) last + 1);
+            for (int i = 0; i <= last; ++i)
+            {
+                const float db0 = minDisplayDb + (float) i;
+                const float h   = hMin + (hMax - hMin) * (float) i / (float) juce::jmax (1, nCols - 1);
+                cols.push_back ({ linearXFor (db0) + gap * 0.5f, hang ? rTop : rBot - h, colW, h });
+                colours.push_back (vuZoneColour (db0, warnDbfs));
+            }
+            ctx.addModuleActor (makeLedChaseActor (std::move (cols), std::move (colours), hang ? 1.0f : -1.0f));
+
+            const float peakDb = minDisplayDb + (float) last + 1.0f;
+            ctx.bubble ({ clickX, rTop - 14.0f },
+                        "PEAK " + juce::String (peakDb > 0.0f ? "+" : "") + juce::String ((int) peakDb) + " dB",
+                        ToyRole::Reward);
+            break;
+        }
+        case 4:
+        {
+            const float fromDb = (std::isfinite (monoDb) && monoDb >= minDisplayDb) ? monoDb : minDisplayDb;
+            const float delta  = clickDb - fromDb;
+            const juce::String label = (std::abs (delta) < 0.05f) ? juce::String ("= 0.0 dB")
+                                     : (delta > 0.0f ? "+" : "") + juce::String (delta, 1) + " dB";
+            ctx.addModuleActor (makeMeasureTapeActor (dialGeom.bandTop - 20.0f, restX, clickX, label));
+            break;
+        }
+        case 5:
+        default:
+        {
+            const float spineY = (dialGeom.bandTop + dialGeom.bandBottom) * 0.5f;
+            ctx.addModuleActor (makeMirrorRippleActor (clickX, spineY, dialGeom.rowTop[0], dialGeom.rowBot[0],
+                                                       dialGeom.leftX, dialGeom.rightX));
+            ctx.bubble ({ clickX, dialGeom.rowTop[0] - 12.0f }, vuDbPctText (clickDb), ToyRole::Reward);
+            break;
+        }
+    }
+}
+
+namespace
+{
+
+    // 读数格式：低于表底显示 "--.-"，正值带 "+"
+    juce::String vuReadoutText (float db, float floorDb)
+    {
+        if (! std::isfinite (db) || db < floorDb) return "--.-";
+        return (db > 0.05f ? "+" : "") + juce::String (db, 1);
+    }
+
+    // 横向式顶部标题行左侧的小字（与右上角 LED 同一行）
+    void drawVuHeaderCaption (juce::Graphics& g, juce::Rectangle<int> ledRect,
+                              float x, const juce::String& text)
+    {
+        PinkXP::drawCachedText (g, text,
+                                juce::Rectangle<float> (x, (float) ledRect.getY(),
+                                                        80.0f, (float) ledRect.getHeight()),
+                                juce::Justification::centredLeft, 9.0f, juce::Font::bold,
+                                PinkXP::ink.withAlpha (0.6f), true);
+    }
 }
 
 void VuMeterModule::drawDial(juce::Graphics& g,
@@ -374,10 +532,20 @@ void VuMeterModule::drawDial(juce::Graphics& g,
                              juce::Point<float>&  outPivot,
                              float&               outRadius) const
 {
-    // 三种结构完全不同的表盘：
-    //   0 半圆（经典）· 1 弧形（240° 圆表，深色面）· 2 梯形（顶边直线刻度）
-    if (dialStyle == 1) { drawArcDial (g, dialArea, outPivot, outRadius); return; }
-    if (dialStyle == 2) { drawTrapezoidDial (g, dialArea, outPivot, outRadius); return; }
+    // 每帧重新产出几何；画不出来（模块太小）时 valid 保持 false
+    dialGeom = DialGeom{};
+
+    // 六种表盘：0 半圆（经典，下面原样保留）· 1 复古扇形 · 2 横向刻度条
+    //           3 LED 梯柱 · 4 极简游标 · 5 镜像刻度
+    switch (dialStyle)
+    {
+        case 1: drawVintageFanDial (g, dialArea, outPivot, outRadius); return;
+        case 2: drawStripDial      (g, dialArea); return;
+        case 3: drawLedLadderDial  (g, dialArea); return;
+        case 4: drawMinimalDial    (g, dialArea); return;
+        case 5: drawMirrorDial     (g, dialArea); return;
+        default: break;
+    }
 
     // 注意：sunken 卡片背景（pink50）已由 paintContent 在外层统一绘制，
     //   这里不再重复 drawSunken，避免出现双层凹陷边框。
@@ -469,203 +637,921 @@ void VuMeterModule::drawDial(juce::Graphics& g,
 
     dialGeom.pivot  = outPivot;
     dialGeom.radius = outRadius;
+    dialGeom.valid  = true;
 }
 
 // ==========================================================
-// 弧形表盘（样式 1）：240° 圆表 —— 粗弧轨 + 轴心居中，深色面
-//   与半圆表盘的区别：不是"底边为直径的上半圆"，而是绕着轴心转
-//   240° 的整圈仪表，两端落在轴心下方。
+// 复古扇形（样式 1）：窄开口的小扇形老式 VU 表头（±fanHalfAngle ≈ ±47°）
+//   · 盘面是一块"扇形窗"：两条直边从轴心放射出去，顶上一段圆弧 —— 剪影是一块
+//     披萨角，而不是样式 0 那种底边为直径的完整半圆；
+//   · 一条粗弧轨当主刻度轨，刻度线从弧轨外沿向外伸，dB 数字排在最外圈；
+//   · 弧轨内侧一条细副刻度弧，挂经典 VU 的百分比小圆点（100% = 0 dBFS）；
+//   · 0 dB 之后弧轨 / 副弧 / 刻度 / 数字整段转红（PinkXP::danger）；
+//   · 左上角 "VU" 字标 + dBFS 单位（与扇形相交时挪进扇形中部）；
+//   · 细长直针从扇形尖端摆出，根部盖半圆盖板（drawFanCap）。
 // ==========================================================
-void VuMeterModule::drawArcDial(juce::Graphics& g,
-                                juce::Rectangle<int> dialArea,
-                                juce::Point<float>&  outPivot,
-                                float&               outRadius) const
+void VuMeterModule::drawVintageFanDial(juce::Graphics& g,
+                                       juce::Rectangle<int> dialArea,
+                                       juce::Point<float>&  outPivot,
+                                       float&               outRadius) const
 {
-    auto inner = dialArea.reduced(8);
-    if (inner.getWidth() < 40 || inner.getHeight() < 34) return;
+    auto inner = dialArea.reduced(10);
+    if (inner.getWidth() < 60 || inner.getHeight() < 40) return;
 
-    const juce::Colour inkCol = PinkXP::ink;        // 跟随主题（暗色主题下自动变浅）
-    const juce::Colour redCol(0xffd21f3a);          // 警戒段：与另两种表盘同一语义色
-    const float half = juce::MathConstants<float>::pi * 2.0f / 3.0f;   // 120°
+    const juce::Colour inkCol = PinkXP::ink;
+    const juce::Colour redCol = PinkXP::danger;
+    const float halfA = fanHalfAngle;
+    const float sinA  = std::sin(halfA);
 
-    // 图形竖向范围 = R（上）+ 0.5R（下）+ 内外描边，横向 = 2R
-    const float R = juce::jmin((float) inner.getWidth()  * 0.5f - 10.0f,
-                               ((float) inner.getHeight() - 14.0f) / 1.5f);
-    if (R < 14.0f) return;
+    // R = 最外圈 dB 数字的中心半径；扇形窗外沿 Rw = R + 10，盖板约 0.13R。
+    //   横向：两端数字中心在 ±R·sinθ 处，再留 14px；
+    //   纵向：Rw + 2（顶） + 4（轴心下沿），盖板在轴心之上不额外占高。
+    //   整体再乘 0.92 留一圈空气，让"小扇形"居中浮在盘面上。
+    const float R = 0.92f * juce::jmin(((float) inner.getWidth() * 0.5f - 14.0f) / sinA,
+                                       (float) inner.getHeight() - 16.0f);
+    if (R < 34.0f) return;
 
+    const float Rw     = R + 10.0f;
+    const float blockH = Rw + 6.0f;
     const float cx = (float) inner.getCentreX();
-    const float cy = (float) inner.getY() + 7.0f + R;
+    const float cy = (float) inner.getY() + ((float) inner.getHeight() - blockH) * 0.5f + Rw + 2.0f;
+    const float capR = juce::jlimit(7.0f, 16.0f, R * 0.13f);
+    // 两端 dB 数字（半宽 12px）中心落在 ±halfA 上：表窗直边再外扩 ≈16px 的角度，数字不压边
+    const float pad  = juce::jmin(0.25f, 16.0f / R);
 
-    outPivot  = { cx, cy };
-    outRadius = R;
-    dialGeom.pivot   = outPivot;
-    dialGeom.radius  = R;
-
-    // ---- 粗弧轨：整段淡色 + 警戒段红色 ----
+    // ---- 扇形窗：淡色底 + 墨色轮廓（两条直边 + 外弧 + 盖板处内弧）----
     {
-        juce::Path rail;
-        rail.addCentredArc(cx, cy, R, R, 0.0f, -half, half, true);
-        g.setColour(inkCol.withAlpha(0.16f));
-        g.strokePath(rail, juce::PathStrokeType(9.0f, juce::PathStrokeType::curved,
-                                                juce::PathStrokeType::rounded));
-    }
-    {
-        juce::Path railRed;
-        railRed.addCentredArc(cx, cy, R, R, 0.0f, vuToAngle(warnDbfs), half, true);
-        g.setColour(redCol.withAlpha(0.85f));
-        g.strokePath(railRed, juce::PathStrokeType(9.0f, juce::PathStrokeType::curved,
-                                                   juce::PathStrokeType::rounded));
+        juce::Path win;
+        win.addPieSegment(cx - Rw, cy - Rw, Rw * 2.0f, Rw * 2.0f,
+                          -halfA - pad, halfA + pad, (capR + 3.0f) / Rw);
+        g.setColour(inkCol.withAlpha(0.05f));
+        g.fillPath(win);
+        g.setColour(inkCol.withAlpha(0.55f));
+        g.strokePath(win, juce::PathStrokeType(1.2f));
     }
 
-    // ---- 内外细描边（让弧轨像一根嵌进面板的轨道）----
-    {
-        juce::Path inEdge, outEdge;
-        inEdge .addCentredArc(cx, cy, R - 5.5f, R - 5.5f, 0.0f, -half, half, true);
-        outEdge.addCentredArc(cx, cy, R + 5.5f, R + 5.5f, 0.0f, -half, half, true);
-        g.setColour(inkCol.withAlpha(0.45f));
-        g.strokePath(inEdge,  juce::PathStrokeType(1.0f));
-        g.strokePath(outEdge, juce::PathStrokeType(1.0f));
-    }
+    const float railW  = juce::jlimit(3.0f, 6.0f, R * 0.055f);                  // 粗弧轨线宽
+    const float rRail  = R - 14.0f - railW * 0.5f;                              // 弧轨中心半径
+    const float rTick0 = rRail + railW * 0.5f;                                  // 刻度起点（弧轨外沿）
+    const float rSub   = rRail - railW * 0.5f - juce::jlimit(6.0f, 12.0f, R * 0.10f);  // 副刻度弧
+    const float aRed   = vuToAngle(warnDbfs);                                   // 0 dB 的角度
 
-    // ---- 刻度（向内）+ 数字（再靠内一档）----
-    g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::bold));
+    auto arcPath = [cx, cy](float r, float a0, float a1)
+    {
+        juce::Path p;
+        p.addCentredArc(cx, cy, r, r, 0.0f, a0, a1, true);
+        return p;
+    };
+    const juce::PathStrokeType railStroke(railW, juce::PathStrokeType::curved,
+                                          juce::PathStrokeType::butt);
+
+    // ---- 粗弧轨：0 dB 前墨色，0 dB 后整段红 ----
+    g.setColour(inkCol.withAlpha(0.85f));
+    g.strokePath(arcPath(rRail, -halfA, aRed), railStroke);
+    g.setColour(redCol);
+    g.strokePath(arcPath(rRail, aRed, halfA), railStroke);
+
+    // ---- 主刻度（弧轨外沿向外）+ 最外圈 dB 数字 ----
     for (const auto& t : kVuTicks)
     {
         const float ang = vuToAngle(t.db);
         const float sa = std::sin(ang), ca = std::cos(ang);
-        const float r0 = R - 6.0f;
-        const float r1 = r0 - (t.major ? 7.0f : 4.0f);
-        const bool red = t.db >= warnDbfs;
-        const auto col = red ? juce::Colour(0xffb61325) : inkCol;
+        const float r1 = rTick0 + (t.major ? 6.0f : 3.0f);
+        const auto  col = (t.db >= warnDbfs) ? redCol : inkCol;
 
         g.setColour(col.withAlpha(t.major ? 0.95f : 0.6f));
-        g.drawLine(cx + sa * r0, cy - ca * r0, cx + sa * r1, cy - ca * r1,
-                   t.major ? 1.6f : 1.0f);
+        g.drawLine(cx + sa * rTick0, cy - ca * rTick0, cx + sa * r1, cy - ca * r1,
+                   t.major ? 1.5f : 1.0f);
 
         if (t.label != nullptr)
-        {
-            const float tx = cx + sa * (r1 - 11.0f);
-            const float ty = cy - ca * (r1 - 11.0f);
             PinkXP::drawCachedText(g, t.label,
-                                   juce::Rectangle<float>(tx - 12.0f, ty - 6.0f, 24.0f, 12.0f),
+                                   juce::Rectangle<float>(cx + sa * R - 12.0f, cy - ca * R - 6.0f, 24.0f, 12.0f),
+                                   juce::Justification::centred, 9.0f, juce::Font::bold, col, true);
+    }
+
+    // ---- 副刻度弧（细）+ 百分比圆点（向内）；100% 之后同样转红 ----
+    if (rSub > capR + 10.0f)
+    {
+        g.setColour(inkCol.withAlpha(0.55f));
+        g.strokePath(arcPath(rSub, -halfA, aRed), juce::PathStrokeType(1.0f));
+        g.setColour(redCol.withAlpha(0.9f));
+        g.strokePath(arcPath(rSub, aRed, halfA), juce::PathStrokeType(1.0f));
+
+        const bool withPctText = R >= 70.0f && rSub - 12.0f > capR + 8.0f;
+        for (int p = 0; p <= 100; p += 10)
+        {
+            const float ang = vuToAngle(vuPercentToDb(p));
+            const float sa = std::sin(ang), ca = std::cos(ang);
+            const float rd = rSub - 3.5f;
+            const float dr = (p % 50 == 0) ? 1.7f : 1.1f;
+            g.setColour(inkCol.withAlpha(0.75f));
+            g.fillEllipse(cx + sa * rd - dr, cy - ca * rd - dr, dr * 2.0f, dr * 2.0f);
+
+            if (withPctText && p % 50 == 0)
+            {
+                const float rt = rSub - 12.0f;
+                PinkXP::drawCachedText(g, p == 100 ? juce::String("100%") : juce::String(p),
+                                       juce::Rectangle<float>(cx + sa * rt - 16.0f, cy - ca * rt - 5.0f, 32.0f, 10.0f),
+                                       juce::Justification::centred, 8.0f, juce::Font::plain,
+                                       inkCol.withAlpha(0.7f), true);
+            }
+        }
+    }
+
+    // ---- "VU" 字标 + 单位：默认放盘面左上角（窄扇形之外的空角）；
+    //   窄高模块里扇形会顶到左上角，这时改放扇形中部（老式表头的经典位置）----
+    {
+        juce::Rectangle<float> mark((float) inner.getX() + 2.0f, (float) inner.getY(), 44.0f, 31.0f);
+
+        auto insideFan = [&](juce::Point<float> p)
+        {
+            const float dx = p.x - cx, dy = p.y - cy;
+            return std::sqrt(dx * dx + dy * dy) <= Rw + 6.0f
+                && std::abs(std::atan2(dx, -dy)) <= halfA + pad + 0.05f;
+        };
+        if (insideFan(mark.getTopLeft())    || insideFan(mark.getTopRight())
+         || insideFan(mark.getBottomLeft()) || insideFan(mark.getBottomRight()))
+        {
+            const float my = cy - R * 0.46f;
+            mark = { cx - 22.0f, my - 15.0f, 44.0f, 31.0f };
+            PinkXP::drawCachedText(g, "VU", mark.withHeight(22.0f), juce::Justification::centred,
+                                   13.0f, juce::Font::bold, inkCol.withAlpha(0.85f));
+            PinkXP::drawCachedText(g, "dBFS", juce::Rectangle<float>(mark.getX(), mark.getY() + 21.0f, 44.0f, 10.0f),
+                                   juce::Justification::centred, 8.0f, juce::Font::bold,
+                                   inkCol.withAlpha(0.55f), true);
+        }
+        else
+        {
+            PinkXP::drawCachedText(g, "VU", mark.withHeight(22.0f), juce::Justification::centredLeft,
+                                   13.0f, juce::Font::bold, inkCol.withAlpha(0.85f));
+            PinkXP::drawCachedText(g, "dBFS", juce::Rectangle<float>(mark.getX() + 1.0f, mark.getY() + 21.0f, 44.0f, 10.0f),
+                                   juce::Justification::centredLeft, 8.0f, juce::Font::bold,
+                                   inkCol.withAlpha(0.55f), true);
+        }
+    }
+
+    outPivot  = { cx, cy };
+    outRadius = rRail;
+    dialGeom.pivot     = outPivot;
+    dialGeom.radius    = rRail;
+    dialGeom.needleLen = rTick0 + 4.0f;                        // 针尖刺进刻度圈
+    dialGeom.capR      = capR;
+    dialGeom.valid     = true;
+}
+
+void VuMeterModule::drawFanCap(juce::Graphics& g) const
+{
+    if (! dialGeom.valid || dialGeom.capR <= 0.0f) return;
+
+    const float r = dialGeom.capR;
+    const auto  c = dialGeom.pivot;
+
+    // 半圆盖板：盖住指针根部（老式表头的黑色盖板，这里用主题按钮面色）
+    juce::Path cap;
+    cap.addPieSegment(c.x - r, c.y - r, r * 2.0f, r * 2.0f,
+                      -juce::MathConstants<float>::halfPi,
+                      +juce::MathConstants<float>::halfPi, 0.0f);
+    g.setColour(PinkXP::btnFace);
+    g.fillPath(cap);
+    g.setColour(PinkXP::ink);
+    g.strokePath(cap, juce::PathStrokeType(1.2f));
+
+    // 盖板上的轴钉
+    const float sy = c.y - r * 0.45f;
+    g.setColour(PinkXP::pink300);
+    g.fillEllipse(c.x - 2.5f, sy - 2.5f, 5.0f, 5.0f);
+    g.setColour(PinkXP::ink);
+    g.drawEllipse(c.x - 2.5f, sy - 2.5f, 5.0f, 5.0f, 1.0f);
+}
+
+// ==========================================================
+// 横向式公共：扣掉顶部"标题小字 + LED"一行后的绘制区
+// ==========================================================
+juce::Rectangle<float> VuMeterModule::linearBody(juce::Rectangle<int> dialArea) const
+{
+    const auto  led = ledBounds(dialArea);
+    const float top = (float) led.getBottom() + 2.0f;
+    return { (float) dialArea.getX() + 8.0f, top,
+             (float) dialArea.getWidth() - 16.0f,
+             juce::jmax(0.0f, (float) dialArea.getBottom() - 8.0f - top) };
+}
+
+// ==========================================================
+// 横向刻度条（样式 2）
+//   · 一根水平粗横杆，按 绿 → 黄 → 红 分段着色（-6 / 0 dBFS 分界）；
+//   · 上方一排斜刻度 + 数字：刻度线向两侧外撇，像把扇形表盘"摊平"；
+//   · 下方一排小圆点标经典 VU 的百分比（100% = 0 dBFS），数字放不下就跳过；
+//   · 0 dB 位一条竖直分界线贯穿刻度 / 横杆 / 圆点三排；
+//   · 指示器随 needleStyle 换形态：发丝针 + 骑杆圆珠 / 填充条 + 大三角箭头 / L、R 双轨道滑块。
+//   两端仍是 minDisplayDb / maxDisplayDb（dBFS 线性），只借经典横条 VU 的形式。
+// ==========================================================
+void VuMeterModule::drawStripDial(juce::Graphics& g, juce::Rectangle<int> dialArea) const
+{
+    const auto body = linearBody(dialArea);
+    if (body.getWidth() < 60.0f || body.getHeight() < 16.0f) return;
+
+    const juce::Colour inkCol = PinkXP::ink;
+    drawVuHeaderCaption(g, ledBounds(dialArea), body.getX(), "dBFS");
+
+    dialGeom.leftX  = body.getX() + 12.0f;
+    dialGeom.rightX = body.getRight() - 12.0f;
+
+    // 高度不够时依次省掉：百分比数字 → 圆点排 → 刻度排
+    const float H = body.getHeight();
+    const bool withTicks   = H >= 34.0f;
+    const bool withDots    = H >= 48.0f;
+    const bool withPctText = H >= 62.0f;
+
+    const float numH   = withTicks ? 12.0f : 0.0f;
+    const float tickH  = withTicks ? juce::jlimit(6.0f, 14.0f, H * 0.14f) : 0.0f;
+    const float gapT   = withTicks ? 6.0f : 4.0f;          // 同时给游标上端伸出量留位置
+    const float barH   = (needleStyle == 2) ? juce::jlimit(10.0f, 20.0f, H * 0.22f)   // 立体声：两条轨道
+                                            : juce::jlimit( 6.0f, 16.0f, H * 0.16f);
+    const float gapD   = withDots ? 7.0f : 4.0f;
+    const float dotsH  = withDots ? (4.0f + (withPctText ? 12.0f : 0.0f)) : 0.0f;
+    const float blockH = numH + tickH + gapT + barH + gapD + dotsH;
+
+    const float numTop  = body.getY() + juce::jmax(0.0f, (H - blockH) * 0.5f);
+    const float tickTop = numTop + numH;
+    const float tickBot = tickTop + tickH;
+    const float barTop  = tickBot + gapT;
+    const float barBot  = barTop + barH;
+    const float barMid  = (barTop + barBot) * 0.5f;
+    const float dotY    = barBot + gapD + 2.0f;
+    const float pctTop  = dotY + 4.0f;
+
+    const float cxs   = (dialGeom.leftX + dialGeom.rightX) * 0.5f;
+    const float halfW = juce::jmax(1.0f, (dialGeom.rightX - dialGeom.leftX) * 0.5f);
+
+    // ---- 上排：斜刻度 + 数字（斜率随离中心距离增大，中间近乎竖直）----
+    if (withTicks)
+    {
+        for (const auto& t : kVuTicks)
+        {
+            const float x    = linearXFor(t.db);
+            const float len  = t.major ? tickH : tickH * 0.55f;
+            const float lean = (x - cxs) / halfW * len * 0.5f;
+            const auto  col  = (t.db >= warnDbfs) ? PinkXP::danger : inkCol;
+
+            g.setColour(col.withAlpha(t.major ? 0.95f : 0.6f));
+            g.drawLine(x, tickBot, x + lean, tickBot - len, t.major ? 1.6f : 1.0f);
+
+            if (t.label != nullptr)
+                PinkXP::drawCachedText(g, t.label,
+                                       juce::Rectangle<float>(x + lean - 12.0f, numTop, 24.0f, 12.0f),
+                                       juce::Justification::centred, 9.0f, juce::Font::bold, col, true);
+        }
+    }
+
+    // ---- 横杆：绿 → 黄 → 红 分段 + 顶边高光 + 墨色描边 ----
+    //   指示器形态（needleStyle）决定横杆怎么亮：
+    //     细线   = 横杆整根常亮，指示器是一根贯穿上下三排的发丝针 + 骑杆圆珠；
+    //     楔形   = 横杆变成填充条（当前电平之前实色、之后淡色）+ 上下一对大三角箭头；
+    //     立体声 = 横杆劈成上下两条轨道，L / R 各自填充、各自一个滑块。
+    const VuZoneX zx { linearXFor(minDisplayDb), linearXFor(kVuCautionDb),
+                       linearXFor(warnDbfs),     linearXFor(maxDisplayDb) };
+    const juce::Rectangle<float> barRect(dialGeom.leftX, barTop,
+                                         dialGeom.rightX - dialGeom.leftX, barH);
+    const float monoDb = currentMonoDbfs();
+    const bool  stereo = (needleStyle == 2);
+    const bool  wedge  = (needleStyle == 1);
+    const float laneGap = 2.0f;
+    const float laneH   = (barH - laneGap) * 0.5f;
+
+    if (stereo)
+    {
+        juce::Path laneL, laneR;
+        laneL.addRectangle(barRect.withHeight(laneH));
+        laneR.addRectangle(barRect.withTrimmedTop(laneH + laneGap));
+        fillZonedShape(g, laneL, zx, linearXFor(displayedL), 0.18f);
+        fillZonedShape(g, laneR, zx, linearXFor(displayedR), 0.18f);
+        g.setColour(inkCol);
+        g.drawRect(barRect.withHeight(laneH), 1.0f);
+        g.drawRect(barRect.withTrimmedTop(laneH + laneGap), 1.0f);
+        drawVuChannelTag(g, "L", body.getX(), barTop + laneH * 0.5f);
+        drawVuChannelTag(g, "R", body.getX(), barBot - laneH * 0.5f);
+    }
+    else
+    {
+        juce::Path bar;
+        bar.addRectangle(barRect);
+        fillZonedShape(g, bar, zx, wedge ? linearXFor(monoDb) : zx.x1, wedge ? 0.18f : 0.0f);
+        g.setColour(PinkXP::hl.withAlpha(0.35f));
+        g.fillRect(barRect.withHeight(1.0f).translated(0.0f, 1.0f));
+        g.setColour(inkCol);
+        g.drawRect(barRect, 1.0f);
+    }
+
+    // ---- 下排：百分比小圆点（每 10%），20% 一档放数字，从右往左排、挤不下就跳过 ----
+    if (withDots)
+    {
+        float lastLeft = 1.0e9f;
+        for (int p = 100; p >= 0; p -= 10)
+        {
+            const float x  = linearXFor(vuPercentToDb(p));
+            const bool  mj = (p % 20 == 0);
+            const float dr = mj ? 1.8f : 1.2f;
+            g.setColour(inkCol.withAlpha(mj ? 0.85f : 0.55f));
+            g.fillEllipse(x - dr, dotY - dr, dr * 2.0f, dr * 2.0f);
+
+            if (withPctText && mj)
+            {
+                const juce::String s = (p == 100) ? juce::String("100%") : juce::String(p);
+                const float w = 7.0f * (float) s.length() + 6.0f;
+                if (x + w * 0.5f <= lastLeft - 2.0f)
+                {
+                    PinkXP::drawCachedText(g, s, juce::Rectangle<float>(x - w * 0.5f, pctTop, w, 10.0f),
+                                           juce::Justification::centred, 8.0f, juce::Font::plain,
+                                           inkCol.withAlpha(0.7f), true);
+                    lastLeft = x - w * 0.5f;
+                }
+            }
+        }
+    }
+
+    // ---- 0 dB 竖直分界线（贯穿三排）----
+    {
+        const float x0 = linearXFor(warnDbfs);
+        const float yA = withTicks ? tickTop - 1.0f : barTop - 3.0f;
+        const float yB = withDots  ? dotY + 3.0f    : barBot + 3.0f;
+        g.setColour(inkCol.withAlpha(0.9f));
+        g.drawLine(x0, yA, x0, yB, 1.2f);
+    }
+
+    // ---- 指示器 ----
+    const float needleTop = withTicks ? tickTop + 2.0f : barTop - 5.0f;
+    const float needleBot = withDots  ? dotY + 4.0f    : barBot + 5.0f;
+    float curBot = barBot + 4.0f;          // 指示器下沿（玩具虚影 / 互动定位用）
+
+    if (stereo)
+    {
+        // 每条轨道一个滑块：向轨道外侧多伸 4px，L 朝上、R 朝下
+        auto slider = [&](float db, juce::Colour c, float y0, float y1)
+        {
+            const float x = linearXFor(db);
+            const juce::Rectangle<float> r(x - 3.0f, y0, 6.0f, y1 - y0);
+            g.setColour(c);
+            g.fillRect(r);
+            g.setColour(inkCol);
+            g.drawRect(r, 1.0f);
+        };
+        slider(displayedL, PinkXP::pink500, barTop - 5.0f, barTop + laneH);
+        slider(displayedR, PinkXP::pink700, barBot - laneH, barBot + 5.0f);
+        curBot = barBot + 5.0f;
+    }
+    else if (wedge)
+    {
+        // 一对大三角箭头从上下夹住填充条的前沿，中间一根 3px 墨色前沿线
+        const float x = linearXFor(monoDb);
+        const float s = juce::jlimit(5.0f, 9.0f, barH * 0.7f);
+        juce::Path p;
+        p.addTriangle(x - s, barTop - s * 1.4f - 1.0f, x + s, barTop - s * 1.4f - 1.0f, x, barTop - 1.0f);
+        p.addTriangle(x - s, barBot + s * 1.4f + 1.0f, x + s, barBot + s * 1.4f + 1.0f, x, barBot + 1.0f);
+        g.setColour(inkCol);
+        g.fillRect(juce::Rectangle<float>(x - 1.5f, barTop, 3.0f, barH));
+        g.setColour(PinkXP::pink600);
+        g.fillPath(p);
+        g.setColour(inkCol);
+        g.strokePath(p, juce::PathStrokeType(1.0f));
+        curBot = barBot + s * 1.4f + 1.0f;
+    }
+    else
+    {
+        // 发丝针：贯穿刻度排 / 横杆 / 圆点排，骑杆处一颗圆珠
+        const float x  = linearXFor(monoDb);
+        const float kr = juce::jlimit(3.0f, 6.0f, barH * 0.45f);
+        g.setColour(PinkXP::pink600);
+        g.fillRect(juce::Rectangle<float>(x - 0.75f, needleTop, 1.5f, needleBot - needleTop));
+        g.fillEllipse(x - kr, barMid - kr, kr * 2.0f, kr * 2.0f);
+        g.setColour(inkCol);
+        g.drawEllipse(x - kr, barMid - kr, kr * 2.0f, kr * 2.0f, 1.0f);
+        curBot = needleBot;
+    }
+
+    dialGeom.trackTop    = body.getY();
+    dialGeom.trackBottom = curBot;
+    dialGeom.radius      = curBot - body.getY();
+    dialGeom.bandTop     = barTop;
+    dialGeom.bandBottom  = barBot;
+    dialGeom.valid       = true;
+}
+
+// ==========================================================
+// LED 梯柱（样式 3）
+//   1 dB 一格的 LED 柱排成一行，柱高从左到右逐格加高（阶梯剪影，越响越高），
+//   按电平点亮；绿 / 黄 / 红分段（-6 / 0 dBFS），最高一格提亮；未点亮的格子
+//   留淡色底 + 段色细框，静音时也能看出整条梯子和三色分区。
+//   指示器形态（needleStyle）：
+//     细线   = 一排细针状 LED（格宽只有间距的 ~38%），像梳齿；
+//     楔形   = 整条梯子合成一块实心楔形（格缝只留每 3 dB 一道细缝），按电平填充；
+//     立体声 = 上下镜像两排：L 从中线往上长、R 从中线往下倒挂。
+// ==========================================================
+void VuMeterModule::drawLedLadderDial(juce::Graphics& g, juce::Rectangle<int> dialArea) const
+{
+    const auto body = linearBody(dialArea);
+    if (body.getWidth() < 60.0f || body.getHeight() < 16.0f) return;
+
+    const juce::Colour inkCol = PinkXP::ink;
+    const bool stereo = (needleStyle == 2);
+    const bool wedge  = (needleStyle == 1);
+    drawVuHeaderCaption(g, ledBounds(dialArea), body.getX(), "dBFS");
+
+    dialGeom.leftX  = body.getX() + 12.0f;
+    dialGeom.rightX = body.getRight() - 12.0f;
+
+    const bool  labels = body.getHeight() >= 34.0f;
+    const float colTop = body.getY();
+    const float colBot = body.getBottom() - (labels ? 16.0f : 0.0f);
+    if (colBot - colTop < 8.0f) return;
+
+    // 每格 = 1 dB，格子边界正好落在 linearXFor(整数 dB) 上，格缝居中于边界
+    const int   nCols = juce::roundToInt(maxDisplayDb - minDisplayDb);
+    const float pitch = (dialGeom.rightX - dialGeom.leftX) / (float) nCols;
+    const float gap   = (needleStyle == 0) ? pitch * 0.62f                       // 细针：格缝比格子宽
+                      : (pitch >= 3.0f ? juce::jlimit(1.0f, 3.0f, pitch * 0.3f) : 0.0f);
+    const float colW  = juce::jmax(1.0f, pitch - gap);
+
+    // ---- 0 dB 分界线：先画，从格缝里透出来 ----
+    {
+        const float x0 = linearXFor(warnDbfs);
+        g.setColour(inkCol.withAlpha(0.55f));
+        g.drawLine(x0, colTop, x0, colBot + (labels ? 3.0f : 0.0f), 1.0f);
+    }
+
+    // 逐格画一排；hang = 从 rowTop 往下长（立体声 R 行）
+    auto ladder = [&](float rowTop, float rowBot, float level, bool hang)
+    {
+        const float hMax = rowBot - rowTop;
+        const float hMin = hMax * 0.28f;
+        const int   topLit = (std::isfinite(level) && level >= minDisplayDb)
+                               ? juce::jmin(nCols - 1, (int) std::floor(level - minDisplayDb))
+                               : -1;
+
+        for (int i = 0; i < nCols; ++i)
+        {
+            const float db0 = minDisplayDb + (float) i;
+            const float h   = hMin + (hMax - hMin) * (float) i / (float) juce::jmax(1, nCols - 1);
+            const juce::Rectangle<float> r(linearXFor(db0) + gap * 0.5f, hang ? rowTop : rowBot - h, colW, h);
+            const auto zc  = vuZoneColour(db0, warnDbfs);
+
+            if (i <= topLit)
+            {
+                g.setColour(i == topLit ? zc.brighter(0.25f) : zc);
+                g.fillRect(r);
+            }
+            else
+            {
+                g.setColour(inkCol.withAlpha(0.07f));
+                g.fillRect(r);
+                if (colW >= 3.0f)
+                {
+                    g.setColour(zc.withAlpha(0.35f));
+                    g.drawRect(r, 1.0f);
+                }
+            }
+        }
+    };
+
+    dialGeom.ladderRows = 1;
+    dialGeom.rowTop[0]  = colTop;
+    dialGeom.rowBot[0]  = colBot;
+    dialGeom.rowHang[0] = false;
+
+    if (stereo)
+    {
+        const float mid = (colTop + colBot) * 0.5f;
+        ladder(colTop,     mid - 1.5f, displayedL, false);
+        ladder(mid + 1.5f, colBot,     displayedR, true);
+
+        // 中线：两排共用的"地面"
+        g.setColour(inkCol.withAlpha(0.6f));
+        g.fillRect(juce::Rectangle<float>(dialGeom.leftX, mid - 0.5f, dialGeom.rightX - dialGeom.leftX, 1.0f));
+
+        // 行首 L / R（阶梯最矮那端靠中线，上下两角都空着）
+        drawVuChannelTag(g, "L", body.getX(), mid - 8.0f);
+        drawVuChannelTag(g, "R", body.getX(), mid + 8.0f);
+
+        dialGeom.ladderRows = 2;
+        dialGeom.rowTop[0] = colTop;      dialGeom.rowBot[0] = mid - 1.5f; dialGeom.rowHang[0] = false;
+        dialGeom.rowTop[1] = mid + 1.5f;  dialGeom.rowBot[1] = colBot;     dialGeom.rowHang[1] = true;
+    }
+    else if (wedge)
+    {
+        // 实心楔形：左低右高的梯形剪影，按电平三色填充
+        const float hMax = colBot - colTop;
+        const float hMin = hMax * 0.28f;
+        juce::Path w;
+        w.startNewSubPath(dialGeom.leftX,  colBot);
+        w.lineTo        (dialGeom.leftX,  colBot - hMin);
+        w.lineTo        (dialGeom.rightX, colTop);
+        w.lineTo        (dialGeom.rightX, colBot);
+        w.closeSubPath();
+
+        const VuZoneX zx { linearXFor(minDisplayDb), linearXFor(kVuCautionDb),
+                           linearXFor(warnDbfs),     linearXFor(maxDisplayDb) };
+        const float monoDb = currentMonoDbfs();
+        const float xLit = (std::isfinite(monoDb) && monoDb >= minDisplayDb) ? linearXFor(monoDb)
+                                                                             : zx.x0;
+        fillZonedShape(g, w, zx, xLit, 0.16f);
+
+        // 每 3 dB 一道细缝（底色），保留"LED 拼起来"的颗粒感
+        g.setColour(PinkXP::content);
+        for (int i = 3; i < nCols; i += 3)
+        {
+            const float x = linearXFor(minDisplayDb + (float) i);
+            g.fillRect(juce::Rectangle<float>(x - 0.5f, colTop, 1.0f, colBot - colTop));
+        }
+
+        // 前沿：一根墨色竖线 + 顶端小三角，标出当前电平落在楔形上的高度
+        if (xLit > zx.x0)
+        {
+            const float tTop = colBot - (hMin + (hMax - hMin) * (xLit - zx.x0) / juce::jmax(1.0f, zx.x1 - zx.x0));
+            const float ty   = juce::jmax(tTop, colTop + 6.0f);   // 右端最高处别顶进 LED 那一行
+            g.setColour(inkCol);
+            g.fillRect(juce::Rectangle<float>(xLit - 1.0f, tTop, 2.0f, colBot - tTop));
+            juce::Path tri;
+            tri.addTriangle(xLit - 4.0f, ty - 6.0f, xLit + 4.0f, ty - 6.0f, xLit, ty);
+            g.fillPath(tri);
+        }
+
+        g.setColour(inkCol.withAlpha(0.6f));
+        g.strokePath(w, juce::PathStrokeType(1.0f));
+    }
+    else
+    {
+        ladder(colTop, colBot, currentMonoDbfs(), false);
+    }
+
+    // ---- 底排刻度数字 ----
+    if (labels)
+    {
+        for (const auto& t : kVuTicks)
+        {
+            if (t.label == nullptr) continue;
+            const float x   = linearXFor(t.db);
+            const auto  col = (t.db >= warnDbfs) ? PinkXP::danger : inkCol;
+            g.setColour(col.withAlpha(0.8f));
+            g.drawLine(x, colBot + 1.0f, x, colBot + 4.0f, 1.0f);
+            PinkXP::drawCachedText(g, t.label, juce::Rectangle<float>(x - 12.0f, colBot + 4.0f, 24.0f, 12.0f),
                                    juce::Justification::centred, 9.0f, juce::Font::bold, col, true);
         }
     }
 
-    // ---- 中央单位文字 ----
-    g.setColour(inkCol.withAlpha(0.65f));
-    PinkXP::drawCachedText(g, "dBFS",
-                           juce::Rectangle<float>(cx - 30.0f, cy - R * 0.45f - 8.0f, 60.0f, 16.0f),
-                           juce::Justification::centred, 11.0f, juce::Font::bold,
-                           inkCol.withAlpha(0.65f));
-
-    // ---- 轴心 ----
-    g.setColour(PinkXP::pink300);
-    g.fillEllipse(cx - 6.0f, cy - 6.0f, 12.0f, 12.0f);
-    g.setColour(inkCol);
-    g.drawEllipse(cx - 6.0f, cy - 6.0f, 12.0f, 12.0f, 1.2f);
+    dialGeom.trackTop    = colTop;
+    dialGeom.trackBottom = colBot;
+    dialGeom.radius      = colBot - colTop;
+    dialGeom.bandTop     = colTop;
+    dialGeom.bandBottom  = colBot;
+    dialGeom.valid       = true;
 }
 
 // ==========================================================
-// 楔形刻度表盘（样式 2）：长指针 + 梯形剪影的刻度带
-//   沿用老式 VU 表的"扇形刻度"画法：
-//     · 数字排在刻度线正上方；
-//     · 刻度线长度随电平原位变化 —— 低电平侧长、高电平侧短，整排刻度
-//       的外轮廓就是一个梯形（警戒段再抬高一档，基线呈浅 V 形）；
-//     · 指针从底部中点扫向刻度基线，尖端落基线上，像一根长摆杆。
+// 极简游标（样式 4）
+//   大号数字读数占上部；下方只有一根发丝刻度线 + 5 个稀疏刻度（-36 / -20 / -10 / 0 / +3）。
+//   没有表盘、没有色块，信息只剩"数字 + 位置"。指示器形态（needleStyle）：
+//     细线   = 2px 进度线 + 竖发丝游标（顶端小圆点）；
+//     楔形   = 进度变成一块从左端尖起、越往右越厚的实心楔形（0 dB 后转红）+ 大三角游标；
+//     立体声 = 两根独立的发丝线（上 L 下 R）各自进度 + 游标，读数分左右两格。
 // ==========================================================
-void VuMeterModule::drawTrapezoidDial(juce::Graphics& g,
-                                      juce::Rectangle<int> dialArea,
-                                      juce::Point<float>&  outPivot,
-                                      float&               outRadius) const
+void VuMeterModule::drawMinimalDial(juce::Graphics& g, juce::Rectangle<int> dialArea) const
 {
-    auto inner = dialArea.reduced(8);
-    if (inner.getWidth() < 48 || inner.getHeight() < 42) return;
+    const auto body = linearBody(dialArea);
+    if (body.getWidth() < 60.0f || body.getHeight() < 20.0f) return;
 
     const juce::Colour inkCol = PinkXP::ink;
-    const juce::Colour redCol(0xffd21f3a);
+    const bool stereo = (needleStyle == 2);
+    const bool wedge  = (needleStyle == 1);
 
-    dialGeom.leftX    = (float) inner.getX() + 6.0f;
-    dialGeom.rightX   = (float) inner.getRight() - 6.0f;
-    dialGeom.tickTopY = (float) inner.getY() + 17.0f;      // 数字行（14px）之下
-    if (dialGeom.rightX - dialGeom.leftX < 40.0f) return;
+    dialGeom.leftX  = body.getX() + 12.0f;
+    dialGeom.rightX = body.getRight() - 12.0f;
 
-    // 最长刻度：给轴心留出 8px，其余高度按 0.62 折算 → 小模块也不会溢出
-    dialGeom.tickLenHi = juce::jlimit(8.0f, 30.0f,
-                                      ((float) inner.getBottom() - 2.0f
-                                        - dialGeom.tickTopY) * 0.62f);
+    // 线下预留：刻度短线 + 数字 10px；线上预留：游标 / 楔形 / 立体声第二根线
+    const bool  labels = body.getHeight() >= 40.0f;
+    const float lineY  = std::floor(body.getBottom() - (labels ? 23.0f : 11.0f));
+    const float lineL  = lineY - 14.0f;                       // 立体声：L 线（R 线 = lineY）
+    const float aboveH = stereo ? 26.0f : (wedge ? 22.0f : 12.0f);
+    const float monoDb = currentMonoDbfs();
+    const float x0     = linearXFor(warnDbfs);
 
-    const float numTop = (float) inner.getY() + 1.0f;
-
-    // ---- 数字（刻度线正上方）----
-    g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::bold));
-    for (const auto& t : kVuTicks)
+    // ---- 大号读数（动态文本，直接 drawText，不进静态文本缓存）----
+    const juce::Rectangle<float> readRect(body.getX(), body.getY(),
+                                          body.getWidth(), lineY - aboveH - body.getY());
+    if (readRect.getHeight() >= 12.0f)
     {
-        if (t.label == nullptr) continue;
+        const bool  withUnit = readRect.getHeight() >= 34.0f;
+        const auto  numRect  = withUnit ? readRect.withTrimmedBottom(11.0f) : readRect;
+        const int   cols     = stereo ? 2 : 1;
+        const float cellW    = numRect.getWidth() / (float) cols;
+        // 字高先按高度取，再按"5 个字符"的宽度收缩，窄模块不裁字
+        const float fh = juce::jlimit(9.0f, 48.0f,
+                                      juce::jmin(numRect.getHeight() * 0.8f, cellW / 5.5f));
+        g.setFont(PinkXP::getAxisFont(fh, juce::Font::bold));
 
-        const float tx  = wedgeXFor(t.db);
-        const bool  red = t.db >= warnDbfs;
-        const auto  col = red ? juce::Colour(0xffb61325) : inkCol;
-        const float lx  = juce::jlimit((float) inner.getX(),
-                                       (float) inner.getRight() - 24.0f, tx - 12.0f);
-        PinkXP::drawCachedText(g, t.label, juce::Rectangle<float>(lx, numTop, 24.0f, 12.0f),
-                               juce::Justification::centred, 9.0f, juce::Font::bold, col, true);
-    }
-
-    // ---- 刻度线：长度按电平变化 → 梯形剪影 ----
-    for (const auto& t : kVuTicks)
-    {
-        const float tx  = wedgeXFor(t.db);
-        const float by  = wedgeBaselineY(t.db);
-        const bool  red = t.db >= warnDbfs;
-        const auto  col = red ? juce::Colour(0xffb61325) : inkCol;
-
-        g.setColour(col.withAlpha(t.major ? 0.95f : 0.55f));
-        g.drawLine(tx, dialGeom.tickTopY, tx, by, t.major ? 2.0f : 1.2f);
-    }
-
-    // ---- 基线：跟着刻度末端走，警戒段单独一段红色并加粗 ----
-    {
-        juce::Path baseInk, baseRed;
-        bool firstInk = true, firstRed = true;
-
-        for (const auto& t : kVuTicks)
+        for (int c = 0; c < cols; ++c)
         {
-            const float x = wedgeXFor(t.db);
-            const float y = wedgeBaselineY(t.db) + 1.5f;
+            const float v    = stereo ? (c == 0 ? displayedL : displayedR) : monoDb;
+            const auto  cell = numRect.withX(numRect.getX() + cellW * (float) c).withWidth(cellW);
+            g.setColour(v >= warnDbfs ? PinkXP::danger : inkCol);
+            g.drawText(vuReadoutText(v, minDisplayDb), cell, juce::Justification::centred, false);
 
-            if (t.db < warnDbfs)
+            if (withUnit)
             {
-                if (firstInk) { baseInk.startNewSubPath(x, y); firstInk = false; }
-                else            baseInk.lineTo(x, y);
+                const juce::String unit = stereo ? (c == 0 ? "L dBFS" : "R dBFS") : "dBFS";
+                PinkXP::drawCachedText(g, unit,
+                                       juce::Rectangle<float>(cell.getX(), numRect.getBottom(), cellW, 10.0f),
+                                       juce::Justification::centred, 8.0f, juce::Font::plain,
+                                       inkCol.withAlpha(0.55f), true);
             }
+        }
+    }
 
-            // 红段从警戒前 1 dB 起笔，和墨段重叠一格，避免出现断口
-            if (t.db >= warnDbfs - 1.0f)
+    // ---- 发丝刻度线 + 稀疏刻度（刻度 / 数字挂在最下面那根线下）----
+    const float scaleW = dialGeom.rightX - dialGeom.leftX;
+    g.setColour(inkCol.withAlpha(0.35f));
+    g.fillRect(juce::Rectangle<float>(dialGeom.leftX, lineY, scaleW, 1.0f));
+    if (stereo)
+    {
+        g.fillRect(juce::Rectangle<float>(dialGeom.leftX, lineL, scaleW, 1.0f));
+        drawVuChannelTag(g, "L", body.getX(), lineL - 3.0f);
+        drawVuChannelTag(g, "R", body.getX(), lineY - 3.0f);
+    }
+
+    struct Mark { float db; const char* label; };
+    static const Mark marks[] = { { -36.0f, "-36" }, { -20.0f, "-20" }, { -10.0f, "-10" },
+                                  {   0.0f, "0"   }, {   3.0f, "+3"  } };
+    for (const auto& m : marks)
+    {
+        const float x   = linearXFor(m.db);
+        const auto  col = ((m.db >= warnDbfs) ? PinkXP::danger : inkCol).withAlpha(0.6f);
+        g.setColour(col);
+        g.fillRect(juce::Rectangle<float>(x - 0.5f, lineY + 1.0f, 1.0f, 3.0f));
+        if (labels)
+            PinkXP::drawCachedText(g, m.label, juce::Rectangle<float>(x - 12.0f, lineY + 12.0f, 24.0f, 10.0f),
+                                   juce::Justification::centred, 8.0f, juce::Font::plain, col, true);
+    }
+
+    // 有效电平 → x；低于表底返回 -1（不画进度）
+    auto litX = [&](float db) -> float
+    {
+        return (std::isfinite(db) && db >= minDisplayDb) ? linearXFor(db) : -1.0f;
+    };
+
+    // ---- 细线进度：左端 → 当前电平，紧贴线上 2px，0 dB 之后转红 ----
+    auto progress = [&](float db, float y, juce::Colour c)
+    {
+        const float x = litX(db);
+        if (x < 0.0f) return;
+        g.setColour(c);
+        g.fillRect(juce::Rectangle<float>(dialGeom.leftX, y - 2.0f, juce::jmin(x, x0) - dialGeom.leftX, 2.0f));
+        if (x > x0)
+        {
+            g.setColour(PinkXP::danger);
+            g.fillRect(juce::Rectangle<float>(x0, y - 2.0f, x - x0, 2.0f));
+        }
+    };
+
+    // ---- 发丝游标：线上竖线 + 顶端小圆点 ----
+    auto hairCursor = [&](float db, float y, juce::Colour c)
+    {
+        const float x = linearXFor(db);
+        g.setColour(c);
+        g.fillRect(juce::Rectangle<float>(x - 0.75f, y - 9.0f, 1.5f, 9.0f));
+        g.fillEllipse(x - 2.5f, y - 12.0f, 5.0f, 5.0f);
+    };
+
+    if (stereo)
+    {
+        progress(displayedL, lineL, PinkXP::pink500);
+        progress(displayedR, lineY, PinkXP::pink700);
+        hairCursor(displayedL, lineL, PinkXP::pink500);
+        hairCursor(displayedR, lineY, PinkXP::pink700);
+    }
+    else if (wedge)
+    {
+        // 楔形：淡色"满量程"剪影 + 实心楔形填到当前电平（越响越厚）
+        const float hMax = 12.0f;
+        auto wedgeH = [&](float x) { return 1.0f + (hMax - 1.0f) * (x - dialGeom.leftX) / juce::jmax(1.0f, scaleW); };
+
+        juce::Path ghost;
+        ghost.addTriangle(dialGeom.leftX, lineY, dialGeom.rightX, lineY - hMax, dialGeom.rightX, lineY);
+        g.setColour(inkCol.withAlpha(0.08f));
+        g.fillPath(ghost);
+
+        const float x = litX(monoDb);
+        if (x > dialGeom.leftX)
+        {
+            juce::Path w;
+            w.startNewSubPath(dialGeom.leftX, lineY);
+            w.lineTo(x, lineY - wedgeH(x));
+            w.lineTo(x, lineY);
+            w.closeSubPath();
             {
-                if (firstRed) { baseRed.startNewSubPath(x, y); firstRed = false; }
-                else            baseRed.lineTo(x, y);
+                juce::Graphics::ScopedSaveState ss(g);
+                g.reduceClipRegion(juce::Rectangle<int>((int) dialGeom.leftX - 1, (int) (lineY - hMax) - 2,
+                                                        juce::roundToInt(x0) - (int) dialGeom.leftX + 1, (int) hMax + 4));
+                g.setColour(PinkXP::pink600);
+                g.fillPath(w);
+            }
+            if (x > x0)
+            {
+                juce::Graphics::ScopedSaveState ss(g);
+                g.reduceClipRegion(juce::Rectangle<int>(juce::roundToInt(x0), (int) (lineY - hMax) - 2,
+                                                        juce::roundToInt(x) - juce::roundToInt(x0) + 1, (int) hMax + 4));
+                g.setColour(PinkXP::danger);
+                g.fillPath(w);
             }
         }
 
-        g.setColour(inkCol.withAlpha(0.85f));
-        g.strokePath(baseInk, juce::PathStrokeType(2.4f));
-        g.setColour(redCol.withAlpha(0.95f));
-        g.strokePath(baseRed, juce::PathStrokeType(3.2f));
+        // 大三角游标：尖端落在楔形顶边上
+        const float cx  = linearXFor(monoDb);
+        const float tip = lineY - (x > dialGeom.leftX ? wedgeH(cx) : 1.0f) - 1.0f;
+        juce::Path tri;
+        tri.addTriangle(cx - 6.0f, tip - 9.0f, cx + 6.0f, tip - 9.0f, cx, tip);
+        g.setColour(PinkXP::pink600);
+        g.fillPath(tri);
+        g.setColour(inkCol);
+        g.strokePath(tri, juce::PathStrokeType(1.0f));
+    }
+    else
+    {
+        progress(monoDb, lineY, PinkXP::pink600);
+        hairCursor(monoDb, lineY, PinkXP::pink600);
     }
 
-    // ---- 轴心（底边中点，指针从这里摆出）----
-    const juce::Point<float> piv((float) inner.getCentreX(), (float) inner.getBottom() - 2.0f);
-    g.setColour(PinkXP::pink300);
-    g.fillEllipse(piv.x - 4.0f, piv.y - 4.0f, 8.0f, 8.0f);
-    g.setColour(inkCol);
-    g.drawEllipse(piv.x - 4.0f, piv.y - 4.0f, 8.0f, 8.0f, 1.1f);
+    dialGeom.trackTop    = body.getY();
+    dialGeom.trackBottom = lineY;
+    dialGeom.radius      = lineY - body.getY();
+    dialGeom.bandTop     = stereo ? lineL : lineY;
+    dialGeom.bandBottom  = lineY;
+    dialGeom.valid       = true;
+}
 
-    outPivot  = piv;
-    outRadius = juce::jmax(10.0f, piv.y - dialGeom.tickTopY);
+// ==========================================================
+// 镜像刻度（样式 5）
+//   dB 数字沿中脊排一行，上下两排刻度以中脊对称（上排朝上、下排朝下），再往外是
+//   上下两条填充条：未点亮部分以淡色显示绿 / 黄 / 红分段，点亮到当前电平。
+//   Mono = 上下同读总电平（完全镜像）· Stereo = 上 L 下 R；条子形状见下方 barShape。
+// ==========================================================
+void VuMeterModule::drawMirrorDial(juce::Graphics& g, juce::Rectangle<int> dialArea) const
+{
+    const auto body = linearBody(dialArea);
+    if (body.getWidth() < 60.0f || body.getHeight() < 24.0f) return;
 
-    dialGeom.pivot  = piv;
-    dialGeom.radius = outRadius;
+    const juce::Colour inkCol = PinkXP::ink;
+    const bool stereo = (needleStyle == 2);
+    drawVuHeaderCaption(g, ledBounds(dialArea), body.getX(), "dBFS");
+
+    dialGeom.leftX  = body.getX() + 14.0f;      // 左侧给 Stereo 的 L / R 字母留位置
+    dialGeom.rightX = body.getRight() - 12.0f;
+
+    const float H      = body.getHeight();
+    const bool  labels = H >= 40.0f;
+    const float spineH = labels ? 12.0f : 2.0f;
+    const float tickH  = juce::jlimit(3.0f, 9.0f, H * 0.10f);
+    const float gap    = 3.0f;
+    const float barH   = juce::jlimit(4.0f, 22.0f, (H - spineH - 2.0f * (tickH + gap)) * 0.5f);
+    const float blockH = spineH + 2.0f * (tickH + gap + barH);
+
+    const float upTop    = body.getY() + juce::jmax(0.0f, (H - blockH) * 0.5f);
+    const float upBot    = upTop + barH;
+    const float spineTop = upBot + gap + tickH;
+    const float spineBot = spineTop + spineH;
+    const float loTop    = spineBot + tickH + gap;
+    const float loBot    = loTop + barH;
+    const float scaleW   = dialGeom.rightX - dialGeom.leftX;
+
+    // ---- 中脊：两条基线 + 对称刻度 + 数字 ----
+    g.setColour(inkCol.withAlpha(0.5f));
+    g.fillRect(juce::Rectangle<float>(dialGeom.leftX, spineTop - 1.0f, scaleW, 1.0f));
+    g.fillRect(juce::Rectangle<float>(dialGeom.leftX, spineBot,        scaleW, 1.0f));
+    for (const auto& t : kVuTicks)
+    {
+        const float x   = linearXFor(t.db);
+        const float len = t.major ? tickH : tickH * 0.5f;
+        const float w   = t.major ? 1.4f : 1.0f;
+        const auto  col = (t.db >= warnDbfs) ? PinkXP::danger : inkCol;
+        g.setColour(col.withAlpha(t.major ? 0.9f : 0.55f));
+        g.drawLine(x, spineTop - 1.0f, x, spineTop - 1.0f - len, w);
+        g.drawLine(x, spineBot + 1.0f, x, spineBot + 1.0f + len, w);
+
+        if (labels && t.label != nullptr)
+            PinkXP::drawCachedText(g, t.label, juce::Rectangle<float>(x - 12.0f, spineTop, 24.0f, spineH),
+                                   juce::Justification::centred, 9.0f, juce::Font::bold, col, true);
+    }
+
+    // ---- 上下填充条：形状随指示器形态（needleStyle）变化 ----
+    //   细线   = 两条贴着刻度排的窄条 + 一根上下贯穿中脊的发丝针（两端圆珠）；
+    //   楔形   = 两条条子都变成楔形（靠中脊的一边是直线，外沿从左往右张开），
+    //            上下合起来像一只横放的喇叭口；前沿墨线 + 三角箭头直指中脊；
+    //   立体声 = 满高矩形条，上 L 下 R，各自一块声道色的粗端帽。
+    const VuZoneX zx { linearXFor(minDisplayDb), linearXFor(kVuCautionDb),
+                       linearXFor(warnDbfs),     linearXFor(maxDisplayDb) };
+    const float monoDb = currentMonoDbfs();
+    auto litX = [&](float db) -> float
+    {
+        return (std::isfinite(db) && db >= minDisplayDb) ? linearXFor(db) : dialGeom.leftX;
+    };
+
+    // spineBelow = 该条在中脊上方（内沿在下）
+    auto barShape = [&](float top, bool spineBelow) -> juce::Path
+    {
+        juce::Path p;
+        const float inner = spineBelow ? top + barH : top;           // 靠中脊的一边
+        const float outer = spineBelow ? top        : top + barH;
+        if (needleStyle == 1)
+        {
+            const float dir = spineBelow ? 1.0f : -1.0f;             // outer → inner 的方向
+            p.startNewSubPath(dialGeom.leftX, inner);
+            p.lineTo(dialGeom.leftX,  inner - dir * barH * 0.2f);
+            p.lineTo(dialGeom.rightX, outer);
+            p.lineTo(dialGeom.rightX, inner);
+            p.closeSubPath();
+        }
+        else if (needleStyle == 0)
+        {
+            const float h = juce::jmax(3.0f, barH * 0.38f);
+            p.addRectangle(dialGeom.leftX, spineBelow ? inner - h : inner, scaleW, h);
+        }
+        else
+        {
+            p.addRectangle(dialGeom.leftX, top, scaleW, barH);
+        }
+        return p;
+    };
+
+    auto bar = [&](float top, float level, bool spineBelow, juce::Colour capCol)
+    {
+        const auto  shape = barShape(top, spineBelow);
+        const float xl    = litX(level);
+        fillZonedShape(g, shape, zx, xl, 0.14f);
+        g.setColour(inkCol.withAlpha(0.6f));
+        g.strokePath(shape, juce::PathStrokeType(1.0f));
+
+        if (xl <= dialGeom.leftX) return;
+        if (needleStyle == 1)
+        {
+            // 前沿墨线（楔形在该处的厚度）+ 三角箭头：底边贴条的内沿，尖端落中脊基线
+            const float inner = spineBelow ? top + barH : top;
+            const float t     = (xl - dialGeom.leftX) / juce::jmax(1.0f, scaleW);
+            const float th    = barH * (0.2f + 0.8f * t);
+            g.setColour(inkCol);
+            g.fillRect(juce::Rectangle<float>(xl - 1.0f, spineBelow ? inner - th : inner, 2.0f, th));
+
+            const float tip = spineBelow ? spineTop - 1.0f : spineBot + 1.0f;
+            juce::Path p;
+            p.addTriangle(xl - 4.5f, inner, xl + 4.5f, inner, xl, tip);
+            g.setColour(capCol);
+            g.fillPath(p);
+            g.setColour(inkCol);
+            g.strokePath(p, juce::PathStrokeType(1.0f));
+        }
+        else if (needleStyle == 2)
+        {
+            const juce::Rectangle<float> cap(xl - 2.5f, top - 2.0f, 5.0f, barH + 4.0f);
+            g.setColour(capCol);
+            g.fillRect(cap);
+            g.setColour(inkCol);
+            g.drawRect(cap, 1.0f);
+        }
+    };
+
+    bar(upTop, stereo ? displayedL : monoDb, true,  stereo ? PinkXP::pink500 : PinkXP::pink600);
+    bar(loTop, stereo ? displayedR : monoDb, false, stereo ? PinkXP::pink700 : PinkXP::pink600);
+
+    if (needleStyle == 0)
+    {
+        // 发丝针：上下贯穿两条窄条和中脊，两端各一颗圆珠
+        const float x = litX(monoDb);
+        g.setColour(PinkXP::pink600);
+        g.fillRect(juce::Rectangle<float>(x - 0.75f, upTop, 1.5f, loBot - upTop));
+        g.fillEllipse(x - 3.0f, upTop - 3.0f, 6.0f, 6.0f);
+        g.fillEllipse(x - 3.0f, loBot - 3.0f, 6.0f, 6.0f);
+        g.setColour(inkCol);
+        g.drawEllipse(x - 3.0f, upTop - 3.0f, 6.0f, 6.0f, 1.0f);
+        g.drawEllipse(x - 3.0f, loBot - 3.0f, 6.0f, 6.0f, 1.0f);
+    }
+
+    if (stereo)
+    {
+        drawVuChannelTag(g, "L", body.getX(), upTop + barH * 0.5f);
+        drawVuChannelTag(g, "R", body.getX(), loTop + barH * 0.5f);
+    }
+
+    // ---- 0 dB 竖直分界线（上下贯穿）----
+    {
+        const float x0 = linearXFor(warnDbfs);
+        g.setColour(inkCol.withAlpha(0.85f));
+        g.drawLine(x0, upTop - 2.0f, x0, loBot + 2.0f, 1.0f);
+    }
+
+    dialGeom.trackTop    = body.getY();
+    dialGeom.trackBottom = loBot;
+    dialGeom.radius      = loBot - body.getY();
+    dialGeom.bandTop     = spineTop;
+    dialGeom.bandBottom  = spineBot;
+    dialGeom.rowTop[0]   = upTop;      // 镜像：上条 / 下条外沿（玩具涟漪的上下范围）
+    dialGeom.rowBot[0]   = loBot;
+    dialGeom.valid       = true;
 }
 
 void VuMeterModule::drawNeedle(juce::Graphics& g,
@@ -674,17 +1560,16 @@ void VuMeterModule::drawNeedle(juce::Graphics& g,
                                float              thickness,
                                bool               wedge) const
 {
-    // 几何由 drawDial 按当前样式缓存：半圆 / 弧形是"角度 + 半径"，
-    //   梯形是"尖端沿顶边线性移动"，这里统一换算成角度 + 长度。
+    // 几何由 drawDial 按当前样式缓存（只有指针式 0 半圆 / 1 复古扇形会走到这里）
     const float ang  = needleAngleFor(valueDb);
     const float sinA = std::sin(ang);
     const float cosA = std::cos(ang);
     const auto  pivot = dialGeom.pivot;
 
-    // 指针尖端：长度已按样式算好（半圆/弧形 = R-10，避开刻度数字）
+    // 指针尖端：长度已按样式算好（半圆 = R-10 避开数字；复古扇形刺进刻度圈）
     const float tipR = needleLengthFor(valueDb);
-    // 指针根部：圆心后方伸出一点（配重效果）；梯形轴心在底边，几乎不留尾巴
-    const float tailR = (dialStyle == 2) ? 2.0f : 8.0f;
+    // 指针根部：半圆在圆心后方伸出一点（配重效果）；复古扇形根部藏在盖板下，不留尾巴
+    const float tailR = (dialStyle == 1) ? 0.0f : 8.0f;
 
     const float x1 = pivot.x - sinA * tailR;
     const float y1 = pivot.y + cosA * tailR;
@@ -807,27 +1692,57 @@ void VuMeterModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content
     // 表盘区域 = sunken 卡片内部（再减去一点内描边余量，和 drawDial 保持一致）
     auto dialArea = area;
 
-    // 画表盘 (获取圆心 + 半径)
+    // 画表盘 (获取圆心 + 半径)。横向式（2..5）的游标 / 灯格 / 填充条在各自
+    //   draw*Dial 里一并画完，这里只给指针式（0 半圆 / 1 复古扇形）画指针。
     juce::Point<float> pivot;
     float radius = 0.0f;
     drawDial(g, dialArea, pivot, radius);
 
-    if (radius > 10.0f)
+    if (! isLinearStyle() && radius > 10.0f)
     {
         // 指针和 LED 共用的"单声道总电平"（dBFS）
         const float monoDb = currentMonoDbfs();
+        // 指针式里只有半圆保持旧线宽；复古扇形的三种指针形态拉开差异：
+        //   细线 = 1.2px 发丝长针；楔形 = 根部宽约 1.4 个盖板半径的矛形针（根部藏进盖板）；
+        //   立体声 = 两根细针 + 针身上各挂一枚 L / R 圆标（错开半径，重叠时也能分清）。
+        const bool  fan    = (dialStyle == 1);
 
         if (needleStyle == 2)
         {
             // Stereo：L / R 各一根细指针（取已平滑的 displayedL/R）
-            drawNeedle(g, displayedL, PinkXP::pink500, 1.6f);
-            drawNeedle(g, displayedR, PinkXP::pink700, 1.6f);
+            drawNeedle(g, displayedL, PinkXP::pink500, fan ? 1.4f : 1.6f);
+            drawNeedle(g, displayedR, PinkXP::pink700, fan ? 1.4f : 1.6f);
+
+            if (fan)
+            {
+                auto tag = [&](float db, juce::Colour c, const char* text, float frac)
+                {
+                    const float ang = needleAngleFor(db);
+                    const float r   = needleLengthFor(db) * frac;
+                    const juce::Point<float> p(dialGeom.pivot.x + std::sin(ang) * r,
+                                               dialGeom.pivot.y - std::cos(ang) * r);
+                    const float tr = 6.0f;
+                    g.setColour(c);
+                    g.fillEllipse(p.x - tr, p.y - tr, tr * 2.0f, tr * 2.0f);
+                    g.setColour(PinkXP::ink);
+                    g.drawEllipse(p.x - tr, p.y - tr, tr * 2.0f, tr * 2.0f, 1.0f);
+                    PinkXP::drawCachedText(g, text, juce::Rectangle<float>(p.x - tr, p.y - tr, tr * 2.0f, tr * 2.0f),
+                                           juce::Justification::centred, 8.0f, juce::Font::bold,
+                                           PinkXP::readableInkOn(c), true);
+                };
+                tag(displayedL, PinkXP::pink500, "L", 0.52f);
+                tag(displayedR, PinkXP::pink700, "R", 0.70f);
+            }
         }
         else
         {
-            // 单一指针（总电平），主题粉色系 pink600，稍粗一点
-            drawNeedle(g, monoDb, PinkXP::pink600, 2.2f, needleStyle == 1);
+            // 单一指针（总电平），主题粉色系 pink600
+            const float th = fan ? (needleStyle == 1 ? dialGeom.capR * 0.6f : 1.2f) : 2.2f;
+            drawNeedle(g, monoDb, PinkXP::pink600, th, needleStyle == 1);
         }
+
+        if (fan)
+            drawFanCap(g);
     }
 
     // ---- LED 信号灯：放到表盘旁边（sunken 卡片内的右上角空白） ----
@@ -842,10 +1757,9 @@ juce::Rectangle<int> VuMeterModule::ledBounds(juce::Rectangle<int> area) const
     const int ledSz = juce::jlimit(10, 18,
                                    juce::jmin(area.getWidth(), area.getHeight()) / 12);
     // 相对 sunken 内沿再缩 6px，给 drawSunken 的阴影/内描边一点呼吸。
-    //   楔形刻度把数字排在顶部，所以灯改放右下角；另两种表盘顶部是空的。
-    const int y = (dialStyle == 2) ? (area.getBottom() - ledSz - 6)
-                                   : (area.getY()      + 6);
-    return { area.getRight() - ledSz - 6, y, ledSz, ledSz };
+    //   六种样式统一放右上角：指针式（0 / 1）的盘面顶角本来就空；横向式（2..5）
+    //   由 linearBody 在顶部为这一行让位，刻度数字不会压到灯。
+    return { area.getRight() - ledSz - 6, area.getY() + 6, ledSz, ledSz };
 }
 
 // ----------------------------------------------------------
@@ -862,8 +1776,10 @@ juce::ValueTree VuMeterModule::saveModuleSpecificState() const
 
 void VuMeterModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
-    // 缺键 = 保持当前值（构造默认 = 旧 VU 外观）
-    if (state.hasProperty ("dialStyle"))   dialStyle   = juce::jlimit (0, 2, (int) state.getProperty ("dialStyle"));
+    // 缺键 = 保持当前值（构造默认 = 旧 VU 外观）。
+    //   dialStyle 1 / 2 旧值（弧形 / 梯形）已被新样式取代：索引原地复用，读档后直接显示
+    //   复古扇形 / 横向刻度条；0 半圆不变。
+    if (state.hasProperty ("dialStyle"))   dialStyle   = juce::jlimit (0, numDialStyles - 1, (int) state.getProperty ("dialStyle"));
     if (state.hasProperty ("needleStyle")) needleStyle = juce::jlimit (0, 2, (int) state.getProperty ("needleStyle"));
     if (state.hasProperty ("showLed"))     showLed     = (bool) state.getProperty ("showLed");
     refreshControlPanel();
@@ -873,14 +1789,19 @@ void VuMeterModule::restoreModuleSpecificState (const juce::ValueTree& state)
 void VuMeterModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
     out.push_back (ParamDef::choice ("dialStyle", "Dial style",
-        { "Half circle", "Arc", "Trapezoid" },
-        "Half circle: the classic pink semicircle. Arc: a 240-degree round gauge with a thick rail. "
-        "Trapezoid: a vintage fan scale - long ticks on the loud side, short on the quiet side, "
-        "with a long needle swinging across it.")
+        { "Half circle", "Vintage fan", "Bar scale", "LED ladder", "Minimal", "Mirror" },
+        "Half circle: the classic pink semicircle. "
+        "Vintage fan: a narrow fan-shaped window with a thick arc rail, a thin percent scale inside, a long thin needle and a red zone past 0 dB. "
+        "Bar scale: a green-yellow-red bar with slanted ticks above, percent dots below and a slider riding on it. "
+        "LED ladder: a row of LED columns that step up in height and light up with the level. "
+        "Minimal: a big number over a hairline scale with a small cursor. "
+        "Mirror: the dB scale runs along the middle with a fill bar above and a mirrored one below.")
         .in ("Dial"));
     out.push_back (ParamDef::choice ("needleStyle", "Needle style",
         { "Thin line", "Wedge", "Stereo L/R" },
-        "Thin line: thin needle. Wedge: tapered needle. Stereo L/R: two thin needles, one per channel.")
+        "Thin line: thin needle. Wedge: tapered needle. Stereo L/R: two thin needles, one per channel. "
+        "On the bar-type dials it changes the indicator: Thin line = hairline cursor or slim LEDs, "
+        "Wedge = filled bar or solid wedge with a big arrow, Stereo L/R = separate L and R tracks.")
         .in ("Dial"));
     out.push_back (ParamDef::toggle ("showLed", "Signal LED",
         "Round lamp in the corner: dark = no signal, green = signal, red = at or above 0 dBFS.").in ("Dial"));
@@ -896,7 +1817,7 @@ double VuMeterModule::getParamValue (const juce::String& id) const
 
 void VuMeterModule::setParamValue (const juce::String& id, double v)
 {
-    if      (id == "dialStyle")   dialStyle   = juce::jlimit (0, 2, juce::roundToInt (v));
+    if      (id == "dialStyle")   dialStyle   = juce::jlimit (0, numDialStyles - 1, juce::roundToInt (v));
     else if (id == "needleStyle") needleStyle = juce::jlimit (0, 2, juce::roundToInt (v));
     else if (id == "showLed")     showLed     = v >= 0.5;
     else return;

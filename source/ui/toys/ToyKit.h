@@ -220,6 +220,15 @@ std::unique_ptr<ToyActor> makeVolcanoActor (juce::Point<float> at, juce::Point<f
 // 指针虚影（叠加在真实指针上，不改变真实指针）：
 //   theta 为数学角度（0=最左，π/2=正上，π=最右），与 Phase/VU 真实指针同约定。
 std::unique_ptr<ToyActor> makeGhostNeedleActor (juce::Point<float> pivot, float radius, float thetaRad);
+// VU 横向刻度条：弹簧游标（幽灵游标从点击处带过冲弹回真实电平，拖一根弹簧 + 残影）
+std::unique_ptr<ToyActor> makeSliderFlickActor (float top, float bottom, float clickX, float restX);
+// VU LED 梯柱：跑马冲顶（从左逐格点亮到点击格，顶帽弹飞后落回；capDir -1 向上 / +1 向下）
+std::unique_ptr<ToyActor> makeLedChaseActor (std::vector<juce::Rectangle<float>> cols,
+                                             std::vector<juce::Colour> colours, float capDir);
+// VU 极简游标：卷尺（从当前游标量到点击处，标出 dB 差值后卷回）
+std::unique_ptr<ToyActor> makeMeasureTapeActor (float lineY, float fromX, float toX, const juce::String& label);
+// VU 镜像刻度：水滴涟漪（以中脊为水面上下对称荡开三圈，限制在 top..bottom / xMin..xMax 内）
+std::unique_ptr<ToyActor> makeMirrorRippleActor (float x, float spineY, float top, float bottom, float xMin, float xMax);
 // Loudness：打砖块碎片（彩色方块下落 + 弹跳）
 std::unique_ptr<ToyActor> makeBrickShardsActor (juce::Point<float> at, juce::Colour colour, int count);
 // VU：玻璃裂（放射裂纹，4 秒淡出）
