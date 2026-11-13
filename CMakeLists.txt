@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 3.1.0 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 3.2.0 LANGUAGES C CXX)
 
 # ==========================================================
 # Steam 构建开关（默认 OFF，绝不影响官网 / Inno Setup 流水线）
@@ -427,7 +427,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 3.1.0
+        VERSION 3.2.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -480,7 +480,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 3.1.0
+        VERSION 3.2.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd

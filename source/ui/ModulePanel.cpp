@@ -50,6 +50,62 @@ namespace
 }
 
 // ==========================================================
+// 设置抽屉的"点空白处自动收起"
+//   · openDrawerPanels：当前打开着抽屉的模块（策略：同时只允许一个）
+//   · 监听挂在 topLevel 上（wantsEventsForAllNestedChildComponents = true）：
+//     窗口内任何组件的鼠标按下都会通知我们，浮动窗口各自挂自己的顶层。
+//   · 抽屉打开时才挂、全关时摘掉，平时零开销。
+// ==========================================================
+namespace
+{
+    juce::Array<ModulePanel*>& openDrawerPanels()
+    {
+        static juce::Array<ModulePanel*> list;
+        return list;
+    }
+
+    juce::Component::SafePointer<juce::Component>& drawerListenerHost()
+    {
+        static juce::Component::SafePointer<juce::Component> host;
+        return host;
+    }
+
+    struct DrawerDismissListener : public juce::MouseListener
+    {
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            ModulePanel::closeOpenControlDrawers (e.eventComponent, e.getPosition());
+        }
+    };
+
+    DrawerDismissListener& drawerDismissListener()
+    {
+        static DrawerDismissListener listener;
+        return listener;
+    }
+
+    void attachDrawerDismissListener (juce::Component* owner)
+    {
+        auto* top = (owner != nullptr) ? owner->getTopLevelComponent() : nullptr;
+        if (top == nullptr || drawerListenerHost().getComponent() == top)
+            return;
+
+        if (drawerListenerHost().getComponent() != nullptr)
+            drawerListenerHost()->removeMouseListener (&drawerDismissListener());
+
+        top->addMouseListener (&drawerDismissListener(), true);
+        drawerListenerHost() = top;
+    }
+
+    void detachDrawerDismissListener()
+    {
+        if (drawerListenerHost().getComponent() != nullptr)
+            drawerListenerHost()->removeMouseListener (&drawerDismissListener());
+        drawerListenerHost() = nullptr;
+    }
+}
+
+// ==========================================================
 // getModuleDisplayName —— 模块类型 -> 默认标题
 // ==========================================================
 juce::String getModuleDisplayName(ModuleType t)
@@ -71,7 +127,7 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::dynamicsMeters:    return "Dynamics Meters";
         case ModuleType::dynamicsDr:        return "Dynamics DR";
         case ModuleType::dynamicsCrest:     return "Dynamics Crest";
-        case ModuleType::waveform:          return "Waveform";
+        case ModuleType::waveform:          return "Waveform History";
         case ModuleType::vuMeter:           return "VU Meter";
         case ModuleType::spectrogram:       return "Spectrogram";
         case ModuleType::spectrogram3d:    return "Spectrogram 3D";
@@ -111,7 +167,13 @@ ModulePanel::ModulePanel(ModuleType type)
     setOpaque (true);
 }
 
-ModulePanel::~ModulePanel() = default;
+ModulePanel::~ModulePanel()
+{
+    // 模块销毁时摘掉注册/监听，避免"点空白处收起"持有悬空指针
+    openDrawerPanels().removeAllInstancesOf (this);
+    if (openDrawerPanels().isEmpty())
+        detachDrawerDismissListener();
+}
 
 bool ModulePanel::isVisuallyActiveInWorkspace() const noexcept
 {
@@ -208,6 +270,10 @@ void ModulePanel::setControlPanelOpen (bool open)
     if (controlPanelOpen_ == open)
         return;
 
+    // 打开前先收起别人的：同时只允许一个抽屉，点别的齿轮时旧的自动让位
+    if (open)
+        closeOpenControlDrawers (nullptr, {});
+
     controlPanelOpen_ = open;
 
     if (open)
@@ -223,14 +289,59 @@ void ModulePanel::setControlPanelOpen (bool open)
         }
         controlDrawer_->setVisible (true);
         layoutControlDrawer();
+
+        openDrawerPanels().addIfNotAlreadyThere (this);
+        attachDrawerDismissListener (this);
     }
-    else if (controlDrawer_ != nullptr)
+    else
     {
-        controlDrawer_->setVisible (false);
+        if (controlDrawer_ != nullptr)
+            controlDrawer_->setVisible (false);
+
+        // 注册表 / 监听无论如何都要摘干净（防御：抽屉组件可能已被提前清掉）
+        openDrawerPanels().removeAllInstancesOf (this);
+        if (openDrawerPanels().isEmpty())
+            detachDrawerDismissListener();
     }
 
     // 抽屉出现 / 消失会改变内容区的遮挡关系：整块重绘一次
     repaint();
+}
+
+// 点空白处自动收起：由顶层 MouseListener 调用（source = 实际被点中的组件）
+void ModulePanel::closeOpenControlDrawers (const juce::Component* source,
+                                           juce::Point<int>       posInSource)
+{
+    if (openDrawerPanels().isEmpty())
+        return;
+
+    // 点在某个模块的齿轮按钮上 → 由该模块自己切换开合，这里不插手
+    if (source != nullptr)
+    {
+        const ModulePanel* panel = dynamic_cast<const ModulePanel*> (source);
+        if (panel == nullptr)
+            panel = source->findParentComponentOfClass<ModulePanel>();
+
+        if (panel != nullptr && panel->hasControlPanel()
+            && panel->getControlButtonBounds()
+                     .contains (panel->getLocalPoint (source, posInSource)))
+            return;
+    }
+
+    // 拷贝一份再关：关闭会改写注册表
+    const juce::Array<ModulePanel*> snapshot (openDrawerPanels());
+    for (auto* p : snapshot)
+    {
+        if (p == nullptr || ! p->isControlPanelOpen())
+            continue;
+
+        // 点在这个抽屉内部（含其子控件）→ 保留
+        if (source != nullptr
+            && p->getControlDrawerBounds().contains (p->getLocalPoint (source, posInSource)))
+            continue;
+
+        p->setControlPanelOpen (false);
+    }
 }
 
 void ModulePanel::refreshControlPanel()
@@ -565,8 +676,23 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
     pendingRepaintStampMs = 0;
 
     // Toybox：模块内 actor 绘制（插在标志清零之后、早退 return 之前，§R5）
+    //   设置抽屉是子组件，而 paintOverChildren 画在所有子组件之上 —— 不排除抽屉
+    //   区域的话，点模块产生的 emoji / 粒子会盖住设置界面。抽屉打开时把这块裁掉，
+    //   actor 进入抽屉范围就"钻到面板后面"。
     if (toyState != nullptr)
-        toyState->paint (g);
+    {
+        const auto drawer = getControlDrawerBounds();
+        if (drawer.isEmpty())
+        {
+            toyState->paint (g);
+        }
+        else
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            g.excludeClipRegion (drawer);
+            toyState->paint (g);
+        }
+    }
 
     // 右下角 CPU 占用提示文字：暂时屏蔽（不再做视觉展示，但保留
     //   setCpuLoad / getCpuLabelBounds 等 API，方便后续测试时重新开启）

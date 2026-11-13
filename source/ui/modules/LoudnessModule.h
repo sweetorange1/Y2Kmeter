@@ -101,6 +101,8 @@ private:
 
     // ---- 灯条样式 ----
     void rebuildBarSlots();
+    // 灯条样式的可用区：左/上留 6px，右/下只留 2px（刻度文本贴近右边界、读数贴近下边界）
+    juce::Rectangle<int> barLayoutArea(juce::Rectangle<int> content) const noexcept;
     // 把 content 区拆成各柱区域 + 刻度尺（layoutContent 与静态层共用同一份几何）
     void computeBarGeometry(juce::Rectangle<int> content,
                             std::vector<juce::Rectangle<int>>& bars,

@@ -96,11 +96,11 @@ void LoudnessModule::buildParamDefs (std::vector<ParamDef>& out) const
         "LED bars: pixel meters with a dB scale. Number readouts: big numbers with a progress bar.")
         .in ("Style"));
 
-    out.push_back (ParamDef::toggle ("itemM", "Momentary (LUFS-M)",
+    out.push_back (ParamDef::toggle ("itemM", "Momentary",
         "Loudness over the last 400 ms - reacts fastest.").in ("Show"));
-    out.push_back (ParamDef::toggle ("itemS", "Short-term (LUFS-S)",
+    out.push_back (ParamDef::toggle ("itemS", "Short-term",
         "Loudness over the last 3 s - the usual main number.").in ("Show"));
-    out.push_back (ParamDef::toggle ("itemI", "Integrated (LUFS-I)",
+    out.push_back (ParamDef::toggle ("itemI", "Integrated",
         "Gated average over the whole programme. Resets after a long silence.").in ("Show"));
     out.push_back (ParamDef::toggle ("itemTp", "True Peak",
         "Inter-sample peak (4x oversampled). LED bars show L and R, readouts show the louder one.").in ("Show"));
@@ -409,14 +409,24 @@ void LoudnessModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 // ==========================================================
 // 布局
 // ==========================================================
+juce::Rectangle<int> LoudnessModule::barLayoutArea(juce::Rectangle<int> content) const noexcept
+{
+    auto area = content.reduced(6);
+    // 右侧 / 下方原来各留 6px，刻度文本与读数离模块边界太远；
+    //   收紧到 2px，只留一条小空隙。
+    area.setRight  (content.getRight()  - 2);
+    area.setBottom (content.getBottom() - 2);
+    return area;
+}
+
 void LoudnessModule::computeBarGeometry(juce::Rectangle<int> content,
                                         std::vector<juce::Rectangle<int>>& bars,
                                         juce::Rectangle<int>& scale) const
 {
-    auto area = content.reduced(6);
+    auto area = barLayoutArea(content);
 
-    scale = area.removeFromRight(30);
-    area.removeFromRight(4);
+    scale = area.removeFromRight(22);   // 刻度列：4px 刻度线 + 文本，右边不再留大片空白
+    area.removeFromRight(3);
     area.removeFromBottom(labelH + readoutH);
 
     const int barCount = juce::jmax (1, (int) slots.size());
@@ -501,13 +511,12 @@ void LoudnessModule::paintLedBars(juce::Graphics& g, juce::Rectangle<int> conten
 
     drawScale(g, areaScale);
 
-    // 底部标签 + 数字读数
-    const int bottom = contentBounds.reduced(6).getBottom();
+    // 底部标签 + 数字读数（与 computeBarGeometry 共用同一份布局区）
+    const int bottom = barLayoutArea(contentBounds).getBottom();
 
     for (int idx = 0; idx < (int) slots.size() && idx < (int) barAreas.size(); ++idx)
     {
         const auto& bar = *slots[(size_t) idx].bar;
-        const bool isLUFS = slots[(size_t) idx].isLufs;
         const int x = barAreas[(size_t) idx].getX();
         const int barW = barAreas[(size_t) idx].getWidth();
         const int labelY = bottom - labelH - readoutH;
@@ -531,8 +540,10 @@ void LoudnessModule::paintLedBars(juce::Graphics& g, juce::Rectangle<int> conten
             readout = juce::String(juce::jlimit(-60.0f, 60.0f, val), 1);
 
         // 读数位图缓存：值变化且距上次 ≥ 100ms 才重光栅化（10Hz 刷新）
+        //   颜色不用电平分区色（pink200 这类中间调在深色主题下对比太弱），
+        //   统一用"数字读数"样式里大数字的颜色 pink600 —— 深色主题下它就是浅色端。
         const double nowMs = juce::Time::getMillisecondCounterHiRes();
-        const juce::Colour rc = isLUFS ? lufsToColour(val) : dbToColour(val);
+        const juce::Colour rc = PinkXP::pink600;
         if (readout != readoutCacheText_[idx]
             || nowMs - readoutCacheTimeMs_[idx] >= 100.0
             || ! readoutCache_[idx].isValid())

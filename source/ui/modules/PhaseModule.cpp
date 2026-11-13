@@ -107,7 +107,7 @@ void PhaseModule::restoreModuleSpecificState (const juce::ValueTree& state)
 
 void PhaseModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
-    out.push_back (ParamDef::toggle ("itemGonio", "Goniometer (M/S scope)",
+    out.push_back (ParamDef::toggle ("itemGonio", "Goniometer",
         "Left against right as a mid/side vector scope. A tall thin shape is mono, a wide cloud is stereo.").in ("Show"));
     out.push_back (ParamDef::toggle ("itemCorr", "Correlation dial",
         "+1 = mono-safe, 0 = very wide, -1 = out of phase. A needle below 0 means parts cancel in mono.").in ("Show"));

@@ -12,11 +12,6 @@
 
 namespace
 {
-    juce::Colour keepAlpha (juce::Colour tinted, float alpha)
-    {
-        return tinted.withAlpha (alpha);
-    }
-
     void pushQuadVerts (std::vector<float>& v, float x0, float y0, float x1, float y1, juce::Colour c)
     {
         const float r = c.getFloatRed(), g = c.getFloatGreen(), b = c.getFloatBlue(), a = c.getFloatAlpha();
@@ -25,6 +20,40 @@ namespace
             x1, y0, r, g, b, a,  x1, y1, r, g, b, a,  x0, y1, r, g, b, a,
         };
         v.insert (v.end(), q, q + 36);
+    }
+
+    // Liang–Barsky：把线段裁剪到矩形内。全部在界外返回 false，否则就地改写端点。
+    //   GL 直渲染没有 scissor，超出画布的几何会画到别的 GL 模块上 ——
+    //   X-Y / 李萨如的标尺环在自动缩放（autoGain > 1）时半径会超出画布，
+    //   必须在进顶点流之前裁掉。
+    bool clipSegmentToRect (float& x0, float& y0, float& x1, float& y1,
+                            const juce::Rectangle<float>& r) noexcept
+    {
+        const float dx = x1 - x0, dy = y1 - y0;
+        float t0 = 0.0f, t1 = 1.0f;
+
+        const float p[4] = { -dx, dx, -dy, dy };
+        const float q[4] = { x0 - r.getX(), r.getRight()  - x0,
+                             y0 - r.getY(), r.getBottom() - y0 };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            if (std::abs (p[i]) < 1.0e-9f)
+            {
+                if (q[i] < 0.0f)
+                    return false;       // 与该边平行且在界外
+                continue;
+            }
+
+            const float t = q[i] / p[i];
+            if (p[i] < 0.0f) { if (t > t1) return false; if (t > t0) t0 = t; }
+            else             { if (t < t0) return false; if (t < t1) t1 = t; }
+        }
+
+        const float cx0 = x0 + t0 * dx, cy0 = y0 + t0 * dy;
+        const float cx1 = x0 + t1 * dx, cy1 = y0 + t1 * dy;
+        x0 = cx0; y0 = cy0; x1 = cx1; y1 = cy1;
+        return true;
     }
 }
 
@@ -113,12 +142,13 @@ juce::ValueTree OscilloscopeModule::saveModuleSpecificState() const
     juce::ValueTree s("state");
     s.setProperty("displayMode", (int) displayMode, nullptr);
     s.setProperty("waveChannel", waveChannel, nullptr);
-    s.setProperty("waveColour",  waveColour, nullptr);
     s.setProperty("bandColour",  bandColour, nullptr);
     s.setProperty("crossLow",    (double) crossLowHz, nullptr);
     s.setProperty("crossHigh",   (double) crossHighHz, nullptr);
     s.setProperty("autoGain",    autoGain, nullptr);
     s.setProperty("showRings",   showRings, nullptr);
+    s.setProperty("dotSize",     (double) dotSize, nullptr);
+    s.setProperty("fadeSpeed",   (double) fadeSpeed, nullptr);
     return s;
 }
 
@@ -135,15 +165,18 @@ void OscilloscopeModule::restoreModuleSpecificState(const juce::ValueTree& state
     else if (state.hasProperty ("channelMode"))
         waveChannel = juce::jlimit (0, 2, (int) state.getProperty ("channelMode"));
 
-    if (state.hasProperty ("waveColour")) waveColour = juce::jlimit (0, 1, (int) state.getProperty ("waveColour"));
+    // 旧存档的 waveColour（0 Classic / 1 Pink）已废弃：Pink 选项删除，一律按主题配色
     if (state.hasProperty ("bandColour")) bandColour = (bool) state.getProperty ("bandColour");
     if (state.hasProperty ("crossLow"))   crossLowHz  = juce::jlimit (80.0f, 1000.0f, (float) (double) state.getProperty ("crossLow"));
-    if (state.hasProperty ("crossHigh"))  crossHighHz = juce::jlimit (2000.0f, 10000.0f, (float) (double) state.getProperty ("crossHigh"));
+    if (state.hasProperty ("crossHigh"))  crossHighHz = juce::jlimit (500.0f, 10000.0f, (float) (double) state.getProperty ("crossHigh"));
     if (state.hasProperty ("autoGain"))   autoGain    = (bool) state.getProperty ("autoGain");
     if (state.hasProperty ("showRings"))  showRings   = (bool) state.getProperty ("showRings");
+    if (state.hasProperty ("dotSize"))    dotSize     = juce::jlimit (1.0f, 6.0f, (float) (double) state.getProperty ("dotSize"));
+    if (state.hasProperty ("fadeSpeed"))  fadeSpeed   = juce::jlimit (0.2f, 4.0f, (float) (double) state.getProperty ("fadeSpeed"));
 
     if (! autoGain) autoGainFactor = 1.0f;
     splitter.setCrossover (crossLowHz, crossHighHz);
+    trailNeedsClear = true;
 
     invalidateStaticLayer();
     invalidateDynamicLayer();
@@ -165,20 +198,22 @@ void OscilloscopeModule::buildParamDefs (std::vector<ParamDef>& out) const
     out.push_back (ParamDef::choice ("waveChannel", "Channels",
         { "Left", "Right", "Both" },
         "Which channel traces to draw.").in ("Waveform").when (isWave));
-    out.push_back (ParamDef::choice ("waveColour", "Trace colours",
-        { "Classic", "Pink" },
-        "Classic follows the theme palette. Pink is the colour set of the former Oscilloscope Wave module.")
-        .in ("Waveform").when (isWave));
 
     out.push_back (ParamDef::toggle ("bandColour", "Colour by frequency",
-        "Dots turn red for lows, green for mids and blue for highs, blended by how much energy each band has.")
+        "Audio is split into three bands and each band's dots are drawn in its own colour: "
+        "red for lows, purple-blue for mids, cyan for highs.")
         .in ("Scatter").when (isScatter));
     out.push_back (ParamDef::slider ("crossLow", "Low / mid split", 80.0, 1000.0, 10.0, " Hz",
-        "Below this frequency counts as low (red).", 250.0)
+        "Low band: below this frequency (red dot cloud).", 200.0)
         .in ("Scatter").when ([this] { return xyBandActive(); }));
-    out.push_back (ParamDef::slider ("crossHigh", "Mid / high split", 2000.0, 10000.0, 100.0, " Hz",
-        "Above this frequency counts as high (blue).", 4000.0)
+    out.push_back (ParamDef::slider ("crossHigh", "Mid / high split", 500.0, 10000.0, 100.0, " Hz",
+        "High band: above this frequency (cyan dot cloud).", 2000.0)
         .in ("Scatter").when ([this] { return xyBandActive(); }));
+    out.push_back (ParamDef::slider ("dotSize", "Dot size", 1.0, 6.0, 1.0, " px",
+        "Side length of each dot.").in ("Scatter").when (isScatter));
+    out.push_back (ParamDef::slider ("fadeSpeed", "Fade speed", 0.2, 4.0, 0.1, "x",
+        "How fast old dots disappear. 1.0 is the classic trail; higher is shorter, lower leaves long tails.")
+        .in ("Scatter").when (isScatter));
     out.push_back (ParamDef::toggle ("autoGain", "Auto zoom",
         "Scales the picture so the loudest point stays inside the screen.").in ("Scatter").when (isScatter));
     out.push_back (ParamDef::toggle ("showRings", "Level rings",
@@ -189,12 +224,13 @@ double OscilloscopeModule::getParamValue (const juce::String& id) const
 {
     if (id == "displayMode") return (double) (int) displayMode;
     if (id == "waveChannel") return (double) waveChannel;
-    if (id == "waveColour")  return (double) waveColour;
     if (id == "bandColour")  return bandColour ? 1.0 : 0.0;
     if (id == "crossLow")    return (double) crossLowHz;
     if (id == "crossHigh")   return (double) crossHighHz;
     if (id == "autoGain")    return autoGain ? 1.0 : 0.0;
     if (id == "showRings")   return showRings ? 1.0 : 0.0;
+    if (id == "dotSize")     return (double) dotSize;
+    if (id == "fadeSpeed")   return (double) fadeSpeed;
     return 0.0;
 }
 
@@ -207,12 +243,27 @@ void OscilloscopeModule::setParamValue (const juce::String& id, double v)
     }
 
     if      (id == "waveChannel") waveChannel = juce::jlimit (0, 2, juce::roundToInt (v));
-    else if (id == "waveColour")  waveColour  = juce::jlimit (0, 1, juce::roundToInt (v));
-    else if (id == "bandColour")  bandColour  = v >= 0.5;
-    else if (id == "crossLow")    { crossLowHz  = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); }
-    else if (id == "crossHigh")   { crossHighHz = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); }
+    else if (id == "bandColour")
+    {
+        const bool turningOn = (v >= 0.5) && ! bandColour;
+        bandColour = v >= 0.5;
+        trailNeedsClear = true;
+
+        // 每次开启染色都把两个分频点复位到默认（200 / 2000，与 MiniMeters 一致）：
+        //   抽屉里的滑条由 refreshControlPanel 回读，会同步显示新值。
+        if (turningOn)
+        {
+            crossLowHz  = y2k::bands::BandSplitter::kDefaultLowCross;
+            crossHighHz = y2k::bands::BandSplitter::kDefaultHighCross;
+            splitter.setCrossover (crossLowHz, crossHighHz);
+        }
+    }
+    else if (id == "crossLow")    { crossLowHz  = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); trailNeedsClear = true; }
+    else if (id == "crossHigh")   { crossHighHz = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); trailNeedsClear = true; }
     else if (id == "autoGain")    { autoGain = v >= 0.5; if (! autoGain) autoGainFactor = 1.0f; }
     else if (id == "showRings")   showRings = v >= 0.5;
+    else if (id == "dotSize")     dotSize   = juce::jlimit (1.0f, 6.0f, (float) v);
+    else if (id == "fadeSpeed")   fadeSpeed = juce::jlimit (0.2f, 4.0f, (float) v);
     else return;
 
     invalidateDynamicLayer();
@@ -224,6 +275,7 @@ void OscilloscopeModule::setDisplayMode(DisplayMode m)
 {
     if (displayMode == m) return;
     displayMode = m;
+    trailNeedsClear = true;
     invalidateStaticLayer();
     invalidateDynamicLayer();
     // v2.9.3：三种模式都支持 GL 直渲染；切换后立即重建快照，避免旧模式闪一帧
@@ -285,8 +337,6 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! isShowing() || ! isVisuallyActiveInWorkspace()) return;
     if (! frame.has (AnalyserHub::Kind::Oscilloscope)) return;
 
-    hold.tick (frame.dtSec);
-
     const int n = (int) frame.oscL.size();
 
     if (hold.active)
@@ -310,6 +360,7 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         snapshotR.resize (n);
         std::memcpy (snapshotL.getRawDataPointer(), readBufL.data(), (size_t) n * sizeof (float));
         std::memcpy (snapshotR.getRawDataPointer(), readBufR.data(), (size_t) n * sizeof (float));
+        snapshotBaseIndex = (juce::int64) (std::uint64_t) holdPlayPos - (juce::int64) n;
     }
     else
     {
@@ -318,10 +369,11 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         snapshotR.resize(n);
         std::memcpy (snapshotL.getRawDataPointer(), frame.oscL.data(), (size_t) n * sizeof (float));
         std::memcpy (snapshotR.getRawDataPointer(), frame.oscR.data(), (size_t) n * sizeof (float));
+        snapshotBaseIndex = (juce::int64) frame.oscTotalSamples - (juce::int64) n;
     }
 
     // 方案 A：只有数据真正变化才标脏动态层，避免每帧 4 次 strokePath
-    if (snapshotChangedSinceLastDraw() || std::abs (hold.ghostMix - lastDrawnGhost) > 0.001f)
+    if (snapshotChangedSinceLastDraw())
         dynamicLayerDirty = true;
 
     const bool scatter = (displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous);
@@ -366,18 +418,29 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
-    // 频段染色：对当前显示窗口算三频段权重（仅 X-Y / Lissajous + 开启时才付费）
+    // 频段染色：把当前窗口的 L/R 滤成低 / 中 / 高三路（仅 X-Y / 李萨如 + 开启时才付费）
     if (xyBandActive() && snapshotL.size() > 1 && snapshotR.size() == snapshotL.size())
     {
+        const int nb = snapshotL.size();
         const double fs = hub.getSampleRate();
         if (fs != splitterRate)
         {
             splitter.prepare (fs, crossLowHz, crossHighHz);
             splitterRate = fs;
         }
-        splitter.compute (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(),
-                          snapshotL.size(), wLow, wMid, wHigh);
+
+        lowL.resize ((size_t) nb);  lowR.resize ((size_t) nb);
+        midL.resize ((size_t) nb);  midR.resize ((size_t) nb);
+        highL.resize ((size_t) nb); highR.resize ((size_t) nb);
+
+        splitter.split (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(), nb,
+                        lowL.data(), lowR.data(), midL.data(), midR.data(),
+                        highL.data(), highR.data());
     }
+
+    // 散点残影：累计 dt，供 buildGlSnapshot 换算与帧率无关的衰减系数
+    if (scatter)
+        trailDtAccumSec = juce::jmin (0.5f, trailDtAccumSec + frame.dtSec);
 
     // v2.9：去掉 15ms×DPI 硬编码节流（高 DPI 下会锁到 ≤33fps），每个分发帧重绘
     // v2.9.3：同步生成 GL 直渲染快照（waveform / XY / Lissajous 三种模式）
@@ -391,24 +454,9 @@ void OscilloscopeModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 OscilloscopeModule::WaveColours OscilloscopeModule::waveColours() const
 {
     WaveColours c;
-    if (waveColour == 1)   // Pink：旧 Oscilloscope Wave
-    {
-        c.lGlow = PinkXP::pink300.withAlpha (0.35f); c.lMain = PinkXP::pink400;
-        c.rGlow = PinkXP::pink500.withAlpha (0.35f); c.rMain = PinkXP::pink600;
-    }
-    else                   // Classic：chartRamp 阶梯（S4 调色板重构）
-    {
-        c.lGlow = PinkXP::chartRamp[3].withAlpha (0.35f); c.lMain = PinkXP::chartRamp[4];
-        c.rGlow = PinkXP::chartRamp[5].withAlpha (0.35f); c.rMain = PinkXP::chartRamp[6];
-    }
-
-    if (hold.ghostMix > 0.0f)
-    {
-        c.lGlow = keepAlpha (hold.tint (c.lGlow), c.lGlow.getFloatAlpha());
-        c.lMain = keepAlpha (hold.tint (c.lMain), c.lMain.getFloatAlpha());
-        c.rGlow = keepAlpha (hold.tint (c.rGlow), c.rGlow.getFloatAlpha());
-        c.rMain = keepAlpha (hold.tint (c.rMain), c.rMain.getFloatAlpha());
-    }
+    // 主题 chartRamp 阶梯（S4 调色板重构）：波形配色不再提供 Pink 备选
+    c.lGlow = PinkXP::chartRamp[3].withAlpha (0.35f); c.lMain = PinkXP::chartRamp[4];
+    c.rGlow = PinkXP::chartRamp[5].withAlpha (0.35f); c.rMain = PinkXP::chartRamp[6];
     return c;
 }
 
@@ -426,50 +474,66 @@ void OscilloscopeModule::collectXYPoints (juce::Rectangle<int> canvas, bool rota
     const float cy = (float) inner.getCentreY();
     const float baseRadius = (float) juce::jmin (inner.getWidth(), inner.getHeight()) * 0.45f;
     const float effectiveRadius = baseRadius * autoGainFactor;
-    const float denom = (float) juce::jmax (1, N - 1);
     const auto innerF = inner.toFloat().expanded (1.0f);
 
-    const bool useBand = xyBandActive() && (int) wLow.size() == N;
-    const auto baseCol = hold.tint (PinkXP::chartRamp[5]);
+    const bool useBand = xyBandActive() && (int) lowL.size() == N;
 
-    out.reserve ((size_t) N);
-    for (int i = 0; i < N; ++i)
+    // 三路时每路降密度：3 层点云总量控制在 ~3k 点（GL 顶点流别爆）
+    const int stride = juce::jmax (1, N / (useBand ? 1024 : 2048));
+
+    // 单层点云：把 (L,R) 映射到相位仪坐标
+    auto pushCloud = [&] (const float* srcL, const float* srcR, juce::Colour col, int layer)
     {
-        const float rawL = snapshotL.getUnchecked (i);
-        const float rawR = snapshotR.getUnchecked (i);
-        if (! std::isfinite (rawL) || ! std::isfinite (rawR))
-            continue;
-
-        // v1.8.5：样本直接限幅到 ±1，autoGain 在像素映射阶段生效
-        const float lx = juce::jlimit (-1.0f, 1.0f, rawL);
-        const float ry = juce::jlimit (-1.0f, 1.0f, rawR);
-
-        float px, py;
-        if (rotate45)
+        for (int i = 0; i < N; i += stride)
         {
-            const float mid  = (lx + ry) * 0.7071067f;
-            const float side = (lx - ry) * 0.7071067f;
-            px = cx + side * effectiveRadius;
-            py = cy - mid  * effectiveRadius;
+            const float rawL = srcL[i];
+            const float rawR = srcR[i];
+            if (! std::isfinite (rawL) || ! std::isfinite (rawR))
+                continue;
+
+            // v1.8.5：样本直接限幅到 ±1，autoGain 在像素映射阶段生效
+            const float lx = juce::jlimit (-1.0f, 1.0f, rawL);
+            const float ry = juce::jlimit (-1.0f, 1.0f, rawR);
+
+            float px, py;
+            if (rotate45)
+            {
+                const float mid  = (lx + ry) * 0.7071067f;
+                const float side = (lx - ry) * 0.7071067f;
+                px = cx + side * effectiveRadius;
+                py = cy - mid  * effectiveRadius;
+            }
+            else
+            {
+                px = cx + lx * effectiveRadius;
+                py = cy - ry * effectiveRadius;
+            }
+
+            if (! innerF.contains (px, py))
+                continue;
+
+            // 残影本身负责衰减，点统一用固定 alpha
+            out.push_back ({ px, py, 0.9f, col, layer });
         }
-        else
+    };
+
+    if (useBand)
+    {
+        // MiniMeters 风格：三路各自的点云 + 固定色，不混色
+        const auto bandCol = [] (const y2k::bands::Rgb& c)
         {
-            px = cx + lx * effectiveRadius;
-            py = cy - ry * effectiveRadius;
-        }
-
-        if (! innerF.contains (px, py))
-            continue;
-
-        juce::Colour col = baseCol;
-        if (useBand)
-        {
-            const auto rgb = y2k::bands::mix (wLow[(size_t) i], wMid[(size_t) i], wHigh[(size_t) i]);
-            col = hold.tint (juce::Colour::fromFloatRGBA (rgb.r, rgb.g, rgb.b, 1.0f));
-        }
-
-        // 越新的点（i 越大）越亮
-        out.push_back ({ px, py, 0.25f + 0.6f * ((float) i / denom), col });
+            return juce::Colour::fromFloatRGBA (c.r, c.g, c.b, 1.0f);
+        };
+        out.reserve ((size_t) (N / stride * 3 + 3));
+        pushCloud (lowL.data(),  lowR.data(),  bandCol (y2k::bands::kLowRgb),  0);
+        pushCloud (midL.data(),  midR.data(),  bandCol (y2k::bands::kMidRgb),  1);
+        pushCloud (highL.data(), highR.data(), bandCol (y2k::bands::kHighRgb), 2);
+    }
+    else
+    {
+        out.reserve ((size_t) (N / stride + 1));
+        pushCloud (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(),
+                   PinkXP::chartRamp[5], 0);
     }
 }
 
@@ -491,12 +555,33 @@ void OscilloscopeModule::buildGlSnapshot()
     if (N <= 1)
         return;
 
+    const bool scatterMode = (displayMode == DisplayMode::xy || displayMode == DisplayMode::lissajous);
+
     auto snap = beginGlSnapshot();
-    // v2.9.4：逻辑 FBO 渲染（规避 dock/聚焦时的透明与拖影问题，见框架注释）
-    snap->renderToLogical = true;
-    snap->logicalW = canvas.getWidth();
-    snap->logicalH = canvas.getHeight();
     snap->canvasLocal = canvas;
+
+    if (scatterMode)
+    {
+        // 散点：点云走持久残影通道（点大小 / 消失速度可调，三路点云颜色不互相污染）
+        snap->trailFbo   = true;
+        snap->trailLayers = 1;
+        snap->trailDecay = std::pow (kTrailDecayPerFrame,
+                                     juce::jmax (0.0f, trailDtAccumSec) * 60.0f * fadeSpeed);
+        snap->trailClear = trailNeedsClear;
+        trailNeedsClear  = false;
+        trailDtAccumSec  = 0.0f;
+
+        snap->texW = canvas.getWidth();
+        snap->texH = canvas.getHeight();
+        snap->texTargetRect = canvas;
+    }
+    else
+    {
+        // v2.9.4：逻辑 FBO 渲染（规避 dock/聚焦时的透明与拖影问题，见框架注释）
+        snap->renderToLogical = true;
+        snap->logicalW = canvas.getWidth();
+        snap->logicalH = canvas.getHeight();
+    }
 
     const int maxPts = juce::jmax (64, inner.getWidth());
     snap->vertices.reserve ((size_t) (1500 * 6 * 6 + (size_t) 4 * maxPts * 6 * 6));
@@ -540,6 +625,14 @@ void OscilloscopeModule::buildGlSnapshot()
     const int   targetPoints = juce::jmax (64, inner.getWidth());
     const int   stride = juce::jmax (1, N / targetPoints);
 
+    // 抽点相位锁定：按「绝对样本索引 % stride」选集，而不是从窗口第 0 个样本数起。
+    //   慢放时读窗口每帧只前进十几个样本（实时约 800 个），若按窗口相对下标抽点，
+    //   抽到的样本逐帧换一批 —— 同一个波形被抽成几种不同形状，画面就在这些形状
+    //   之间来回闪（看到的就是"大量毛刺 + 两个状态切换"）。锁到样本流之后，
+    //   抽点集合只随窗口平移，形状保持不变。
+    const juce::int64 baseIdx = juce::jmax<juce::int64> (0, snapshotBaseIndex);
+    const int phase0 = (int) ((stride - (int) (baseIdx % (juce::int64) stride)) % stride);
+
     auto pushWave = [&] (const juce::Array<float>& samples,
                          juce::Colour glowCol, float glowHalfW,
                          juce::Colour mainCol, float mainHalfW)
@@ -547,7 +640,7 @@ void OscilloscopeModule::buildGlSnapshot()
         std::vector<float> xs, ys;
         xs.reserve ((size_t) (N / stride + 4));
         ys.reserve ((size_t) (N / stride + 4));
-        for (int i = 0; i < N; i += stride)
+        for (int i = phase0; i < N; i += stride)
         {
             const float raw = samples.getUnchecked (i);
             const float s = std::isfinite (raw) ? juce::jlimit (-1.0f, 1.0f, raw) : 0.0f;
@@ -555,7 +648,7 @@ void OscilloscopeModule::buildGlSnapshot()
             xs.push_back ((float) inner.getX() + norm * (float) inner.getWidth());
             ys.push_back (cy - s * halfH);
         }
-        if ((N - 1) % stride != 0)
+        if (phase0 < N && ((N - 1 - phase0) % stride) != 0)
         {
             const float raw = samples.getUnchecked (N - 1);
             const float s = std::isfinite (raw) ? juce::jlimit (-1.0f, 1.0f, raw) : 0.0f;
@@ -611,6 +704,11 @@ void OscilloscopeModule::buildGlSnapshot()
                         rb0 = ringCol.getFloatBlue(), ra0 = ringCol.getFloatAlpha();
             const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
             constexpr int ringSegs = 64;
+
+            // 环可能超出画布（autoGain 放大时）→ 逐段裁到画布内，
+            //   否则 GL 直渲染会把线画到旁边的 GL 模块上。
+            const auto ringClip = canvas.toFloat().reduced (1.0f);
+
             for (int ri = 0; ri < 4; ++ri)
             {
                 const float rr = baseRadius * gain * ringFrac[ri];
@@ -619,8 +717,12 @@ void OscilloscopeModule::buildGlSnapshot()
                 {
                     const float a0 = juce::MathConstants<float>::twoPi * (float) s       / (float) ringSegs;
                     const float a1 = juce::MathConstants<float>::twoPi * (float) (s + 1) / (float) ringSegs;
-                    const float x0 = cxx + rr * std::cos (a0), y0 = cyy + rr * std::sin (a0);
-                    const float x1 = cxx + rr * std::cos (a1), y1 = cyy + rr * std::sin (a1);
+                    float x0 = cxx + rr * std::cos (a0), y0 = cyy + rr * std::sin (a0);
+                    float x1 = cxx + rr * std::cos (a1), y1 = cyy + rr * std::sin (a1);
+
+                    if (! clipSegmentToRect (x0, y0, x1, y1, ringClip))
+                        continue;
+
                     const float dx = x1 - x0, dy = y1 - y0;
                     const float len = std::sqrt (dx * dx + dy * dy);
                     if (len < 1.0e-6f) continue;
@@ -639,12 +741,24 @@ void OscilloscopeModule::buildGlSnapshot()
             }
         }
 
-        // 点云：全点 2×2 quad，每点带 alpha（越新越亮）与频段色
+        // 背景段（凹陷 / 网格 / 标尺环）直接画后缓冲；之后的点云进残影层
+        snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+        snap->trailSegStart = (int) snap->segments.size();
+
+        // 点云：点大小可调；三路点云各用自己的固定色，靠残影衰减留尾
         std::vector<XYPoint> pts;
         collectXYPoints (canvas, rotate45, pts);
-        for (const auto& p : pts)
-            pushQuadVerts (snap->vertices, p.x - 1.0f, p.y - 1.0f, p.x + 1.0f, p.y + 1.0f,
-                           p.col.withAlpha (p.alpha));
+        if (! pts.empty())
+        {
+            const float hs = juce::jmax (0.5f, dotSize * 0.5f);
+            const int startIdx = (int) snap->vertices.size() / 6;
+            for (const auto& p : pts)
+                pushQuadVerts (snap->vertices, p.x - hs, p.y - hs, p.x + hs, p.y + hs,
+                               p.col.withAlpha (p.alpha));
+            snap->segments.push_back ({ startIdx,
+                                        (int) (snap->vertices.size() / 6) - startIdx,
+                                        Primitive::Triangles, 0 });
+        }
     }
     else
     {
@@ -654,10 +768,9 @@ void OscilloscopeModule::buildGlSnapshot()
             pushWave (snapshotL, wc.lGlow, 1.1f, wc.lMain, 0.7f);
         if (drawsR() && snapshotR.size() == N)
             pushWave (snapshotR, wc.rGlow, 1.1f, wc.rMain, 0.7f);
-    }
 
-    // 单段：全部为 GL_TRIANGLES
-    snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+        snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
+    }
 
     publishGlSnapshot (std::move (snap));
 }
@@ -705,19 +818,20 @@ void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int>
 
     if (displayMode == DisplayMode::waveform)
     {
-        const bool legend = (waveColour == 0 && waveChannel == 2);
+        const bool legend = (waveChannel == 2);
         if (legend)
         {
-            // 旧 Oscilloscope 的 L / R 双色图例
+            // L / R 双色图例：色块取当前波形实际配色（跟随主题 chartRamp）
+            const auto wc = waveColours();
             PinkXP::drawCachedText (g, "L", juce::Rectangle<int> (canvas.getX() + 4, canvas.getBottom() - 14, 24, 12),
                                     juce::Justification::centredLeft, 9.0f, juce::Font::plain,
                                     PinkXP::ink.withAlpha (0.85f), true);
-            g.setColour (PinkXP::pink400);
+            g.setColour (wc.lMain);
             g.fillRect  (canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
             PinkXP::drawCachedText (g, "R", juce::Rectangle<int> (canvas.getX() + 32, canvas.getBottom() - 14, 24, 12),
                                     juce::Justification::centredLeft, 9.0f, juce::Font::plain,
                                     PinkXP::ink.withAlpha (0.85f), true);
-            g.setColour (PinkXP::pink600);
+            g.setColour (wc.rMain);
             g.fillRect  (canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
         }
         else
@@ -864,17 +978,17 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
     // 左下角说明（与 GL overlay 一致）
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
-    if (waveColour == 0 && waveChannel == 2)
+    if (waveChannel == 2)
     {
         g.drawText(y2k::tr ("L"), canvas.getX() + 4, canvas.getBottom() - 14,
                    24, 12, juce::Justification::centredLeft, false);
-        g.setColour(PinkXP::pink400);
+        g.setColour(wc.lMain);
         g.fillRect(canvas.getX() + 14, canvas.getBottom() - 9, 8, 2);
 
         g.setColour(PinkXP::ink.withAlpha(0.85f));
         g.drawText(y2k::tr ("R"), canvas.getX() + 32, canvas.getBottom() - 14,
                    24, 12, juce::Justification::centredLeft, false);
-        g.setColour(PinkXP::pink600);
+        g.setColour(wc.rMain);
         g.fillRect(canvas.getX() + 42, canvas.getBottom() - 9, 8, 2);
     }
     else
@@ -932,38 +1046,44 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     std::vector<XYPoint> pts;
     collectXYPoints (canvas, rotate45, pts);
 
+    const float ds = juce::jmax (1.0f, dotSize);
+    const float hs = ds * 0.5f;
+
     if (xyBandActive())
     {
-        // 频段染色：每点颜色不同，逐点绘制
+        // 三路点云：按层分组成 3 个 RectangleList，各一次 fillRectList
+        //   （CPU 回退没有残影，直接画瞬时点；点色固定为频段色）
+        juce::RectangleList<float> lists[3];
+        for (auto& l : lists)
+            l.ensureStorageAllocated ((int) pts.size() / 3 + 8);
+
         for (const auto& p : pts)
+            lists[juce::jlimit (0, 2, p.layer)].addWithoutMerging ({ p.x - hs, p.y - hs, ds, ds });
+
+        const auto bandCol = [] (const y2k::bands::Rgb& c)
         {
-            g.setColour (p.col.withAlpha (p.alpha));
-            g.fillRect (p.x - 0.5f, p.y - 0.5f, 2.0f, 2.0f);
+            return juce::Colour::fromFloatRGBA (c.r, c.g, c.b, 0.9f);
+        };
+        const juce::Colour cols[3] = { bandCol (y2k::bands::kLowRgb),
+                                       bandCol (y2k::bands::kMidRgb),
+                                       bandCol (y2k::bands::kHighRgb) };
+        for (int li = 0; li < 3; ++li)
+        {
+            if (lists[li].isEmpty()) continue;
+            g.setColour (cols[li]);
+            g.fillRectList (lists[li]);
         }
     }
     else
     {
-        // 方案 C：按 alpha 分桶，合并 setColour + fillRect 调用
-        constexpr int kAlphaBuckets = 8;
-        juce::RectangleList<float> buckets[kAlphaBuckets];
-        for (int b = 0; b < kAlphaBuckets; ++b)
-            buckets[b].ensureStorageAllocated((int) pts.size() / kAlphaBuckets + 8);
-
+        // 单色点云：合并成一次 fillRectList
+        juce::RectangleList<float> all;
+        all.ensureStorageAllocated ((size_t) pts.size());
         for (const auto& p : pts)
-        {
-            const float normAlpha = (p.alpha - 0.25f) / 0.6f;
-            const int bucket = juce::jlimit(0, kAlphaBuckets - 1, (int) (normAlpha * (float) kAlphaBuckets));
-            buckets[bucket].addWithoutMerging({ p.x - 0.5f, p.y - 0.5f, 2.0f, 2.0f });
-        }
+            all.addWithoutMerging ({ p.x - hs, p.y - hs, ds, ds });
 
-        const auto baseCol = hold.tint (PinkXP::chartRamp[5]);
-        for (int b = 0; b < kAlphaBuckets; ++b)
-        {
-            if (buckets[b].isEmpty()) continue;
-            const float bucketAlpha = 0.25f + 0.6f * (((float) b + 0.5f) / (float) kAlphaBuckets);
-            g.setColour(baseCol.withAlpha(bucketAlpha));
-            g.fillRectList(buckets[b]);
-        }
+        g.setColour (PinkXP::chartRamp[5].withAlpha (0.9f));
+        g.fillRectList (all);
     }
 
     // 左下角模式说明 + 当前增益
@@ -993,8 +1113,12 @@ juce::Path OscilloscopeModule::buildWaveformPath(const juce::Array<float>& sampl
     const int targetPoints = juce::jmax(64, inner.getWidth());
     const int stride = juce::jmax(1, len / targetPoints);
 
+    // 与 GL 路径同一套相位锁定（见 buildGlSnapshot 的 pushWave）
+    const juce::int64 baseIdx = juce::jmax<juce::int64> (0, snapshotBaseIndex);
+    const int phase0 = (int) ((stride - (int) (baseIdx % (juce::int64) stride)) % stride);
+
     bool started = false;
-    for (int i = 0; i < len; i += stride)
+    for (int i = phase0; i < len; i += stride)
     {
         const float raw = samples.getUnchecked(i);
         const float s = std::isfinite(raw) ? juce::jlimit(-1.0f, 1.0f, raw) : 0.0f;
@@ -1128,7 +1252,6 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
 
     const bool modeChanged  = (lastDrawnMode != displayMode);
     const bool gainChanged  = (std::abs(autoGainFactor - lastDrawnAutoGain) > 0.005f);
-    const bool ghostChanged = (std::abs(hold.ghostMix - lastDrawnGhost) > 0.001f);
 
     if (sizeChanged)
     {
@@ -1139,7 +1262,7 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
         dynamicLayerDirty = true;
     }
 
-    if (modeChanged || gainChanged || ghostChanged)
+    if (modeChanged || gainChanged)
         dynamicLayerDirty = true;
 
     dynamicLayerCanvasBounds = canvas;
@@ -1177,6 +1300,5 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
     }
     lastDrawnMode     = displayMode;
     lastDrawnAutoGain = autoGainFactor;
-    lastDrawnGhost    = hold.ghostMix;
     dynamicLayerDirty = false;
 }

@@ -1,4 +1,6 @@
 #include "source/ui/modules/DynamicsModule.h"
+#include <cmath>
+
 #include "source/ui/modules/MeterWidgets.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
@@ -76,6 +78,7 @@ void DynamicsModule::restoreModuleSpecificState (const juce::ValueTree& state)
         std::fill (crestHist.begin(), crestHist.end(), 0.0f);
         crestHistWrite = 0;
         crestHistAccum = 0.0f;
+        crestHistTotal = 0;
     }
     items = it;
 
@@ -92,9 +95,9 @@ void DynamicsModule::restoreModuleSpecificState (const juce::ValueTree& state)
 
 void DynamicsModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
-    out.push_back (ParamDef::toggle ("itemPeak", "Peak bars (L / R)",
+    out.push_back (ParamDef::toggle ("itemPeak", "Peak bars",
         "Sample-peak level bars for the left and right channel, with a slowly falling hold line.").in ("Show"));
-    out.push_back (ParamDef::toggle ("itemRms", "RMS bars (L / R)",
+    out.push_back (ParamDef::toggle ("itemRms", "RMS bars",
         "Average (RMS) level bars for the left and right channel.").in ("Show"));
     out.push_back (ParamDef::toggle ("itemDrShort", "DR short-term",
         "Dynamic range of the recent programme: loudest 20% against the average.").in ("Show"));
@@ -160,6 +163,7 @@ void DynamicsModule::setParamValue (const juce::String& id, double v)
         std::fill (crestHist.begin(), crestHist.end(), 0.0f);
         crestHistWrite = 0;
         crestHistAccum = 0.0f;
+        crestHistTotal = 0;
     }
     items = it;
     layoutContent (getContentBounds());
@@ -227,6 +231,7 @@ void DynamicsModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         {
             crestHist[(size_t) crestHistWrite] = crestVal;
             crestHistWrite = (crestHistWrite + 1) % crestHistLen;
+            ++crestHistTotal;
         }
     }
 
@@ -622,27 +627,55 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
     const float w = (float) plot.getWidth();
     const float h = (float) plot.getHeight();
 
-    juce::Path path;
-    for (int j = 0; j < drawN; ++j)
-    {
-        // 每个绘制点覆盖 [j*N/drawN, (j+1)*N/drawN) 个样本，取最大值
-        const int k0 = (int) ((int64_t) j * N / drawN);
-        const int k1 = juce::jmax (k0 + 1, (int) ((int64_t) (j + 1) * N / drawN));
-        float v = 0.0f;
-        for (int k = k0; k < k1; ++k)
-        {
-            const int idx = ((crestHistWrite - N + k) % crestHistLen + crestHistLen) % crestHistLen;
-            v = juce::jmax (v, crestHist[(size_t) idx]);
-        }
+    // ---- 列的相位锁定（与示波器抽点是同一类问题）----
+    //   旧实现把每列的样本区间钉在"窗口起点"上：窗口每推进 1 个样本，同一列
+    //   统计的样本集合就整体平移，峰值会在相邻列之间来回跳 —— 历史跨度调大
+    //   （每列覆盖十几个样本）时就是肉眼可见的"毛刺 + 闪烁"。
+    //   现在列边界钉在**绝对样本序号**上，整条曲线再按窗口左边缘的小数相位
+    //   平移：画面连续滚动，峰值不会再跳列。
+    const float samplesPerCol = (float) N / (float) drawN;
+    const juce::int64 winStartAbs = (juce::int64) crestHistTotal - (juce::int64) N;
+    const double colPos = (double) winStartAbs / (double) juce::jmax (1.0e-6f, samplesPerCol);
+    const juce::int64 firstBin = (juce::int64) std::floor (colPos);
+    const float frac = (float) (colPos - (double) firstBin);
+    const float pxPerCol = w / (float) drawN;
 
-        const float t = (float) j / (float) juce::jmax(1, drawN - 1);
-        const float x = (float) plot.getX() + t * w;
+    auto ringAt = [this] (juce::int64 absIdx) noexcept
+    {
+        if (absIdx < 0) return 0.0f;
+        return crestHist[(size_t) (absIdx % (juce::int64) crestHistLen)];
+    };
+
+    juce::Path path;
+    bool started = false;
+    for (int j = 0; j <= drawN; ++j)
+    {
+        // 该绘制列对应的绝对样本区间 [bin*spc, (bin+1)*spc)
+        const juce::int64 bin = firstBin + (juce::int64) j;
+        const juce::int64 s0 = (juce::int64) std::llround ((double) bin * (double) samplesPerCol);
+        const juce::int64 s1 = juce::jmax (s0 + 1, (juce::int64) std::llround ((double) (bin + 1) * (double) samplesPerCol));
+
+        // 只统计落在显示窗口内、且已经写入的部分
+        const juce::int64 a0 = juce::jmax (s0, winStartAbs);
+        const juce::int64 a1 = juce::jmin (s1, (juce::int64) crestHistTotal);
+        if (a1 <= a0) continue;   // 该列全部超出写入位置（右边缘的那半列）
+
+        float v = 0.0f;
+        for (juce::int64 a = a0; a < a1; ++a)
+            v = juce::jmax (v, ringAt (a));
+
+        const float x = (float) plot.getX() + ((float) j - frac) * pxPerCol;
         const float norm = juce::jlimit(0.0f, 1.0f, v / 30.0f);
         const float y = (float) plot.getBottom() - norm * h;
 
-        if (j == 0) path.startNewSubPath(x, y);
-        else        path.lineTo(x, y);
+        if (! started) { path.startNewSubPath(x, y); started = true; }
+        else           path.lineTo(x, y);
     }
+    if (! started) return;
+
+    // 曲线向右会多出一列（子列偏移），统一裁到绘图区内
+    juce::Graphics::ScopedSaveState ss (g);
+    g.reduceClipRegion (plot);
 
     juce::Path fill = path;
     fill.lineTo((float) plot.getRight(),  (float) plot.getBottom());

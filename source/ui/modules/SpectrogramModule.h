@@ -4,6 +4,7 @@
 #include <vector>
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/HoldSlowMo.h"
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
@@ -36,7 +37,12 @@ public:
 
     // 鼠标悬停标尺：仪表区域内十字线 + 频率/时间读数
     void mouseMove (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;   // 按住拖动时读数也要跟随鼠标
     void mouseExit (const juce::MouseEvent& e) override;
+
+    // ---- 按住冻结：按住画布左键 → 停止推进新列（画面完全静止），松手继续滚动 ----
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseUp   (const juce::MouseEvent& e) override;
 
     // 默认每格像素尺寸（正方形），决定"默认状态下"方格是多大像素
     void  setCellPx (int px);
@@ -220,6 +226,9 @@ private:
     void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);
     juce::Point<int> hoverPos;
     bool             hoverActive = false;
+
+    // ---- 按住冻结 ----
+    HoldSlowMo hold;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrogramModule)
 };

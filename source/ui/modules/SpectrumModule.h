@@ -72,9 +72,14 @@ public:
     void setSharpEnabled(bool b);
     bool isSharpEnabled() const noexcept { return sharpEnabled; }
 
-    // 持久化：peakHold / sharp / curve / channel / fftScale
-    //   Slope 已固定为常开（按钮移除）：旧存档里的 "slope" 属性一律忽略，
-    //   直接按新版行为（始终做 4.5dB/oct 补偿）强制适应。
+    // ---- Slope（频谱倾斜补偿，dB/oct，基准 1 kHz）----
+    //   旧版是标题栏的 SLOPE 开关按钮（已删）；v3.1 起以参数形式回到控制面板：
+    //   0 = 关闭（显示原始电平），4.5 = 旧版"开"的效果（粉噪看起来接近平直）。
+    void  setSlopeDbPerOct (float v);
+    float getSlopeDbPerOct() const noexcept { return slopeDbPerOct; }
+
+    // 持久化：peakHold / sharp / curve / channel / fftScale / slope
+    //   "slope" 旧存档是布尔（true/false），读档时按 true→4.5、false→0 迁移。
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState(const juce::ValueTree& state) override;
 
@@ -182,6 +187,7 @@ private:
     int    slopeCacheSize = 0;
     double slopeCacheSampleRate = 0.0;
     y2k::fscale::Scale slopeCacheScale = y2k::fscale::Scale::log;
+    float  slopeCacheDbPerOct = -1.0f;   // 缓存也跟 slope 参数绑定
 
     // paintContent 是 const 路径，使用 mutable 缓存承接曲线点数组。
     mutable std::vector<juce::Point<float>> curvePts;
@@ -208,7 +214,9 @@ private:
 
     // 新模块默认：Peak 关（不画峰值虚线）+ Semi 曲线（细节与平滑折中）
     bool peakHoldEnabled = false;
-    // Slope 恒开（v3.1 移除按钮）：magData 一律做 4.5dB/oct 补偿，不再有开关
+    // Slope 补偿量（dB/oct，基准 1 kHz）：默认 4.5 = 旧版 SLOPE 开关"开"的效果；
+    //   0 = 关闭（与旧版"关"等价）。
+    float slopeDbPerOct = 4.5f;
     CurveMode   curveMode   = CurveMode::semi;    // 曲线模式（平滑 / 半平滑 / 折线）
     ChannelMode channelMode = ChannelMode::mid;   // 通道模式
 

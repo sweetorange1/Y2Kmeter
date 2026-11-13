@@ -10,7 +10,10 @@
 // ==========================================================
 // VuMeterModule —— Pink XP 像素风"模拟 VU 表"指针仪表
 //
-//   · 与其它矩形柱状/数字模块视觉差异化：采用**半圆扇形表盘 + 指针**
+//   · 与其它矩形柱状/数字模块视觉差异化：指针式表盘，三种结构完全不同的样式
+//       · 0 半圆（经典）—— 底边为直径的 180° 上半圆
+//       · 1 弧形        —— 240° 圆表 + 粗弧轨
+//       · 2 梯形        —— 老式扇形刻度：刻度线左长右短（轮廓成梯形），长指针横扫
 //   · 单指针（总电平：L/R 功率合成），订阅 Oscilloscope 从原始波形算瞬时 RMS
 //     → 后端零新增计算
 //   · 右上角圆形 LED 信号灯：
@@ -34,7 +37,7 @@ public:
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
     // ---- 持久化 + 控制面板（v3.1）----
-    //   dialStyle:   0 Classic（旧外观）/ 1 Dark / 2 Minimal（去掉细刻度与 dBFS 字样）
+    //   dialStyle:   0 半圆（旧外观）/ 1 弧形（240° 圆表，深色面）/ 2 梯形（顶边直线刻度）
     //   needleStyle: 0 Line（旧外观）/ 1 Wedge（锥形）/ 2 Stereo（L、R 双指针）
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
@@ -56,10 +59,8 @@ private:
     //   做子步插值，指针看起来是连续扫过的。
     void timerCallback() override;
 
-    // 画一条指针（从圆心向刻度位置延伸）
+    // 画一条指针（几何取自最近一次 drawDial 的结果，三种表盘自适应）
     void drawNeedle (juce::Graphics& g,
-                     juce::Point<float> pivot,
-                     float              radius,
                      float              valueDb,       // 当前 dBFS 值
                      juce::Colour       colour,
                      float              thickness,
@@ -70,15 +71,47 @@ private:
     int  needleStyle = 0;
     bool showLed     = true;
 
-    // 画表盘底色 + 刻度 + 数字
+    // 画表盘底色 + 刻度 + 数字（三种结构完全不同的表盘）
     void drawDial   (juce::Graphics& g,
                      juce::Rectangle<int> dialArea,
                      juce::Point<float>&  outPivot,
                      float&               outRadius) const;
+    void drawArcDial        (juce::Graphics& g, juce::Rectangle<int> dialArea,
+                             juce::Point<float>& outPivot, float& outRadius) const;
+    void drawTrapezoidDial  (juce::Graphics& g, juce::Rectangle<int> dialArea,
+                             juce::Point<float>& outPivot, float& outRadius) const;
 
-    // 画右上角 LED 信号灯
+    // dB → 表盘归一化位置 [0,1]（minDisplayDb … maxDisplayDb）
+    float dialTFor (float db) const noexcept;
+    // 半圆 / 弧形：指针角度（弧度，0 = 正上，顺时针为正）；梯形按尖端位置反算
+    float needleAngleFor  (float db) const noexcept;
+    // 当前样式下指针长度（像素）
+    float needleLengthFor (float db) const noexcept;
+
+    // 最近一次 drawDial 产出的几何（指针 / 玩具虚影共用）
+    struct DialGeom
+    {
+        juce::Point<float> pivot { 0.0f, 0.0f };
+        float radius  = 0.0f;    // 半圆 / 弧形：指针长度基准
+        // 楔形刻度（样式 2）：刻度带的左右端、刻度线起点与最长刻度
+        float leftX    = 0.0f;
+        float rightX   = 0.0f;
+        float tickTopY = 0.0f;
+        float tickLenHi = 0.0f;
+    };
+    mutable DialGeom dialGeom;
+
+    // 楔形刻度：dB → 横向位置 / 刻度线长度（左长右短，警戒段再抬高一档）
+    float wedgeXFor         (float db) const noexcept;
+    float wedgeTickLengthFor(float db) const noexcept;
+    float wedgeBaselineY    (float db) const noexcept;
+
+    // 画 LED 信号灯（位置见 ledBounds）
     void drawLed    (juce::Graphics& g,
                      juce::Rectangle<int> ledArea) const;
+    // LED 位置：半圆 / 弧形放右上角（盘面顶部是空的）；楔形刻度占满顶部，
+    //   灯改放右下角，避免压住刻度数字。绘制与玩具点击共用这一份。
+    juce::Rectangle<int> ledBounds(juce::Rectangle<int> area) const;
 
     // dBFS 值 → 指针角度（弧度）
     float vuToAngle(float valueDb) const noexcept;

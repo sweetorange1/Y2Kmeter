@@ -165,8 +165,8 @@ void WaveformModule::buildParamDefs (std::vector<ParamDef>& out) const
         1.0, " px/s",
         "Scroll speed in pixels per second. Faster shows more detail, slower shows a longer history.",
         80.0).in ("Scrolling"));
-    out.push_back (ParamDef::toggle ("dual", "Dual channel (L top / R bottom)",
-        "Draw the left and right channel as two separate waveforms, one above the other.")
+    out.push_back (ParamDef::toggle ("dual", "Dual channel",
+        "Draw the left and right channel as two separate waveforms, left on top and right below.")
         .in ("Scrolling"));
 }
 
@@ -381,14 +381,16 @@ void WaveformModule::mouseDown (const juce::MouseEvent& e)
 {
     ModulePanel::mouseDown (e);   // 保留基类行为（toFront / 右键菜单 / 边缘拖拽）
 
-    // 只在"左键按在画布内部（避开边缘缩放热区）"时进入慢放；抽屉是子组件，点击不会走到这里。
+    // 只在"左键按在画布内部（避开边缘缩放热区）"时冻结；抽屉是子组件，点击不会走到这里。
     if (e.mods.isLeftButtonDown()
         && getCanvasBounds (getContentBounds()).reduced (6).contains (e.getPosition())
         && ! getControlDrawerBounds().contains (e.getPosition()))
     {
         hold.press();
-        holdPendingStart = true;   // 下一帧到达时用当前帧窗口作为历史起点
-        buildGlSnapshot();
+        // 立即停住：丢掉还没写进环形的待写列和半列累加，按下瞬间画面就不再移动
+        pendingHead  = 0;
+        pendingCount = 0;
+        resetAccumulator();
         repaint();
     }
 }
@@ -397,12 +399,12 @@ void WaveformModule::mouseUp (const juce::MouseEvent& e)
 {
     ModulePanel::mouseUp (e);
 
-    // 松手直接回到实时：onFrame 检测到录制停止后，会把样本游标对齐到最新位置，
-    //   慢放期间没来得及消费的样本被直接跳过；残影色由 HoldSlowMo::tick 渐隐。
-    if (hold.active || holdPendingStart)
+    // 松手直接回到实时：onFrame 会把样本游标对齐到最新位置，
+    //   冻结期间产生的样本被直接跳过（画面从当前时刻继续滚动）。
+    if (hold.active)
     {
         hold.release();
-        holdPendingStart = false;
+        repaint();   // 去掉"冻结时才有"的音名读数，不等下一帧
     }
 }
 
@@ -437,9 +439,6 @@ void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
         currentPitchConf = frame.pitch.confidence;
     }
 
-    // 松手后残影色渐隐：即便本帧没有新列，也要重建快照让颜色连续过渡
-    const bool ghostFading = hold.tick (frame.dtSec);
-
     if (columnHistory.empty() || samplesPerColumn <= 0.0f)
         return;
 
@@ -451,82 +450,42 @@ void WaveformModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     if (hold.active)
     {
-        // ---- 慢放：读指针按"被拉长 50 倍的时间"推进，样本取自长历史 ----
-        if (holdPendingStart || ! history.isRecording())
-        {
-            history.begin (frame);
-            holdPlayPos  = (double) history.totalWritten();
-            holdConsumed = history.totalWritten();
-            holdPendingStart = false;
-        }
-        else
-        {
-            history.feed (frame);
-        }
-
-        holdPlayPos += (double) hold.dilate (frame.dtSec) * cachedSampleRate;
-        const double hi = (double) history.totalWritten();
-        const double lo = (double) history.oldestReadable();
-        holdPlayPos = juce::jlimit (lo < hi ? lo : hi, hi, holdPlayPos);
-
-        const juce::uint64 target = (juce::uint64) holdPlayPos;
-        if (holdConsumed < history.oldestReadable())
-            holdConsumed = history.oldestReadable();
-
-        if (target > holdConsumed)
-        {
-            const int n = (int) juce::jmin<juce::uint64> (target - holdConsumed, (juce::uint64) snapshotLen);
-            holdBufL.resize ((size_t) n);
-            holdBufR.resize ((size_t) n);
-            history.read (target, n, holdBufL.data(), holdBufR.data());
-            pushHistorySamples (holdBufL.data(), holdBufR.data(), n, n);
-            holdConsumed = target;
-        }
-
-        lastOscTotal  = total;       // 实时游标继续跟随，松手时用它对齐
+        // 按住 = 画面完全静止（冻结）：不消费任何样本，已写好的列保持原样。
+        //   实时游标继续跟随（lastOscTotal），松手后从最新位置接着画 ——
+        //   冻结期间产生的样本直接跳过，画面不会补播。
+        lastOscTotal  = total;
         oscTotalValid = true;
     }
     else
     {
-        if (history.isRecording())
+        // 本帧新增了多少**真实**样本：直接用音频线程的累计写入计数做差。
+        //   旧做法用帧时钟估（dt × sampleRate）会和音频实际产出对不齐，周期性
+        //   重复消费同一段样本 —— 同一像素列里混进两个相位的波形，画面上就是
+        //   "线突然变粗"的疙瘩。
+        if (! oscTotalValid || total < lastOscTotal)
         {
-            // 刚松手：慢放期间落后的样本直接跳过，从最新位置接着画
-            history.end();
+            // 首帧 / Hub 刚 prepare 过（计数归零）：只对齐游标，不追加
             lastOscTotal  = total;
             oscTotalValid = true;
-            resetAccumulator();
+            return;
         }
-        else
+
+        const juce::uint64 available = total - lastOscTotal;
+        lastOscTotal = total;
+
+        if (available > 0)
         {
-            // 本帧新增了多少**真实**样本：直接用音频线程的累计写入计数做差。
-            //   旧做法用帧时钟估（dt × sampleRate）会和音频实际产出对不齐，周期性
-            //   重复消费同一段样本 —— 同一像素列里混进两个相位的波形，画面上就是
-            //   "线突然变粗"的疙瘩。
-            if (! oscTotalValid || total < lastOscTotal)
-            {
-                // 首帧 / Hub 刚 prepare 过（计数归零）：只对齐游标，不追加
-                lastOscTotal  = total;
-                oscTotalValid = true;
-                return;
-            }
+            // 环形缓冲只保留最近 snapshotLen 个样本：超出的部分只能丢弃（否则会
+            //   落后于实时）。正常帧率下 available 远小于 2048，不会触发。
+            const int numToAppend = (int) juce::jmin<juce::uint64> (available, (juce::uint64) snapshotLen);
 
-            const juce::uint64 available = total - lastOscTotal;
-            lastOscTotal = total;
-
-            if (available > 0)
-            {
-                // 环形缓冲只保留最近 snapshotLen 个样本：超出的部分只能丢弃（否则会
-                //   落后于实时）。正常帧率下 available 远小于 2048，不会触发。
-                const int numToAppend = (int) juce::jmin<juce::uint64> (available, (juce::uint64) snapshotLen);
-
-                pushHistorySamples (frame.oscL.data(), frame.oscR.data(), snapshotLen, numToAppend);
-            }
+            pushHistorySamples (frame.oscL.data(), frame.oscR.data(), snapshotLen, numToAppend);
         }
     }
 
     // 把待写列按本帧预算推进环形缓冲（突发数据分几帧摊开，见 columnBudgetForDt）。
     //   没有新样本时也要 drain：上一帧突发留下的积压要继续吃掉，否则会"停一拍再跳"。
-    if (drainPendingColumns (columnBudgetForDt (frame.dtSec)) <= 0 && ! ghostFading)
+    if (drainPendingColumns (columnBudgetForDt (frame.dtSec)) <= 0)
         return;   // 本帧画面没有任何变化，不必重建快照 / 重绘
 
     buildGlSnapshot();
@@ -773,9 +732,7 @@ bool WaveformModule::resolveColumn (int xi, int w, int innerY, int innerH, int c
     // 颜色 + 透明度：SIB 模式下存在感由齿音强度决定，其余由电平决定
     //   色相不做跨列平均（圆周量线性平均会串色），直接用本列自己的估计
     const auto style = columnStyle (c1, level01, alpha);
-    // 按住慢放期间曲线整体混向残影色（保持各列自己的不透明度）
-    const juce::Colour shown = (hold.ghostMix > 0.0f) ? hold.tint (style.colour) : style.colour;
-    out.colour = shown.withAlpha (juce::jlimit (0.0f, 1.0f, style.alpha));
+    out.colour = style.colour.withAlpha (juce::jlimit (0.0f, 1.0f, style.alpha));
     return true;
 }
 
@@ -1012,6 +969,24 @@ void WaveformModule::mouseMove(const juce::MouseEvent& e)
     }
 }
 
+void WaveformModule::mouseDrag(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDrag(e);
+
+    // 按住拖动期间 JUCE 只派发 mouseDrag（mouseMove 被抑制），若不同步更新
+    //   hoverPos，十字线与时间 / dBFS 读数就会停在按下那一刻的位置不动。
+    //   按住冻结时画面本身不重绘，没有新列顺带刷新，这个问题尤其明显。
+    const auto canvas = getCanvasBounds(getContentBounds());
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
 void WaveformModule::mouseExit(const juce::MouseEvent& e)
 {
     ModulePanel::mouseExit(e);
@@ -1054,12 +1029,31 @@ void WaveformModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canv
     juce::String readout = formatRelativeTime (timeSec) + "  "
                          + juce::String (db, 1) + " dBFS";
 
-    // PITCH 模式追加当前音名，方便肉眼验证跟踪是否合理
-    if (colorSource == ColorSource::pitch && currentPitchConf > 0.06f)
+    // PITCH 模式追加音名：只在按住冻结时显示。
+    //   · 冻结时画面静止，鼠标所在那一列（时间位置）的音高是确定值，读数跟着指针走；
+    //   · 不冻结时列一直向左跑，同一 x 对应的音高每帧都在变，显示出来没有意义，
+    //     干脆不显示。
+    //   音名取自该列的 pitchNote（PITCH 模式下颜色的含义），纵坐标是电平，没有音名。
+    if (colorSource == ColorSource::pitch && hold.active)
     {
-        const juce::String note = midiNoteName (currentPitchNote);
-        if (note.isNotEmpty())
-            readout += "  " + note;
+        const int colCap = (int) columnHistory.size();
+        const int w = juce::jmin (inner.getWidth(), colCap);
+        if (colCap > 0 && validCols > 0 && w > 0)
+        {
+            const int xi = juce::jlimit (0, w - 1, hoverPos.x - inner.getX());
+            const int k  = w - 1 - xi;                    // 0 = 最右（最新）
+            if (k < validCols)
+            {
+                const int idx = (writeCol - 1 - k + colCap) % colCap;
+                const auto& c = columnHistory[(size_t) idx];
+                if (c.pitchConf > 0.06f)
+                {
+                    const juce::String note = midiNoteName (c.pitchNote);
+                    if (note.isNotEmpty())
+                        readout += "  " + note;
+                }
+            }
+        }
     }
 
     PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);

@@ -5,29 +5,35 @@
 #include <vector>
 
 // ==========================================================
-// BandSplit —— 时域三频段权重（低 / 中 / 高）
+// BandSplit —— 时域三频段分离（低 / 中 / 高）
 //
-//   用途：示波器 X-Y / 李萨如、立体声场的"频段染色"。每个样本点得到三个
-//   权重 (wLow, wMid, wHigh)，和为 1；显示层按权重把固定的红 / 绿 / 蓝混色
-//   （低频偏红、中频偏绿、高频偏蓝）。
+//   用途：示波器 X-Y / 李萨如、立体声场的"频段染色"。
+//   做法参考 MiniMeters Stereometer 的 Multiband 模式：把 L / R 各自滤成
+//   三路独立信号，三路各自画一层纯色点云叠在一起（颜色不混）。
 //
-//   做法（纯 C++，不依赖 JUCE，可单测）：
-//     1) 取单声道和 (L+R)/2；
-//     2) 两个 Linkwitz-Riley 4 阶分频点（每点 2 级同参 Butterworth 级联）
-//        分成 低 / 中 / 高 三路：低 = LP(f1)，中 = HP(f1)→LP(f2)，高 = HP(f1)→HP(f2)；
-//     3) 每路整流 + 峰值包络（立即起、按频段取不同释放时间：低频慢、高频快）；
-//     4) 包络归一化 → 权重。静音时权重落到"中"。
+//   实现（纯 C++，不依赖 JUCE，可单测）：
+//     · 两个 Linkwitz-Riley 4 阶分频点（每点 2 级同参 Butterworth 级联）：
+//         低 = LP(f1)
+//         中 = HP(f1) → LP(f2)
+//         高 = HP(f2)
+//       三路互斥，相位在分频点处对齐（LR 特性）。
+//     · 默认 200 Hz / 2000 Hz（与 MiniMeters 一致；面板上可调）。
 //
-//   线程 / 状态：窗口式无状态调用（每帧对 2048 样本窗口从零状态跑一遍），
-//   窗口最早的约 100 个样本带滤波器起振瞬态，它们 alpha 最低，肉眼不可辨。
-//   成本：每帧 ≈ 2048 × 8 个 biquad，微秒级。
+//   线程 / 状态：窗口式无状态调用（每帧对整窗样本从零状态跑一遍），
+//   窗口最早的约 100 个样本带滤波器起振瞬态，肉眼不可辨。
+//   成本：每帧 ≈ 2 声道 × 2048 样本 × 8 biquad，微秒级。
 // ==========================================================
 namespace y2k::bands
 {
     class BandSplitter
     {
     public:
-        void prepare (double sampleRate, float lowCrossHz = 250.0f, float highCrossHz = 4000.0f) noexcept
+        static constexpr float kDefaultLowCross  = 200.0f;
+        static constexpr float kDefaultHighCross = 2000.0f;
+
+        void prepare (double sampleRate,
+                      float lowCrossHz  = kDefaultLowCross,
+                      float highCrossHz = kDefaultHighCross) noexcept
         {
             fs = sampleRate > 0.0 ? sampleRate : 48000.0;
             setCrossover (lowCrossHz, highCrossHz);
@@ -45,47 +51,30 @@ namespace y2k::bands
         float getLowCross()  const noexcept { return f1; }
         float getHighCross() const noexcept { return f2; }
 
-        // L / R：n 个样本（时间从旧到新）。输出三个长度 n 的权重数组（和为 1）。
-        void compute (const float* L, const float* R, int n,
-                      std::vector<float>& wLow, std::vector<float>& wMid, std::vector<float>& wHigh)
+        // L / R：n 个样本（时间从旧到新）。
+        // 输出三路互斥的立体声信号，长度均为 n；调用方负责分配（可复用缓冲）。
+        void split (const float* L, const float* R, int n,
+                    float* lowL,  float* lowR,
+                    float* midL,  float* midR,
+                    float* highL, float* highR) const noexcept
         {
-            wLow.resize ((size_t) n);
-            wMid.resize ((size_t) n);
-            wHigh.resize ((size_t) n);
             if (n <= 0) return;
 
-            Chain c = proto;   // 每次调用从零状态开始
-            c.reset();
-
-            // 包络释放系数：低频慢、高频快（时间常数约 1.5 个周期的量级）
-            const float relLow  = releaseCoeff (8.0e-3);
-            const float relMid  = releaseCoeff (1.5e-3);
-            const float relHigh = releaseCoeff (3.0e-4);
-            float eLo = 0.0f, eMi = 0.0f, eHi = 0.0f;
+            Chain cl = proto, cr = proto;   // 每帧从零状态开始
+            cl.reset();
+            cr.reset();
 
             for (int i = 0; i < n; ++i)
             {
                 const float l = std::isfinite (L[i]) ? L[i] : 0.0f;
                 const float r = std::isfinite (R[i]) ? R[i] : 0.0f;
-                const float x = 0.5f * (l + r);
 
                 float lo, mi, hi;
-                c.process (x, lo, mi, hi);
+                cl.process (l, lo, mi, hi);
+                lowL[(size_t) i] = lo; midL[(size_t) i] = mi; highL[(size_t) i] = hi;
 
-                eLo = follow (eLo, std::abs (lo), relLow);
-                eMi = follow (eMi, std::abs (mi), relMid);
-                eHi = follow (eHi, std::abs (hi), relHigh);
-
-                const float sum = eLo + eMi + eHi;
-                if (sum < 1.0e-5f)
-                {
-                    wLow[(size_t) i] = 0.0f; wMid[(size_t) i] = 1.0f; wHigh[(size_t) i] = 0.0f;
-                }
-                else
-                {
-                    const float inv = 1.0f / sum;
-                    wLow[(size_t) i] = eLo * inv; wMid[(size_t) i] = eMi * inv; wHigh[(size_t) i] = eHi * inv;
-                }
+                cr.process (r, lo, mi, hi);
+                lowR[(size_t) i] = lo; midR[(size_t) i] = mi; highR[(size_t) i] = hi;
             }
         }
 
@@ -125,16 +114,6 @@ namespace y2k::bands
             }
         };
 
-        static float follow (float env, float rect, float rel) noexcept
-        {
-            return rect > env ? rect : rect + rel * (env - rect);
-        }
-
-        float releaseCoeff (double seconds) const noexcept
-        {
-            return (float) std::exp (-1.0 / (fs * seconds));
-        }
-
         static void designOne (Biquad& bq, double fs, float freq, bool highPass) noexcept
         {
             constexpr double kPi = 3.14159265358979323846;
@@ -162,20 +141,14 @@ namespace y2k::bands
         }
 
         double fs = 48000.0;
-        float f1 = 250.0f, f2 = 4000.0f;
-        Chain proto;   // 系数原型；compute() 拷贝一份并清零状态
+        float f1 = kDefaultLowCross, f2 = kDefaultHighCross;
+        Chain proto;   // 系数原型；split() 拷贝一份并清零状态
     };
 
-    // 固定的低 / 中 / 高三色（红 / 绿 / 蓝），不随主题变化
+    // 三路固定配色（MiniMeters Stereometer 主题默认值）：
+    //   低 #E60045（红）/ 中 #665AFF（蓝紫）/ 高 #00FFFF（青）
     struct Rgb { float r, g, b; };
-    inline constexpr Rgb kLowRgb  { 0.93f, 0.23f, 0.23f };   // 红
-    inline constexpr Rgb kMidRgb  { 0.23f, 0.83f, 0.35f };   // 绿
-    inline constexpr Rgb kHighRgb { 0.23f, 0.48f, 1.00f };   // 蓝
-
-    inline Rgb mix (float wLow, float wMid, float wHigh) noexcept
-    {
-        return { wLow * kLowRgb.r + wMid * kMidRgb.r + wHigh * kHighRgb.r,
-                 wLow * kLowRgb.g + wMid * kMidRgb.g + wHigh * kHighRgb.g,
-                 wLow * kLowRgb.b + wMid * kMidRgb.b + wHigh * kHighRgb.b };
-    }
+    inline constexpr Rgb kLowRgb  { 0.902f, 0.000f, 0.271f };   // 230,  0, 69
+    inline constexpr Rgb kMidRgb  { 0.400f, 0.353f, 1.000f };   // 102, 90,255
+    inline constexpr Rgb kHighRgb { 0.000f, 1.000f, 1.000f };   //   0,255,255
 }

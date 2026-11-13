@@ -1051,8 +1051,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.1.0 debug"
-                                                                               : "v3.1.0"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.2.0 debug"
+                                                                               : "v3.2.0"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1094,7 +1094,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.1.0";
+        const juce::String versionBase = "v3.2.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -4616,7 +4616,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.1.0";
+        const juce::String versionBase = "v3.2.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -9466,113 +9466,138 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
     }
     else if (snap->trailFbo && snap->texW > 0 && snap->texH > 0 && s3dTexShader != nullptr)
     {
-      // ============ trail 累积通道（v2.9.5，StereoField 残影）============
-      //   1) 持久 trail FBO（1x 逻辑尺寸，不清 —— 衰减 + 累积）
-      if (mod.glFbo == 0 || mod.glFboW != snap->texW || mod.glFboH != snap->texH)
+      // ============ trail 累积通道（v2.9.5 / v3.1 多层）============
+      //   1) 每层一个持久 FBO（1x 逻辑尺寸，不清 —— 衰减 + 累积）。
+      //      三频段点云各占一层：颜色永远不会互相污染。
+      const int layerCount = juce::jlimit (1, 3, snap->trailLayers);
+
+      if (mod.glTrailW != snap->texW || mod.glTrailH != snap->texH)
       {
-        if (mod.glFbo != 0)
+        for (int li = 0; li < 3; ++li)
         {
-          glDeleteFramebuffers (1, &mod.glFbo);
-          glDeleteTextures (1, &mod.glFboTex);
-          mod.glFbo = 0;
-          mod.glFboTex = 0;
+          if (mod.glTrailFbo[li] != 0)
+          {
+            glDeleteFramebuffers (1, &mod.glTrailFbo[li]);
+            glDeleteTextures (1, &mod.glTrailTex[li]);
+            mod.glTrailFbo[li] = 0;
+            mod.glTrailTex[li] = 0;
+          }
+          mod.glTrailCleared[li] = true;
         }
-        glGenFramebuffers (1, &mod.glFbo);
-        glGenTextures (1, &mod.glFboTex);
-        glBindTexture (GL_TEXTURE_2D, mod.glFboTex);
+
+        mod.glTrailW = snap->texW;
+        mod.glTrailH = snap->texH;
+      }
+
+      // 逐层补齐 FBO（层数从 1 变 3 时只补后两层，不做全量重建）
+      for (int li = 0; li < layerCount; ++li)
+      {
+        if (mod.glTrailFbo[li] != 0)
+          continue;
+
+        glGenFramebuffers (1, &mod.glTrailFbo[li]);
+        glGenTextures (1, &mod.glTrailTex[li]);
+        glBindTexture (GL_TEXTURE_2D, mod.glTrailTex[li]);
         glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
                       snap->texW, snap->texH, 0,
                       GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glBindTexture (GL_TEXTURE_2D, 0);
-        glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
+        glBindFramebuffer (GL_FRAMEBUFFER, mod.glTrailFbo[li]);
         glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                GL_TEXTURE_2D, mod.glFboTex, 0);
+                                GL_TEXTURE_2D, mod.glTrailTex[li], 0);
         glBindFramebuffer (GL_FRAMEBUFFER, 0);
-        mod.glFboW = snap->texW;
-        mod.glFboH = snap->texH;
-        mod.glTrailCleared = false;
+        mod.glTrailCleared[li] = false;
       }
 
       Y2K_DIAG_PHASE ("gl:draw module (trail FBO)");
-      glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
-      glViewport (0, 0, snap->texW, snap->texH);
-      if (! mod.glTrailCleared)
-      {
-        glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
-        glClear (GL_COLOR_BUFFER_BIT);
-        mod.glTrailCleared = true;
-      }
 
-      //   2) 衰减 pass：覆盖 quad，blend (ZERO, ONE_MINUS_SRC_ALPHA) → dst×decay
-      s3dShader->use();
-      s3dNdcUniform->set (2.0f / (float) snap->texW, 2.0f / (float) snap->texH, -1.0f, -1.0f);
-      s3dTransformUniform->set (1.0f, -1.0f, 0.0f, (float) snap->texH);
-      s3dSnapUniform->set (0.0f);
-      glBlendFunc (GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
-      {
-        const float w = (float) snap->texW, h = (float) snap->texH;
-        const float a = 1.0f - snap->trailDecay;
-        const float quad[36] = {
-          0.0f, 0.0f, 1, 1, 1, a,   w, 0.0f, 1, 1, 1, a,   0.0f, h, 1, 1, 1, a,
-          w, 0.0f, 1, 1, 1, a,      w, h, 1, 1, 1, a,      0.0f, h, 1, 1, 1, a,
-        };
-        // v2.9.5：衰减 quad 用 s3dQuadVbo（勿污染模块 glVbo）
-        glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
-        glVertexAttribPointer ((GLuint) s3dPosAttrib, 2, GL_FLOAT, GL_FALSE, 24, nullptr);
-        glEnableVertexAttribArray ((GLuint) s3dPosAttrib);
-        glVertexAttribPointer ((GLuint) s3dColAttrib, 4, GL_FLOAT, GL_FALSE, 24, (void*) 8);
-        glEnableVertexAttribArray ((GLuint) s3dColAttrib);
-        glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
-        glDrawArrays (GL_TRIANGLES, 0, 6);
-      }
-
-      //   2.b) 残值清零 pass（v3.0.6）：dst -= eps（四通道同减）
-      //     trail FBO 是 8bit RGBA8，衰减 pass 的乘法是"×decay 后四舍五入"，
-      //     于是 alpha/RGB 只要落到 1~3/255 就成了不动点：
-      //         round(3 × 0.92) = 3   round(12 × 0.959@120Hz) = 12 ...
-      //     乘法永远无法把这些量化残值压到 0 —— 表现为雷达里那个永远擦不掉的
-      //     浅灰小点（高刷屏上残值更大，更明显）。
-      //     这里再走一遍减法：blend (REVERSE_SUBTRACT, ONE, ONE) → dst - src，
-      //     src 取 2/255，残值两帧内必归零；对满幅像素只相当于多衰减 0.8%。
-      //     四通道一起减：只减 alpha 会留下 alpha=0 但 RGB≈1 的像素，
-      //     合成（ONE, 1-SRC_ALPHA）时仍会叠出一层极淡的灰色。
-      {
-        constexpr float kFlush = 2.0f / 255.0f;
-        const float w = (float) snap->texW, h = (float) snap->texH;
-        const float quad[36] = {
-          0.0f, 0.0f, kFlush, kFlush, kFlush, kFlush,
-          w, 0.0f, kFlush, kFlush, kFlush, kFlush,
-          0.0f, h, kFlush, kFlush, kFlush, kFlush,
-          w, 0.0f, kFlush, kFlush, kFlush, kFlush,
-          w, h, kFlush, kFlush, kFlush, kFlush,
-          0.0f, h, kFlush, kFlush, kFlush, kFlush,
-        };
-        glBlendEquation (GL_FUNC_REVERSE_SUBTRACT);
-        glBlendFunc (GL_ONE, GL_ONE);
-        glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
-        glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
-        glDrawArrays (GL_TRIANGLES, 0, 6);
-        glBlendEquation (GL_FUNC_ADD);
-      }
-
-      //   3) 点 pass：trail 段（叠加累积；点顶点为模块本地坐标，
-      //      经 canvasLocal 偏移换算到 trail FBO 坐标）
-      glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-      s3dTransformUniform->set (1.0f, -1.0f,
-                                -(float) snap->canvasLocal.getX(),
-                                (float) (snap->texH + snap->canvasLocal.getY()));
+      // 顶点数据只上传一次（逐层绘制共用同一个 VBO）
       setVertexAttribs();
       if (needUpload)
         glBufferData (GL_ARRAY_BUFFER,
                       (GLsizeiptr) (snap->vertices.size() * sizeof (float)),
                       snap->vertices.data(), GL_DYNAMIC_DRAW);
-      for (size_t si = (size_t) snap->trailSegStart; si < snap->segments.size(); ++si)
+
+      for (int li = 0; li < layerCount; ++li)
       {
-        const auto& seg = snap->segments[si];
-        glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
-                      seg.offset, seg.count);
+        glBindFramebuffer (GL_FRAMEBUFFER, mod.glTrailFbo[li]);
+        glViewport (0, 0, snap->texW, snap->texH);
+        if (! mod.glTrailCleared[li] || snap->trailClear)
+        {
+          glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+          glClear (GL_COLOR_BUFFER_BIT);
+          mod.glTrailCleared[li] = true;
+        }
+
+        //   2) 衰减 pass：覆盖 quad，blend (ZERO, ONE_MINUS_SRC_ALPHA) → dst×decay
+        s3dShader->use();
+        s3dNdcUniform->set (2.0f / (float) snap->texW, 2.0f / (float) snap->texH, -1.0f, -1.0f);
+        s3dTransformUniform->set (1.0f, -1.0f, 0.0f, (float) snap->texH);
+        s3dSnapUniform->set (0.0f);
+        glBlendFunc (GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+        {
+          const float w = (float) snap->texW, h = (float) snap->texH;
+          const float a = 1.0f - snap->trailDecay;
+          const float quad[36] = {
+            0.0f, 0.0f, 1, 1, 1, a,   w, 0.0f, 1, 1, 1, a,   0.0f, h, 1, 1, 1, a,
+            w, 0.0f, 1, 1, 1, a,      w, h, 1, 1, 1, a,      0.0f, h, 1, 1, 1, a,
+          };
+          // v2.9.5：衰减 quad 用 s3dQuadVbo（勿污染模块 glVbo）
+          glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
+          glVertexAttribPointer ((GLuint) s3dPosAttrib, 2, GL_FLOAT, GL_FALSE, 24, nullptr);
+          glEnableVertexAttribArray ((GLuint) s3dPosAttrib);
+          glVertexAttribPointer ((GLuint) s3dColAttrib, 4, GL_FLOAT, GL_FALSE, 24, (void*) 8);
+          glEnableVertexAttribArray ((GLuint) s3dColAttrib);
+          glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
+          glDrawArrays (GL_TRIANGLES, 0, 6);
+        }
+
+        //   2.b) 残值清零 pass（v3.0.6）：dst -= eps（四通道同减）
+        //     trail FBO 是 8bit RGBA8，衰减 pass 的乘法是"×decay 后四舍五入"，
+        //     于是 alpha/RGB 只要落到 1~3/255 就成了不动点：
+        //         round(3 × 0.92) = 3   round(12 × 0.959@120Hz) = 12 ...
+        //     乘法永远无法把这些量化残值压到 0 —— 表现为雷达里那个永远擦不掉的
+        //     浅灰小点（高刷屏上残值更大，更明显）。
+        //     这里再走一遍减法：blend (REVERSE_SUBTRACT, ONE, ONE) → dst - src，
+        //     src 取 2/255，残值两帧内必归零；对满幅像素只相当于多衰减 0.8%。
+        //     四通道一起减：只减 alpha 会留下 alpha=0 但 RGB≈1 的像素，
+        //     合成（ONE, 1-SRC_ALPHA）时仍会叠出一层极淡的灰色。
+        {
+          constexpr float kFlush = 2.0f / 255.0f;
+          const float w = (float) snap->texW, h = (float) snap->texH;
+          const float quad[36] = {
+            0.0f, 0.0f, kFlush, kFlush, kFlush, kFlush,
+            w, 0.0f, kFlush, kFlush, kFlush, kFlush,
+            0.0f, h, kFlush, kFlush, kFlush, kFlush,
+            w, 0.0f, kFlush, kFlush, kFlush, kFlush,
+            w, h, kFlush, kFlush, kFlush, kFlush,
+            0.0f, h, kFlush, kFlush, kFlush, kFlush,
+          };
+          glBlendEquation (GL_FUNC_REVERSE_SUBTRACT);
+          glBlendFunc (GL_ONE, GL_ONE);
+          glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
+          glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
+          glDrawArrays (GL_TRIANGLES, 0, 6);
+          glBlendEquation (GL_FUNC_ADD);
+        }
+
+        //   3) 点 pass：该层的 trail 段（叠加累积；点顶点为模块本地坐标，
+        //      经 canvasLocal 偏移换算到 trail FBO 坐标）
+        glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        s3dTransformUniform->set (1.0f, -1.0f,
+                                  -(float) snap->canvasLocal.getX(),
+                                  (float) (snap->texH + snap->canvasLocal.getY()));
+        setVertexAttribs();   // 衰减/清零 pass 把 attrib 指向了 s3dQuadVbo，这里必须重设
+        for (size_t si = (size_t) snap->trailSegStart; si < snap->segments.size(); ++si)
+        {
+          const auto& seg = snap->segments[si];
+          if (juce::jlimit (0, layerCount - 1, seg.trailLayer) != li)
+            continue;
+          glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
+                        seg.offset, seg.count);
+        }
       }
 
       //   4) 背景段直接画后缓冲
@@ -9594,14 +9619,15 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
         }
       }
 
-      //   5) 合成：trail 纹理 alpha 混合到 texTargetRect
+      //   5) 合成：逐层把 trail 纹理 alpha 混合到 texTargetRect
       //   反馈修复（外网 #9）：trail FBO 内部是预乘 alpha（点绘制用源 alpha
       //   叠加 + 衰减 pass 连 RGB 一起缩放）。旧代码用直通混合
       //   (SRC_ALPHA, 1-SRC_ALPHA) 合成，预乘色被二次压暗 → 浅色背景上
       //   淡出前出现"灰/脏"中间态。改用预乘混合 (ONE, 1-SRC_ALPHA)，
       //   点保持原色、只降 alpha 直到消失。
       glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-      drawTexQuad (mod.glFboTex, snap->texTargetRect, 0.0f, 1.0f);
+      for (int li = 0; li < layerCount; ++li)
+        drawTexQuad (mod.glTrailTex[li], snap->texTargetRect, 0.0f, 1.0f);
       glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // 恢复直通混合，避免污染后续模块
       diagCheckGl ("trail-compose");
     }
@@ -9874,6 +9900,18 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
             gmod->glFbo = 0;
             gmod->glFboTex = 0;
           }
+          for (int li = 0; li < 3; ++li)
+          {
+            if (gmod->glTrailFbo[li] != 0)
+            {
+              juce::gl::glDeleteFramebuffers (1, &gmod->glTrailFbo[li]);
+              juce::gl::glDeleteTextures (1, &gmod->glTrailTex[li]);
+              gmod->glTrailFbo[li] = 0;
+              gmod->glTrailTex[li] = 0;
+            }
+          }
+          gmod->glTrailW = 0;
+          gmod->glTrailH = 0;
           if (gmod->glTex != 0) { juce::gl::glDeleteTextures (1, &gmod->glTex); gmod->glTex = 0; }
         }
         else

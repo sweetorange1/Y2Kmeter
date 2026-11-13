@@ -124,7 +124,7 @@ void ModuleControlDrawer::rebuild()
                 s->setRange (row->def.minV, row->def.maxV, row->def.step);
                 if (row->def.skewMid > row->def.minV && row->def.skewMid < row->def.maxV)
                     s->setSkewFactorFromMidPoint (row->def.skewMid);
-                s->setTextBoxStyle (juce::Slider::TextBoxRight, false, PinkXP::ui (52), PinkXP::ui (kRowH));
+                s->setTextBoxStyle (juce::Slider::TextBoxRight, false, PinkXP::ui (68), PinkXP::ui (kRowH));
                 s->setTextValueSuffix (row->def.suffix);
                 s->setColour (juce::Slider::textBoxTextColourId, PinkXP::ink);
                 s->setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);

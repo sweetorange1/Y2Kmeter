@@ -249,6 +249,16 @@ public:
     void setControlPanelOpen (bool open);
     void refreshControlPanel();
 
+    // 点空白处自动收起：关闭所有打开的抽屉。
+    //   source / posInSource 是这次鼠标按下落在哪个组件、组件内坐标
+    //   （点为 null 时无条件全关）；点在某个抽屉内部或某个齿轮按钮上时不关。
+    static void closeOpenControlDrawers (const juce::Component* source,
+                                         juce::Point<int>       posInSource);
+
+    // 抽屉当前占用的区域（模块本地坐标；收起时为空）。
+    //   public：ToyOverlay 绘制全窗口 emoji 时需要排除它（否则 emoji 会盖住设置界面）。
+    juce::Rectangle<int> getControlDrawerBounds() const;
+
     virtual void   buildParamDefs (std::vector<ParamDef>& out) const { juce::ignoreUnused (out); }
     virtual double getParamValue  (const juce::String& id) const     { juce::ignoreUnused (id); return 0.0; }
     virtual void   setParamValue  (const juce::String& id, double v) { juce::ignoreUnused (id, v); }
@@ -413,8 +423,6 @@ protected:
 
     // 派生类在构造里调用：声明本模块有控制面板（标题栏出现齿轮按钮）
     void setControlPanelEnabled (bool enabled) noexcept;
-    // 抽屉当前占用的区域（模块本地坐标；收起时为空）
-    juce::Rectangle<int> getControlDrawerBounds() const;
 
     juce::String titleText;  // 模块标题文字（protected，子类 paint() 可读取）
 

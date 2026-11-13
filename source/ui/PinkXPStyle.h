@@ -432,6 +432,10 @@ namespace PinkXP
     // 格式化频率读数：<1kHz 显示 "xxx Hz"，>=1kHz 显示 "x.x kHz"
     juce::String formatFreqHz(float hz);
 
+    // 频率 → 音名（十二平均律，A4 = 440 Hz），返回带八度的名字（如 "A4"）。
+    //   超出 16 Hz–20 kHz 或非法值返回空串（调用方据此决定是否追加读数）。
+    juce::String noteNameForHz(float hz);
+
     // 前景文字色（可读性兜底）：
     //   主题 ink 相对 fill 的 WCAG 对比度 >= minContrast 时原样返回 ink；
     //   否则在 ink / selInk / 纯黑 / 纯白中挑对比度最高者。
@@ -596,6 +600,18 @@ public:
     int getTextButtonWidthToFitText (juce::TextButton&, int buttonHeight) override;
 
     void drawPopupMenuBackground(juce::Graphics& g, int width, int height) override;
+
+    // ---- 滚动条（Viewport / 列表）----
+    //   JUCE 默认画的是 V4 的蓝灰滑块，和主题完全不搭；这里改成 XP 像素风：
+    //   凹陷轨道 + 主题粉滑块（悬停 / 按下加深），颜色全部取当前主题。
+    void drawScrollbar (juce::Graphics&, juce::ScrollBar&, int x, int y, int width, int height,
+                        bool isScrollbarVertical, int thumbStartPosition, int thumbSize,
+                        bool isMouseOver, bool isMouseDown) override;
+    // 两端的箭头按钮（V2 默认会用 ScrollBar 的配色画成蓝灰小方块，同样要跟随主题）
+    void drawScrollbarButton (juce::Graphics&, juce::ScrollBar&, int width, int height,
+                              int buttonDirection, bool isScrollbarVertical,
+                              bool shouldDrawButtonAsHighlighted,
+                              bool shouldDrawButtonAsDown) override;
     void drawPopupMenuItem(juce::Graphics&, const juce::Rectangle<int>& area,
                            bool isSeparator, bool isActive, bool isHighlighted,
                            bool isTicked, bool hasSubMenu,

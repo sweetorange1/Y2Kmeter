@@ -77,6 +77,8 @@ public:
         bool  trailFbo = false;
         float trailDecay = 0.92f;
         int   trailSegStart = 0;            // segments 前缀（背景）画后缓冲
+        int   trailLayers = 1;              // 残影层数 1..3：每层独立 FBO、独立衰减
+        bool  trailClear = false;           // true = 本帧先把所有层清空（切模式 / 改参数）
 
         juce::uint64 version = 0;
         std::vector<float> vertices;
@@ -86,6 +88,7 @@ public:
             int       offset    = 0;   // 顶点下标
             int       count     = 0;
             Primitive primitive = Primitive::Triangles;
+            int       trailLayer = 0;  // 该段写入哪一层残影（仅 trail 段有效）
         };
         std::vector<Segment> segments;
     };
@@ -100,7 +103,10 @@ public:
     unsigned     glFbo = 0, glFboTex = 0;                  // 逻辑分辨率渲染 FBO（懒创建）
     int          glFboW = 0, glFboH = 0;
     unsigned     glTex = 0;                                // 纹理通道纹理（懒创建）
-    bool         glTrailCleared = false;                   // trail FBO 是否已清透明
+    // 残影通道：最多 3 层，每层独立 FBO（三频段点云各自一条轨迹，颜色不互相污染）
+    unsigned     glTrailFbo[3] { 0, 0, 0 }, glTrailTex[3] { 0, 0, 0 };
+    int          glTrailW = 0, glTrailH = 0;
+    bool         glTrailCleared[3] { true, true, true };   // 该层是否已清透明
     juce::uint64 lastUploadedVersion = 0;                  // 已上传版本（GL 线程写）
 
     // 浮动态（脱离到独立窗口）时模块移出 Editor 组件树，Editor 不再渲染它的

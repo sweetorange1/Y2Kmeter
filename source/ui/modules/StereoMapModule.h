@@ -53,7 +53,12 @@ public:
 
     // 鼠标悬停标尺：绘图区内十字线 + 频率/纵轴坐标读数
     void mouseMove (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;   // 按住拖动时读数也要跟随鼠标
     void mouseExit (const juce::MouseEvent& e) override;
+
+    // ---- 按住子弹时间（与 Spectrum 一致）：只拖慢回落沿 ----
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseUp   (const juce::MouseEvent& e) override;
 
     // ---- Toybox：点击绘图区 → 该频段的声像 / 抵消读数气泡 ----
     //   ToyHit / ToyContext 由 ModuleWorkspace.h 前向声明，实现文件引入 ToyKit.h。
@@ -118,6 +123,11 @@ private:
     // 鼠标悬停态（标尺）
     juce::Point<int> hoverPos;
     bool             hoverActive = false;
+
+    // 按住子弹时间：只把下降沿（回落）的时间拉长 kBulletTimeSlowdown 倍，
+    //   上升沿保持实时（与 SpectrumModule 的语义一致）
+    bool bulletTimeActive = false;
+    static constexpr float kBulletTimeSlowdown = 50.0f;
 
     int cachedBandCount = 0;
 

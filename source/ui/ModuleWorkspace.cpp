@@ -316,7 +316,7 @@ ModuleType resolveRetiredModuleType (ModuleType t, juce::ValueTree& seedOut)
 
         // ---- 示波器类 → oscilloscope ----
         case ModuleType::oscilloscopeWave:
-            seed ({ { "displayMode", 0 }, { "waveChannel", 2 }, { "waveColour", 1 } });
+            seed ({ { "displayMode", 0 }, { "waveChannel", 2 } });
             return ModuleType::oscilloscope;
 
         // ---- 相位类 → phase ----

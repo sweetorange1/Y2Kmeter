@@ -152,6 +152,9 @@ private:
     std::vector<float> crestHist;
     int   crestHistWrite = 0;
     float crestHistAccum = 0.0f;
+    // 累计写入的样本总数（绝对序号）。绘制时列边界按它对齐，
+    //   保证窗口滑动时同一列的样本集合不变（否则峰值会在相邻列之间跳 → 闪烁）。
+    juce::int64 crestHistTotal = 0;
 
     // 布局缓存
     juce::Rectangle<int> areaMeters;

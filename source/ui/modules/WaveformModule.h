@@ -5,7 +5,6 @@
 #include <vector>
 
 #include "source/analysis/AnalyserHub.h"
-#include "source/analysis/OscHistory.h"
 #include "source/analysis/SibilanceDetector.h"
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/HoldSlowMo.h"
@@ -28,13 +27,8 @@
 //                AnalyserHub::Kind::Spectrum（PITCH 模式的音高估计）
 //                —— 仅 PITCH 模式下 retain，切走即 release
 //
-// 顶部工具栏：
-//   ┌──────────────────────────────────────────────┐
-//   │ [PITCH]                           [Freeze]   │  [SPEED]
-//   ├──────────────────────────────────────────────┤  滑条
-//   │                瀑布画布（凹陷）               │  (1024…
-//   └──────────────────────────────────────────────┘   16384)
-//     ↑ 左上角按钮单击循环 PITCH → LOUD → SIB，文字即当前模式
+// 布局（v3.1）：顶部工具栏 / SPEED 滑条取消，整块内容区都是瀑布画布；
+//   着色来源、速度、双声道分轨、齿音阈值都在标题栏齿轮的控制面板里。
 // ==========================================================
 
 class WaveformModule : public GlDirectModuleBase,
@@ -65,6 +59,7 @@ public:
 
     // 鼠标悬停标尺：仪表区域内十字线 + 时间/响度（PITCH 模式追加音名）读数
     void mouseMove (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;   // 按住拖动时读数也要跟随鼠标
     void mouseExit (const juce::MouseEvent& e) override;
 
     // ---- 滚动速度（SPEED 滑条，像素列/秒）----
@@ -78,9 +73,9 @@ public:
     void setColorSource (ColorSource s);
     ColorSource getColorSource() const noexcept { return colorSource; }
 
-    // ---- v3.1：按住慢放（取代 Freeze 按钮）----
-    //   按住画布左键 → 时间被拉长 50 倍（读指针从长历史里按 1/50 速度喂给列聚合），
-    //   曲线混向残影色；松手直接跳回实时（参照频谱的子弹时间，见 HoldSlowMo.h）。
+    // ---- v3.1：按住冻结（取代 Freeze 按钮）----
+    //   按住画布左键 → 完全静止：不消费任何样本、不写新列（按下瞬间清空待写列与
+    //   半列累加）；松手直接跳回实时，冻结期间的样本丢弃不补播（见 HoldSlowMo.h）。
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseUp   (const juce::MouseEvent& e) override;
 
@@ -250,13 +245,8 @@ private:
     float currentPitchNote = 60.0f;
     float currentPitchConf = 0.0f;
 
-    // 按住慢放
+    // 按住冻结（v3.1：不再慢放滚动，按住期间画面完全静止）
     HoldSlowMo hold;
-    OscHistory history;
-    bool          holdPendingStart = false;
-    double        holdPlayPos      = 0.0;      // 读指针（绝对样本位置）
-    juce::uint64  holdConsumed     = 0;        // 已喂给列聚合的绝对样本位置
-    std::vector<float> holdBufL, holdBufR;
 
     double cachedSampleRate = 48000.0;   // 缓存 hub 的采样率（避免每帧查询）
 

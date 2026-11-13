@@ -99,9 +99,9 @@ void SpectrogramModule::restoreModuleSpecificState (const juce::ValueTree& state
 void SpectrogramModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
     out.push_back (ParamDef::choice ("direction", "Scroll direction",
-        { "Left", "Right", "Up", "Down" },
-        "Which way the picture moves. Left: new sound enters on the right (classic). "
-        "Up and Down turn the picture so time runs vertically and frequency runs left to right.")
+        { "Leftwards", "Rightwards", "Upwards", "Downwards" },
+        "Which way the picture moves. Leftwards: new sound enters on the right (classic). "
+        "Upwards and Downwards turn the picture so time runs vertically and frequency runs left to right.")
         .in ("Scrolling"));
     out.push_back (ParamDef::slider ("speed", "Speed", 5.0, 120.0, 1.0, " px/s",
         "Scroll speed in pixels per second. Slower keeps a longer history on screen.")
@@ -407,6 +407,14 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (! isShowing()) return;
     if (! frame.has (AnalyserHub::Kind::Spectrum)) return;
 
+    // 按住 = 画面完全静止：不采样、不推进新列；只把帧时钟对齐，
+    //   否则松手后 dt 会攒成一大坨、一次性补好几列。
+    if (hold.active)
+    {
+        lastFrameMs = juce::Time::getMillisecondCounterHiRes();
+        return;
+    }
+
     const auto canvas = getCanvasBounds (getContentBounds());
     // 与 paintContent 一致：内部绘图区 = canvas.reduced(2)，外围 2px 留给凹陷边框
     const auto plot   = canvas.reduced (2);
@@ -450,12 +458,12 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (nCols < 0) nCols = 0;
     columnAccumulator -= (float) nCols;
 
-    if (nCols == 0)
-    {
-        // 这一帧不推进：不改变 writeCol、不改变 image，也不需要 repaint。
-        return;
-    }
-
+    // 子列偏移（0..1）：剩下的 `columnAccumulator` 就是"离下一列还差多少"。
+    //   低速度时一列要好几帧才推进，如果只按整列跳，画面会每 100~200ms 跳
+    //   cellPx 个像素 —— 现场表现就是"每动一次闪一下"（尤其 <30 px/s 时）。
+    //   把这段小数喂给滚动窗口（GL 的 texScrollU / CPU 的变换原点），滚动就是
+    //   连续的；新列仍然只在整数时刻写入。因此这里必须**每帧**重建快照并重绘，
+    //   不能再像以前那样 nCols==0 就直接 return。
     ensureImage();
 
     // 连续 push nCols 列（都是当前帧最新的幅度快照 —— 低 fps 下这会
@@ -517,7 +525,8 @@ void SpectrogramModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<i
     // 方向变换：图像坐标 (u = 时间列 0..2*cols，v = 频率行 0..rows，行 0 = 高频) → 屏幕。
     //   Left（旧外观）：u→x 向右增长，截取 [writeCol, writeCol+cols) 窗口，新数据在右。
     //   其余方向见下，窗口同样是 [writeCol, writeCol+cols)，只是轴与朝向不同。
-    const float wc = (float) writeCol;
+    // 与 GL 路径一致：窗口起点 = 已写列 + 子列偏移（低速时连续滚动，不再整列跳）
+    const float wc = (float) writeCol + juce::jlimit (0.0f, 1.0f, columnAccumulator);
     const float px = (float) plot.getX(), py = (float) plot.getY();
     juce::AffineTransform xform;
     if (! isVertical())
@@ -591,7 +600,9 @@ void SpectrogramModule::buildGlSnapshot()
     snap->texW = cols * 2;
     snap->texH = rows;
     snap->texDirty = true;
-    snap->texScrollU = (float) writeCol / (float) (cols * 2);
+    // 窗口起点 = 已写列 + 未走完的那一列（子列偏移）→ 低速时滚动也是连续的
+    snap->texScrollU = ((float) writeCol + juce::jlimit (0.0f, 1.0f, columnAccumulator))
+                            / (float) (cols * 2);
     snap->texWinW = 0.5f;
     snap->texTargetRect = plot;
     {
@@ -737,6 +748,50 @@ void SpectrogramModule::mouseMove(const juce::MouseEvent& e)
     }
 }
 
+void SpectrogramModule::mouseDrag(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDrag(e);
+
+    // 按住拖动期间 JUCE 只派发 mouseDrag（mouseMove 被抑制），若不同步更新
+    //   hoverPos，十字线与频率 / 时间 / 音名读数就会停在按下那一刻的位置不动。
+    const auto canvas = getCanvasBounds(getContentBounds());
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains(pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void SpectrogramModule::mouseDown(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDown(e);   // 保留基类行为（toFront / 右键菜单 / 边缘拖拽）
+
+    // 只在"左键按在画布内部（避开边缘缩放热区）"时冻结；抽屉是子组件，点击不会走到这里。
+    if (e.mods.isLeftButtonDown()
+        && getCanvasBounds(getContentBounds()).reduced (6).contains (e.getPosition())
+        && ! getControlDrawerBounds().contains (e.getPosition()))
+    {
+        hold.press();
+        // 保留 columnAccumulator（子列偏移），冻结时画面停在当前位置，不会跳一格
+        repaint();
+    }
+}
+
+void SpectrogramModule::mouseUp(const juce::MouseEvent& e)
+{
+    ModulePanel::mouseUp(e);
+
+    // 松手直接恢复滚动：下一帧用新的 lastFrameMs 重新累计列
+    if (hold.active)
+    {
+        hold.release();
+        repaint();   // 去掉"冻结时才有"的音名读数，不等下一帧
+    }
+}
+
 void SpectrogramModule::mouseExit(const juce::MouseEvent& e)
 {
     ModulePanel::mouseExit(e);
@@ -755,8 +810,18 @@ void SpectrogramModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> c
     float freqHz = 0.0f, secondsAgo = 0.0f;
     hoverToFreqAndAge (canvas, hoverPos, freqHz, secondsAgo);
 
-    const juce::String readout = PinkXP::formatFreqHz(freqHz)
-                               + "  " + juce::String(-secondsAgo, 1) + " s";
+    juce::String readout = PinkXP::formatFreqHz(freqHz)
+                         + "  " + juce::String(-secondsAgo, 1) + " s";
+
+    // 音名只在按住冻结时显示（与波形历史一致）：滚动中同一点的读数参考意义不大，
+    //   冻结后鼠标所在频率的音高才是确定值。
+    if (hold.active)
+    {
+        const juce::String note = PinkXP::noteNameForHz(freqHz);
+        if (note.isNotEmpty())
+            readout += "  " + note;
+    }
+
     PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);
 }
 

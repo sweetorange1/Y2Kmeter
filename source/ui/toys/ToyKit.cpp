@@ -510,6 +510,30 @@ void ToyOverlay::paint (juce::Graphics& g)
     const auto clip = g.getClipBounds();
     if (clock.director.atlas != nullptr)
         clock.director.atlas->setPhysicalScale (g.getInternalContext().getPhysicalPixelScaleFactor());
+
+    // 设置抽屉的层级必须高于 emoji：叠加层画在所有模块之上（飞出模块的自由
+    //   actor 走这里），抽屉却是模块子组件 —— 不排除就会被盖住。
+    //   把当前打开的抽屉矩形从裁剪区里扣掉，emoji 经过时自动"钻到面板后面"。
+    juce::RectangleList<int> drawerRects;
+    for (auto& sp : clock.panels)
+    {
+        if (auto* p = sp.getComponent())
+        {
+            const auto drawer = p->getControlDrawerBounds();
+            if (! drawer.isEmpty() && drawer.intersects (clip))
+            {
+                const auto tl = getLocalPoint (p, drawer.getTopLeft());
+                drawerRects.addWithoutMerging ({ tl.x, tl.y, drawer.getWidth(), drawer.getHeight() });
+            }
+        }
+    }
+
+    juce::Graphics::ScopedSaveState ss (g);
+    // 注：本仓库的 JUCE 只有 excludeClipRegion(Rectangle<int>) 单矩形重载，
+    //     没有 RectangleList 版本 —— 逐个扣除（调用是累积的）。
+    for (int i = 0; i < drawerRects.getNumRectangles(); ++i)
+        g.excludeClipRegion (drawerRects.getRectangle (i));
+
     for (auto& a : clock.freeActors)
         if (a->getBounds().getSmallestIntegerContainer().intersects (clip))
         {

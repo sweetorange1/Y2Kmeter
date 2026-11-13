@@ -16,11 +16,13 @@
 //   同一路 Kind::Oscilloscope 的 2048 样本窗口，用「显示类型」+ 参数还原每一种旧外观。
 //
 //   显示类型（displayMode）：
-//     · Waveform  —— 时域波形；声道 L / R / 双（waveChannel），配色 Classic / Pink（waveColour）
+//     · Waveform  —— 时域波形；声道 L / R / 双（waveChannel），配色跟随主题 chartRamp
 //     · X-Y       —— 李萨如 XY（L→X，R→Y，点阵）
 //     · Lissajous —— Mid/Side（旋转 45° 的 XY）
-//   X-Y / Lissajous 可开启「频段染色」：低 / 中 / 高频的点分别着红 / 绿 / 蓝
-//   （固定色，按三频段能量权重混色；分频点可调，见 BandSplit.h）。
+//   X-Y / Lissajous 可开启「频段染色」：L/R 各滤成低 / 中 / 高三路，三路各自的
+//   点云按固定色叠画（低 = 红 #E60045 / 中 = 蓝紫 #665AFF / 高 = 青 #00FFFF，
+//   同 MiniMeters Stereometer）；分频点可调（默认 200 / 2000 Hz，见 BandSplit.h）。
+//   散点走持久残影通道，点大小 / 消失速度在控制面板可调。
 //
 //   v3.1 交互变化：
 //     · 顶部工具栏（模式按钮 + Freeze 按钮）取消，整块内容区都是画布；
@@ -75,9 +77,10 @@ protected:
 
 private:
     // 一个 XY 散点（GL 与 CPU 回退路径共用同一份几何/配色）
-    struct XYPoint { float x, y, alpha; juce::Colour col; };
+    // layer：频段染色时 0/1/2 = 低/中/高（CPU 回退按它分组合并绘制）
+    struct XYPoint { float x, y, alpha; juce::Colour col; int layer = 0; };
 
-    // 波形声道配色（glow / main），已含残影色
+    // 波形声道配色（glow / main）
     struct WaveColours { juce::Colour lGlow, lMain, rGlow, rMain; };
 
     // ---- 各模式绘制 ----
@@ -116,21 +119,30 @@ private:
     // 参数（构造默认 = 旧 Oscilloscope 外观）
     DisplayMode displayMode = DisplayMode::waveform;
     int   waveChannel = 2;        // 0 L / 1 R / 2 双
-    int   waveColour  = 0;        // 0 Classic（chartRamp）/ 1 Pink（旧 Oscilloscope Wave）
     bool  bandColour  = false;    // X-Y / Lissajous 频段染色
-    float crossLowHz  = 250.0f;
-    float crossHighHz = 4000.0f;
+    float crossLowHz  = y2k::bands::BandSplitter::kDefaultLowCross;    // 200 Hz（MiniMeters 默认）
+    float crossHighHz = y2k::bands::BandSplitter::kDefaultHighCross;   // 2 kHz
     bool  autoGain    = true;     // X-Y / Lissajous 自动缩放
     bool  showRings   = true;     // X-Y / Lissajous 标尺环
+    float dotSize     = 2.0f;     // 散点边长（px，1–6）
+    float fadeSpeed   = 1.0f;     // 残影消失速度倍率（1.0 = 经典拖尾）
 
     // 快照（UI 线程独占使用）：实时窗口，或慢放时从历史读出的窗口
     juce::Array<float> snapshotL;
     juce::Array<float> snapshotR;
+    // snapshotL[0] 的绝对样本索引：抽点渲染按它对齐相位，慢放时画面不会在
+    //   几种抽点形状之间来回闪（见 buildGlSnapshot 的 pushWave）
+    juce::int64 snapshotBaseIndex = 0;
 
-    // 频段权重（与 snapshot 同长；仅 xyBandActive 时有效）
+    // 三频段分离结果（与 snapshot 同长；仅 xyBandActive 时有效）
     y2k::bands::BandSplitter splitter;
-    std::vector<float> wLow, wMid, wHigh;
+    std::vector<float> lowL, lowR, midL, midR, highL, highR;
     double splitterRate = 0.0;
+
+    // 散点残影：累计 dt 用于按帧率无关的衰减（与 StereoField 同策略）
+    static constexpr float kTrailDecayPerFrame = 0.92f;
+    float trailDtAccumSec = 0.0f;
+    bool  trailNeedsClear = true;   // 切换模式 / 开关染色 / 改分频后要求清一次 trail
 
     // 按住慢放
     HoldSlowMo hold;
@@ -152,7 +164,6 @@ private:
     int   lastDrawnSampleCount = -1;
     float lastDrawnFingerprint[6] { 0, 0, 0, 0, 0, 0 };
     DisplayMode lastDrawnMode = DisplayMode::waveform;
-    float       lastDrawnGhost = 0.0f;
 
     // XY / Lissajous 自动缩放（v1.8.5）
     float autoGainFactor              = 1.0f;    // 当前增益系数 [0.1, 10]

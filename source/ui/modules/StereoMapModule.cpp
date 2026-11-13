@@ -188,7 +188,7 @@ void StereoMapModule::restoreModuleSpecificState (const juce::ValueTree& state)
 
 void StereoMapModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
-    out.push_back (ParamDef::choice ("mode", "Mode",
+    out.push_back (ParamDef::choice ("mode", "Map mode",
         { "Pan", "Mono check" },
         "Pan: where each frequency band sits in the stereo field - up = left, middle = centre, down = right. "
         "Mono check: how much of each band survives when summed to mono - top is safe, bottom is heavy cancellation.")
@@ -353,16 +353,35 @@ void StereoMapModule::computeStereoMap (float dtSec)
     if (sizeMismatch || cancelMismatch)
         return;
 
-    const float alpha = juce::jlimit (0.10f, 0.58f, juce::jmax (0.0f, dtSec) * 12.0f);
+    const float dt = juce::jmax (0.0f, dtSec);
+    // 上升沿（attack）走实时；按住时下降沿（release）做 1/50 时间膨胀
+    //   —— 与 SpectrumModule 的子弹时间语义一致：只拖慢回落，不拖慢跟上信号。
+    const float dtRelease = bulletTimeActive ? dt / kBulletTimeSlowdown : dt;
+    const float alphaUp   = juce::jlimit (0.10f, 0.58f, dt * 12.0f);
+    const float alphaDown = bulletTimeActive ? juce::jlimit (0.002f, 0.58f, dtRelease * 12.0f) : alphaUp;
     // 抵消比是"两路比值的比值"，天然比幅度更抖；单独用一条更慢的平滑。
-    const float alphaCancel = juce::jlimit (0.08f, 0.40f, juce::jmax (0.0f, dtSec) * 8.0f);
+    const float alphaUpC   = juce::jlimit (0.08f, 0.40f, dt * 8.0f);
+    const float alphaDownC = bulletTimeActive ? juce::jlimit (0.0015f, 0.40f, dtRelease * 8.0f) : alphaUpC;
+
+    // 幅度类量（强度 / 电平 / 抵消量）：上升快、下降慢 —— 按住时只拖慢回落。
+    auto follow = [] (float cur, float target, float aUp, float aDown) noexcept
+    {
+        return (target > cur) ? cur + (target - cur) * aUp
+                              : cur + (target - cur) * aDown;
+    };
+
+    // 声像是**有符号**量（-1 左 … +1 右），不能按"值变大 = attack"来分：
+    //   那样向上的移动实时、向下的移动被拖慢 50 倍，曲线会一路往上漂、全挤到中线上方。
+    //   这里两个方向用同一个系数：按住时整体放慢（子弹时间），松手恢复。
+    const float alphaPan = bulletTimeActive ? juce::jlimit (0.002f, 0.58f, dtRelease * 12.0f) : alphaUp;
+
     for (int i = 0; i < bandCount; ++i)
     {
-        panByBand[(size_t) i] += (targetPan[(size_t) i] - panByBand[(size_t) i]) * alpha;
-        strengthByBand[(size_t) i] += (targetStrength[(size_t) i] - strengthByBand[(size_t) i]) * alpha;
-        levelDbByBand[(size_t) i] += (targetLevelDb[(size_t) i] - levelDbByBand[(size_t) i]) * alpha;
+        panByBand[(size_t) i]      += (targetPan[(size_t) i] - panByBand[(size_t) i]) * alphaPan;
+        strengthByBand[(size_t) i] = follow (strengthByBand[(size_t) i], targetStrength[(size_t) i], alphaUp,  alphaDown);
+        levelDbByBand[(size_t) i]  = follow (levelDbByBand[(size_t) i],  targetLevelDb[(size_t) i],  alphaUp,  alphaDown);
         if (wantCancel)
-            cancelByBand[(size_t) i] += (targetCancel[(size_t) i] - cancelByBand[(size_t) i]) * alphaCancel;
+            cancelByBand[(size_t) i] = follow (cancelByBand[(size_t) i], targetCancel[(size_t) i],   alphaUpC, alphaDownC);
     }
 }
 
@@ -633,6 +652,49 @@ void StereoMapModule::mouseMove (const juce::MouseEvent& e)
     }
 }
 
+void StereoMapModule::mouseDrag (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDrag (e);
+
+    // 按住拖动期间 JUCE 只派发 mouseDrag（mouseMove 被抑制），不同步的话
+    //   十字线与读数会停在按下那一刻的位置不动。
+    const auto canvas = canvasBounds();
+    const auto pos    = e.getPosition();
+    const bool inside = canvas.contains (pos);
+    if (inside != hoverActive || (inside && pos != hoverPos))
+    {
+        hoverActive = inside;
+        hoverPos    = pos;
+        repaint();
+    }
+}
+
+void StereoMapModule::mouseDown (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseDown (e);   // 保留基类行为（toFront / 右键菜单 / 边缘拖拽）
+
+    // 只在"左键按在画布内部（避开边缘缩放热区与抽屉）"时进入子弹时间
+    if (e.mods.isLeftButtonDown()
+        && canvasBounds().contains (e.getPosition())
+        && ! getControlDrawerBounds().contains (e.getPosition()))
+    {
+        bulletTimeActive = true;
+        repaint();
+    }
+}
+
+void StereoMapModule::mouseUp (const juce::MouseEvent& e)
+{
+    ModulePanel::mouseUp (e);
+
+    // 松手即恢复（按下位置不在画布时这里只是无害地写一次 false）
+    if (bulletTimeActive)
+    {
+        bulletTimeActive = false;
+        repaint();   // 去掉"按住才有"的音名读数，不等下一帧
+    }
+}
+
 void StereoMapModule::mouseExit (const juce::MouseEvent& e)
 {
     ModulePanel::mouseExit (e);
@@ -670,7 +732,18 @@ juce::String StereoMapModule::makeCoordReadout (juce::Point<int> pos, juce::Rect
         ? formatPan (panForY ((float) pos.y, plot))
         : formatPercent (compatForY ((float) pos.y, plot));
 
-    return PinkXP::formatFreqHz (freq) + "  " + yText;
+    juce::String text = PinkXP::formatFreqHz (freq) + "  " + yText;
+
+    // 按住（子弹时间）时补音名：曲线慢下来，读数才对得上这个频点的音高
+    //   （与 Spectrum 的悬停读数同一套口径）
+    if (bulletTimeActive)
+    {
+        const juce::String note = PinkXP::noteNameForHz (freq);
+        if (note.isNotEmpty())
+            text += "  " + note;
+    }
+
+    return text;
 }
 
 // 点击态读数：该频率上的真实数据（平滑后的声像 / 抵消量 + 原始电平）

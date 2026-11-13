@@ -70,25 +70,28 @@ namespace y2k::help
                     "- M: momentary LUFS (400 ms window)\n"
                     "- S: short-term LUFS (3 s window)\n"
                     "- I: integrated LUFS (gated, whole programme)\n"
-                    "- Peak L / R: channel peak level\n"
+                    "- TP-L / TP-R: true peak (4x oversampled)\n"
+                    "- RMS-L / RMS-R: average level of each channel\n"
+                    "LED bars or big-number readouts; rows can be hidden behind the gear button.\n"
                     "Integrated resets automatically after a long silence.");
 
             case ModuleType::oscilloscope:
                 return make (name,
                     "Oscilloscope with three views:\n"
-                    "- Wave: classic time-domain waveform\n"
+                    "- Waveform: classic time-domain trace (L / R / both)\n"
                     "- X-Y: left vs right plot (stereo shape)\n"
-                    "- Liss: Lissajous figure\n"
-                    "X-Y and Liss auto-zoom to the signal peak. Freeze holds the picture.");
+                    "- Lissajous: mid / side figure\n"
+                    "X-Y and Liss auto-zoom to the signal peak; both can colour the dots by band.\n"
+                    "Press and hold the picture to slow it down 50x, release to go live.\n"
+                    "Display type and the scatter options sit behind the gear button.");
 
             case ModuleType::spectrum:
                 return make (name,
-                    "Real-time spectrum analyser on a log axis (20 Hz - 20 kHz).\n"
-                    "- Hover the graph to read frequency and level.\n"
+                    "Real-time spectrum analyser (20 Hz - 20 kHz, log / mel / linear axis).\n"
+                    "- Hover the graph to read frequency and level (plus the note name while holding).\n"
                     "- Press and hold the mouse on the graph for bullet time: the "
                     "fall-off slows to 1/50 speed (ghost colour) until you release.\n"
-                    "- Peak / Sharp / curve style / channel view buttons on top.\n"
-                    "Resolution follows FFT Size in the bottom toolbar.");
+                    "Peak hold, sharpening, slope, curve style, channel view and FFT scale all sit behind the gear button.");
 
             case ModuleType::phase:
                 return make (name,
@@ -96,13 +99,15 @@ namespace y2k::help
                     "- Goniometer: mid / side vector scope of L and R\n"
                     "- Correlation: +1 mono-safe, 0 very wide, -1 out of phase\n"
                     "- Width and Balance bars\n"
+                    "Each view can be shown or hidden behind the gear button.\n"
                     "A needle that sits below 0 means parts will cancel in mono.");
 
             case ModuleType::dynamics:
                 return make (name,
-                    "Dynamics overview: Peak and RMS for L / R, crest factor "
-                    "(peak minus RMS) and dynamic range (DR) with history.\n"
-                    "Hover the graph to read values.");
+                    "Dynamics overview: peak and RMS bars for L / R, crest factor (peak minus RMS),\n"
+                    "dynamic range (DR) and a crest history graph.\n"
+                    "Every row can be switched off; the history span sits behind the gear button.\n"
+                    "Hover the history graph to read values.");
 
             case ModuleType::lufsRealtime:
                 return make (name,
@@ -155,35 +160,36 @@ namespace y2k::help
             case ModuleType::waveform:
                 return make (name,
                     "Scrolling waveform history.\n"
-                    "- Colour button: PITCH / LOUD / SIB colouring.\n"
-                    "- Freeze: pause scrolling.\n"
-                    "- SPEED: scroll speed in pixels per second.\n"
-                    "Hover to read time and level.");
+                    "- Colouring: pitch / loudness / sibilance.\n"
+                    "- Press and hold the picture to freeze it, release to continue from live.\n"
+                    "Speed, dual-channel split and the sibilance threshold sit behind the gear button.\n"
+                    "Hover to read time and level (the note name appears while frozen).");
 
             case ModuleType::vuMeter:
                 return make (name,
                     "Analogue-style VU needle (combined L + R RMS, dBFS).\n"
                     "Fast rise, slow mechanical fall - like a real VU.\n"
+                    "Dial style, needle style and the signal LED sit behind the gear button.\n"
                     "LED: off = no signal, green = signal, red = hot.");
 
             case ModuleType::spectrogram:
                 return make (name,
-                    "Pixel spectrogram: frequency (vertical) over time (scrolling).\n"
-                    "- Mode: - Classic / + Sharp / ++ Sharper.\n"
-                    "- SPEED: scroll speed.\n"
-                    "Hover to read frequency.");
+                    "Pixel spectrogram: frequency over time, scrolling continuously.\n"
+                    "- Press and hold the picture to freeze it, release to continue from live.\n"
+                    "Direction, sharpening, scroll speed, colour scheme and FFT scale sit behind the gear button.\n"
+                    "Hover to read frequency and time (the note name appears while frozen).");
 
             case ModuleType::spectrogram3d:
                 return make (name,
                     "3D spectrum waterfall seen from above - recent spectra roll "
                     "back into the distance.\n"
-                    "- TINT: colour peaks with the theme (off = blue-to-red heat map).\n"
-                    "- SPEED: scroll speed.");
+                    "Colour mode, depth direction and scroll speed sit behind the gear button.");
 
             case ModuleType::stereoField:
                 return make (name,
                     "Stereo field radar. Direction = L / R balance, distance = level.\n"
-                    "Auto-scales to the recent peak; the dB rings show the current scale.");
+                    "Auto-scales to the recent peak; the dB rings show the current scale.\n"
+                    "Dot size, fade speed and three-band colouring sit behind the gear button.");
 
             case ModuleType::stereoMap:
                 return make (name,
@@ -191,7 +197,8 @@ namespace y2k::help
                     "- PAN: where each band sits (up = left, down = right).\n"
                     "- MONO: how much of each band survives a mono fold-down "
                     "(lower = more cancellation).\n"
-                    "Hover for a ruler, click for a readout bubble.");
+                    "Press and hold for bullet time and a note-name readout.\n"
+                    "Hover for a ruler; click for a data bubble. Mode and FFT scale sit behind the gear button.");
 
             case ModuleType::virtuPet:
                 return make (name,

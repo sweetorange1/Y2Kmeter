@@ -27,7 +27,7 @@
 
 1. `CMakeLists.txt`：`project(Y2Kmeter VERSION x.y.z)` + 两个 `juce_add_plugin(... VERSION x.y.z)`（共 3 处）。
 2. `Y2Kmeter_installer.iss`：`MyAppVersion` 等版本字段。
-3. `PluginEditor.cpp`：`"vx.y.z"` 字面量 3 处 —— `getStringWidth` 一处（含 debug/正式两变体）+ `versionText` 两处。当前约 1055/1056、1098、4629 行（行号会漂移，以 `grep "v3.1.0"` 为准）。
+3. `PluginEditor.cpp`：`"vx.y.z"` 字面量 3 处 —— `getStringWidth` 一处（含 debug/正式两变体）+ `versionText` 两处。当前约 1055/1056、1098、4629 行（行号会漂移，以 `grep "v3.2.0"` 为准）。
 4. `README.md` 徽章、文档版本声明（`PROJECT_OVERVIEW.md` §1.1）。
 
 ## 4. `ModuleType` 枚举规则

@@ -1153,6 +1153,23 @@ namespace PinkXP
         return juce::String((int) std::lround(hz)) + " Hz";
     }
 
+    juce::String noteNameForHz(float hz)
+    {
+        if (! std::isfinite(hz) || hz < 16.0f || hz > 20000.0f)
+            return {};
+
+        static const char* names[12] = { "C", "C#", "D", "D#", "E", "F",
+                                         "F#", "G", "G#", "A", "A#", "B" };
+        const float midi = 69.0f + 12.0f * std::log2(hz / 440.0f);
+        if (! std::isfinite(midi) || midi < 12.0f || midi > 132.0f)
+            return {};
+
+        const int n   = juce::roundToInt(midi);
+        const int pc  = ((n % 12) + 12) % 12;
+        const int oct = n / 12 - 1;
+        return juce::String(names[pc]) + juce::String(oct);
+    }
+
     // ==========================================================
     // 前景色可读性兜底（WCAG 相对亮度 / 对比度）
     // ==========================================================
@@ -2872,6 +2889,90 @@ void PinkXPLookAndFeel::drawPopupMenuBackground(juce::Graphics& g, int width, in
     }
 
     PinkXP::drawRaised(g, { 0, 0, width, height }, PinkXP::btnFace);
+}
+
+void PinkXPLookAndFeel::drawScrollbar(juce::Graphics& g, juce::ScrollBar& bar,
+                                      int x, int y, int width, int height,
+                                      bool isScrollbarVertical,
+                                      int thumbStartPosition, int thumbSize,
+                                      bool isMouseOver, bool isMouseDown)
+{
+    juce::ignoreUnused (bar);
+
+    const juce::Rectangle<int> track (x, y, width, height);
+    if (track.isEmpty())
+        return;
+
+    // 轨道：比底色略深的凹槽 + 1px 内框（像素风，硬边不圆角）
+    g.setColour (PinkXP::content.darker (0.05f));
+    g.fillRect (track);
+    g.setColour (PinkXP::ink.withAlpha (0.18f));
+    g.drawRect (track, 1);
+
+    if (thumbSize <= 0)
+        return;
+
+    auto thumb = isScrollbarVertical
+                   ? juce::Rectangle<int> (x, y + thumbStartPosition, width, thumbSize)
+                   : juce::Rectangle<int> (x + thumbStartPosition, y, thumbSize, height);
+
+    // 轨道内缩 1px，滑块与边框之间留一点缝隙
+    thumb = thumb.reduced (1);
+    if (thumb.isEmpty())
+        return;
+
+    const auto base = isMouseDown ? PinkXP::pink600
+                     : isMouseOver ? PinkXP::pink500
+                                   : PinkXP::pink400;
+
+    g.setColour (base);
+    g.fillRect (thumb);
+    g.setColour (PinkXP::ink.withAlpha (0.55f));
+    g.drawRect (thumb, 1);
+
+    // 左上 1px 高光：XP 凸起质感
+    g.setColour (PinkXP::hl.withAlpha (0.75f));
+    if (isScrollbarVertical)
+        g.fillRect (thumb.getX() + 1, thumb.getY() + 1, thumb.getWidth() - 2, 1);
+    else
+        g.fillRect (thumb.getX() + 1, thumb.getY() + 1, 1, thumb.getHeight() - 2);
+}
+
+void PinkXPLookAndFeel::drawScrollbarButton (juce::Graphics& g, juce::ScrollBar& bar,
+                                             int width, int height, int buttonDirection,
+                                             bool isScrollbarVertical,
+                                             bool shouldDrawButtonAsHighlighted,
+                                             bool shouldDrawButtonAsDown)
+{
+    juce::ignoreUnused (bar, isScrollbarVertical);
+
+    const juce::Rectangle<int> r (0, 0, width, height);
+    if (r.isEmpty())
+        return;
+
+    // 底色：正常 / 悬停 / 按下（全部取主题色，不再走 ScrollBar 的默认蓝灰）
+    g.setColour (shouldDrawButtonAsDown        ? PinkXP::pink300
+               : shouldDrawButtonAsHighlighted ? PinkXP::btnFace.brighter (0.06f)
+                                               : PinkXP::btnFace);
+    g.fillRect (r);
+    g.setColour (PinkXP::ink.withAlpha (0.35f));
+    g.drawRect (r, 1);
+
+    // 小三角箭头（ink）
+    const float cx = (float) r.getCentreX();
+    const float cy = (float) r.getCentreY();
+    const float t  = juce::jlimit (2.0f, 4.5f, (float) juce::jmin (width, height) * 0.30f);
+
+    juce::Path tri;
+    switch (buttonDirection)
+    {
+        case 0:  tri.addTriangle (cx, cy - t, cx - t, cy + t, cx + t, cy + t); break;   // 上
+        case 1:  tri.addTriangle (cx + t, cy, cx - t, cy - t, cx - t, cy + t); break;   // 右
+        case 2:  tri.addTriangle (cx, cy + t, cx - t, cy - t, cx + t, cy - t); break;   // 下
+        default: tri.addTriangle (cx - t, cy, cx + t, cy - t, cx + t, cy + t); break;   // 左
+    }
+    g.setColour (PinkXP::ink.withAlpha (0.85f));
+    g.fillPath (tri);
 }
 
 void PinkXPLookAndFeel::drawPopupMenuItem(juce::Graphics& g, const juce::Rectangle<int>& area,

@@ -77,7 +77,9 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 - **入口**：标题栏 `[齿轮][弹出][关闭]`。仅 `setControlPanelEnabled(true)` 的模块显示齿轮（不含速度/调性、录音、ProjectM、VirtuPet）。
 - **抽屉**：`ModuleControlDrawer`（`source/ui/ModuleControlDrawer.h/.cpp`）首次点开时懒创建，**覆盖式**盖在内容区顶部，高度上限 = 内容区 80%（超出内部滚动）。不改变画布尺寸 —— Spectrogram 改尺寸会 `ensureGrid` 清历史，所以抽屉绝不挤占画布。
 - **展开状态不进存档**，加载后一律收起；布局锁定时仍可调（不是布局操作）；浮动窗口里同样可用。
+- **点击别处自动收起**：抽屉打开时把 `DrawerDismissListener` 挂到当前窗口的 topLevel（`addMouseListener(..., true)`，窗口内任何组件的鼠标按下都会通知到），命中规则在 `ModulePanel::closeOpenControlDrawers(source, pos)`：点在抽屉内部（含子控件）或任一模块的齿轮按钮上不关，其余位置一律收起；**同时只允许开一个抽屉**（`setControlPanelOpen(true)` 会先关掉别人的）。抽屉全关时监听自动摘掉，平时零开销。
 - **Toybox**：抽屉及其子控件标记 `toy.optOut`，点击不触发彩蛋；按住慢放的 `mouseDown` 也排除抽屉区域。
+- **绘制层级：抽屉 > emoji**。抽屉是模块子组件，而彩蛋有两处绘制都在子组件之上 —— 模块内的 `ModulePanel::paintOverChildren` 与飞出模块的全窗口 `ToyOverlay::paint`。两处都用 `Graphics::excludeClipRegion` 扣掉 `getControlDrawerBounds()`（overlay 侧用 `getLocalPoint` 把各模块的抽屉换算到叠加层坐标），emoji / 粒子经过抽屉时自动"钻到面板后面"，不会再盖住设置界面。
 - **声明方式**（`ModuleWorkspace.h` 里的 `ParamDef` / `ModulePanel`）：模块覆写 `buildParamDefs / getParamValue / setParamValue`，抽屉据此生成控件（`choice` 互斥按钮、`toggle` ON/OFF、`slider` 横向滑条）。支持分组（`.in("组名")`）、条件可见（`.when(lambda)`）、悬停提示（`y2k::help::make`）。
 - **`ParamDef.id` 同时是存档键，改名即破坏兼容。** 外部改了参数（`restoreModuleSpecificState` / 预设）后要调 `refreshControlPanel()`。
 - 所有面板文案都进 `i18n/zh-CN.lang`（v3.1 追加 135 条，位于文件末尾的「v3.1 模块控制面板」段）。
@@ -90,7 +92,7 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 | --- | --- | --- |
 | `loudness` | `lufs_realtime` | `style=1`（数字读数），仅 M / S / I |
 | | `true_peak` | `style=1`，仅 TP + RMS |
-| `oscilloscope` | `oscilloscope_wave`（含 `oscilloscope_left/right`） | `displayMode=0`（波形）、`waveChannel=2`（双）、`waveColour=1`（粉色，复刻原配色） |
+| `oscilloscope` | `oscilloscope_wave`（含 `oscilloscope_left/right`） | `displayMode=0`（波形）、`waveChannel=2`（双） |
 | `phase` | `phase_correlation` | 仅 `itemCorr` |
 | | `phase_balance` | 仅 `itemWidth` + `itemBal`，`barStyle=1`（实心） |
 | `dynamics` | `dynamics_meters` | 仅 `itemPeak` + `itemRms` |
@@ -119,15 +121,15 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 | 模块 | 参数 |
 | --- | --- |
 | 响度 `loudness` | `style`（灯条 / 数字读数）、`itemM` `itemS` `itemI` `itemTp` `itemRms` |
-| VU `vuMeter` | `dialStyle`（Classic / Dark / Minimal）、`needleStyle`（Line / Wedge / Stereo L/R）、`showLed` |
-| 示波器 `oscilloscope` | `displayMode`（波形 / X-Y / 李萨如）、`waveChannel`（L / R / 双）、`waveColour`（Classic / Pink）、`bandColour`（频段染色，仅 X-Y / 李萨如）、`crossLow` `crossHigh`、`autoGain`、`showRings` |
-| 频谱 `spectrum` | `peakHold`、`sharp`、`curve`（Smooth / Semi / Raw）、`channel`（Mid / Mid+Side / L+R）、`fftScale` |
+| VU `vuMeter` | `dialStyle`（**三种结构不同的表盘**：Half circle / Arc / Trapezoid=楔形刻度）、`needleStyle`（Thin line / Wedge / Stereo L/R）、`showLed` |
+| 示波器 `oscilloscope` | `displayMode`（波形 / X-Y / 李萨如）、`waveChannel`（L / R / 双）、`bandColour`（三路点云染色，仅 X-Y / 李萨如）、`crossLow` `crossHigh`（默认 200 / 2000 Hz）、`dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`autoGain`、`showRings`（波形配色固定跟随主题 `chartRamp`；旧存档的 `waveColour` 键被忽略） |
+| 频谱 `spectrum` | `peakHold`、`sharp`、`slope`（0–12 dB/oct，默认 4.5 = 旧 SLOPE 开关"开"；0 = 关；旧存档的布尔 `slope` 读档时迁移为 4.5 / 0）、`curve`（Smooth / Semi / Raw）、`channel`（Mid / Mid+Side / L+R）、`fftScale` |
 | 相位 `phase` | `itemGonio` `itemCorr` `itemWidth` `itemBal`、`gonioStyle`（点阵 / 轨迹）、`barStyle`（像素格 / 实心） |
 | 动态 `dynamics` | `itemPeak` `itemRms` `itemDrShort` `itemDrInt` `itemCrest` `itemHist`、`style`（大数字 / 进度条+数字）、`histSpan`（1–35 s，原先不持久化） |
 | 语谱图 `spectrogram` | `direction`（左 / 右 / 上 / 下）、`speed`（5–120 px/s，原先不持久化）、`shaper`（Classic / Sharp / Sharper）、`colour`（Theme / Heat / Grey / Ice）、`fftScale` |
 | 语谱图 3D `spectrogram3d` | `colourMode`（Theme / Heat / Grey / Ice）、`depthDir`（右后方 / 左后方）、`speed` |
 | 波形历史 `waveform` | `colorSource`（Pitch / Loudness / Sibilance）、`sibThreshold`（-60…-10 dB，默认 -35）、`speed`、`dual`（上 L / 下 R 双声道） |
-| 立体声场 `stereoField` | `dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`bandColour`、`crossLow` `crossHigh` |
+| 立体声场 `stereoField` | `dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`bandColour`（三路独立轨迹）、`crossLow` `crossHigh`（默认 200 / 2000 Hz） |
 | 立体声频段图 `stereoMap` | `mode`（Pan / Mono check）、`fftScale` |
 
 「Display style / 项目开关」类参数的默认值都是该模块旧外观；颜色相关的固定配色（Heat / Grey / Ice、频段染色红绿蓝）不随主题变化。
@@ -139,16 +141,20 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 - **只改横轴排布，不改 FFT 尺寸**；FFT size 仍是 Hub 全局唯一，由工具栏 `FFT Size` 控制。
 - 改 scale 会让频谱的平滑缓存、斜率补偿缓存、语谱图网格全部作废并重建（列对应的频率变了，旧列不可复用）。
 
-### 7.6 按住慢放（示波器、波形历史，取代 Freeze 按钮）
+### 7.6 按住交互（示波器慢放 / 波形历史、语谱图冻结，取代 Freeze 按钮）
 
-- `source/ui/HoldSlowMo.h`：共享状态机，`kSlowdown = 50`（与 `SpectrumModule::bulletTimeSlowdown` 一致）、`kGhostFadeSec = 0.6`；按住时曲线混向残影色（`PinkXP::sel`，与频谱同色），**松手直接回实时**，残影色线性渐隐。频谱模块保留自己的实现（它的「慢放」只是回落沿拉长，语义不同）。
+- `source/ui/HoldSlowMo.h`：共享状态机，`kSlowdown = 50`（与 `SpectrumModule::bulletTimeSlowdown` 一致）；**松手直接回实时**。慢放 / 冻结本身不改变配色（残影变色已取消，画面始终用模块正常配色）。频谱模块保留自己的实现（它的「慢放」只是回落沿拉长，语义不同）。
+- **语谱图同样是「完全冻结」**：按住画布左键时 `onFrame` 只对齐 `lastFrameMs`（避免松手后 dt 攒成一大坨、一次补好几列），不采样、不推进新列；按下瞬间把 `columnAccumulator` 清零，画面当场停住。松手从当前时刻继续滚动，冻结期间的频谱不补播。
 - `source/analysis/OscHistory.h`：示波器样本的长环形历史，容量 2^18（48 kHz ≈ 5.5 s，96 kHz ≈ 2.7 s）。用 `oscTotalSamples` 做差在 UI 线程接续新增样本；**只在按住期间分配并录制**，不按住零成本。慢放读指针只落后实时，超容量时被夹回最老可读位置。
-- Waveform 里读指针按「被拉长 50 倍的时间」推进，喂给原有的列聚合（`pushHistorySamples`）；松手时样本游标对齐到最新位置，慢放期间未消费的样本被跳过。
+- **波形历史是「完全冻结」而不是慢放**：按住期间 `onFrame` 只同步实时游标（`lastOscTotal`）、不消费任何样本；按下瞬间还会清空待写列与半列累加，保证画面当场停住。松手后从最新位置继续滚动，冻结期间的样本直接跳过（不补播）。因此波形历史不再使用 `OscHistory`（长历史只服务示波器）。
+- **示波器抽点必须按绝对样本索引对齐**（`snapshotBaseIndex`）：波形折线是「每 stride 个样本取 1 点」画的（stride ≈ 窗口样本数 / 画布宽度，2048 px 窗口下约 5）。慢放时窗口每帧只前进十几个样本，若按「窗口第 0 个样本」开始抽点，抽到的样本每帧换一批，同一波形被抽成两三种不同形状 —— 现场表现为「大量毛刺 + 两个状态来回闪」。把抽点集合锁到样本流上（`(base + i) % stride == 0`）后只剩平移，形状不再跳。X-Y / 李萨如走全点散点，不受影响。
+- **悬停读数里的音名**：语谱图在冻结时、频谱在按住（子弹时间）时，读数末尾追加鼠标所在频率的音名（`PinkXP::noteNameForHz`，十二平均律 A4 = 440 Hz）。不按住时语谱图不显示音名 —— 画面在滚动，同一点的数值会一直变，这是和波形历史保持一致的口径。三个模块的悬停都重写了 `mouseDrag`，按住拖动时十字线与读数持续跟随鼠标（JUCE 在按住期间只派发 `mouseDrag`）。
 - 老存档里的 `frozen=1` 丢弃，加载后为未冻结（新设计没有锁存式冻结）。
 
 ### 7.7 频段染色与齿音阈值
 
-- `source/analysis/BandSplit.h`（`y2k::bands::BandSplitter`）：LR4 三频段分离（默认 250 Hz / 4 kHz，面板可调）→ 逐样本能量权重 → 固定红（低）/ 绿（中）/ 蓝（高）按权重混色。**仅开启 `bandColour` 时才计算**，示波器 X-Y / 李萨如与立体声场共用。状态跨帧保持，在 UI 线程分发器里算，不碰音频线程。
+- `source/analysis/BandSplit.h`（`y2k::bands::BandSplitter`）：LR4 三频段分离（默认 200 Hz / 2 kHz，面板可调）→ **输出三路独立的 L/R 信号**（低 = LP(f1)、中 = HP(f1)→LP(f2)、高 = HP(f2)，三路互斥）。显示层不再按能量混色，而是像 MiniMeters Stereometer 那样**每路画一层纯色点云**：低 = 红 `#E60045`、中 = 蓝紫 `#665AFF`、高 = 青 `#00FFFF`。**仅开启 `bandColour` 时才计算**，示波器 X-Y / 李萨如与立体声场共用；窗口式无状态调用，在 UI 线程分发器里算，不碰音频线程。**每次把染色开关从关拨到开，两个分频点都会复位成默认的 200 / 2000 Hz**（避免上次调过的分频点让三色分布看起来"不对"）；读档不触发复位，仍按存档值恢复。
+- 三路点云的残影：示波器散点用 1 层持久 trail（点大小 / 消失速度可调）；立体声场 `trailLayers = 3`，每层独立 FBO（GL）或独立离屏图（CPU 回退），颜色不会互相污染。
 - `SibilanceDetector`：`kThresholdDb` 常量改为可设成员 `setThresholdDb()`（默认仍 -35 dB，迟滞 -4 dB 不变），运行时改不重置滤波器 / 包络。波形历史双声道模式下左右各用一个检测器，各自只看自己的声道。
 
 ### 7.8 订阅生命周期与共享
@@ -178,3 +184,36 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 3. `saveModuleSpecificState` 写出新键，`restoreModuleSpecificState` 用 `hasProperty` 判断后再赋值（**缺键不覆盖**），末尾调 `refreshControlPanel()`。
 4. 若参数会改变画布网格 / 缓存（如语谱图方向），在 setter 里让对应缓存失效并重建快照；GL 与 legacy 两条绘制路径都要跟着改。
 5. 参数默认值必须等于该模块旧外观。
+
+### 7.12 语谱图的低速滚动（子列偏移）
+
+滚动速度 = `pixelsPerSecond`（px/s），而新列只在「累计够一整列（`cellPx` 像素）」时才写入。低速度时一列要好几百毫秒才凑够，若画面只在写列那一帧整列跳一次，视觉上就是「每动一下闪一下」（< 30 px/s 尤其明显，约 5–7 Hz）。
+
+做法：`columnAccumulator` 减掉整数列后剩下的**小数**当作子列偏移（0..1），喂给滚动窗口 —— GL 走 `snap->texScrollU = (writeCol + frac) / (cols*2)`，CPU 回退走图像变换原点 `wc = writeCol + frac`。因此 `onFrame` **每帧都要重建快照并 `repaintFrameContent()`**（不能再 `nCols == 0` 时直接 return），新列仍只在整数时刻写入。冻结时保留这段小数偏移，按下瞬间不会跳一格。
+
+GL 的 Right / Up / Down 走「展开纹理」路径（每帧重排整张纹理、没有窗口偏移），暂时还是整列步进 —— 只有 Left（经典方向）享受子列偏移。CPU 回退四个方向都是连续的。
+
+### 7.13 动态模块的「峰值因数历史」列相位
+
+同一类问题的第三个现场：历史环按 120 点/秒写入，跨度为 1–35 s，绘制时把窗口 `N` 个样本按画布宽度分成若干列、每列取**最大值**。旧实现把列边界钉在「窗口起点」上 —— 窗口每推进 1 个样本，同一列统计的样本集合就整体平移一次，峰值会在相邻列之间来回跳。跨度调大（每列覆盖十几个样本）后，肉眼就是「毛刺 + 闪烁」。
+
+修法与示波器抽点一致：新增 `crestHistTotal`（绝对写入序号），**列边界对齐到绝对样本序号** `floor(abs / spc)`，再按窗口左边缘的小数相位 `frac` 平移整条曲线 —— 画面连续滚动，同一列永远是同一批样本。右边缘那半列（超出写入位置）直接跳过，避免曲线尾部掉到 0。
+
+### 7.14 GL 直渲染没有 scissor —— 几何必须自己裁
+
+GL 直渲染模块的顶点是**模块本地坐标**，渲染器只设 `glViewport(0,0,vw,vh)` + 一个平移 / 翻转的 uniform，**没有按模块矩形开 `glScissor`**。所以任何超出画布的几何都会照常画出来，压到旁边的 GL 模块上。
+
+第一个踩到的现场：示波器 X-Y / 李萨如的**标尺环**。半径 = `baseRadius * autoGainFactor`，自动缩放放大（>1）后圆环会超出画布 → 环线画到了邻近模块。修法是在进顶点流之前用 Liang–Barsky 把每个环段裁到 `canvas` 内（`clipSegmentToRect`，裁掉后重新算法线，避免半个 quad 探出边界）。
+
+新写 GL 几何时记住这条：**画布外的部分自己裁**，别指望渲染器兜底；点云这类已经在生成阶段做过 `innerF.contains` 过滤的不受影响。
+
+### 7.15 v3.2 视觉与交互收尾
+
+- **VU 三种表盘**（`dialStyle` 0/1/2，索引与旧存档一致）：
+  - `0` 半圆：底边为直径的 180° 上半圆（原经典外观）；
+  - `1` 弧形：240° 圆表，轴心居中，9px 粗弧轨 + 内外细描边，刻度朝内；
+  - `2` 楔形刻度：老式 VU 扇形 —— 数字在刻度线上方，刻度线**低电平侧长、高电平侧短**（外轮廓即梯形），粗基线沿刻度末端走（警戒段转红），长指针从底边中点扫过；刻度长度按模块高度缩放（`dialGeom.tickLenHi`）。
+  - 指针几何由 `drawDial` 写进 `dialGeom` 缓存，`needleAngleFor / needleLengthFor` 按样式换算（楔形是"尖端位置反算角度 + 距离"）；楔形样式的 LED 挪到右下角（顶部被数字占满）。三种表盘颜色全部取主题（只有警戒红是固定语义色）。
+- **响度灯条读数**：底部数字改用 `PinkXP::pink600`（与「数字读数」样式的大数字同色；深色主题下 pink 阶梯越靠后越亮，所以更清楚）。灯条布局由 `barLayoutArea()` 统一计算：左/上 6px、右/下 2px，刻度列 30 → 22px；静态层、柱区、刻度、标签共用同一份几何。
+- **抽屉滚动条**：`PinkXPLookAndFeel` 补了 `drawScrollbar / drawScrollbarButton`（此前继承 V4 默认的蓝灰滑块 + V2 蓝灰箭头，不跟主题）。轨道 = content 略深 + ink 1px 内框；滑块 pink400 / 500 / 600（常态 / 悬停 / 按下）+ 左上 1px 高光；箭头按钮同色系。全局生效。
+- **悬停说明**：`y2k::help::moduleHelp` 全面校对 —— 响度补 TP / RMS 两行，各模块补上 v3.1 新增参数与"都在齿轮面板里"的位置说明；已合并的旧类型条目保留但永不显示。语言包逐行对齐（91 行帮助文案 0 缺译、938 键 0 重复）。

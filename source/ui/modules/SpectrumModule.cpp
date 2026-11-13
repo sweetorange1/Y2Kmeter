@@ -58,7 +58,8 @@ juce::ValueTree SpectrumModule::saveModuleSpecificState() const
     s.setProperty("channel", juce::String (channelMode == ChannelMode::mid       ? "mid"
                                          : channelMode == ChannelMode::midSide   ? "midside"
                                                                                  : "lr"), nullptr);
-    // 不写 "slope"：Slope 已固定常开，旧存档里的值不再有意义
+    // slope：数值（dB/oct）。旧版是布尔开关，读档时迁移（见 restore）
+    s.setProperty("slope", (double) slopeDbPerOct, nullptr);
     s.setProperty("fftScale", juce::String (fftScale == y2k::fscale::Scale::mel    ? "mel"
                                           : fftScale == y2k::fscale::Scale::linear ? "linear"
                                                                                    : "log"), nullptr);
@@ -95,7 +96,14 @@ void SpectrumModule::restoreModuleSpecificState(const juce::ValueTree& state)
                                     : y2k::fscale::Scale::log);
     }
 
-    // 旧存档兼容：即使记录了 "slope"=false 也忽略 —— Slope 恒开（强制适应新版本）
+    // slope：新存档是数值；旧存档是布尔开关（true = 当年的 4.5 dB/oct，false = 关）
+    if (state.hasProperty("slope"))
+    {
+        const auto v = state.getProperty("slope");
+        setSlopeDbPerOct (v.isBool() ? ((bool) v ? 4.5f : 0.0f)
+                                     : (float) (double) v);
+    }
+
     refreshControlPanel();
 }
 
@@ -145,9 +153,13 @@ void SpectrumModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
     out.push_back (ParamDef::toggle ("peakHold", "Peak hold",
         "Keep a slowly falling line at the highest level each frequency has reached.").in ("Display"));
-    out.push_back (ParamDef::toggle ("sharp", "Sharp (reassigned lines)",
+    out.push_back (ParamDef::toggle ("sharp", "Sharpening",
         "Reassign spectral energy to its true frequency so notes and harmonics collapse "
         "into crisp lines instead of wide humps.").in ("Display"));
+    out.push_back (ParamDef::slider ("slope", "Slope", 0.0, 12.0, 0.5, " dB/oct",
+        "Tilts the curve up towards the highs, 1 kHz is the pivot. 4.5 dB/oct (default) makes "
+        "pink noise look flat; 0 turns the tilt off and shows the raw level.")
+        .in ("Display"));
     out.push_back (ParamDef::choice ("curve", "Curve",
         { "Smooth", "Semi", "Raw" },
         "Smooth: 256 columns with blur - calm. Semi: one point per FFT bin with a spline. "
@@ -167,6 +179,7 @@ double SpectrumModule::getParamValue (const juce::String& id) const
 {
     if (id == "peakHold") return peakHoldEnabled ? 1.0 : 0.0;
     if (id == "sharp")    return sharpEnabled ? 1.0 : 0.0;
+    if (id == "slope")    return (double) slopeDbPerOct;
     if (id == "curve")    return (double) (int) curveMode;
     if (id == "channel")  return (double) (int) channelMode;
     if (id == "fftScale") return (double) (int) fftScale;
@@ -177,6 +190,7 @@ void SpectrumModule::setParamValue (const juce::String& id, double v)
 {
     if      (id == "peakHold") setPeakHoldEnabled (v >= 0.5);
     else if (id == "sharp")    setSharpEnabled (v >= 0.5);
+    else if (id == "slope")    setSlopeDbPerOct ((float) v);
     else if (id == "curve")    setCurveMode ((CurveMode) juce::jlimit (0, 2, juce::roundToInt (v)));
     else if (id == "channel")  setChannelMode ((ChannelMode) juce::jlimit (0, 2, juce::roundToInt (v)));
     else if (id == "fftScale") setFftScale (y2k::fscale::fromIndex (juce::roundToInt (v)));
@@ -195,13 +209,34 @@ void SpectrumModule::setSharpEnabled(bool b)
     repaint();
 }
 
+void SpectrumModule::setSlopeDbPerOct (float v)
+{
+    v = juce::jlimit (0.0f, 12.0f, v);
+    if (std::abs (v - slopeDbPerOct) < 0.01f)
+        return;
+
+    slopeDbPerOct = v;
+
+    // 补偿量变了：斜率缓存、平滑状态、峰值、谱线全部作废，从下一帧按新补偿重算
+    //   （不清的话旧值是按旧斜率算出来的，会慢慢"漂"到新位置）
+    slopeCacheSize = 0;
+    smoothedDb.clear();
+    secondaryDb.clear();
+    peakDb.clear();
+    sharpLines.clear();
+    curve_cache_dirty_ = true;
+
+    buildGlSnapshot();
+    repaint();
+}
+
 // ----------------------------------------------------------
 // Sharper 模式（重分配谱线）
 // ----------------------------------------------------------
 float SpectrumModule::sharpSlopeDb (float freqHz) const noexcept
 {
-    // 与曲线 Slope 补偿同款：4.5dB/oct（基准 1kHz），按精确频率计算
-    return 4.5f * std::log2 (juce::jmax (20.0f, freqHz) / 1000.0f);
+    // 与曲线 Slope 补偿同款（基准 1 kHz，量值来自参数），按精确频率计算
+    return slopeDbPerOct * std::log2 (juce::jmax (20.0f, freqHz) / 1000.0f);
 }
 
 void SpectrumModule::updateSharpLines (const std::vector<AnalyserHub::ReassignedPeak>& peaks,
@@ -229,7 +264,7 @@ void SpectrumModule::updateSharpLines (const std::vector<AnalyserHub::Reassigned
 
     for (const auto& pk : peaks)
     {
-        // Slope 恒开：重分配谱线与主曲线用同一套 4.5dB/oct 补偿
+        // 重分配谱线与主曲线用同一套 Slope 补偿（量值取自参数）
         const float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, pk.mag))
                        + sharpSlopeDb ((float) pk.freqHz);
 
@@ -368,7 +403,7 @@ float SpectrumModule::toyReadDbAtX (float x) const
             const float d = std::abs (smoothedHz[(size_t) i] - freq);
             if (d < best) { best = d; col = i; }
         }
-        slopeDb = 4.5f * std::log2 (juce::jmax (20.0f, smoothedHz[(size_t) col]) / 1000.0f);
+        slopeDb = slopeDbPerOct * std::log2 (juce::jmax (20.0f, smoothedHz[(size_t) col]) / 1000.0f);
     }
     else
     {
@@ -576,7 +611,7 @@ void SpectrumModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 // ----------------------------------------------------------
 // processSeries —— 一路 N 列线性幅度 → N 列 dBFS 显示值
 //   1) 线性 → dB；
-//   2) Slope 补偿（4.5dB/oct，v3.1 起恒开）；
+//   2) Slope 补偿（dB/oct 可调，默认 4.5，0 = 关闭）；
 //   3) 上升快 / 下降慢 EMA（子弹时间只拖慢下降沿）；
 //   4) 圆滑模式：末端轻量 3 列模糊磨圆拐点；
 //      Semi / Raw 模式跳过这一步 —— 该卷积会把孤立尖峰
@@ -609,7 +644,7 @@ void SpectrumModule::processSeries (const juce::Array<float>& mags,
         const float mag = std::abs (mags.getUnchecked (col));
         float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
 
-        // Slope 补偿：4.5 dB/oct 高频提升（基准 1kHz）
+        // Slope 补偿：dB/oct 可调（默认 4.5，基准 1 kHz；0 = 关闭）
         if ((int) slopeOffsetDb.size() == N)
             db += slopeOffsetDb[(size_t) col];
 
@@ -743,7 +778,7 @@ void SpectrumModule::processBinSeries (const juce::Array<float>& mags, double hz
         freqs[(size_t) idx] = fCenter;
 
         float db = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
-        db += 4.5f * std::log2 (juce::jmax (20.0f, fCenter) / 1000.0f);   // slope
+        db += slopeDbPerOct * std::log2 (juce::jmax (20.0f, fCenter) / 1000.0f);   // slope
 
         const float prev  = state[(size_t) idx];
         const float alpha = (db > prev) ? alphaUp : alphaDown;
@@ -830,6 +865,7 @@ void SpectrumModule::ensureDisplayCache (int numPoints)
     if (slopeCacheSize == numPoints
         && slopeCacheScale == fftScale
         && std::abs (slopeCacheSampleRate - sampleRate) <= 0.5
+        && std::abs (slopeCacheDbPerOct - slopeDbPerOct) < 0.01f
         && (int) slopeOffsetDb.size() == numPoints)
     {
         return;
@@ -845,12 +881,13 @@ void SpectrumModule::ensureDisplayCache (int numPoints)
         const double t = (double) col / (double) juce::jmax (1, numPoints - 1);
         const double f = y2k::fscale::fromUnit (fftScale, t, fMin, fMax);
         const double octaves = std::log2 (juce::jmax (20.0, f) / 1000.0);
-        slopeOffsetDb[(size_t) col] = (float) (4.5 * octaves);
+        slopeOffsetDb[(size_t) col] = (float) (slopeDbPerOct * octaves);
     }
 
     slopeCacheSize = numPoints;
     slopeCacheScale = fftScale;
     slopeCacheSampleRate = sampleRate;
+    slopeCacheDbPerOct = slopeDbPerOct;
 }
 
 // ----------------------------------------------------------
@@ -1409,8 +1446,17 @@ void SpectrumModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canv
                   / juce::jmax(1.0f, (float) canvas.getHeight());
     const float db = minDb + juce::jlimit(0.0f, 1.0f, t) * (maxDb - minDb);
 
-    const juce::String readout = PinkXP::formatFreqHz(freqHz)
-                               + "  " + juce::String(db, 1) + " dBFS";
+    juce::String readout = PinkXP::formatFreqHz(freqHz)
+                         + "  " + juce::String(db, 1) + " dBFS";
+
+    // 按住（子弹时间）时补一个音名：曲线慢下来，读数才对得上这个频点的音高
+    if (bulletTimeActive)
+    {
+        const juce::String note = PinkXP::noteNameForHz(freqHz);
+        if (note.isNotEmpty())
+            readout += "  " + note;
+    }
+
     PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);
 }
 

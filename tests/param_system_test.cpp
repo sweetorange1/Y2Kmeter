@@ -4,12 +4,13 @@
 // 覆盖：
 //   1. FreqScale：log / mel / linear 的 toUnit ↔ fromUnit 互逆、端点、单调；
 //      Log 与旧实现（20 Hz ~ 20 kHz 对数插值）逐点一致（"旧外观"回归保证）。
-//   2. BandSplitter：纯低频 / 中频 / 高频正弦 → 权重分别落在对应频段；
-//      权重和恒为 1；静音落到"中"。
+//   2. BandSplitter：纯低频 / 中频 / 高频正弦 → 三路滤波输出的能量分别落在
+//      对应频段（互斥）；静音三路都无能量；分频点可调；三色为 MiniMeters 默认。
 //
 // 运行：直接执行，全部通过时打印 ALL_OK（返回 0）。
 // ==========================================================
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -100,7 +101,30 @@ void testBandSplit()
     constexpr int n = 2048;
 
     y2k::bands::BandSplitter sp;
-    sp.prepare (fs, 250.0f, 4000.0f);
+    sp.prepare (fs);   // 默认 200 / 2000 Hz（MiniMeters 一致）
+
+    std::vector<float> loL, loR, miL, miR, hiL, hiR;
+
+    // 跳过滤波器起振段，取后半窗口的 RMS
+    auto rms = [] (const std::vector<float>& v)
+    {
+        const size_t start = v.size() / 2;
+        double s = 0.0;
+        for (size_t i = start; i < v.size(); ++i)
+            s += (double) v[i] * v[i];
+        const double cnt = (double) std::max<size_t> (1, v.size() - start);
+        return std::sqrt (s / cnt);
+    };
+
+    auto splitRms = [&] (const std::vector<float>& x, double* out)
+    {
+        loL.resize ((size_t) n); loR.resize ((size_t) n);
+        miL.resize ((size_t) n); miR.resize ((size_t) n);
+        hiL.resize ((size_t) n); hiR.resize ((size_t) n);
+        sp.split (x.data(), x.data(), n,
+                  loL.data(), loR.data(), miL.data(), miR.data(), hiL.data(), hiR.data());
+        out[0] = rms (loL); out[1] = rms (miL); out[2] = rms (hiL);
+    };
 
     struct Case { double f; int dominant; const char* name; };   // 0 低 1 中 2 高
     const Case cases[] = { { 80.0, 0, "80 Hz -> low" }, { 1000.0, 1, "1 kHz -> mid" },
@@ -109,49 +133,47 @@ void testBandSplit()
     for (const auto& c : cases)
     {
         const auto x = sine (fs, c.f, n);
-        std::vector<float> wl, wm, wh;
-        sp.compute (x.data(), x.data(), n, wl, wm, wh);
-
-        // 跳过起振段，取后半窗口的平均权重
         double a[3] = { 0, 0, 0 };
-        int cnt = 0;
-        for (int i = n / 2; i < n; ++i)
-        {
-            a[0] += wl[(size_t) i]; a[1] += wm[(size_t) i]; a[2] += wh[(size_t) i];
-            ++cnt;
-            checkNear (wl[(size_t) i] + wm[(size_t) i] + wh[(size_t) i], 1.0, 1e-4, "weights sum to 1");
-        }
-        for (double& v : a) v /= cnt;
+        splitRms (x, a);
 
-        std::printf ("  %-14s low=%.2f mid=%.2f high=%.2f\n", c.name, a[0], a[1], a[2]);
-        check (a[c.dominant] > 0.6, std::string (c.name) + ": dominant band wins");
+        std::printf ("  %-14s low=%.3f mid=%.3f high=%.3f\n", c.name, a[0], a[1], a[2]);
+        check (a[c.dominant] > 0.2, std::string (c.name) + ": dominant band has energy");
+
+        for (int b = 0; b < 3; ++b)
+            if (b != c.dominant)
+                check (a[c.dominant] > a[b] * 2.0, std::string (c.name) + ": dominant band wins");
     }
 
-    // 静音 → 落在中频
+    // 静音 → 三路都没有能量
     {
         std::vector<float> z ((size_t) n, 0.0f);
-        std::vector<float> wl, wm, wh;
-        sp.compute (z.data(), z.data(), n, wl, wm, wh);
-        checkNear (wm.back(), 1.0, 1e-6, "silence -> mid");
+        double a[3] = { 0, 0, 0 };
+        splitRms (z, a);
+        check (a[0] < 1e-6 && a[1] < 1e-6 && a[2] < 1e-6, "silence -> no band energy");
     }
 
-    // 调整分频点后仍成立：2 kHz 在 (250,4000) 属中频，在 (250,1500) 属高频
+    // 分频点可调：2 kHz 在 (200,4000) 属中频，在 (200,1000) 属高频
     {
         const auto x = sine (fs, 2000.0, n);
-        std::vector<float> wl, wm, wh;
-        sp.setCrossover (250.0f, 1500.0f);
-        sp.compute (x.data(), x.data(), n, wl, wm, wh);
-        check (wh.back() > wm.back(), "crossover change moves 2 kHz into the high band");
+        double a[3] = { 0, 0, 0 };
+
+        sp.setCrossover (200.0f, 4000.0f);
+        splitRms (x, a);
+        check (a[1] > a[2], "crossover change moves 2 kHz into the mid band");
+
+        sp.setCrossover (200.0f, 1000.0f);
+        splitRms (x, a);
+        check (a[2] > a[1], "crossover change moves 2 kHz into the high band");
     }
 
-    // 固定三色
+    // 固定三色（MiniMeters 主题默认）：低 = 红、中 = 蓝紫、高 = 青
     {
-        const auto r = y2k::bands::mix (1.0f, 0.0f, 0.0f);
-        check (r.r > r.g && r.r > r.b, "low = red");
-        const auto g = y2k::bands::mix (0.0f, 1.0f, 0.0f);
-        check (g.g > g.r && g.g > g.b, "mid = green");
-        const auto b = y2k::bands::mix (0.0f, 0.0f, 1.0f);
-        check (b.b > b.r && b.b > b.g, "high = blue");
+        const auto& lo = y2k::bands::kLowRgb;
+        const auto& mi = y2k::bands::kMidRgb;
+        const auto& hi = y2k::bands::kHighRgb;
+        check (lo.r > lo.g && lo.r > lo.b, "low = red");
+        check (mi.b > mi.r && mi.b > mi.g, "mid = purple-blue");
+        check (hi.g > 0.9f && hi.b > 0.9f && hi.r < 0.1f, "high = cyan");
     }
 }
 } // namespace

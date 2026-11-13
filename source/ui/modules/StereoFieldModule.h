@@ -54,7 +54,8 @@ public:
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
     // ---- 持久化 + 控制面板（v3.1）----
-    //   dotSize（px）· fadeSpeed（1 = 旧版衰减速度，越大点消失越快）· bandColour（低/中/高 = 红/绿/蓝）
+    //   dotSize（px）· fadeSpeed（1 = 旧版衰减速度，越大点消失越快）
+    //   bandColour（三路点云各自一条残影：低 = 红 / 中 = 蓝紫 / 高 = 青，同 MiniMeters）
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
     void   buildParamDefs (std::vector<ParamDef>& out) const override;
@@ -115,7 +116,10 @@ private:
     juce::Array<float> snapshotR;
 
     // 渐隐残影离屏图像（ARGB 预乘；每帧 multiplyAlpha 衰减）
-    juce::Image trailImage;
+    //   三频段染色时每层一张（低 / 中 / 高各自一条轨迹，颜色不互相污染）；
+    //   未染色时只用第 0 层。
+    static constexpr int kTrailLayers = 3;
+    juce::Image trailImage[kTrailLayers];
     bool  trailNeedsUpdate = true;
 
     int    themeSubToken = -1;
@@ -130,16 +134,19 @@ private:
     // ---- 控制面板参数（构造默认 = 旧外观）----
     float dotSize    = 2.0f;     // 点边长（px），旧版固定 2×2
     float fadeSpeed  = 1.0f;     // 点消失速度倍率
-    bool  bandColour = false;    // 频段染色：低 / 中 / 高 = 红 / 绿 / 蓝
-    float crossLowHz = 250.0f, crossHighHz = 4000.0f;
+    bool  bandColour = false;    // 频段染色：低 / 中 / 高 = 红 / 蓝紫 / 青（各一层轨迹）
+    float crossLowHz  = y2k::bands::BandSplitter::kDefaultLowCross;    // 200 Hz
+    float crossHighHz = y2k::bands::BandSplitter::kDefaultHighCross;   // 2 kHz
 
     // 一个待绘的点（GL 与 CPU 回退共用同一份几何 / 配色）
-    struct Pt { float x, y; juce::Colour col; };
+    //   layer = 写进哪一层残影（三频段染色时 0/1/2 对应低/中/高）
+    struct Pt { float x, y; juce::Colour col; int layer = 0; };
     void collectPoints (const juce::Rectangle<int>& plot, std::vector<Pt>& out) const;
 
     y2k::bands::BandSplitter splitter;
-    std::vector<float> wLow, wMid, wHigh;
+    std::vector<float> lowL, lowR, midL, midR, highL, highR;
     double splitterRate = 0.0;
+    bool   trailNeedsClear = true;   // 切模式 / 改染色 / 改分频后要求清一次 trail
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StereoFieldModule)
 };
