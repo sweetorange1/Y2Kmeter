@@ -778,8 +778,12 @@ public:
     struct AudioSourceItem
     {
         juce::String displayName;    // 显示给用户看的名字
-        juce::String sourceId;       // 稳定 ID（回调携带，用于宿主 App 识别）
-        bool         isLoopback = false; // 是否"系统输出 Loopback"占位项
+        juce::String sourceId;       // 稳定 ID（回调携带，用于宿主 App 识别）；
+                                     //   空串 = 不可选的提示行（灰显，如 "No apps are playing audio"）
+        bool         isLoopback = false; // 走回环采集（整机输出 / 定向程序）；false = 硬件输入设备
+        juce::StringArray submenuPath;   // 所在子菜单的路径，逐级一个名字；空 = 顶层条目。
+                                         //   如 { "App Audio Capture" } 或 { "App Audio Capture", "All Apps" }。
+                                         //   同一个子菜单的条目必须相邻
     };
 
     // 由 Editor/Standalone App 调用来填充下拉项
@@ -792,6 +796,10 @@ public:
 
     // 用户在下拉里选择后的回调（sourceId 为 setAudioSourceItems 时提供的 ID）
     std::function<void(const juce::String& sourceId, bool isLoopback)> onAudioSourceChanged;
+
+    // 下拉菜单即将弹出：宿主 App 借此刷新动态条目（当前正在运行 / 发声的程序列表），
+    //   在回调里直接调 setAudioSourceItems() 即可，菜单会按新内容弹出。
+    std::function<void()> onAudioSourceListRequested;
 
     // 控制"信号源"下拉 + 前缀标签 + 其左侧分隔线的可见性。
     //   · 用于 VST3 / AU 等插件模式：宿主 DAW 直接给音频，不需要选择信号源，
@@ -1116,8 +1124,23 @@ private:
     // 调色面板（点击预览方块/"+"时在左下角展开；调色板重构，替换旧双色取色器）
     std::unique_ptr<PalettePanel> palettePanel;
 
+    // 弹出前给一次"刷新条目"机会的 ComboBox（JUCE 的 ComboBox 没有 about-to-show 回调；
+    //   鼠标 / 键盘两条触发路径最终都走 showPopup()，在这里拦一次最稳）。
+    class RefreshingComboBox : public juce::ComboBox
+    {
+    public:
+        std::function<void()> onAboutToShowPopup;
+
+        void showPopup() override
+        {
+            if (onAboutToShowPopup)
+                onAboutToShowPopup();
+            juce::ComboBox::showPopup();
+        }
+    };
+
     // 底部工具栏里的音频信号源下拉（位于主题栏与 Hide 按钮之间）
-    juce::ComboBox                 audioSourceBox;
+    RefreshingComboBox             audioSourceBox;
     juce::Array<AudioSourceItem>   audioSourceItems;
     juce::Label                    audioSourceLabel;    // "Source:" 前缀标签
 

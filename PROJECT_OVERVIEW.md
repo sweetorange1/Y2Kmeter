@@ -80,7 +80,7 @@
 
 **⑥ 桌面集成（Standalone 专属）**
 
-- 音频源选择：麦克风 / 桌面系统音频采集（macOS 走 ScreenCaptureKit、Windows 走 WASAPI Loopback）
+- 音频源选择：麦克风 / 桌面系统音频采集（macOS 走 ScreenCaptureKit、Windows 走 WASAPI Loopback）/ **定向程序音频采集**（仅 Windows 10 2004+：Source 下拉的 "App Audio Capture" 子菜单里列出此刻正在出声的程序，其余程序收在末尾的 "All Apps" 二级子菜单，选中后只采该程序连同其子进程的声音，同 OBS 的 Application Audio Capture；详见 §5.2.1）
 - 无边框窗口 + 自定义标题栏（关闭 / 置顶 / 最小化 / 布局锁定 / 双击标题栏全屏）
 - 模块脱离 / 停靠（浮动窗口）、预设导出 / 导入（Save / Load）
 - 自动更新检查、可选匿名遥测、新手引导（右键添加 VirtuPet → 播放音频孵化）
@@ -297,7 +297,8 @@
 | 文件 | 作用 |
 | --- | --- |
 | [Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | 自实现 `juce::JUCEApplication` + `Y2KMainWindow`（DocumentWindow）替换 JUCE 内建的 `StandaloneFilterApp`；启动 → 加载 settings → 创建 Processor+Editor → 绑定 Loopback 音源 → 恢复主题/FPS/位置/尺寸/固定态 |
-| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`，采集"系统默认播放端点"输出，输出统一立体声 float32 |
+| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：裸 WASAPI 回环采集器，输出统一立体声 float32。两种目标共用一条采集循环：① 整机输出（默认）= 默认播放端点 + `AUDCLNT_STREAMFLAGS_LOOPBACK`；② 定向程序（`setTargetProcess("chrome.exe")`）= 进程级回环（`ActivateAudioInterfaceAsync` + `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`），目标没在运行时进入"等待"并持续输出静音，启动后自动接上 |
+| [AppAudioTargets.h/.cpp](/I:/Y2KMeter/source/standalone/AppAudioTargets.h) | Windows：定向程序采集的目标枚举 / 解析（`y2k::appaudio`）。`listCapturableApps()` 返回全量列表（音频会话 + 可见顶层窗口），每项带 `isActive`（有 Active 状态的音频会话 = 此刻正在出声），按 exe 去重、解析到同名进程树根、显示名取版本资源 FileDescription；`resolveTargetProcessId()` 把 exe 名解析成当前该采的 PID。非 Windows 为空实现 |
 | [MacDesktopAudioCapture.h/.mm](/I:/Y2KMeter/source/standalone/MacDesktopAudioCapture.h) | macOS：`ScreenCaptureKit` 获取桌面音频（Objective-C++） |
 | [AudioDumpRecorder.h/.cpp](/I:/Y2KMeter/source/standalone/AudioDumpRecorder.h) | **仅 macOS**，通过环境变量 `Y2KM_AUDIO_DUMP` 系列开启，把音频原样落盘做调试 |
 
@@ -439,6 +440,27 @@ main
      4. 保存 settings
 ```
 
+### 5.2.1 Standalone 音频源（Source 下拉）
+
+`sourceId` 是音频源的稳定标识，同时也是 settings 里 `audio.sourceId` 的持久化值：
+
+| sourceId | 含义 | 实现 |
+| --- | --- | --- |
+| `input:default` | 麦克风 / 默认输入设备 | JUCE `AudioDeviceManager` → `processBlock` |
+| `loopback:default` | 整机输出 | Win `WasapiLoopbackCapture`（端点回环）/ macOS `MacDesktopAudioCapture` / 其他平台虚拟回环输入设备 |
+| `app:<exe 文件名>` | 定向程序（如 `app:chrome.exe`，**仅 Windows 10 2004+**） | `WasapiLoopbackCapture::setTargetProcess` → 进程级回环 |
+
+定向程序采集的要点（改这块前必读）：
+
+- **目标用 exe 文件名而不是 PID**：PID 每次启动都变，exe 名可跨重启持久化。显示名另存 `audio.appDisplayName`（程序没开时读不到版本信息）。
+- **解析到同名进程树根 + `INCLUDE_TARGET_PROCESS_TREE`**：Chrome / Electron 的声音由子进程发出，直接采子进程会漏、采根进程才全。
+- **目标没在运行不算失败**：采集线程进入"等待"（每 2 秒重新解析一次目标），期间按墙钟节奏输出静音（表头归零、波形照滚）；程序启动 / 重启后自动接上。只有系统不支持、或已找到程序却建不起流才算 `start()` 失败 → 弹窗并回退到 `loopback:default`。
+- **进程级回环的虚拟设备不支持 `GetMixFormat`**（`E_NOTIMPL`）：格式由我们指定（float32 立体声，采样率取默认播放端点，与整机回环一致 → 两种模式切换不触发下游重新 `prepare`）。
+- **激活回调必须实现 `IAgileObject`**：`ActivateAudioInterfaceAsync` 在系统工作线程回调，缺这个标记会封送失败。`ProcessLoopbackActivation` 用 WRL 的 `RuntimeClass<ClassicCom, FtmBase, ...>` 实现（与微软示例同一写法）。
+- **程序列表只在下拉弹出前刷新**（`ModuleWorkspace::onAudioSourceListRequested` → Standalone 里重新调 `appaudio::listCapturableApps()`），平时零开销；当前目标即使已退出也保留一项。下拉条目 ID = `audioSourceItems` 下标 + 1，取选中项统一用 `getSelectedId() - 1`。程序列表收在 "App Audio Capture" 子菜单里（`AudioSourceItem::submenuPath` 是子菜单路径（`StringArray`，逐级一个名字），相邻的同路径项归一个子菜单，同一子菜单的条目必须连续添加；子菜单名同时是翻译键；当前选中项在子菜单里时标题也打勾；`sourceId` 为空的条目是灰显提示行，用于"当前没有程序在播放声音"）。
+- **程序列表的口径是"Active 会话"，不是"有会话"**：音频会话建立后只要进程活着就一直是 Inactive、不会过期（实测流全部释放后直到进程退出才 Expired），所以按"未过期会话"列会把 QQ / Discord / Steam 这类开过一次音频就再没出声的程序全列出来。EarTrumpet 源码（`AudioDeviceSessionCollection` / `AudioDeviceSession.State`）本身并不按"是否在出声"过滤，只剔除 Expired / 已断开（`OnSessionDisconnected`、进程退出）/ 被迁到别的设备的会话，而且这些状态是它常驻后台靠事件累积出来的，一次性快照拿不到；所以这里不照搬它，改用 `AudioSessionStateActive` 作为快照下"真正有音频活动"的判据。没在出声的程序（暂停中的播放器、只发提示音的程序、还没碰过音频的程序）不进主列表，统一收在末尾的 "All Apps" 二级子菜单里。
+- 整机回环与定向程序共用同一个采集器对象、同一条 `onAudio` → `AnalyserHub::pushStereo` 链路；换目标时先 `stop()`（同步 join）再 `setTargetProcess()`，不要在采集线程运行期间改 `onAudio`。
+
 ### 5.3 布局持久化流程
 
 ```
@@ -518,8 +540,8 @@ main
 - **Windows**：
   - 强制静态 CRT（`MultiThreaded` / `MultiThreadedDebug`）—— 干净 Win10/11 免装 VC redist。
   - 首次 Editor 可用时 **强制关闭 Direct2D 渲染**（切软光栅/GDI），规避 AMD 驱动在 DLL 卸载时的 loader lock 死锁。
-  - Standalone Loopback 用裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`。
-  - 链接 `ole32 / uuid / avrt`。
+  - Standalone Loopback 用裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`；定向程序采集用进程级回环（Windows 10 2004 / build 19041 起，旧系统下拉里不出现程序列表）。
+  - 链接 `ole32 / uuid / avrt / mmdevapi / version`（后两者：`ActivateAudioInterfaceAsync`、读 exe 版本资源做显示名）。
 - **macOS**：
   - 启用 Objective-C++（`enable_language(OBJCXX)`），仅编译 `.mm` 文件时用。
   - 桌面音频走 `ScreenCaptureKit`（macOS 13+）；链接 `ScreenCaptureKit / AVFoundation / CoreMedia / Foundation`。

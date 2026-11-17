@@ -767,6 +767,10 @@ source/ui/modules/OscilloscopeModule.cpp
   source/standalone/Y2KStandaloneApp.cpp
   source/standalone/WasapiLoopbackCapture.h
   source/standalone/WasapiLoopbackCapture.cpp
+  # 定向程序音频采集（Application Audio Capture）的目标枚举：
+  #   音频会话 + 顶层窗口 → Source 下拉里的程序列表；非 Windows 为空实现
+  source/standalone/AppAudioTargets.h
+  source/standalone/AppAudioTargets.cpp
 
   source/network/Version.h
   source/network/Version.cpp
@@ -843,9 +847,13 @@ target_link_libraries(Y2Kmeter_milkdrop PRIVATE ${Y2KM_COMMON_LINK_LIBS})
 #   · ole32 / uuid —— CoCreateInstance / IID_IMMDeviceEnumerator 等 COM 符号
 #   · avrt         —— AvSetMmThreadCharacteristics（把采集线程提升为 Pro Audio 优先级，
 #                      减少 loopback 丢帧；未启用 loopback 时不会调用，纯开销 0）
+#   · mmdevapi     —— ActivateAudioInterfaceAsync（定向程序采集 = 进程级回环的激活入口）
+#   · version      —— GetFileVersionInfo（读 exe 的 FileDescription 作为程序显示名，
+#                      见 source/standalone/AppAudioTargets.cpp）
+#   两者都是系统自带 DLL（Win8+ / 全版本），不引入新的分发依赖。
 if (WIN32)
-  target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt)
-  target_link_libraries(Y2Kmeter_milkdrop PRIVATE ole32 uuid avrt)
+  target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt mmdevapi version)
+  target_link_libraries(Y2Kmeter_milkdrop PRIVATE ole32 uuid avrt mmdevapi version)
 endif()
 
 # ==========================================================

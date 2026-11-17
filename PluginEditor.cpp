@@ -2232,6 +2232,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     {
         if (onAudioSourceChanged) onAudioSourceChanged (sourceId, isLoopback);
     };
+    workspace->onAudioSourceListRequested = [this]()
+    {
+        if (onAudioSourceListRequested) onAudioSourceListRequested();
+    };
 
     // 4.3) FPS 限制按钮切换 → 修改 AnalyserHub 的 FrameDispatcher 频率
     workspace->onFpsLimitChanged = [this](int hz)
@@ -7108,7 +7112,7 @@ void Y2KmeterAudioProcessorEditor::setAudioSourceItems (
     juce::Array<ModuleWorkspace::AudioSourceItem> ws;
     ws.ensureStorageAllocated (items.size());
     for (const auto& it : items)
-        ws.add ({ it.displayName, it.sourceId, it.isLoopback });
+        ws.add ({ it.displayName, it.sourceId, it.isLoopback, it.submenuPath });
 
     workspace->setAudioSourceItems (ws, selectedSourceId);
 }
