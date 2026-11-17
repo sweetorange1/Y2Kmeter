@@ -75,7 +75,7 @@ Y2Kmeter 项目的通用工程维护 Skill。它不绑定某一个模块，而�
 - `Y2KmeterAudioProcessor` 是分析入口；`Y2KmeterAudioProcessorEditor` 是 UI 壳；`AnalyserHub` 是分析调度中心（6 路分析、按引用计数启用）；`ModuleWorkspace` 是模块容器 + 布局持久化。
 - 新增模块类型：`ModuleType` **只追加不重排**；同步枚举、字符串映射、工厂、默认布局、持久化、`CMakeLists.txt` 源文件列表、性能计数映射。
 - 旧类型（`lufs_realtime` / `true_peak` / `oscilloscope_wave` / `phase_correlation` / `phase_balance` / `dynamics_meters` / `dynamics_dr` / `dynamics_crest`）已合并到新模块，**字符串映射必须保留**，否则旧存档模块会静默丢失。
-- Standalone 采集走 `WasapiLoopbackCapture` / `MacDesktopAudioCapture`，不经过宿主 `processBlock`。
+- Standalone 采集走 `WasapiLoopbackCapture` / `MacDesktopAudioCapture`，不经过宿主 `processBlock`。Windows 的定向程序采集（`app:<exe>`）是同一个采集器的进程级回环模式，约定见 PROJECT_OVERVIEW §5.2.1。
 
 ### 4.2 参数与存档（最容易踩）
 
