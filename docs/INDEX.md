@@ -1,7 +1,8 @@
 # Y2Kmeter AI 知识库（索引）
 
-> 本文件夹是**面向 AI 助手**的项目知识库，与根目录 `PROJECT_OVERVIEW.md`（现状导航）配套。
-> 两者职责划分：
+> **Y2Kmeter** 是一款开源（GPL-3.0）、免费分发的音频分析 / 计量插件：纯"读取 → 计算 → 绘图"型软件，
+> 不修改音频、不含驱动与常驻服务。本文件夹是**面向 AI 助手**的项目知识库，与根目录
+> `PROJECT_OVERVIEW.md`（现状导航）配套。两者职责划分：
 > - `PROJECT_OVERVIEW.md` —— **现状**：产品是什么、架构分层、代码结构、关键类、业务流、核心约定。改动前先读它。
 > - `docs/` —— **开发须知与易错点**：从历史开发过程中提炼出的、对后续开发仍有指导意义的规则 / 约束 / 已知限制 / 待办。按主题拆分，按需查阅。
 >
@@ -20,7 +21,7 @@
 
 ## 关键事实速查（版本 / 目录）
 
-- 当前版本：`3.2.0`（CMakeLists `project(Y2Kmeter VERSION 3.2.0)`）。
+- 当前版本：`3.3.0`（CMakeLists `project(Y2Kmeter VERSION 3.3.0)`）。
 - 构建目录：Release = `cmake-build-release-visual-studio`；诊断包 RelWithDebInfo = `cmake-build-relwithdebinfo-visual-studio-ninja`。
 - vendored JUCE：`third_party/JUCE`（补丁 0001~0006 已打入源码，diff 在 `third_party/juce_patches/`）。
 - 未发布/开发中的模块：`Stereo Map`（`ModuleType::stereoMap`）。

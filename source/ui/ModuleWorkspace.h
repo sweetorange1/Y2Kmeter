@@ -69,7 +69,14 @@ enum class ModuleType
     tempoKey,
 
     // v2.9.9 补充：录音机（红点按钮录制 pre-gain 原始输入，32-bit float WAV）
-    recorder
+    recorder,
+
+    // v3.3：电脑状态（CPU / GPU / 温度 / 内存 / 显存 / 磁盘 / 网络 / 电池），
+    //   数据来自 source/system/SystemStats 后台采集线程，不订阅 AnalyserHub
+    systemMonitor,
+
+    // v3.3：小工具（计算器 / 取色器 / 秒表 / 倒计时 / 音频换算 / 时钟 / 便签）
+    utility
 };
 
 juce::String getModuleDisplayName(ModuleType t);

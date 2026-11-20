@@ -7,7 +7,7 @@
 <p align="center"><strong>Y2K 像素复古音频分析仪</strong> — VST3 / AU / Standalone</p>
 
 <p align="center">
-<img src="https://img.shields.io/badge/version-3.2.0-blue" alt="Version">
+<img src="https://img.shields.io/badge/version-3.3.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
 </p>
@@ -33,9 +33,9 @@
 | **频谱分析** | 对数轴 20Hz~20kHz，双路 FFT（2048 + 8192），dBFS 纵轴，峰值保持 |
 | **频谱瀑布图** | 像素方格风格 Spectrogram，时间×频率 滚动热力图 |
 | **示波器 / 波形** | X-Y / Lissajous / 持续滚动瀑布波形 |
-| **VU 表** | 模拟指针式 VU 表，带峰值灯 |
+| **VU 表** | 指针式（analogue）VU 表，带峰值灯 |
 | **EQ 频谱** | Y2K 主题的 6 段 EQ 频谱可视化（仅显示，不处理音频） |
-| **VirtuPet 电子宠物** | 音频信号驱动的像素小怪，含孵化/觅食/睡眠/生病/死亡完整状态机 |
+| **VirtuPet 电子宠物** | 随音频信号变动的像素小怪，含孵化/觅食/睡眠/生病/死亡完整状态机 |
 | **拼豆像素画** | 用户拖入图片生成拼豆像素画，可贴到桌面背景 |
 | **Milkdrop 可视化** 🔥 | 基于 **libprojectM 4** 原生 OpenGL 渲染，本地打包 1114 个真实 Milkdrop 预设 |
 
@@ -50,7 +50,7 @@ Y2Kmeter v2.1.0 起内置完整 **Milkdrop 可视化引擎**：
 - 66 个基础纹理（来自 projectM 官方 texture pack）
 - 预设切换软渐变（soft-cut 1.0s），支持上一个/下一个/随机/指定
 - 分辨率缩放（1:1 / 1:2 / 1:4）平衡画质与性能
-- 音频实时联动（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）
+- 音频实时联动（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量调制视觉效果）
 - 预设索引持久化（关闭软件后重新打开自动恢复）
 - 100% 本地运行，无需网络，无需 WebView/WebGL
 

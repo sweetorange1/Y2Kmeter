@@ -231,6 +231,21 @@ namespace y2k::help
                     "- SAVE LAST N s: grab the last N seconds from the 60 s buffer.\n"
                     "The folder opens after saving.");
 
+            case ModuleType::systemMonitor:
+                return make (name,
+                    "Computer status: CPU, GPU, temperatures, memory, video memory, disk, network and battery.\n"
+                    "Style (cards / bars / graphs / compact), items, refresh rate and units sit behind the gear button.\n"
+                    "Hover a temperature to see where it comes from.\n"
+                    "On Windows the CPU temperature is read from HWiNFO or LibreHardwareMonitor when one of them is running.\n"
+                    "Read-only: it only reads public system counters and installs no drivers.");
+
+            case ModuleType::utility:
+                return make (name,
+                    "Handy desk tools in one module.\n"
+                    "Choose the tool behind the gear button: calculator, colour picker, stopwatch, timer,\n"
+                    "audio calculator (tempo / note / gain / samples), clock or notes.\n"
+                    "Each tool keeps its contents when you switch away and back.");
+
             default:
                 break;
         }

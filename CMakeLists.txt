@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 3.2.0 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 3.3.0 LANGUAGES C CXX)
 
 # ==========================================================
 # Steam 构建开关（默认 OFF，绝不影响官网 / Inno Setup 流水线）
@@ -427,7 +427,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 3.2.0
+        VERSION 3.3.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -480,7 +480,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 3.2.0
+        VERSION 3.3.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -755,6 +755,22 @@ source/ui/modules/OscilloscopeModule.cpp
   # v2.9.9 补充：录音机模块（红点按钮 + 录制计时）
   source/ui/modules/RecorderModule.h
   source/ui/modules/RecorderModule.cpp
+  # v3.3：电脑状态模块 + 系统状态采集层（Windows：PDH / DXGI / D3DKMT / NVML /
+  #   HWiNFO 共享内存 / LHM WMI；macOS：mach / IOKit；所需系统库由源文件内
+  #   #pragma comment 链接，均为系统自带公开 API，无驱动）
+  source/system/SystemStats.h
+  source/system/SystemStats.cpp
+  source/system/SystemStatsWin.cpp
+  source/system/SystemStatsMac.cpp
+  source/ui/modules/SystemMonitorModule.h
+  source/ui/modules/SystemMonitorModule.cpp
+  # v3.3：小工具模块（计算器 / 取色器 / 秒表 / 倒计时 / 音频换算 / 时钟 / 便签）
+  source/ui/modules/UtilityModule.h
+  source/ui/modules/UtilityModule.cpp
+  source/ui/modules/UtilityTools.h
+  source/ui/modules/UtilityTools.cpp
+  source/ui/modules/ScreenColourSampler.h
+  source/ui/modules/ScreenColourSampler.cpp
   source/ui/modules/VirtuPetModule.h
   source/ui/modules/VirtuPetModule.cpp
   source/ui/modules/MilkdropModule.h
@@ -805,6 +821,8 @@ if (APPLE)
     source/standalone/AudioDumpRecorder.cpp
     source/ui/modules/MilkdropModule_mac.h
     source/ui/modules/MilkdropModule_mac.mm
+    # v3.3：小工具取色器 —— 系统取色放大镜 NSColorSampler（AppKit，无需屏幕录制授权）
+    source/ui/modules/ScreenColourSampler_mac.mm
   )
   target_sources(Y2Kmeter PRIVATE ${Y2KM_PLUGIN_SOURCES_APPLE})
   target_sources(Y2Kmeter_milkdrop PRIVATE ${Y2KM_PLUGIN_SOURCES_APPLE})
@@ -846,6 +864,10 @@ target_link_libraries(Y2Kmeter_milkdrop PRIVATE ${Y2KM_COMMON_LINK_LIBS})
 if (WIN32)
   target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt)
   target_link_libraries(Y2Kmeter_milkdrop PRIVATE ole32 uuid avrt)
+  # v3.3 电脑状态模块：PDH 性能计数器 / DXGI 显卡枚举 / WMI（读取用户自行运行的
+  #   LibreHardwareMonitor 温度）。源文件里也有 #pragma comment，这里显式列出便于审阅。
+  target_link_libraries(Y2Kmeter PRIVATE pdh dxgi wbemuuid oleaut32)
+  target_link_libraries(Y2Kmeter_milkdrop PRIVATE pdh dxgi wbemuuid oleaut32)
 endif()
 
 # ==========================================================

@@ -6,13 +6,31 @@
 > **开发过程的易错点 / 约束 / 已知限制已提炼为面向 AI 的知识库 [docs/](docs/INDEX.md)**（构建、渲染 GL、窗口布局、分析模块、UI 功能、通用教训六个主题），本文只保留理解项目现状所需的内容。
 >
 > **Steam 渠道相关内容（成就 / 云存档 / 独立 build-steam 流水线）单独维护在 [STEAM_OVERVIEW.md](STEAM_OVERVIEW.md)**，本文不重复；涉及 `source/steam/`、`Y2K_STEAM_BUILD`、`dist-steam/` 的改动先看那份文档。
+>
+> **项目性质（读本文档前先明确这是什么软件）**
+>
+> Y2Kmeter 是一个**开源（GPL-3.0）、免费分发**的音频分析 / 计量插件，发行形态为 Windows / macOS 的
+> VST3 + AU 插件，以及配套的 Standalone 桌面版。它属于纯 **读取 → 计算 → 绘图** 型软件：
+>
+> - 只对送进来的音频样本做数学运算，把结果绘制成表盘、瀑布图与时序曲线；
+> - 不处理、不修改、不输出音频（插件模式下是纯分析器，不改变被分析的声音）；
+> - 不在用户不知情的前提下保存音频内容 —— 只有用户主动使用录制类功能并导出时，才会写入用户自己选定的文件。
+>
+> Standalone 桌面版唯一涉及系统资源的行为，是读取声卡"当前正在播放"的音频，效果等同于把一台
+> 硬件分析仪并联在扬声器线上（Windows：WASAPI Loopback 公开接口；macOS：ScreenCaptureKit 的音频输出流）。
+> 所有系统交互都通过操作系统公开发布的 API 完成，**不含驱动、内核组件或常驻服务，也不读取、不修改其他程序内部的数据**。
+>
+> v3.3 起的「电脑状态」模块额外**只读**系统公开的性能计数器（CPU / GPU / 内存 / 磁盘 / 网络 / 电池），CPU 温度仅在用户自己运行 HWiNFO / LibreHardwareMonitor 时读取它们**主动公开**的共享数据；模块未添加或不可见时不做任何采集。
+>
+> **联网行为只有两项，共用安装时的一个授权项（默认关闭；关闭时程序不发起任何网络请求）**：
+> ① 启动时查询一次是否有新版本；② 在用户同意后发送一次不含身份信息的版本与环境统计。
 
 ---
 
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.2.0`）
+- **产品名**：`Y2Kmeter` （版本：`3.3.0`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -35,6 +53,11 @@
 > · 修掉三个渲染问题：语谱图低速滚动的明暗闪烁（子列偏移）、动态模块 Crest 历史的毛刺闪烁（列相位锁定）、X-Y / 李萨如标尺环放大后画到邻居模块（GL 几何自裁）。
 > · 悬停说明整体校对（响度补 RMS / 真峰值、各模块补新增参数与抽屉位置）。
 
+> **v3.3 本轮变更**（细节见 [docs/analysis-modules.md](docs/analysis-modules.md) §8）：
+> · 新增 **电脑状态模块**（`systemMonitor`）：CPU（含每核 / 实时频率）/ CPU 温度 / GPU / GPU 温度 / 内存 / 显存 / 磁盘 / 网络 / 电池；四种样式（卡片环形表 / 任务管理器式横条 / 历史曲线 / 紧凑读数），项目开关、温度单位、刷新间隔、历史跨度可调。新采集层 `source/system/SystemStats`（后台线程 + 进程内共享，模块不可见时停止采集），Windows 走 PDH / DXGI / D3DKMT / NVML 并桥接 HWiNFO / LibreHardwareMonitor 读 CPU 温度，macOS 走 mach / IOKit；只用公开 API，不含驱动。
+> · 新增 **小工具模块**（`utility`）：计算器 / 取色器 / 秒表 / 倒计时 / 音频换算（BPM↔毫秒含附点三连音 + TAP 测速、音名↔频率、dB↔倍数、采样↔毫秒）/ 时钟 / 便签；各工具内容独立存档，秒表与倒计时按绝对时间戳跨会话继续。
+> · 注册链路（枚举追加 `systemMonitor` / `utility`，含字符串、显示名、工厂、添加菜单、性能计数、CMake 源与 Windows 系统库）与 `i18n/zh-CN.lang`（约 180 条新文案）已同步。
+
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
 - **动态范围**：Peak / RMS / Crest / Short-term DR / Integrated DR
@@ -43,10 +66,10 @@
 - **示波器**：Waveform / X-Y / Lissajous 李萨如图
 - **持续滚动瀑布波形**（Waveform）
 - **频谱瀑布图**（Spectrogram 像素方格风格 / Spectrogram 3D 三维曲面）
-- **模拟 VU 表**（六种表盘：指针式 半圆 / 复古扇形，横向式 横向刻度条 / LED 梯柱 / 极简游标 / 镜像刻度；单指针或 L/R 双针 + LED 信号灯，非对称弹道）
+- **指针式 VU 表**（Analogue VU；六种表盘：指针式 半圆 / 复古扇形，横向式 横向刻度条 / LED 梯柱 / 极简游标 / 镜像刻度；单指针或 L/R 双针 + LED 信号灯，非对称弹道）
 - **声像雷达**（Stereo Field，半圆雷达，幅度驱动声像位置）
 - **频谱声像图**（Stereo Map，按频率逐段对比 L/R：PAN 轴 ±1 声像偏向（上=L / 中=居中 / 下=R），MONO 轴为**倒置的单声道保留量**（上=100% 干净 / 下=50% 满幅抵消）；**未发布**）
-- **实时节拍 / 音乐调性**（Tempo / Key：BPM + 大调 / 自然小调 / 和声小调 / 旋律小调 + 关系调 + 可解释置信度；后台线程分析，未加载模块时完全不运行）
+- **实时节拍 / 音乐调性**（Tempo / Key：BPM + 大调 / 自然小调 / 和声小调 / 旋律小调 + 关系调 + 可解释置信度；工作线程分析，未加载模块时完全不运行）
 - **（已下线）拼豆频谱**（`Spectrum Perlerbeads` / `ModuleType::eq`，Y2K 主题的拼豆格子频谱，**仅可视化，不做实际 EQ 处理**）：v3.0.6 起因性能问题暂时从产品中移除 —— 不进"添加模块"菜单，旧存档里的 `type="eq"` 节点在加载时**同位置同尺寸**迁移成 `spectrum`。
 
 > v3.1 起，实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest 已作为"项目开关"并入响度 / 相位 / 动态模块，复用同一路分析结果，后端零新增计算。旧存档里的这些类型字符串仍可加载。
@@ -64,6 +87,11 @@
 
 - 音频信号驱动的像素电子宠物，完整状态机（孵化蛋 / 觅食 / 睡眠 / 生病 / 死亡），随机蛋样式、巡逻 / 说话 / 跳跃行为
 
+**③-b 桌面辅助模块（v3.3，不参与音频分析）**
+
+- **电脑状态**（`systemMonitor`）：CPU（含每核 / 实时频率）/ CPU 温度 / GPU / GPU 温度 / 内存 / 显存 / 磁盘 / 网络 / 电池；四种样式（卡片环形表 / 任务管理器式横条 / 历史曲线 / 紧凑读数），项目、单位、刷新间隔、历史跨度可调。只读系统公开计数器（Windows：PDH / DXGI / D3DKMT / NVML，CPU 温度桥接用户自行运行的 HWiNFO / LibreHardwareMonitor；macOS：mach / IOKit），不含驱动。
+- **小工具**（`utility`）：计算器 / 取色器（Windows 拖动吸管实时放大取色，macOS 系统取色放大镜）/ 秒表（计圈）/ 倒计时（到点闪烁 + 提示音）/ 音频换算（BPM ↔ 毫秒含附点三连音 + TAP 测速、音名 ↔ 频率、dB ↔ 倍数、采样 ↔ 毫秒）/ 时钟（数字 / 指针）/ 便签；每个工具的内容独立保存。
+
 **④ 主题与视觉系统**（Y2K / Pink XP 像素复古风）
 
 - **12 个手工调校预设主题**（数据驱动、外观零回归）：糖果粉 / 星空深蓝 / 赛博紫 / 橘色波普 / 水蓝珠光 / 苏打绿 / 丛林绿 / Windows XP 经典 / 红黑暗夜 / 纯黑灰（OLED 友好）/ 纯白灰 / 黑粉（默认主题）
@@ -80,10 +108,10 @@
 
 **⑥ 桌面集成（Standalone 专属）**
 
-- 音频源选择：麦克风 / 桌面系统音频采集（macOS 走 ScreenCaptureKit、Windows 走 WASAPI Loopback）
+- 音频源选择：麦克风输入 / 系统正在播放的音频（Windows：WASAPI Loopback；macOS：ScreenCaptureKit 音频输出流）
 - 无边框窗口 + 自定义标题栏（关闭 / 置顶 / 最小化 / 布局锁定 / 双击标题栏全屏）
 - 模块脱离 / 停靠（浮动窗口）、预设导出 / 导入（Save / Load）
-- 自动更新检查、可选匿名遥测、新手引导（右键添加 VirtuPet → 播放音频孵化）
+- 版本更新检查、可选的匿名环境统计（安装时授权，默认关闭）、新手引导（右键添加 VirtuPet → 播放音频孵化）
 
 ### 1.3 技术栈
 | 项目 | 版本 / 说明 |
@@ -94,7 +122,7 @@
 | GPU | `juce::juce_opengl`（Editor 挂 `OpenGLContext`，绘制走 GPU）；Milkdrop 模块使用 libprojectM 4 native OpenGL（架构与避坑见 [docs/rendering-gl.md](docs/rendering-gl.md)） |
 | 构建 | CMake ≥ 3.22 |
 | Windows CRT | 强制静态 CRT（`MultiThreaded`，避免依赖 VC_redist） |
-| macOS 语言扩展 | Objective-C++（`.mm` 文件走 ScreenCaptureKit 桌面音频采集） |
+| macOS 语言扩展 | Objective-C++（`.mm` 文件，用于读取 ScreenCaptureKit 的桌面音频输出流） |
 | 安装器 | Inno Setup（[Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss)） |
 | 字体 | `Silkscreen-Regular.ttf`（像素英文字体，通过 `juce_add_binary_data` 打包） |
 | 项目性能特性 | 支持 **LTO/IPO** + **PGO**（`Y2K_ENABLE_LTO`、`Y2K_PGO_MODE`）|
@@ -180,7 +208,7 @@
 ┌────────────────────────────────────────────────────────────────┐
 │  Standalone 外壳（source/standalone）                            │
 │    Y2KStandaloneApp / WasapiLoopbackCapture / MacDesktopCapture │
-│    · 无边框 Y2K 窗口 / 系统输出 Loopback 采集                     │
+│    · 无边框 Y2K 窗口 / 系统输出 Loopback 读取                     │
 ├────────────────────────────────────────────────────────────────┤
 │  Plugin 层                                                       │
 │    Y2KmeterAudioProcessor  (PluginProcessor.h/cpp)              │
@@ -214,7 +242,7 @@
 ```
 
 ### 2.1 关键调用关系
-1. **音频入口 → 分析**：`Y2KmeterAudioProcessor::processBlock` → `AnalyserHub::pushStereo` → 分发到 6 路：`Oscilloscope / Spectrum / Loudness / Phase / Dynamics / MusicAnalysis`。前 5 路在音频线程内联计算；`MusicAnalysis` 只做降混 + 写入有界环形缓冲，真正的 FFT / 自相关 / chroma 在独立后台线程。
+1. **音频入口 → 分析**：`Y2KmeterAudioProcessor::processBlock` → `AnalyserHub::pushStereo` → 分发到 6 路：`Oscilloscope / Spectrum / Loudness / Phase / Dynamics / MusicAnalysis`。前 5 路在音频线程内联计算；`MusicAnalysis` 只做降混 + 写入有界环形缓冲，真正的 FFT / 自相关 / chroma 在独立工作线程。
 2. **UI 拉分析结果**：`AnalyserHub` 内部 `FrameDispatcher` 在 UI 线程按目标频率（FPS 按钮 30/60/120/无上限）组装 `FrameSnapshot`，通过 `FrameListener::onFrame(frame)` 派发给所有订阅的模块。v2.9 起由 Editor 的 vblank 同步时钟驱动（§4.2），与显示器刷新同相。
 3. **模块的 UI 生命周期**：模块继承 `ModulePanel + AnalyserHub::FrameListener`，构造时 `hub.retain(Kind::xxx)` + `hub.addFrameListener(this)`，析构时对称 release + remove。**未加载的模块 → 引用计数为 0 → `pushStereo` 自动跳过对应计算路径**。
 4. **Standalone 音频源**：`Y2KStandaloneApp` 通过 `WasapiLoopbackCapture`（Win）或 `MacDesktopAudioCapture`（macOS 使用 ScreenCaptureKit）获取"系统外放音频"，直接 push 到 `AnalyserHub`（不走 `processBlock`）。DAW 场景则由宿主经 `processBlock` 送入。
@@ -237,7 +265,7 @@
 ### 3.2 `source/analysis`（音频分析）
 | 文件 | 类 / 关键实现 |
 | --- | --- |
-| [AnalyserHub.h](/I:/Y2KMeter/source/analysis/AnalyserHub.h) | `LoudnessMeter` / `PhaseCorrelator` / `DynamicRangeMeter` / `AnalyserHub`（**注意**：为了绕过 MSVC include-guard 串扰，四个类都塞进了同一个头，实现分散在各自 cpp）|
+| [AnalyserHub.h](/I:/Y2KMeter/source/analysis/AnalyserHub.h) | `LoudnessMeter` / `PhaseCorrelator` / `DynamicRangeMeter` / `AnalyserHub`（**注意**：为了避免 MSVC include-guard 串扰，四个类都塞进了同一个头，实现分散在各自 cpp）|
 | [AnalyserHub.cpp](/I:/Y2KMeter/source/analysis/AnalyserHub.cpp) | `AnalyserHub::pushStereo` 主路+低频路双 FFT、`FrameDispatcher` 内部 Timer、Kind 引用计数、FrameSnapshot 组装与广播 |
 | [LoudnessMeter.cpp](/I:/Y2KMeter/source/analysis/LoudnessMeter.cpp) | K-weighting 双级 IIR + 400ms 动量 LUFS、3s 短期、全程积分（含相对门限）、100ms RMS、4× 过采样 True Peak |
 | [PhaseCorrelator.cpp](/I:/Y2KMeter/source/analysis/PhaseCorrelator.cpp) | EMA 滑动窗计算 correlation / width / balance |
@@ -245,7 +273,7 @@
 | [music/RealFft.h/.cpp](/I:/Y2KMeter/source/analysis/music/RealFft.cpp) | `RealFft`：极简 radix-2 FFT（纯 C++，不依赖 JUCE，供测试目标直接链接） |
 | [music/TempoEstimator.h/.cpp](/I:/Y2KMeter/source/analysis/music/TempoEstimator.cpp) | `TempoEstimator`：46ms/25% hop 分帧 → 24 对数带谱通量 → 8s 包络归一化自相关 + 谐波梳状 + 对数正态速度先验 → 三候选中值 + 八度迟滞 + 置信度 |
 | [music/KeyEstimator.h/.cpp](/I:/Y2KMeter/source/analysis/music/KeyEstimator.cpp) | `KeyEstimator`：186ms/25% hop 分帧 → 55Hz–5kHz bin 折 12 音级 chroma → 20s 滑动窗口 → KK 轮廓 Pearson 相关（大调 / 自然 / 和声 / 旋律小调共 48 候选）+ 关系调迟滞 + 置信度 |
-| [music/MusicAnalysisEngine.h/.cpp](/I:/Y2KMeter/source/analysis/music/MusicAnalysisEngine.cpp) | 音频线程降混 + 无锁 SPSC 环形缓冲（131072 采样）；后台 `juce::Thread` 消费并发布 `Result`；**首次订阅才分配缓冲/建线程**，无模块时零资源 |
+| [music/MusicAnalysisEngine.h/.cpp](/I:/Y2KMeter/source/analysis/music/MusicAnalysisEngine.cpp) | 音频线程降混 + 无锁 SPSC 环形缓冲（131072 采样）；工作线程 `juce::Thread` 消费并发布 `Result`；**首次订阅才分配缓冲/建线程**，无模块时零资源 |
 | [music/MusicAnalysisTypes.h](/I:/Y2KMeter/source/analysis/music/MusicAnalysisTypes.h) | `Result` / `Status` / `Mode` / `KeySpelling`（按调式选常用拼写）/ `RelativeKey`（关系调）—— 纯 C++，供 UI 与测试共用 |
 | [FreqScale.h](/I:/Y2KMeter/source/analysis/FreqScale.h) | **v3.1** `y2k::fscale`：log / mel / linear 频率轴正反映射（"FFT scale"），Hub 取样与 UI 坐标共用，纯 C++ |
 | [BandSplit.h](/I:/Y2KMeter/source/analysis/BandSplit.h) | **v3.1** `y2k::bands::BandSplitter`：LR4 三频段分离（默认 200 / 2000 Hz，可调）→ 三路独立 L/R 信号；显示层每路一层纯色点云（低红 / 中蓝紫 / 高青，同 MiniMeters Stereometer），仅开启染色时计算，纯 C++ |
@@ -255,7 +283,7 @@
 ### 3.3 `source/ui`（UI 框架）
 | 文件 | 关键内容 |
 | --- | --- |
-| [ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | `ModuleType` 枚举 / `ModulePanel` 基类 / `ModuleWorkspace` 主类 / `ThemeSwatchBar` / `HideChromeButton`（**同一个头包含多个类**，同样为绕过 MSVC 串扰）|
+| [ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | `ModuleType` 枚举 / `ModulePanel` 基类 / `ModuleWorkspace` 主类 / `ThemeSwatchBar` / `HideChromeButton`（**同一个头包含多个类**，同样为避免 MSVC 串扰）|
 | [ModuleWorkspace.cpp](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | 拖拽 / 网格吸附 / 布局持久化 / 拼豆图片 / 底部 toolbar / 添加菜单 / 鼠标事件 |
 | [ModulePanel.cpp](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 各模块统一的像素窗口：标题栏 + 齿轮（控制面板）/ 弹出 / 关闭按钮 + 边缘/角拖拽缩放 + 右下 CPU 小字 |
 | [ModuleControlDrawer.h/.cpp](/I:/Y2KMeter/source/ui/ModuleControlDrawer.h) | **v3.1** 模块控制面板抽屉：覆盖式盖在内容区顶部，由 `ModulePanel::buildParamDefs()` 的参数表生成控件（choice / toggle / slider，分组、条件可见、窄模块换行、超高滚动），自己不存状态 |
@@ -265,7 +293,7 @@
 | [source/ui/palette/](/I:/Y2KMeter/source/ui/palette/) | 调色板重构模块：`OkLchUtils`（OKLCH/色域裁剪/WCAG）、`ThemeSpec`（意图参数+分享码）、`PaletteGenerator`（Recipe+护栏，纯 C++）、`ThemeLibrary`（我的主题）、`PalettePanel`（新面板 UI） |
 | [UiFrameClock.h/.cpp](/I:/Y2KMeter/source/ui/UiFrameClock.h) | 统一 UI 帧时钟（阶段1性能改造，目前尚未强制接线，主流数据流仍走 `AnalyserHub::FrameDispatcher`） |
 | [HoverHelp.h/.cpp](/I:/Y2KMeter/source/ui/HoverHelp.h) | 悬停提示：`y2k::help` 文案库（模块详细说明 / 全局开关持久化）+ `Y2KTooltipWindow`（统一解析控件 / 模块 / 自绘按钮提示，仪表内容区静止才弹出）；绘制在 `PinkXPLookAndFeel::drawTooltip`（详见 [docs/ui-features.md](docs/ui-features.md)） |
-| [UiPrefs.h/.cpp](/I:/Y2KMeter/source/ui/UiPrefs.h) | 进程级 UI 偏好（`Y2Kmeter.uiPrefs.xml`：界面语言 / 悬停提示开关），独立于布局与预设 |
+| [UiPrefs.h/.cpp](/I:/Y2KMeter/source/ui/UiPrefs.h) | 应用级 UI 偏好（`Y2Kmeter.uiPrefs.xml`：界面语言 / 悬停提示开关），独立于布局与预设 |
 | [../i18n/Localisation.h/.cpp](/I:/Y2KMeter/source/i18n/Localisation.h) | 界面国际化 `y2k::i18n` / `y2k::tr` / `y2k::trf`：语言包（`i18n/*.lang`）注册与合并、查表翻译（精确 / 数字模板 / 逐行）、按语言字体、运行时切换广播（详见 [docs/ui-features.md](docs/ui-features.md)） |
 
 ### 3.4 `source/ui/modules`（分析模块 UI）
@@ -287,24 +315,26 @@
 | [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式在 v3.1 起由控制面板切换（顶部按钮取消），并新增 FFT scale —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；频率轴 20Hz–20kHz（对数 / 梅尔 / 线性），384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡；**按住画布 = 子弹时间**（幅度类量只拖慢回落沿 50 倍；声像是有符号量，两个方向同速放慢），按住时悬停读数追加音名） | `Spectrum`（L/R 分路 + mid 单声道路） |
 | [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET（未启动时 RESET 会自动 START，连续 3 s 无信号自动 reset）；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
-| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本注入机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量驱动视觉效果）|
+| [SystemMonitorModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SystemMonitorModule.h) | `SystemMonitorModule`（**v3.3** 电脑状态：CPU / 温度 / GPU / 内存 / 显存 / 磁盘 / 网络 / 电池，四种样式；悬停温度显示数据来源与读不到时的解决办法） | `y2k::sys::Sampler`（[source/system/SystemStats.h](/I:/Y2KMeter/source/system/SystemStats.h)，后台线程，不走 AnalyserHub）|
+| [UtilityModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/UtilityModule.h) + [UtilityTools.h/.cpp](/I:/Y2KMeter/source/ui/modules/UtilityTools.h) | `UtilityModule`（**v3.3** 小工具：计算器 / 取色器 / 秒表 / 倒计时 / 音频换算 / 时钟 / 便签；工具视图 `y2k::util::ToolView`，屏幕取色 `ScreenColourSampler`(.cpp / _mac.mm)） | — |
+| [MilkdropModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/MilkdropModule.h) | `MilkdropModule`（v2.5.2：Editor GL 上下文渲染 → offscreen FBO + 跨 FBO blit 零拷贝管线，~60fps 无遮盖 + auto 轮播 + 预设跳转 + 分辨率缩放 1:1/1:2/1:4；GLView 支持浮动态独立 OpenGLContext；新增 Standalone 脱离/浮动/停靠/置顶/布局持久化；archive v2.2.4：PBO 异步回读 + Triple-buffer 无锁帧传输；v2.6.1：color 面板 RGB+Bright 四行滑块 + effects 面板 invert/shadows 纯开关 + 脱离模式 FBO 渲染路径修复；**v2.6.5：效果系统架构重构（注册表驱动 + efftop/effbottom 分类）+ 38 个后处理效果（含第三批 19 个实验性效果）+ effects 面板动态网格布局**；**v2.6.6：wave 样式编辑面板（mode/X/Y/R/G/B/A/Mys 滑块 + dots/thick/add/bright 开关）+ 预设文本改写机制**；**v2.6.7：tweak 面板重构为后处理 uv 几何畸变（7 浮点 zoom/rot/warp/dx/dy/sx/sy + 3 整数万花镜 kaleido/fold_x/fold_y 滑块）+ 实时生效不重载预设**；**v2.7.1：预设收藏库 like（右下角爱心收藏/双向箭头切换 + 双向索引记忆 + 随机去重）**） | `Oscilloscope`（立体声 PCM 推流 → `bass`/`mid`/`treb` 变量调制视觉效果）|
 | [MilkdropVisualState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualState.h) | `MilkdropVisualState`（v2.6.1 新增，v2.6.5 扩展：Milkdrop 后处理全局视觉状态结构体，`tint_r/g/b` + `brightness` + 38 个开关效果字段 + `isNeutral()`；v2.6.7 新增 `offset` 成员承载 tweak 后处理 uv 畸变；由 Editor 全局共享并持久化到 Processor host state） | — |
 | [MilkdropEffect.h](/I:/Y2KMeter/source/ui/modules/MilkdropEffect.h) | `MilkdropEffect`（v2.6.5 新增，header-only：`MilkdropEffectId` 枚举 + `MilkdropEffectDef` 元数据 + `GetMilkdropEffectDefs()` 注册表；驱动 effects 面板 UI 动态生成与 shader uniform 传递） | — |
-| [MilkdropWaveState.h](/I:/Y2KMeter/source/ui/modules/MilkdropWaveState.h) | `MilkdropWaveState`（v2.6.6 新增，header-only：Milkdrop 简单波形样式覆盖状态结构体 + 16 种 `wave_mode` 名称表 + `GetWaveModeName()` + `ReplaceWaveKeyValue()`/`ApplyWaveParamsToPresetText()` 预设文本注入函数；全局共享并持久化到 Processor host state） | — |
+| [MilkdropWaveState.h](/I:/Y2KMeter/source/ui/modules/MilkdropWaveState.h) | `MilkdropWaveState`（v2.6.6 新增，header-only：Milkdrop 简单波形样式覆盖状态结构体 + 16 种 `wave_mode` 名称表 + `GetWaveModeName()` + `ReplaceWaveKeyValue()`/`ApplyWaveParamsToPresetText()` 预设文本改写函数；全局共享并持久化到 Processor host state） | — |
 | [MilkdropVisualOffsetState.h](/I:/Y2KMeter/source/ui/modules/MilkdropVisualOffsetState.h) | `MilkdropVisualOffsetState`（v2.6.7 新增，header-only：tweak 后处理 uv 几何畸变数据载体，7 个浮点 `value[]` + 3 个整数 `ivalue[]` + `isNeutral()`/`reset()` + `GetVisualOffsetParams()`/`GetVisualOffsetIntParams()` 元数据；作为 `MilkdropVisualState::offset` 成员随视觉状态每帧传递到 `MilkdropTintPass`） | — |
 
 ### 3.5 `source/standalone`（Standalone App）
 | 文件 | 作用 |
 | --- | --- |
 | [Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | 自实现 `juce::JUCEApplication` + `Y2KMainWindow`（DocumentWindow）替换 JUCE 内建的 `StandaloneFilterApp`；启动 → 加载 settings → 创建 Processor+Editor → 绑定 Loopback 音源 → 恢复主题/FPS/位置/尺寸/固定态 |
-| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`，采集"系统默认播放端点"输出，输出统一立体声 float32 |
+| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`，读取"系统默认播放端点"输出，输出统一立体声 float32 |
 | [MacDesktopAudioCapture.h/.mm](/I:/Y2KMeter/source/standalone/MacDesktopAudioCapture.h) | macOS：`ScreenCaptureKit` 获取桌面音频（Objective-C++） |
 | [AudioDumpRecorder.h/.cpp](/I:/Y2KMeter/source/standalone/AudioDumpRecorder.h) | **仅 macOS**，通过环境变量 `Y2KM_AUDIO_DUMP` 系列开启，把音频原样落盘做调试 |
 
 ### 3.6 `source/perf`
 | 文件 | 作用 |
 | --- | --- |
-| [PerformanceCounterSystem.h/.cpp](/I:/Y2KMeter/source/perf/PerformanceCounterSystem.h) | 全局性能计数系统（发布版 `Y2K_ENABLE_PERF_COUNTERS=0` 关闭）；提供 `ScopedPerfTimer`、`ScopedLockWaitMeasure` 用于埋点 |
+| [PerformanceCounterSystem.h/.cpp](/I:/Y2KMeter/source/perf/PerformanceCounterSystem.h) | 全局性能计数系统（发布版 `Y2K_ENABLE_PERF_COUNTERS=0` 关闭）；提供 `ScopedPerfTimer`、`ScopedLockWaitMeasure` 用于性能计时 |
 
 ---
 
@@ -318,13 +348,13 @@
   - 子节点 `<PBEQ_Layout>` 承载 `ModuleWorkspace` 布局（模块位置 / 拼豆图 / 主题 / FPS 等）。
   - Milkdrop 相关属性直接挂顶层：`milkdropTintR/G/B`、`milkdropBrightness`、`milkdropInvert/Shadows/...` 等效果开关、`milkdropWaveXxx` 波形覆盖、`milkdropOffsetXxx`（tweak uv 畸变），以及 **v2.7.1 新增的 `milkdropUseLikeLibrary`**（收藏库切换状态，`std::atomic<bool>` 持久化）。
 - 分析开关：`setAnalysisActive(false)` 时 `processBlock` 完全跳过分析（UI 不可见时用）。
-- CPU 负载：`getCpuLoad()` 供每个模块右下角显示；Loopback 路径用 `registerLoopbackRenderTime` 通道注入。
+- CPU 负载：`getCpuLoad()` 供每个模块右下角显示；Loopback 路径用 `registerLoopbackRenderTime` 通道回填。
 - 分析前置增益：`setAnalysisInputGainDb / getAnalysisInputGainLinear`（-10 ~ +36 dB），只作用于分析路径，不改变透传输出。
-- **P4 flush 钩子**：`flushPendingUiStateBeforeSave`（Editor 注册；`getStateInformation` 前 flush 掉 workspace 的 debounce 布局变更）。
+- **P4 flush 回调**：`flushPendingUiStateBeforeSave`（Editor 注册；`getStateInformation` 前 flush 掉 workspace 的 debounce 布局变更）。
 
 ### 4.2 `AnalyserHub`（[AnalyserHub.h](/I:/Y2KMeter/source/analysis/AnalyserHub.h)）
 - **枚举** `AnalyserHub::Kind`：`Oscilloscope=0 / Spectrum=1 / Loudness=2 / Phase=3 / Dynamics=4 / MusicAnalysis=5 / NumKinds=6`。
-- **MusicAnalysis 生命周期（v2.9.9 补充）**：`retain(Kind::MusicAnalysis)` 的 0→1 会调用 `musicEngine.setActive(true)`（分配环形缓冲 + 启动后台线程），`release` 到 0 时 `setActive(false)` 停线程；未加载 Tempo/Key 模块的实例不建线程、不分配缓冲、音频线程零开销。`pushStereo` 只做 `(L+R)/2` 入队，FFT/自相关/chroma 全部在工作线程。
+- **MusicAnalysis 生命周期（v2.9.9 补充）**：`retain(Kind::MusicAnalysis)` 的 0→1 会调用 `musicEngine.setActive(true)`（分配环形缓冲 + 启动工作线程），`release` 到 0 时 `setActive(false)` 停线程；未加载 Tempo/Key 模块的实例不建线程、不分配缓冲、音频线程零开销。`pushStereo` 只做 `(L+R)/2` 入队，FFT/自相关/chroma 全部在工作线程。
 - **引用计数** `retain(Kind)` / `release(Kind)` / `isActive(Kind)` —— UI 线程调用；`pushStereo` 里读原子决定是否跳过某路计算。
 - **FrameSnapshot**：一帧一份聚合数据（`activeMask`、`tickCount`、示波器 L/R 2048 样本、频谱 mag 1024/4096、Loudness/Phase/Dynamics 快照）。
 - **FrameDispatcher**（pimpl）：`startFrameDispatcher(hz)` 设定目标频率（上限 120Hz）。v2.9 起支持**外部帧时钟**：Editor 挂 `juce::VBlankAttachment` 后调用 `setExternalFrameClock(true)`，内部 Timer 停转，改由 Editor 在每个 vblank（按 FPS 上限抽稀后）调用 `dispatchFrameNow(ts)` —— 分发与显示器刷新同相；vblank 停摆（显示器休眠/远程桌面）由 Editor 10Hz 看门狗切回 Timer。`FrameSnapshot` 新增 `timeSec/dtSec` 供模块做帧率无关动画，快照本身走 4 槽复用池（不再每帧 37KB make_shared）。
@@ -342,7 +372,7 @@
 - **FPS 上限（封顶语义）**：FPS 按钮选择 30/60/120/无上限；`applyAdaptiveFrameRate` 仅保证 FrameDispatcher 目标频率与上限一致，不再动态降档。v2.9 起上限由 vblank 抽稀实现（上限 ≥ 显示器刷新率时每帧分发 = 跟随刷新率）。
 - **真实帧率统计（v2.9）**：FPS 标签以 GL 线程实际出帧数（`renderOpenGL` 里 `glFrameCounter`）为准，而非分发次数 —— GL 跟不上时多次 repaint 会被合并，分发数不变但屏幕实际掉帧，旧统计会把掉帧"藏"起来。
 - **持久化协作**：Editor 构造时读 `Processor.getSavedLayoutXml` 恢复布局；`workspace->onLayoutChanged` → 写回 Processor。
-- **Windows Direct2D 处理**：首次 `visibilityChanged` 时通过 `renderingEngineConfigured` flag 强制切换到软光栅/GDI，规避 AMD `atidxx64.dll` 卸载死锁（详见头文件相关注释）。
+- **Windows Direct2D 处理**：首次 `visibilityChanged` 时通过 `renderingEngineConfigured` flag 强制切换到软光栅/GDI，避免 AMD `atidxx64.dll` 卸载死锁（详见头文件相关注释）。
 - **Chrome 隐藏态**：Hide 按钮收缩窗口；实现"幂等化" —— Hide 前完整快照 bounds 与 resizeLimits，Show 时直接 setBounds 回快照，避免累积漂移。
 - **双击标题栏切换全屏**（v1.8.2 新增，v2.6.0 后按平台拆分）：`mouseDoubleClick` 中命中 `getTitleBarBounds()` 且避开按钮与标题文字热区后，走 `toggleFakeFullScreen()` —— **macOS** 调用 `rw->setFullScreen(!isFullScreen())` 进入系统原生全屏（独立 Space、隐藏菜单栏/Dock）；**Windows** 保留 v2.5.8 的伪最大化（setBounds 到 userArea，避免覆盖任务栏及 PopupMenu Z 序遮挡）。仅 Standalone 非 chrome 隐藏态下生效，插件宿主模式不接管。切换前先把 `draggingWindow=false` 复位，避免上一帧 `mouseDown` 启动的 `windowDragger` 残留拖拽态。
 - **布局锁定按钮 L**（v1.8.3 新增）：位于顶栏「最小化 _」按钮左侧，从右到左依次为 `× / * / _ / L`。点击切换 `layoutLocked`，同步 `ModuleWorkspace::setLayoutLocked` 与 Processor `setLayoutLocked`（XML 属性 `layoutLocked="1"` 序列化）。锁定时：
@@ -481,7 +511,7 @@ main
   Standalone 启动 → ThemeLibrary::ensureLoadedFromLibraryFile()
                    → mergeFromSettings(ui.themeLibrary)   ← 旧用户首次升级即完成迁移
   Standalone 退出 → saveUiAndAudioState() 仍把库写回 ui.themeLibrary（让导出的存档带上主题）
-  Standalone Load 预设 → 覆盖 .settings 并重启 → 新进程按上面两条"合并"，用户主题不丢
+  Standalone Load 预设 → 覆盖 .settings 并重启 → 下次启动按上面两条"合并"，用户主题不丢
 
   VST3（R19）：
     getStateInformation → themeId / themeName / themeSpec / themeLib 写入 <PBEQ_State>
@@ -494,7 +524,7 @@ main
 ## 6. 特殊约定与注意事项
 
 ### 6.1 头文件合并（**极其重要**）
-项目里存在几处"多个类合并到同一个头文件"的**违反常规的做法**，原因是 **绕过 MSVC 多文件同批编译时的 include-guard 跨 TU 串扰问题**：
+项目里存在几处"多个类合并到同一个头文件"的**违反常规的做法**，原因是 **避免 MSVC 多文件同批编译时的 include-guard 跨 TU 串扰问题**：
 
 - [source/analysis/AnalyserHub.h](/I:/Y2KMeter/source/analysis/AnalyserHub.h) 里同时定义了 `LoudnessMeter`、`PhaseCorrelator`、`DynamicRangeMeter`、`AnalyserHub`。
 - [source/ui/ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) 里同时定义了 `ModuleType` / `ModulePanel` / `ModuleWorkspace` / `ThemeSwatchBar` / `HideChromeButton`。
@@ -505,7 +535,7 @@ main
 ### 6.2 pimpl 前向声明约定
 - `Y2KmeterAudioProcessor` 的 `analyserHub` 成员：**头里只前向声明** `class AnalyserHub;`，完整定义只在 cpp 中出现。
 - `Y2KmeterAudioProcessorEditor` 的 `workspace` 成员同样处理。
-- `AnalyserHub` 的 `FrameDispatcher` 也是 pimpl，隐藏 `juce::Timer` 依赖。
+- `AnalyserHub` 的 `FrameDispatcher` 也是 pimpl，隔离 `juce::Timer` 依赖。
 
 ### 6.3 音频线程约束
 - `pushStereo`、`processBlock`、`registerLoopbackRenderTime` 必须**无锁 / 无堆分配 / 无系统调用**。
@@ -517,7 +547,7 @@ main
 ### 6.4 平台差异
 - **Windows**：
   - 强制静态 CRT（`MultiThreaded` / `MultiThreadedDebug`）—— 干净 Win10/11 免装 VC redist。
-  - 首次 Editor 可用时 **强制关闭 Direct2D 渲染**（切软光栅/GDI），规避 AMD 驱动在 DLL 卸载时的 loader lock 死锁。
+  - 首次 Editor 可用时 **强制关闭 Direct2D 渲染**（切软光栅/GDI），避免 AMD 显卡驱动在 DLL 卸载时的 loader lock 死锁。
   - Standalone Loopback 用裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`。
   - 链接 `ole32 / uuid / avrt`。
 - **macOS**：
@@ -575,7 +605,7 @@ main
   Timer 降级为 10Hz 兜底（onFrame 断流 >100ms 时主动拉最新帧）。
 
 **模块级开销削减**
-- `SpectrumModule`：旧"每帧新建整张 ARGB Image → 软件光栅化全部内容 → 整图上传纹理"的缓存
+- `SpectrumModule`：旧"每帧新建整张 ARGB Image → 软件光栅化全部内容 → 整图写入纹理"的缓存
   改为**静态层缓存**（底衬/网格/坐标文字，按物理像素渲染，尺寸/DPI/主题色变化才重建，GL 复用纹理）
   + 曲线每帧直接画。
 - `DynamicsCrestModule`：历史曲线 Path 抽稀到绘图区像素宽度（1050 点 → ~几百点），
@@ -607,7 +637,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.2.0`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.3.0`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定
@@ -664,14 +694,15 @@ Y2Kmeter/
 └── source/
     ├── Y2KLogging.h               ─ 编译期日志开关宏 Y2K_LOG（§1.4）
     ├── analysis/                  ─ AnalyserHub + 6 路分析器 + music/（BPM / 调性）
+    ├── system/                    ─ v3.3 电脑状态采集（SystemStats：Win PDH/DXGI/D3DKMT/NVML/HWiNFO/LHM，mac mach/IOKit）
     ├── ui/                        ─ ModuleWorkspace / ModulePanel / PinkXPStyle / UiFrameClock / HoverHelp / UiPrefs
     │   ├── modules/               ─ 各分析模块 UI（含 Milkdrop / VirtuPet / TempoKey / Recorder / StereoField / StereoMap）
     │   ├── palette/               ─ 调色板重构（OkLch / ThemeSpec / PaletteGenerator / ThemeLibrary / PalettePanel）
     │   └── toys/                  ─ Toybox 玩具盒互动系统
-    ├── standalone/                ─ Y2KStandaloneApp + WASAPI Loopback（Win）/ ScreenCaptureKit（mac）采集
+    ├── standalone/                ─ Y2KStandaloneApp + WASAPI Loopback（Win）/ ScreenCaptureKit（mac）音频读取
     ├── i18n/                      ─ 国际化运行时（Localisation / tr / trf）
     ├── diag/                      ─ 运行时诊断日志 Y2KDiagLog（§1.5）
-    ├── network/                   ─ 更新检查 / 遥测
+    ├── network/                   ─ 更新检查 / 环境统计
     ├── steam/                     ─ Steam 集成（成就 / 云存档，见 STEAM_OVERVIEW.md）
     └── perf/                      ─ 性能计数系统（发布版关闭）
 ```

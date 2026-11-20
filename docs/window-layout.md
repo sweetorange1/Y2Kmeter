@@ -22,7 +22,7 @@
 - **mouseExit 用屏幕坐标 + 顶层窗口 bounds 裁决**（跨越子组件会误触发）；不要用 `Desktop::getMainMouseSource().getScreenPosition()`（缓存滞后），用 `MouseEvent::getScreenPosition()`。
 - `autoHideNeedsExitFirst`：resize 后要求鼠标先离开一次，才允许 hover show。
 - `suppressAutoShowCounter`（int，timer 递减）：`setBounds()` 产生的异步 WM_SIZE/mouse 事件在回调返回后才抵达，`bool` 挡不住，必须用计数器覆盖 ~300ms 窗口期。
-- 多层兜底监听：`TopLevelExitWatcher`（顶层窗口级 mouseExit）、`TopLevelFocusWatcher`（focus 轮询）、`AutoHideChildWatcher`（`addMouseListener(watcher, true)` 收嵌套子组件事件）。
+- 多层兜底订阅：`TopLevelExitWatcher`（顶层窗口级 mouseExit）、`TopLevelFocusWatcher`（focus 轮询）、`AutoHideChildWatcher`（`addMouseListener(watcher, true)` 收嵌套子组件事件）。
 - 顶层 `ResizableWindow` 与 Editor **各有 constrainer**：shrink/expand 都要同步放宽/夹紧 RW 层 limits。
 
 ## 4. Stick（驻留条）
@@ -43,7 +43,7 @@
 - 松手吸附基准 = **光标所在屏** `rcWork`，阈值 8 DIP × 该屏 scale。
 - `ensureWindowOnScreen()`（10Hz 兜底）：窗口完全离开所有屏则拉回最近工作区；伪全屏在 rcWork 变化时重贴合；最小化态跳过（`GetWindowRect` 返回 -32000 哨兵）。
 - 伪全屏禁止拖抬头；全屏退出落盘"进入前 bounds"（否则下次启动是"铺满屏但非全屏"的普通窗口）。
-- 诊断开关 `Y2KM_SNAP_DEBUG=1` → `%TEMP%\Y2Kmeter_snap_debug.txt`（dump JUCE Displays 表 + Win32 监视器表）。
+- 诊断开关 `Y2KM_SNAP_DEBUG=1` → `%TEMP%\Y2Kmeter_snap_debug.txt`（dump JUCE Displays 表 + Win32 显示器表）。
 
 ### 混合 DPI 经验（易错）
 

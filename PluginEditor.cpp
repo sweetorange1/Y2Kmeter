@@ -26,6 +26,8 @@
 #include "source/ui/modules/TempoKeyModule.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/RecorderModule.h"
+#include "source/ui/modules/SystemMonitorModule.h"
+#include "source/ui/modules/UtilityModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
@@ -1051,8 +1053,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.2.0 debug"
-                                                                               : "v3.2.0"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.3.0 debug"
+                                                                               : "v3.3.0"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1094,7 +1096,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.2.0";
+        const juce::String versionBase = "v3.3.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -1799,7 +1801,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::tempoKey,
 
         // 录音机（红点录制 pre-gain 原始输入，保存 32-bit float WAV）
-        ModuleType::recorder
+        ModuleType::recorder,
+
+        // v3.3：电脑状态（CPU / GPU / 温度 / 内存 / 网络…，后台线程采集系统公开计数器）
+        ModuleType::systemMonitor,
+
+        // v3.3：小工具（计算器 / 取色器 / 秒表 / 倒计时 / 音频换算 / 时钟 / 便签）
+        ModuleType::utility
     });
 
 #if JUCE_WINDOWS
@@ -4285,6 +4293,12 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
         case ModuleType::recorder:
             return std::make_unique<RecorderModule>(processor.getAnalyserHub());
 
+        case ModuleType::systemMonitor:
+            return std::make_unique<SystemMonitorModule>();
+
+        case ModuleType::utility:
+            return std::make_unique<UtilityModule>();
+
         default:
             jassertfalse; // 暂未实现
             return nullptr;
@@ -4616,7 +4630,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.2.0";
+        const juce::String versionBase = "v3.3.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";

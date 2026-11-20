@@ -32,7 +32,7 @@
 - projectM handle 必须在 GL 线程创建/销毁；析构先同步 detach 等 GL 收尾。
 - `componentPaintingEnabled(true)` 下 CachedImage 会被 ModulePanel 底色覆盖 → paintContent 用 `drawImageAt` 覆盖。
 - `GLint/GLuint` 是全局作用域（khrplatform.h），**不加** `juce::gl::` 前缀。
-- `glBlitFramebuffer` 格式不匹配时驱动静默丢弃，`glError` 仍为 0。
+- `glBlitFramebuffer` 格式不匹配时显卡驱动会直接丢弃该次拷贝，`glError` 仍为 0。
 - `triggerRepaint()` 不可靠驱动 UI 重绘；用 `juce::Timer`（消息线程回调）才可靠。
 - 不要在 `paint`/`paintContent` 内调 `repaint()`（干扰 CachedImage）。
 - `hasKeyboardFocus()` 是组件级 API，判断窗口激活要用 `TopLevelWindow::getActiveTopLevelWindow()`。

@@ -3,7 +3,7 @@
 ## 1. 分析后端（详见 PROJECT_OVERVIEW.md §3.2 / §4.2）
 
 - `AnalyserHub` 6 路 Kind（`Oscilloscope/Spectrum/Loudness/Phase/Dynamics/MusicAnalysis`），引用计数按需计算；`pushStereo` 只算计数 > 0 的路径。
-- `MusicAnalysis`（Tempo/Key）：音频线程只降混 + 写入 SPSC 环形缓冲（131072 采样），FFT/自相关/chroma 在独立后台线程；**首次 `retain` 才建线程/缓冲**，无模块时零资源。
+- `MusicAnalysis`（Tempo/Key）：音频线程只降混 + 写入 SPSC 环形缓冲（131072 采样），FFT/自相关/chroma 在独立工作线程；**首次 `retain` 才建线程/缓冲**，无模块时零资源。
 - **三路 FFT**（Stereo Map 引入）：主 FFT 由单路（mid）变三路（mid+L+R），复用同一 `fft` 实例 + 窗函数，**常开**（不做按需开关，否则 `fftFifoIndex` 相位错位）。`rebuildMainFft()` 与 `applyMainFftSizeChange()` 两处都要同步 resize 6 个 vector，漏一处即越界读。
 
 ## 2. 计量口径关键事实（详见 PROJECT_OVERVIEW.md §1.2 / §3.2）
@@ -43,12 +43,12 @@
 
 ## 5. Recorder 模块
 
-- 后端启动即常驻采集，内存滚动保留最近 60s；拖动条选 1~60s，导出"按下前 N 秒"为 WAV。
+- 后端启动即常驻录制，内存滚动保留最近 60s；拖动条选 1~60s，导出"按下前 N 秒"为 WAV。
 - **单段上限 1 小时**（v3.0.0 起，到点自动保存并停止）。
 
 已知限制：
-1. 采集期间切换音频设备/采样率 → 缓冲按新率重建，之前的 N 秒丢弃。
-2. 环形缓冲满（采集线程被挂起 >1.3s）丢样本，无提示。
+1. 录制期间切换音频设备/采样率 → 缓冲按新率重建，之前的 N 秒丢弃。
+2. 环形缓冲满（录制线程被挂起 >1.3s）丢样本，无提示。
 3. 导出在消息线程同步落盘（60s ≈ 23MB@48k），慢盘上最多几百 ms 停顿。
 4. 滚动历史常驻内存（60s×2ch×4B ≈ 23MB@48k，96k 约 46MB）；有输入才分配。
 5. 录制中移除模块/关界面会立即收尾并保存，不留半截文件。
@@ -77,7 +77,7 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 - **入口**：标题栏 `[齿轮][弹出][关闭]`。仅 `setControlPanelEnabled(true)` 的模块显示齿轮（不含速度/调性、录音、ProjectM、VirtuPet）。
 - **抽屉**：`ModuleControlDrawer`（`source/ui/ModuleControlDrawer.h/.cpp`）首次点开时懒创建，**覆盖式**盖在内容区顶部，高度上限 = 内容区 80%（超出内部滚动）。不改变画布尺寸 —— Spectrogram 改尺寸会 `ensureGrid` 清历史，所以抽屉绝不挤占画布。
 - **展开状态不进存档**，加载后一律收起；布局锁定时仍可调（不是布局操作）；浮动窗口里同样可用。
-- **点击别处自动收起**：抽屉打开时把 `DrawerDismissListener` 挂到当前窗口的 topLevel（`addMouseListener(..., true)`，窗口内任何组件的鼠标按下都会通知到），命中规则在 `ModulePanel::closeOpenControlDrawers(source, pos)`：点在抽屉内部（含子控件）或任一模块的齿轮按钮上不关，其余位置一律收起；**同时只允许开一个抽屉**（`setControlPanelOpen(true)` 会先关掉别人的）。抽屉全关时监听自动摘掉，平时零开销。
+- **点击别处自动收起**：抽屉打开时把 `DrawerDismissListener` 挂到当前窗口的 topLevel（`addMouseListener(..., true)`，窗口内任何组件的鼠标按下都会通知到），命中规则在 `ModulePanel::closeOpenControlDrawers(source, pos)`：点在抽屉内部（含子控件）或任一模块的齿轮按钮上不关，其余位置一律收起；**同时只允许开一个抽屉**（`setControlPanelOpen(true)` 会先关掉别人的）。抽屉全关时订阅自动摘掉，平时零开销。
 - **Toybox**：抽屉及其子控件标记 `toy.optOut`，点击不触发彩蛋；按住慢放的 `mouseDown` 也排除抽屉区域。
 - **绘制层级：抽屉 > emoji**。抽屉是模块子组件，而彩蛋有两处绘制都在子组件之上 —— 模块内的 `ModulePanel::paintOverChildren` 与飞出模块的全窗口 `ToyOverlay::paint`。两处都用 `Graphics::excludeClipRegion` 扣掉 `getControlDrawerBounds()`（overlay 侧用 `getLocalPoint` 把各模块的抽屉换算到叠加层坐标），emoji / 粒子经过抽屉时自动"钻到面板后面"，不会再盖住设置界面。
 - **声明方式**（`ModuleWorkspace.h` 里的 `ParamDef` / `ModulePanel`）：模块覆写 `buildParamDefs / getParamValue / setParamValue`，抽屉据此生成控件（`choice` 互斥按钮、`toggle` ON/OFF、`slider` 横向滑条）。支持分组（`.in("组名")`）、条件可见（`.when(lambda)`）、悬停提示（`y2k::help::make`）。
@@ -131,6 +131,8 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 | 波形历史 `waveform` | `colorSource`（Pitch / Loudness / Sibilance）、`sibThreshold`（-60…-10 dB，默认 -35）、`speed`、`dual`（上 L / 下 R 双声道） |
 | 立体声场 `stereoField` | `dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`bandColour`（三路独立轨迹）、`crossLow` `crossHigh`（默认 200 / 2000 Hz） |
 | 立体声频段图 `stereoMap` | `mode`（Pan / Mono check）、`fftScale` |
+| 电脑状态 `systemMonitor`（v3.3） | `style`（Cards / Bars / Graphs / Compact）、`itemCpu` `itemCpuTemp` `itemGpu` `itemGpuTemp` `itemRam` `itemVram` `itemDisk` `itemNet` `itemBattery`、`perCore`、`infoBar`、`colourByLoad`、`tempUnit`（摄氏 / 华氏）、`interval`（0.5–5 s，默认 1）、`histSpan`（15–600 s，默认 60） |
+| 小工具 `utility`（v3.3） | `tool`（Calculator / Colour Picker / Stopwatch / Timer / Audio Calc / Clock / Notes）；各工具参数存在 `<tools>` 下以工具名命名的子节点：`calcTape`、`pickFormat` `pickAutoCopy`、`swHundredths`、`tmSound` `tmFlash`、`cvA4`、`clkStyle` `clk24h` `clkSeconds` `clkDate`、`noteSize` |
 
 「Display style / 项目开关」类参数的默认值都是该模块旧外观；颜色相关的固定配色（Heat / Grey / Ice、频段染色红绿蓝）不随主题变化。
 
@@ -242,3 +244,24 @@ GL 直渲染模块的顶点是**模块本地坐标**，渲染器只设 `glViewpo
 - **轴刻度 / 标签留白走常量，别再写字面魔数**：
   - 频谱（`SpectrumModule.cpp` 顶层匿名 namespace）：`axisLabelGap / dbLabelColumnW / hzLabelRowH` 是画布边距与标签绘制的**唯一事实来源**。左侧 dB 列与底部 Hz 行同一口径（文字厚度 + 2px 间隙）：底部 16，左侧 20 —— 最宽刻度 `-80` 在 9px 轴字体下实测 ≈15px（Silkscreen 14.9 / ChillBitmap 14.6）。`getCanvasBounds()` 与 `drawAxisLabels()` 必须同时引用它；旧版 `withTrimmedLeft(32)` + `canvas.getX() - 32 + (28 - w)` 是同一数值手工抄了三遍，改边距漏改一处就会错位。
   - 相位（`PhaseModule.cpp` 顶层匿名 namespace）：`barLabelW(44) / barLabelGap(4) / barLeftInset` —— WIDTH / BAL 标签在条形左侧的整块空白列内**水平居中**，列宽按最宽标签实测 ≈36px + 两侧各 6px 取；GL overlay、GL 快照、CPU 回退绘制、静态层四条路径共用 `barLeftInset`（旧版 4 处 `labelW = 56` + 2 处 `withTrimmedLeft(60)` 各自抄一份）。
+
+## 8. 电脑状态 / 小工具模块（v3.3）
+
+两个模块都**不订阅 `AnalyserHub`**，对音频线程零影响；都只走 CPU 绘制（没有 GL 直渲染路径）。
+
+### 8.1 电脑状态 `systemMonitor`（`SystemMonitorModule` + `source/system/SystemStats*`）
+
+- **采集层** `y2k::sys::Sampler`：进程内共享（`juce::SharedResourcePointer`），后台线程采样；UI 只拷 `Snapshot`。采样间隔 = 所有订阅者请求的最小值（0.5–5 s）。历史环 `kHistoryLen = 1200` 样本 / 指标。
+- **订阅时机**：模块 20 Hz 定时器里按 `isShowing()` 订阅 / 退订 —— 添加菜单的悬停预览会临时构造模块，**构造函数里不能订阅**（否则每次悬停都起线程）；窗口最小化时自动退订，线程阻塞等待。最后一个模块销毁 → 采集器析构（`stopThread`，最坏等一次 WMI 查询）。
+- **Windows 数据源**（全部公开 API，无驱动）：PDH（`PdhAddEnglishCounterW`，非英文系统可用）→ CPU `% Processor Utility`（同任务管理器）、每核、`% Processor Performance × ~MHz` 得实时频率、磁盘、网络（排除 loopback / isatap / teredo / vEthernet，防止 Hyper-V 虚拟交换机重复计数）、`GPU Engine`（按引擎聚合全部进程后取主 GPU 最忙引擎，同任务管理器）、`GPU Adapter Memory`；DXGI 选主 GPU（专用显存最大）；GPU 温度 D3DKMT `KMTQAITYPE_ADAPTERPERFDATA(62)`（结构体按 SDK `shared/d3dkmthk.h` 自行声明，避免 NTDDI 宏依赖）→ NVML → 桥接；CPU 温度 HWiNFO 共享内存（`Global\HWiNFO_SENS_SM2`，需用户开启 Shared Memory Support）→ LibreHardwareMonitor / OpenHardwareMonitor WMI → ACPI 热区（精度有限，悬停提示会说明）→ N/A。
+- **macOS**：mach（CPU / 内存）、IOKit `IOAccelerator.PerformanceStatistics`（GPU / 显存；Apple Silicon 统一内存只有占用量）、`IOBlockStorageDriver.Statistics`（磁盘）、`NET_RT_IFLIST2`（网络 64 位计数）、`IOPowerSources`（电池）。**温度无公开 API，显示 N/A**。系统头必须在 `JuceHeader.h` 之前 include（MacTypes.h 的 `Point` 与 `using namespace juce` 冲突）。
+- **样式**：Cards（分段环形表 + 迷你曲线，宽卡片右侧放曲线 / 每核条）、Bars（LED 分段条，负载类按格位置三色）、Graphs（历史曲线，网络为下行 + 上行双线，量程按历史峰值自动、上涨即跟随回落缓慢）、Compact（按区域自动缩字号的单行 / 多行读数）。数值 20 Hz 缓动。
+- **已知限制**：PDH 首次采集前 300 ms 内速率类计数器无效（首帧补等）；多 GPU 只看"专用显存最大"的那块；CPU 温度在没有桥接工具时多为 N/A（这是 Windows 平台限制，不是 bug）。
+
+### 8.2 小工具 `utility`（`UtilityModule` + `UtilityTools` + `ScreenColourSampler`）
+
+- 控制面板 `tool` 选工具；**所有工具的参数一次性列在 `buildParamDefs` 里，用 `.when(tool == X)` 只显示当前工具的** —— 抽屉参数表保持稳定，切工具不需要重建抽屉。
+- 存档：`<state tool="N"><tools><calculator …/><notes text="…"/>…</tools></state>`；切换工具前先 `captureCurrentToolState()`，所以每个工具的内容互不覆盖。秒表 / 倒计时存**绝对时间戳**，重启后按真实时间继续（倒计时在关闭期间到点：直接显示到点，不补播提示音）。
+- 工具视图以 z 序 0 加入（`addAndMakeVisible(*view, 0)`），保证控制面板抽屉始终在工具之上。模块标记 `toy.optOut`，按钮 / 输入框不触发 Toybox。
+- 取色器：Windows 按住吸管拖到屏幕任意处松手（GDI `BitBlt` 读光标周围 11×11 像素实时放大）；macOS 用 `NSColorSampler`（无需屏幕录制授权，`ScreenColourSampler_mac.mm`，**不 include JuceHeader**）。`EDIT` 打开 `ColourSelector` 弹出框微调。
+- 便签用系统字体（像素字体没有中文字形）；输入停顿 0.7 s 才通知存档（工作区本身另有 16 ms 防抖）。

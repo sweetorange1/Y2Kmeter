@@ -216,6 +216,8 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::milkdrop:         return "milkdrop";
         case ModuleType::tempoKey:         return "tempo_key";
         case ModuleType::recorder:          return "recorder";
+        case ModuleType::systemMonitor:     return "system_monitor";
+        case ModuleType::utility:           return "utility";
     }
 
     return "eq";
@@ -257,6 +259,8 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "milkdrop",          ModuleType::milkdrop },
         { "tempo_key",         ModuleType::tempoKey },
         { "recorder",          ModuleType::recorder },
+        { "system_monitor",    ModuleType::systemMonitor },
+        { "utility",           ModuleType::utility },
     };
     for (auto& p : kv)
         if (s == p.k)

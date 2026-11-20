@@ -137,6 +137,8 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::milkdrop:         return "Milkdrop";
         case ModuleType::tempoKey:         return "Tempo / Key";
         case ModuleType::recorder:          return "Recorder";
+        case ModuleType::systemMonitor:     return "System Monitor";
+        case ModuleType::utility:           return "Tools";
 
         default:                            return "Module";
 

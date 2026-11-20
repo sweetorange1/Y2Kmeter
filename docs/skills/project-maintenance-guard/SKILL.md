@@ -49,7 +49,7 @@ Y2Kmeter 项目的通用工程维护 Skill。它不绑定某一个模块，而�
 
 ## 2. 前置检查（v3.2 现状）
 
-1. **版本**：当前 `3.2.0`；C++17；JUCE 8.0.12 vendored（`third_party/JUCE`，带 0001~0006 补丁）。
+1. **版本**：当前 `3.3.0`；C++17；JUCE 8.0.12 vendored（`third_party/JUCE`，带 0001~0006 补丁）。
 2. **模块形态**：分析模块 = `ModulePanel` 子类；多数同时继承 `GlDirectModuleBase` + `AnalyserHub::FrameListener`。**GL 与 CPU 回退是两条绘制路径，改外观必须两边都改**（`buildGlSnapshot` / `paintGlOverlay` 与 `paintLegacyContent`）。
 3. **参数系统（v3.1+）**：抽屉由 `ModulePanel::buildParamDefs` 生成，值走 `getParamValue / setParamValue`，持久化走 `save / restoreModuleSpecificState`。
 4. **i18n**：界面上出现的英文都是**翻译键**，必须在 `i18n/zh-CN.lang` 补中文（逐行键，非整段）。
