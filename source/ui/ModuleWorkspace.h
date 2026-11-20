@@ -88,7 +88,7 @@ ModuleType   stringToModuleType(const juce::String& s, bool* ok = nullptr);
 // ------------------------------------------------------------
 // ThemeSwatchBar —— 参考 Win XP 画图底部调色板样式的主题选择器
 //   调色板重构（R1）布局：
-//     [当前主题预览块] [预设色票 x12] [我的主题 xN(角标)] [+] [主题名]
+//     [当前主题预览块] [预设色票 x12] [我的主题 xN(角标)] [+] [SKIN] [主题名]
 //   超宽时支持滚轮横向滚动。
 // ------------------------------------------------------------
 class ThemeSwatchBar : public juce::Component,
@@ -115,7 +115,7 @@ private:
     juce::Rectangle<int> getUserSwatchBounds(int index) const;
     juce::Rectangle<int> getNewButtonBounds() const;
 
-    // hitTest：kind = 0 无 / 1 预览块 / 2 预设 / 3 我的主题 / 4 "+"
+    // hitTest：kind = 0 无 / 1 预览块 / 2 预设 / 3 我的主题 / 4 "+" / 5 视觉风格（SKIN）
     struct Hit { int kind = 0; int index = -1; };
     Hit hitTest(juce::Point<int> p) const;
 
@@ -437,6 +437,12 @@ protected:
     // repaintFrameContent() 的失效区域：默认整个内容区；GL 直渲染模块接管后
     //   仅为画布（overlay 绘制范围），见 GlDirectModuleBase。
     virtual juce::Rectangle<int> getFrameRepaintBounds();
+
+    // 绿幕风格（PinkXP::isChromaKeySkin）下保留的"数据画布"（模块本地坐标）：
+    //   未悬停时画布以外一律盖成纯绿；返回空 = 本模块不支持绿幕，整块纯绿。
+    //   支持的模块（Milkdrop / 示波器 / 波形 / 频谱 / 语谱图 / 3D 语谱 / 响度）
+    //   覆写返回自己的画布，并在画布内自行把背景画成纯绿、跳过网格 / 刻度 / 图例。
+    virtual juce::Rectangle<int> getChromaKeyCanvas() { return {}; }
 
     juce::Rectangle<int> getCloseButtonBounds() const;
     juce::Rectangle<int> getPopOutButtonBounds() const;  // 弹出/停靠按钮边界

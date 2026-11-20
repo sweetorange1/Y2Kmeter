@@ -7,6 +7,8 @@
 > - `docs/` —— **开发须知与易错点**：从历史开发过程中提炼出的、对后续开发仍有指导意义的规则 / 约束 / 已知限制 / 待办。按主题拆分，按需查阅。
 >
 > **阅读顺序建议**：先 `PROJECT_OVERVIEW.md` 定位"改哪个文件、调哪个类"，再按改动主题进对应文档查"有哪些坑、有哪些硬约束、有哪些未完成事项"。
+>
+> **新会话开场话术**见 [AI_START_PROMPT.md](AI_START_PROMPT.md)（复制粘贴用；含"分段读、别整篇塞上下文"的约束与协作约定）。
 
 ## 文件清单
 
@@ -21,7 +23,7 @@
 
 ## 关键事实速查（版本 / 目录）
 
-- 当前版本：`3.3.0`（CMakeLists `project(Y2Kmeter VERSION 3.3.0)`）。
+- 当前版本：`3.4.0`（CMakeLists `project(Y2Kmeter VERSION 3.4.0)`）。
 - 构建目录：Release = `cmake-build-release-visual-studio`；诊断包 RelWithDebInfo = `cmake-build-relwithdebinfo-visual-studio-ninja`。
 - vendored JUCE：`third_party/JUCE`（补丁 0001~0006 已打入源码，diff 在 `third_party/juce_patches/`）。
 - 未发布/开发中的模块：`Stereo Map`（`ModuleType::stereoMap`）。

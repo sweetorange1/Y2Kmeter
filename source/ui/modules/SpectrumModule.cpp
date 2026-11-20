@@ -984,12 +984,13 @@ void SpectrumModule::buildGlSnapshot()
     snap->logicalH = canvas.getHeight();
     snap->canvasLocal = canvas;
 
-    // ---- 背景（凹陷，框架 helper）----
+    // ---- 背景（凹陷，框架 helper；绿幕下为纯绿）----
     appendSunkenFrame (snap->vertices, canvas);
 
     auto inner = canvas.reduced (2);
 
-    // ---- 网格（与 drawGrid 逐笔对应）----
+    // ---- 网格（与 drawGrid 逐笔对应；绿幕不画）----
+    if (! PinkXP::isChromaKeySkin())
     {
         // 横线（每 20dB，0dB 高亮）
         for (int db = (int) minDb; db <= (int) maxDb; db += 20)
@@ -1482,6 +1483,8 @@ juce::uint32 SpectrumModule::computeThemeColourKey() noexcept
     juce::uint32 k = 2166136261u;
     for (auto c : { PinkXP::btnFace, PinkXP::content, PinkXP::pink200, PinkXP::pink400, PinkXP::ink })
         k = (k ^ c.getARGB()) * 16777619u;
+    // 视觉风格改变画布凹槽 / 绿幕开关 → 并入键
+    k = (k ^ (juce::uint32) PinkXP::getCurrentSkin()) * 16777619u;
     return k;
 }
 
@@ -1518,6 +1521,12 @@ void SpectrumModule::renderStaticLayer (juce::Rectangle<int> contentBounds, floa
 
 void SpectrumModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (canvas);
+        return;
+    }
     PinkXP::drawSunken(g, canvas, PinkXP::content);
 }
 
@@ -1526,6 +1535,9 @@ void SpectrumModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> canv
 // ----------------------------------------------------------
 void SpectrumModule::drawGrid(juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+        return;   // 绿幕：只留曲线与读数
+
     auto inner = canvas.reduced(2);
     if (inner.isEmpty()) return;
 
@@ -1788,6 +1800,9 @@ void SpectrumModule::drawCurves(juce::Graphics& g, juce::Rectangle<int> canvas) 
 // ----------------------------------------------------------
 void SpectrumModule::drawAxisLabels(juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+        return;   // 绿幕：坐标刻度文字也不画
+
     // 轴标签是静态文本，但组件每帧全量重绘；用位图缓存避免每帧塑形 + 逐
     // glyph GL 调用（mac NSOpenGL 下开销是 Windows 约 10 倍）。
     const juce::Colour labelColour = PinkXP::ink.withAlpha(0.85f);

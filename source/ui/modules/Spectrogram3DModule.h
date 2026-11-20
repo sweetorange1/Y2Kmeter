@@ -62,6 +62,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;   // 轴标签 + 悬停标尺
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override; // 离屏 Image 旧路径
+    // 绿幕：保留 3D 画布（低能量条带与远处层在色板里融进纯绿）
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getCanvasBounds (getContentBounds()); }
 
 private:
     // ---- 布局 ----

@@ -1053,8 +1053,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.3.0 debug"
-                                                                               : "v3.3.0"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.4.0 debug"
+                                                                               : "v3.4.0"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1096,7 +1096,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.3.0";
+        const juce::String versionBase = "v3.4.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -2290,6 +2290,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     PinkXP::ThemeLibrary::instance().ensureLoadedFromLibraryFile();
 
     // 订阅主题变更 → 切主题后刷新全局重绘
+    // 绿幕风格：Editor 自身（标题栏 / 工具栏 / 空白桌面）是一个悬停显示区域
+    PinkXP::markChromaRegion (*this);
+
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
         Y2K_LOG ("[palette] editor theme callback: invalidate desktop cache");
@@ -2304,6 +2307,19 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         for (auto& wnd : floatingWindows_)
             if (wnd != nullptr)
                 wnd->refreshThemeColours();
+
+        // 视觉风格切换后字体也要换（像素 / 矢量 / 等宽终端字体）：广播期间不能
+        //   再嵌套广播，异步走与切语言相同的"换字体 + 刷新布局"流程。
+        if (PinkXP::activeTypefaceStale())
+        {
+            juce::Component::SafePointer<juce::Component> safe (this);
+            juce::MessageManager::callAsync ([safe]
+            {
+                if (auto* self = dynamic_cast<Y2KmeterAudioProcessorEditor*> (safe.getComponent()))
+                    if (PinkXP::activeTypefaceStale())
+                        self->applyLanguageChange();
+            });
+        }
     });
 
     // 应用默认主题（会把全局配色重写一次，确保状态一致）
@@ -2780,6 +2796,8 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     customTypeface = nullptr;
     // 同理释放按界面语言加载的字体缓存（Silkscreen / 中文像素字体等）
     PinkXP::releaseTypefaceCache();
+    // 绿幕悬停轮询定时器（进程级静态对象）：不能拖到 DLL 卸载期再析构
+    PinkXP::releaseChromaHoverTracker();
 
     // 3.1) 关键：清空 PinkXPStyle 的桌面纹理缓存（getSharedDesktopTexture）。
     //
@@ -4550,9 +4568,11 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
     cacheGraphics.drawImageAt (sharedBase, 0, 0);
     // drawLogo 期望 area 是"目标绘制矩形"，而 cache Image 以 (0,0) 起点，
     // 因此传递一个左上角为 (0,0) 的等尺寸矩形。
-    PinkXP::drawLogo (cacheGraphics,
-                      juce::Rectangle<int>(0, 0, bounds.getWidth(), bounds.getHeight()),
-                      logoImage);
+    //   绿幕风格：桌面只留纯绿，不叠 logo
+    if (! PinkXP::isChromaKeySkin())
+        PinkXP::drawLogo (cacheGraphics,
+                          juce::Rectangle<int>(0, 0, bounds.getWidth(), bounds.getHeight()),
+                          logoImage);
 }
 
 // ----------------------------------------------------------
@@ -4587,7 +4607,8 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
             else
             {
                 PinkXP::drawDesktop (g, getLocalBounds());
-                PinkXP::drawLogo    (g, wsBounds, logoImage);
+                if (! PinkXP::isChromaKeySkin())
+                    PinkXP::drawLogo (g, wsBounds, logoImage);
             }
         }
     }
@@ -4600,8 +4621,20 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
     //      "Y2Kmeter v1.1 iisaacbeats.cn"文字；不画右侧最小化/固定/关闭按钮
     //      （宿主窗口已经提供系统级边框/关闭按钮，伪按钮会产生两套 UI 打架）。
     //    · Hide 态：标题栏不占位；悬停浮层时由 paintOverChildren 画在模块之上。
+    //    · 绿幕风格：鼠标不在 Editor chrome 上时整条标题栏（含下沿分割线）纯绿。
     if (! chromeDim)
-        drawTitleBar (g);
+    {
+        if (PinkXP::isChromaKeySkin() && ! PinkXP::isChromaRevealed (*this))
+        {
+            const auto tb = getTitleBarBounds();
+            g.setColour (PinkXP::chromaKeyGreen());
+            g.fillRect (tb.withHeight (tb.getHeight() + 1));
+        }
+        else
+        {
+            drawTitleBar (g);
+        }
+    }
     // chrome 隐藏态（未悬停）的浮动关闭按钮 + 抬头文字由 ChromeHiddenOverlay 处理
 }
 
@@ -4630,7 +4663,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.3.0";
+        const juce::String versionBase = "v3.4.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";

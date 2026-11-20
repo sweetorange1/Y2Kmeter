@@ -7,7 +7,7 @@
 <p align="center"><strong>Y2K 像素复古音频分析仪</strong> — VST3 / AU / Standalone</p>
 
 <p align="center">
-<img src="https://img.shields.io/badge/version-3.3.0-blue" alt="Version">
+<img src="https://img.shields.io/badge/version-3.4.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
 </p>
@@ -102,6 +102,7 @@ cmake --build cmake-build-release --config Release
 - **[JUCE](https://juce.com)** — 强大的跨平台音频应用框架，提供插件格式、OpenGL 上下文、DSP 等一切基础设施。
 - **[Inno Setup](https://jrsoftware.org/isinfo.php)** — Windows 安装包制作工具。
 - **[Silkscreen](https://kottke.org/plus/type/silkscreen/)** — 经典的像素英文字体，作为 Y2Kmeter 的默认 UI 字体。
+- **视觉风格字体**（均来自 [Google Fonts](https://github.com/google/fonts) / [Noto CJK](https://github.com/notofonts/noto-cjk)）— Inter（现代简约 / 绿幕）、Nunito（玻璃）、Orbitron（霓虹赛博）、Exo 2（千禧金属）、VT323（CRT 终端）、Open Sans（Win11 Fluent）、Noto Sans SC 思源黑体（非像素风格的中文界面）。
 
 ### 音频标准参考
 
@@ -122,6 +123,7 @@ Y2Kmeter 本体以 **GPL-3.0** 开源。
 | Milkdrop 预设 / 纹理 | LGPL-2.1-or-later |
 | JUCE | GPL-3.0 / 商业双授权 |
 | Silkscreen 字体 | SIL Open Font License |
+| Inter / Nunito / Orbitron / Exo 2 / VT323 / Open Sans / Noto Sans SC 字体 | SIL Open Font License 1.1（原文见 `ttf/skin/licenses/`） |
 
 > 详细许可文本见根目录 `LICENSE` 文件。
 

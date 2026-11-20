@@ -647,6 +647,10 @@ public:
                 PinkXP::applyTheme (targetId);
                 Y2K_LOG ("[boot] preset theme applied");
             }
+
+            // 视觉风格（与颜色主题正交；缺键 = 像素复古，旧存档外观不变）
+            PinkXP::applySkin (PinkXP::skinFromInt (
+                getUserSettings().getIntValue ("ui.skinId", (int) PinkXP::SkinId::pinkXP)));
             Y2K_LOG ("[boot] 1.15 theme restore done");
         }
 
@@ -1389,6 +1393,7 @@ private:
             "ui.fftSize",
             "ui.toyLevel",
             "ui.themeId",
+            "ui.skinId",
             "audio.sourceId",
             "milkdrop.currentPreset",
             "filterState",     // 插件状态（EQ/布局 XML）— 保证用当前值重写
@@ -1605,6 +1610,7 @@ private:
         //   · 主题在运行时被 ThemeSwatchBar::mouseDown → PinkXP::applyTheme 修改；
         //     这里只是在退出前快照一次 gCurrentThemeId。
         s.setValue ("ui.themeId", (int) PinkXP::getCurrentThemeId());
+        s.setValue ("ui.skinId",  (int) PinkXP::getCurrentSkin());
 
         // 若当前为自定义主题，保存：
         //   · 旧键双色（向后兼容降级）

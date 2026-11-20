@@ -309,6 +309,9 @@ juce::Colour SpectrogramModule::intensityToColour (float t) const noexcept
 {
     t = juce::jlimit (0.0f, 1.0f, t);
 
+    // 绿幕：低强度像素渐隐为纯绿（静音区域抠像后透明），高强度保持原色阶
+    const auto base = [&]() noexcept -> juce::Colour
+    {
     // v3.1 固定色阶（颜色参数 ≠ Theme）：不随主题变化
     switch (colourScheme)
     {
@@ -352,6 +355,9 @@ juce::Colour SpectrogramModule::intensityToColour (float t) const noexcept
         return PinkXP::sampleChartRamp ((t - kBlend) / (1.0f - kBlend));
     }
     return PinkXP::interpolateOkLab (spectrogramBaseColour_, spectrogramAccentColour_, t);
+    }();
+
+    return PinkXP::isChromaKeySkin() ? PinkXP::chromaKeyFade (base, t) : base;
 }
 
 // ----------------------------------------------------------
@@ -940,6 +946,12 @@ void SpectrogramModule::writeLatestColumnToImage()
 
 void SpectrogramModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (canvas);
+        return;
+    }
     PinkXP::drawSunken (g, canvas, PinkXP::content);
 }
 
@@ -948,6 +960,9 @@ void SpectrogramModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
 // ----------------------------------------------------------
 void SpectrogramModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+        return;   // 绿幕：刻度文字不画
+
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
 
     const double sampleRate = hub.getSampleRate();

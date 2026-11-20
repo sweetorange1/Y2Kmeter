@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 3.3.0 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 3.4.0 LANGUAGES C CXX)
 
 # ==========================================================
 # Steam 构建开关（默认 OFF，绝不影响官网 / Inno Setup 流水线）
@@ -427,7 +427,7 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 3.3.0
+        VERSION 3.4.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
@@ -480,7 +480,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 3.3.0
+        VERSION 3.4.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -555,6 +555,36 @@ juce_add_binary_data(Y2KI18nData
   SOURCES
     ${Y2KM_I18N_LANG_FILES}
     "${Y2KM_FONT_ZH_SRC}"
+)
+
+# ==========================================================
+# 视觉风格（Skin）字体：每种风格各配一套英文字体，非像素风格的中文界面
+#   统一改用 Noto Sans SC（思源黑体）。全部为 SIL Open Font License 1.1，
+#   许可证原文见 ttf/skin/licenses/。
+#   独立 binary data target（Noto Sans SC ~8 MB），改动其它资源不会触发它重新生成。
+#   C++ 侧引用：Y2KSkinFontData::Inter_ttf 等（见 PinkXPStyle.cpp skinFontSpec）。
+# ==========================================================
+set(Y2KM_SKIN_FONT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ttf/skin")
+set(Y2KM_SKIN_FONT_FILES
+  "${Y2KM_SKIN_FONT_DIR}/Inter.ttf"
+  "${Y2KM_SKIN_FONT_DIR}/Nunito.ttf"
+  "${Y2KM_SKIN_FONT_DIR}/Orbitron.ttf"
+  "${Y2KM_SKIN_FONT_DIR}/Exo2.ttf"
+  "${Y2KM_SKIN_FONT_DIR}/VT323.ttf"
+  "${Y2KM_SKIN_FONT_DIR}/OpenSans.ttf"
+  "${Y2KM_SKIN_FONT_DIR}/NotoSansSC.otf"
+)
+foreach(_y2k_font IN LISTS Y2KM_SKIN_FONT_FILES)
+  if (NOT EXISTS "${_y2k_font}")
+    message(FATAL_ERROR "缺少风格字体资源：${_y2k_font}")
+  endif()
+endforeach()
+
+juce_add_binary_data(Y2KSkinFontData
+  HEADER_NAME Y2KSkinFontData.h
+  NAMESPACE   Y2KSkinFontData
+  SOURCES
+    ${Y2KM_SKIN_FONT_FILES}
 )
 
 # ==========================================================
@@ -841,6 +871,7 @@ target_include_directories(Y2Kmeter_milkdrop PRIVATE
 set(Y2KM_COMMON_LINK_LIBS
   Y2Kmeter_BinaryData
   Y2KI18nData
+  Y2KSkinFontData
   juce::juce_audio_utils
   juce::juce_dsp
   # GPU 合成层：Editor 里挂 juce::OpenGLContext 后，整个绘制管线会被翻译

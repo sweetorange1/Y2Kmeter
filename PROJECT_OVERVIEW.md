@@ -1,7 +1,7 @@
 
 # Y2Kmeter 项目全景简介（AI 上下文导航文档）
 
-> 本文档是为 AI 助手上下文初始化设计的项目导航说明。阅读完本文档，你应能立刻定位到"改哪个文件、调哪个类、走哪条数据流"。
+> 本文档是为 AI 助手上下文初始化设计的项目导航说明。**按需查阅即可**：找到"改哪个文件、调哪个类、走哪条数据流"就够了。
 >
 > **开发过程的易错点 / 约束 / 已知限制已提炼为面向 AI 的知识库 [docs/](docs/INDEX.md)**（构建、渲染 GL、窗口布局、分析模块、UI 功能、通用教训六个主题），本文只保留理解项目现状所需的内容。
 >
@@ -24,13 +24,24 @@
 >
 > **联网行为只有两项，共用安装时的一个授权项（默认关闭；关闭时程序不发起任何网络请求）**：
 > ① 启动时查询一次是否有新版本；② 在用户同意后发送一次不含身份信息的版本与环境统计。
+>
+> **给 AI 的阅读方式（重要）**
+>
+> 本文档 700+ 行、约 60 KB，**不要一次性整篇读入上下文**（既慢又浪费预算）。推荐做法：
+>
+> 1. 先读 §1「项目概述」+ §7「常见修改场景速查」，通常就够定位了；
+> 2. 需要细节时用 `read_file` 的 `offset` / `limit` 按章节读，单次 ≤200 行；
+> 3. 再往下才进 `docs/` 对应主题文档（见 [docs/INDEX.md](docs/INDEX.md) 的"何时读"列）。
+> 4. 新会话开场可直接粘贴 [docs/AI_START_PROMPT.md](docs/AI_START_PROMPT.md) 的话术，一次带齐上述约定。
+>
+> 目标是"改哪个文件、调哪个类、走哪条数据流"，不需要通读全文。
 
 ---
 
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.3.0`）
+- **产品名**：`Y2Kmeter` （版本：`3.4.0`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -54,9 +65,14 @@
 > · 悬停说明整体校对（响度补 RMS / 真峰值、各模块补新增参数与抽屉位置）。
 
 > **v3.3 本轮变更**（细节见 [docs/analysis-modules.md](docs/analysis-modules.md) §8）：
-> · 新增 **电脑状态模块**（`systemMonitor`）：CPU（含每核 / 实时频率）/ CPU 温度 / GPU / GPU 温度 / 内存 / 显存 / 磁盘 / 网络 / 电池；四种样式（卡片环形表 / 任务管理器式横条 / 历史曲线 / 紧凑读数），项目开关、温度单位、刷新间隔、历史跨度可调。新采集层 `source/system/SystemStats`（后台线程 + 进程内共享，模块不可见时停止采集），Windows 走 PDH / DXGI / D3DKMT / NVML 并桥接 HWiNFO / LibreHardwareMonitor 读 CPU 温度，macOS 走 mach / IOKit；只用公开 API，不含驱动。
+> · 新增 **电脑状态模块**（`systemMonitor`）：把系统的公开性能计数器绘制成卡片环形表 / 任务管理器式横条 / 历史曲线 / 紧凑读数四种样式，项目开关、单位、刷新间隔、历史跨度可调。数据层在 `source/system/SystemStats`（后台线程 + 进程内共享，模块不可见时停止采样），全部走操作系统公开 API，**不含驱动、不联网、不读取其他程序内部数据**；指标口径、采样层设计与已知限制见 [docs/analysis-modules.md](docs/analysis-modules.md) §8。
 > · 新增 **小工具模块**（`utility`）：计算器 / 取色器 / 秒表 / 倒计时 / 音频换算（BPM↔毫秒含附点三连音 + TAP 测速、音名↔频率、dB↔倍数、采样↔毫秒）/ 时钟 / 便签；各工具内容独立存档，秒表与倒计时按绝对时间戳跨会话继续。
 > · 注册链路（枚举追加 `systemMonitor` / `utility`，含字符串、显示名、工厂、添加菜单、性能计数、CMake 源与 Windows 系统库）与 `i18n/zh-CN.lang`（约 180 条新文案）已同步。
+
+> **v3.4 本轮变更**（细节见 §4.6 与 §1.2 ④）：
+> · 视觉风格从 3 种扩到 **8 种**：新增 **玻璃**（窗口内模拟毛玻璃，全部不透明绘制）/ **霓虹赛博**（合成波桌面 + 灯管描边 + 彩色辉光）/ **CRT 终端**（磷光单色 + 扫描线 + 暗角）/ **Win11 Fluent**（Mica 桌面 + 细描边 + 小控件大圆角；模块外框仍直角）/ **绿幕**（见下）。`SkinId` 按整数持久化，只追加不重排，旧存档零影响。
+> · 新增 **绿幕风格**（`greenScreen`）：给视频创作者录屏抠像 —— 桌面 / 工作区 / 工具栏 / 标题栏 / 模块外壳未悬停时纯绿 `#00FF00`，鼠标悬停处恢复显示；支持的模块（Milkdrop / 示波器 / 波形 / 频谱 / 语谱图 / 3D 语谱 / 响度）覆写 `getChromaKeyCanvas()` 只保留数据图形与数值读数，网格 / 坐标刻度 / 图例全部不画，其它模块未悬停时整块纯绿。
+> · 新增 **按风格切换字体**：每种风格一套英文字体（Silkscreen / Exo 2 / Inter / Nunito / Orbitron / VT323 / Open Sans），中文界面在像素复古 / CRT 下沿用语言包像素字，其余风格改用 Noto Sans SC。字体全部 SIL OFL 1.1，资源在 `ttf/skin/`（独立 binary data target `Y2KSkinFontData`，许可证 `ttf/skin/licenses/`）。
 
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
@@ -85,11 +101,11 @@
 
 **③ VirtuPet 电子宠物**
 
-- 音频信号驱动的像素电子宠物，完整状态机（孵化蛋 / 觅食 / 睡眠 / 生病 / 死亡），随机蛋样式、巡逻 / 说话 / 跳跃行为
+- 音频信号驱动的像素电子宠物，完整生命周期状态机（孵化蛋 / 觅食 / 睡眠 / 生病 / 生命值耗尽），随机蛋样式、巡逻 / 说话 / 跳跃行为
 
 **③-b 桌面辅助模块（v3.3，不参与音频分析）**
 
-- **电脑状态**（`systemMonitor`）：CPU（含每核 / 实时频率）/ CPU 温度 / GPU / GPU 温度 / 内存 / 显存 / 磁盘 / 网络 / 电池；四种样式（卡片环形表 / 任务管理器式横条 / 历史曲线 / 紧凑读数），项目、单位、刷新间隔、历史跨度可调。只读系统公开计数器（Windows：PDH / DXGI / D3DKMT / NVML，CPU 温度桥接用户自行运行的 HWiNFO / LibreHardwareMonitor；macOS：mach / IOKit），不含驱动。
+- **电脑状态**（`systemMonitor`）：把系统公开的性能计数器画成四种样式（卡片环形表 / 任务管理器式横条 / 历史曲线 / 紧凑读数），项目、单位、刷新间隔、历史跨度可调。**只读**操作系统公开计数器，不含驱动、不联网、只在模块可见时采样；指标口径与实现见 [docs/analysis-modules.md](docs/analysis-modules.md) §8。
 - **小工具**（`utility`）：计算器 / 取色器（Windows 拖动吸管实时放大取色，macOS 系统取色放大镜）/ 秒表（计圈）/ 倒计时（到点闪烁 + 提示音）/ 音频换算（BPM ↔ 毫秒含附点三连音 + TAP 测速、音名 ↔ 频率、dB ↔ 倍数、采样 ↔ 毫秒）/ 时钟（数字 / 指针）/ 便签；每个工具的内容独立保存。
 
 **④ 主题与视觉系统**（Y2K / Pink XP 像素复古风）
@@ -98,6 +114,9 @@
 - **调色板重构（v2.10）**：左下角「Palette Studio」面板 —— 色相环 + 明暗（Dark/Light/Auto）+ 氛围 + 和谐方式 + 随机；`OKLCH` 感知均匀色彩空间 + Recipe 配方 + WCAG 对比度护栏（自动修复可读性）；支持 7 个语义角色微调（自动/手动锁定）、撤销/重做（40 步）、A/B 对比、迷你预览卡、质量徽章
 - **我的主题**（自定义 = 一等公民）：可命名保存 ≤24 套（独立存档到 `%APPDATA%\Y2Kmeter.themeLibrary.xml`，Load 存档只合并、不覆盖）、重命名/删除/排序、分享码（`Y2KT1-xxxx` ≤80 字符）复制/粘贴、`.y2kpalette` 文件导入导出、桌面纹理（7 种）+ 标题图标（8 候选）自选、恢复默认（Reset）
 - **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
+- **视觉风格（Skin，与颜色主题正交）**：主题色票条 `+` 右侧的 `SKIN` 按钮切换 —— 像素复古（默认，外观与旧版一致）/ 千禧金属（拉丝金属桌面 + 铬质渐变 + 镜面高光）/ 现代简约（扁平 + 1px 细描边 + 小控件圆角 + 柔和阴影）/ 玻璃（窗口内模拟毛玻璃，全部不透明绘制）/ 霓虹赛博（合成波桌面 + 灯管描边 + 彩色辉光）/ CRT 终端（磷光单色 + 扫描线 + 暗角）/ Win11 Fluent（Mica 桌面 + 细描边 + 小控件大圆角；模块外框仍直角）/ **绿幕**（给视频创作者抠像，见下）。只改外壳层（模块外框 / 标题栏 / 按钮 / 下拉 / 滑条 / 滚动条 / 菜单 / 提示框 / 桌面 / GL 画布凹槽），颜色仍取当前主题；非像素风格下桌面纹理由风格接管
+- **风格字体**：每种风格配一套英文字体（Silkscreen / Exo 2 / Inter / Nunito / Orbitron / VT323 / Open Sans / 绿幕 Inter，`PinkXPStyle.cpp` 的 `skinFontSpec`，`scale` 为相对 Silkscreen 的字号系数）；中文界面在像素复古 / CRT 下沿用语言包像素字 ChillBitmap，其余风格改用 Noto Sans SC。切风格 → Editor 主题回调发现 `activeTypefaceStale()` → 异步走 `applyLanguageChange()` 换字体 + 重排。字体资源在 `ttf/skin/`（独立 binary data target `Y2KSkinFontData`，许可证 `ttf/skin/licenses/`）
+- **绿幕风格**（`SkinId::greenScreen`）：桌面 / 工作区画布 / 底部工具栏 / Editor 标题栏 / 模块外壳在鼠标未悬停时一律纯绿 `#00FF00`（`PinkXP::isChromaRevealed` 用 20Hz 轮询判定鼠标所在区域，悬停的模块或 Editor chrome 按正常外观显示）。支持的模块覆写 `ModulePanel::getChromaKeyCanvas()` 保留数据画布：Milkdrop / 示波器 / 波形历史 / 频谱 / 语谱图（静音像素经 `chromaKeyFade` 渐隐为绿）/ 3D 语谱 / 响度（只留点亮电平格 + 标签 + 数值）；画布内背景纯绿、不画网格 / 坐标刻度 / 图例。其它模块未悬停时整块纯绿
 - 拖入图片生成「拼豆像素画」贴到桌面背景
 
 **⑤ 布局预设**（11 个常规 + 3 个 stick 条状变体，编号 4 / 8 已废弃）
@@ -108,7 +127,7 @@
 
 **⑥ 桌面集成（Standalone 专属）**
 
-- 音频源选择：麦克风输入 / 系统正在播放的音频（Windows：WASAPI Loopback；macOS：ScreenCaptureKit 音频输出流）
+- 音频源选择（用户在下拉里显式选择其一，程序不会自行开启）：麦克风输入 / 系统正在播放的音频（Windows：WASAPI Loopback；macOS：ScreenCaptureKit 音频输出流）
 - 无边框窗口 + 自定义标题栏（关闭 / 置顶 / 最小化 / 布局锁定 / 双击标题栏全屏）
 - 模块脱离 / 停靠（浮动窗口）、预设导出 / 导入（Save / Load）
 - 版本更新检查、可选的匿名环境统计（安装时授权，默认关闭）、新手引导（右键添加 VirtuPet → 播放音频孵化）
@@ -124,7 +143,7 @@
 | Windows CRT | 强制静态 CRT（`MultiThreaded`，避免依赖 VC_redist） |
 | macOS 语言扩展 | Objective-C++（`.mm` 文件，用于读取 ScreenCaptureKit 的桌面音频输出流） |
 | 安装器 | Inno Setup（[Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss)） |
-| 字体 | `Silkscreen-Regular.ttf`（像素英文字体，通过 `juce_add_binary_data` 打包） |
+| 字体 | `Silkscreen-Regular.ttf`（像素英文字体，通过 `juce_add_binary_data` 打包）；风格字体 `ttf/skin/*`（`Y2KSkinFontData`，SIL OFL 1.1） |
 | 项目性能特性 | 支持 **LTO/IPO** + **PGO**（`Y2K_ENABLE_LTO`、`Y2K_PGO_MODE`）|
 | 特殊宏 | `Y2K_ENABLE_PERF_COUNTERS=0`（发布版关闭性能计数）、`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1`（用自定义 Standalone 外壳）、`Y2K_ENABLE_LOGGING`（仅 RelWithDebInfo 定义，见 §1.4） |
 
@@ -304,7 +323,7 @@
 | [EqModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/EqModule.h) | `EqModule`（Y2K 像素频谱可视化，非真实 EQ） | `Spectrum` |
 | [LoudnessModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/LoudnessModule.h) | `LoudnessModule`（**v3.1 合并**原 实时 LUFS / 真峰值 / 响度主表：项目开关 M / S / I / TP / RMS + 样式「灯条 / 数字读数」） | `Loudness` |
 | [OscilloscopeModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/OscilloscopeModule.h) | `OscilloscopeModule`（**v3.1 合并**原 OscilloscopeWave：显示类型 波形 / X-Y / 李萨如，波形可选 L / R / 双声道（配色跟随主题）；X-Y / 李萨如可开**频段染色**；Freeze 按钮取消，改**按住画布慢放 50 倍**；v1.8.4 起 XY/Lissajous 峰值驱动自动缩放 + 同心标尺环） | `Oscilloscope` |
-| [SpectrumModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrumModule.h) | `SpectrumModule`（频谱 + peak hold；**v3.1** 顶部四按钮（Peak / Sharp / 曲线 / 通道）搬进控制面板，另加 **FFT scale**（log / mel / linear）与 **Slope**（0–12 dB/oct，默认 4.5，0 = 关闭）；按住画布 = 子弹时间，悬停读数按追加音名） | `Spectrum` |
+| [SpectrumModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrumModule.h) | `SpectrumModule`（频谱 + peak hold；**v3.1** 顶部四按钮（Peak / Sharp / 曲线 / 通道）搬进控制面板，另加 **FFT scale**（log / mel / linear）与 **Slope**（0–12 dB/oct，默认 4.5，0 = 关闭）；按住画布 = 慢放，悬停读数按追加音名） | `Spectrum` |
 | [PhaseModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/PhaseModule.h) | `PhaseModule`（Goniometer + Correlation Dial + Width/Balance Bar；**v3.1 合并**原相位相关 / 相位平衡：四个项目可独立开关，相位图 / 条形各有样式；按启用项动态订阅 Phase / Oscilloscope） | `Phase` + `Oscilloscope` |
 | [DynamicsModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | `DynamicsModule`（Peak/RMS 柱 + DR short / integrated + Crest 值 + Crest 历史；**v3.1 合并**原 DynamicsMeters / DR / Crest：六个项目可独立开关，读数样式，历史跨度 1–35 s 可调且持久化） | `Dynamics` |
 | [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列；**v3.1** 工具栏 / SPEED 栏 / Freeze 取消：着色来源（Pitch / Loudness / Sibilance）、速度、**双声道上下分轨**、**齿音识别阈值**都在控制面板，按住画布完全冻结） | `Oscilloscope` |
@@ -312,7 +331,7 @@
 | [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（**v3.1** 控制面板：颜色模式 Theme / Heat / Grey / Ice、深度方向 右后 / 左后、速度；v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
 | [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | `VuMeterModule`（**表盘样式六种**：0 半圆 / 1 复古扇形 / 2 横向刻度条 / 3 LED 梯柱 / 4 极简游标 / 5 镜像刻度，同一条 dBFS 线性刻度；指针样式 Thin line / Wedge / Stereo L/R（横向式里控制游标形状）；信号灯开关）。**v3.1：原 `LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` 类已并入 Loudness / Phase / Dynamics 模块，只剩枚举值作为旧存档别名** | 视模块而定 |
 | [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向；**自动缩放**：1 s 周期峰值归一 + 10% 死区，雷达轮廓固定、dB 标签按增益换算 + 渐隐残影；**v3.1** 控制面板：点大小 1–6 px、点消失速度、频段染色（三路各自一条残影轨迹）） | `Oscilloscope` |
-| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式在 v3.1 起由控制面板切换（顶部按钮取消），并新增 FFT scale —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；频率轴 20Hz–20kHz（对数 / 梅尔 / 线性），384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡；**按住画布 = 子弹时间**（幅度类量只拖慢回落沿 50 倍；声像是有符号量，两个方向同速放慢），按住时悬停读数追加音名） | `Spectrum`（L/R 分路 + mid 单声道路） |
+| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式在 v3.1 起由控制面板切换（顶部按钮取消），并新增 FFT scale —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；频率轴 20Hz–20kHz（对数 / 梅尔 / 线性），384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡；**按住画布 = 慢放**（幅度类量只拖慢回落沿 50 倍；声像是有符号量，两个方向同速放慢），按住时悬停读数追加音名） | `Spectrum`（L/R 分路 + mid 单声道路） |
 | [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET（未启动时 RESET 会自动 START，连续 3 s 无信号自动 reset）；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [SystemMonitorModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SystemMonitorModule.h) | `SystemMonitorModule`（**v3.3** 电脑状态：CPU / 温度 / GPU / 内存 / 显存 / 磁盘 / 网络 / 电池，四种样式；悬停温度显示数据来源与读不到时的解决办法） | `y2k::sys::Sampler`（[source/system/SystemStats.h](/I:/Y2KMeter/source/system/SystemStats.h)，后台线程，不走 AnalyserHub）|
@@ -327,7 +346,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | [Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | 自实现 `juce::JUCEApplication` + `Y2KMainWindow`（DocumentWindow）替换 JUCE 内建的 `StandaloneFilterApp`；启动 → 加载 settings → 创建 Processor+Editor → 绑定 Loopback 音源 → 恢复主题/FPS/位置/尺寸/固定态 |
-| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`，读取"系统默认播放端点"输出，输出统一立体声 float32 |
+| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：直接调用 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`，读取"系统默认播放端点"输出（用户选中该音源后才启动），输出统一立体声 float32 |
 | [MacDesktopAudioCapture.h/.mm](/I:/Y2KMeter/source/standalone/MacDesktopAudioCapture.h) | macOS：`ScreenCaptureKit` 获取桌面音频（Objective-C++） |
 | [AudioDumpRecorder.h/.cpp](/I:/Y2KMeter/source/standalone/AudioDumpRecorder.h) | **仅 macOS**，通过环境变量 `Y2KM_AUDIO_DUMP` 系列开启，把音频原样落盘做调试 |
 
@@ -420,6 +439,7 @@
 - **UI 密度缩放（v2.7.5 新增）**：`uiScale() / ui(px) / setUiScale() / uiScaleForDisplay(userArea)` —— 按屏幕逻辑分辨率自动分级（0.75~1.0），统一缩放标题栏 / 工具栏 / 模块 chrome 尺寸与正文字号，解决低分辨率屏幕上"非仪表部分过大、仪表区被压缩"的问题；支持多屏跨屏自动校准。
 - **悬停标尺公共辅助（v2.7.0 新增）**：`formatFreqHz(hz)` 格式化频率读数（`<1kHz → "xxx Hz"`，`≥1kHz → "x.x kHz"`）；`noteNameForHz(hz)` 频率 → 音名（十二平均律 A4 = 440 Hz，如 `"A4"`，越界返回空串）；`drawHoverRuler(g, canvas, pos, readout)` 在仪表区绘制十字线 + 鼠标右上方读数框（自动越界回退），供频谱类/时序类模块复用。
 - **默认主题（v2.7.0 变更）**：全局默认主题由 `winXP` 改为 `blackPink`（首次无存档启动时的缺省配色）。
+- **视觉风格（Skin）**：`SkinId`（`pinkXP=0 / chrome=1 / modern=2 / glass=3 / neon=4 / crt=5 / fluent=6 / greenScreen=7`，按整数持久化，**只追加不重排**）+ `getAllSkins / getCurrentSkin / skinFromInt / applySkin / skinHairlineOn / skinUsesFlatControls`。分派点只有：`drawRaised / drawRaisedFrame / drawSunken / drawPressed / drawHardShadow / drawDesktop / drawPinkTitleBar`、`PinkXPLookAndFeel`（按下点阵、滚动条、下拉分隔线）、GL 侧 `GlDirectModuleBase::appendSunkenFrame`（CPU / GL 两条路径必须同步改）。外框总厚保持 2px，调用方内缩布局不受影响；`pinkXP` 分支即旧代码。`applySkin` 会失效桌面纹理并走 `notifyThemeSubscribers()`；按 themeId 做键的缓存要把风格并入键（如 `ModuleWorkspace::rebuildCanvasBgCacheIfNeeded`）。持久化：Standalone `ui.skinId`、插件态 `skinId`（缺键不覆盖）。
 
 ---
 
@@ -548,7 +568,7 @@ main
 - **Windows**：
   - 强制静态 CRT（`MultiThreaded` / `MultiThreadedDebug`）—— 干净 Win10/11 免装 VC redist。
   - 首次 Editor 可用时 **强制关闭 Direct2D 渲染**（切软光栅/GDI），避免 AMD 显卡驱动在 DLL 卸载时的 loader lock 死锁。
-  - Standalone Loopback 用裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`。
+  - Standalone Loopback 直接调用 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`（不引入第三方音频库）。
   - 链接 `ole32 / uuid / avrt`。
 - **macOS**：
   - 启用 Objective-C++（`enable_language(OBJCXX)`），仅编译 `.mm` 文件时用。
@@ -637,7 +657,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.3.0`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.0`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定
@@ -663,9 +683,11 @@ main
 | 合并 / 退役一个模块类型 | `ModuleType` 枚举保留不删；`ModuleWorkspace.cpp` 的 `isRetiredModuleType` + `resolveRetiredModuleType` 登记"旧类型 → 存活类型 + 外观种子"；从 `availableTypes` 移除。预设表无需改，都经 `createModule` |
 | 改频率轴刻度 | `source/analysis/FreqScale.h`（唯一事实来源）；Hub 取样函数 `scale` 参数 + UI 坐标换算要同步 |
 | 加一个主题 | `PinkXPStyle.h` `ThemeId` 加枚举；`PinkXPStyle.cpp` `getAllThemes()` 追加 `Theme` 结构；`ThemeSwatchBar` 会自动展现 |
+| 加一种视觉风格（Skin） | `PinkXPStyle.h` `SkinId` 末尾追加；`getAllSkins()` / `skinFromInt()` 追加；在 §4.6 列出的分派点（含 GL `appendSunkenFrame`）各补一个分支；`skinFontSpec` 补字体；显示名进 `i18n/zh-CN.lang`；SKIN 菜单自动列出 |
+| 让模块支持绿幕 | 覆写 `getChromaKeyCanvas()` 返回数据画布；画布背景（CPU `drawBackground` + GL `appendSunkenFrame` 已自动）画纯绿，网格 / 刻度 / 图例在 `PinkXP::isChromaKeySkin()` 下跳过；静态层缓存键并入风格 |
+| 换字体 | `CMakeLists.txt` 的 `Y2KM_FONT_EN_SRC` / `Y2KM_SKIN_FONT_FILES`；`PinkXP::skinFontSpec` / `chooseActiveFont` |
 | 自定义主题持久化 | 保存：`Y2KStandaloneApp::saveUiAndAudioState()` 写 `ui.customPrimary`/`ui.customSecondary`；加载：`initialise()` 1.15) 分支检测 `ThemeId::custom` → 读回 `Colour::fromString()` → `applyCustomTheme()` |
 | 修改音频前置增益范围 | `PluginProcessor.cpp` 的 `clampGainDb`（当前 -10..+36 dB）+ `ModuleWorkspace` 里 gainSlider 的 setRange |
-| 换字体 | `CMakeLists.txt` 的 `Y2KM_FONT_EN_SRC`；`PinkXP::loadActiveTypeface` 里 BinaryData 引用 |
 | 调 FPS 分档策略 | [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `applyAdaptiveFrameRate` |
 | 改布局持久化 XML 结构 | `Y2KmeterAudioProcessor::getStateInformation` + `ModuleWorkspace::saveLayoutTree/loadLayoutFromTree` |
 | Standalone 启动时初始化 | [Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) 的 `initialise()`（1.15) 主题恢复 / 恢复 FPS / 恢复 Loopback 选择等散落于此）|
@@ -694,7 +716,7 @@ Y2Kmeter/
 └── source/
     ├── Y2KLogging.h               ─ 编译期日志开关宏 Y2K_LOG（§1.4）
     ├── analysis/                  ─ AnalyserHub + 6 路分析器 + music/（BPM / 调性）
-    ├── system/                    ─ v3.3 电脑状态采集（SystemStats：Win PDH/DXGI/D3DKMT/NVML/HWiNFO/LHM，mac mach/IOKit）
+    ├── system/                    ─ v3.3 电脑状态采样（SystemStats：只读 OS 公开计数器，不含驱动）
     ├── ui/                        ─ ModuleWorkspace / ModulePanel / PinkXPStyle / UiFrameClock / HoverHelp / UiPrefs
     │   ├── modules/               ─ 各分析模块 UI（含 Milkdrop / VirtuPet / TempoKey / Recorder / StereoField / StereoMap）
     │   ├── palette/               ─ 调色板重构（OkLch / ThemeSpec / PaletteGenerator / ThemeLibrary / PalettePanel）

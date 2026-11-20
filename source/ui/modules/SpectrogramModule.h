@@ -92,6 +92,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：保留瀑布画布（静音像素在 intensityToColour 里渐隐为纯绿）
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getCanvasBounds (getContentBounds()); }
 
 private:
     // ---- 布局 ----

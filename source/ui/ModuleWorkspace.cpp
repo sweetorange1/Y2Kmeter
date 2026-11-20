@@ -390,6 +390,9 @@ public:
     {
         if (img == nullptr || img->pixelImage.isNull()) return;
 
+        // 绿幕：桌面贴画同属"非数据"内容，不画（透出下方纯绿画布）
+        if (PinkXP::isChromaKeySkin()) return;
+
         // 把 Graphics 原点临时平移到 workspace 坐标系（layer 在父坐标系里
         //   的位置等于 getX()/getY()；setOrigin(-x,-y) 后 g 的 (0,0)
         //   就对应 workspace 的 (0,0)）→ 复用 workspace 已有的绘制代码。
@@ -2586,6 +2589,8 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     int themeKey = static_cast<int>(PinkXP::getCurrentThemeId()) * 100;
     if (PinkXP::isCustomThemeActive())
         themeKey += static_cast<int>(PinkXP::getCurrentThemeSpec().brightness);
+    // 视觉风格改变 drawSunken 的质感 → 并入 key（themeKey < 10000）
+    themeKey += static_cast<int>(PinkXP::getCurrentSkin()) * 10000;
 
     if (! canvasBgCacheDirty
         && canvasBgCache.isValid()
@@ -2597,9 +2602,20 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     canvasBgCache = juce::Image (juce::Image::ARGB, w, h, true);
     juce::Graphics cg (canvasBgCache);
 
-    // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
-    PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
-                        PinkXP::content.withAlpha (0.70f));
+    // 绿幕：工作区画布整块纯绿（不画凹槽 / 网格点阵）；
+    //   用户主动打开的 Grid 叠加线仍保留（布局辅助，可随时关掉）
+    const bool chromaKey = PinkXP::isChromaKeySkin();
+    if (chromaKey)
+    {
+        cg.setColour (PinkXP::chromaKeyGreen());
+        cg.fillAll();
+    }
+    else
+    {
+        // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
+        PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
+                            PinkXP::content.withAlpha (0.70f));
+    }
 
     // 2) 网格点阵 —— 转换为 Image-local 坐标
     auto canvas = getCanvasArea();
@@ -2609,11 +2625,14 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
         canvas.getWidth(),
         canvas.getHeight());
 
-    cg.setColour (PinkXP::pink200.withAlpha (0.35f));
-    for (int y = localCanvas.getY(); y < localCanvas.getBottom(); y += gridSize)
+    if (! chromaKey)
     {
-        for (int x = localCanvas.getX(); x < localCanvas.getRight(); x += gridSize * 2)
-            cg.fillRect (x, y, 1, 1);
+        cg.setColour (PinkXP::pink200.withAlpha (0.35f));
+        for (int y = localCanvas.getY(); y < localCanvas.getBottom(); y += gridSize)
+        {
+            for (int x = localCanvas.getX(); x < localCanvas.getRight(); x += gridSize * 2)
+                cg.fillRect (x, y, 1, 1);
+        }
     }
 
     // 3) Grid 叠加线
@@ -2967,7 +2986,7 @@ void ModuleWorkspace::paint(juce::Graphics& g)
     // ------------------------------------------------------
     // 引导提示：当 chrome 可见、且用户尚未拖入任何图片时，在 canvas 右下角
     // 给出 PNG/JPG/BMP/GIF 拖拽提示。一旦有图或用户点击了 Hide，此提示隐藏。
-    if (chromeVisible && perlerImages.isEmpty())
+    if (chromeVisible && perlerImages.isEmpty() && ! PinkXP::isChromaKeySkin())
     {
         auto canvas = getCanvasArea();
         // 右下角留 12px 边距；上下两行文案；使用 ink 色弱化透明度，不抢视觉
@@ -3215,6 +3234,15 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
     //   层级由 z-order 保证（底板 → slider），不再在 paintOverChildren 里手绘。
     //   旧实现在这里用 chromeVisible 作为入口条件（Hide 浮层态恒为 false），
     //   导致弹窗只剩轨道与控制头、边框轮廓丢失。
+
+    // 绿幕：底部工具栏（含其上所有子控件）未悬停 Editor chrome 时盖成纯绿。
+    //   工作区自身不是绿幕区域，isChromaRevealed 会向上找到 Editor。
+    if (PinkXP::isChromaKeySkin() && chromeVisible && ! minimalMode_
+        && ! PinkXP::isChromaRevealed (*this))
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (getToolbarArea());
+    }
 
     if (! hoverPreviewActive)
         return;
@@ -4908,6 +4936,29 @@ namespace
 
 namespace
 {
+    // 视觉风格入口："+" 右侧的小按钮（[+] [SKIN] [主题名]），点击弹出风格菜单。
+    //   宽度按当前语言译文测量；几何只由 "+" 按钮位置推导，不新增成员状态。
+    juce::String skinButtonText()
+    {
+        return y2k::tr ("SKIN");
+    }
+
+    juce::Font skinButtonFont()
+    {
+        return PinkXP::SymbolGlyphs::buttonFont (skinButtonText(), 10.0f, juce::Font::bold);
+    }
+
+    juce::Rectangle<int> skinButtonBoundsAfter (juce::Rectangle<int> newButton)
+    {
+        const int textW = (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (skinButtonText(),
+                                                                               skinButtonFont()));
+        return { newButton.getRight() + PinkXP::ui (6), newButton.getY(),
+                 textW + PinkXP::ui (12), newButton.getHeight() };
+    }
+}
+
+namespace
+{
     // 我的主题色票颜色：由 ThemeSpec 快速推导 accent 色（轻量，paint 帧可承受）
     juce::Colour quickAccentForSpec(const y2kpal::ThemeSpec& s)
     {
@@ -4989,7 +5040,8 @@ int ThemeSwatchBar::totalContentWidth() const
     const auto& lib = PinkXP::ThemeLibrary::instance();
     const int usersW = lib.size() > 0
         ? lib.size() * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)) - PinkXP::ui (kSwatchGap) : 0;
-    return getNewButtonBounds().getRight() + PinkXP::ui (kGroupGap) + PinkXP::ui (90);  // 90 = 主题名最小宽度
+    return skinButtonBoundsAfter (getNewButtonBounds()).getRight()
+         + PinkXP::ui (kGroupGap) + PinkXP::ui (90);  // 90 = 主题名最小宽度
 }
 
 void ThemeSwatchBar::updateScrollLimits()
@@ -5015,6 +5067,9 @@ ThemeSwatchBar::Hit ThemeSwatchBar::hitTest(juce::Point<int> p) const
 
     if (getNewButtonBounds().contains(p))
         return { 4, 0 };
+
+    if (skinButtonBoundsAfter (getNewButtonBounds()).contains (p))
+        return { 5, 0 };
 
     return {};
 }
@@ -5140,10 +5195,20 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
         }
     }
 
+    // ---- 视觉风格入口（SKIN）：外观本身随当前风格绘制，所见即所选 ----
+    const auto skinBtn = skinButtonBoundsAfter (getNewButtonBounds());
+    if (skinBtn.getX() < getWidth() && skinBtn.getRight() > 0)
+    {
+        PinkXP::drawRaised (g, skinBtn, hoverHit_.kind == 5 ? PinkXP::pink200 : PinkXP::btnFace);
+        g.setColour (PinkXP::ink);
+        PinkXP::SymbolGlyphs::drawText (g, skinButtonText(), skinBtn,
+                                        juce::Justification::centred, skinButtonFont());
+    }
+
     // ---- 右侧当前主题名 ----
     {
         const auto& th = PinkXP::getCurrentTheme();
-        const int tx = getNewButtonBounds().getRight() + PinkXP::ui (kGroupGap);
+        const int tx = skinBtn.getRight() + PinkXP::ui (kGroupGap);
         const int tw = juce::jmax(0, getWidth() - tx - 4);
         if (tw > 10 && tx < getWidth())
         {
@@ -5191,6 +5256,13 @@ void ThemeSwatchBar::mouseMove(const juce::MouseEvent& e)
                 setTooltip(y2k::help::make ("New palette",
                                             "Open Palette Studio to build a new theme from the current one."));
                 break;
+            case 5:
+                setTooltip(y2k::help::make ("Visual Style",
+                                            "Switch the shape and texture of the whole interface.\n"
+                                            "Colours still follow the current theme.\n"
+                                            "Each style also brings its own font.\n"
+                                            "Green Screen: everything except the meter data turns pure green for keying."));
+                break;
             default:
                 setTooltip({});
                 break;
@@ -5230,6 +5302,32 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
         PinkXP::ThemeLibrary::instance().applyThemeAt(h.index);
         if (auto* top = getTopLevelComponent()) top->repaint();
         else                                    repaint();
+        return;
+    }
+
+    if (h.kind == 5)
+    {
+        // 视觉风格菜单：条目 id = SkinId + 1（0 保留给"未选择"）
+        juce::PopupMenu m;
+        m.setLookAndFeel (&getPinkXPLookAndFeel());
+        const auto current = PinkXP::getCurrentSkin();
+        for (const auto& s : PinkXP::getAllSkins())
+            m.addItem (1 + (int) s.id, s.displayName, true, s.id == current);
+
+        const auto area = localAreaToGlobal (skinButtonBoundsAfter (getNewButtonBounds()));
+        juce::Component::SafePointer<ThemeSwatchBar> safe (this);
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
+                                                   .withTargetScreenArea (area),
+                         [safe] (int result)
+                         {
+                             if (result <= 0)
+                                 return;
+                             PinkXP::applySkin (PinkXP::skinFromInt (result - 1));
+                             if (safe == nullptr)
+                                 return;
+                             if (auto* top = safe->getTopLevelComponent()) top->repaint();
+                             else                                          safe->repaint();
+                         });
     }
 }
 

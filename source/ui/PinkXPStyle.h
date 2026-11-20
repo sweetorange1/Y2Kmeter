@@ -160,7 +160,17 @@ namespace PinkXP
     //   · 英文 / 未声明字体的语言 → 内置 Silkscreen-Regular.ttf
     //   · 其它语言 → 语言包 @font 指定的字体（如中文 ChillBitmap_16px）
     //   同一字体只创建一次 Typeface（进程内缓存，见 releaseTypefaceCache）。
+    //   v3.4：字体同时跟随视觉风格（Skin）——
+    //   · 英文 / 无 @font 语言：按风格取内置英文字体（像素复古 Silkscreen /
+    //     千禧金属 Exo 2 / 现代简约 Inter / 玻璃 Nunito / 霓虹 Orbitron /
+    //     CRT VT323 / Fluent Open Sans / 绿幕 Inter）；
+    //   · 中文：像素复古 / CRT 沿用语言包像素字（ChillBitmap），其余风格改用
+    //     Noto Sans SC（思源黑体）；其它带 @font 的语言始终用语言包字体。
     juce::Typeface::Ptr loadActiveTypeface();
+
+    // 当前已加载的字体是否与"当前风格 + 当前语言"应选的字体不一致
+    //   （切换风格后 Editor 据此重新 loadActiveTypeface + 刷新布局）
+    bool activeTypefaceStale();
 
     // 释放 loadActiveTypeface 的缓存（Editor 析构时调用，规避 DLL 卸载期悬垂引用）
     void releaseTypefaceCache();
@@ -569,6 +579,73 @@ namespace PinkXP
     //   界面语言切换后复用这条链路：各模块订阅回调里本来就会失效静态文字层 /
     //   GL 快照 / 位图缓存并重绘，换字体后需要的正是同一套刷新。
     void notifyThemeSubscribers();
+
+    // ======================================================
+    // 视觉风格（Skin）—— 与颜色主题正交
+    //   颜色主题决定"用什么颜色"，风格决定"形状与质感"（凸起/凹陷/按下/
+    //   标题栏/硬阴影/桌面底纹/滚动条）。所有风格都只读取当前主题的配色槽位，
+    //   因此任意主题 × 任意风格都可组合。
+    //   · 分派点：drawRaised / drawRaisedFrame / drawSunken / drawPressed /
+    //     drawHardShadow / drawDesktop / drawPinkTitleBar / PinkXPLookAndFeel，
+    //     以及 GL 直渲染的 GlDirectModuleBase::appendSunkenFrame。
+    //   · 外框厚度保持 2px（与旧版一致），调用方的内缩布局不受影响。
+    //   · SkinId 按整数持久化（ui.skinId / 插件态 skinId）：只追加不重排。
+    // ======================================================
+    enum class SkinId
+    {
+        pinkXP = 0,   // 像素复古（Win95/XP 2px 硬斜角，默认，外观与旧版完全一致）
+        chrome = 1,   // 千禧金属（拉丝金属渐变 + 镜面高光 + 铬质标题栏）
+        modern = 2,   // 现代简约（扁平 + 1px 细描边 + 小控件圆角 + 柔和阴影）
+        glass  = 3,   // 玻璃（窗口内模拟毛玻璃：纵向通透渐变 + 上沿镜面高光 + 半透明细边；全部不透明绘制）
+        neon   = 4,   // 霓虹赛博（深色桌面 + 透视网格 + 发光灯管描边 + 彩色辉光阴影）
+        crt    = 5,   // CRT 终端（磷光单色描边 + 扫描线 + 暗角；等宽终端字体）
+        fluent = 6,   // Win11 Fluent（Mica 质感桌面 + 细描边 + 小控件大圆角 + 柔和投影）
+        greenScreen = 7 // 绿幕（视频抠像：桌面 / 外壳 / 网格 / 刻度全部纯绿 #00FF00，只留数据图形与数值读数）
+    };
+
+    struct SkinInfo
+    {
+        SkinId      id;
+        const char* displayName;   // 英文源文案（翻译键）
+    };
+
+    const std::vector<SkinInfo>& getAllSkins();
+    SkinId getCurrentSkin() noexcept;
+    // 越界 / 未知值回退 pinkXP（旧存档 / 新版存档回退旧版时的兜底）
+    SkinId skinFromInt (int raw) noexcept;
+    // 切换风格：失效桌面纹理缓存 + 广播主题订阅（各模块静态层 / GL 快照随之重建）
+    void applySkin (SkinId id);
+
+    // 风格辅助：在 fill 上取一条可见的细描边色（不透明；亮底压暗、暗底提亮）。
+    //   现代简约风格的 CPU 描边与 GL 画布凹槽共用，保证两条绘制路径一致。
+    juce::Colour skinHairlineOn (juce::Colour fill, float amount = 0.20f) noexcept;
+
+    // 风格是否使用"扁平小控件"（圆角按钮 / 胶囊滚动条 / 细分隔线）：
+    //   modern / glass / fluent / greenScreen / neon。LnF 与 GL 凹槽共用同一判定。
+    bool skinUsesFlatControls (SkinId id) noexcept;
+
+    // ======================================================
+    // 绿幕（SkinId::greenScreen）—— 给视频创作者录屏抠像
+    //   · 桌面 / 工作区画布 / 工具栏 / 标题栏 / 模块外壳：未悬停时一律纯绿；
+    //     鼠标悬停在某个模块（或 Editor 自身 chrome）上时该区域按正常外观显示。
+    //   · 支持的模块（ModulePanel::getChromaKeyCanvas 返回非空）：画布内背景
+    //     纯绿、不画网格 / 刻度 / 图例，只留数据图形与数值读数；
+    //     其它模块未悬停时整块纯绿。
+    //   · 悬停判定：进程内单个 20Hz 定时器轮询鼠标所在的"绿幕区域"
+    //     （markChromaRegion 标记的最近祖先组件），变化时只重绘新旧两个区域。
+    //     定时器只在绿幕风格下懒创建，离开绿幕 / Editor 析构时释放。
+    // ======================================================
+    bool         isChromaKeySkin() noexcept;
+    juce::Colour chromaKeyGreen() noexcept;                    // 0xFF00FF00
+    // 强度色阶抠像：t（0..1 强度）很低时返回纯绿，过渡段向原色渐变，其余原样
+    //   （语谱图 / 3D 瀑布的"静音"像素直接落成绿幕，抠像后透明）
+    juce::Colour chromaKeyFade (juce::Colour c, float t) noexcept;
+    // 把组件标记为绿幕悬停区域（ModulePanel / Editor 构造时调用）
+    void markChromaRegion (juce::Component& c);
+    // c 所属的绿幕区域当前是否处于"悬停显示"状态；非绿幕风格恒为 true
+    bool isChromaRevealed (const juce::Component& c);
+    // 释放悬停轮询定时器（Editor 析构时调用，规避 DLL 卸载期静态析构 Timer）
+    void releaseChromaHoverTracker();
 }
 
 // ==========================================================

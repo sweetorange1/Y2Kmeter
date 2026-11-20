@@ -147,6 +147,22 @@
 "New palette" = "新建配色"
 "Open Palette Studio to build a new theme from the current one." = "打开调色工作室，基于当前主题创建新主题。"
 
+# 视觉风格（Skin）
+"SKIN" = "风格"
+"Visual Style" = "视觉风格"
+"Switch the shape and texture of the whole interface." = "切换整个界面的形状与质感。"
+"Colours still follow the current theme." = "颜色仍跟随当前主题。"
+"Each style also brings its own font." = "每种风格还会换上与之相配的字体。"
+"Green Screen: everything except the meter data turns pure green for keying." = "绿幕：除仪表数据外全部变成纯绿，方便录屏后抠像。"
+"Pixel XP" = "像素复古"
+"Millennium Chrome" = "千禧金属"
+"Modern Minimal" = "现代简约"
+"Frosted Glass" = "玻璃"
+"Neon Cyber" = "霓虹赛博"
+"CRT Terminal" = "CRT 终端"
+"Fluent" = "Win11 Fluent"
+"Green Screen" = "绿幕（抠像）"
+
 # 拼豆图片拖放
 "Drag an image here to pixelate it" = "把图片拖到这里即可像素化"
 "Supported: PNG / JPG / JPEG / BMP / GIF" = "支持：PNG / JPG / JPEG / BMP / GIF"

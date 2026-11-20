@@ -50,6 +50,8 @@ public:
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：整个内容区都是读数（电平格 + 数值），底色 / 凹槽 / 刻度在绘制时跳过
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getContentBounds(); }
 
 private:
     // ---- 单条像素柱状表 ----

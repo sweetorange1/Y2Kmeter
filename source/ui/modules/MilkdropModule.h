@@ -194,6 +194,8 @@ public:
     void paintContent(juce::Graphics& g,
                       juce::Rectangle<int> contentBounds) override;
     void layoutContent(juce::Rectangle<int> contentBounds) override;
+    // 绿幕：projectM 画面整块都是"数据"，保留整个内容区（外壳未悬停时纯绿）
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getContentBounds(); }
 
     // === Editor projectM 桥接 ===
     // 返回本模块内容区在 MilkdropModule 自身坐标系中的矩形，

@@ -107,6 +107,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：保留频谱画布（曲线 / 峰值 / 悬停读数），刻度列与外壳盖绿
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getCanvasBounds (getContentBounds()); }
 
 private:
 

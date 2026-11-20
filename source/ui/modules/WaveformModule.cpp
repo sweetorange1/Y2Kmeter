@@ -815,6 +815,14 @@ juce::Rectangle<int> WaveformModule::getGlCanvasBounds (juce::Rectangle<int> con
 
 void WaveformModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
 {
+    // 绿幕：窗口时长提示 / L·R 标注都不画，只留悬停读数
+    if (PinkXP::isChromaKeySkin())
+    {
+        if (hoverActive)
+            drawHoverRuler (g, canvas);
+        return;
+    }
+
     // 窗口样本数提示（GL 路径下文字必须画在 overlay 里）
     g.setColour (PinkXP::ink.withAlpha (0.8f));
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
@@ -848,7 +856,7 @@ void WaveformModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int>
 
     drawWaveform (g, canvas);
 
-    if (dualChannel)
+    if (dualChannel && ! PinkXP::isChromaKeySkin())
     {
         g.setColour (PinkXP::ink.withAlpha (0.8f));
         g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
@@ -883,10 +891,10 @@ void WaveformModule::buildGlSnapshot()
     snap->logicalH = canvas.getHeight();
     snap->canvasLocal = canvas;
 
-    // ---- 背景 ----
+    // ---- 背景（绿幕：只铺纯绿，不画基准线 / 分区虚线）----
+    appendSunkenFrame (snap->vertices, canvas);
+    if (! PinkXP::isChromaKeySkin())
     {
-        appendSunkenFrame (snap->vertices, canvas);
-
         auto inner = canvas.reduced (2);
 
         Lane bgLanes[2];
@@ -1062,6 +1070,13 @@ void WaveformModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canv
 
 void WaveformModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (canvas);
+        return;
+    }
+
     PinkXP::drawSunken (g, canvas, PinkXP::content);
 
     auto inner = canvas.reduced (2);

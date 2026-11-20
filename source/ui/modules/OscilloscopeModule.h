@@ -74,6 +74,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：保留示波器画布（波形 / XY 点云），网格 / 标尺环 / 图例不画
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getCanvasBounds (getContentBounds()); }
 
 private:
     // 一个 XY 散点（GL 与 CPU 回退路径共用同一份几何/配色）

@@ -2,7 +2,7 @@
 
 ## 1. VirtuPet（电子宠物）
 
-- 音频信号驱动状态机（蛋/孵化/觅食/睡眠/生病/死亡）；`hub.retain(Kind::Loudness)` 只在存在 VirtuPet 模块时保持（见 PROJECT_OVERVIEW.md §4.3）。
+- 音频信号驱动状态机（蛋/孵化/觅食/睡眠/生病/生命值耗尽）；`hub.retain(Kind::Loudness)` 只在存在 VirtuPet 模块时保持（见 PROJECT_OVERVIEW.md §4.3）。
 - **置顶逻辑有两处**：`hookPanel` 的 `onBroughtToFront` + `mouseDown` 图片聚焦分支；新增可 `toFront` 组件（视频/3D 层）必须同步加入。
 - **多宠物**：当前单实例（添加菜单不允许多选同类型），但代码已按"可能有多个"编写，放开无需大改。
 - **carried 拖拽状态机**：

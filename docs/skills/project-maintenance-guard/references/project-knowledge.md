@@ -7,7 +7,7 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | `Y2Kmeter` |
-| 当前版本 | `3.3.0`（版本号同步点见 SKILL.md §6） |
+| 当前版本 | `3.4.0`（版本号同步点见 SKILL.md §6） |
 | 形态 | VST3 / AU / Standalone（纯分析，不产生音频输出） |
 | 技术栈 | C++17、JUCE 8.0.12（vendored + 0001~0006 补丁）、CMake ≥ 3.22 |
 | 平台 | Windows（静态 CRT）/ macOS |

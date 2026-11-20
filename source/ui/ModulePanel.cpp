@@ -167,6 +167,9 @@ ModulePanel::ModulePanel(ModuleType type)
     //   覆盖这里的默认值，以获得"透背景叠加"的效果；那类模块必须用自己的
     //   repaintSelfAndParent 机制来避免拖影，属于 per-module 决策。
     setOpaque (true);
+
+    // 绿幕风格：每个模块是独立的悬停显示区域（见 PinkXP::isChromaRevealed）
+    PinkXP::markChromaRegion (*this);
 }
 
 ModulePanel::~ModulePanel()
@@ -693,6 +696,29 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
             juce::Graphics::ScopedSaveState ss (g);
             g.excludeClipRegion (drawer);
             toyState->paint (g);
+        }
+    }
+
+    // 绿幕：未悬停时把外壳（标题栏 / 边框 / 按钮 / 控件条 / 抽屉）整块盖成纯绿，
+    //   只留 getChromaKeyCanvas() 返回的数据画布（不支持的模块返回空 = 整块纯绿）。
+    //   画在所有子组件与 Toybox actor 之上；GL 直渲染的画布挖洞区不在覆盖范围内。
+    if (PinkXP::isChromaKeySkin() && ! isBareMode() && ! PinkXP::isChromaRevealed (*this))
+    {
+        const auto green = PinkXP::chromaKeyGreen();
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            const auto keep = getChromaKeyCanvas();
+            if (! keep.isEmpty())
+                g.excludeClipRegion (keep);
+            g.setColour (green);
+            g.fillRect (getLocalBounds());
+        }
+
+        const auto drawer = getControlDrawerBounds();
+        if (! drawer.isEmpty())
+        {
+            g.setColour (green);
+            g.fillRect (drawer);
         }
     }
 
