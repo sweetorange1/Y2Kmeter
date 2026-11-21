@@ -41,7 +41,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.4.1`）
+- **产品名**：`Y2Kmeter` （版本：`3.4.2`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -80,6 +80,11 @@
 > · 模块抬头 / Editor 抬头的文字改为对齐"位图内的文字排版框"（去掉旧的 CJK 手工 +1 补偿）。
 > · **点击模块内部也置顶**：`ModulePanel` 挂深层鼠标监听（`ChildClickToFront`），子组件（计算器按钮 / 便签输入框 / Milkdrop 控制栏 / 抽屉控件）吃掉 `mouseDown` 时补一次 `toFront(false)` + `onBroughtToFront`。
 > · **霓虹赛博抬头提亮**：底色不再往纯黑混（会失饱和 → 发灰发脏），改 HSV 压明度 + 拉饱和，`magenta → pink` 纵向渐变（55% / 80% / 102%）+ 上下近白灯芯与 bloom；新增 `PinkXP::titleBarDividerColour()`（霓虹下标题栏下沿换成灯管亮色，让光漏进内容区；其它风格仍为 `dark`），标题文字在霓虹下不再画深色投影。
+
+> **v3.4.2 本轮变更**（调色工作室 × 视觉风格；细节见 §4.6）：
+> · **官方预设下只改桌面纹理 / 标题图标不再跳色**：旧逻辑任何改动都会走 `applyThemeFromSpec`（双色反推 + OKLCH 生成器 + 护栏）→ 整套手工配色被近似色替换。现在预设起步时面板处于"只改装饰"模式，纹理 / 图标经 `PinkXP::applyPresetDecor` 写成**预设装饰覆盖**（`PresetDecor`，只换 `desktopPattern` / `titleIconText`，配色原样）；一旦改了色相 / 明暗 / 滑条 / 和谐 / 角色 / 随机 / 粘贴等配色参数才转为生成器主题。对比 / 还原会连同打开时的装饰覆盖一起恢复。持久化：Standalone `ui.presetPattern` / `ui.presetIcon`、插件态 `presetPattern` / `presetIcon`（-1 / 缺键 = 预设原样）。
+> · **桌面纹理在所有风格下生效**（绿幕除外）：`drawDesktop` 把纹理抽成 `drawDesktopPatternLayer`，各风格先画自己的底色 / 氛围，再按风格质感叠加用户选择的纹理（千禧金属 = 蚀刻、现代 / Fluent = 低对比压纹、玻璃 = 光团下的透出纹理、霓虹 = 地平线以上的灯管色图案（替代旧固定星点）、CRT = 扫描线下的磷光余辉）。像素复古与旧版逐像素一致；`kDesktopPatternVersion` 升到 4。
+> · **霓虹抬头不再发黑**：去掉所有压明度，颜色只取调色工作室的 **Accent**（上沿 / 中段）与 **Accent2**（下沿 = Accent→Accent2 的 OKLab 40% 混色），灯芯 / bloom / 标题栏下沿亮缝（`titleBarDividerColour`）同源。
 
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
@@ -121,7 +126,7 @@
 - **调色板重构（v2.10）**：左下角「Palette Studio」面板 —— 色相环 + 明暗（Dark/Light/Auto）+ 氛围 + 和谐方式 + 随机；`OKLCH` 感知均匀色彩空间 + Recipe 配方 + WCAG 对比度护栏（自动修复可读性）；支持 7 个语义角色微调（自动/手动锁定）、撤销/重做（40 步）、A/B 对比、迷你预览卡、质量徽章
 - **我的主题**（自定义 = 一等公民）：可命名保存 ≤24 套（独立存档到 `%APPDATA%\Y2Kmeter.themeLibrary.xml`，Load 存档只合并、不覆盖）、重命名/删除/排序、分享码（`Y2KT1-xxxx` ≤80 字符）复制/粘贴、`.y2kpalette` 文件导入导出、桌面纹理（7 种）+ 标题图标（8 候选）自选、恢复默认（Reset）
 - **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
-- **视觉风格（Skin，与颜色主题正交）**：主题色票条 `+` 右侧的 `SKIN` 按钮切换 —— 像素复古（默认，外观与旧版一致）/ 千禧金属（拉丝金属桌面 + 铬质渐变 + 镜面高光）/ 现代简约（扁平 + 1px 细描边 + 小控件圆角 + 柔和阴影）/ 玻璃（窗口内模拟毛玻璃，全部不透明绘制）/ 霓虹赛博（合成波桌面 + 灯管描边 + 彩色辉光）/ CRT 终端（磷光单色 + 扫描线 + 暗角）/ Win11 Fluent（Mica 桌面 + 细描边 + 小控件大圆角；模块外框仍直角）/ **绿幕**（给视频创作者抠像，见下）。只改外壳层（模块外框 / 标题栏 / 按钮 / 下拉 / 滑条 / 滚动条 / 菜单 / 提示框 / 桌面 / GL 画布凹槽），颜色仍取当前主题；非像素风格下桌面纹理由风格接管
+- **视觉风格（Skin，与颜色主题正交）**：主题色票条 `+` 右侧的 `SKIN` 按钮切换 —— 像素复古（默认，外观与旧版一致）/ 千禧金属（拉丝金属桌面 + 铬质渐变 + 镜面高光）/ 现代简约（扁平 + 1px 细描边 + 小控件圆角 + 柔和阴影）/ 玻璃（窗口内模拟毛玻璃，全部不透明绘制）/ 霓虹赛博（合成波桌面 + 灯管描边 + 彩色辉光）/ CRT 终端（磷光单色 + 扫描线 + 暗角）/ Win11 Fluent（Mica 桌面 + 细描边 + 小控件大圆角；模块外框仍直角）/ **绿幕**（给视频创作者抠像，见下）。只改外壳层（模块外框 / 标题栏 / 按钮 / 下拉 / 滑条 / 滚动条 / 菜单 / 提示框 / 桌面 / GL 画布凹槽），颜色仍取当前主题；桌面纹理在所有风格下都生效（绿幕除外），由各风格按自身质感叠加在风格底色之上
 - **风格字体**：每种风格配一套英文字体（Silkscreen / Exo 2 / Inter / Nunito / Orbitron / VT323 / Open Sans / 绿幕 Inter，`PinkXPStyle.cpp` 的 `skinFontSpec`，`scale` 为相对 Silkscreen 的字号系数）；中文界面在像素复古 / CRT 下沿用语言包像素字 ChillBitmap，其余风格改用 Noto Sans SC。切风格 → Editor 主题回调发现 `activeTypefaceStale()` → 异步走 `applyLanguageChange()` 换字体 + 重排。字体资源在 `ttf/skin/`（独立 binary data target `Y2KSkinFontData`，许可证 `ttf/skin/licenses/`）
 - **绿幕风格**（`SkinId::greenScreen`）：桌面 / 工作区画布 / 底部工具栏 / Editor 标题栏 / 模块外壳在鼠标未悬停时一律纯绿 `#00FF00`（`PinkXP::isChromaRevealed` 用 20Hz 轮询判定鼠标所在区域，悬停的模块或 Editor chrome 按正常外观显示）。支持的模块覆写 `ModulePanel::getChromaKeyCanvas()` 保留数据画布：Milkdrop / 示波器 / 波形历史 / 频谱 / 语谱图（静音像素经 `chromaKeyFade` 渐隐为绿）/ 3D 语谱 / 响度（只留点亮电平格 + 标签 + 数值）；画布内背景纯绿、不画网格 / 坐标刻度 / 图例。其它模块未悬停时整块纯绿
 - 拖入图片生成「拼豆像素画」贴到桌面背景
@@ -439,6 +444,7 @@
 ### 4.6 `PinkXP`（[PinkXPStyle.h](/I:/Y2KMeter/source/ui/PinkXPStyle.h)）
 - **13 个主题槽**（`ThemeId` 只追加不重排，保护旧存档）：12 个手工调校预设（数据驱动原值）+ `custom`（=11，生成器主题）。默认主题 `blackPink`。
 - **调色板重构 API（S2）**：`applyThemeFromSpec(spec, name)` / `applyUserTheme(spec, name)` / `getCurrentThemeSpec()` —— 模块仍读 `PinkXP::pinkXXX` 等 19 槽位符号，映射层保证兼容；扩展槽 `accent2` / `chartRamp[8]` / `danger` / `warn` / `ok`。
+- **预设装饰覆盖**：`PresetDecor { active, id, pattern, titleIconIndex }` + `getPresetDecor / setPresetDecor / applyPresetDecor / titleIconIndexOf`。只替换官方预设的 `desktopPattern` / `titleIconText`，配色不经生成器；`getCurrentTheme()` 对登记的预设返回叠加覆盖后的副本。覆盖只属于登记的那个预设：`applyTheme(其它 id)` / `applyThemeFromSpec` 时自动失效。启动 / 读工程需在 `applyTheme` **之前**调 `setPresetDecor`。生成器主题下 `applyPresetDecor` 只改其 spec 的 pattern / titleIcon（配色同样不变）。标题图标候选 8 个（`kTitleIconCandidates`，与 `PalettePanel` 的 `kTitleIcons` 同序）。
 - **图表渐变（A3/S4）**：`sampleChartRamp(t)` / `interpolateOkLab(a, b, t)` 在 OKLab 空间插值；Spectrogram / Spectrum / Waveform / Oscilloscope 已改用 `chartRamp`。
 - **主题订阅**：`subscribeThemeChanged(cb) → token`，用于组件切主题时刷新缓存的颜色。
 - **桌面纹理共享缓存**：`getSharedDesktopTexture(w,h)` 跨实例复用（多插件实例共用同一张 Image），主题切换时 `invalidateDesktopTextureCache()`。
@@ -665,7 +671,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.1`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.2`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定

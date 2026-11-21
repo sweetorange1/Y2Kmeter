@@ -644,6 +644,22 @@ public:
                 {
                     if ((int) t.id == savedThemeRaw) { targetId = t.id; break; }
                 }
+
+                // 官方预设的装饰覆盖（桌面纹理 / 标题图标；缺键 / -1 = 预设原样）
+                {
+                    auto& s = getUserSettings();
+                    const int pat = s.getIntValue ("ui.presetPattern", -1);
+                    PinkXP::PresetDecor decor;
+                    if (pat >= 0 && pat <= (int) y2kpal::Pattern::PixelFlower)
+                    {
+                        decor.active         = true;
+                        decor.id             = targetId;
+                        decor.pattern        = (y2kpal::Pattern) pat;
+                        decor.titleIconIndex = s.getIntValue ("ui.presetIcon", -1);
+                    }
+                    PinkXP::setPresetDecor (decor);
+                }
+
                 PinkXP::applyTheme (targetId);
                 Y2K_LOG ("[boot] preset theme applied");
             }
@@ -1611,6 +1627,15 @@ private:
         //     这里只是在退出前快照一次 gCurrentThemeId。
         s.setValue ("ui.themeId", (int) PinkXP::getCurrentThemeId());
         s.setValue ("ui.skinId",  (int) PinkXP::getCurrentSkin());
+
+        // 官方预设的装饰覆盖（调色工作室在预设下改的桌面纹理 / 标题图标）
+        {
+            const auto decor = PinkXP::getPresetDecor();
+            const bool keep  = decor.active && ! PinkXP::isCustomThemeActive()
+                            && decor.id == PinkXP::getCurrentThemeId();
+            s.setValue ("ui.presetPattern", keep ? (int) decor.pattern : -1);
+            s.setValue ("ui.presetIcon",    keep ? decor.titleIconIndex : -1);
+        }
 
         // 若当前为自定义主题，保存：
         //   · 旧键双色（向后兼容降级）

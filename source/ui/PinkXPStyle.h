@@ -624,6 +624,27 @@ namespace PinkXP
     //   · 否则从当前主题的 Accent/Background 反推（"基于预设新建"入口，R10）。
     y2kpal::ThemeSpec getCurrentThemeSpec();
 
+    // ---- 官方预设的装饰覆盖（桌面纹理 / 标题图标）----
+    //   调色工作室在预设主题下只改纹理 / 图标时走这里：保留预设的手工配色，
+    //   不经过 OKLCH 生成器重算（否则整套颜色会被反推近似色替换 → 跳色）。
+    //   覆盖只对 id 对应的预设生效；切到其它预设或生成器主题时自动失效。
+    struct PresetDecor
+    {
+        bool            active         = false;
+        ThemeId         id             = ThemeId::blackPink;
+        y2kpal::Pattern pattern        = y2kpal::Pattern::Checker;
+        int             titleIconIndex = -1;   // -1 = 沿用预设自带图标；0..7 = 调色工作室候选图标
+    };
+
+    PresetDecor getPresetDecor();
+    // 只写状态不提交（启动 / 读工程时在 applyTheme 之前调用；active=false 即清除）
+    void setPresetDecor(const PresetDecor& decor);
+    // 对当前主题立即生效并提交：预设 → 写装饰覆盖（配色不变）；
+    //   生成器主题 → 只改其 spec 的 pattern / titleIcon（同 spec 生成，配色同样不变）
+    void applyPresetDecor(y2kpal::Pattern pattern, int titleIconIndex);
+    // 图标文本在调色工作室 8 个候选中的索引；不在候选中返回 -1
+    int titleIconIndexOf(const char* iconText);
+
     // 供 ThemeLibrary 应用"我的主题"（命名主题，随 ui.themeLibrary 持久化）
     void applyUserTheme(const y2kpal::ThemeSpec& spec, const juce::String& name);
 

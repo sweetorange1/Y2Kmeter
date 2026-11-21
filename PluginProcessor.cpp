@@ -705,6 +705,14 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setProperty ("themeName", PinkXP::getCustomThemeName(),        nullptr);
     root.setProperty ("themeSpec",
                       juce::String(PinkXP::getCurrentThemeSpec().shareCode()), nullptr);
+    {
+        // 官方预设的装饰覆盖（桌面纹理 / 标题图标；-1 = 预设原样）
+        const auto decor = PinkXP::getPresetDecor();
+        const bool keep  = decor.active && ! PinkXP::isCustomThemeActive()
+                        && decor.id == PinkXP::getCurrentThemeId();
+        root.setProperty ("presetPattern", keep ? (int) decor.pattern : -1, nullptr);
+        root.setProperty ("presetIcon",    keep ? decor.titleIconIndex : -1, nullptr);
+    }
 
     // 颜色存档独立：工程里仍写一份主题库（分享/迁移用），但读取端只做"合并"，
     //   真正的长期存储是用户级的 Y2Kmeter.themeLibrary.xml（见 ThemeLibrary）。
@@ -792,6 +800,18 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
             PinkXP::ThemeId target = PinkXP::ThemeId::blackPink;
             for (const auto& t : themes)
                 if ((int) t.id == themeId) { target = t.id; break; }
+
+            // 预设装饰覆盖：工程里没有（旧工程 / -1）即预设原样
+            PinkXP::PresetDecor decor;
+            const int pat = (int) root.getProperty ("presetPattern", -1);
+            if (pat >= 0 && pat <= (int) y2kpal::Pattern::PixelFlower)
+            {
+                decor.active         = true;
+                decor.id             = target;
+                decor.pattern        = (y2kpal::Pattern) pat;
+                decor.titleIconIndex = (int) root.getProperty ("presetIcon", -1);
+            }
+            PinkXP::setPresetDecor (decor);
             PinkXP::applyTheme(target);
         }
 
