@@ -1,4 +1,4 @@
-#include "source/ui/PinkXPStyle.h"
+﻿#include "source/ui/PinkXPStyle.h"
 #include "BinaryData.h"
 #include "Y2KSkinFontData.h"
 #include "source/i18n/Localisation.h"
@@ -226,6 +226,46 @@ namespace PinkXP
     // 定义见下方（Font 实例缓存 / 静态文本位图缓存）
     static void releaseFontInstanceCache();
     static void releaseStaticTextCache();
+    static void glyphInkCacheClear();   // 字形墨迹缓存（定义见下方 FontOptics 段）
+
+    // ---- 文本光学度量缓存（实现见下方 getFontOptics）----
+    //   键含 typeface 指针，换字体 / 释放 Typeface 时必须清空（见 releaseTypefaceCache），
+    //   否则会拿旧指针做键、甚至命中已析构 Typeface 的度量。
+    namespace
+    {
+        struct FontOpticsKey
+        {
+            const juce::Typeface* typeface = nullptr;
+            int  heightQ = 0;      // 高度量化到 0.05px
+            bool cjk     = false;
+
+            bool operator== (const FontOpticsKey& o) const noexcept
+            {
+                return typeface == o.typeface && heightQ == o.heightQ && cjk == o.cjk;
+            }
+            bool operator< (const FontOpticsKey& o) const noexcept
+            {
+                if (typeface != o.typeface) return typeface < o.typeface;
+                if (heightQ  != o.heightQ)  return heightQ < o.heightQ;
+                return cjk < o.cjk;
+            }
+        };
+
+        // 有意不析构（同其它字体缓存；正常释放走 releaseTypefaceCache）
+        std::map<FontOpticsKey, FontOptics>& fontOpticsCache()
+        {
+            static auto& cache = *new std::map<FontOpticsKey, FontOptics>();
+            return cache;
+        }
+    }
+
+    static void releaseFontOpticsCache()
+    {
+        fontOpticsCache().clear();
+
+        // 字形墨迹缓存（键含 Typeface 指针，定义见下方 glyphInkCache）
+        glyphInkCacheClear();
+    }
 
     void releaseTypefaceCache()
     {
@@ -234,6 +274,7 @@ namespace PinkXP
         //   会以 "mutex lock failed" 终止进程。
         releaseFontInstanceCache();
         releaseStaticTextCache();
+        releaseFontOpticsCache();
         gTypefaceCache.clear();
         gSymbolTypeface = nullptr;
         gSymbolTypefaceId.clear();
@@ -652,6 +693,193 @@ namespace PinkXP
         return sym != nullptr && sym != gTypeface;
     }
 
+    // ==========================================================
+    // 文本光学度量 / 居中修正（见头文件 FontOptics 说明）
+    // ==========================================================
+    namespace
+    {
+        // 真实墨迹包围盒（坐标相对基线：上方为负）。
+        //   注意：GlyphArrangement::getBoundingBox / PositionedGlyph::getBounds 返回的是
+        //   **行框**（advance 宽 × ascent+descent），不是字形轮廓 —— 用它做"居中"等于
+        //   按行框居中（_ 依旧贴底、* 依旧顶天）。这里取每个 glyph 的轮廓 Path 再求 bounds，
+        //   才是"眼睛看到的墨迹"。
+        juce::Rectangle<float> glyphInkBounds (const juce::GlyphArrangement& ga)
+        {
+            juce::Path outline;
+            for (const auto& gl : ga)
+                if (! gl.isWhitespace())
+                    gl.createPath (outline);
+
+            return outline.isEmpty() ? juce::Rectangle<float>() : outline.getBounds();
+        }
+
+        juce::Rectangle<float> measureInk (const juce::Font& font, const juce::String& text)
+        {
+            juce::GlyphArrangement ga;
+            ga.addLineOfText (font, text, 0.0f, 0.0f);
+            if (ga.getNumGlyphs() <= 0)
+                return {};
+            return glyphInkBounds (ga);
+        }
+
+        // 单个 glyph 的墨迹缓存（图标按钮每次 paint 都要用；按 typeface + 高度 + 字符缓存）
+        std::map<std::tuple<const juce::Typeface*, int, juce::String>, juce::Rectangle<float>>&
+            glyphInkCache()
+        {
+            static auto& cache = *new std::map<std::tuple<const juce::Typeface*, int, juce::String>,
+                                               juce::Rectangle<float>>();
+            return cache;
+        }
+
+        juce::Rectangle<float> cachedGlyphInk (const juce::Font& font, const juce::String& text)
+        {
+            const auto key = std::make_tuple (font.getTypefacePtr().get(),
+                                              (int) std::lround (font.getHeight() * 20.0f),
+                                              text);
+
+            auto& cache = glyphInkCache();
+            if (auto it = cache.find (key); it != cache.end())
+                return it->second;
+
+            const auto ink = measureInk (font, text);
+            if (cache.size() > 512)
+                cache.clear();
+            return cache.emplace (key, ink).first->second;
+        }
+    }
+
+    static void glyphInkCacheClear()
+    {
+        glyphInkCache().clear();
+    }
+
+    namespace
+    {
+
+        // 字形带在该字体里的位置（相对行框中心，单位 = 行高）。
+        //   = 行框居中时基线的偏移 +(ascent-descent)/2 与字形带中心相对基线的偏移之和；
+        //   正数表示"按行框居中时，字形带落在框中心下方"。
+        float measureBandFactor (const juce::Font& font, bool cjk)
+        {
+            const float h = font.getHeight();
+            if (h <= 0.0f)
+                return 0.0f;
+
+            const float lineHalf = (font.getAscent() - font.getDescent()) * 0.5f;
+            float bandTop = 0.0f, bandBottom = 0.0f;
+
+            if (cjk)
+            {
+                // 方块字带：实测 "国" 的墨迹（CJK 字形占满 em 框，上下沿即字面）
+                const auto ink = measureInk (font, juce::String::charToString ((juce_wchar) 0x56FD));
+                if (! ink.isEmpty())
+                {
+                    bandTop    = ink.getY();
+                    bandBottom = ink.getBottom();
+                }
+            }
+
+            if (bandTop == 0.0f && bandBottom == 0.0f)
+            {
+                // 拉丁字形带：上沿 = 大写高（小写词也按大写字顶对齐 → 基线一致），
+                //   下沿 = 下伸墨迹的一半（无下伸部的词补半格，整排文字不会视觉偏下）
+                const auto capInk  = measureInk (font, "H");
+                const auto descInk = measureInk (font, "g");
+                bandTop    = capInk.isEmpty()  ? -h * 0.70f : capInk.getY();
+                bandBottom = descInk.isEmpty() ?  0.0f      : descInk.getBottom() * 0.5f;
+            }
+
+            return (lineHalf + (bandTop + bandBottom) * 0.5f) / h;
+        }
+
+        // 基准位置：像素复古（Silkscreen）现行的视觉位置。
+        //   拉丁字体一律对齐到它 → 默认皮肤外观零变化，其它字体向像素风看齐。
+        float pixelReferenceFactor()
+        {
+            static const float factor = [] () -> float
+            {
+                using namespace Y2KSkinFontData;
+                auto tf = typefaceFromCache ("builtin:Silkscreen",
+                                             BinaryData::SilkscreenRegular_ttf,
+                                             (size_t) BinaryData::SilkscreenRegular_ttfSize);
+                if (tf == nullptr)
+                    return 0.0f;
+
+                const juce::Font reference (juce::FontOptions (tf).withHeight (200.0f));
+                return measureBandFactor (reference, false);
+            }();
+            return factor;
+        }
+    }
+
+    const FontOptics& getFontOptics (const juce::Font& font)
+    {
+        const FontOpticsKey key {
+            font.getTypefacePtr().get(),
+            (int) std::lround (font.getHeight() * 20.0f),
+            SymbolGlyphs::cjkFontActive()
+        };
+
+        auto& cache = fontOpticsCache();
+        if (auto it = cache.find (key); it != cache.end())
+            return it->second;
+
+        FontOptics o;
+        const float h = font.getHeight();
+
+        o.lineAscent  = font.getAscent();
+        o.lineDescent = font.getDescent();
+
+        const auto capInk  = measureInk (font, "H");
+        const auto descInk = measureInk (font, "g");
+        o.capHeight    = capInk.isEmpty()  ? h * 0.70f : -capInk.getY();
+        o.descenderInk = descInk.isEmpty() ? 0.0f      :  descInk.getBottom();
+
+        o.latinBandTop    = -o.capHeight;
+        o.latinBandBottom =  o.descenderInk * 0.5f;
+        o.cjkBandTop      =  o.latinBandTop;
+        o.cjkBandBottom   =  o.latinBandBottom;
+
+        // 字形带位置（相对行框中心，行高为单位）
+        const float latinFactor = measureBandFactor (font, false);
+        float       cjkFactor   = latinFactor;
+        const bool  cjkFont     = key.cjk;
+
+        if (cjkFont)
+        {
+            const auto cjkInk = measureInk (font, juce::String::charToString ((juce_wchar) 0x56FD));
+            if (! cjkInk.isEmpty())
+            {
+                o.cjkBandTop    = cjkInk.getY();
+                o.cjkBandBottom = cjkInk.getBottom();
+                cjkFactor       = measureBandFactor (font, true);
+            }
+        }
+
+        // 目标位置：
+        //   · 拉丁字体（英文界面）→ 像素复古的现行位置（默认皮肤零回归）；
+        //   · CJK 字体（中文界面）→ 精确居中（方块字是正方形，居中口径无歧义，
+        //     也修掉"中文按钮文字看着偏下"）。
+        //   同一字体只给一个修正量（CJK 字体用方块字带，拉丁字体用拉丁带），
+        //   保证"中英混排的同一行"共享基线，不会各按各的字形带上下跳。
+        const float targetFactor = cjkFont ? 0.0f : pixelReferenceFactor();
+        o.nudge = (targetFactor - (cjkFont ? cjkFactor : latinFactor)) * h;
+
+        return cache.emplace (key, o).first->second;   // std::map：插入不失效已有引用
+    }
+
+    float opticalNudge (const juce::Font& font)
+    {
+        return getFontOptics (font).nudge;
+    }
+
+    juce::Font fitFontToHeight (juce::Font font, float maxHeight)
+    {
+        if (maxHeight > 1.0f && font.getHeight() > maxHeight)
+            font.setHeight (maxHeight);
+        return font;
+    }
+
     juce::Font SymbolGlyphs::getFont (const juce::String& text, float height, int styleFlags)
     {
         const auto base = PinkXP::getFont (height, styleFlags);
@@ -688,6 +916,56 @@ namespace PinkXP
         //   不会得到"当前语言字体"（否则中英文界面图标风格会不一致）。
         juce::ignoreUnused (styleFlags);
         return makeSymbolFont (h);
+    }
+
+    void SymbolGlyphs::drawIconGlyph (juce::Graphics& g,
+                                      const juce::String& glyph,
+                                      juce::Rectangle<int> area,
+                                      float fontHeight,
+                                      juce::Colour colour,
+                                      int pixelSkinDx,
+                                      int pixelSkinDy)
+    {
+        const auto shown = y2k::tr (glyph);
+
+        // 高度上限：图标字不许超出按钮（VT323 这类高行框字体会把 _ * 顶出按钮）。
+        //   +1 容差：像素复古的 iconFont(11)=16.5 落在 16px 按钮里，保持旧观感。
+        const auto font = fitFontToHeight (iconFont (fontHeight, juce::Font::bold),
+                                           (float) area.getHeight() + 1.0f);
+        g.setColour (colour);
+
+        // 像素复古：保持旧版逐像素外观（行框居中 + 调用方手调偏移）
+        if (gCurrentSkin == SkinId::pinkXP)
+        {
+            g.setFont (font);
+            g.drawText (shown, area.translated (pixelSkinDx, pixelSkinDy),
+                        juce::Justification::centred, false);
+            return;
+        }
+
+        // 其它风格：按字形**轮廓墨迹**包围盒居中 —— 与字体 metrics 无关。
+        //   用轮廓而不是 getBoundingBox（行框），否则 _ 还是贴底、* 还是顶天。
+        const auto ink = cachedGlyphInk (font, shown);
+        if (ink.isEmpty())
+        {
+            g.setFont (font);
+            g.drawText (shown, area, juce::Justification::centred, false);
+            return;
+        }
+
+        juce::GlyphArrangement ga;
+        ga.addLineOfText (font, shown, 0.0f, 0.0f);
+        if (ga.getNumGlyphs() <= 0)
+        {
+            g.setFont (font);
+            g.drawText (shown, area, juce::Justification::centred, false);
+            return;
+        }
+
+        const float dx = std::floor ((float) area.getCentreX() - ink.getCentreX() + 0.5f);
+        const float dy = std::floor ((float) area.getCentreY() - ink.getCentreY() + 0.5f);
+        ga.moveRangeOfGlyphs (0, -1, dx, dy);
+        ga.draw (g);
     }
 
     juce::Font SymbolGlyphs::infinityFont (float height, int styleFlags)
@@ -800,11 +1078,18 @@ namespace PinkXP
 
         const auto runs = splitRuns (text);
 
+        // 垂直居中统一走"字形带"光学居中（跨字体一致，见 FontOptics）。
+        //   JUCE 原生 drawText 是按行框居中的，不同字体墨迹在行框里的位置不同，
+        //   同一控件换皮肤后文字会上下漂 0.5~2px。
+        const int vFlags = justification.getOnlyVerticalFlags();
+        const bool vCentred = (vFlags & juce::Justification::verticallyCentred) != 0;
+        const float nudge = vCentred ? opticalNudge (baseFont) : 0.0f;
+
         // 单 run 且不是符号：走原生 drawText（保留省略号 / 压缩等行为）
         if (runs.size() == 1 && ! runs[0].symbol)
         {
             g.setFont (baseFont);
-            g.drawText (text, area, justification, false);
+            g.drawText (text, area.toFloat().translated (0.0f, nudge), justification, false);
             return;
         }
 
@@ -827,13 +1112,12 @@ namespace PinkXP
             x += (float) area.getWidth() - totalWidth;
 
         float top = (float) area.getY();
-        const int vFlags = justification.getOnlyVerticalFlags();
-        if ((vFlags & juce::Justification::verticallyCentred) != 0)
+        if (vCentred)
             top += ((float) area.getHeight() - baseFont.getHeight()) * 0.5f;
         else if ((vFlags & juce::Justification::bottom) != 0)
             top += (float) area.getHeight() - baseFont.getHeight();
 
-        const float baseline = top + baseFont.getAscent();
+        const float baseline = top + baseFont.getAscent() + nudge;
 
         // 用 addLineOfText（无 maxWidth 截断）而不是 drawText：
         //   Graphics::drawText 的 curtailment 会按 Silkscreen 的 advance 判断
@@ -2795,15 +3079,39 @@ namespace PinkXP
         }
         else if (gCurrentSkin == SkinId::neon)
         {
-            // 霓虹：暗色灯箱 + 底部发光灯管
+            // 霓虹：发光灯箱（顶灯管 → 暗玻璃 → 底灯管的三段式纵向光）
+            //   · 旧实现把强调色往**纯黑**里混，压暗的同时丢了饱和度 → 发灰发脏；
+            //     现在改走 HSV：先拉饱和再压明度（深但不浑），
+            //     上沿 55% / 中段 80% / 下沿 102%（≈满强度）—— 越靠下越"亮"，
+            //     整条抬头有"灯从下往上照"的通透感。
+            //   · 上下各一条近白灯芯 + 灯芯内侧的半透光晕 = 灯管自发光；
+            //   · 底沿再叠 3px bloom，让光漏进内容区（配合 titleBarDividerColour 的亮缝）。
             const float y0 = (float) bounds.getY();
             const float y1 = (float) bounds.getBottom();
-            juce::ColourGradient grad (sel.interpolatedWith (juce::Colours::black, 0.62f), 0.0f, y0,
-                                       sel.interpolatedWith (juce::Colours::black, 0.38f), 0.0f, y1, false);
+
+            const auto base   = sel.withMultipliedSaturation (1.35f);
+            // 暗端往品红/紫偏一点点（合成波招牌的 magenta → pink 纵向渐变）：
+            //   深色偏紫比"深红"干净得多，也更像夜景里的灯箱背光。
+            const auto topCol = base.withRotatedHue (-0.050f).withMultipliedBrightness (0.55f);
+            const auto midCol = base.withRotatedHue (-0.018f).withMultipliedBrightness (0.80f);
+            const auto botCol = base.withMultipliedBrightness (1.02f);
+
+            juce::ColourGradient grad (topCol, 0.0f, y0, botCol, 0.0f, y1, false);
+            grad.addColour (0.62, midCol);
             g.setGradientFill (grad);
             g.fillRect (bounds);
-            g.setColour (sel.withAlpha (0.55f));
+
+            // 顶部灯管：1px 近白芯 + 下方 2px 渐隐光晕
+            g.setColour (neonCore (true).withAlpha (0.85f));
             g.fillRect (bounds.getX(), bounds.getY(), bounds.getWidth(), 1);
+            g.setColour (neonCore (false).withAlpha (0.34f));
+            g.fillRect (bounds.getX(), bounds.getY() + 1, bounds.getWidth(), 2);
+
+            // 底部灯管：3px bloom（越靠下越亮）+ 2px 近白亮芯
+            g.setColour (neonCore (false).withAlpha (0.20f));
+            g.fillRect (bounds.getX(), bounds.getBottom() - 6, bounds.getWidth(), 3);
+            g.setColour (neonCore (false).withAlpha (0.42f));
+            g.fillRect (bounds.getX(), bounds.getBottom() - 3, bounds.getWidth(), 1);
             g.setColour (neonCore (true));
             g.fillRect (bounds.getX(), bounds.getBottom() - 2, bounds.getWidth(), 2);
         }
@@ -2833,9 +3141,10 @@ namespace PinkXP
 
         const auto& th = getCurrentTheme();
 
-        // 扁平类风格去掉标题文字的 1px 投影；其余风格保持
+        // 扁平类风格去掉标题文字的 1px 投影；其余风格保持。
+        //   霓虹也归入"无投影"：灯箱底色已经够亮，深色投影会在灯管光里糊成一块脏边。
         const bool flatTitle = gCurrentSkin == SkinId::modern || gCurrentSkin == SkinId::fluent
-                            || gCurrentSkin == SkinId::greenScreen;
+                            || gCurrentSkin == SkinId::greenScreen || gCurrentSkin == SkinId::neon;
         const juce::Colour titleShadow = flatTitle
                                            ? juce::Colours::transparentBlack
                                            : sel.darker(0.50f).withAlpha(0.55f);
@@ -2854,31 +3163,44 @@ namespace PinkXP
         const auto titleImg = cachedStaticText (
             g, title, fontHeight, juce::Font::bold, selInk, titleShadow);
 
-        // CJK 方块字紧贴 em 顶部、descent 很小，按字体 metrics 垂直居中后视觉偏上
-        //   —— 中文界面下标题统一向下微移 1px（英文界面为 0，无变化）
-        const int titleVNudge = SymbolGlyphs::cjkFontActive() ? 1 : 0;
-
+        // 垂直定位沿用 layoutStaticText 的口径：对齐"位图内的文字排版框"
+        //   （boxTop/boxHeight），而不是整张位图 —— 位图底部多留了 1px 空白，
+        //   直接居中整张图会让标题永远高 1px（旧版是给 CJK 单独 +1 补偿）。
+        //   字形本身的光学居中由 SymbolGlyphs::drawText 里的 FontOptics 负责。
         if (titleImg.isValid())
         {
-            titleImg.drawAt (g,
-                             (float) textRect.getX() - titleImg.originX,
-                             (float) (textRect.getY() + (textRect.getHeight() - titleImg.getHeight()) / 2 + titleVNudge));
+            const float imgY = (float) textRect.getY()
+                             + ((float) textRect.getHeight() - titleImg.boxHeight) * 0.5f
+                             - titleImg.boxTop;
+            titleImg.drawAt (g, (float) textRect.getX() - titleImg.originX, imgY);
         }
         else
         {
-            // 兜底（缓存失败）：保持旧绘制路径
+            // 兜底（缓存失败）：保持旧绘制路径，同样按光学居中修正
             const auto shownTitle = y2k::tr (title);
-            g.setFont(getFont(fontHeight, juce::Font::bold));
+            const auto titleFont  = getFont (fontHeight, juce::Font::bold);
+            const int  nudge      = (int) std::lround (opticalNudge (titleFont));
+            g.setFont(titleFont);
             if (! titleShadow.isTransparent())
             {
                 g.setColour(titleShadow);
-                g.drawText(shownTitle, textRect.translated(1, 1 + titleVNudge), juce::Justification::centredLeft, false);
+                g.drawText(shownTitle, textRect.translated(1, 1 + nudge), juce::Justification::centredLeft, false);
             }
             g.setColour(selInk);
-            g.drawText(shownTitle, textRect.translated(0, titleVNudge), juce::Justification::centredLeft, false);
+            g.drawText(shownTitle, textRect.translated(0, nudge), juce::Justification::centredLeft, false);
         }
 
         return bounds;
+    }
+
+    juce::Colour titleBarDividerColour() noexcept
+    {
+        // 霓虹：用灯管亮色代替深色硬线 —— 深色线会把标题栏底部的辉光切断，
+        //   整条抬头立刻"发闷"；换成亮芯后光会顺着缝隙漏进内容区。
+        if (gCurrentSkin == SkinId::neon)
+            return neonCore (true);
+
+        return dark;
     }
 
     // ======================================================
@@ -3732,9 +4054,22 @@ void PinkXPLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& butt
     if (shouldDrawButtonAsDown || button.getToggleState())
         area.translate(1, 1);
 
+    // 字号上限：字体行高不得超过按钮高度（VT323 1.30 系数在 22px 按钮里会溢出）。
+    //   字体高度与名义字号成正比 → 按比例把名义字号收回来，像素复古不受影响
+    //   （Silkscreen 12 → 18px ≤ 按钮高度）。
+    const float nominal = symbolsOnly ? 14.0f : 12.0f;
+    const auto  probe   = symbolsOnly
+                            ? PinkXP::SymbolGlyphs::iconFont (nominal, juce::Font::bold)
+                            : PinkXP::SymbolGlyphs::buttonFont (shown, nominal, juce::Font::bold);
+    const float maxH    = (float) button.getHeight();
+    const float fontSize = (probe.getHeight() > maxH && probe.getHeight() > 0.0f)
+                               ? nominal * maxH / probe.getHeight()
+                               : nominal;
+
     // 静态位图缓存（mac 性能）：与 SymbolGlyphs::drawText(shown, area, centred, baseFont) 等价
+    //   垂直位置由位图内的光学居中（FontOptics）负责，不同字体都落在按钮视觉中心
     PinkXP::drawCachedSymbolText (g, shown, area, juce::Justification::centred,
-                                  symbolsOnly ? 14.0f : 12.0f, juce::Font::bold, textColour,
+                                  fontSize, juce::Font::bold, textColour,
                                   symbolsOnly ? PinkXP::StaticTextFont::icon
                                               : PinkXP::StaticTextFont::button,
                                   juce::Colours::transparentBlack, false);
@@ -3747,13 +4082,20 @@ juce::Font PinkXPLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHei
 
 int PinkXPLookAndFeel::getTextButtonWidthToFitText (juce::TextButton& b, int buttonHeight)
 {
-    // 测量与 drawButtonText 用同一套"按文本选字体 + run 化"，避免混排宽度不一致
+    // 测量与 drawButtonText 用同一套"按文本选字体 + run 化 + 高度上限"，避免宽度不一致
     const juce::String shown = y2k::tr (b.getButtonText());
-    const juce::Font font = PinkXP::SymbolGlyphs::isSymbolsOnly (shown)
-        ? PinkXP::SymbolGlyphs::iconFont (14.0f, juce::Font::bold)
-        : PinkXP::SymbolGlyphs::buttonFont (shown,
-                                            juce::jmin (14.0f, buttonHeight * 0.55f),
-                                            juce::Font::bold);
+    const bool symbolsOnly = PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
+    const float nominal = symbolsOnly ? 14.0f : juce::jmin (14.0f, buttonHeight * 0.55f);
+    const juce::Font probe = symbolsOnly
+        ? PinkXP::SymbolGlyphs::iconFont (nominal, juce::Font::bold)
+        : PinkXP::SymbolGlyphs::buttonFont (shown, nominal, juce::Font::bold);
+    const float maxH = (float) juce::jmax (1, buttonHeight);
+    const float fontSize = (probe.getHeight() > maxH && probe.getHeight() > 0.0f)
+                               ? nominal * maxH / probe.getHeight()
+                               : nominal;
+    const juce::Font font = symbolsOnly
+        ? PinkXP::SymbolGlyphs::iconFont (fontSize, juce::Font::bold)
+        : PinkXP::SymbolGlyphs::buttonFont (shown, fontSize, juce::Font::bold);
     return (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (shown, font)) + buttonHeight;
 }
 
@@ -3861,11 +4203,15 @@ void PinkXPLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
     {
         const float alpha = label.isEnabled() ? 1.0f : 0.5f;
         const juce::String shown = y2k::tr (label.getText());
-        const juce::Font baseFont = getLabelFont (label);
 
         g.setColour (label.findColour (juce::Label::textColourId).withMultipliedAlpha (alpha));
 
         const auto textArea = getLabelBorderSize (label).subtractedFrom (label.getLocalBounds());
+
+        // 字号上限：行高明显超过标签可用高度时收回来（高行框字体在窄条里会溢出）。
+        //   +1 容差：像素复古 11pt→16.5px 落在 16px 标签里保持旧观感，不触发收缩。
+        const juce::Font baseFont = PinkXP::fitFontToHeight (getLabelFont (label),
+                                                             (float) textArea.getHeight() + 1.0f);
 
         // 只有"含装饰符号"的文本才走 run 化绘制（CJK + 符号混排时符号换英文
         //   字体，CJK 留中文字体）；其余文本保持 drawFittedText 的原有缩放 /
@@ -3882,7 +4228,16 @@ void PinkXPLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
         {
             const juce::Font font (PinkXP::SymbolGlyphs::rebase (baseFont, shown));
             g.setFont (font);
-            g.drawFittedText (shown, textArea, label.getJustificationType(),
+
+            // 单行 + 垂直居中：先按字形带做光学修正（跨字体一致），
+            //   多行 / 顶底对齐保持 drawFittedText 的原行为
+            auto drawArea = textArea.toFloat();
+            if (! shown.containsChar ('\n')
+                && (label.getJustificationType().getOnlyVerticalFlags()
+                        & juce::Justification::verticallyCentred) != 0)
+                drawArea.translate (0.0f, PinkXP::opticalNudge (font));
+
+            g.drawFittedText (shown, drawArea.toNearestInt(), label.getJustificationType(),
                               juce::jmax (1, (int) ((float) textArea.getHeight() / font.getHeight())),
                               label.getMinimumHorizontalScale());
         }
@@ -3903,9 +4258,9 @@ void PinkXPLookAndFeel::drawComboBoxTextWhenNothingSelected (juce::Graphics& g, 
     g.setColour (findColour (juce::ComboBox::textColourId).withMultipliedAlpha (0.5f));
 
     const juce::String shown = y2k::tr (box.getTextWhenNothingSelected());
-    const auto baseFont = label.getLookAndFeel().getLabelFont (label);
-
     const auto textArea = getLabelBorderSize (label).subtractedFrom (label.getBounds());
+    const auto baseFont = PinkXP::fitFontToHeight (label.getLookAndFeel().getLabelFont (label),
+                                                   (float) textArea.getHeight() + 1.0f);
 
     const auto runs = PinkXP::SymbolGlyphs::splitRuns (shown);
     const bool needsRunLayout = runs.size() > 1 || (runs.size() == 1 && runs[0].symbol);
@@ -3918,7 +4273,13 @@ void PinkXPLookAndFeel::drawComboBoxTextWhenNothingSelected (juce::Graphics& g, 
 
     const juce::Font font (PinkXP::SymbolGlyphs::rebase (baseFont, shown));
     g.setFont (font);
-    g.drawFittedText (shown, textArea, label.getJustificationType(),
+
+    auto drawArea = textArea.toFloat();
+    if ((label.getJustificationType().getOnlyVerticalFlags()
+            & juce::Justification::verticallyCentred) != 0)
+        drawArea.translate (0.0f, PinkXP::opticalNudge (font));
+
+    g.drawFittedText (shown, drawArea.toNearestInt(), label.getJustificationType(),
                       juce::jmax (1, (int) ((float) textArea.getHeight() / font.getHeight())),
                       label.getMinimumHorizontalScale());
 }

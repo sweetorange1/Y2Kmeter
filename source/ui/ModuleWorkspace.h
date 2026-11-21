@@ -469,6 +469,30 @@ private:
     void updateCursorFor(Edge e);
     void layoutControlDrawer();
 
+    // ------------------------------------------------------------
+    // bug1：点击模块"内部"也要置顶
+    //   · 只点外框 / 标题栏时事件落在面板自己身上 → mouseDown 里的
+    //     toFront + onBroughtToFront 正常执行；
+    //   · 点到内部子组件（小工具模块的计算器按钮 / 便签输入框、Milkdrop
+    //     控制栏、抽屉控件……）时事件被子组件吃掉，面板收不到 mouseDown，
+    //     于是模块不会被提到最前，也不会通知 workspace 取消图片聚焦 /
+    //     重排贴纸与 VirtuPet。
+    //   · 这里给面板挂一个"深层鼠标监听"（wantsEventsForAllNestedChildComponents）：
+    //     凡是落在本面板子组件上的按下，都补一次置顶；面板自身的点击由
+    //     mouseDown 处理，监听里显式跳过，避免重复执行。
+    //   · 只用 toFront(false)：子组件（例如便签 TextEditor）需要保留键盘焦点。
+    // ------------------------------------------------------------
+    struct ChildClickToFront : public juce::MouseListener
+    {
+        explicit ChildClickToFront (ModulePanel& p) noexcept : panel (p) {}
+        void mouseDown (const juce::MouseEvent& e) override;
+        ModulePanel& panel;
+    };
+
+    void bringToFrontFromChildClick();
+
+    ChildClickToFront childClickToFront { *this };
+
     bool controlPanelEnabled_ = false;
     bool controlPanelOpen_    = false;
     std::unique_ptr<ModuleControlDrawer> controlDrawer_;

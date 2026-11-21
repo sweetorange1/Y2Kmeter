@@ -35,3 +35,9 @@
 ## 6. 版本号同步
 
 - 升版本要同步 CMakeLists（3 处）+ `.iss` + `PluginEditor.cpp`（3 处字面量）+ README 徽章 + 文档（详见 build-toolchain.md §3）。
+
+## 7. 文本与字体
+
+- **JUCE 的 `getBounds()` 是"行框"不是"墨迹"**：`GlyphArrangement::getBoundingBox()` / `PositionedGlyph::getBounds()` 返回 `advance 宽 × (ascent + descent)`。用它做垂直居中等于按行框居中 —— `_` 永远贴底、`*` 永远顶天。要真实墨迹必须 `PositionedGlyph::createPath(path)` 后取 `path.getBounds()`。
+- **像素级手调偏移只在"单一字体"前提下成立**：`translate(0, -1)` 这类补偿是按某一套字体调的，换字体/换皮肤就变成新的偏差。跨字体统一走实测字形带（`PinkXP::FontOptics`，见 rendering-gl.md §5）。
+- **"默认皮肤零回归"的做法**：把基准字体（Silkscreen）的现行视觉位置当成 0 点，其它字体向它对齐，而不是给所有字体（含默认）重新定一套绝对值。

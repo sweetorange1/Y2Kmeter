@@ -33,11 +33,16 @@ namespace
 void ModuleControlDrawer::Inner::paint (juce::Graphics& g)
 {
     // 分组标题 + 参数标签
+    //   · 字号上限 + 光学居中，与按钮 / 标签同一套口径（见 PinkXP::FontOptics）
     for (const auto& h : drawer.headers)
     {
+        const auto font = PinkXP::fitFontToHeight (PinkXP::getFont (10.0f, juce::Font::bold),
+                                                   (float) h.rect.getHeight());
         g.setColour (PinkXP::pink600.withAlpha (0.9f));
-        g.setFont (PinkXP::getFont (10.0f, juce::Font::bold));
-        g.drawText (y2k::tr (h.text), h.rect, juce::Justification::centredLeft, true);
+        g.setFont (font);
+        g.drawText (y2k::tr (h.text),
+                    h.rect.toFloat().translated (0.0f, PinkXP::opticalNudge (font)),
+                    juce::Justification::centredLeft, true);
         g.setColour (PinkXP::shdw.withAlpha (0.5f));
         g.fillRect (h.rect.getX(), h.rect.getBottom() - 1, h.rect.getWidth(), 1);
     }
@@ -45,9 +50,13 @@ void ModuleControlDrawer::Inner::paint (juce::Graphics& g)
     for (const auto& r : drawer.rows)
     {
         if (! r->visible) continue;
+        const auto font = PinkXP::fitFontToHeight (PinkXP::getFont (11.0f, juce::Font::plain),
+                                                   (float) r->labelRect.getHeight());
         g.setColour (PinkXP::ink);
-        g.setFont (PinkXP::getFont (11.0f, juce::Font::plain));
-        g.drawText (y2k::tr (r->def.label), r->labelRect, juce::Justification::centredLeft, true);
+        g.setFont (font);
+        g.drawText (y2k::tr (r->def.label),
+                    r->labelRect.toFloat().translated (0.0f, PinkXP::opticalNudge (font)),
+                    juce::Justification::centredLeft, true);
     }
 }
 

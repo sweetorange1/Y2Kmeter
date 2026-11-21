@@ -1777,8 +1777,8 @@ void PalettePanel::paint(juce::Graphics& g)
     auto bar = inner.removeFromTop(PinkXP::ui(22));
     PinkXP::drawPinkTitleBar(g, bar, y2k::tr("PALETTE STUDIO"), 12.0f);
 
-    // 标题栏下沿深色分割线（与 ModulePanel 一致：在标题栏底边外再补 1px）
-    g.setColour(PinkXP::dark);
+    // 标题栏下沿分割线（与 ModulePanel 一致：在标题栏底边外再补 1px）
+    g.setColour(PinkXP::titleBarDividerColour());
     g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
 
     // 右上角 × 关闭按钮：完全复刻 ModulePanel 的自绘样式
@@ -1790,12 +1790,9 @@ void PalettePanel::paint(juce::Graphics& g)
         else
             PinkXP::drawRaised(g, cb, closeHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
 
-        g.setColour(PinkXP::ink);
-        g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
         auto cbText = cb;
-        cbText.translate(0, -1);
         if (closePressed_) cbText.translate(1, 1);
-        g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
+        PinkXP::SymbolGlyphs::drawIconGlyph (g, "x", cbText, 11.0f, PinkXP::ink, 0, -1);
     }
 }
 

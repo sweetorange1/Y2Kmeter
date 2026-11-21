@@ -170,14 +170,43 @@ ModulePanel::ModulePanel(ModuleType type)
 
     // 绿幕风格：每个模块是独立的悬停显示区域（见 PinkXP::isChromaRevealed）
     PinkXP::markChromaRegion (*this);
+
+    // bug1：点击内部子组件也要置顶（见头文件 ChildClickToFront 说明）
+    addMouseListener (&childClickToFront, /*wantsEventsForAllNestedChildComponents=*/ true);
 }
 
 ModulePanel::~ModulePanel()
 {
+    // 监听器是本对象的成员，先摘掉再析构，避免监听列表持有悬空指针
+    removeMouseListener (&childClickToFront);
+
     // 模块销毁时摘掉注册/监听，避免"点空白处收起"持有悬空指针
     openDrawerPanels().removeAllInstancesOf (this);
     if (openDrawerPanels().isEmpty())
         detachDrawerDismissListener();
+}
+
+void ModulePanel::ChildClickToFront::mouseDown (const juce::MouseEvent& e)
+{
+    auto* origin = e.originalComponent;
+
+    // 落在面板自己身上的按下由 ModulePanel::mouseDown 处理，这里不重复执行
+    if (origin == nullptr || origin == &panel || ! panel.isParentOf (origin))
+        return;
+
+    panel.bringToFrontFromChildClick();
+}
+
+void ModulePanel::bringToFrontFromChildClick()
+{
+    if (! isVisible())
+        return;
+
+    // 不抢键盘焦点：内部控件（便签 TextEditor / 计算器按钮）需要保留自己的焦点
+    toFront (false);
+
+    if (onBroughtToFront)
+        onBroughtToFront (*this);
 }
 
 bool ModulePanel::isVisuallyActiveInWorkspace() const noexcept
@@ -566,8 +595,8 @@ void ModulePanel::paint(juce::Graphics& g)
     {
         PinkXP::drawPinkTitleBar(g, tb, titleText, 12.0f);
 
-        // 标题栏下沿深色分割线（凸出边框外 1px）
-        g.setColour(PinkXP::dark);
+        // 标题栏下沿分割线（凸出边框外 1px；霓虹风格下是灯管亮色，让光漏进内容区）
+        g.setColour(PinkXP::titleBarDividerColour());
         g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 1);
 
         // 3. 关闭按钮（×）
@@ -577,13 +606,11 @@ void ModulePanel::paint(juce::Graphics& g)
         else
             PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
 
-        g.setColour(PinkXP::ink);
-        // 图标字符（× / - / =）：恒用英文 UI 字体，不随语言切换变样
-        g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
+        // 图标字符（× / - / =）：恒用英文 UI 字体，不随语言切换变样；
+        //   非像素风格下按字形墨迹居中（切风格换字体后不再上下跑位）
         auto cbText = cb;
-        cbText.translate(0, -1);
         if (closeButtonPressed) cbText.translate(1, 1);
-        g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
+        PinkXP::SymbolGlyphs::drawIconGlyph (g, "x", cbText, 11.0f, PinkXP::ink, 0, -1);
 
         // 3.5. 弹出/停靠按钮（仅在 Standalone 模式或已处于浮动态时绘制）
         if (popOutEnabled_ || isFloating_)
@@ -594,12 +621,10 @@ void ModulePanel::paint(juce::Graphics& g)
             else
                 PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
 
-            g.setColour(PinkXP::ink);
-            g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
             auto popBtnText = popBtn;
-            popBtnText.translate(0, -1);
             if (popOutButtonPressed_) popBtnText.translate(1, 1);
-            g.drawText(y2k::tr (isFloating_ ? "=" : "-"), popBtnText, juce::Justification::centred, false);
+            PinkXP::SymbolGlyphs::drawIconGlyph (g, isFloating_ ? "=" : "-", popBtnText, 11.0f,
+                                                 PinkXP::ink, 0, -1);
         }
 
         // 3.6. 控制面板（齿轮）按钮：仅声明了控制面板的模块显示

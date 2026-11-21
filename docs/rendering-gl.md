@@ -57,6 +57,9 @@
 - 单字符/短文本最易踩：0.5px 就足以让第一颗 glyph 完全消失（表现为"标签随机丢失"，与主题/窗口宽度无关）。
 - 自建文本位图缓存：宽度必须 `ceil` 并留余量，不能用 `round`。
 - `PinkXP::getFont()` 有 **1.5× 放大**（正文），窄标签走位图要按 1.5× 反推尺寸，或直接 `axisFont=true`（坐标轴专用，不缩放）。
+- **垂直居中统一走 `PinkXP::FontOptics`**（`opticalNudge` / `fitFontToHeight`，v3.4.1）：`drawText(..., centred)` 是按**行框**居中的，各字体 ascent/descent 比例不同 → 换皮肤 / 换字体后同一控件里的文字漂 0.5~2px。规则：拉丁字体对齐像素复古基准（默认皮肤零回归），CJK 字体按方块字墨迹精确居中。**不要再写 `translate(0, -1)` 这类手调补偿**，那是按某一套字体调的，换字体就会跑。
+- **图标字符走 `SymbolGlyphs::drawIconGlyph`**：按字形**轮廓墨迹**居中。注意 `GlyphArrangement::getBoundingBox` / `PositionedGlyph::getBounds` 返回的是**行框**（advance × ascent+descent），拿它做"居中"等于没居中（`_` 依旧贴底、`*` 依旧顶天）；真实墨迹必须 `PositionedGlyph::createPath(path)` 后取 `path.getBounds()`。
+- 徽标 / 标题这类"整张位图"摆放：对齐的是位图里的**文字排版框**（`StaticText::boxTop / boxHeight`），不是整张位图 —— 位图底部多留 1px，居中整图会让文字永远高 1px。
 
 ## 6. Milkdrop 效果系统（v2.6.x 起，详见 PROJECT_OVERVIEW.md §3.4）
 

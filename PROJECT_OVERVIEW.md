@@ -41,7 +41,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.4.0`）
+- **产品名**：`Y2Kmeter` （版本：`3.4.1`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -73,6 +73,13 @@
 > · 视觉风格从 3 种扩到 **8 种**：新增 **玻璃**（窗口内模拟毛玻璃，全部不透明绘制）/ **霓虹赛博**（合成波桌面 + 灯管描边 + 彩色辉光）/ **CRT 终端**（磷光单色 + 扫描线 + 暗角）/ **Win11 Fluent**（Mica 桌面 + 细描边 + 小控件大圆角；模块外框仍直角）/ **绿幕**（见下）。`SkinId` 按整数持久化，只追加不重排，旧存档零影响。
 > · 新增 **绿幕风格**（`greenScreen`）：给视频创作者录屏抠像 —— 桌面 / 工作区 / 工具栏 / 标题栏 / 模块外壳未悬停时纯绿 `#00FF00`，鼠标悬停处恢复显示；支持的模块（Milkdrop / 示波器 / 波形 / 频谱 / 语谱图 / 3D 语谱 / 响度）覆写 `getChromaKeyCanvas()` 只保留数据图形与数值读数，网格 / 坐标刻度 / 图例全部不画，其它模块未悬停时整块纯绿。
 > · 新增 **按风格切换字体**：每种风格一套英文字体（Silkscreen / Exo 2 / Inter / Nunito / Orbitron / VT323 / Open Sans），中文界面在像素复古 / CRT 下沿用语言包像素字，其余风格改用 Noto Sans SC。字体全部 SIL OFL 1.1，资源在 `ttf/skin/`（独立 binary data target `Y2KSkinFontData`，许可证 `ttf/skin/licenses/`）。
+
+> **v3.4.1 本轮变更**（细节见 §4.6、§7 与 [docs/rendering-gl.md](docs/rendering-gl.md) §5）：
+> · 新增 **跨字体文本光学排版** `PinkXP::FontOptics`（`getFontOptics / opticalNudge / fitFontToHeight`）：把所有"控件内单行文本"从 JUCE 的**行框居中**改成**字形带居中**。拉丁字体（英文界面）对齐像素复古的现行位置（默认皮肤零回归）；CJK 字体（中文界面）按方块字墨迹精确居中；另按控件高度夹紧字号上限（VT323 这类高行框字体不再撑破按钮）。接入 `SymbolGlyphs::drawText` / `drawButtonText` / `drawLabel` / ComboBox / 菜单 / 抽屉 / `drawPinkTitleBar` / Editor 抬头。
+> · 图标字符按**真实轮廓墨迹**居中（`SymbolGlyphs::drawIconGlyph`）：`GlyphArrangement::getBoundingBox` 返回的是行框不是墨迹，必须走 `PositionedGlyph::createPath` + `Path::getBounds()`；修复 `_` 贴底、`*` 顶天、模块抬头 `×` 偏移。
+> · 模块抬头 / Editor 抬头的文字改为对齐"位图内的文字排版框"（去掉旧的 CJK 手工 +1 补偿）。
+> · **点击模块内部也置顶**：`ModulePanel` 挂深层鼠标监听（`ChildClickToFront`），子组件（计算器按钮 / 便签输入框 / Milkdrop 控制栏 / 抽屉控件）吃掉 `mouseDown` 时补一次 `toFront(false)` + `onBroughtToFront`。
+> · **霓虹赛博抬头提亮**：底色不再往纯黑混（会失饱和 → 发灰发脏），改 HSV 压明度 + 拉饱和，`magenta → pink` 纵向渐变（55% / 80% / 102%）+ 上下近白灯芯与 bloom；新增 `PinkXP::titleBarDividerColour()`（霓虹下标题栏下沿换成灯管亮色，让光漏进内容区；其它风格仍为 `dark`），标题文字在霓虹下不再画深色投影。
 
 - **响度计量**：ITU-R BS.1770-4（LUFS-M 瞬时 / LUFS-S 短时 / LUFS-I 积分，含 -70 LUFS 绝对门限 + 相对门限 + 静音自动重置）
 - **电平表**：RMS L/R、True Peak L/R（4× 过采样插值）
@@ -436,10 +443,11 @@
 - **主题订阅**：`subscribeThemeChanged(cb) → token`，用于组件切主题时刷新缓存的颜色。
 - **桌面纹理共享缓存**：`getSharedDesktopTexture(w,h)` 跨实例复用（多插件实例共用同一张 Image），主题切换时 `invalidateDesktopTextureCache()`。
 - **两种字体接口**：`getFont(h)` 有 1.5x 放大（正文），并叠加全局 UI 密度缩放 `uiScale()`（低分辨率下更紧凑）；`getAxisFont(h)` 保持原大小（坐标轴刻度专用，不缩放）。
+- **文本光学排版（v3.4.1）**：`FontOptics` + `getFontOptics(font)` / `opticalNudge(font)` / `fitFontToHeight(font, maxH)`。JUCE 的 `drawText(centred)` 按**行框**（ascent+descent）居中，各字体墨迹在行框里的位置不同 → 同控件换皮肤后文字漂 0.5~2px。这里按"字形带"（拉丁：`H` 大写高 + `g` 下伸墨迹一半；CJK：`国` 的实测墨迹）居中：**拉丁字体对齐 Silkscreen 基准（像素复古零回归），CJK 字体精确居中**；度量在运行时实测并按 `(typeface, 高度)` 缓存。图标字符走 `SymbolGlyphs::drawIconGlyph`（按 `Path` 轮廓墨迹居中）。注意 `GlyphArrangement::getBoundingBox` / `PositionedGlyph::getBounds` 返回的是**行框**不是墨迹，取墨迹必须 `createPath` + `Path::getBounds()`。
 - **UI 密度缩放（v2.7.5 新增）**：`uiScale() / ui(px) / setUiScale() / uiScaleForDisplay(userArea)` —— 按屏幕逻辑分辨率自动分级（0.75~1.0），统一缩放标题栏 / 工具栏 / 模块 chrome 尺寸与正文字号，解决低分辨率屏幕上"非仪表部分过大、仪表区被压缩"的问题；支持多屏跨屏自动校准。
 - **悬停标尺公共辅助（v2.7.0 新增）**：`formatFreqHz(hz)` 格式化频率读数（`<1kHz → "xxx Hz"`，`≥1kHz → "x.x kHz"`）；`noteNameForHz(hz)` 频率 → 音名（十二平均律 A4 = 440 Hz，如 `"A4"`，越界返回空串）；`drawHoverRuler(g, canvas, pos, readout)` 在仪表区绘制十字线 + 鼠标右上方读数框（自动越界回退），供频谱类/时序类模块复用。
 - **默认主题（v2.7.0 变更）**：全局默认主题由 `winXP` 改为 `blackPink`（首次无存档启动时的缺省配色）。
-- **视觉风格（Skin）**：`SkinId`（`pinkXP=0 / chrome=1 / modern=2 / glass=3 / neon=4 / crt=5 / fluent=6 / greenScreen=7`，按整数持久化，**只追加不重排**）+ `getAllSkins / getCurrentSkin / skinFromInt / applySkin / skinHairlineOn / skinUsesFlatControls`。分派点只有：`drawRaised / drawRaisedFrame / drawSunken / drawPressed / drawHardShadow / drawDesktop / drawPinkTitleBar`、`PinkXPLookAndFeel`（按下点阵、滚动条、下拉分隔线）、GL 侧 `GlDirectModuleBase::appendSunkenFrame`（CPU / GL 两条路径必须同步改）。外框总厚保持 2px，调用方内缩布局不受影响；`pinkXP` 分支即旧代码。`applySkin` 会失效桌面纹理并走 `notifyThemeSubscribers()`；按 themeId 做键的缓存要把风格并入键（如 `ModuleWorkspace::rebuildCanvasBgCacheIfNeeded`）。持久化：Standalone `ui.skinId`、插件态 `skinId`（缺键不覆盖）。
+- **视觉风格（Skin）**：`SkinId`（`pinkXP=0 / chrome=1 / modern=2 / glass=3 / neon=4 / crt=5 / fluent=6 / greenScreen=7`，按整数持久化，**只追加不重排**）+ `getAllSkins / getCurrentSkin / skinFromInt / applySkin / skinHairlineOn / skinUsesFlatControls`。分派点只有：`drawRaised / drawRaisedFrame / drawSunken / drawPressed / drawHardShadow / drawDesktop / drawPinkTitleBar / titleBarDividerColour`、`PinkXPLookAndFeel`（按下点阵、滚动条、下拉分隔线）、GL 侧 `GlDirectModuleBase::appendSunkenFrame`（CPU / GL 两条路径必须同步改）。外框总厚保持 2px，调用方内缩布局不受影响；`pinkXP` 分支即旧代码。`applySkin` 会失效桌面纹理并走 `notifyThemeSubscribers()`；按 themeId 做键的缓存要把风格并入键（如 `ModuleWorkspace::rebuildCanvasBgCacheIfNeeded`）。持久化：Standalone `ui.skinId`、插件态 `skinId`（缺键不覆盖）。
 
 ---
 
@@ -657,7 +665,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.0`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.1`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定
@@ -686,6 +694,7 @@ main
 | 加一种视觉风格（Skin） | `PinkXPStyle.h` `SkinId` 末尾追加；`getAllSkins()` / `skinFromInt()` 追加；在 §4.6 列出的分派点（含 GL `appendSunkenFrame`）各补一个分支；`skinFontSpec` 补字体；显示名进 `i18n/zh-CN.lang`；SKIN 菜单自动列出 |
 | 让模块支持绿幕 | 覆写 `getChromaKeyCanvas()` 返回数据画布；画布背景（CPU `drawBackground` + GL `appendSunkenFrame` 已自动）画纯绿，网格 / 刻度 / 图例在 `PinkXP::isChromaKeySkin()` 下跳过；静态层缓存键并入风格 |
 | 换字体 | `CMakeLists.txt` 的 `Y2KM_FONT_EN_SRC` / `Y2KM_SKIN_FONT_FILES`；`PinkXP::skinFontSpec` / `chooseActiveFont` |
+| 调文本 / 图标的垂直位置、字号上限 | `PinkXP::FontOptics`（`getFontOptics` / `opticalNudge` / `fitFontToHeight`，`PinkXPStyle.cpp`）：所有控件内单行文字按"字形带"光学居中（拉丁字体对齐像素复古基准、CJK 字体精确居中），图标字符用 `SymbolGlyphs::drawIconGlyph`（墨迹包围盒居中） |
 | 自定义主题持久化 | 保存：`Y2KStandaloneApp::saveUiAndAudioState()` 写 `ui.customPrimary`/`ui.customSecondary`；加载：`initialise()` 1.15) 分支检测 `ThemeId::custom` → 读回 `Colour::fromString()` → `applyCustomTheme()` |
 | 修改音频前置增益范围 | `PluginProcessor.cpp` 的 `clampGainDb`（当前 -10..+36 dB）+ `ModuleWorkspace` 里 gainSlider 的 setRange |
 | 调 FPS 分档策略 | [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `applyAdaptiveFrameRate` |

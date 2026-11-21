@@ -5414,13 +5414,17 @@ void HideChromeButton::paintButton(juce::Graphics& g, bool isMouseOver, bool isB
     //   已是物理像素（PinkXP::ui(22) 乘过 uiScale），getFont 又乘一次 uiScale
     //   → 双重缩放。低分辨率屏幕（uiScale<1）下字号被压小，高分屏被放大，
     //   win/mac 两端同源，只是低分辨率设备上更明显。
-    g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
+    // 与 PinkXPLookAndFeel::drawButtonText 同一套口径：字号上限 + 光学居中
+    const auto btnFont = PinkXP::fitFontToHeight (PinkXP::getFont(12.0f, juce::Font::bold),
+                                                  (float) r.getHeight());
+    g.setFont(btnFont);
     g.setColour(PinkXP::ink);
     // 水平 padding 只留 1px —— "Show" 四个像素字母 + 字符间距比 "Hide" 宽，
     //   之前 reduced(4, 2) 会在 btnW=52 / font≈12pt 下把 "w" 切掉半像素。
     auto textArea = r.reduced(1, 2);
     if (isButtonDown) textArea.translate(1, 1);
-    g.drawText(y2k::tr (getButtonText()), textArea,
+    g.drawText(y2k::tr (getButtonText()),
+               textArea.toFloat().translated (0.0f, PinkXP::opticalNudge (btnFont)),
                juce::Justification::centred, false);
 }
 

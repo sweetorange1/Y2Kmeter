@@ -108,6 +108,12 @@ namespace PinkXP
                                           const juce::String& title,
                                           float fontHeight = 11.0f);
 
+    // 标题栏下沿分割线的颜色（调用方在 drawPinkTitleBar 之后自己画 1~2px）。
+    //   · 默认 = pinkXP 的深色硬线（dark）；
+    //   · 霓虹赛博 = 灯管亮色 —— 让标题栏底部的辉光"漏"进内容区，
+    //     深色硬线会把光切断，整条抬头看起来就发闷。
+    juce::Colour titleBarDividerColour() noexcept;
+
     // 在 iconArea 中央以 colour 绘制一个文本符号图标（由主题配置）
     // shadowColour 是阴影/bevel 底色，应从标题栏背景衍生以保持一致的凸起效果
     void drawTitleIconText(juce::Graphics& g,
@@ -186,6 +192,44 @@ namespace PinkXP
     juce::Font getAxisFont(float height, int styleFlags = juce::Font::plain);
 
     // ==========================================================
+    // 文本光学排版（跨字体统一）—— 所有"控件内单行文字 / 图标字符"都走这里
+    //
+    //   背景：JUCE 的 drawText(..., centred) 是按**字体行框**（ascent+descent）
+    //   垂直居中的。行框在字形上下留的白并不对称，而每个字体的 ascent/descent
+    //   比例、大写高（cap height）、下伸部深度都不一样，于是：
+    //     · 同一段文字换字体后在控件里上下漂 0.5~2px（按钮文字"看着偏下"）；
+    //     · 单个图标字符（_ * x L）漂得更狠 —— _ 贴下边缘、* 顶到上边缘。
+    //   这里统一改成按**字形带**（glyph band）居中：
+    //     · 拉丁文本：上沿 = 大写高（小写词也按大写字顶对齐 → 相邻控件基线一致），
+    //       下沿 = 下伸墨迹的一半（无下伸部的词补半格，整排文字不会视觉偏下）；
+    //     · CJK 文本：上/下沿取方块字的实测墨迹（方块字占满 em 框）；
+    //     · 单个图标字符：直接按该字符的墨迹包围盒居中（见 drawIconGlyph）。
+    //   度量全部运行时实测（GlyphArrangement，不依赖字体表 / 平台差异），
+    //   按 (typeface, 高度) 缓存，绘制路径上零额外塑形开销。
+    // ==========================================================
+    struct FontOptics
+    {
+        float lineAscent   = 0.0f;   // JUCE 行框（px）
+        float lineDescent  = 0.0f;
+        float capHeight    = 0.0f;   // 大写字母墨迹高（px）
+        float descenderInk = 0.0f;   // 下伸部墨迹深度（px）
+        float latinBandTop = 0.0f, latinBandBottom = 0.0f;   // 相对基线（上负下正）
+        float cjkBandTop   = 0.0f, cjkBandBottom   = 0.0f;
+        float nudge        = 0.0f;   // 统一修正量（px，正 = 下移）
+    };
+
+    // 取某个 Font 的光学度量（进程内缓存；仅消息线程 / GL 渲染线程调用）
+    const FontOptics& getFontOptics (const juce::Font& font);
+
+    // 该字体下所有单行文本应额外下移的像素数（正 = 下移）。
+    //   按**字体**给出（不按字符串）：同一字体里中英混排共享基线，不会各跳各的。
+    float opticalNudge (const juce::Font& font);
+
+    // 高度上限钳制：字体行高超过 maxHeight 时等比缩到 maxHeight。
+    //   用于定高控件（按钮 / 标签 / 图标位），避免 VT323 这类高行框字体撑破控件。
+    juce::Font fitFontToHeight (juce::Font font, float maxHeight);
+
+    // ==========================================================
     // 符号字形集中管理（界面国际化补充）
     //   中文像素字体（ChillBitmap）对一批装饰符号（✓ ♡ ★ ● × ↑ ↓ ← → ▸ ▾ ▲
     //   ✎ ∞ ⚠ · … 等）存在 cmap 条目：Windows 的 DirectWrite 下这些位图字形
@@ -240,6 +284,23 @@ namespace PinkXP
         //   与表情字符同理：这类符号的字形属于品牌视觉的一部分，
         //   不应因中英文切换而跟着换字体变样。
         static juce::Font iconFont (float height, int styleFlags = juce::Font::plain);
+
+        // 图标按钮的字符绘制：把 glyph 画在 area 的"视觉中心"。
+        //   · drawText(..., Justification::centred) 是按字体行框（ascent + descent）
+        //     垂直居中的：不同风格的字体 x-height / descent 比例差别很大
+        //     （Orbitron / Exo 2 / VT323 / Open Sans ...），同一个 x / _ / * / L
+        //     会上下漂 1~3px，表现为"切风格后标题栏按钮字符跑位"。
+        //   · 这里改用 GlyphArrangement 取真实墨迹包围盒再对齐中心，任何字体下
+        //     都落在按钮的视觉中心。
+        //   · 像素复古（SkinId::pinkXP）仍走旧路径（行框居中 + 调用方手调偏移），
+        //     保证默认风格逐像素不变；pixelSkinDx / pixelSkinDy 即那组旧偏移。
+        static void drawIconGlyph (juce::Graphics& g,
+                                   const juce::String& glyph,
+                                   juce::Rectangle<int> area,
+                                   float fontHeight,
+                                   juce::Colour colour,
+                                   int pixelSkinDx = 0,
+                                   int pixelSkinDy = 0);
 
         // ∞ 专用：与语言无关的等比符号字体。
         //   中文像素字体里 ∞ 是空白字形，英文 UI 字体（Silkscreen）也没有它，

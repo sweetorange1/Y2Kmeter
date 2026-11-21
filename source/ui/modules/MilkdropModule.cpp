@@ -1797,7 +1797,7 @@ void MilkdropModule::paint(juce::Graphics& g) {
   //   等）→ "视频区与抬头之间一条极细的线能看到被覆盖的模块"。
   //   多画一行，让这条线的实体部分完整盖住那个边界行；AA 残差落在视频的第二
   //   行上（= 暗线 + 视频的柔和过渡），不会再透出别的模块。
-  g.setColour(PinkXP::dark);
+  g.setColour(PinkXP::titleBarDividerColour());
   g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 2);
 
   // 3. 关闭按钮（×）—— 借用基类的 pressed/hover 标志，与 ModulePanel 风格一致
@@ -1806,12 +1806,9 @@ void MilkdropModule::paint(juce::Graphics& g) {
     PinkXP::drawPressed(g, cb, PinkXP::pink100);
   else
     PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
-  g.setColour(PinkXP::ink);
-  g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
   auto cbText = cb;
-  cbText.translate(0, -1);
   if (closeButtonPressed) cbText.translate(1, 1);
-  g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
+  PinkXP::SymbolGlyphs::drawIconGlyph (g, "x", cbText, 11.0f, PinkXP::ink, 0, -1);
 
   // 3.5. 弹出/停靠按钮
   if (isPopOutEnabled() || isFloating())
@@ -1821,12 +1818,10 @@ void MilkdropModule::paint(juce::Graphics& g) {
       PinkXP::drawPressed(g, popBtn, PinkXP::pink100);
     else
       PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
-    g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
     auto popBtnText = popBtn;
-    popBtnText.translate(0, -1);
     if (popOutButtonPressed_) popBtnText.translate(1, 1);
-    g.drawText(y2k::tr (isFloating() ? "=" : "-"), popBtnText, juce::Justification::centred, false);
+    PinkXP::SymbolGlyphs::drawIconGlyph (g, isFloating() ? "=" : "-", popBtnText, 11.0f,
+                                         PinkXP::ink, 0, -1);
   }
   } // if (!isBareMode())
 
