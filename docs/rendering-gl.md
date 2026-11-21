@@ -20,6 +20,7 @@
 - **组件层每次 repaint 都会让脏区内所有组件按 z 序重画**（不是只画发起者）。一个"内容很少变"的组件只要压在每帧刷新的模块上，就会每帧整块重画。低频组件（电脑状态、计算器、悬停提示……）用 `y2k::ui::setGlSafeImageCache()`（实现见 `ModulePanel.cpp`）挂整组件位图缓存：只有自己失效的区域才重画进缓存，被连带重绘时只贴一张图。
   - 缓存固定用软件 Image、只在 GL 合成目标启用（判据 `getPreferredImageTypeForTemporaryImages()` 是否为 `OpenGLImageType`，**不要**用 `getCurrentContext() != nullptr`，见 §2.1）；浮动态窗口照原路径画。
   - 不要给每帧自绘的组件挂（等于多画一次 + 每帧上传纹理）。
+- **"画一次复用"的缓存必须并入 `PinkXP::getAppearanceGeneration()`**（主题 / 皮肤 / 自定义配色变化 +1）。否则只有被 repaint 波及的区域会更新：典型症状是"模块内容在动、抬头颜色停在上一个主题"，切主题后必须删掉重加模块才恢复（v3.4.3 踩过）。`setGlSafeImageCache` 已内置该判断。
 - **渐变填充不便宜**：JUCE 的 GL 渲染器每次换填充都会丢掉缓存的"渐变颜色表纹理"。本仓库补丁 0007 按颜色停靠点复用、并把纹理挂在 `OpenGLContext` 关联对象上跨帧保留 —— 新皮肤大量使用渐变时这是关键项。
 - **`g.drawRect(r, 1)` 在 GL 下走 EdgeTable + 多矩形裁剪求交**（比 4 次 `fillRect` 贵一个数量级）。每帧重绘的 chrome 边框用 4 次 `fillRect`（见 `PinkXP::chromeFrame`）。
 - GL 直渲染模块的 overlay 里，静态文字走 `PinkXP::drawCachedText`，动态数值才走 `drawText`。`drawCachedText` 有 `Rectangle<int>` / `Rectangle<float>` 两个重载，花括号实参 `{x,y,w,h}` 会二义，必须显式写类型。

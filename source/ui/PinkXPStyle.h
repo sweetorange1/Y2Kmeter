@@ -184,6 +184,12 @@ namespace PinkXP
     // 字体代次：每次 initCustomTypeface +1（供文字位图等缓存做键）
     juce::uint32 getFontGeneration() noexcept;
 
+    // 外观代次：主题 / 皮肤 / 自定义配色任一变化 +1（v3.4.4）。
+    //   整组件位图缓存（y2k::ui::setGlSafeImageCache）与其它"画一次复用"的缓存
+    //   必须比对它 —— 否则主题变化时只有自己主动重绘的区域会更新，
+    //   例如模块抬头只被"内容区刷新"带着重画时颜色会停在上一个主题。
+    juce::uint32 getAppearanceGeneration() noexcept;
+
     // 取自定义字体（按激活字体）
     // 注意：为整体可读性，此函数会对高度做 1.5x 放大（坐标轴刻度请用 getAxisFont）
     juce::Font getFont(float height, int styleFlags = juce::Font::plain);

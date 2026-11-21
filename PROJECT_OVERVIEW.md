@@ -88,6 +88,11 @@
 > · **bug3**：mac 原生全屏中退出时，窗口几何改存"当前（全屏）几何"（与布局坐标同尺寸），并在启动且本次要进全屏时跳过旧的小窗口几何 —— 修复"重开后模块全挤到上方"。
 > · **bug4**：从全屏磁贴预设切到非全屏预设时先退出原生全屏（异步轮询到真正离开全屏），并统一放开 Editor / 顶层窗口的 resizeLimits，预设尺寸不再被夹回整屏。
 
+> **v3.4.3 后续补充**（三个小 bug，版本号不变）：
+> · **位图缓存随外观失效**：`PinkXP` 新增 `getAppearanceGeneration()`（主题 / 皮肤 / 自定义配色任一变化 +1，挂在主题广播里），整组件位图缓存比对它 —— 修复"电脑状态模块抬头颜色不随预设变化（内容区在动、抬头区没被标脏，一直贴着旧缓存）"。**凡是"画一次复用"的缓存都应并入这个代次**（见 [docs/rendering-gl.md](docs/rendering-gl.md) §1.1）。
+> · **按钮字体可强制英文 UI 字体**：组件属性 `y2k.iconFont`（`drawButtonText` / `getTextButtonWidthToFitText` 都认）。计算器全部按钮启用 —— 中文界面下 `C` / 数字 / `x` 原来落在没有粗体的中文字体上，与 `+ - = / %` 这些走 iconFont 的符号按钮粗细不一致。
+> · **预设色票收纳**：`ThemeSwatchBar` 装不下全部官方预设时，在最后一个可见色票右侧显示"…"按钮，点开是全部预设的菜单（条目用该预设代表色作文字色）—— 任何窗口宽度都能选到每一个预设。判定收敛在 `presetStartX/presetAvailWidth/presetOverflowVisible` 三处，宽度优先级仍是 `SKIN > "+" > … > 我的主题 > 预设色票`。
+
 > **v3.4.2 本轮变更**（调色工作室 × 视觉风格；细节见 §4.6）：
 > · **官方预设下只改桌面纹理 / 标题图标不再跳色**：旧逻辑任何改动都会走 `applyThemeFromSpec`（双色反推 + OKLCH 生成器 + 护栏）→ 整套手工配色被近似色替换。现在预设起步时面板处于"只改装饰"模式，纹理 / 图标经 `PinkXP::applyPresetDecor` 写成**预设装饰覆盖**（`PresetDecor`，只换 `desktopPattern` / `titleIconText`，配色原样）；一旦改了色相 / 明暗 / 滑条 / 和谐 / 角色 / 随机 / 粘贴等配色参数才转为生成器主题。对比 / 还原会连同打开时的装饰覆盖一起恢复。持久化：Standalone `ui.presetPattern` / `ui.presetIcon`、插件态 `presetPattern` / `presetIcon`（-1 / 缺键 = 预设原样）。
 > · **桌面纹理在所有风格下生效**（绿幕除外）：`drawDesktop` 把纹理抽成 `drawDesktopPatternLayer`，各风格先画自己的底色 / 氛围，再按风格质感叠加用户选择的纹理（千禧金属 = 蚀刻、现代 / Fluent = 低对比压纹、玻璃 = 光团下的透出纹理、霓虹 = 地平线以上的灯管色图案（替代旧固定星点）、CRT = 扫描线下的磷光余辉）。像素复古与旧版逐像素一致；`kDesktopPatternVersion` 升到 4。

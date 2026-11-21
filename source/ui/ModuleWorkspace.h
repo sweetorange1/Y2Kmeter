@@ -129,6 +129,15 @@ private:
     int  visiblePresetCount() const;     // 实际显示的预设色票数量
     int  visibleUserCount() const;       // 实际显示的"我的主题"色票数量
 
+    // 宽度装不下全部预设色票时，在可见色票右侧显示一个"…"展开按钮，
+    //   点开是全部官方预设的菜单 —— 保证任何宽度下都能选到每一个预设（bug3）。
+    //   三个函数共用 presetStartX() / presetAvailWidth()，避免各处口径漂移。
+    int  presetStartX() const;
+    int  presetAvailWidth() const;
+    bool presetOverflowVisible() const;
+    juce::Rectangle<int> overflowButtonBounds() const;
+    void showPresetOverflowMenu();
+
     Hit hoverHit_;
     int  scrollX_ = 0;
     int  libToken_ = 0;

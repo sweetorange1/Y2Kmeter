@@ -59,6 +59,16 @@ namespace
             if (imageBounds.isEmpty())
                 return;
 
+            // 外观代次（主题 / 皮肤 / 配色）变化 → 整张缓存作废：
+            //   缓存只按"自己失效的区域"重画，主题变化时只有被 repaint 波及的区域会更新，
+            //   典型症状是模块抬头停在旧主题色（内容区因为逐帧刷新反而是新的）。
+            const auto appearance = PinkXP::getAppearanceGeneration();
+            if (appearance != cachedAppearance)
+            {
+                cachedAppearance = appearance;
+                validArea.clear();
+            }
+
             if (image.isNull() || image.getBounds() != imageBounds || cachedScale != scale)
             {
                 // 恒用清空的 ARGB：小数缩放下右 / 下边不足 1px 的余量保持透明，
@@ -104,6 +114,7 @@ namespace
         juce::Image image;
         juce::RectangleList<int> validArea;
         float cachedScale = 0.0f;
+        juce::uint32 cachedAppearance = 0;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlSafeComponentImageCache)
     };

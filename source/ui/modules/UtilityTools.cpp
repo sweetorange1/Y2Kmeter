@@ -252,6 +252,10 @@ public:
         {
             auto b = std::make_unique<juce::TextButton> (l);
             prepButton (*b);
+            // 纯拉丁/符号标签：整颗按钮用英文 UI 像素字体（与英文界面完全一致）。
+            //   否则中文界面下 "C"/数字/"x" 会落到没有粗体的中文字体上，与
+            //   "+ / - / = / %" 这些符号按钮（走 iconFont）粗细不一致（bug2）。
+            b->getProperties().set ("y2k.iconFont", true);
             const juce::String key (l);
             b->onClick = [this, key] { grabKeyboardFocus(); press (key); };
             addAndMakeVisible (*b);

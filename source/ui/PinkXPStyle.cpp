@@ -42,6 +42,9 @@ namespace PinkXP
     // 当前视觉风格（字体选择也依赖它，故定义提前到这里；分派逻辑见下方 Skin 段）
     static SkinId gCurrentSkin = SkinId::pinkXP;
 
+    // 外观代次（主题 / 皮肤 / 配色任一变化 +1）：整组件位图缓存据此整体失效。
+    static std::atomic<juce::uint32> gAppearanceGeneration { 1 };
+
     // 当前语言字号换算（initCustomTypeface 时从 y2k::i18n 读取）
     static float gFontScale     = 1.0f;
     static float gMinFontHeight = 0.0f;
@@ -282,6 +285,11 @@ namespace PinkXP
         gSymbolTypeface = nullptr;
         gSymbolTypefaceId.clear();
         gLoadedFontId.clear();
+    }
+
+    juce::uint32 getAppearanceGeneration() noexcept
+    {
+        return gAppearanceGeneration.load();
     }
 
     juce::uint32 getFontGeneration() noexcept
@@ -3804,6 +3812,8 @@ namespace PinkXP
 
     void notifyThemeSubscribers()
     {
+        ++gAppearanceGeneration;
+
         // 通知所有订阅者。每个回调单独 try/catch 隔离：任一订阅者抛异常
         //   都不能中断后续订阅者（Editor 的桌面缓存失效回调排在队列末尾，
         //   若被前面模块的异常截断，桌面纹理就会永远画旧缓存图）。
@@ -4262,7 +4272,11 @@ void PinkXPLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& butt
     //   的 0.9 收紧影响，中英文界面字形/大小完全一致。
     //   混排文本（如「高级 ▸」）由 drawText 拆 run：CJK 留中文字体，
     //   ▸ 用英文字体 —— 整串换字体会让中文消失。
-    const bool symbolsOnly = PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
+    //   组件可用属性 "y2k.iconFont" 强制整颗用英文 UI 字体（计算器等纯拉丁控件：
+    //   CJK 界面的中文字体没有粗体、笔画明显比英文界面的像素字体细，同一排按钮
+    //   会一半粗一半细 —— v3.4.4 bug2）。
+    const bool forceIconFont = (bool) button.getProperties().getWithDefault ("y2k.iconFont", false);
+    const bool symbolsOnly = forceIconFont || PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
 
     auto area = button.getLocalBounds();
     if (shouldDrawButtonAsDown || button.getToggleState())
@@ -4298,7 +4312,8 @@ int PinkXPLookAndFeel::getTextButtonWidthToFitText (juce::TextButton& b, int but
 {
     // 测量与 drawButtonText 用同一套"按文本选字体 + run 化 + 高度上限"，避免宽度不一致
     const juce::String shown = y2k::tr (b.getButtonText());
-    const bool symbolsOnly = PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
+    const bool forceIconFont = (bool) b.getProperties().getWithDefault ("y2k.iconFont", false);
+    const bool symbolsOnly = forceIconFont || PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
     const float nominal = symbolsOnly ? 14.0f : juce::jmin (14.0f, buttonHeight * 0.55f);
     const juce::Font probe = symbolsOnly
         ? PinkXP::SymbolGlyphs::iconFont (nominal, juce::Font::bold)

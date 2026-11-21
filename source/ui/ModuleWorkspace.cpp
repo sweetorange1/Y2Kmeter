@@ -5015,12 +5015,14 @@ juce::Rectangle<int> ThemeSwatchBar::getPresetSwatchBounds(int index) const
 
 juce::Rectangle<int> ThemeSwatchBar::getUserSwatchBounds(int index) const
 {
-    // 起点跟随"实际显示的预设色票数量"（bug1：宽度不足时预设让位给 SKIN 按钮）
+    // 起点跟随"实际显示的预设色票数量"（bug1：宽度不足时预设让位给 SKIN 按钮）；
+    //   预设装不下时还要多让一个"…"展开按钮的位置（bug3）。
     const int presetCount = visiblePresetCount();
+    const int presetSlots = presetCount + (presetOverflowVisible() ? 1 : 0);
     const int usersX = PinkXP::ui (kBarLeftPad)
                      + juce::jmin(getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
                      + PinkXP::ui (kGroupGap)
-                     + presetCount * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap))
+                     + presetSlots * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap))
                      + PinkXP::ui (kGroupGap);
     const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
     return { usersX - scrollX_ + index * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)),
@@ -5045,25 +5047,76 @@ int ThemeSwatchBar::reservedTailWidth() const
     return PinkXP::ui (6) + plusW + PinkXP::ui (6) + skinW + PinkXP::ui (kBarRightPad);
 }
 
+int ThemeSwatchBar::presetStartX() const
+{
+    return PinkXP::ui (kBarLeftPad)
+         + juce::jmin (getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
+         + PinkXP::ui (kGroupGap);
+}
+
+// 预设色票可用宽度：扣掉左侧固定部分、尾部固定占用与"我的主题"色票区。
+int ThemeSwatchBar::presetAvailWidth() const
+{
+    const int step   = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int users  = visibleUserCount();
+    const int usersW = users > 0 ? users * step - PinkXP::ui (kSwatchGap) + PinkXP::ui (kGroupGap) : 0;
+    return getWidth() - presetStartX() - reservedTailWidth() - usersW;
+}
+
+// 是否要显示"…"：装不下全部预设，且让出一个色票的位置后还放得下按钮。
+bool ThemeSwatchBar::presetOverflowVisible() const
+{
+    const int total = (int) PinkXP::getAllThemes().size();
+    if (total <= 0)
+        return false;
+
+    const int step  = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int avail = presetAvailWidth();
+    if (avail < PinkXP::ui (kSwatchW))
+        return false;
+
+    const int fits = juce::jlimit (0, total, (avail + PinkXP::ui (kSwatchGap)) / step);
+    if (fits >= total)
+        return false;
+
+    // 只要还放得下按钮本身就要显示 —— 极窄时宁可一个色票都不画，也要留出入口
+    return avail >= PinkXP::ui (kSwatchW);
+}
+
 int ThemeSwatchBar::visiblePresetCount() const
 {
     const int total = (int) PinkXP::getAllThemes().size();
     if (total <= 0)
         return 0;
 
-    const int step    = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
-    const int startX  = PinkXP::ui (kBarLeftPad)
-                      + juce::jmin (getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
-                      + PinkXP::ui (kGroupGap);
-    const int usersW  = visibleUserCount() > 0
-        ? visibleUserCount() * step - PinkXP::ui (kSwatchGap) + PinkXP::ui (kGroupGap) : 0;
-
-    const int avail = getWidth() - startX - reservedTailWidth() - usersW;
+    const int step  = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int avail = presetAvailWidth();
     if (avail < PinkXP::ui (kSwatchW))
         return 0;
 
     // 最后一个色票后面不需要再留 gap
-    return juce::jlimit (0, total, (avail + PinkXP::ui (kSwatchGap)) / step);
+    const int fits = juce::jlimit (0, total, (avail + PinkXP::ui (kSwatchGap)) / step);
+    if (fits >= total || ! presetOverflowVisible())
+        return fits;
+
+    // 装不下全部：给"…"展开按钮留一个位置（它排在最后一个可见色票之后）。
+    //   连"色票 + 按钮"都放不下时返回 0（只显示按钮），保证任何宽度都能选到全部预设。
+    const int avail2 = avail - (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap));
+    if (avail2 < PinkXP::ui (kSwatchW))
+        return 0;
+
+    return juce::jlimit (0, total - 1, (avail2 + PinkXP::ui (kSwatchGap)) / step);
+}
+
+juce::Rectangle<int> ThemeSwatchBar::overflowButtonBounds() const
+{
+    if (! presetOverflowVisible())
+        return {};
+
+    const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
+    const int x = presetStartX() - scrollX_
+                + visiblePresetCount() * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap));
+    return { x, y, PinkXP::ui (kSwatchW), PinkXP::ui (kSwatchH) };
 }
 
 int ThemeSwatchBar::visibleUserCount() const
@@ -5074,11 +5127,8 @@ int ThemeSwatchBar::visibleUserCount() const
         return 0;
 
     const int step   = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
-    const int startX = PinkXP::ui (kBarLeftPad)
-                     + juce::jmin (getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
-                     + PinkXP::ui (kGroupGap);
     // 分给"我的主题"的额度：扣掉左侧固定部分 + 尾部固定占用。
-    const int avail = getWidth() - startX - reservedTailWidth() - PinkXP::ui (kGroupGap);
+    const int avail = getWidth() - presetStartX() - reservedTailWidth() - PinkXP::ui (kGroupGap);
     if (avail < PinkXP::ui (kSwatchW))
         return 0;
 
@@ -5117,6 +5167,11 @@ ThemeSwatchBar::Hit ThemeSwatchBar::hitTest(juce::Point<int> p) const
     for (int i = 0, n = juce::jmin (visiblePresetCount(), (int) themes.size()); i < n; ++i)
         if (getPresetSwatchBounds(i).contains(p))
             return { 2, i };
+
+    // "…" 展开按钮（装不下的预设收在这里，bug3）。排在"我的主题"之前判断：
+    //   它紧贴最后一个可见预设色票，与用户色票区不重叠但顺序更自然。
+    if (const auto ov = overflowButtonBounds(); ! ov.isEmpty() && ov.contains (p))
+        return { 6, 0 };
 
     const auto& lib = PinkXP::ThemeLibrary::instance();
     for (int i = 0, n = juce::jmin (visibleUserCount(), lib.size()); i < n; ++i)
@@ -5215,6 +5270,29 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
                    th.id == PinkXP::getCurrentThemeId(),
                    hoverHit_.kind == 2 && hoverHit_.index == i,
                    false);
+    }
+
+    // ---- "…"：装不下的预设收进这里（bug3）----
+    if (const auto ov = overflowButtonBounds(); ! ov.isEmpty())
+    {
+        const bool hovered = hoverHit_.kind == 6;
+
+        PinkXP::drawRaised (g, ov, PinkXP::btnFace);
+        if (hovered)
+        {
+            g.setColour (PinkXP::sel.withAlpha (0.35f));
+            g.fillRect (ov.reduced (1));
+        }
+
+        // 三个点用像素方块画（不依赖字体里有没有省略号字形）
+        const int dot = juce::jmax (2, PinkXP::ui (2));
+        const int gap = juce::jmax (1, PinkXP::ui (1));
+        const int totalW = dot * 3 + gap * 2;
+        int dx = ov.getCentreX() - totalW / 2;
+        const int dy = ov.getCentreY() - dot / 2;
+        g.setColour (PinkXP::ink);
+        for (int i = 0; i < 3; ++i, dx += dot + gap)
+            g.fillRect (dx, dy, dot, dot);
     }
 
     // ---- 我的主题（R1/R11：与预设同款色票 + 角标区分）----
@@ -5363,6 +5441,12 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
+    if (h.kind == 6)
+    {
+        showPresetOverflowMenu();
+        return;
+    }
+
     if (h.kind == 5)
     {
         // 视觉风格菜单：条目 id = SkinId + 1（0 保留给"未选择"）
@@ -5395,6 +5479,47 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
                              else                                          safe->repaint();
                          });
     }
+}
+
+// bug3：宽度装不下的官方预设收进"…"菜单 —— 任何窗口宽度下都能选到全部预设。
+void ThemeSwatchBar::showPresetOverflowMenu()
+{
+    juce::PopupMenu m;
+    m.setLookAndFeel (&getPinkXPLookAndFeel());
+
+    const auto& themes = PinkXP::getAllThemes();
+    const auto current = PinkXP::getCurrentThemeId();
+
+    for (int i = 0; i < (int) themes.size(); ++i)
+    {
+        const auto& th = themes[(size_t) i];
+        // 用色票颜色作文字色：一眼能看出是哪种配色
+        m.addColouredItem (i + 1, y2k::tr (th.displayName), th.swatch, true, th.id == current);
+    }
+
+    const auto area = localAreaToGlobal (overflowButtonBounds());
+    auto options = PinkXP::withFullScreenMenuArea (
+        juce::PopupMenu::Options().withTargetComponent (this)
+                                  .withTargetScreenArea (area),
+        *this);
+
+    juce::Component::SafePointer<ThemeSwatchBar> safe (this);
+    m.showMenuAsync (options, [safe] (int result)
+    {
+        if (result <= 0)
+            return;
+
+        const auto& list = PinkXP::getAllThemes();
+        const int index = result - 1;
+        if (index < 0 || index >= (int) list.size())
+            return;
+
+        PinkXP::applyTheme (list[(size_t) index].id);
+        if (safe == nullptr)
+            return;
+        if (auto* top = safe->getTopLevelComponent()) top->repaint();
+        else                                          safe->repaint();
+    });
 }
 
 void ThemeSwatchBar::mouseWheelMove(const juce::MouseEvent&,
