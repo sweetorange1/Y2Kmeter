@@ -25,11 +25,17 @@
 - 首次判定 `!processor.isTutorialCompleted()`（缺省 false）。
 - `skipTutorial()` 不标记完成（下次切回 default 预设可重触发）；`completeTutorial()` 标记并持久化。两者不可混用。
 
-## 4. 悬停提示（Hover Help）
+## 4. 底部主题栏（`ThemeSwatchBar`）
+
+- 结构：`[当前主题预览块] [预设色票 ×12] [我的主题 ×N] [+] [SKIN] [主题名]`；点预览块 / "+" 展开调色工作室，点 SKIN 弹出视觉风格菜单。
+- **宽度优先级（v3.4.3 bug1）**：`SKIN > "+" > 我的主题 > 预设色票`。`reservedTailWidth()` 先扣掉"+"、SKIN 与右侧内边距 `kBarRightPad`，剩余宽度由 `visibleUserCount()` / `visiblePresetCount()` 分配 —— 窗口变窄时**先少显示预设色票**，SKIN 按钮永远在栏内，不会再被右侧控制区挡住。新增栏内控件必须并入 `reservedTailWidth()`。
+- SKIN 菜单与右侧 ComboBox 下拉统一走 `PinkXP::withFullScreenMenuArea()`（stick 驻留 / mac 原生全屏 / 控件不在 `userArea` 内时把允许区域放宽到整块显示器），否则全屏下菜单会被 clamp 到离按钮很远的地方（v3.4.3 bug2）。
+
+## 5. 悬停提示（Hover Help）
 
 - `source/ui/HoverHelp.h`：`y2k::help` 文案库 + `Y2KTooltipWindow`；绘制在 `PinkXPLookAndFeel::drawTooltip`；仪表内容区静止才弹出（详见 PROJECT_OVERVIEW.md §3.3）。
 
-## 5. i18n / 中文本地化
+## 6. i18n / 中文本地化
 
 - `source/i18n/Localisation.h`：`y2k::i18n` / `y2k::tr` / `y2k::trf`；语言包 `i18n/*.lang` 注册与合并；查表翻译（精确/数字模板/逐行）；按语言字体；运行时切换广播（详见 PROJECT_OVERVIEW.md §3.3）。
 - 新用户默认语言跟随系统。

@@ -7,6 +7,117 @@
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/perf/FramePerfLog.h"
 #include "source/diag/Y2KDiagLog.h"
+#include <juce_opengl/juce_opengl.h>
+
+// ============================================================
+// GlSafeComponentImageCache —— y2k::ui::setGlSafeImageCache 的实现
+//   （设计说明见 ModuleWorkspace.h 的声明处）
+//   与 JUCE 自带 setBufferedToImage（StandardCachedComponentImage）的区别：
+//     · 只在绘制目标是 OpenGL 合成时启用，其它目标直接 paintEntireComponent，
+//       行为与未缓存完全一致；
+//     · 缓存固定 SoftwareImageType：JUCE 的 GL 渲染器与软件渲染器共用同一套
+//       EdgeTable 光栅化，画面一致；且不持有 GL 帧缓冲 —— 自带实现在 GL 下会用
+//       OpenGLImageType，Editor 的 GL 上下文重建（换 peer 等）后析构会在新上下文
+//       里误删同名对象；
+//     · 设备像素缩放 / 尺寸变化时自动重建。
+// ============================================================
+namespace
+{
+    class GlSafeComponentImageCache final : public juce::CachedComponentImage
+    {
+    public:
+        explicit GlSafeComponentImageCache (juce::Component& c) noexcept : owner (c) {}
+
+        void paint (juce::Graphics& g) override
+        {
+            auto& ctx = g.getInternalContext();
+
+            // 判断绘制目标本身是否 GL 合成（不能用"当前线程有无 GL 上下文"：
+            //   GL 线程上的离屏软件绘制同样有 current context，见 PROJECT_OVERVIEW §6.5）
+            const auto preferredType = ctx.getPreferredImageTypeForTemporaryImages();
+            if (dynamic_cast<const juce::OpenGLImageType*> (preferredType.get()) == nullptr)
+            {
+                owner.paintEntireComponent (g, false);
+                return;
+            }
+
+            const float scale = ctx.getPhysicalPixelScaleFactor();
+            const auto compBounds = owner.getLocalBounds();
+
+            if (compBounds.isEmpty() || ! (scale > 0.0f))
+                return;
+
+            // 位图按"设备像素"取整（向上）：图像像素与屏幕像素 1:1。绘制时用
+            //   scale(1/scale) + 低质量采样 —— JUCE renderImage 判定为纯平移后四舍五入
+            //   到整像素直接贴图（见 RenderingHelpers::renderImage）。Windows 125% /
+            //   150% 等小数缩放下也不会因 w/iw 的取整误差退化成插值采样而发虚；
+            //   多出的不足 1px 由父组件按子组件边界裁掉。
+            const juce::Rectangle<int> imageBounds (0, 0,
+                                                    (int) std::ceil ((float) compBounds.getWidth()  * scale - 0.001f),
+                                                    (int) std::ceil ((float) compBounds.getHeight() * scale - 0.001f));
+
+            if (imageBounds.isEmpty())
+                return;
+
+            if (image.isNull() || image.getBounds() != imageBounds || cachedScale != scale)
+            {
+                // 恒用清空的 ARGB：小数缩放下右 / 下边不足 1px 的余量保持透明，
+                //   不会露出未初始化像素（RGB 位图不清空）
+                image = juce::Image (juce::Image::ARGB,
+                                     imageBounds.getWidth(), imageBounds.getHeight(),
+                                     true, juce::SoftwareImageType());
+                cachedScale = scale;
+                validArea.clear();
+            }
+
+            if (! validArea.containsRectangle (compBounds))
+            {
+                juce::Graphics imG (image);
+                auto& lg = imG.getInternalContext();
+                lg.addTransform (juce::AffineTransform::scale (scale));
+
+                for (auto& r : validArea)
+                    lg.excludeClipRectangle (r);
+
+                if (! owner.isOpaque())
+                {
+                    lg.setFill (juce::Colours::transparentBlack);
+                    lg.fillRect (compBounds, true);
+                    lg.setFill (juce::Colours::black);
+                }
+
+                owner.paintEntireComponent (imG, true);
+                validArea = compBounds;
+            }
+
+            g.setColour (juce::Colours::black.withAlpha (owner.getAlpha()));
+            g.setImageResamplingQuality (juce::Graphics::lowResamplingQuality);   // 父组件已 ScopedSaveState
+            g.drawImageTransformed (image, juce::AffineTransform::scale (1.0f / scale), false);
+        }
+
+        bool invalidateAll() override                                 { validArea.clear(); return true; }
+        bool invalidate (const juce::Rectangle<int>& area) override   { validArea.subtract (area); return true; }
+        void releaseResources() override                              { image = {}; validArea.clear(); }
+
+    private:
+        juce::Component& owner;
+        juce::Image image;
+        juce::RectangleList<int> validArea;
+        float cachedScale = 0.0f;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlSafeComponentImageCache)
+    };
+}
+
+void y2k::ui::setGlSafeImageCache (juce::Component& c, bool enabled)
+{
+    const bool has = dynamic_cast<GlSafeComponentImageCache*> (c.getCachedComponentImage()) != nullptr;
+
+    if (enabled && ! has)
+        c.setCachedComponentImage (new GlSafeComponentImageCache (c));
+    else if (! enabled && has)
+        c.setCachedComponentImage (nullptr);
+}
 
 namespace
 {

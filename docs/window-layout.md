@@ -55,6 +55,14 @@
 
 - 恢复紧凑预设（如 `horizontal bar`）前先 `prepareConstrainerForWindowRestore(w,h)` 放宽 constrainer min/max —— 否则默认 `minH=420` 会在 `setBounds` 阶段把低高度存档夹大。
 - 改版本号后增量构建不重写 `*_resources.rc`（见 build-toolchain.md）。
+- **macOS 原生全屏的几何存档（v3.4.3 bug3）**：布局坐标是按退出时的 canvas 存的，几何必须存同一尺寸 —— `saveMainWindowBounds()` 在全屏态直接把当前（全屏）矩形写进 `window.*`（旧实现跳过写入、保留上一次的小窗口尺寸 → 重启后模块全挤在上方）。同时 `restoreMainWindowBounds()` 在 `window.nativeFullScreen=1` 时**跳过**旧几何恢复（本次启动会进全屏，小窗口只会闪一下）。
+
+## 6.1 布局预设与全屏状态（v3.4.3 bug4）
+
+- 全屏磁贴预设（14/15/16）在 mac 会 `setFullScreen(true)` 并把 Editor / 顶层窗口的 `resizeLimits` 锁死到整屏尺寸。
+- 因此 `applyLayoutPreset()` 做了两件事：①目标不是全屏磁贴预设且当前处于原生全屏 → 先 `setFullScreen(false)`，轮询到真的离开全屏（`continueLayoutPresetAfterFullScreenExit`，80ms × 40）再重新应用；②应用前统一放开 Editor / 窗口的 resizeLimits，各预设分支随后按自己的目标尺寸重设。
+- 漏掉①的表现：全屏预设切到默认 / 横条预设后窗口仍铺满整屏，只有模块被换掉。
+- 新增任何"直接改窗口尺寸"的入口，都要同样先放开 resizeLimits。
 
 ## 7. 相关引用
 

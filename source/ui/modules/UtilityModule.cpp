@@ -31,6 +31,10 @@ UtilityModule::UtilityModule()
     });
 
     setTool (ToolKind::calculator, true);
+
+    // 低频交互模块：常被摆在每帧刷新的模块上方，挂位图缓存避免被"陪着"每帧
+    //   整块重画（计算器 20 个按钮 + 文本，mac 上曾是 GL 线程主要热点之一）
+    y2k::ui::setGlSafeImageCache (*this, true);
 }
 
 UtilityModule::~UtilityModule()

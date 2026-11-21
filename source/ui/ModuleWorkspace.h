@@ -122,6 +122,13 @@ private:
     int  totalContentWidth() const;
     void updateScrollLimits();
 
+    // 宽度不足时的让位规则（bug1）：右侧固定保留"+"/SKIN 与内边距，色票数量随
+    //   剩余宽度递减 —— 预设色票优先让位，其次才是"我的主题"色票；
+    //   不再出现 SKIN 按钮被右侧控制区挡住的情况。
+    int  reservedTailWidth() const;      // 从最后一个色票之后到右边界的固定占用
+    int  visiblePresetCount() const;     // 实际显示的预设色票数量
+    int  visibleUserCount() const;       // 实际显示的"我的主题"色票数量
+
     Hit hoverHit_;
     int  scrollX_ = 0;
     int  libToken_ = 0;
@@ -217,6 +224,21 @@ struct ParamDef
 };
 
 class ModuleControlDrawer; // 定义见 ModulePanel 之后
+
+// ------------------------------------------------------------
+// 低频组件的整组件位图缓存（v3.4.x 性能，实现见 ModulePanel.cpp）
+//   Editor GL 合成下，任何组件 repaint 都会让其矩形内的所有组件按 z 序重画。
+//   低频组件（电脑状态、计算器、悬停提示……）一旦叠在每帧刷新的模块上，
+//   就会被"陪着"每帧整块重画。挂上缓存后只有它自己失效的区域才重画进缓存，
+//   被连带重绘时只需一次贴图。
+//   · 仅 GL 合成目标启用；浮动窗口（CoreGraphics / Direct2D）照原路径绘制；
+//   · 缓存是设备分辨率的软件 Image，不持有任何 GL 资源（GL 上下文重建安全）。
+//   只适合自身刷新率低（≤ 约 20Hz）的组件；每帧自绘的组件挂上反而更慢。
+// ------------------------------------------------------------
+namespace y2k::ui
+{
+    void setGlSafeImageCache (juce::Component& c, bool enabled);
+}
 
 // ------------------------------------------------------------
 // ModulePanel —— 所有分析模块的 Pink XP 像素窗口基类

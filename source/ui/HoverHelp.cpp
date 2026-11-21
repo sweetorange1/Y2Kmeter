@@ -281,6 +281,10 @@ Y2KTooltipWindow::Y2KTooltipWindow (juce::Component* parentComponent)
     //   · getComponentUnderMouse 永远不会命中提示框本身。
     setInterceptsMouseClicks (false, false);
 
+    // 提示框内容静态，但常悬停在 Milkdrop / 示波器等每帧刷新的模块上方：
+    //   挂位图缓存，避免每帧重新排版 + 逐字绘制（mac 上曾占 GL 线程约 10%）
+    y2k::ui::setGlSafeImageCache (*this, true);
+
     // 低频回收"鼠标已离开本 peer"的旧提示（见 StaleTipGuard 注释）
     staleTipGuard.startTimerHz (8);
 }

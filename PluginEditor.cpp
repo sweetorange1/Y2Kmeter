@@ -1053,8 +1053,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.4.2 debug"
-                                                                               : "v3.4.2"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.4.3 debug"
+                                                                               : "v3.4.3"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1096,7 +1096,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.4.2";
+        const juce::String versionBase = "v3.4.3";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -3213,6 +3213,46 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
     if (pseudoFullScreen)
         toggleFakeFullScreen();
 
+    // bug4：macOS 原生全屏 → 切到"非全屏磁贴预设"时必须先退出全屏。
+    //   否则全屏磁贴预设锁死的 resizeLimits（min=max=整屏尺寸）会把后面
+    //   setSize(960×640) / 横条高度全部夹回去，窗口保持全屏、只有模块被换掉。
+    //   退出动画是异步的：轮询到真正离开全屏后再重新进入本函数。
+   #if JUCE_MAC
+    if (! isFullScreenTilePreset (presetId)
+        && juce::JUCEApplicationBase::isStandaloneApp())
+    {
+        if (auto* rw = dynamic_cast<juce::ResizableWindow*> (getTopLevelComponent()))
+        {
+            if (rw->isFullScreen())
+            {
+                rw->setFullScreen (false);
+
+                juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> self (this);
+                juce::Timer::callAfterDelay (80, [self, presetId] { continueLayoutPresetAfterFullScreenExit (self, presetId, 40); });
+                return;
+            }
+        }
+    }
+   #endif
+
+    // 切换预设前统一放开尺寸限制：全屏磁贴预设会把 Editor / 顶层窗口的 limits
+    //   锁死到整屏尺寸，不解开会把非全屏预设的 setSize 夹回去（bug4 的另一半）。
+    //   各预设分支随后会按自己的目标尺寸重新设置 limits。
+    {
+        if (auto* ec = getConstrainer())
+            setResizeLimits (juce::jmax (1, ec->getMinimumWidth()),
+                             juce::jmax (1, ec->getMinimumHeight()),
+                             juce::jmax (ec->getMaximumWidth(),  8000),
+                             juce::jmax (ec->getMaximumHeight(), 8000));
+
+        if (auto* top = getTopLevelComponent())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+                if (auto* wc = rw->getConstrainer())
+                    rw->setResizeLimits (juce::jmax (1, wc->getMinimumWidth()),
+                                         juce::jmax (1, wc->getMinimumHeight()),
+                                         32768, 32768);
+    }
+
     // 保存所有 VirtuPet 模块的状态（切换预设时保留，不被清除）
     struct VirtuPetState { juce::String roleName; float hunger; float health; };
     juce::Array<VirtuPetState> virtuPetStates;
@@ -4112,6 +4152,28 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
    #endif
 }
 
+// bug4：等待 macOS 退出原生全屏（异步动画）后重新应用预设。
+//   triesLeft × 80ms ≈ 最长 3.2s 的等待，覆盖系统动画 / 慢机器。
+void Y2KmeterAudioProcessorEditor::continueLayoutPresetAfterFullScreenExit (
+    juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> self,
+    int presetId, int triesLeft)
+{
+    if (self == nullptr)
+        return;
+
+    if (auto* rw = dynamic_cast<juce::ResizableWindow*> (self->getTopLevelComponent()))
+        if (rw->isFullScreen() && triesLeft > 0)
+        {
+            juce::Timer::callAfterDelay (80, [self, presetId, triesLeft]
+            {
+                continueLayoutPresetAfterFullScreenExit (self, presetId, triesLeft - 1);
+            });
+            return;
+        }
+
+    self->applyLayoutPreset (presetId);
+}
+
 // ----------------------------------------------------------
 // 布局预设辅助：把顶层窗口调整到目标尺寸并返回对齐后的 canvas
 //   · 居中于当前屏幕 userArea（standalone）或仅调整 Editor 尺寸（插件）
@@ -4665,7 +4727,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.4.2";
+        const juce::String versionBase = "v3.4.3";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -10050,7 +10112,10 @@ void Y2KmeterAudioProcessorEditor::RequestGlFrame()
   if (editorBeingDestructed || !openGLContext.isAttached())
     return;
 
-  openGLContext.triggerRepaint();
+  // mac：与组件重绘一起合并到下一个显示器刷新再出帧（JUCE 补丁 0005）。
+  //   直接 triggerRepaint 会立即唤醒 GL 线程，与随后到来的组件重绘各出一帧，
+  //   60Hz 屏上 GL 跑到 ~80 帧/秒，多出来的帧全是浪费。Windows 上等同 triggerRepaint。
+  openGLContext.triggerRepaintPacedToDisplay();
 }
 
 void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {

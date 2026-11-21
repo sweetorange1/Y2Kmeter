@@ -4932,6 +4932,7 @@ namespace
     constexpr int kSwatchGap  = 3;    // 色票间距
     constexpr int kGroupGap   = 10;   // 组间间距
     constexpr int kBarLeftPad = 6;    // 整体左内边距
+    constexpr int kBarRightPad = 8;   // 整体右内边距（缩进，见 bug1）
 }
 
 namespace
@@ -5014,7 +5015,8 @@ juce::Rectangle<int> ThemeSwatchBar::getPresetSwatchBounds(int index) const
 
 juce::Rectangle<int> ThemeSwatchBar::getUserSwatchBounds(int index) const
 {
-    const int presetCount = (int) PinkXP::getAllThemes().size();
+    // 起点跟随"实际显示的预设色票数量"（bug1：宽度不足时预设让位给 SKIN 按钮）
+    const int presetCount = visiblePresetCount();
     const int usersX = PinkXP::ui (kBarLeftPad)
                      + juce::jmin(getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
                      + PinkXP::ui (kGroupGap)
@@ -5027,21 +5029,77 @@ juce::Rectangle<int> ThemeSwatchBar::getUserSwatchBounds(int index) const
 
 juce::Rectangle<int> ThemeSwatchBar::getNewButtonBounds() const
 {
-    const auto& lib = PinkXP::ThemeLibrary::instance();
-    const int x = (lib.size() > 0)
-        ? getUserSwatchBounds(lib.size() - 1).getRight() + PinkXP::ui (6)
+    const int users = visibleUserCount();
+    const int x = (users > 0)
+        ? getUserSwatchBounds(users - 1).getRight() + PinkXP::ui (6)
         : getUserSwatchBounds(0).getX();
     const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
     return { x, y, PinkXP::ui (kSwatchH), PinkXP::ui (kSwatchH) };
 }
 
-int ThemeSwatchBar::totalContentWidth() const
+int ThemeSwatchBar::reservedTailWidth() const
+{
+    // "+" 按钮 + SKIN 按钮 + SKIN 后的组间距 + 右内边距（都从当前宽度里先扣掉）
+    const int plusW  = PinkXP::ui (kSwatchH);
+    const int skinW  = skinButtonBoundsAfter ({ 0, 0, plusW, plusW }).getWidth();
+    return PinkXP::ui (6) + plusW + PinkXP::ui (6) + skinW + PinkXP::ui (kBarRightPad);
+}
+
+int ThemeSwatchBar::visiblePresetCount() const
+{
+    const int total = (int) PinkXP::getAllThemes().size();
+    if (total <= 0)
+        return 0;
+
+    const int step    = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int startX  = PinkXP::ui (kBarLeftPad)
+                      + juce::jmin (getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
+                      + PinkXP::ui (kGroupGap);
+    const int usersW  = visibleUserCount() > 0
+        ? visibleUserCount() * step - PinkXP::ui (kSwatchGap) + PinkXP::ui (kGroupGap) : 0;
+
+    const int avail = getWidth() - startX - reservedTailWidth() - usersW;
+    if (avail < PinkXP::ui (kSwatchW))
+        return 0;
+
+    // 最后一个色票后面不需要再留 gap
+    return juce::jlimit (0, total, (avail + PinkXP::ui (kSwatchGap)) / step);
+}
+
+int ThemeSwatchBar::visibleUserCount() const
 {
     const auto& lib = PinkXP::ThemeLibrary::instance();
-    const int usersW = lib.size() > 0
-        ? lib.size() * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)) - PinkXP::ui (kSwatchGap) : 0;
-    return skinButtonBoundsAfter (getNewButtonBounds()).getRight()
-         + PinkXP::ui (kGroupGap) + PinkXP::ui (90);  // 90 = 主题名最小宽度
+    const int total = lib.size();
+    if (total <= 0)
+        return 0;
+
+    const int step   = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int startX = PinkXP::ui (kBarLeftPad)
+                     + juce::jmin (getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
+                     + PinkXP::ui (kGroupGap);
+    // 分给"我的主题"的额度：扣掉左侧固定部分 + 尾部固定占用。
+    const int avail = getWidth() - startX - reservedTailWidth() - PinkXP::ui (kGroupGap);
+    if (avail < PinkXP::ui (kSwatchW))
+        return 0;
+
+    int cap = (avail + PinkXP::ui (kSwatchGap)) / step;
+
+    // 宽度够时给预设色票留至少 4 个位置：用户主题存很多时不至于把预设全挤掉。
+    const int totalPresets = (int) PinkXP::getAllThemes().size();
+    if (totalPresets > 0 && getWidth() >= PinkXP::ui (260))
+    {
+        const int reserveForPresets = juce::jmin (totalPresets, 4) * step + PinkXP::ui (kGroupGap);
+        cap = juce::jmax (0, (avail - reserveForPresets + PinkXP::ui (kSwatchGap)) / step);
+    }
+
+    return juce::jlimit (0, total, cap);
+}
+
+int ThemeSwatchBar::totalContentWidth() const
+{
+    // 内容已按宽度自适应（预设让位），横向滚动只剩极小概率的极端组合，
+    //   这里返回真实右边界，滚动极限自然为 0。
+    return skinButtonBoundsAfter (getNewButtonBounds()).getRight() + PinkXP::ui (kBarRightPad);
 }
 
 void ThemeSwatchBar::updateScrollLimits()
@@ -5056,12 +5114,12 @@ ThemeSwatchBar::Hit ThemeSwatchBar::hitTest(juce::Point<int> p) const
         return { 1, 0 };
 
     const auto& themes = PinkXP::getAllThemes();
-    for (int i = 0; i < (int) themes.size(); ++i)
+    for (int i = 0, n = juce::jmin (visiblePresetCount(), (int) themes.size()); i < n; ++i)
         if (getPresetSwatchBounds(i).contains(p))
             return { 2, i };
 
     const auto& lib = PinkXP::ThemeLibrary::instance();
-    for (int i = 0; i < lib.size(); ++i)
+    for (int i = 0, n = juce::jmin (visibleUserCount(), lib.size()); i < n; ++i)
         if (getUserSwatchBounds(i).contains(p))
             return { 3, i };
 
@@ -5150,7 +5208,7 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
 
     // ---- 预设色票（12 个，外观不变）----
     const auto& themes = PinkXP::getAllThemes();
-    for (int i = 0; i < (int) themes.size(); ++i)
+    for (int i = 0, n = juce::jmin (visiblePresetCount(), (int) themes.size()); i < n; ++i)
     {
         const auto& th = themes[(size_t) i];
         drawSwatch(getPresetSwatchBounds(i), th.swatch,
@@ -5162,7 +5220,7 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
     // ---- 我的主题（R1/R11：与预设同款色票 + 角标区分）----
     const auto& lib = PinkXP::ThemeLibrary::instance();
     const bool customActive = PinkXP::isCustomThemeActive();
-    for (int i = 0; i < lib.size(); ++i)
+    for (int i = 0, n = juce::jmin (visibleUserCount(), lib.size()); i < n; ++i)
     {
         drawSwatch(getUserSwatchBounds(i),
                    quickAccentForSpec(lib.themes()[(size_t) i].spec),
@@ -5209,7 +5267,7 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
     {
         const auto& th = PinkXP::getCurrentTheme();
         const int tx = skinBtn.getRight() + PinkXP::ui (kGroupGap);
-        const int tw = juce::jmax(0, getWidth() - tx - 4);
+        const int tw = juce::jmax(0, getWidth() - tx - PinkXP::ui (kBarRightPad));
         if (tw > 10 && tx < getWidth())
         {
             const juce::String shown = y2k::tr (th.displayName);
@@ -5315,9 +5373,17 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
             m.addItem (1 + (int) s.id, s.displayName, true, s.id == current);
 
         const auto area = localAreaToGlobal (skinButtonBoundsAfter (getNewButtonBounds()));
+
+        // bug2：macOS 原生全屏下 display->userArea 仍扣除了菜单栏/Dock，而底部工具栏
+        //   正好落在这段被扣除的区域内 —— JUCE 会把菜单 clamp 到 userArea，表现为
+        //   "菜单跑到按钮上方很远"。与右侧布局预设 / 音频源下拉同一套修正。
+        auto options = PinkXP::withFullScreenMenuArea (
+            juce::PopupMenu::Options().withTargetComponent (this)
+                                      .withTargetScreenArea (area),
+            *this);
+
         juce::Component::SafePointer<ThemeSwatchBar> safe (this);
-        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
-                                                   .withTargetScreenArea (area),
+        m.showMenuAsync (options,
                          [safe] (int result)
                          {
                              if (result <= 0)

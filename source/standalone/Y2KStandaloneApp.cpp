@@ -876,6 +876,7 @@ public:
                     });
                 }
                #endif
+
             });
         }
 
@@ -1162,6 +1163,15 @@ private:
         //   可能低于旧阈值，旧逻辑会把完全合法的存档当损坏直接丢弃。
         if (w < 64 || h < 32 || w > 32768 || h > 32768) return false;
 
+       #if JUCE_MAC
+        // bug3：本次启动会进入原生全屏时，不按存档的小窗口尺寸恢复 ——
+        //   旧存档里可能留着"进全屏前"的尺寸（甚至是残缺的条状高度），
+        //   先恢复成小窗口再进全屏会让布局/画面闪一下，且全屏下几何无意义。
+        //   全屏尺寸由系统的 setFullScreen 决定（restorePseudoFullScreen 之后）。
+        if (s.getBoolValue ("window.nativeFullScreen", false))
+            return false;
+       #endif
+
         juce::Rectangle<int> target (x, y, w, h);
 
         const auto& disp = juce::Desktop::getInstance().getDisplays();
@@ -1283,7 +1293,31 @@ private:
         //     窗口上屏后按该值重新进入原生全屏。
         const bool wasNativeFullScreen = mainWindow->isFullScreen();
         getUserSettings().setValue ("window.nativeFullScreen", wasNativeFullScreen ? 1 : 0);
-        if (wasNativeFullScreen) return;
+
+        // ★ bug3 修复：全屏中退出时，模块布局是按"整屏 canvas"存的，几何也必须存
+        //   同一尺寸 —— 旧实现只跳过几何写入、保留上一次的普通窗口尺寸，重启后
+        //   先按小窗口恢复布局（所有模块被挤到上方 / 露不全），再进全屏。
+        //   现在把当前（全屏）几何一并落盘：重启→恢复同尺寸窗口→布局坐标一致
+        //   → 350ms 后进入原生全屏，画面与退出前完全一致。
+        //   注意：全屏态不做下面的 hide 反算（全屏下 setAutoHideMode 不收缩窗口）。
+        if (wasNativeFullScreen)
+        {
+            const auto b = mainWindow->getBounds();
+            if (b.getWidth() >= 64 && b.getHeight() >= 32)
+            {
+                auto& s = getUserSettings();
+                s.removeValue ("window.x");
+                s.removeValue ("window.y");
+                s.removeValue ("window.w");
+                s.removeValue ("window.h");
+                s.setValue ("window.x", b.getX());
+                s.setValue ("window.y", b.getY());
+                s.setValue ("window.w", b.getWidth());
+                s.setValue ("window.h", b.getHeight());
+            }
+            getUserSettings().setValue ("window.fullscreen", 0);
+            return;
+        }
        #endif
 
         // 若窗口已经被 hide（shutdown 阶段的二次调用），跳过 —— 真正的 save

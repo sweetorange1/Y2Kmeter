@@ -12,6 +12,8 @@
 #include <juce_opengl/juce_opengl.h>
 
 #include <unordered_map>
+#include <algorithm>
+#include <iterator>
 #include <map>
 #include <tuple>
 #include <atomic>
@@ -1913,8 +1915,15 @@ namespace PinkXP
             if (r.getWidth() < 2 || r.getHeight() < 2)
                 return;
 
+            // 1px 外框用 4 次 fillRect 而不是 drawRect（性能）：JUCE 的 drawRect 会
+            //   把 4 条边合成矩形列表 → 在 GL 渲染器里构造 EdgeTable 并与当前多矩形
+            //   裁剪区逐块求交（每帧 repaint 的模块越多，裁剪区越碎越贵）；
+            //   fillRect 走矩形快速路径。像素结果完全相同。
             g.setColour (dark);
-            g.drawRect (r, 1);
+            g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+            g.fillRect (r.getX(), r.getBottom() - 1, r.getWidth(), 1);
+            g.fillRect (r.getX(), r.getY() + 1, 1, r.getHeight() - 2);
+            g.fillRect (r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 2);
 
             const auto in = r.reduced (1);
             if (in.isEmpty())
@@ -4079,14 +4088,87 @@ namespace PinkXP
         return interpolateOkLab(chartRamp[i], chartRamp[i + 1], u);
     }
 
+    namespace
+    {
+        // ---- interpolateOkLab 快速路径（性能）----
+        //   立体声频段图 / 波形历史 / 语谱图在 onFrame 里逐顶点、逐列调用，原实现每次
+        //   都要 6 次 pow + 6 次 cbrt（两端 sRGB → OKLab）+ 3 次 pow（输出编码），
+        //   全部模块时约占消息线程 6%。
+        //   · 两端颜色几乎总是同几组主题色：OKLab 结果放进线程本地直接映射小缓存；
+        //   · 输出 linear → sRGB8：预先按原公式二分出 255 个"进位阈值"，查表二分
+        //     8 次即得，与 toRgb8 (linearToRgb (x)) 逐值一致（浮点边界除外）。
+        y2kpal::OkLab okLabOfCached (juce::Colour c) noexcept
+        {
+            struct Entry { juce::uint32 key = 0xffffffffu; y2kpal::OkLab lab; };
+            thread_local Entry cache[64];
+
+            const juce::uint32 key = ((juce::uint32) c.getRed() << 16)
+                                   | ((juce::uint32) c.getGreen() << 8)
+                                   |  (juce::uint32) c.getBlue();
+            auto& e = cache[(key * 2654435761u) >> 26];
+
+            if (e.key != key)
+            {
+                e.key = key;
+                e.lab = y2kpal::linearToOkLab (y2kpal::rgbToLinear (
+                            y2kpal::fromRgb8 ({ c.getRed(), c.getGreen(), c.getBlue() })));
+            }
+
+            return e.lab;
+        }
+
+        juce::uint8 encodeLinearToSrgb8 (float x) noexcept
+        {
+            struct Table
+            {
+                float thr[255];   // x >= thr[k] ⇔ 原公式结果 >= k + 1
+
+                Table()
+                {
+                    auto encode = [] (float v)
+                    {
+                        return (int) std::lroundf (y2kpal::clamp01 (y2kpal::linearToSrgb (v)) * 255.0f);
+                    };
+
+                    for (int k = 0; k < 255; ++k)
+                    {
+                        float lo = 0.0f, hi = 1.0f;   // encode(lo) <= k < encode(hi)
+                        for (int it = 0; it < 48; ++it)
+                        {
+                            const float mid = 0.5f * (lo + hi);
+                            if (mid <= lo || mid >= hi)
+                                break;
+                            (encode (mid) > k ? hi : lo) = mid;
+                        }
+                        thr[k] = hi;
+                    }
+                }
+            };
+
+            static const Table table;
+
+            if (! (x > 0.0f))   // 含 NaN
+                return 0;
+
+            return (juce::uint8) (std::upper_bound (std::begin (table.thr), std::end (table.thr), x)
+                                  - std::begin (table.thr));
+        }
+    }
+
     juce::Colour interpolateOkLab(juce::Colour a, juce::Colour b, float t)
     {
         t = juce::jlimit(0.0f, 1.0f, t);
-        const y2kpal::Rgb8 c = y2kpal::interpolateOkLab(
-            { a.getRed(), a.getGreen(), a.getBlue() },
-            { b.getRed(), b.getGreen(), b.getBlue() },
-            t);
-        return juce::Colour(c.r, c.g, c.b);
+
+        const auto la = okLabOfCached (a);
+        const auto lb = okLabOfCached (b);
+        const y2kpal::OkLab m { la.L + (lb.L - la.L) * t,
+                                la.a + (lb.a - la.a) * t,
+                                la.b + (lb.b - la.b) * t };
+        const auto lin = y2kpal::okLabToLinear (m);
+
+        return juce::Colour (encodeLinearToSrgb8 (lin.r),
+                             encodeLinearToSrgb8 (lin.g),
+                             encodeLinearToSrgb8 (lin.b));
     }
 }
 
@@ -4743,6 +4825,43 @@ void PinkXPLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& l
                     box.findColour(juce::ComboBox::textColourId));
 }
 
+juce::PopupMenu::Options PinkXP::withFullScreenMenuArea (juce::PopupMenu::Options options,
+                                                          juce::Component& anchor)
+{
+    // 需要放宽菜单允许区域的三种场景（默认区域 = display->userArea）：
+    //   1) stick 驻留态（Windows）：AppBar 把条带从 userArea 挖掉，控件位于
+    //      条带内（userArea 之外），默认 clamp 会把菜单整体推到条带上方；
+    //   2) macOS 原生全屏：窗口铺满 totalArea（覆盖菜单栏/Dock），但 JUCE 报告的
+    //      display->userArea 仍扣除了菜单栏/Dock —— 底部工具栏里的控件正好落在
+    //      这段被扣除的区域内，默认 clamp 会把菜单推到控件上方"隔一段距离"；
+    //   3) 控件中心本来就在 userArea 之外（贴边的条状窗口等）。
+    bool needsOverride = isStickDockActive();
+
+   #if JUCE_MAC
+    if (! needsOverride)
+        if (auto* top = anchor.getTopLevelComponent())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+                needsOverride = rw->isFullScreen();
+   #endif
+
+    const auto anchorScreen = anchor.getScreenBounds();
+    const auto display = juce::Desktop::getInstance().getDisplays()
+                             .getDisplayForPoint (anchorScreen.getCentre());
+    if (display == nullptr)
+        return options;
+
+    // 工作区内的控件（例如浮动窗口）不受影响，保持默认锚点与约束。
+    if (! needsOverride && display->userArea.contains (anchorScreen.getCentre()))
+        return options;
+
+    // 放宽允许区域到整个显示器，让菜单按默认逻辑贴着控件展开（可以盖在
+    //   条带 / 全屏底边上）。withParentAreaOverride 是本仓库 JUCE 的扩展
+    //   （见 juce_PopupMenu.h），全平台可用。
+    Y2K_DIAG ("UIPOPUP", "menu area override applied (stick / fullscreen / off userArea)");
+    return options.withParentAreaOverride (
+        display->safeAreaInsets.subtractedFrom (display->totalArea));
+}
+
 juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce::ComboBox& box,
                                                                             juce::Label& label)
 {
@@ -4751,41 +4870,8 @@ juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce
     //   时间戳，两条日志的时间差就是"点击 → 弹菜单"的延迟。
     Y2K_DIAG ("UIPOPUP", "combobox showPopup (getOptionsForComboBoxPopupMenu)");
 
-    auto options = juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu (box, label);
-
-    // 需要放宽菜单允许区域的两种场景（默认区域 = display->userArea）：
-    //   1) stick 驻留态（Windows）：AppBar 把条带从 userArea 挖掉，下拉框位于
-    //      条带内（userArea 之外），默认 clamp 会把菜单整体推到条带上方；
-    //   2) macOS 原生全屏：窗口铺满 totalArea（覆盖菜单栏/Dock），但 JUCE 报告的
-    //      display->userArea 仍扣除了菜单栏/Dock —— 底部工具栏里的下拉框正好落在
-    //      这段被扣除的区域内，默认 clamp 会把菜单推到控件上方"隔一段距离"。
-    bool needsOverride = PinkXP::isStickDockActive();
-
-   #if JUCE_MAC
-    if (! needsOverride)
-        if (auto* top = box.getTopLevelComponent())
-            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
-                needsOverride = rw->isFullScreen();
-   #endif
-
-    if (! needsOverride)
-        return options;
-
-    const auto boxScreen = box.getScreenBounds();
-    const auto display = juce::Desktop::getInstance().getDisplays()
-                             .getDisplayForPoint (boxScreen.getCentre());
-    if (display == nullptr)
-        return options;
-
-    // 工作区内的下拉（例如浮动窗口）不受影响，保持默认锚点与约束。
-    if (display->userArea.contains (boxScreen.getCentre()))
-        return options;
-
-    // 放宽允许区域到整个显示器，让菜单按默认逻辑贴着下拉框展开（可以盖在
-    //   条带 / 全屏底边上）。withParentAreaOverride 是本仓库 JUCE 的扩展
-    //   （见 juce_PopupMenu.h），全平台可用。
-    return options.withParentAreaOverride (
-        display->safeAreaInsets.subtractedFrom (display->totalArea));
+    return PinkXP::withFullScreenMenuArea (
+        juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu (box, label), box);
 }
 
 // ==========================================================

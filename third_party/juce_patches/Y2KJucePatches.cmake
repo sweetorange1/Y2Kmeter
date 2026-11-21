@@ -26,6 +26,11 @@ set(Y2K_JUCE_PATCH_MARKERS
   "modules/juce_opengl/opengl/juce_OpenGLContext.h|takeRenderStats"
   "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|renderOpenGLPreLock"
   "modules/juce_opengl/opengl/juce_OpenGLRenderer.h|renderOpenGLPreLock"
+  # 0007 GL 渐变颜色表纹理按停靠点复用 + 跨帧保留（v3.4.x 全平台性能）
+  "modules/juce_opengl/opengl/juce_OpenGLGraphicsContext.cpp|Y2K.GradientTextures"
+  # 0008 mac 显式出帧也按显示器刷新合并（v3.4.x mac 性能）
+  "modules/juce_opengl/opengl/juce_OpenGLContext.h|triggerRepaintPacedToDisplay"
+  "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|triggerRepaintPacedToDisplay"
 )
 
 function(y2k_verify_juce_patches juce_dir)

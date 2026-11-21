@@ -199,6 +199,13 @@ public:
     */
     void setComponentRepaintsPacedToDisplay (bool shouldPace) noexcept;
 
+    /** (Y2Kmeter patch) Like triggerRepaint(), but when component repaints are paced to
+        the display (see setComponentRepaintsPacedToDisplay) the frame is coalesced to the
+        next display refresh together with any pending component repaints. Otherwise
+        (other platforms, pacing disabled or no display link) behaves like triggerRepaint().
+    */
+    void triggerRepaintPacedToDisplay();
+
     /** (Y2Kmeter patch) Per-phase timing of the render thread, accumulated since the last
         call to takeRenderStats(). All times are in milliseconds, summed over `frames`.
     */

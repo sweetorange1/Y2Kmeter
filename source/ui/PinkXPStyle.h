@@ -500,6 +500,16 @@ namespace PinkXP
     // ==========================================================
     juce::Component* getInWindowMenuHost (juce::Component* targetComponent);
 
+    // 菜单允许区域修正（bug2）：默认允许区域是 display->userArea，但
+    //   · stick 驻留态（Windows）：控件位于 AppBar 条带内（userArea 之外）；
+    //   · macOS 原生全屏：窗口铺满 totalArea（盖住菜单栏/Dock），而 userArea 仍扣除了它们；
+    //   · 控件中心本来就不在 userArea 内（贴边条状窗口等）。
+    //   这些情况下 JUCE 会把菜单 clamp 到 userArea，表现为"菜单跑到离控件很远的地方"。
+    //   命中任一条件时把允许区域放宽到整块显示器（扣掉安全区），菜单就会贴着
+    //   anchor 展开。ComboBox 下拉与自绘按钮的 PopupMenu 都应经过这里。
+    juce::PopupMenu::Options withFullScreenMenuArea (juce::PopupMenu::Options options,
+                                                     juce::Component& anchor);
+
     // 格式化频率读数：<1kHz 显示 "xxx Hz"，>=1kHz 显示 "x.x kHz"
     juce::String formatFreqHz(float hz);
 

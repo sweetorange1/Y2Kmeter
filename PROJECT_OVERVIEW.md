@@ -41,7 +41,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.4.2`）
+- **产品名**：`Y2Kmeter` （版本：`3.4.3`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -80,6 +80,13 @@
 > · 模块抬头 / Editor 抬头的文字改为对齐"位图内的文字排版框"（去掉旧的 CJK 手工 +1 补偿）。
 > · **点击模块内部也置顶**：`ModulePanel` 挂深层鼠标监听（`ChildClickToFront`），子组件（计算器按钮 / 便签输入框 / Milkdrop 控制栏 / 抽屉控件）吃掉 `mouseDown` 时补一次 `toFront(false)` + `onBroughtToFront`。
 > · **霓虹赛博抬头提亮**：底色不再往纯黑混（会失饱和 → 发灰发脏），改 HSV 压明度 + 拉饱和，`magenta → pink` 纵向渐变（55% / 80% / 102%）+ 上下近白灯芯与 bloom；新增 `PinkXP::titleBarDividerColour()`（霓虹下标题栏下沿换成灯管亮色，让光漏进内容区；其它风格仍为 `dark`），标题文字在霓虹下不再画深色投影。
+
+> **v3.4.3 本轮变更**（"全屏：全部模块"预设加模块后掉到 30fps + 主题栏 / 全屏四个 bug；细节见 [docs/rendering-gl.md](docs/rendering-gl.md) §1.1 与 [docs/window-layout.md](docs/window-layout.md)）：
+> · **帧率**：全屏密排布局下，新加的电脑状态 / 小工具模块被自动摆在每帧刷新的模块上方 → 组件层"连带重绘"让它们整块重画。新增 `y2k::ui::setGlSafeImageCache()`（低频组件整组件位图缓存，仅 GL 合成目标生效、缓存为软件 Image 不持 GL 资源）；电脑状态模块的自适应字号加结果缓存、环形表分段合并描边；JUCE 补丁 0007（渐变颜色表纹理按停靠点复用 + 跨帧保留）、0008（Milkdrop 的显式出帧请求也按显示器刷新合并）；`chromeFrame` 1px 外框改 4 次 `fillRect`；`PinkXP::interpolateOkLab` 加快速路径（两端 OKLab 缓存 + 输出查表，逐值一致）。实测 GL 42~54 → 59~60fps，进程 CPU 103% → 75%。
+> · **bug1**：`ThemeSwatchBar` 右侧留内边距并按可用宽度递减色票数量（预设色票优先让位、其次"我的主题"、最后才是"+"与 SKIN），窄窗口下 SKIN 按钮不再被右侧控制区挡住。
+> · **bug2**：SKIN 菜单与右侧 ComboBox 下拉统一走 `PinkXP::withFullScreenMenuArea()` —— stick 驻留 / mac 原生全屏 / 控件不在 userArea 内时把菜单允许区域放宽到整块显示器，菜单重新贴着按钮展开。
+> · **bug3**：mac 原生全屏中退出时，窗口几何改存"当前（全屏）几何"（与布局坐标同尺寸），并在启动且本次要进全屏时跳过旧的小窗口几何 —— 修复"重开后模块全挤到上方"。
+> · **bug4**：从全屏磁贴预设切到非全屏预设时先退出原生全屏（异步轮询到真正离开全屏），并统一放开 Editor / 顶层窗口的 resizeLimits，预设尺寸不再被夹回整屏。
 
 > **v3.4.2 本轮变更**（调色工作室 × 视觉风格；细节见 §4.6）：
 > · **官方预设下只改桌面纹理 / 标题图标不再跳色**：旧逻辑任何改动都会走 `applyThemeFromSpec`（双色反推 + OKLCH 生成器 + 护栏）→ 整套手工配色被近似色替换。现在预设起步时面板处于"只改装饰"模式，纹理 / 图标经 `PinkXP::applyPresetDecor` 写成**预设装饰覆盖**（`PresetDecor`，只换 `desktopPattern` / `titleIconText`，配色原样）；一旦改了色相 / 明暗 / 滑条 / 和谐 / 角色 / 随机 / 粘贴等配色参数才转为生成器主题。对比 / 还原会连同打开时的装饰覆盖一起恢复。持久化：Standalone `ui.presetPattern` / `ui.presetIcon`、插件态 `presetPattern` / `presetIcon`（-1 / 缺键 = 预设原样）。
@@ -602,7 +609,8 @@ main
 - ★ **永远不 clear FBO 0**（CachedImage 合成面）——clear 会破坏 JUCE 已合成的所有组件 UI。
 - 插件宿主与 Standalone **共用**，宿主下 JUCE 会为 Editor 创建 GL 子层不影响宿主窗口其余部分。
 - 坐标系统：`getLocalPoint(milk, point)` 纯组件树遍历 + `openGLContext.getRenderingScale()` DPI 缩放 + Y-flip。
-- ★ **vendored JUCE 有本地补丁**（含 mac GL 的 VBO orphaning、repaint 按显示器刷新合并、Font 比较快速路径等），补丁清单 / 升级流程见 [third_party/juce_patches/README.md](third_party/juce_patches/README.md)；改 JUCE 源码必须同步导出补丁并补配置期校验标记（否则 CMake 配置会报错）。
+- ★ **vendored JUCE 有本地补丁**（含 mac GL 的 VBO orphaning、repaint 按显示器刷新合并、Font 比较快速路径、渐变纹理跨帧复用等），补丁清单 / 升级流程见 [third_party/juce_patches/README.md](third_party/juce_patches/README.md)；改 JUCE 源码必须同步导出补丁并补配置期校验标记（否则 CMake 配置会报错）。
+- ★ **组件层每次 repaint 都会让脏区内所有组件按 z 序重画**（不是只画发起者）—— 低频组件压在每帧刷新的模块上就会被"陪着"每帧整块重画。规则与可用工具（`y2k::ui::setGlSafeImageCache`、静态文字位图、`fillRect` 代替 `drawRect`、渐变复用）见 [docs/rendering-gl.md](docs/rendering-gl.md) §1.1。**新增低频模块 / 新增带渐变的皮肤时务必按该节自查。**
 - ★ **`OpenGLContext::getCurrentContext() != nullptr` 不等于"绘制目标是 GL 目标"**。GL 渲染线程上跑的任何离屏软件绘制（`createComponentSnapshot` 等）也同样满足这个判断。`OpenGLImageType` 的 Image 只能被 GL 上下文消费，画进软件 Image 在 macOS 会越界读崩溃（Windows 不炸）—— 见 [docs/rendering-gl.md](docs/rendering-gl.md)「GL Image 消费规则」。
 
 ### 6.6 性能优化点
@@ -660,6 +668,15 @@ main
   把 `renderOpenGL` 移出 MessageManager 锁（出锁后仅允许 FBO 渲染 + 合成，禁止触碰组件树）。
 - JUCE 2D GL 渲染器的路径/描边在 CPU 光栅化，复杂 Path（波形、频谱虚线峰值）仍是每帧成本主体。
 
+**组件层（v3.4.3 mac 性能轮）**
+- 认清了一条容易被忽略的成本：JUCE 组件层是**按脏区重画区域内的所有组件**，不是"只画发起 repaint 的那个模块"。密排全屏布局里，低频模块叠在每帧刷新的模块上就会每帧整块重画。对策（详见 [docs/rendering-gl.md](docs/rendering-gl.md) §1.1）：
+  - `y2k::ui::setGlSafeImageCache()`：低频组件（电脑状态 / 小工具 / 悬停提示）整组件位图缓存；
+  - 静态文字位图 `PinkXP::drawCachedText`（设备分辨率、单次 blit）、自适应字号结果缓存；
+  - `chromeFrame` 的 1px 外框用 4 次 `fillRect`（`drawRect` 在 GL 下走 EdgeTable + 裁剪求交）；
+  - JUCE 补丁 0007：渐变颜色表纹理按停靠点复用并跨帧保留（新皮肤大量使用渐变）；
+  - JUCE 补丁 0008：Milkdrop 的显式出帧请求也参与"按显示器刷新合并"，避免 60Hz 屏跑 ~80fps；
+  - `PinkXP::interpolateOkLab` 快速路径：两端颜色 OKLab 结果线程本地缓存 + 输出 linear→sRGB8 查表（与原公式逐值一致，实测 200 万组随机色 0 差异）。
+
 ### 6.7 编译期宏
 | 宏 | 默认值 | 作用 |
 | --- | --- | --- |
@@ -671,7 +688,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.2`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.3`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定
@@ -696,7 +713,9 @@ main
 | 给模块加/改参数（控制面板） | 覆写 `buildParamDefs / getParamValue / setParamValue`，存档读写用"缺键不覆盖"，默认值 = 旧外观；`ParamDef.id` 即存档键不能改名；文案补 `i18n/zh-CN.lang`。步骤见 [docs/analysis-modules.md](docs/analysis-modules.md) §7.11 |
 | 合并 / 退役一个模块类型 | `ModuleType` 枚举保留不删；`ModuleWorkspace.cpp` 的 `isRetiredModuleType` + `resolveRetiredModuleType` 登记"旧类型 → 存活类型 + 外观种子"；从 `availableTypes` 移除。预设表无需改，都经 `createModule` |
 | 改频率轴刻度 | `source/analysis/FreqScale.h`（唯一事实来源）；Hub 取样函数 `scale` 参数 + UI 坐标换算要同步 |
-| 加一个主题 | `PinkXPStyle.h` `ThemeId` 加枚举；`PinkXPStyle.cpp` `getAllThemes()` 追加 `Theme` 结构；`ThemeSwatchBar` 会自动展现 |
+| 加一个主题 | `PinkXPStyle.h` `ThemeId` 加枚举；`PinkXPStyle.cpp` `getAllThemes()` 追加 `Theme` 结构；`ThemeSwatchBar` 会自动展现（宽度不足时按 `visiblePresetCount/visibleUserCount` 自动少显示几个色票，**不要**改成横向滚动挤掉 SKIN 按钮） |
+| 底部主题栏（`ThemeSwatchBar`）加控件 | 宽度优先级是 SKIN > "+" > "我的主题" > 预设色票，右侧还有 `kBarRightPad` 内边距。新控件必须并入 `reservedTailWidth()` 一起算，否则窄窗口下会被右侧控制区挡住（v3.4.3 bug1） |
+| 调整全屏磁贴预设（14/15/16） | `PluginEditor.cpp` 的 `kFull*Tiles` 表（参考画布 2560×1328，自动归一化到实际 canvas）+ `applyFullScreenTilePreset()`（mac 会 `setFullScreen(true)` 并锁死 resizeLimits）。**切到非全屏预设时必须先退出原生全屏**（`applyLayoutPreset` 已处理，见 bug4），任何新的"改窗口尺寸"入口都要先放开 resizeLimits |
 | 加一种视觉风格（Skin） | `PinkXPStyle.h` `SkinId` 末尾追加；`getAllSkins()` / `skinFromInt()` 追加；在 §4.6 列出的分派点（含 GL `appendSunkenFrame`）各补一个分支；`skinFontSpec` 补字体；显示名进 `i18n/zh-CN.lang`；SKIN 菜单自动列出 |
 | 让模块支持绿幕 | 覆写 `getChromaKeyCanvas()` 返回数据画布；画布背景（CPU `drawBackground` + GL `appendSunkenFrame` 已自动）画纯绿，网格 / 刻度 / 图例在 `PinkXP::isChromaKeySkin()` 下跳过；静态层缓存键并入风格 |
 | 换字体 | `CMakeLists.txt` 的 `Y2KM_FONT_EN_SRC` / `Y2KM_SKIN_FONT_FILES`；`PinkXP::skinFontSpec` / `chooseActiveFont` |
@@ -727,7 +746,7 @@ Y2Kmeter/
 ├── i18n/                          ─ 语言包（*.lang，中英文）
 ├── scripts/                       ─ macOS 图标流水线等辅助脚本
 ├── tests/                         ─ 分析算法单元测试（RealFft / Tempo / Key）
-├── third_party/                   ─ vendored JUCE 8.0.12 + juce_patches/（本地补丁 0001~0006）
+├── third_party/                   ─ vendored JUCE 8.0.12 + juce_patches/（本地补丁 0001~0008）
 └── source/
     ├── Y2KLogging.h               ─ 编译期日志开关宏 Y2K_LOG（§1.4）
     ├── analysis/                  ─ AnalyserHub + 6 路分析器 + music/（BPM / 调性）

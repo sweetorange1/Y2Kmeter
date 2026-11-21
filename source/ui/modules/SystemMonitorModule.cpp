@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 using y2k::sys::Metric;
 using y2k::sys::Snapshot;
@@ -44,22 +45,50 @@ namespace
     constexpr float kTempLo = 20.0f;
     constexpr float kTempHi = 100.0f;
 
-    juce::Font fitFont (const juce::String& text, float maxW, float maxH, float minH, int flags)
+    // 返回传给 getAxisFont 的字号（逐次缩小直到放得下，最多 5 轮）
+    float fitHeightUncached (const juce::String& text, float maxW, float maxH, float minH, int flags)
     {
         float h = juce::jmax (minH, maxH);
 
         for (int pass = 0; pass < 5; ++pass)
         {
-            const auto f = PinkXP::getAxisFont (h, flags);
-            const float w = juce::GlyphArrangement::getStringWidth (f, text);
+            const float w = juce::GlyphArrangement::getStringWidth (PinkXP::getAxisFont (h, flags), text);
 
             if (w <= maxW || h <= minH)
-                return f;
+                return h;
 
             h = juce::jmax (minH, h * maxW / w * 0.97f);
         }
 
-        return PinkXP::getAxisFont (h, flags);
+        return h;
+    }
+
+    // 自适应字号结果缓存（性能）：每段文字原来每次绘制都要按字号逐次塑形测宽
+    //   （最多 5 轮）。标签 / 单位等文本与布局尺寸都很少变化，按
+    //   （文本, 区域, 字号上下限, 样式, UI 密度, 字体代次）缓存字号。仅消息线程 /
+    //   持消息锁的 GL 线程调用，天然串行。
+    juce::Font fitFont (const juce::String& text, float maxW, float maxH, float minH, int flags)
+    {
+        static std::unordered_map<juce::String, float> cache;
+        static juce::uint32 cacheGeneration = 0;
+
+        const auto gen = PinkXP::getFontGeneration();
+        if (gen != cacheGeneration || cache.size() > 512)
+        {
+            cache.clear();
+            cacheGeneration = gen;
+        }
+
+        juce::String key;
+        key.preallocateBytes ((size_t) text.getNumBytesAsUTF8() + 48);
+        key << text << '\x1f' << maxW << '\x1f' << maxH << '\x1f' << minH << '\x1f' << flags
+            << '\x1f' << PinkXP::uiScale();
+
+        auto it = cache.find (key);
+        if (it == cache.end())
+            it = cache.emplace (std::move (key), fitHeightUncached (text, maxW, maxH, minH, flags)).first;
+
+        return PinkXP::getAxisFont (it->second, flags);
     }
 
     void drawFitted (juce::Graphics& g, const juce::String& text, juce::Rectangle<int> r,
@@ -84,24 +113,48 @@ namespace
         const float filled = juce::jlimit (0.0f, 1.0f, frac) * (float) segments;
         const juce::PathStrokeType stroke (thickness, juce::PathStrokeType::mitered, juce::PathStrokeType::butt);
 
+        // 性能：分段之间留有间隙、互不重叠，同色同 alpha 的段合并成一条 Path 一次描边
+        //   （原来每段 1~2 次 strokePath，28 段 × 每张卡片，是本模块主要开销之一）。
+        //   底色段一条；完全点亮的段一条；只有部分点亮的那一段单独描边。
+        juce::Path track, lit, partial;
+        float partialCover = 0.0f;
+
         for (int i = 0; i < segments; ++i)
         {
             const float a0 = start + seg * (float) i + gap * 0.5f;
             const float a1 = a0 + seg - gap;
 
-            juce::Path p;
-            p.addCentredArc (c.x, c.y, radius, radius, 0.0f, a0, a1, true);
+            track.addCentredArc (c.x, c.y, radius, radius, 0.0f, a0, a1, true);
 
             const float cover = juce::jlimit (0.0f, 1.0f, filled - (float) i);
 
-            g.setColour (PinkXP::ink.withAlpha (0.10f));
-            g.strokePath (p, stroke);
-
             if (frac >= 0.0f && cover > 0.0f)
             {
-                g.setColour (colour.withMultipliedAlpha (0.35f + 0.65f * cover));
-                g.strokePath (p, stroke);
+                if (cover >= 1.0f)
+                {
+                    lit.addCentredArc (c.x, c.y, radius, radius, 0.0f, a0, a1, true);
+                }
+                else
+                {
+                    partial.addCentredArc (c.x, c.y, radius, radius, 0.0f, a0, a1, true);
+                    partialCover = cover;
+                }
             }
+        }
+
+        g.setColour (PinkXP::ink.withAlpha (0.10f));
+        g.strokePath (track, stroke);
+
+        if (! lit.isEmpty())
+        {
+            g.setColour (colour);   // 0.35 + 0.65 × 1
+            g.strokePath (lit, stroke);
+        }
+
+        if (! partial.isEmpty())
+        {
+            g.setColour (colour.withMultipliedAlpha (0.35f + 0.65f * partialCover));
+            g.strokePath (partial, stroke);
         }
     }
 
@@ -163,6 +216,10 @@ SystemMonitorModule::SystemMonitorModule()
     // 20 Hz：检查新样本 + 数值缓动；订阅本身等到真正显示在屏幕上才发生
     //   （添加菜单的悬停预览会临时构造本模块，不应因此启动采集线程）
     startTimerHz (20);
+
+    // 最高 20Hz 自绘：常被摆在每帧刷新的模块上方，挂位图缓存避免被"陪着"
+    //   每帧整块重画（环形表描边 + 自适应字号文本，mac 上曾占 GL 线程约 15%）
+    y2k::ui::setGlSafeImageCache (*this, true);
 }
 
 SystemMonitorModule::~SystemMonitorModule()
