@@ -41,7 +41,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.4.3`）
+- **产品名**：`Y2Kmeter` （版本：`3.4.5`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -92,6 +92,10 @@
 > · **位图缓存随外观失效**：`PinkXP` 新增 `getAppearanceGeneration()`（主题 / 皮肤 / 自定义配色任一变化 +1，挂在主题广播里），整组件位图缓存比对它 —— 修复"电脑状态模块抬头颜色不随预设变化（内容区在动、抬头区没被标脏，一直贴着旧缓存）"。**凡是"画一次复用"的缓存都应并入这个代次**（见 [docs/rendering-gl.md](docs/rendering-gl.md) §1.1）。
 > · **按钮字体可强制英文 UI 字体**：组件属性 `y2k.iconFont`（`drawButtonText` / `getTextButtonWidthToFitText` 都认）。计算器全部按钮启用 —— 中文界面下 `C` / 数字 / `x` 原来落在没有粗体的中文字体上，与 `+ - = / %` 这些走 iconFont 的符号按钮粗细不一致。
 > · **预设色票收纳**：`ThemeSwatchBar` 装不下全部官方预设时，在最后一个可见色票右侧显示"…"按钮，点开是全部预设的菜单（条目用该预设代表色作文字色）—— 任何窗口宽度都能选到每一个预设。判定收敛在 `presetStartX/presetAvailWidth/presetOverflowVisible` 三处，宽度优先级仍是 `SKIN > "+" > … > 我的主题 > 预设色票`。
+
+> **v3.4.5 本轮变更**（两个严重 bug）：
+> · **Milkdrop 控制台点一下就消失**：`ModuleWorkspace` 的 `onBroughtToFront` 原来无条件 `clearMilkdropFocus(modules)`，把**刚被点击的那一块**也一起失焦。v3.4.1 的 `ChildClickToFront` 深层鼠标监听在目标 `mouseDown` **之后**才触发，于是"点控制台按钮"= 先置 `pressedOverlayBtn_`、再立刻被 `setFocusVisual(false)` 清空并隐藏控制栏 —— 表现为嵌入态点视频区看不到控制台、点抬头能弹出来但按钮点不动且一按就消失（脱离态不在 `modules` 里，所以正常）。现在 `clearMilkdropFocus` 接受 `except` 参数，`onBroughtToFront` 传入被置顶的 `&p` 跳过自己；画布空白处点击仍清全部。见 `source/ui/ModuleWorkspace.cpp`。
+> · **Load 存档重启后界面毫无变化**（Standalone）：`handleImportSettings` 只做了 `copyFileTo` 物理覆盖，但内存里的 `PropertiesFile` 仍是**导入前**的旧运行时状态 —— 退出路径上 `StandalonePluginHolder` 析构的 `saveAudioDeviceState()`、`ach::detach()`、`appProperties.saveIfNeeded()` 都会把整份内存属性表写回磁盘 → 刚导入的存档被旧进程原样盖回。现在拷贝成功后立刻 `props->reload()`，随后的善后写入只补 `audioSetup` 等本机键，存档内容不再丢失。
 
 > **v3.4.2 本轮变更**（调色工作室 × 视觉风格；细节见 §4.6）：
 > · **官方预设下只改桌面纹理 / 标题图标不再跳色**：旧逻辑任何改动都会走 `applyThemeFromSpec`（双色反推 + OKLCH 生成器 + 护栏）→ 整套手工配色被近似色替换。现在预设起步时面板处于"只改装饰"模式，纹理 / 图标经 `PinkXP::applyPresetDecor` 写成**预设装饰覆盖**（`PresetDecor`，只换 `desktopPattern` / `titleIconText`，配色原样）；一旦改了色相 / 明暗 / 滑条 / 和谐 / 角色 / 随机 / 粘贴等配色参数才转为生成器主题。对比 / 还原会连同打开时的装饰覆盖一起恢复。持久化：Standalone `ui.presetPattern` / `ui.presetIcon`、插件态 `presetPattern` / `presetIcon`（-1 / 缺键 = 预设原样）。
@@ -693,7 +697,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.3`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.5`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定

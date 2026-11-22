@@ -1579,8 +1579,24 @@ private:
             return;
         }
 
+        // 2.5) ★ 关键：把内存里的 PropertiesFile 也同步成刚导入的存档。
+        //   只做物理覆盖是不够的 —— 本次退出路径里还有几处会写 settings：
+        //     · StandalonePluginHolder 析构 → shutDownAudioDevices()
+        //       → saveAudioDeviceState() 写 audioSetup / shouldMuteInput；
+        //     · shutdown() 里 y2k::ach::detach() 写成就累计值；
+        //     · 紧随其后的 appProperties.saveIfNeeded()（PropertiesFile 析构
+        //       也会 flush 一次）。
+        //   这些写入都是"把内存中的整份属性表落盘"，而内存里此刻还是**导入前**
+        //   的旧运行时状态 → 刚 copy 进去的存档被原样盖回去，用户重启后看到的
+        //   仍是旧界面（布局 / 主题 / 窗口全部没变）。
+        //   reload() 让内存与刚导入的文件一致（存档里的 key 覆盖内存值），
+        //   之后这些善后写入只会补上 audioSetup 等与本机相关的键。
+        if (! props->reload())
+            DBG ("handleImportSettings: settings reload after import failed");
+
         // 3) 锁死 persistAllSettings / 任何后续 flushCurrentStateToDisk ——
-        //    不让关闭路径把当前内存运行时状态再写回去覆盖刚导入的文件。
+        //    不让关闭路径把当前内存运行时状态（尤其是 filterState 布局 XML）
+        //    再写回去覆盖刚导入的文件。
         alreadyPersisted = true;
 
         // 4) 启动一个新的自己（独立进程），然后 quit 当前进程 ——
