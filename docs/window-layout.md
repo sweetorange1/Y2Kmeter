@@ -22,7 +22,7 @@
 - **mouseExit 用屏幕坐标 + 顶层窗口 bounds 裁决**（跨越子组件会误触发）；不要用 `Desktop::getMainMouseSource().getScreenPosition()`（缓存滞后），用 `MouseEvent::getScreenPosition()`。
 - `autoHideNeedsExitFirst`：resize 后要求鼠标先离开一次，才允许 hover show。
 - `suppressAutoShowCounter`（int，timer 递减）：`setBounds()` 产生的异步 WM_SIZE/mouse 事件在回调返回后才抵达，`bool` 挡不住，必须用计数器覆盖 ~300ms 窗口期。
-- 多层兜底监听：`TopLevelExitWatcher`（顶层窗口级 mouseExit）、`TopLevelFocusWatcher`（focus 轮询）、`AutoHideChildWatcher`（`addMouseListener(watcher, true)` 收嵌套子组件事件）。
+- 多层兜底订阅：`TopLevelExitWatcher`（顶层窗口级 mouseExit）、`TopLevelFocusWatcher`（focus 轮询）、`AutoHideChildWatcher`（`addMouseListener(watcher, true)` 收嵌套子组件事件）。
 - 顶层 `ResizableWindow` 与 Editor **各有 constrainer**：shrink/expand 都要同步放宽/夹紧 RW 层 limits。
 
 ## 4. Stick（驻留条）
@@ -43,7 +43,7 @@
 - 松手吸附基准 = **光标所在屏** `rcWork`，阈值 8 DIP × 该屏 scale。
 - `ensureWindowOnScreen()`（10Hz 兜底）：窗口完全离开所有屏则拉回最近工作区；伪全屏在 rcWork 变化时重贴合；最小化态跳过（`GetWindowRect` 返回 -32000 哨兵）。
 - 伪全屏禁止拖抬头；全屏退出落盘"进入前 bounds"（否则下次启动是"铺满屏但非全屏"的普通窗口）。
-- 诊断开关 `Y2KM_SNAP_DEBUG=1` → `%TEMP%\Y2Kmeter_snap_debug.txt`（dump JUCE Displays 表 + Win32 监视器表）。
+- 诊断开关 `Y2KM_SNAP_DEBUG=1` → `%TEMP%\Y2Kmeter_snap_debug.txt`（dump JUCE Displays 表 + Win32 显示器表）。
 
 ### 混合 DPI 经验（易错）
 
@@ -55,6 +55,14 @@
 
 - 恢复紧凑预设（如 `horizontal bar`）前先 `prepareConstrainerForWindowRestore(w,h)` 放宽 constrainer min/max —— 否则默认 `minH=420` 会在 `setBounds` 阶段把低高度存档夹大。
 - 改版本号后增量构建不重写 `*_resources.rc`（见 build-toolchain.md）。
+- **macOS 原生全屏的几何存档（v3.4.3 bug3）**：布局坐标是按退出时的 canvas 存的，几何必须存同一尺寸 —— `saveMainWindowBounds()` 在全屏态直接把当前（全屏）矩形写进 `window.*`（旧实现跳过写入、保留上一次的小窗口尺寸 → 重启后模块全挤在上方）。同时 `restoreMainWindowBounds()` 在 `window.nativeFullScreen=1` 时**跳过**旧几何恢复（本次启动会进全屏，小窗口只会闪一下）。
+
+## 6.1 布局预设与全屏状态（v3.4.3 bug4）
+
+- 全屏磁贴预设（14/15/16）在 mac 会 `setFullScreen(true)` 并把 Editor / 顶层窗口的 `resizeLimits` 锁死到整屏尺寸。
+- 因此 `applyLayoutPreset()` 做了两件事：①目标不是全屏磁贴预设且当前处于原生全屏 → 先 `setFullScreen(false)`，轮询到真的离开全屏（`continueLayoutPresetAfterFullScreenExit`，80ms × 40）再重新应用；②应用前统一放开 Editor / 窗口的 resizeLimits，各预设分支随后按自己的目标尺寸重设。
+- 漏掉①的表现：全屏预设切到默认 / 横条预设后窗口仍铺满整屏，只有模块被换掉。
+- 新增任何"直接改窗口尺寸"的入口，都要同样先放开 resizeLimits。
 
 ## 7. 相关引用
 

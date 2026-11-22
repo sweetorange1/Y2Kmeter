@@ -322,6 +322,94 @@ void GlDirectModuleBase::appendDisc (std::vector<float>& v,
 void GlDirectModuleBase::appendSunkenFrame (std::vector<float>& v, juce::Rectangle<int> canvas)
 {
     auto cr = canvas.toFloat();
+
+    // 视觉风格分派：与 CPU 的 PinkXP::drawSunken 逐风格对应（GL 无混合假设，
+    //   半透明效果一律预先与 content 混成不透明色）
+    const auto skin = PinkXP::getCurrentSkin();
+    const auto edge = [&] (juce::Rectangle<float> r, juce::Colour c, float inset)
+    {
+        // 1px 矩形描边（inset = 距画布外沿的像素数）
+        const auto o = r.reduced (inset);
+        appendQuad (v, { o.getX(), o.getY(), o.getWidth(), 1.0f }, c);
+        appendQuad (v, { o.getX(), o.getBottom() - 1.0f, o.getWidth(), 1.0f }, c);
+        appendQuad (v, { o.getX(), o.getY(), 1.0f, o.getHeight() }, c);
+        appendQuad (v, { o.getRight() - 1.0f, o.getY(), 1.0f, o.getHeight() }, c);
+    };
+
+    // 绿幕：画布只铺纯绿（不画凹槽边框，抠像后画布边界完全透明）
+    if (skin == PinkXP::SkinId::greenScreen)
+    {
+        appendQuad (v, cr, PinkXP::chromaKeyGreen());
+        return;
+    }
+    if (skin == PinkXP::SkinId::glass)
+    {
+        // 与 PinkXP::glassFrame(sunken) 同系数预混：外 1px dark@0.42，上沿 dark@0.16，下沿 white@0.40
+        const auto c = PinkXP::content;
+        appendQuad (v, cr, c);
+        edge (cr, c.interpolatedWith (PinkXP::dark, 0.42f), 0.0f);
+        appendQuad (v, { cr.getX() + 1.0f, cr.getY() + 1.0f, cr.getWidth() - 2.0f, 1.0f },
+                    c.interpolatedWith (PinkXP::dark, 0.16f));
+        appendQuad (v, { cr.getX() + 1.0f, cr.getBottom() - 2.0f, cr.getWidth() - 2.0f, 1.0f },
+                    c.interpolatedWith (juce::Colours::white, 0.40f));
+        return;
+    }
+    if (skin == PinkXP::SkinId::neon)
+    {
+        // 与 neonFrame(sunken) 对应：外 1px dark，内 1px sel@0.50
+        appendQuad (v, cr, PinkXP::content);
+        edge (cr, PinkXP::dark, 0.0f);
+        edge (cr, PinkXP::content.interpolatedWith (PinkXP::sel, 0.50f), 1.0f);
+        return;
+    }
+    if (skin == PinkXP::SkinId::crt)
+    {
+        // 与 crtFrame(sunken) 对应：1px sel@0.55
+        appendQuad (v, cr, PinkXP::content);
+        edge (cr, PinkXP::content.interpolatedWith (PinkXP::sel, 0.55f), 0.0f);
+        return;
+    }
+    if (skin == PinkXP::SkinId::fluent)
+    {
+        // 与 fluentFillAndOutline(sunken) 对应（画布超过圆角上限，走直角分支）
+        appendQuad (v, cr, PinkXP::content);
+        edge (cr, PinkXP::skinHairlineOn (PinkXP::content, 0.14f), 0.0f);
+        appendQuad (v, { cr.getX(), cr.getBottom() - 1.0f, cr.getWidth(), 1.0f },
+                    PinkXP::skinHairlineOn (PinkXP::content, 0.38f));
+        return;
+    }
+    if (skin == PinkXP::SkinId::modern)
+    {
+        const auto line = PinkXP::skinHairlineOn (PinkXP::content, 0.18f);
+        appendQuad (v, cr, PinkXP::content);
+        appendQuad (v, { cr.getX(), cr.getY(), (float) cr.getWidth(), 1.0f }, line);
+        appendQuad (v, { cr.getX(), cr.getBottom() - 1.0f, (float) cr.getWidth(), 1.0f }, line);
+        appendQuad (v, { cr.getX(), cr.getY(), 1.0f, (float) cr.getHeight() }, line);
+        appendQuad (v, { cr.getRight() - 1.0f, cr.getY(), 1.0f, (float) cr.getHeight() }, line);
+        return;
+    }
+    if (skin == PinkXP::SkinId::chrome)
+    {
+        const auto lit = PinkXP::hl.interpolatedWith (juce::Colours::white, 0.5f);
+        appendQuad (v, cr, PinkXP::content);
+        // 顶部内阴影 3 行（对应 CPU 的 0.22 / 0.12 / 0.05 暗色叠加）
+        const float alphas[3] = { 0.22f, 0.12f, 0.05f };
+        for (int i = 0; i < 3 && (float) i < cr.getHeight() - 4.0f; ++i)
+            appendQuad (v, { cr.getX() + 2.0f, cr.getY() + 2.0f + (float) i, (float) cr.getWidth() - 4.0f, 1.0f },
+                        PinkXP::content.interpolatedWith (PinkXP::dark, alphas[i]));
+        // 外 1px 深色切边
+        appendQuad (v, { cr.getX(), cr.getY(), (float) cr.getWidth(), 1.0f }, PinkXP::dark);
+        appendQuad (v, { cr.getX(), cr.getBottom() - 1.0f, (float) cr.getWidth(), 1.0f }, PinkXP::dark);
+        appendQuad (v, { cr.getX(), cr.getY(), 1.0f, (float) cr.getHeight() }, PinkXP::dark);
+        appendQuad (v, { cr.getRight() - 1.0f, cr.getY(), 1.0f, (float) cr.getHeight() }, PinkXP::dark);
+        // 内 1px：左上阴影 / 右下高光
+        appendQuad (v, { cr.getX() + 1.0f, cr.getY() + 1.0f, (float) cr.getWidth() - 2.0f, 1.0f }, PinkXP::shdw);
+        appendQuad (v, { cr.getX() + 1.0f, cr.getY() + 1.0f, 1.0f, (float) cr.getHeight() - 2.0f }, PinkXP::shdw);
+        appendQuad (v, { cr.getX() + 1.0f, cr.getBottom() - 2.0f, (float) cr.getWidth() - 2.0f, 1.0f }, lit);
+        appendQuad (v, { cr.getRight() - 2.0f, cr.getY() + 1.0f, 1.0f, (float) cr.getHeight() - 2.0f }, lit);
+        return;
+    }
+
     appendQuad (v, cr, PinkXP::content);
     appendQuad (v, { cr.getX(), cr.getY(), (float) cr.getWidth(), 2.0f }, PinkXP::dark);
     appendQuad (v, { cr.getX(), cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::dark);

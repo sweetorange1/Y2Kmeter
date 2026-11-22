@@ -95,6 +95,10 @@ Thumbs.db
 /test_tools/projectm_native/vcpkg/
 /test_tools/*.zipnul
 
+# Steam 发布本地脚本 / 公告草稿（含 Steam 账号、本地绝对路径，只本地保留）
+/steam_upload_*.ps1
+/docs/STEAM_ANNOUNCE_*.md
+
 # Windows reserved device names (cannot be tracked by git)
 nul
 tools/milkdrop_tester/nul

@@ -21,11 +21,11 @@
 
 ## 4. 事件驱动与线程
 
-- **事件驱动不可靠时加兜底**：mouseEnter/Exit 可能因焦点切换/多屏/DPI 变化丢失，叠加 timer 轮询、多层监听。
+- **事件驱动不可靠时加兜底**：mouseEnter/Exit 可能因焦点切换/多屏/DPI 变化丢失，叠加 timer 轮询、多层订阅。
 - **异步事件需要计时器窗口保护**：`setBounds()` 产生的异步 WM_SIZE/mouse 事件在回调返回后才抵达，同步 `bool` 挡不住，用计数器 + timer 递减覆盖窗口期。
 - **浮动态（pop-out）模块 = CPU 软件路径，高频重绘必须限流**：模块脱离后不在 Editor 组件树里，GL 直渲染不再覆盖它，每帧都是消息线程上的整区软件光栅化；再叠加高频鼠标事件（高回报率鼠标拖拽可达数百 Hz）就会把消息线程打满，症状是**整个进程**卡顿而不只是该模块掉帧。统一入口是 `ModulePanel::repaintFrameContent / repaintHover`（浮动态限流，见 rendering-gl.md §1），新写跟随鼠标的绘制不要直接 `repaint()`。
 - **节流必须带"最后一帧补齐"**：只按时间窗口丢弃重绘，拖拽停下的瞬间会丢掉最后一次事件，UI 定格在上一帧位置（悬停十字线尤其明显）。做法是累积区域 + 一次 `juce::Timer::callAfterDelay` 补发（见 `ModulePanel::repaintHover`）。
-- **头文件合并绕过 MSVC include-guard 串扰**：多类合并到同一头（`AnalyserHub.h`、`ModuleWorkspace.h`），不要拆散（详见 PROJECT_OVERVIEW.md §6.1）。
+- **头文件合并避免 MSVC include-guard 串扰**：多类合并到同一头（`AnalyserHub.h`、`ModuleWorkspace.h`），不要拆散（详见 PROJECT_OVERVIEW.md §6.1）。
 - **音频线程约束**：`pushStereo`/`processBlock`/`registerLoopbackRenderTime` 必须无锁/无堆分配/无系统调用（详见 PROJECT_OVERVIEW.md §6.3）。
 
 ## 5. 全量构建 / 枚举 / 类布局
@@ -35,3 +35,9 @@
 ## 6. 版本号同步
 
 - 升版本要同步 CMakeLists（3 处）+ `.iss` + `PluginEditor.cpp`（3 处字面量）+ README 徽章 + 文档（详见 build-toolchain.md §3）。
+
+## 7. 文本与字体
+
+- **JUCE 的 `getBounds()` 是"行框"不是"墨迹"**：`GlyphArrangement::getBoundingBox()` / `PositionedGlyph::getBounds()` 返回 `advance 宽 × (ascent + descent)`。用它做垂直居中等于按行框居中 —— `_` 永远贴底、`*` 永远顶天。要真实墨迹必须 `PositionedGlyph::createPath(path)` 后取 `path.getBounds()`。
+- **像素级手调偏移只在"单一字体"前提下成立**：`translate(0, -1)` 这类补偿是按某一套字体调的，换字体/换皮肤就变成新的偏差。跨字体统一走实测字形带（`PinkXP::FontOptics`，见 rendering-gl.md §5）。
+- **"默认皮肤零回归"的做法**：把基准字体（Silkscreen）的现行视觉位置当成 0 点，其它字体向它对齐，而不是给所有字体（含默认）重新定一套绝对值。

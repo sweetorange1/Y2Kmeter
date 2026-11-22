@@ -16,6 +16,8 @@
 | 0004 | `juce_OpenGLGraphicsContext.cpp` | mac 下 VBO orphaning（先 `glBufferData(nullptr)` 再 `glBufferSubData`），避免驱动隐式同步卡顿 | v3.0.2（mac 性能） |
 | 0005 | `juce_OpenGLContext.h/.cpp` | 新增 `OpenGLContext::setComponentRepaintsPacedToDisplay()`（仅 mac）：组件 repaint 合并到下一个 CVDisplayLink 刷新再出帧。显示器刷新信号超过 100ms 没来时自动退回立即渲染 | v3.0.2（mac 性能） |
 | 0006 | `juce_OpenGLContext.h/.cpp`、`juce_OpenGLRenderer.h` | `OpenGLContext::takeRenderStats()`：渲染线程分段耗时（sleep / 锁等待 / renderOpenGL / paintComponent / 合成 / swap / 重绘面积）；`OpenGLRenderer::renderOpenGLPreLock()`（仅 Windows 调用）：在拿消息锁之前执行，Editor 用它在锁外渲染 projectM，让消息线程与 GL 并行 | Win 性能优化 |
+| 0007 | `juce_OpenGLGraphicsContext.cpp` | 渐变填充的颜色表纹理按"颜色停靠点"复用，并挂在 OpenGLContext 的关联对象上跨帧保留（原实现每次换填充都重新生成并上传 256×1 纹理，每帧还会删光重建）。全平台生效 | v3.4.x（性能） |
+| 0008 | `juce_OpenGLContext.h/.cpp` | 新增 `OpenGLContext::triggerRepaintPacedToDisplay()`：显式出帧请求也走 0005 的按刷新合并（mac）；其它平台等同 `triggerRepaint()`。Milkdrop 嵌入态逐帧出帧请求改用它 | v3.4.x（mac 性能） |
 
 ## 升级 JUCE 时
 

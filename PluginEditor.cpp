@@ -1,4 +1,4 @@
-#include "PluginEditor.h"
+﻿#include "PluginEditor.h"
 #include <JuceHeader.h>
 #include <array>
 #include <chrono>
@@ -26,6 +26,8 @@
 #include "source/ui/modules/TempoKeyModule.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/RecorderModule.h"
+#include "source/ui/modules/SystemMonitorModule.h"
+#include "source/ui/modules/UtilityModule.h"
 #include "source/ui/modules/MilkdropModule.h"
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
@@ -1051,8 +1053,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.2.0 debug"
-                                                                               : "v3.2.0"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.4.5 debug"
+                                                                               : "v3.4.5"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1094,7 +1096,7 @@ public:
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.2.0";
+        const juce::String versionBase = "v3.4.5";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -1119,31 +1121,36 @@ public:
         // chrome 隐藏态：文字淡淡贴在底图上，hover 时略亮并加下划线
         const float textAlpha = titleTextHovered ? 0.95f : 0.55f;
 
+        // 跨字体光学居中（与 drawTitleBar 同一个口径）
+        const int nameDy    = juce::roundToInt (PinkXP::opticalNudge (nameFont));
+        const int versionDy = juce::roundToInt (PinkXP::opticalNudge (versionFont));
+        const int urlDy     = juce::roundToInt (PinkXP::opticalNudge (urlFont));
+
         // 文字描边（1px 阴影），帮助文字在任何底图上都可读
         g.setColour (juce::Colours::white.withAlpha (textAlpha * 0.6f));
         g.setFont (nameFont);
-        g.drawText (y2k::tr (nameText), x0 + 1, y + 1, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0 + 1, y + nameDy + 1, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (y2k::tr (versionText), x0 + nameW + gap1 + 1, y + 1, versionW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionText), x0 + nameW + gap1 + 1, y + versionDy + 1, versionW, h, juce::Justification::centredLeft, false);
         g.setFont (urlFont);
-        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2 + 1, y + 1, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2 + 1, y + urlDy + 1, urlW, h, juce::Justification::centredLeft, false);
 
         // 主文字（墨色）
         g.setColour (PinkXP::ink.withAlpha (textAlpha));
         g.setFont (nameFont);
-        g.drawText (y2k::tr (nameText), x0, y, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0, y + nameDy, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (y2k::tr (versionBase), x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionBase), x0 + nameW + gap1, y + versionDy, versionBaseW, h, juce::Justification::centredLeft, false);
         if (versionTagW > 0)
         {
             // " debug" 用强调色（hover 时更亮），一眼能认出诊断包
             g.setColour (PinkXP::warn.withAlpha (juce::jmax (0.75f, textAlpha)));
-            g.drawText (y2k::tr (versionTag), x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
+            g.drawText (y2k::tr (versionTag), x0 + nameW + gap1 + versionBaseW, y + versionDy, versionTagW, h,
                         juce::Justification::centredLeft, false);
             g.setColour (PinkXP::ink.withAlpha (textAlpha));   // 恢复 url 文字颜色
         }
         g.setFont (urlFont);
-        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2, y + urlDy, urlW, h, juce::Justification::centredLeft, false);
 
         if (titleTextHovered)
         {
@@ -1166,12 +1173,9 @@ public:
         else
             PinkXP::drawRaised  (g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
 
-        g.setColour (PinkXP::ink);
-        g.setFont   (PinkXP::SymbolGlyphs::iconFont (12.0f, juce::Font::bold));
         auto cbText = cb;
-        cbText.translate (-1, -1);
         if (closeButtonPressed) cbText.translate (1, 1);
-        g.drawText (y2k::tr ("x"), cbText, juce::Justification::centred, false);
+        PinkXP::SymbolGlyphs::drawIconGlyph (g, "x", cbText, 12.0f, PinkXP::ink, -1, -1);
     }
 
     int getCachedTitleTextWidth() const noexcept { return cachedTitleTextW; }
@@ -1799,7 +1803,13 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         ModuleType::tempoKey,
 
         // 录音机（红点录制 pre-gain 原始输入，保存 32-bit float WAV）
-        ModuleType::recorder
+        ModuleType::recorder,
+
+        // v3.3：电脑状态（CPU / GPU / 温度 / 内存 / 网络…，后台线程采集系统公开计数器）
+        ModuleType::systemMonitor,
+
+        // v3.3：小工具（计算器 / 取色器 / 秒表 / 倒计时 / 音频换算 / 时钟 / 便签）
+        ModuleType::utility
     });
 
 #if JUCE_WINDOWS
@@ -2286,6 +2296,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     PinkXP::ThemeLibrary::instance().ensureLoadedFromLibraryFile();
 
     // 订阅主题变更 → 切主题后刷新全局重绘
+    // 绿幕风格：Editor 自身（标题栏 / 工具栏 / 空白桌面）是一个悬停显示区域
+    PinkXP::markChromaRegion (*this);
+
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
         Y2K_LOG ("[palette] editor theme callback: invalidate desktop cache");
@@ -2300,6 +2313,19 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         for (auto& wnd : floatingWindows_)
             if (wnd != nullptr)
                 wnd->refreshThemeColours();
+
+        // 视觉风格切换后字体也要换（像素 / 矢量 / 等宽终端字体）：广播期间不能
+        //   再嵌套广播，异步走与切语言相同的"换字体 + 刷新布局"流程。
+        if (PinkXP::activeTypefaceStale())
+        {
+            juce::Component::SafePointer<juce::Component> safe (this);
+            juce::MessageManager::callAsync ([safe]
+            {
+                if (auto* self = dynamic_cast<Y2KmeterAudioProcessorEditor*> (safe.getComponent()))
+                    if (PinkXP::activeTypefaceStale())
+                        self->applyLanguageChange();
+            });
+        }
     });
 
     // 应用默认主题（会把全局配色重写一次，确保状态一致）
@@ -2776,6 +2802,8 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     customTypeface = nullptr;
     // 同理释放按界面语言加载的字体缓存（Silkscreen / 中文像素字体等）
     PinkXP::releaseTypefaceCache();
+    // 绿幕悬停轮询定时器（进程级静态对象）：不能拖到 DLL 卸载期再析构
+    PinkXP::releaseChromaHoverTracker();
 
     // 3.1) 关键：清空 PinkXPStyle 的桌面纹理缓存（getSharedDesktopTexture）。
     //
@@ -3188,6 +3216,46 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
     //   与 enterStickMode 的处理保持一致（那里也是先退全屏再备份几何）。
     if (pseudoFullScreen)
         toggleFakeFullScreen();
+
+    // bug4：macOS 原生全屏 → 切到"非全屏磁贴预设"时必须先退出全屏。
+    //   否则全屏磁贴预设锁死的 resizeLimits（min=max=整屏尺寸）会把后面
+    //   setSize(960×640) / 横条高度全部夹回去，窗口保持全屏、只有模块被换掉。
+    //   退出动画是异步的：轮询到真正离开全屏后再重新进入本函数。
+   #if JUCE_MAC
+    if (! isFullScreenTilePreset (presetId)
+        && juce::JUCEApplicationBase::isStandaloneApp())
+    {
+        if (auto* rw = dynamic_cast<juce::ResizableWindow*> (getTopLevelComponent()))
+        {
+            if (rw->isFullScreen())
+            {
+                rw->setFullScreen (false);
+
+                juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> self (this);
+                juce::Timer::callAfterDelay (80, [self, presetId] { continueLayoutPresetAfterFullScreenExit (self, presetId, 40); });
+                return;
+            }
+        }
+    }
+   #endif
+
+    // 切换预设前统一放开尺寸限制：全屏磁贴预设会把 Editor / 顶层窗口的 limits
+    //   锁死到整屏尺寸，不解开会把非全屏预设的 setSize 夹回去（bug4 的另一半）。
+    //   各预设分支随后会按自己的目标尺寸重新设置 limits。
+    {
+        if (auto* ec = getConstrainer())
+            setResizeLimits (juce::jmax (1, ec->getMinimumWidth()),
+                             juce::jmax (1, ec->getMinimumHeight()),
+                             juce::jmax (ec->getMaximumWidth(),  8000),
+                             juce::jmax (ec->getMaximumHeight(), 8000));
+
+        if (auto* top = getTopLevelComponent())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+                if (auto* wc = rw->getConstrainer())
+                    rw->setResizeLimits (juce::jmax (1, wc->getMinimumWidth()),
+                                         juce::jmax (1, wc->getMinimumHeight()),
+                                         32768, 32768);
+    }
 
     // 保存所有 VirtuPet 模块的状态（切换预设时保留，不被清除）
     struct VirtuPetState { juce::String roleName; float hunger; float health; };
@@ -4088,6 +4156,28 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
    #endif
 }
 
+// bug4：等待 macOS 退出原生全屏（异步动画）后重新应用预设。
+//   triesLeft × 80ms ≈ 最长 3.2s 的等待，覆盖系统动画 / 慢机器。
+void Y2KmeterAudioProcessorEditor::continueLayoutPresetAfterFullScreenExit (
+    juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> self,
+    int presetId, int triesLeft)
+{
+    if (self == nullptr)
+        return;
+
+    if (auto* rw = dynamic_cast<juce::ResizableWindow*> (self->getTopLevelComponent()))
+        if (rw->isFullScreen() && triesLeft > 0)
+        {
+            juce::Timer::callAfterDelay (80, [self, presetId, triesLeft]
+            {
+                continueLayoutPresetAfterFullScreenExit (self, presetId, triesLeft - 1);
+            });
+            return;
+        }
+
+    self->applyLayoutPreset (presetId);
+}
+
 // ----------------------------------------------------------
 // 布局预设辅助：把顶层窗口调整到目标尺寸并返回对齐后的 canvas
 //   · 居中于当前屏幕 userArea（standalone）或仅调整 Editor 尺寸（插件）
@@ -4288,6 +4378,12 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
 
         case ModuleType::recorder:
             return std::make_unique<RecorderModule>(processor.getAnalyserHub());
+
+        case ModuleType::systemMonitor:
+            return std::make_unique<SystemMonitorModule>();
+
+        case ModuleType::utility:
+            return std::make_unique<UtilityModule>();
 
         default:
             jassertfalse; // 暂未实现
@@ -4540,9 +4636,11 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
     cacheGraphics.drawImageAt (sharedBase, 0, 0);
     // drawLogo 期望 area 是"目标绘制矩形"，而 cache Image 以 (0,0) 起点，
     // 因此传递一个左上角为 (0,0) 的等尺寸矩形。
-    PinkXP::drawLogo (cacheGraphics,
-                      juce::Rectangle<int>(0, 0, bounds.getWidth(), bounds.getHeight()),
-                      logoImage);
+    //   绿幕风格：桌面只留纯绿，不叠 logo
+    if (! PinkXP::isChromaKeySkin())
+        PinkXP::drawLogo (cacheGraphics,
+                          juce::Rectangle<int>(0, 0, bounds.getWidth(), bounds.getHeight()),
+                          logoImage);
 }
 
 // ----------------------------------------------------------
@@ -4577,7 +4675,8 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
             else
             {
                 PinkXP::drawDesktop (g, getLocalBounds());
-                PinkXP::drawLogo    (g, wsBounds, logoImage);
+                if (! PinkXP::isChromaKeySkin())
+                    PinkXP::drawLogo (g, wsBounds, logoImage);
             }
         }
     }
@@ -4590,8 +4689,20 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
     //      "Y2Kmeter v1.1 iisaacbeats.cn"文字；不画右侧最小化/固定/关闭按钮
     //      （宿主窗口已经提供系统级边框/关闭按钮，伪按钮会产生两套 UI 打架）。
     //    · Hide 态：标题栏不占位；悬停浮层时由 paintOverChildren 画在模块之上。
+    //    · 绿幕风格：鼠标不在 Editor chrome 上时整条标题栏（含下沿分割线）纯绿。
     if (! chromeDim)
-        drawTitleBar (g);
+    {
+        if (PinkXP::isChromaKeySkin() && ! PinkXP::isChromaRevealed (*this))
+        {
+            const auto tb = getTitleBarBounds();
+            g.setColour (PinkXP::chromaKeyGreen());
+            g.fillRect (tb.withHeight (tb.getHeight() + 1));
+        }
+        else
+        {
+            drawTitleBar (g);
+        }
+    }
     // chrome 隐藏态（未悬停）的浮动关闭按钮 + 抬头文字由 ChromeHiddenOverlay 处理
 }
 
@@ -4620,7 +4731,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.2.0";
+        const juce::String versionBase = "v3.4.5";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -4642,31 +4753,37 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         const int h  = textArea.getHeight();
         const int x0 = textArea.getX();
 
+        // 跨字体光学居中（见 PinkXP::FontOptics）：三种字号各自按字形带修正；
+        //   像素复古的修正量 < 0.5px，四舍五入后为 0 → 旧外观逐像素不变。
+        const int nameDy    = juce::roundToInt (PinkXP::opticalNudge (nameFont));
+        const int versionDy = juce::roundToInt (PinkXP::opticalNudge (versionFont));
+        const int urlDy     = juce::roundToInt (PinkXP::opticalNudge (urlFont));
+
         // 文字阴影（1,1）
         g.setColour (PinkXP::sel.darker(0.55f));
         g.setFont (nameFont);
-        g.drawText (y2k::tr (nameText), x0 + 1, y + 1, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0 + 1, y + nameDy + 1, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (y2k::tr (versionText), x0 + nameW + gap1 + 1, y + 1, versionW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionText), x0 + nameW + gap1 + 1, y + versionDy + 1, versionW, h, juce::Justification::centredLeft, false);
         g.setFont (urlFont);
-        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2 + 1, y + 1, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2 + 1, y + urlDy + 1, urlW, h, juce::Justification::centredLeft, false);
 
         // 主文字（白色）
         g.setColour (PinkXP::selInk);
         g.setFont (nameFont);
-        g.drawText (y2k::tr (nameText), x0, y, nameW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (nameText), x0, y + nameDy, nameW, h, juce::Justification::centredLeft, false);
         g.setFont (versionFont);
-        g.drawText (y2k::tr (versionBase), x0 + nameW + gap1, y, versionBaseW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (versionBase), x0 + nameW + gap1, y + versionDy, versionBaseW, h, juce::Justification::centredLeft, false);
         if (versionTagW > 0)
         {
             // " debug" 用强调色，方便一眼认出诊断包
             g.setColour (PinkXP::warn);
-            g.drawText (y2k::tr (versionTag), x0 + nameW + gap1 + versionBaseW, y, versionTagW, h,
+            g.drawText (y2k::tr (versionTag), x0 + nameW + gap1 + versionBaseW, y + versionDy, versionTagW, h,
                         juce::Justification::centredLeft, false);
             g.setColour (PinkXP::selInk);   // 恢复后续 url 文字颜色
         }
         g.setFont (urlFont);
-        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2, y, urlW, h, juce::Justification::centredLeft, false);
+        g.drawText (y2k::tr (urlText), x0 + nameW + gap1 + versionW + gap2, y + urlDy, urlW, h, juce::Justification::centredLeft, false);
 
         // hover 时在可点击区域（name + version + url 整段）画下划线
         if (titleTextHovered)
@@ -4680,8 +4797,8 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         // 缓存实际绘制宽度，供 mouseMove / mouseDown 精确命中（参考 titleTextHovered）
         cachedTitleTextW = nameW + gap1 + versionW + gap2 + urlW;
 
-        // 标题栏下沿 1px 深色分割线（与 ModulePanel 视觉一致）
-        g.setColour (PinkXP::dark);
+        // 标题栏下沿 1px 分割线（与 ModulePanel 视觉一致；霓虹风格下换成灯管亮色）
+        g.setColour (PinkXP::titleBarDividerColour());
         g.fillRect (tb.getX(), tb.getBottom(), tb.getWidth(), 1);
 
         // 3) 右上角三个按钮（从右到左：关闭 × / 固定 ★ / 最小化 _ ）
@@ -4703,13 +4820,15 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
                 else
                     PinkXP::drawRaised  (g, rc, hovered ? PinkXP::pink200 : PinkXP::btnFace);
 
-                g.setColour (PinkXP::ink);
-                // 图标字符（L / _ / * / x）：恒用英文 UI 字体，不随语言切换变样
-                g.setFont   (PinkXP::SymbolGlyphs::iconFont (fontHeight, juce::Font::bold));
+                // 图标字符（L / _ / * / x）：恒用英文 UI 字体，不随语言切换变样。
+                //   bug2：drawText 的 centred 是按字体行框居中的，切风格换字体后
+                //   （Orbitron / Exo 2 / VT323 / Open Sans ... 的 x-height / descent
+                //   比例差别很大）字符会整体上下跑位。改由 drawIconGlyph 按字形
+                //   墨迹包围盒居中；像素复古风格内部仍走旧路径 + 旧偏移，外观不变。
                 auto txt = rc;
-                txt.translate (glyphDxWhenIdle, glyphDyWhenIdle);
                 if (pressed || activeLatched) txt.translate (1, 1);
-                g.drawText (y2k::tr (glyph), txt, juce::Justification::centred, false);
+                PinkXP::SymbolGlyphs::drawIconGlyph (g, glyph, txt, fontHeight, PinkXP::ink,
+                                                     glyphDxWhenIdle, glyphDyWhenIdle);
             };
 
             // 3a-lock) 布局锁定按钮（v1.8.3 新增）："L" 作为 Lock 的助记符号
@@ -9997,7 +10116,10 @@ void Y2KmeterAudioProcessorEditor::RequestGlFrame()
   if (editorBeingDestructed || !openGLContext.isAttached())
     return;
 
-  openGLContext.triggerRepaint();
+  // mac：与组件重绘一起合并到下一个显示器刷新再出帧（JUCE 补丁 0005）。
+  //   直接 triggerRepaint 会立即唤醒 GL 线程，与随后到来的组件重绘各出一帧，
+  //   60Hz 屏上 GL 跑到 ~80 帧/秒，多出来的帧全是浪费。Windows 上等同 triggerRepaint。
+  openGLContext.triggerRepaintPacedToDisplay();
 }
 
 void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {

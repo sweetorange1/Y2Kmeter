@@ -646,9 +646,29 @@ public:
                 {
                     if ((int) t.id == savedThemeRaw) { targetId = t.id; break; }
                 }
+
+                // 官方预设的装饰覆盖（桌面纹理 / 标题图标；缺键 / -1 = 预设原样）
+                {
+                    auto& s = getUserSettings();
+                    const int pat = s.getIntValue ("ui.presetPattern", -1);
+                    PinkXP::PresetDecor decor;
+                    if (pat >= 0 && pat <= (int) y2kpal::Pattern::PixelFlower)
+                    {
+                        decor.active         = true;
+                        decor.id             = targetId;
+                        decor.pattern        = (y2kpal::Pattern) pat;
+                        decor.titleIconIndex = s.getIntValue ("ui.presetIcon", -1);
+                    }
+                    PinkXP::setPresetDecor (decor);
+                }
+
                 PinkXP::applyTheme (targetId);
                 Y2K_LOG ("[boot] preset theme applied");
             }
+
+            // 视觉风格（与颜色主题正交；缺键 = 像素复古，旧存档外观不变）
+            PinkXP::applySkin (PinkXP::skinFromInt (
+                getUserSettings().getIntValue ("ui.skinId", (int) PinkXP::SkinId::pinkXP)));
             Y2K_LOG ("[boot] 1.15 theme restore done");
         }
 
@@ -871,6 +891,7 @@ public:
                     });
                 }
                #endif
+
             });
         }
 
@@ -1157,6 +1178,15 @@ private:
         //   可能低于旧阈值，旧逻辑会把完全合法的存档当损坏直接丢弃。
         if (w < 64 || h < 32 || w > 32768 || h > 32768) return false;
 
+       #if JUCE_MAC
+        // bug3：本次启动会进入原生全屏时，不按存档的小窗口尺寸恢复 ——
+        //   旧存档里可能留着"进全屏前"的尺寸（甚至是残缺的条状高度），
+        //   先恢复成小窗口再进全屏会让布局/画面闪一下，且全屏下几何无意义。
+        //   全屏尺寸由系统的 setFullScreen 决定（restorePseudoFullScreen 之后）。
+        if (s.getBoolValue ("window.nativeFullScreen", false))
+            return false;
+       #endif
+
         juce::Rectangle<int> target (x, y, w, h);
 
         const auto& disp = juce::Desktop::getInstance().getDisplays();
@@ -1278,7 +1308,31 @@ private:
         //     窗口上屏后按该值重新进入原生全屏。
         const bool wasNativeFullScreen = mainWindow->isFullScreen();
         getUserSettings().setValue ("window.nativeFullScreen", wasNativeFullScreen ? 1 : 0);
-        if (wasNativeFullScreen) return;
+
+        // ★ bug3 修复：全屏中退出时，模块布局是按"整屏 canvas"存的，几何也必须存
+        //   同一尺寸 —— 旧实现只跳过几何写入、保留上一次的普通窗口尺寸，重启后
+        //   先按小窗口恢复布局（所有模块被挤到上方 / 露不全），再进全屏。
+        //   现在把当前（全屏）几何一并落盘：重启→恢复同尺寸窗口→布局坐标一致
+        //   → 350ms 后进入原生全屏，画面与退出前完全一致。
+        //   注意：全屏态不做下面的 hide 反算（全屏下 setAutoHideMode 不收缩窗口）。
+        if (wasNativeFullScreen)
+        {
+            const auto b = mainWindow->getBounds();
+            if (b.getWidth() >= 64 && b.getHeight() >= 32)
+            {
+                auto& s = getUserSettings();
+                s.removeValue ("window.x");
+                s.removeValue ("window.y");
+                s.removeValue ("window.w");
+                s.removeValue ("window.h");
+                s.setValue ("window.x", b.getX());
+                s.setValue ("window.y", b.getY());
+                s.setValue ("window.w", b.getWidth());
+                s.setValue ("window.h", b.getHeight());
+            }
+            getUserSettings().setValue ("window.fullscreen", 0);
+            return;
+        }
        #endif
 
         // 若窗口已经被 hide（shutdown 阶段的二次调用），跳过 —— 真正的 save
@@ -1404,6 +1458,7 @@ private:
             "ui.fftSize",
             "ui.toyLevel",
             "ui.themeId",
+            "ui.skinId",
             "audio.sourceId",
             "milkdrop.currentPreset",
             "filterState",     // 插件状态（EQ/布局 XML）— 保证用当前值重写
@@ -1531,6 +1586,13 @@ private:
         //    后续我们要做的物理覆盖不会被 PropertiesFile 的析构 flush 抢跑。
         props->saveIfNeeded();
 
+        // 1.5) 覆盖前备份当前 settings：万一导入的存档是坏的 / 解析不了，
+        //      用它把磁盘和内存一起还原，避免"存档坏了还照常重启"。
+        //      TemporaryFile 析构时自动删除，不会在用户目录留下垃圾；
+        //      临时名不带 .settings 后缀，也不会被 Steam Auto-Cloud 同步。
+        juce::TemporaryFile backup (dest);
+        const bool hasBackup = dest.copyFileTo (backup.getFile());
+
         // 2) 物理覆盖 settings 文件
         const bool ok = src.copyFileTo (dest);
         if (! ok)
@@ -1539,8 +1601,51 @@ private:
             return;
         }
 
+        // 2.5) ★ 关键：把内存里的 PropertiesFile 也同步成刚导入的存档。
+        //   只做物理覆盖是不够的 —— 本次退出路径里还有几处会写 settings：
+        //     · StandalonePluginHolder 析构 → shutDownAudioDevices()
+        //       → saveAudioDeviceState() 写 audioSetup / shouldMuteInput；
+        //     · shutdown() 里 y2k::ach::detach() 写成就累计值；
+        //     · 紧随其后的 appProperties.saveIfNeeded()（PropertiesFile 析构
+        //       也会 flush 一次）。
+        //   这些写入都是"把内存中的整份属性表落盘"，而内存里此刻还是**导入前**
+        //   的旧运行时状态 → 刚 copy 进去的存档被原样盖回去，用户重启后看到的
+        //   仍是旧界面（布局 / 主题 / 窗口全部没变）。
+        //   reload() 让内存与刚导入的文件一致（存档里的 key 覆盖内存值），
+        //   之后这些善后写入只会补上 audioSetup 等与本机相关的键。
+        //   ★ 注意 JUCE 的 reload() 是"合并"而不是"替换"（loadAsXml 只 set 不
+        //     clear）：存档里缺失的 key 会保留内存旧值。对完整导出的存档没有
+        //     影响，但不要据此认为内存与文件逐 key 相等。
+        if (! props->reload())
+        {
+            // 存档解析失败：把磁盘还原成导入前的文件，内存仍是导入前的旧表
+            //（reload 失败不会清空内存），随后中止本次导入 —— 不重启、不退出。
+            DBG ("handleImportSettings: settings reload failed; rolling back → "
+                 + dest.getFullPathName());
+
+            bool rolledBack = false;
+            if (hasBackup)
+                rolledBack = backup.getFile().copyFileTo (dest) && props->reload();
+
+            if (! rolledBack)
+            {
+                // 没有可用备份：至少把内存旧表写回，别在磁盘上留一个坏文件。
+                props->setNeedsToBeSaved (true);
+                props->saveIfNeeded();
+            }
+
+            return;
+        }
+
+        // 2.6) 成就累计值同样来自 settings（steam.runtimeSeconds / steam.preset*）。
+        //      y2k::ach 在 initialise() 时只读一次并缓存在内存里，reload() 不会碰
+        //      到它；不重新 attach 的话，退出时 detach() 会把**导入前**的进度写
+        //      回去，把存档里的数值覆盖掉（界面正常但成就进度回退）。
+        y2k::ach::attach (*props);
+
         // 3) 锁死 persistAllSettings / 任何后续 flushCurrentStateToDisk ——
-        //    不让关闭路径把当前内存运行时状态再写回去覆盖刚导入的文件。
+        //    不让关闭路径把当前内存运行时状态（尤其是 filterState 布局 XML）
+        //    再写回去覆盖刚导入的文件。
         alreadyPersisted = true;
 
         // 4) 启动一个新的自己（独立进程），然后 quit 当前进程 ——
@@ -1624,6 +1729,16 @@ private:
         //   · 主题在运行时被 ThemeSwatchBar::mouseDown → PinkXP::applyTheme 修改；
         //     这里只是在退出前快照一次 gCurrentThemeId。
         s.setValue ("ui.themeId", (int) PinkXP::getCurrentThemeId());
+        s.setValue ("ui.skinId",  (int) PinkXP::getCurrentSkin());
+
+        // 官方预设的装饰覆盖（调色工作室在预设下改的桌面纹理 / 标题图标）
+        {
+            const auto decor = PinkXP::getPresetDecor();
+            const bool keep  = decor.active && ! PinkXP::isCustomThemeActive()
+                            && decor.id == PinkXP::getCurrentThemeId();
+            s.setValue ("ui.presetPattern", keep ? (int) decor.pattern : -1);
+            s.setValue ("ui.presetIcon",    keep ? decor.titleIconIndex : -1);
+        }
 
         // 若当前为自定义主题，保存：
         //   · 旧键双色（向后兼容降级）

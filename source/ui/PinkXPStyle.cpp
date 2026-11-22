@@ -1,5 +1,6 @@
-#include "source/ui/PinkXPStyle.h"
+﻿#include "source/ui/PinkXPStyle.h"
 #include "BinaryData.h"
+#include "Y2KSkinFontData.h"
 #include "source/i18n/Localisation.h"
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/ui/palette/PaletteGenerator.h"
@@ -11,10 +12,13 @@
 #include <juce_opengl/juce_opengl.h>
 
 #include <unordered_map>
+#include <algorithm>
+#include <iterator>
 #include <map>
 #include <tuple>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 
 // ==========================================================
 // PinkXPStyle.cpp —— 像素风配色/绘制/LookAndFeel 的实现
@@ -28,11 +32,18 @@ namespace
 }
 
 // ==========================================================
-// 字体配置：英文默认 Silkscreen-Regular.ttf；其它界面语言按语言包 @font 切换
+// 字体配置：按视觉风格（Skin）选英文字体；其它界面语言按语言包 @font 切换，
+//   中文在非像素风格下改用 Noto Sans SC（见 loadActiveTypeface）
 // ==========================================================
 namespace PinkXP
 {
     static juce::Typeface::Ptr gTypeface;
+
+    // 当前视觉风格（字体选择也依赖它，故定义提前到这里；分派逻辑见下方 Skin 段）
+    static SkinId gCurrentSkin = SkinId::pinkXP;
+
+    // 外观代次（主题 / 皮肤 / 配色任一变化 +1）：整组件位图缓存据此整体失效。
+    static std::atomic<juce::uint32> gAppearanceGeneration { 1 };
 
     // 当前语言字号换算（initCustomTypeface 时从 y2k::i18n 读取）
     static float gFontScale     = 1.0f;
@@ -40,19 +51,124 @@ namespace PinkXP
     static bool  gFontMetricsLoaded = false;
     static std::atomic<juce::uint32> gFontGeneration { 1 };
 
-    // 英文 UI 字体（Silkscreen）的 Typeface —— 装饰符号的渲染基底
+    // 英文 UI 字体（随风格）的 Typeface —— 装饰符号的渲染基底
     //   （SymbolGlyphs 用；releaseTypefaceCache 里与语言字体缓存一起释放）
     static juce::Typeface::Ptr gSymbolTypeface;
+    static juce::String        gSymbolTypefaceId;
 
     // loadActiveTypeface 缓存：fontId → Typeface（同一字体只解析一次；
     //   中文像素字体 12 MB，重复 createSystemTypefaceFor 代价很高）
     static std::vector<std::pair<juce::String, juce::Typeface::Ptr>> gTypefaceCache;
 
+    // ---- 风格字体表 ----
+    //   scale：在语言包 @fontScale 之上再乘的字号系数 —— UI 尺寸按 Silkscreen
+    //   调校，换字体后用它把视觉字高拉回接近（Silkscreen = 1.0，零回归）。
+    //   pixelCjk：中文界面是否继续用语言包像素字（像素复古 / CRT）。
+    struct SkinFontSpec
+    {
+        const char* id;
+        const char* data;
+        int         size;
+        float       scale;
+        bool        pixelCjk;
+    };
+
+    static SkinFontSpec skinFontSpec (SkinId s) noexcept
+    {
+        using namespace Y2KSkinFontData;
+        switch (s)
+        {
+            case SkinId::chrome:      return { "skin:Exo2",     Exo2_ttf,     Exo2_ttfSize,     0.95f, false };
+            case SkinId::modern:      return { "skin:Inter",    Inter_ttf,    Inter_ttfSize,    1.00f, false };
+            case SkinId::glass:       return { "skin:Nunito",   Nunito_ttf,   Nunito_ttfSize,   1.02f, false };
+            case SkinId::neon:        return { "skin:Orbitron", Orbitron_ttf, Orbitron_ttfSize, 0.86f, false };
+            case SkinId::crt:         return { "skin:VT323",    VT323_ttf,    VT323_ttfSize,    1.30f, true  };
+            case SkinId::fluent:      return { "skin:OpenSans", OpenSans_ttf, OpenSans_ttfSize, 0.96f, false };
+            case SkinId::greenScreen: return { "skin:Inter",    Inter_ttf,    Inter_ttfSize,    1.00f, false };
+            case SkinId::pinkXP:
+            default:
+                return { "builtin:Silkscreen", BinaryData::SilkscreenRegular_ttf,
+                         BinaryData::SilkscreenRegular_ttfSize, 1.0f, true };
+        }
+    }
+
+    // 非像素风格的中文字体（Noto Sans SC Regular）：
+    //   CJK 字面约占 Font 高度（ascent+descent = 1.448em）的 63%，比像素字
+    //   （@fontScale 0.85 后约 77%）小，这里放大回接近的视觉字高；
+    //   矢量字体小字号依然清晰，最小字号只做轻度兜底。
+    static constexpr float kCjkSkinFontScale     = 1.12f;
+    static constexpr float kCjkSkinMinFontHeight = 10.0f;
+    static constexpr const char* kCjkSkinFontId  = "skin:NotoSansSC";
+
+    enum class ActiveFontKind { languagePack, skinLatin, skinCjk };
+
+    struct FontChoice
+    {
+        const void*    data = nullptr;
+        size_t         size = 0;
+        juce::String   id;
+        ActiveFontKind kind = ActiveFontKind::skinLatin;
+    };
+
+    static ActiveFontKind gActiveFontKind = ActiveFontKind::languagePack;
+    static SkinId         gLoadedFontSkin = SkinId::pinkXP;
+    static juce::String   gLoadedFontId;
+
+    static bool currentLanguageIsChinese()
+    {
+        return y2k::i18n::getCurrentLanguageCode().startsWithIgnoreCase ("zh");
+    }
+
+    // "当前风格 + 当前语言"应使用的字体
+    static FontChoice chooseActiveFont()
+    {
+        FontChoice c;
+        const auto spec = skinFontSpec (gCurrentSkin);
+
+        if (y2k::i18n::getCurrentFontData (c.data, c.size, c.id))
+        {
+            c.kind = ActiveFontKind::languagePack;
+            if (! spec.pixelCjk && currentLanguageIsChinese())
+            {
+                c.data = Y2KSkinFontData::NotoSansSC_otf;
+                c.size = (size_t) Y2KSkinFontData::NotoSansSC_otfSize;
+                c.id   = kCjkSkinFontId;
+                c.kind = ActiveFontKind::skinCjk;
+            }
+            return c;
+        }
+
+        c.data = spec.data;
+        c.size = (size_t) spec.size;
+        c.id   = spec.id;
+        c.kind = ActiveFontKind::skinLatin;
+        return c;
+    }
+
     static void refreshFontMetricsFromLanguage()
     {
         const auto& lang = y2k::i18n::getCurrentLanguage();
-        gFontScale     = lang.fontScale > 0.0f ? lang.fontScale : 1.0f;
-        gMinFontHeight = lang.minFontHeight;
+        const float langScale = lang.fontScale > 0.0f ? lang.fontScale : 1.0f;
+
+        switch (gActiveFontKind)
+        {
+            case ActiveFontKind::skinCjk:
+                gFontScale     = kCjkSkinFontScale;
+                gMinFontHeight = kCjkSkinMinFontHeight;
+                break;
+
+            case ActiveFontKind::skinLatin:
+                // 英文字体：语言包换算 × 风格字号系数（像素复古 = 1.0，与旧版一致）
+                gFontScale     = langScale * skinFontSpec (gLoadedFontSkin).scale;
+                gMinFontHeight = lang.minFontHeight;
+                break;
+
+            case ActiveFontKind::languagePack:
+            default:
+                gFontScale     = langScale;
+                gMinFontHeight = lang.minFontHeight;
+                break;
+        }
         gFontMetricsLoaded = true;
     }
 
@@ -73,22 +189,15 @@ namespace PinkXP
         getPinkXPLookAndFeel().setDefaultSansSerifTypeface (ptr);
     }
 
-    juce::Typeface::Ptr loadActiveTypeface()
+    static juce::Typeface::Ptr typefaceFromCache (const juce::String& fontId,
+                                                  const void* data, size_t size)
     {
-        const void*  data = nullptr;
-        size_t       size = 0;
-        juce::String fontId;
-
-        if (! y2k::i18n::getCurrentFontData (data, size, fontId))
-        {
-            data   = BinaryData::SilkscreenRegular_ttf;
-            size   = (size_t) BinaryData::SilkscreenRegular_ttfSize;
-            fontId = "builtin:Silkscreen";
-        }
-
         for (auto& kv : gTypefaceCache)
             if (kv.first == fontId)
                 return kv.second;
+
+        if (data == nullptr || size == 0)
+            return nullptr;
 
         auto tf = juce::Typeface::createSystemTypefaceFor (data, size);
         if (tf != nullptr)
@@ -96,9 +205,73 @@ namespace PinkXP
         return tf;
     }
 
+    juce::Typeface::Ptr loadActiveTypeface()
+    {
+        const auto choice = chooseActiveFont();
+
+        gActiveFontKind = choice.kind;
+        gLoadedFontSkin = gCurrentSkin;
+        gLoadedFontId   = choice.id;
+        gFontMetricsLoaded = false;   // 字号换算随字体种类变化，下次取字体时重算
+
+        return typefaceFromCache (choice.id, choice.data, choice.size);
+    }
+
+    bool activeTypefaceStale()
+    {
+        if (gLoadedFontId.isEmpty())
+            return false;   // 还没加载过（Editor 构造的异步加载会按当前风格取）
+
+        // 同一字体但字号系数不同（如 modern ↔ greenScreen 都是 Inter，系数相同；
+        //   像素复古 ↔ CRT 的中文都是语言包字体）也算过期：换算要跟着刷新
+        return chooseActiveFont().id != gLoadedFontId
+            || (gActiveFontKind == ActiveFontKind::skinLatin
+                && skinFontSpec (gLoadedFontSkin).scale != skinFontSpec (gCurrentSkin).scale);
+    }
+
     // 定义见下方（Font 实例缓存 / 静态文本位图缓存）
     static void releaseFontInstanceCache();
     static void releaseStaticTextCache();
+    static void glyphInkCacheClear();   // 字形墨迹缓存（定义见下方 FontOptics 段）
+
+    // ---- 文本光学度量缓存（实现见下方 getFontOptics）----
+    //   键含 typeface 指针，换字体 / 释放 Typeface 时必须清空（见 releaseTypefaceCache），
+    //   否则会拿旧指针做键、甚至命中已析构 Typeface 的度量。
+    namespace
+    {
+        struct FontOpticsKey
+        {
+            const juce::Typeface* typeface = nullptr;
+            int  heightQ = 0;      // 高度量化到 0.05px
+            bool cjk     = false;
+
+            bool operator== (const FontOpticsKey& o) const noexcept
+            {
+                return typeface == o.typeface && heightQ == o.heightQ && cjk == o.cjk;
+            }
+            bool operator< (const FontOpticsKey& o) const noexcept
+            {
+                if (typeface != o.typeface) return typeface < o.typeface;
+                if (heightQ  != o.heightQ)  return heightQ < o.heightQ;
+                return cjk < o.cjk;
+            }
+        };
+
+        // 有意不析构（同其它字体缓存；正常释放走 releaseTypefaceCache）
+        std::map<FontOpticsKey, FontOptics>& fontOpticsCache()
+        {
+            static auto& cache = *new std::map<FontOpticsKey, FontOptics>();
+            return cache;
+        }
+    }
+
+    static void releaseFontOpticsCache()
+    {
+        fontOpticsCache().clear();
+
+        // 字形墨迹缓存（键含 Typeface 指针，定义见下方 glyphInkCache）
+        glyphInkCacheClear();
+    }
 
     void releaseTypefaceCache()
     {
@@ -107,8 +280,16 @@ namespace PinkXP
         //   会以 "mutex lock failed" 终止进程。
         releaseFontInstanceCache();
         releaseStaticTextCache();
+        releaseFontOpticsCache();
         gTypefaceCache.clear();
         gSymbolTypeface = nullptr;
+        gSymbolTypefaceId.clear();
+        gLoadedFontId.clear();
+    }
+
+    juce::uint32 getAppearanceGeneration() noexcept
+    {
+        return gAppearanceGeneration.load();
     }
 
     juce::uint32 getFontGeneration() noexcept
@@ -455,22 +636,14 @@ namespace PinkXP
 
     juce::Typeface::Ptr SymbolGlyphs::getSymbolTypeface()
     {
-        if (gSymbolTypeface != nullptr)
+        // 英文 UI 字体随风格切换：英文界面下与 gTypeface 是同一个缓存对象
+        //   （指针相等 → needsSymbolFont 直接 no-op，零额外字体）
+        const auto spec = skinFontSpec (gCurrentSkin);
+        if (gSymbolTypeface != nullptr && gSymbolTypefaceId == spec.id)
             return gSymbolTypeface;
 
-        // 复用 loadActiveTypeface 的缓存：英文界面下与 gTypeface 是同一个
-        // Typeface 对象（指针相等 → needsSymbolFont 直接 no-op，零额外字体）
-        for (auto& kv : gTypefaceCache)
-            if (kv.first == "builtin:Silkscreen")
-            {
-                gSymbolTypeface = kv.second;
-                return gSymbolTypeface;
-            }
-
-        gSymbolTypeface = juce::Typeface::createSystemTypefaceFor (
-            BinaryData::SilkscreenRegular_ttf, (size_t) BinaryData::SilkscreenRegular_ttfSize);
-        if (gSymbolTypeface != nullptr)
-            gTypefaceCache.emplace_back ("builtin:Silkscreen", gSymbolTypeface);
+        gSymbolTypeface   = typefaceFromCache (spec.id, spec.data, (size_t) spec.size);
+        gSymbolTypefaceId = spec.id;
         return gSymbolTypeface;
     }
 
@@ -531,6 +704,193 @@ namespace PinkXP
         return sym != nullptr && sym != gTypeface;
     }
 
+    // ==========================================================
+    // 文本光学度量 / 居中修正（见头文件 FontOptics 说明）
+    // ==========================================================
+    namespace
+    {
+        // 真实墨迹包围盒（坐标相对基线：上方为负）。
+        //   注意：GlyphArrangement::getBoundingBox / PositionedGlyph::getBounds 返回的是
+        //   **行框**（advance 宽 × ascent+descent），不是字形轮廓 —— 用它做"居中"等于
+        //   按行框居中（_ 依旧贴底、* 依旧顶天）。这里取每个 glyph 的轮廓 Path 再求 bounds，
+        //   才是"眼睛看到的墨迹"。
+        juce::Rectangle<float> glyphInkBounds (const juce::GlyphArrangement& ga)
+        {
+            juce::Path outline;
+            for (const auto& gl : ga)
+                if (! gl.isWhitespace())
+                    gl.createPath (outline);
+
+            return outline.isEmpty() ? juce::Rectangle<float>() : outline.getBounds();
+        }
+
+        juce::Rectangle<float> measureInk (const juce::Font& font, const juce::String& text)
+        {
+            juce::GlyphArrangement ga;
+            ga.addLineOfText (font, text, 0.0f, 0.0f);
+            if (ga.getNumGlyphs() <= 0)
+                return {};
+            return glyphInkBounds (ga);
+        }
+
+        // 单个 glyph 的墨迹缓存（图标按钮每次 paint 都要用；按 typeface + 高度 + 字符缓存）
+        std::map<std::tuple<const juce::Typeface*, int, juce::String>, juce::Rectangle<float>>&
+            glyphInkCache()
+        {
+            static auto& cache = *new std::map<std::tuple<const juce::Typeface*, int, juce::String>,
+                                               juce::Rectangle<float>>();
+            return cache;
+        }
+
+        juce::Rectangle<float> cachedGlyphInk (const juce::Font& font, const juce::String& text)
+        {
+            const auto key = std::make_tuple (font.getTypefacePtr().get(),
+                                              (int) std::lround (font.getHeight() * 20.0f),
+                                              text);
+
+            auto& cache = glyphInkCache();
+            if (auto it = cache.find (key); it != cache.end())
+                return it->second;
+
+            const auto ink = measureInk (font, text);
+            if (cache.size() > 512)
+                cache.clear();
+            return cache.emplace (key, ink).first->second;
+        }
+    }
+
+    static void glyphInkCacheClear()
+    {
+        glyphInkCache().clear();
+    }
+
+    namespace
+    {
+
+        // 字形带在该字体里的位置（相对行框中心，单位 = 行高）。
+        //   = 行框居中时基线的偏移 +(ascent-descent)/2 与字形带中心相对基线的偏移之和；
+        //   正数表示"按行框居中时，字形带落在框中心下方"。
+        float measureBandFactor (const juce::Font& font, bool cjk)
+        {
+            const float h = font.getHeight();
+            if (h <= 0.0f)
+                return 0.0f;
+
+            const float lineHalf = (font.getAscent() - font.getDescent()) * 0.5f;
+            float bandTop = 0.0f, bandBottom = 0.0f;
+
+            if (cjk)
+            {
+                // 方块字带：实测 "国" 的墨迹（CJK 字形占满 em 框，上下沿即字面）
+                const auto ink = measureInk (font, juce::String::charToString ((juce_wchar) 0x56FD));
+                if (! ink.isEmpty())
+                {
+                    bandTop    = ink.getY();
+                    bandBottom = ink.getBottom();
+                }
+            }
+
+            if (bandTop == 0.0f && bandBottom == 0.0f)
+            {
+                // 拉丁字形带：上沿 = 大写高（小写词也按大写字顶对齐 → 基线一致），
+                //   下沿 = 下伸墨迹的一半（无下伸部的词补半格，整排文字不会视觉偏下）
+                const auto capInk  = measureInk (font, "H");
+                const auto descInk = measureInk (font, "g");
+                bandTop    = capInk.isEmpty()  ? -h * 0.70f : capInk.getY();
+                bandBottom = descInk.isEmpty() ?  0.0f      : descInk.getBottom() * 0.5f;
+            }
+
+            return (lineHalf + (bandTop + bandBottom) * 0.5f) / h;
+        }
+
+        // 基准位置：像素复古（Silkscreen）现行的视觉位置。
+        //   拉丁字体一律对齐到它 → 默认皮肤外观零变化，其它字体向像素风看齐。
+        float pixelReferenceFactor()
+        {
+            static const float factor = [] () -> float
+            {
+                using namespace Y2KSkinFontData;
+                auto tf = typefaceFromCache ("builtin:Silkscreen",
+                                             BinaryData::SilkscreenRegular_ttf,
+                                             (size_t) BinaryData::SilkscreenRegular_ttfSize);
+                if (tf == nullptr)
+                    return 0.0f;
+
+                const juce::Font reference (juce::FontOptions (tf).withHeight (200.0f));
+                return measureBandFactor (reference, false);
+            }();
+            return factor;
+        }
+    }
+
+    const FontOptics& getFontOptics (const juce::Font& font)
+    {
+        const FontOpticsKey key {
+            font.getTypefacePtr().get(),
+            (int) std::lround (font.getHeight() * 20.0f),
+            SymbolGlyphs::cjkFontActive()
+        };
+
+        auto& cache = fontOpticsCache();
+        if (auto it = cache.find (key); it != cache.end())
+            return it->second;
+
+        FontOptics o;
+        const float h = font.getHeight();
+
+        o.lineAscent  = font.getAscent();
+        o.lineDescent = font.getDescent();
+
+        const auto capInk  = measureInk (font, "H");
+        const auto descInk = measureInk (font, "g");
+        o.capHeight    = capInk.isEmpty()  ? h * 0.70f : -capInk.getY();
+        o.descenderInk = descInk.isEmpty() ? 0.0f      :  descInk.getBottom();
+
+        o.latinBandTop    = -o.capHeight;
+        o.latinBandBottom =  o.descenderInk * 0.5f;
+        o.cjkBandTop      =  o.latinBandTop;
+        o.cjkBandBottom   =  o.latinBandBottom;
+
+        // 字形带位置（相对行框中心，行高为单位）
+        const float latinFactor = measureBandFactor (font, false);
+        float       cjkFactor   = latinFactor;
+        const bool  cjkFont     = key.cjk;
+
+        if (cjkFont)
+        {
+            const auto cjkInk = measureInk (font, juce::String::charToString ((juce_wchar) 0x56FD));
+            if (! cjkInk.isEmpty())
+            {
+                o.cjkBandTop    = cjkInk.getY();
+                o.cjkBandBottom = cjkInk.getBottom();
+                cjkFactor       = measureBandFactor (font, true);
+            }
+        }
+
+        // 目标位置：
+        //   · 拉丁字体（英文界面）→ 像素复古的现行位置（默认皮肤零回归）；
+        //   · CJK 字体（中文界面）→ 精确居中（方块字是正方形，居中口径无歧义，
+        //     也修掉"中文按钮文字看着偏下"）。
+        //   同一字体只给一个修正量（CJK 字体用方块字带，拉丁字体用拉丁带），
+        //   保证"中英混排的同一行"共享基线，不会各按各的字形带上下跳。
+        const float targetFactor = cjkFont ? 0.0f : pixelReferenceFactor();
+        o.nudge = (targetFactor - (cjkFont ? cjkFactor : latinFactor)) * h;
+
+        return cache.emplace (key, o).first->second;   // std::map：插入不失效已有引用
+    }
+
+    float opticalNudge (const juce::Font& font)
+    {
+        return getFontOptics (font).nudge;
+    }
+
+    juce::Font fitFontToHeight (juce::Font font, float maxHeight)
+    {
+        if (maxHeight > 1.0f && font.getHeight() > maxHeight)
+            font.setHeight (maxHeight);
+        return font;
+    }
+
     juce::Font SymbolGlyphs::getFont (const juce::String& text, float height, int styleFlags)
     {
         const auto base = PinkXP::getFont (height, styleFlags);
@@ -567,6 +927,56 @@ namespace PinkXP
         //   不会得到"当前语言字体"（否则中英文界面图标风格会不一致）。
         juce::ignoreUnused (styleFlags);
         return makeSymbolFont (h);
+    }
+
+    void SymbolGlyphs::drawIconGlyph (juce::Graphics& g,
+                                      const juce::String& glyph,
+                                      juce::Rectangle<int> area,
+                                      float fontHeight,
+                                      juce::Colour colour,
+                                      int pixelSkinDx,
+                                      int pixelSkinDy)
+    {
+        const auto shown = y2k::tr (glyph);
+
+        // 高度上限：图标字不许超出按钮（VT323 这类高行框字体会把 _ * 顶出按钮）。
+        //   +1 容差：像素复古的 iconFont(11)=16.5 落在 16px 按钮里，保持旧观感。
+        const auto font = fitFontToHeight (iconFont (fontHeight, juce::Font::bold),
+                                           (float) area.getHeight() + 1.0f);
+        g.setColour (colour);
+
+        // 像素复古：保持旧版逐像素外观（行框居中 + 调用方手调偏移）
+        if (gCurrentSkin == SkinId::pinkXP)
+        {
+            g.setFont (font);
+            g.drawText (shown, area.translated (pixelSkinDx, pixelSkinDy),
+                        juce::Justification::centred, false);
+            return;
+        }
+
+        // 其它风格：按字形**轮廓墨迹**包围盒居中 —— 与字体 metrics 无关。
+        //   用轮廓而不是 getBoundingBox（行框），否则 _ 还是贴底、* 还是顶天。
+        const auto ink = cachedGlyphInk (font, shown);
+        if (ink.isEmpty())
+        {
+            g.setFont (font);
+            g.drawText (shown, area, juce::Justification::centred, false);
+            return;
+        }
+
+        juce::GlyphArrangement ga;
+        ga.addLineOfText (font, shown, 0.0f, 0.0f);
+        if (ga.getNumGlyphs() <= 0)
+        {
+            g.setFont (font);
+            g.drawText (shown, area, juce::Justification::centred, false);
+            return;
+        }
+
+        const float dx = std::floor ((float) area.getCentreX() - ink.getCentreX() + 0.5f);
+        const float dy = std::floor ((float) area.getCentreY() - ink.getCentreY() + 0.5f);
+        ga.moveRangeOfGlyphs (0, -1, dx, dy);
+        ga.draw (g);
     }
 
     juce::Font SymbolGlyphs::infinityFont (float height, int styleFlags)
@@ -679,11 +1089,18 @@ namespace PinkXP
 
         const auto runs = splitRuns (text);
 
+        // 垂直居中统一走"字形带"光学居中（跨字体一致，见 FontOptics）。
+        //   JUCE 原生 drawText 是按行框居中的，不同字体墨迹在行框里的位置不同，
+        //   同一控件换皮肤后文字会上下漂 0.5~2px。
+        const int vFlags = justification.getOnlyVerticalFlags();
+        const bool vCentred = (vFlags & juce::Justification::verticallyCentred) != 0;
+        const float nudge = vCentred ? opticalNudge (baseFont) : 0.0f;
+
         // 单 run 且不是符号：走原生 drawText（保留省略号 / 压缩等行为）
         if (runs.size() == 1 && ! runs[0].symbol)
         {
             g.setFont (baseFont);
-            g.drawText (text, area, justification, false);
+            g.drawText (text, area.toFloat().translated (0.0f, nudge), justification, false);
             return;
         }
 
@@ -706,13 +1123,12 @@ namespace PinkXP
             x += (float) area.getWidth() - totalWidth;
 
         float top = (float) area.getY();
-        const int vFlags = justification.getOnlyVerticalFlags();
-        if ((vFlags & juce::Justification::verticallyCentred) != 0)
+        if (vCentred)
             top += ((float) area.getHeight() - baseFont.getHeight()) * 0.5f;
         else if ((vFlags & juce::Justification::bottom) != 0)
             top += (float) area.getHeight() - baseFont.getHeight();
 
-        const float baseline = top + baseFont.getAscent();
+        const float baseline = top + baseFont.getAscent() + nudge;
 
         // 用 addLineOfText（无 maxWidth 截断）而不是 drawText：
         //   Graphics::drawText 的 curtailment 会按 Silkscreen 的 advance 判断
@@ -1265,8 +1681,533 @@ namespace PinkXP
         g.drawText(readout, bx, by, textW, boxH, juce::Justification::centred, false);
     }
 
+    // ==========================================================
+    // 视觉风格（Skin）—— 与颜色主题正交，只决定形状与质感
+    //   pinkXP 分支保持旧代码逐像素不变（默认风格外观零回归）。
+    //   gCurrentSkin 定义在文件开头（字体选择同样依赖它）。
+    // ==========================================================
+    const std::vector<SkinInfo>& getAllSkins()
+    {
+        static const std::vector<SkinInfo> skins {
+            { SkinId::pinkXP,      "Pixel XP" },
+            { SkinId::chrome,      "Millennium Chrome" },
+            { SkinId::modern,      "Modern Minimal" },
+            { SkinId::glass,       "Frosted Glass" },
+            { SkinId::neon,        "Neon Cyber" },
+            { SkinId::crt,         "CRT Terminal" },
+            { SkinId::fluent,      "Fluent" },
+            { SkinId::greenScreen, "Green Screen" },
+        };
+        return skins;
+    }
+
+    SkinId getCurrentSkin() noexcept { return gCurrentSkin; }
+
+    SkinId skinFromInt (int raw) noexcept
+    {
+        switch (raw)
+        {
+            case (int) SkinId::chrome:      return SkinId::chrome;
+            case (int) SkinId::modern:      return SkinId::modern;
+            case (int) SkinId::glass:       return SkinId::glass;
+            case (int) SkinId::neon:        return SkinId::neon;
+            case (int) SkinId::crt:         return SkinId::crt;
+            case (int) SkinId::fluent:      return SkinId::fluent;
+            case (int) SkinId::greenScreen: return SkinId::greenScreen;
+            default:                        return SkinId::pinkXP;
+        }
+    }
+
+    void applySkin (SkinId id)
+    {
+        if (id == gCurrentSkin)
+            return;
+        gCurrentSkin = id;
+
+        // 离开绿幕：悬停轮询不再需要（进入绿幕时由 isChromaRevealed 懒创建）
+        if (id != SkinId::greenScreen)
+            releaseChromaHoverTracker();
+
+        // 桌面纹理按风格烘焙；其余静态层 / GL 快照走主题订阅链路统一重建
+        //   （字体换装由 Editor 的主题回调检测 activeTypefaceStale() 后异步完成）
+        invalidateDesktopTextureCache();
+        notifyThemeSubscribers();
+    }
+
+    juce::Colour skinHairlineOn (juce::Colour fill, float amount) noexcept
+    {
+        const bool darkFill = fill.getPerceivedBrightness() < 0.5f;
+        return fill.withAlpha (1.0f).interpolatedWith (darkFill ? juce::Colours::white
+                                                                 : juce::Colours::black,
+                                                        amount);
+    }
+
+    bool skinUsesFlatControls (SkinId id) noexcept
+    {
+        return id == SkinId::modern || id == SkinId::glass || id == SkinId::fluent
+            || id == SkinId::greenScreen || id == SkinId::neon;
+    }
+
+    // ==========================================================
+    // 绿幕（见头文件说明）
+    // ==========================================================
+    bool isChromaKeySkin() noexcept { return gCurrentSkin == SkinId::greenScreen; }
+
+    juce::Colour chromaKeyGreen() noexcept { return juce::Colour (0xff00ff00); }
+
+    juce::Colour chromaKeyFade (juce::Colour c, float t) noexcept
+    {
+        // t ≤ kGate：纯绿（静音 / 底噪直接抠掉）；kGate..kGate+kRamp：线性过渡到原色
+        //   （抠像软件把过渡段当半透明，边缘柔和不起锯齿）
+        constexpr float kGate = 0.06f;
+        constexpr float kRamp = 0.14f;
+        const auto green = chromaKeyGreen();
+        if (t <= kGate)          return green;
+        if (t >= kGate + kRamp)  return c;
+        return green.interpolatedWith (c.withAlpha (1.0f), (t - kGate) / kRamp);
+    }
+
+    namespace
+    {
+        const juce::Identifier& chromaRegionProp()
+        {
+            static const juce::Identifier id ("y2kChromaRegion");
+            return id;
+        }
+
+        juce::Component* findChromaRegion (const juce::Component* c)
+        {
+            for (; c != nullptr; c = c->getParentComponent())
+                if (c->getProperties().contains (chromaRegionProp()))
+                    return const_cast<juce::Component*> (c);
+            return nullptr;
+        }
+
+        // 鼠标所在绿幕区域的轮询器（消息线程 Timer，20Hz）
+        //   · 用轮询而不是 mouseEnter/Exit：模块的子组件（抽屉 / 按钮 / Milkdrop
+        //     控制栏）会截走鼠标事件，父组件的 enter/exit 在子组件间来回触发。
+        //   · 鼠标落在非区域组件上（弹出菜单 / 提示窗）时保持当前区域，
+        //     避免打开菜单的瞬间工具栏变绿。按住拖拽期间同样保持。
+        struct ChromaHoverTracker : private juce::Timer
+        {
+            juce::Component::SafePointer<juce::Component> region;
+
+            ChromaHoverTracker()  { startTimerHz (20); }
+            ~ChromaHoverTracker() override { stopTimer(); }
+
+            void timerCallback() override
+            {
+                auto& desk  = juce::Desktop::getInstance();
+                auto  mouse = desk.getMainMouseSource();
+                const auto pos = mouse.getScreenPosition().roundToInt();
+
+                auto* hit  = desk.findComponentAt (pos);
+                auto* next = findChromaRegion (hit);
+
+                if (hit != nullptr && next == nullptr)
+                    return;
+                if (mouse.isDragging() && region != nullptr)
+                    return;
+
+                auto* prev = region.getComponent();
+                if (prev == next)
+                    return;
+
+                region = next;
+                if (prev != nullptr) prev->repaint();
+                if (next != nullptr) next->repaint();
+            }
+        };
+
+        std::unique_ptr<ChromaHoverTracker> gChromaTracker;
+    }
+
+    void markChromaRegion (juce::Component& c)
+    {
+        c.getProperties().set (chromaRegionProp(), true);
+    }
+
+    bool isChromaRevealed (const juce::Component& c)
+    {
+        if (! isChromaKeySkin())
+            return true;
+
+        if (gChromaTracker == nullptr)
+            gChromaTracker = std::make_unique<ChromaHoverTracker>();
+
+        auto* region = findChromaRegion (&c);
+        return region != nullptr && gChromaTracker->region.getComponent() == region;
+    }
+
+    void releaseChromaHoverTracker()
+    {
+        gChromaTracker.reset();
+    }
+
+    namespace
+    {
+        // 现代简约：只给小控件（按钮 / 下拉 / 滑块 / 标题栏小按钮）加圆角；
+        //   模块外壳、工具栏、菜单底板等大面板保持直角 —— GL 画布与挖洞外壳
+        //   都是直角几何，大面板圆角会在四角露出底层像素。
+        constexpr int   kModernRoundMaxSide = 40;    // 短边上限（按钮 / 下拉高度）
+        constexpr int   kModernRoundMaxLong = 240;   // 长边上限（排除工具栏等细长条）
+        constexpr float kModernRadius       = 3.0f;
+
+        bool modernRounded (juce::Rectangle<int> r) noexcept
+        {
+            return juce::jmin (r.getWidth(), r.getHeight()) <= kModernRoundMaxSide
+                && juce::jmax (r.getWidth(), r.getHeight()) <= kModernRoundMaxLong
+                && r.getWidth() >= 8 && r.getHeight() >= 8;
+        }
+
+        void modernFillAndOutline (juce::Graphics& g, juce::Rectangle<int> r,
+                                   juce::Colour fill, juce::Colour outline)
+        {
+            if (modernRounded (r))
+            {
+                const auto rf = r.toFloat();
+                g.setColour (fill);
+                g.fillRoundedRectangle (rf, kModernRadius);
+                g.setColour (outline);
+                g.drawRoundedRectangle (rf.reduced (0.5f), kModernRadius, 1.0f);
+            }
+            else
+            {
+                g.setColour (fill);
+                g.fillRect (r);
+                g.setColour (outline);
+                g.drawRect (r, 1);
+            }
+        }
+
+        // 千禧金属：纵向铬质渐变。
+        //   小控件 = 上亮 → 中线折痕 → 下沿回亮（经典铬按钮）；
+        //   大面板 = 柔和的上亮下暗（避免高菜单 / 工具栏中间出现一道硬折痕）。
+        void fillChrome (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill, bool pressedLook)
+        {
+            if (r.isEmpty())
+                return;
+
+            const float y0 = (float) r.getY();
+            const float y1 = (float) r.getBottom();
+            const juce::Colour white = juce::Colours::white;
+            const juce::Colour black = juce::Colours::black;
+
+            if (pressedLook)
+            {
+                juce::ColourGradient grad (fill.interpolatedWith (black, 0.14f), 0.0f, y0,
+                                           fill.interpolatedWith (white, 0.20f), 0.0f, y1, false);
+                g.setGradientFill (grad);
+            }
+            else if (r.getHeight() <= 48)
+            {
+                juce::ColourGradient grad (fill.interpolatedWith (white, 0.60f), 0.0f, y0,
+                                           fill.interpolatedWith (white, 0.25f), 0.0f, y1, false);
+                grad.addColour (0.46, fill.interpolatedWith (white, 0.18f));
+                grad.addColour (0.54, fill.interpolatedWith (black, 0.08f));
+                g.setGradientFill (grad);
+            }
+            else
+            {
+                juce::ColourGradient grad (fill.interpolatedWith (white, 0.22f), 0.0f, y0,
+                                           fill.interpolatedWith (black, 0.08f), 0.0f, y1, false);
+                g.setGradientFill (grad);
+            }
+            g.fillRect (r);
+        }
+
+        // 千禧金属外框（总厚 2px，与像素风同宽，调用方内缩布局不变）：
+        //   外 1px 深色切边 + 内 1px 镜面高光 / 阴影（凸起左上亮，凹陷反之）
+        void chromeFrame (juce::Graphics& g, juce::Rectangle<int> r, bool sunkenLook)
+        {
+            if (r.getWidth() < 2 || r.getHeight() < 2)
+                return;
+
+            // 1px 外框用 4 次 fillRect 而不是 drawRect（性能）：JUCE 的 drawRect 会
+            //   把 4 条边合成矩形列表 → 在 GL 渲染器里构造 EdgeTable 并与当前多矩形
+            //   裁剪区逐块求交（每帧 repaint 的模块越多，裁剪区越碎越贵）；
+            //   fillRect 走矩形快速路径。像素结果完全相同。
+            g.setColour (dark);
+            g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+            g.fillRect (r.getX(), r.getBottom() - 1, r.getWidth(), 1);
+            g.fillRect (r.getX(), r.getY() + 1, 1, r.getHeight() - 2);
+            g.fillRect (r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 2);
+
+            const auto in = r.reduced (1);
+            if (in.isEmpty())
+                return;
+
+            const auto lit  = hl.interpolatedWith (juce::Colours::white, 0.5f);
+            const auto shad = shdw;
+            g.setColour (sunkenLook ? shad : lit);
+            g.fillRect (in.getX(), in.getY(), in.getWidth(), 1);
+            g.fillRect (in.getX(), in.getY(), 1, in.getHeight());
+            g.setColour (sunkenLook ? lit : shad);
+            g.fillRect (in.getX(), in.getBottom() - 1, in.getWidth(), 1);
+            g.fillRect (in.getRight() - 1, in.getY(), 1, in.getHeight());
+        }
+
+        // ---------------- 柔和投影（现代 / 玻璃 / Fluent / 霓虹辉光共用）----------------
+        //   占位与像素风硬阴影相同（右侧 + 底部各 offset 宽），由近到远渐隐
+        void softShadow (juce::Graphics& g, juce::Rectangle<int> r, int offset, juce::Colour c0)
+        {
+            const auto c1 = c0.withAlpha (0.0f);
+            {
+                const juce::Rectangle<int> right (r.getRight(), r.getY() + offset, offset, r.getHeight());
+                juce::ColourGradient grad (c0, (float) right.getX(), 0.0f,
+                                           c1, (float) right.getRight(), 0.0f, false);
+                g.setGradientFill (grad);
+                g.fillRect (right);
+            }
+            {
+                const juce::Rectangle<int> bottom (r.getX() + offset, r.getBottom(), r.getWidth(), offset);
+                juce::ColourGradient grad (c0, 0.0f, (float) bottom.getY(),
+                                           c1, 0.0f, (float) bottom.getBottom(), false);
+                g.setGradientFill (grad);
+                g.fillRect (bottom);
+            }
+        }
+
+        // ---------------- 玻璃（Frosted Glass）----------------
+        //   全部不透明绘制：ModulePanel 是 setOpaque(true)，GL 模块外壳下面只有
+        //   GL 清屏色，真半透明会透出未定义像素 —— "通透感"靠在 fill 上叠加
+        //   白色纵向渐变 + 上沿镜面反光带 + 半透明细边模拟。
+        constexpr float kGlassRadius = 5.0f;
+
+        void glassFill (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill, bool pressedLook)
+        {
+            if (r.isEmpty() || fill.isTransparent())
+                return;
+
+            const float a     = fill.getFloatAlpha();
+            const auto  white = juce::Colours::white;
+            const auto  rf    = r.toFloat();
+            const bool  round = modernRounded (r);
+
+            juce::ColourGradient grad (fill.interpolatedWith (white, pressedLook ? 0.04f : 0.42f).withAlpha (a),
+                                       0.0f, rf.getY(),
+                                       fill.interpolatedWith (white, pressedLook ? 0.24f : 0.06f).withAlpha (a),
+                                       0.0f, rf.getBottom(), false);
+            if (! pressedLook)
+                grad.addColour (0.50, fill.interpolatedWith (white, 0.16f).withAlpha (a));
+            g.setGradientFill (grad);
+            if (round) g.fillRoundedRectangle (rf, kGlassRadius);
+            else       g.fillRect (r);
+
+            // 上半镜面反光带
+            if (! pressedLook && r.getHeight() >= 8)
+            {
+                auto sheen = rf.reduced (2.0f);
+                sheen.setHeight (juce::jmax (2.0f, rf.getHeight() * 0.40f));
+                g.setColour (white.withAlpha (0.14f * a));
+                if (round) g.fillRoundedRectangle (sheen, kGlassRadius - 1.5f);
+                else       g.fillRect (sheen);
+            }
+        }
+
+        // 外 1px 半透明深色细边 + 内 1px 玻璃边缘高光（凸起在上沿；凹陷上沿压暗、下沿提亮）
+        //   GL 侧 appendSunkenFrame 的玻璃分支按同一组系数预混成不透明色
+        void glassFrame (juce::Graphics& g, juce::Rectangle<int> r, bool sunkenLook)
+        {
+            if (r.getWidth() < 4 || r.getHeight() < 4)
+                return;
+
+            const auto rf    = r.toFloat();
+            const bool round = modernRounded (r);
+
+            g.setColour (dark.withAlpha (sunkenLook ? 0.42f : 0.30f));
+            if (round) g.drawRoundedRectangle (rf.reduced (0.5f), kGlassRadius, 1.0f);
+            else       g.drawRect (r, 1);
+
+            const auto in    = r.reduced (1);
+            const int  inset = round ? 3 : 0;
+            const int  w     = in.getWidth() - inset * 2;
+            if (w <= 0)
+                return;
+
+            if (sunkenLook)
+            {
+                g.setColour (dark.withAlpha (0.16f));
+                g.fillRect (in.getX() + inset, in.getY(), w, 1);
+                g.setColour (juce::Colours::white.withAlpha (0.40f));
+                g.fillRect (in.getX() + inset, in.getBottom() - 1, w, 1);
+            }
+            else
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.70f));
+                g.fillRect (in.getX() + inset, in.getY(), w, 1);
+            }
+        }
+
+        // ---------------- 霓虹赛博（Neon Cyber）----------------
+        //   外圈 1px 半透明强调色 = 辉光，内圈 1px 提亮强调色 = 灯管；总厚 2px 不变
+        juce::Colour neonCore (bool hot) noexcept
+        {
+            return sel.interpolatedWith (juce::Colours::white, hot ? 0.55f : 0.30f);
+        }
+
+        void neonFill (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill, bool pressedLook)
+        {
+            if (r.isEmpty() || fill.isTransparent())
+                return;
+            const float a = fill.getFloatAlpha();
+            g.setColour ((pressedLook ? fill.interpolatedWith (sel, 0.28f)
+                                      : fill.interpolatedWith (juce::Colours::black, 0.10f)).withAlpha (a));
+            g.fillRect (r);
+        }
+
+        void neonFrame (juce::Graphics& g, juce::Rectangle<int> r, bool sunkenLook, bool hot)
+        {
+            if (r.getWidth() < 3 || r.getHeight() < 3)
+                return;
+
+            if (sunkenLook)
+            {
+                g.setColour (dark);
+                g.drawRect (r, 1);
+                g.setColour (sel.withAlpha (0.50f));
+                g.drawRect (r.reduced (1), 1);
+                return;
+            }
+
+            g.setColour (sel.withAlpha (hot ? 0.60f : 0.38f));
+            g.drawRect (r, 1);
+            g.setColour (neonCore (hot));
+            g.drawRect (r.reduced (1), 1);
+        }
+
+        // ---------------- CRT 终端 ----------------
+        //   磷光单色：所有描边都用强调色 sel（= 荧光粉颜色），按下 = 反相式染色
+        void crtFill (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill, bool pressedLook)
+        {
+            if (r.isEmpty() || fill.isTransparent())
+                return;
+            g.setColour (pressedLook ? fill.interpolatedWith (sel, 0.40f).withAlpha (fill.getFloatAlpha())
+                                     : fill);
+            g.fillRect (r);
+        }
+
+        void crtFrame (juce::Graphics& g, juce::Rectangle<int> r, bool sunkenLook, bool hot)
+        {
+            if (r.getWidth() < 3 || r.getHeight() < 3)
+                return;
+
+            g.setColour (sunkenLook ? sel.withAlpha (0.55f) : sel);
+            g.drawRect (r, 1);
+            if (hot)
+            {
+                g.setColour (sel);
+                g.drawRect (r.reduced (1), 1);
+            }
+            else if (! sunkenLook)
+            {
+                g.setColour (sel.withAlpha (0.22f));
+                g.drawRect (r.reduced (1), 1);
+            }
+        }
+
+        void crtScanlines (juce::Graphics& g, juce::Rectangle<int> r, float alpha)
+        {
+            g.setColour (juce::Colours::black.withAlpha (alpha));
+            for (int y = r.getY() + 1; y < r.getBottom(); y += 2)
+                g.fillRect (r.getX(), y, r.getWidth(), 1);
+        }
+
+        // ---------------- Win11 Fluent ----------------
+        //   小控件大圆角（6px，上限放宽到 48 × 320）；大面板仍直角（理由同现代简约）。
+        //   1px 细描边 + 下沿略深的"抬升"边；按下 / 选中 = 底部强调色短条。
+        constexpr float kFluentRadius = 6.0f;
+
+        bool fluentRounded (juce::Rectangle<int> r) noexcept
+        {
+            return juce::jmin (r.getWidth(), r.getHeight()) <= 48
+                && juce::jmax (r.getWidth(), r.getHeight()) <= 320
+                && r.getWidth() >= 8 && r.getHeight() >= 8;
+        }
+
+        void fluentFillAndOutline (juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill,
+                                   bool pressedLook, bool sunkenLook)
+        {
+            if (r.getWidth() < 2 || r.getHeight() < 2)
+                return;
+
+            const auto  rf    = r.toFloat();
+            const bool  round = fluentRounded (r);
+            const float rad   = juce::jmin (kFluentRadius, juce::jmin (rf.getWidth(), rf.getHeight()) * 0.5f);
+
+            if (! fill.isTransparent())
+            {
+                const auto base = pressedLook ? fill.interpolatedWith (sel, 0.10f).withAlpha (fill.getFloatAlpha())
+                                              : fill;
+                juce::ColourGradient grad (base.interpolatedWith (juce::Colours::white, sunkenLook ? 0.0f : 0.05f)
+                                               .withAlpha (base.getFloatAlpha()),
+                                           0.0f, rf.getY(), base, 0.0f, rf.getBottom(), false);
+                g.setGradientFill (grad);
+                if (round) g.fillRoundedRectangle (rf, rad);
+                else       g.fillRect (r);
+            }
+
+            const auto ref = fill.isTransparent() ? face : fill;
+            g.setColour (skinHairlineOn (ref, 0.14f));
+            if (round) g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+            else       g.drawRect (r, 1);
+
+            const int inset = round ? (int) rad : 0;
+            const int w     = r.getWidth() - inset * 2;
+            if (w > 0)
+            {
+                g.setColour (skinHairlineOn (ref, sunkenLook ? 0.38f : 0.26f));
+                g.fillRect (r.getX() + inset, r.getBottom() - 1, w, 1);
+            }
+
+            if (pressedLook && r.getWidth() >= 12 && r.getHeight() >= 8)
+            {
+                const int bw = juce::jmax (6, r.getWidth() / 3);
+                g.setColour (sel);
+                g.fillRoundedRectangle ((float) (r.getCentreX() - bw / 2), (float) r.getBottom() - 3.0f,
+                                        (float) bw, 2.0f, 1.0f);
+            }
+        }
+    }
+
     void drawRaised(juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill)
     {
+        switch (gCurrentSkin)
+        {
+            case SkinId::chrome:
+                fillChrome (g, r, fill, false);
+                chromeFrame (g, r, false);
+                return;
+
+            case SkinId::modern:
+            case SkinId::greenScreen:   // 绿幕悬停显示时用现代简约外观
+                modernFillAndOutline (g, r, fill, skinHairlineOn (fill, 0.22f));
+                return;
+
+            case SkinId::glass:
+                glassFill (g, r, fill, false);
+                glassFrame (g, r, false);
+                return;
+
+            case SkinId::neon:
+                neonFill (g, r, fill, false);
+                neonFrame (g, r, false, false);
+                return;
+
+            case SkinId::crt:
+                crtFill (g, r, fill, false);
+                crtFrame (g, r, false, false);
+                return;
+
+            case SkinId::fluent:
+                fluentFillAndOutline (g, r, fill, false, false);
+                return;
+
+            case SkinId::pinkXP:
+            default:
+                break;
+        }
+
         g.setColour(fill);
         g.fillRect(r);
         drawRaisedFrame (g, r);
@@ -1274,6 +2215,33 @@ namespace PinkXP
 
     void drawRaisedFrame(juce::Graphics& g, juce::Rectangle<int> r)
     {
+        switch (gCurrentSkin)
+        {
+            case SkinId::chrome:
+                chromeFrame (g, r, false);
+                return;
+            case SkinId::modern:
+            case SkinId::greenScreen:
+                g.setColour (skinHairlineOn (face, 0.22f));
+                g.drawRect (r, 1);
+                return;
+            case SkinId::glass:
+                glassFrame (g, r, false);
+                return;
+            case SkinId::neon:
+                neonFrame (g, r, false, false);
+                return;
+            case SkinId::crt:
+                crtFrame (g, r, false, false);
+                return;
+            case SkinId::fluent:
+                fluentFillAndOutline (g, r, juce::Colours::transparentBlack, false, false);
+                return;
+            case SkinId::pinkXP:
+            default:
+                break;
+        }
+
         // 外层 2px 硬边框：左+上 白高光，右+下 深色
         g.setColour(hl);
         g.fillRect(r.getX(), r.getY(), r.getWidth(), 2);
@@ -1293,6 +2261,57 @@ namespace PinkXP
 
     void drawSunken(juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill)
     {
+        if (gCurrentSkin == SkinId::chrome)
+        {
+            g.setColour (fill);
+            g.fillRect (r);
+            // 内阴影：顶部 3 行递减的暗色（凹槽深度感）
+            const auto in = r.reduced (2);
+            if (! in.isEmpty())
+            {
+                const float alphas[3] = { 0.22f, 0.12f, 0.05f };
+                for (int i = 0; i < 3 && i < in.getHeight(); ++i)
+                {
+                    g.setColour (dark.withAlpha (alphas[i] * fill.getFloatAlpha()));
+                    g.fillRect (in.getX(), in.getY() + i, in.getWidth(), 1);
+                }
+            }
+            chromeFrame (g, r, true);
+            return;
+        }
+        if (gCurrentSkin == SkinId::modern || gCurrentSkin == SkinId::greenScreen)
+        {
+            modernFillAndOutline (g, r, fill, skinHairlineOn (fill, 0.18f));
+            return;
+        }
+        if (gCurrentSkin == SkinId::glass)
+        {
+            g.setColour (fill);
+            if (modernRounded (r)) g.fillRoundedRectangle (r.toFloat(), kGlassRadius);
+            else                   g.fillRect (r);
+            glassFrame (g, r, true);
+            return;
+        }
+        if (gCurrentSkin == SkinId::neon)
+        {
+            g.setColour (fill);
+            g.fillRect (r);
+            neonFrame (g, r, true, false);
+            return;
+        }
+        if (gCurrentSkin == SkinId::crt)
+        {
+            g.setColour (fill);
+            g.fillRect (r);
+            crtFrame (g, r, true, false);
+            return;
+        }
+        if (gCurrentSkin == SkinId::fluent)
+        {
+            fluentFillAndOutline (g, r, fill, false, true);
+            return;
+        }
+
         g.setColour(fill);
         g.fillRect(r);
 
@@ -1313,6 +2332,42 @@ namespace PinkXP
 
     void drawPressed(juce::Graphics& g, juce::Rectangle<int> r, juce::Colour fill)
     {
+        if (gCurrentSkin == SkinId::chrome)
+        {
+            fillChrome (g, r, fill, true);
+            chromeFrame (g, r, true);
+            return;
+        }
+        if (gCurrentSkin == SkinId::modern || gCurrentSkin == SkinId::greenScreen)
+        {
+            // 按下 / 选中：底色向强调色轻微染色 + 强调色描边
+            modernFillAndOutline (g, r, fill.interpolatedWith (sel, 0.18f), sel);
+            return;
+        }
+        if (gCurrentSkin == SkinId::glass)
+        {
+            glassFill (g, r, fill.interpolatedWith (sel, 0.18f), true);
+            glassFrame (g, r, true);
+            return;
+        }
+        if (gCurrentSkin == SkinId::neon)
+        {
+            neonFill (g, r, fill, true);
+            neonFrame (g, r, false, true);
+            return;
+        }
+        if (gCurrentSkin == SkinId::crt)
+        {
+            crtFill (g, r, fill, true);
+            crtFrame (g, r, false, true);
+            return;
+        }
+        if (gCurrentSkin == SkinId::fluent)
+        {
+            fluentFillAndOutline (g, r, fill, true, false);
+            return;
+        }
+
         g.setColour(fill);
         g.fillRect(r);
 
@@ -1330,7 +2385,36 @@ namespace PinkXP
 
     void drawHardShadow(juce::Graphics& g, juce::Rectangle<int> r, int offset)
     {
-        g.setColour(dark);
+        // 各风格的阴影占位完全相同（右侧 + 底部各 offset 宽），只改质感
+        if (offset > 0)
+        {
+            switch (gCurrentSkin)
+            {
+                case SkinId::greenScreen:
+                    return;   // 绿幕：不画阴影（会在抠像边缘留下一圈脏边）
+                case SkinId::modern:
+                    softShadow (g, r, offset, juce::Colours::black.withAlpha (0.22f));
+                    return;
+                case SkinId::glass:
+                    softShadow (g, r, offset, juce::Colours::black.withAlpha (0.18f));
+                    return;
+                case SkinId::fluent:
+                    softShadow (g, r, offset, juce::Colours::black.withAlpha (0.16f));
+                    return;
+                case SkinId::neon:
+                    softShadow (g, r, offset, sel.withAlpha (0.40f));   // 彩色辉光
+                    return;
+                case SkinId::crt:
+                    g.setColour (sel.withAlpha (0.25f));                // 荧光粉余辉
+                    g.fillRect (r.getRight(), r.getY() + offset, offset, r.getHeight());
+                    g.fillRect (r.getX() + offset, r.getBottom(), r.getWidth(), offset);
+                    return;
+                default:
+                    break;
+            }
+        }
+
+        g.setColour (gCurrentSkin == SkinId::chrome ? dark.withAlpha (0.55f) : dark);
         g.fillRect(r.getRight(), r.getY() + offset, offset, r.getHeight());
         g.fillRect(r.getX() + offset, r.getBottom(), r.getWidth(), offset);
     }
@@ -1388,24 +2472,243 @@ namespace PinkXP
                            |  (juce::uint32) rgb.b);
     }
 
+    // 桌面纹理图层（像素风格与其它风格共用；颜色的 alpha 按"乘法"叠加，
+    //   像素风格传入的 tex / texHi 都是不透明色，结果与旧实现逐像素一致）
+    static void drawDesktopPatternLayer(juce::Graphics& g, juce::Rectangle<int> r,
+                                        DesktopPattern pattern,
+                                        juce::Colour tex, juce::Colour texHi);
+
     void drawDesktop(juce::Graphics& g, juce::Rectangle<int> r)
     {
         // y2k::perf::ScopedPerfTimer desktopTimer(y2k::perf::FunctionId::uiDrawDesktop,
         //                                         y2k::perf::Partition::uiRendering,
         //                                         y2k::perf::ThreadRole::ui);
 
+        // 0) 非像素风格：底色 / 氛围由风格决定，用户在调色工作室选的桌面纹理
+        //    以该风格的质感叠加在上面（旧版这里直接 return，纹理只在像素风下生效）。
+        //    结果同样烘焙进共享桌面纹理，不逐帧绘制。绿幕必须纯绿，不叠纹理。
+        if (gCurrentSkin == SkinId::greenScreen)
+        {
+            g.setColour (chromaKeyGreen());
+            g.fillRect (r);
+            return;
+        }
+
+        // 用户选择的纹理 + 主题纹理色（与像素风格同一来源，按风格降低不透明度）
+        const DesktopPattern userPattern = getCurrentTheme().desktopPattern;
+        const juce::Colour   texBase     = makeDesktopTextureColour();
+        const juce::Colour   texHiBase   = desktop.getBrightness() < 0.5f ? juce::Colours::white
+                                                                          : juce::Colours::black;
+        auto overlayPattern = [&] (juce::Colour tex, juce::Colour texHi)
+        {
+            drawDesktopPatternLayer (g, r, userPattern, tex, texHi);
+        };
+
+        if (gCurrentSkin == SkinId::glass)
+        {
+            // 极光：桌面色 → 强调色的斜向渐变 + 三团大号柔光（模拟毛玻璃后的彩色背景）
+            const auto rf = r.toFloat();
+            juce::ColourGradient grad (desktop.interpolatedWith (sel, 0.28f), rf.getX(), rf.getY(),
+                                       desktop.interpolatedWith (accent2, 0.30f).interpolatedWith (juce::Colours::black, 0.10f),
+                                       rf.getRight(), rf.getBottom(), false);
+            grad.addColour (0.5, desktop);
+            g.setGradientFill (grad);
+            g.fillRect (r);
+
+            // 纹理压在柔光之下：被光团晕开，像隔着毛玻璃看到的桌面
+            overlayPattern (texBase.withAlpha (0.32f), juce::Colours::white.withAlpha (0.22f));
+
+            auto blob = [&] (float cx, float cy, float radius, juce::Colour c, float alpha)
+            {
+                const juce::Point<float> centre (rf.getX() + rf.getWidth() * cx, rf.getY() + rf.getHeight() * cy);
+                const float rad = juce::jmax (rf.getWidth(), rf.getHeight()) * radius;
+                juce::ColourGradient rg (c.withAlpha (alpha), centre.x, centre.y,
+                                         c.withAlpha (0.0f), centre.x + rad, centre.y, true);
+                g.setGradientFill (rg);
+                g.fillEllipse (centre.x - rad, centre.y - rad, rad * 2.0f, rad * 2.0f);
+            };
+            blob (0.18f, 0.22f, 0.42f, sel,                  0.30f);
+            blob (0.82f, 0.30f, 0.36f, accent2,              0.26f);
+            blob (0.55f, 0.88f, 0.40f, juce::Colours::white, 0.14f);
+            return;
+        }
+        if (gCurrentSkin == SkinId::neon)
+        {
+            // 合成波：深色天空（叠用户纹理）+ 地平线辉光 + 透视网格
+            const auto black = juce::Colours::black;
+            const auto rf = r.toFloat();
+            const float horizon = rf.getY() + rf.getHeight() * 0.62f;
+
+            juce::ColourGradient sky (desktop.interpolatedWith (black, 0.86f), 0.0f, rf.getY(),
+                                      desktop.interpolatedWith (black, 0.62f).interpolatedWith (sel, 0.18f),
+                                      0.0f, horizon, false);
+            g.setGradientFill (sky);
+            g.fillRect (rf.withBottom (horizon));
+            juce::ColourGradient ground (desktop.interpolatedWith (black, 0.80f).interpolatedWith (accent2, 0.10f),
+                                         0.0f, horizon,
+                                         desktop.interpolatedWith (black, 0.92f), 0.0f, rf.getBottom(), false);
+            g.setGradientFill (ground);
+            g.fillRect (rf.withTop (horizon));
+
+            // 天空：用户选择的桌面纹理画成灯管色的"霓虹招牌"（替代旧的固定星点），
+            //   只铺在地平线以上，地面保留合成波透视网格
+            {
+                juce::Graphics::ScopedSaveState skyClip (g);
+                g.reduceClipRegion (r.withBottom ((int) std::floor (horizon)));
+                overlayPattern (sel.withAlpha (0.26f), neonCore (true).withAlpha (0.24f));
+            }
+
+            // 地平线辉光
+            juce::ColourGradient glow (sel.withAlpha (0.0f), 0.0f, horizon - 40.0f,
+                                       sel.withAlpha (0.45f), 0.0f, horizon, false);
+            g.setGradientFill (glow);
+            g.fillRect (rf.getX(), horizon - 40.0f, rf.getWidth(), 40.0f);
+            g.setColour (neonCore (true));
+            g.fillRect (rf.getX(), horizon, rf.getWidth(), 1.0f);
+
+            // 透视网格：横线按平方间距向近处展开，竖线汇聚到地平线中点
+            const auto gridCol = sel.withAlpha (0.38f);
+            g.setColour (gridCol);
+            const float depth = rf.getBottom() - horizon;
+            for (int k = 1; k <= 14; ++k)
+            {
+                const float t = (float) k / 14.0f;
+                const float y = horizon + depth * t * t;
+                g.fillRect (rf.getX(), y, rf.getWidth(), 1.0f);
+            }
+            const float vx = rf.getCentreX();
+            const int   spokes = 24;
+            for (int k = -spokes; k <= spokes; ++k)
+            {
+                const float xBottom = vx + (float) k * rf.getWidth() / (float) spokes * 1.6f;
+                g.drawLine (vx + (float) k * 6.0f, horizon, xBottom, rf.getBottom(), 1.0f);
+            }
+            return;
+        }
+        if (gCurrentSkin == SkinId::crt)
+        {
+            // 荧光屏：暗底 + 中心磷光余辉 + 扫描线 + 四角暗角
+            const auto rf = r.toFloat();
+            g.setColour (desktop.interpolatedWith (juce::Colours::black, 0.72f));
+            g.fillRect (r);
+
+            const float rad = juce::jmax (rf.getWidth(), rf.getHeight()) * 0.75f;
+            juce::ColourGradient phosphor (sel.withAlpha (0.20f), rf.getCentreX(), rf.getCentreY(),
+                                           sel.withAlpha (0.0f), rf.getCentreX() + rad, rf.getCentreY(), true);
+            g.setGradientFill (phosphor);
+            g.fillRect (r);
+
+            // 纹理用磷光色，压在扫描线 / 暗角之下，像显像管上的余辉图案
+            overlayPattern (sel.withAlpha (0.20f), sel.interpolatedWith (juce::Colours::white, 0.5f).withAlpha (0.22f));
+
+            crtScanlines (g, r, 0.30f);
+
+            juce::ColourGradient vignette (juce::Colours::black.withAlpha (0.0f), rf.getCentreX(), rf.getCentreY(),
+                                           juce::Colours::black.withAlpha (0.55f),
+                                           rf.getCentreX() + rad * 0.95f, rf.getCentreY(), true);
+            vignette.addColour (0.6, juce::Colours::black.withAlpha (0.0f));
+            g.setGradientFill (vignette);
+            g.fillRect (r);
+            return;
+        }
+        if (gCurrentSkin == SkinId::fluent)
+        {
+            // Mica：桌面色微染强调色的对角柔和渐变 + 右上一团 accent2 柔光 + 极淡颗粒
+            const auto rf = r.toFloat();
+            juce::ColourGradient grad (desktop.interpolatedWith (sel, 0.10f).interpolatedWith (juce::Colours::white, 0.04f),
+                                       rf.getX(), rf.getY(),
+                                       desktop.interpolatedWith (juce::Colours::black, 0.06f),
+                                       rf.getRight(), rf.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRect (r);
+
+            const float rad = juce::jmax (rf.getWidth(), rf.getHeight()) * 0.55f;
+            juce::ColourGradient tint (accent2.withAlpha (0.12f), rf.getRight() - rf.getWidth() * 0.15f, rf.getY(),
+                                       accent2.withAlpha (0.0f), rf.getRight() - rf.getWidth() * 0.15f + rad, rf.getY(), true);
+            g.setGradientFill (tint);
+            g.fillRect (r);
+
+            // 纹理：低对比的 Mica 压纹（颗粒层在上，让纹理不显得"贴图感"）
+            overlayPattern (texBase.withAlpha (0.22f), texHiBase.withAlpha (0.10f));
+
+            juce::uint32 seed = 0x6C8E9CF5u;
+            auto next = [&seed]() noexcept { seed = seed * 1664525u + 1013904223u; return seed; };
+            const int grains = juce::jlimit (0, 60000, r.getWidth() * r.getHeight() / 60);
+            for (int i = 0; i < grains; ++i)
+            {
+                const juce::uint32 s = next();
+                const int x = r.getX() + (int) ((s >> 8) % (juce::uint32) juce::jmax (1, r.getWidth()));
+                const int y = r.getY() + (int) (next() % (juce::uint32) juce::jmax (1, r.getHeight()));
+                g.setColour (((s & 1u) != 0u ? juce::Colours::white : juce::Colours::black).withAlpha (0.025f));
+                g.fillRect (x, y, 1, 1);
+            }
+            return;
+        }
+        if (gCurrentSkin == SkinId::chrome)
+        {
+            // 拉丝金属：上亮下暗 + 一道斜上方的反光带
+            juce::ColourGradient grad (desktop.interpolatedWith (juce::Colours::white, 0.10f),
+                                       0.0f, (float) r.getY(),
+                                       desktop.interpolatedWith (juce::Colours::black, 0.14f),
+                                       0.0f, (float) r.getBottom(), false);
+            grad.addColour (0.30, desktop.interpolatedWith (juce::Colours::white, 0.20f));
+            grad.addColour (0.55, desktop);
+            g.setGradientFill (grad);
+            g.fillRect (r);
+
+            // 纹理：金属面上的蚀刻图案（拉丝纹再盖在上面）
+            overlayPattern (texBase.withAlpha (0.30f), texHiBase.withAlpha (0.14f));
+
+            // 拉丝纹：逐行断续的极淡横线（确定性 LCG，每次烘焙结果一致）
+            juce::uint32 seed = 0x9E3779B9u;
+            auto next = [&seed]() noexcept { seed = seed * 1664525u + 1013904223u; return seed; };
+            for (int y = r.getY(); y < r.getBottom(); ++y)
+            {
+                const juce::uint32 rowSeed = next();
+                const float a = 0.02f + (float) ((rowSeed >> 24) & 0xffu) / 255.0f * 0.06f;
+                const bool light = ((rowSeed >> 9) & 1u) != 0u;
+                g.setColour ((light ? juce::Colours::white : juce::Colours::black).withAlpha (a));
+
+                int x = r.getX() - (int) ((rowSeed >> 12) % 200u);
+                while (x < r.getRight())
+                {
+                    const juce::uint32 s = next();
+                    const int len = 80 + (int) ((s >> 16) % 400u);
+                    const int gap = (int) ((s >> 8) % 60u);
+                    const auto seg = juce::Rectangle<int> (x, y, len, 1).getIntersection (r);
+                    if (! seg.isEmpty())
+                        g.fillRect (seg);
+                    x += len + gap;
+                }
+            }
+            return;
+        }
+        if (gCurrentSkin == SkinId::modern)
+        {
+            // 现代简约：纯色 + 极轻的纵向明暗 + 低对比纹理
+            juce::ColourGradient grad (desktop.interpolatedWith (juce::Colours::white, 0.04f),
+                                       0.0f, (float) r.getY(),
+                                       desktop.interpolatedWith (juce::Colours::black, 0.05f),
+                                       0.0f, (float) r.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRect (r);
+            overlayPattern (texBase.withAlpha (0.28f), texHiBase.withAlpha (0.12f));
+            return;
+        }
+
         // 1) 底色
         g.setColour(desktop);
         g.fillRect(r);
 
-        // 2) 纹理色（反馈 #3：按背景明度保证对比）+ 高光点缀色
-        const juce::Colour tex = makeDesktopTextureColour();
-        const bool bgIsDark = desktop.getBrightness() < 0.5f;
-        const juce::Colour texHi = bgIsDark ? juce::Colours::white : juce::Colours::black;
+        // 2) 纹理色（反馈 #3：按背景明度保证对比）+ 高光点缀色 → 3) 按主题纹理绘制
+        overlayPattern (texBase, texHiBase);
+    }
 
-        // 3) 按主题纹理绘制
-        const auto& th = getCurrentTheme();
-        switch (th.desktopPattern)
+    static void drawDesktopPatternLayer(juce::Graphics& g, juce::Rectangle<int> r,
+                                        DesktopPattern pattern,
+                                        juce::Colour tex, juce::Colour texHi)
+    {
+        switch (pattern)
         {
             case DesktopPattern::checker:
             default:
@@ -1434,7 +2737,7 @@ namespace PinkXP
                         g.fillRect(x + 1, y - 1, 1, 1);
                         g.fillRect(x - 1, y + 1, 1, 1);
                         // 次级小点
-                        g.setColour(tex.withAlpha(0.7f));
+                        g.setColour(tex.withMultipliedAlpha(0.7f));
                         g.fillRect(x + step / 3, y + step / 3, 1, 1);
                         g.fillRect(x - step / 3, y + step / 3, 1, 1);
                     }
@@ -1445,14 +2748,14 @@ namespace PinkXP
             case DesktopPattern::scanGrid:
             {
                 // 网格扫描线：水平淡线 + 竖直淡线 + 每 N 行一条亮线
-                g.setColour(tex.withAlpha(0.85f));
+                g.setColour(tex.withMultipliedAlpha(0.85f));
                 for (int y = r.getY(); y < r.getBottom(); y += 6)
                     g.fillRect(r.getX(), y, r.getWidth(), 1);
-                g.setColour(tex.withAlpha(0.55f));
+                g.setColour(tex.withMultipliedAlpha(0.55f));
                 for (int x = r.getX(); x < r.getRight(); x += 6)
                     g.fillRect(x, r.getY(), 1, r.getHeight());
                 // 扫描高亮条（每 48px）
-                g.setColour(texHi.withAlpha(0.9f));
+                g.setColour(texHi.withMultipliedAlpha(0.9f));
                 for (int y = r.getY(); y < r.getBottom(); y += 48)
                     g.fillRect(r.getX(), y, r.getWidth(), 1);
                 break;
@@ -1471,7 +2774,7 @@ namespace PinkXP
                         g.fillEllipse((float)(x - radius), (float)(y - radius),
                                       (float)(radius * 2), (float)(radius * 2));
                         // 左上高光小点，增加立体感
-                        g.setColour(texHi.withAlpha(0.45f));
+                        g.setColour(texHi.withMultipliedAlpha(0.45f));
                         g.fillEllipse((float)(x - radius + 3), (float)(y - radius + 3),
                                       3.0f, 3.0f);
                     }
@@ -1485,7 +2788,7 @@ namespace PinkXP
                 const int stripeStep = 20;
                 for (int y = r.getY() + stripeStep / 2; y < r.getBottom(); y += stripeStep)
                 {
-                    g.setColour(tex.withAlpha(0.8f));
+                    g.setColour(tex.withMultipliedAlpha(0.8f));
                     g.fillRect(r.getX(), y, r.getWidth(), 2);
 
                     // 同一横条上稀疏的珍珠泡泡
@@ -1495,7 +2798,7 @@ namespace PinkXP
                         if (h < 140)
                         {
                             const int rad = 2 + (h & 3);
-                            g.setColour(texHi.withAlpha(0.65f));
+                            g.setColour(texHi.withMultipliedAlpha(0.65f));
                             g.fillEllipse((float)(x - rad), (float)(y - rad),
                                           (float)(rad * 2), (float)(rad * 2));
                         }
@@ -1518,7 +2821,7 @@ namespace PinkXP
                     const juce::Line<float> line2(
                         (float)(r.getX() + k + 2),                (float) r.getY(),
                         (float)(r.getX() + k + 2 + r.getHeight()), (float) r.getBottom());
-                    g.setColour(texHi.withAlpha(0.35f));
+                    g.setColour(texHi.withMultipliedAlpha(0.35f));
                     g.drawLine(line2, 1.0f);
                 }
                 break;
@@ -1568,7 +2871,7 @@ namespace PinkXP
                 const int amp = 8;
                 for (int y = r.getY() + 4; y < r.getBottom(); y += 26)
                 {
-                    g.setColour(tex.withAlpha(0.9f));
+                    g.setColour(tex.withMultipliedAlpha(0.9f));
                     for (int x = r.getX(); x < r.getRight(); x += 1)
                     {
                         const int phase = (x / period) % 2;
@@ -1588,7 +2891,7 @@ namespace PinkXP
                 const int step = 22;
                 for (int k = -r.getHeight(); k < r.getWidth(); k += step)
                 {
-                    g.setColour(tex.withAlpha(0.75f));
+                    g.setColour(tex.withMultipliedAlpha(0.75f));
                     const juce::Line<float> a(
                         (float)(r.getX() + k),                (float) r.getY(),
                         (float)(r.getX() + k + r.getHeight()), (float) r.getBottom());
@@ -1614,7 +2917,7 @@ namespace PinkXP
                         g.fillRect(x - 1, y + 2, 3, 2);      // 下花瓣
                         g.fillRect(x - 3, y - 1, 2, 3);      // 左花瓣
                         g.fillRect(x + 2, y - 1, 2, 3);      // 右花瓣
-                        g.setColour(texHi.withAlpha(0.8f));
+                        g.setColour(texHi.withMultipliedAlpha(0.8f));
                         g.fillRect(x, y, 1, 1);              // 花蕊
                     }
                 }
@@ -1637,6 +2940,7 @@ namespace PinkXP
         struct DesktopTextureEntry
         {
             ThemeId       theme;
+            SkinId        skin;
             int           width;
             int           height;
             int           patternVersion;
@@ -1645,7 +2949,7 @@ namespace PinkXP
 
         // 底纹绘制算法/参数版本：改动 drawDesktop 的视觉参数时 +1，
         // 旧版本条目视为未命中，强制重新烘焙（避免升级后仍显示旧纹理）。
-        static constexpr int kDesktopPatternVersion = 3;
+        static constexpr int kDesktopPatternVersion = 4;
 
         // 采用普通 vector + 简单 LRU 淘汰；N 不会很大（通常 1~3 种尺寸）
         static std::vector<DesktopTextureEntry>& getDesktopTextureCache()
@@ -1670,6 +2974,7 @@ namespace PinkXP
         {
             auto& e = cache[i];
             if (e.theme == currentTheme
+                && e.skin == gCurrentSkin
                 && e.width == width
                 && e.height == height
                 && e.patternVersion == kDesktopPatternVersion
@@ -1700,7 +3005,7 @@ namespace PinkXP
         if (cache.size() >= kMaxDesktopTextureEntries)
             cache.erase(cache.begin());
 
-        cache.push_back({ currentTheme, width, height, kDesktopPatternVersion, img });
+        cache.push_back({ currentTheme, gCurrentSkin, width, height, kDesktopPatternVersion, img });
         return cache.back().image;
     }
 
@@ -1769,25 +3074,133 @@ namespace PinkXP
                               false);
     }
 
+    // 霓虹抬头下半部的灯色：Accent → Accent2 的 OKLab 混色（调色工作室两种强调色共同决定）
+    static juce::Colour neonTitleLowerColour()
+    {
+        return interpolateOkLab (sel, accent2, 0.40f);
+    }
+
+    // 霓虹抬头底沿灯芯（也用作标题栏下沿亮缝）
+    static juce::Colour neonTitleBottomCore()
+    {
+        return neonTitleLowerColour().interpolatedWith (juce::Colours::white, 0.50f);
+    }
+
     juce::Rectangle<int> drawPinkTitleBar(juce::Graphics& g,
                                           juce::Rectangle<int> bounds,
                                           const juce::String& title,
                                           float fontHeight)
     {
         // 主题底色
-        g.setColour(sel);
-        g.fillRect(bounds);
+        if (gCurrentSkin == SkinId::chrome)
+        {
+            // 千禧金属：铬质高光标题栏（上半亮 → 中线折痕 → 下半回亮）
+            const float y0 = (float) bounds.getY();
+            const float y1 = (float) bounds.getBottom();
+            juce::ColourGradient grad (sel.interpolatedWith (juce::Colours::white, 0.50f), 0.0f, y0,
+                                       sel.interpolatedWith (juce::Colours::white, 0.12f), 0.0f, y1, false);
+            grad.addColour (0.48, sel.interpolatedWith (juce::Colours::white, 0.14f));
+            grad.addColour (0.52, sel.interpolatedWith (juce::Colours::black, 0.10f));
+            g.setGradientFill (grad);
+            g.fillRect (bounds);
+            g.setColour (sel.interpolatedWith (juce::Colours::white, 0.75f));
+            g.fillRect (bounds.getX(), bounds.getY(), bounds.getWidth(), 1);
+            g.setColour (sel.darker (0.55f));
+            g.fillRect (bounds.getX(), bounds.getBottom() - 1, bounds.getWidth(), 1);
+        }
+        else if (gCurrentSkin == SkinId::modern || gCurrentSkin == SkinId::greenScreen
+                 || gCurrentSkin == SkinId::fluent)
+        {
+            // 现代简约 / Fluent / 绿幕（悬停显示）：纯色，不画高光 / 暗线
+            g.setColour (sel);
+            g.fillRect (bounds);
+            if (gCurrentSkin == SkinId::fluent)
+            {
+                g.setColour (sel.darker (0.25f));
+                g.fillRect (bounds.getX(), bounds.getBottom() - 1, bounds.getWidth(), 1);
+            }
+        }
+        else if (gCurrentSkin == SkinId::glass)
+        {
+            // 玻璃：强调色上亮下实 + 上沿镜面反光
+            const float y0 = (float) bounds.getY();
+            const float y1 = (float) bounds.getBottom();
+            juce::ColourGradient grad (sel.interpolatedWith (juce::Colours::white, 0.38f), 0.0f, y0,
+                                       sel, 0.0f, y1, false);
+            g.setGradientFill (grad);
+            g.fillRect (bounds);
+            g.setColour (juce::Colours::white.withAlpha (0.16f));
+            g.fillRect (bounds.withHeight (juce::jmax (1, bounds.getHeight() * 2 / 5)));
+            g.setColour (juce::Colours::white.withAlpha (0.65f));
+            g.fillRect (bounds.getX(), bounds.getY(), bounds.getWidth(), 1);
+        }
+        else if (gCurrentSkin == SkinId::neon)
+        {
+            // 霓虹：灯箱抬头 —— 颜色完全来自调色工作室的 Accent（sel）与 Accent2（accent2）
+            //   · 旧实现上沿压到 55% 明度、上下再各压一条近白灯芯 → "中间发黑、两边发亮"；
+            //     暗部无论往纯黑混还是 HSV 压明度，本质都是往黑里映射，整体发脏。
+            //   · 现在底色不做任何压暗：上沿 = Accent 轻提亮，中段 = Accent 本色，
+            //     下沿 = Accent → Accent2 的 OKLab 混色（感知均匀、不经过灰），
+            //     最暗处就是用户选的颜色本身。
+            //   · 灯芯同样取自两色：上沿 Accent 灯芯，下沿 Accent2 混色灯芯 + 同色 bloom，
+            //     配合 titleBarDividerColour 的同色亮缝，光顺着缝隙漏进内容区。
+            const float y0 = (float) bounds.getY();
+            const float y1 = (float) bounds.getBottom();
+            const auto white  = juce::Colours::white;
+            const auto upper  = sel;
+            const auto lower  = neonTitleLowerColour();
 
-        // 顶部 1px 高光 + 底部 1px 暗线 —— 旧版本这里写死了 0xffff9dbf / pink700，
-        //   在非粉色主题（Starlight 蓝、Tangerine 橙、Aqua 蓝、Matcha 绿、CyberLilac 紫）
-        //   下就会出现"一道粉色横线"的 bug。改为基于当前主题的 `sel` 色做亮/暗推演，
-        //   保证任何主题下顶/底线都与标题栏底色同色系。
-        g.setColour(sel.brighter(0.35f));
-        g.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), 1);
-        g.setColour(sel.darker(0.45f));
-        g.fillRect(bounds.getX(), bounds.getBottom() - 1, bounds.getWidth(), 1);
+            juce::ColourGradient grad (upper.interpolatedWith (white, 0.12f), 0.0f, y0,
+                                       lower, 0.0f, y1, false);
+            grad.addColour (0.40, upper);
+            g.setGradientFill (grad);
+            g.fillRect (bounds);
+
+            // 顶部灯管：1px 灯芯 + 1px 同色光晕
+            g.setColour (upper.interpolatedWith (white, 0.55f).withAlpha (0.80f));
+            g.fillRect (bounds.getX(), bounds.getY(), bounds.getWidth(), 1);
+            g.setColour (upper.interpolatedWith (white, 0.30f).withAlpha (0.30f));
+            g.fillRect (bounds.getX(), bounds.getY() + 1, bounds.getWidth(), 1);
+
+            // 底部灯管：2px 同色 bloom + 2px 灯芯
+            g.setColour (lower.interpolatedWith (white, 0.25f).withAlpha (0.35f));
+            g.fillRect (bounds.getX(), bounds.getBottom() - 4, bounds.getWidth(), 2);
+            g.setColour (neonTitleBottomCore());
+            g.fillRect (bounds.getX(), bounds.getBottom() - 2, bounds.getWidth(), 2);
+        }
+        else if (gCurrentSkin == SkinId::crt)
+        {
+            // CRT：磷光色实底 + 扫描线
+            g.setColour (sel);
+            g.fillRect (bounds);
+            crtScanlines (g, bounds, 0.16f);
+            g.setColour (sel.darker (0.5f));
+            g.fillRect (bounds.getX(), bounds.getBottom() - 1, bounds.getWidth(), 1);
+        }
+        else
+        {
+            g.setColour(sel);
+            g.fillRect(bounds);
+
+            // 顶部 1px 高光 + 底部 1px 暗线 —— 旧版本这里写死了 0xffff9dbf / pink700，
+            //   在非粉色主题（Starlight 蓝、Tangerine 橙、Aqua 蓝、Matcha 绿、CyberLilac 紫）
+            //   下就会出现"一道粉色横线"的 bug。改为基于当前主题的 `sel` 色做亮/暗推演，
+            //   保证任何主题下顶/底线都与标题栏底色同色系。
+            g.setColour(sel.brighter(0.35f));
+            g.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), 1);
+            g.setColour(sel.darker(0.45f));
+            g.fillRect(bounds.getX(), bounds.getBottom() - 1, bounds.getWidth(), 1);
+        }
 
         const auto& th = getCurrentTheme();
+
+        // 扁平类风格去掉标题文字的 1px 投影；其余风格保持。
+        //   霓虹也归入"无投影"：灯箱底色已经够亮，深色投影会在灯管光里糊成一块脏边。
+        const bool flatTitle = gCurrentSkin == SkinId::modern || gCurrentSkin == SkinId::fluent
+                            || gCurrentSkin == SkinId::greenScreen || gCurrentSkin == SkinId::neon;
+        const juce::Colour titleShadow = flatTitle
+                                           ? juce::Colours::transparentBlack
+                                           : sel.darker(0.50f).withAlpha(0.55f);
 
         // 左侧主题文本图标
         auto iconRect = juce::Rectangle<int>(bounds.getX() + 5,
@@ -1801,30 +3214,46 @@ namespace PinkXP
         textRect.removeFromLeft(19); // 给左侧图标留空间
 
         const auto titleImg = cachedStaticText (
-            g, title, fontHeight, juce::Font::bold, selInk, sel.darker(0.50f).withAlpha(0.55f));
+            g, title, fontHeight, juce::Font::bold, selInk, titleShadow);
 
-        // CJK 方块字紧贴 em 顶部、descent 很小，按字体 metrics 垂直居中后视觉偏上
-        //   —— 中文界面下标题统一向下微移 1px（英文界面为 0，无变化）
-        const int titleVNudge = SymbolGlyphs::cjkFontActive() ? 1 : 0;
-
+        // 垂直定位沿用 layoutStaticText 的口径：对齐"位图内的文字排版框"
+        //   （boxTop/boxHeight），而不是整张位图 —— 位图底部多留了 1px 空白，
+        //   直接居中整张图会让标题永远高 1px（旧版是给 CJK 单独 +1 补偿）。
+        //   字形本身的光学居中由 SymbolGlyphs::drawText 里的 FontOptics 负责。
         if (titleImg.isValid())
         {
-            titleImg.drawAt (g,
-                             (float) textRect.getX() - titleImg.originX,
-                             (float) (textRect.getY() + (textRect.getHeight() - titleImg.getHeight()) / 2 + titleVNudge));
+            const float imgY = (float) textRect.getY()
+                             + ((float) textRect.getHeight() - titleImg.boxHeight) * 0.5f
+                             - titleImg.boxTop;
+            titleImg.drawAt (g, (float) textRect.getX() - titleImg.originX, imgY);
         }
         else
         {
-            // 兜底（缓存失败）：保持旧绘制路径
+            // 兜底（缓存失败）：保持旧绘制路径，同样按光学居中修正
             const auto shownTitle = y2k::tr (title);
-            g.setFont(getFont(fontHeight, juce::Font::bold));
-            g.setColour(sel.darker(0.50f).withAlpha(0.55f));
-            g.drawText(shownTitle, textRect.translated(1, 1 + titleVNudge), juce::Justification::centredLeft, false);
+            const auto titleFont  = getFont (fontHeight, juce::Font::bold);
+            const int  nudge      = (int) std::lround (opticalNudge (titleFont));
+            g.setFont(titleFont);
+            if (! titleShadow.isTransparent())
+            {
+                g.setColour(titleShadow);
+                g.drawText(shownTitle, textRect.translated(1, 1 + nudge), juce::Justification::centredLeft, false);
+            }
             g.setColour(selInk);
-            g.drawText(shownTitle, textRect.translated(0, titleVNudge), juce::Justification::centredLeft, false);
+            g.drawText(shownTitle, textRect.translated(0, nudge), juce::Justification::centredLeft, false);
         }
 
         return bounds;
+    }
+
+    juce::Colour titleBarDividerColour() noexcept
+    {
+        // 霓虹：用灯管亮色代替深色硬线 —— 深色线会把标题栏底部的辉光切断，
+        //   整条抬头立刻"发闷"；换成亮芯后光会顺着缝隙漏进内容区。
+        if (gCurrentSkin == SkinId::neon)
+            return neonTitleBottomCore();
+
+        return dark;
     }
 
     // ======================================================
@@ -2277,6 +3706,46 @@ namespace PinkXP
     static juce::String gCustomThemeName;
     static Theme gCustomTheme;                              // 运行时动态构建的完整Theme
 
+    // 标题图标候选（与调色工作室 kTitleIcons 同序；UTF-8 转义字节，避免字面量编码问题）
+    static const char* const kTitleIconCandidates[8] = {
+        "\xe2\x99\xa1",   // ♡
+        "\xe2\x98\x85",   // ★
+        "\xe2\x97\x86",   // ◆
+        "\xe2\x97\x8f",   // ●
+        "\xe2\x9c\xa6",   // ✦
+        "\xe2\x8c\x81",   // ⌁
+        "\xe2\x99\xa5",   // ♥
+        "\xe2\x96\xb2"    // ▲
+    };
+
+    // 官方预设的装饰覆盖（桌面纹理 / 标题图标）+ 叠加覆盖后的预设副本
+    static PresetDecor gPresetDecor;
+    static Theme       gDecoratedPreset;
+
+    DesktopPattern patternFromSpec(y2kpal::Pattern p);
+
+    static const Theme& findPresetTheme(ThemeId id)
+    {
+        const auto& all = getAllThemes();
+        for (const auto& t : all)
+            if (t.id == id)
+                return t;
+        return all.front();
+    }
+
+    static void rebuildDecoratedPreset()
+    {
+        if (! gPresetDecor.active || gPresetDecor.id == ThemeId::custom)
+        {
+            gPresetDecor.active = false;
+            return;
+        }
+        gDecoratedPreset = findPresetTheme(gPresetDecor.id);
+        gDecoratedPreset.desktopPattern = patternFromSpec(gPresetDecor.pattern);
+        if (gPresetDecor.titleIconIndex >= 0 && gPresetDecor.titleIconIndex < 8)
+            gDecoratedPreset.titleIconText = kTitleIconCandidates[gPresetDecor.titleIconIndex];
+    }
+
     juce::Colour getCustomPrimary()  { return gCustomPrimary; }
     juce::Colour getCustomSecondary() { return gCustomSecondary; }
     bool isCustomThemeActive() { return gCurrentThemeId == ThemeId::custom; }
@@ -2287,11 +3756,9 @@ namespace PinkXP
     {
         if (gCurrentThemeId == ThemeId::custom)
             return gCustomTheme;
-        const auto& all = getAllThemes();
-        for (const auto& t : all)
-            if (t.id == gCurrentThemeId)
-                return t;
-        return all.front();
+        if (gPresetDecor.active && gPresetDecor.id == gCurrentThemeId)
+            return gDecoratedPreset;
+        return findPresetTheme(gCurrentThemeId);
     }
 
     // 把 Theme 的全部槽位写入全局调色板并通知订阅者
@@ -2345,6 +3812,8 @@ namespace PinkXP
 
     void notifyThemeSubscribers()
     {
+        ++gAppearanceGeneration;
+
         // 通知所有订阅者。每个回调单独 try/catch 隔离：任一订阅者抛异常
         //   都不能中断后续订阅者（Editor 的桌面缓存失效回调排在队列末尾，
         //   若被前面模块的异常截断，桌面纹理就会永远画旧缓存图）。
@@ -2383,7 +3852,11 @@ namespace PinkXP
 
     void applyTheme(ThemeId id)
     {
+        // 装饰覆盖只属于它登记的那个预设：切到别的主题即失效
+        if (gPresetDecor.active && gPresetDecor.id != id)
+            gPresetDecor.active = false;
         gCurrentThemeId = id;
+        rebuildDecoratedPreset();
         commitTheme(getCurrentTheme());
     }
 
@@ -2462,6 +3935,7 @@ namespace PinkXP
     {
         gCustomSpec = spec;
         gCustomThemeName = displayName.isNotEmpty() ? displayName : juce::String("Custom");
+        gPresetDecor.active = false;   // 离开预设：预设装饰覆盖随之失效
 
         const y2kpal::GeneratedTheme gen = y2kpal::generate(spec);
 
@@ -2488,8 +3962,7 @@ namespace PinkXP
         };
 
         // 标题图标候选（R14：5-8 个，与预设图标风格一致）
-        static const char* const kTitleIcons[] = { "♡", "★", "◆", "●", "✦", "⌁", "♥", "▲" };
-        const char* icon = kTitleIcons[spec.titleIcon % 8];
+        const char* icon = kTitleIconCandidates[spec.titleIcon % 8];
 
         // 逐字段赋值（MSVC 对含 std::array 成员的嵌套聚合初始化较挑剔）
         Theme t;
@@ -2543,10 +4016,64 @@ namespace PinkXP
         for (auto& ov : spec.overrides)
             ov.set = false;
         spec.pattern = patternFromSpecInv(t.desktopPattern);
+        // 图标同样从当前（含装饰覆盖的）预设带出；不在候选里的预设图标回退第 0 个
+        spec.titleIcon = (uint8_t) juce::jmax(0, titleIconIndexOf(t.titleIconText));
         // 氛围/染色从中间值起步（fit 反推会把它们算到接近 0，用户期望默认居中）
         spec.vibe   = 1.0f;
         spec.bgTint = 1.0f;
         return spec;
+    }
+
+    int titleIconIndexOf(const char* iconText)
+    {
+        if (iconText == nullptr)
+            return -1;
+        for (int i = 0; i < 8; ++i)
+            if (std::strcmp(iconText, kTitleIconCandidates[i]) == 0)
+                return i;
+        return -1;
+    }
+
+    PresetDecor getPresetDecor()
+    {
+        return gPresetDecor;
+    }
+
+    void setPresetDecor(const PresetDecor& decor)
+    {
+        gPresetDecor = decor;
+        if (gPresetDecor.titleIconIndex < -1 || gPresetDecor.titleIconIndex > 7)
+            gPresetDecor.titleIconIndex = -1;
+        rebuildDecoratedPreset();
+    }
+
+    void applyPresetDecor(y2kpal::Pattern pattern, int titleIconIndex)
+    {
+        if (titleIconIndex < -1 || titleIconIndex > 7)
+            titleIconIndex = -1;
+
+        if (gCurrentThemeId == ThemeId::custom)
+        {
+            // 生成器主题：同一份 spec 只换装饰，生成结果的配色完全一致
+            y2kpal::ThemeSpec spec = gCustomSpec;
+            spec.pattern = pattern;
+            if (titleIconIndex >= 0)
+                spec.titleIcon = (uint8_t) titleIconIndex;
+            applyThemeFromSpec(spec, gCustomThemeName);
+            return;
+        }
+
+        // 预设：沿用已有覆盖里的图标选择（只改纹理时不丢掉之前挑的图标）
+        int icon = titleIconIndex;
+        if (icon < 0 && gPresetDecor.active && gPresetDecor.id == gCurrentThemeId)
+            icon = gPresetDecor.titleIconIndex;
+
+        gPresetDecor.active         = true;
+        gPresetDecor.id             = gCurrentThemeId;
+        gPresetDecor.pattern        = pattern;
+        gPresetDecor.titleIconIndex = icon;
+        rebuildDecoratedPreset();
+        commitTheme(getCurrentTheme());
     }
 
     void applyUserTheme(const y2kpal::ThemeSpec& spec, const juce::String& name)
@@ -2571,14 +4098,87 @@ namespace PinkXP
         return interpolateOkLab(chartRamp[i], chartRamp[i + 1], u);
     }
 
+    namespace
+    {
+        // ---- interpolateOkLab 快速路径（性能）----
+        //   立体声频段图 / 波形历史 / 语谱图在 onFrame 里逐顶点、逐列调用，原实现每次
+        //   都要 6 次 pow + 6 次 cbrt（两端 sRGB → OKLab）+ 3 次 pow（输出编码），
+        //   全部模块时约占消息线程 6%。
+        //   · 两端颜色几乎总是同几组主题色：OKLab 结果放进线程本地直接映射小缓存；
+        //   · 输出 linear → sRGB8：预先按原公式二分出 255 个"进位阈值"，查表二分
+        //     8 次即得，与 toRgb8 (linearToRgb (x)) 逐值一致（浮点边界除外）。
+        y2kpal::OkLab okLabOfCached (juce::Colour c) noexcept
+        {
+            struct Entry { juce::uint32 key = 0xffffffffu; y2kpal::OkLab lab; };
+            thread_local Entry cache[64];
+
+            const juce::uint32 key = ((juce::uint32) c.getRed() << 16)
+                                   | ((juce::uint32) c.getGreen() << 8)
+                                   |  (juce::uint32) c.getBlue();
+            auto& e = cache[(key * 2654435761u) >> 26];
+
+            if (e.key != key)
+            {
+                e.key = key;
+                e.lab = y2kpal::linearToOkLab (y2kpal::rgbToLinear (
+                            y2kpal::fromRgb8 ({ c.getRed(), c.getGreen(), c.getBlue() })));
+            }
+
+            return e.lab;
+        }
+
+        juce::uint8 encodeLinearToSrgb8 (float x) noexcept
+        {
+            struct Table
+            {
+                float thr[255];   // x >= thr[k] ⇔ 原公式结果 >= k + 1
+
+                Table()
+                {
+                    auto encode = [] (float v)
+                    {
+                        return (int) std::lroundf (y2kpal::clamp01 (y2kpal::linearToSrgb (v)) * 255.0f);
+                    };
+
+                    for (int k = 0; k < 255; ++k)
+                    {
+                        float lo = 0.0f, hi = 1.0f;   // encode(lo) <= k < encode(hi)
+                        for (int it = 0; it < 48; ++it)
+                        {
+                            const float mid = 0.5f * (lo + hi);
+                            if (mid <= lo || mid >= hi)
+                                break;
+                            (encode (mid) > k ? hi : lo) = mid;
+                        }
+                        thr[k] = hi;
+                    }
+                }
+            };
+
+            static const Table table;
+
+            if (! (x > 0.0f))   // 含 NaN
+                return 0;
+
+            return (juce::uint8) (std::upper_bound (std::begin (table.thr), std::end (table.thr), x)
+                                  - std::begin (table.thr));
+        }
+    }
+
     juce::Colour interpolateOkLab(juce::Colour a, juce::Colour b, float t)
     {
         t = juce::jlimit(0.0f, 1.0f, t);
-        const y2kpal::Rgb8 c = y2kpal::interpolateOkLab(
-            { a.getRed(), a.getGreen(), a.getBlue() },
-            { b.getRed(), b.getGreen(), b.getBlue() },
-            t);
-        return juce::Colour(c.r, c.g, c.b);
+
+        const auto la = okLabOfCached (a);
+        const auto lb = okLabOfCached (b);
+        const y2kpal::OkLab m { la.L + (lb.L - la.L) * t,
+                                la.a + (lb.a - la.a) * t,
+                                la.b + (lb.b - la.b) * t };
+        const auto lin = y2kpal::okLabToLinear (m);
+
+        return juce::Colour (encodeLinearToSrgb8 (lin.r),
+                             encodeLinearToSrgb8 (lin.g),
+                             encodeLinearToSrgb8 (lin.b));
     }
 }
 
@@ -2640,10 +4240,14 @@ void PinkXPLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& bu
     if (pressed)
     {
         PinkXP::drawPressed(g, bounds, PinkXP::pink100);
-        g.setColour(PinkXP::pink200);
-        for (int py = bounds.getY() + 3; py < bounds.getBottom() - 2; py += 4)
-            for (int px = bounds.getX() + 3 + ((py / 4) % 2) * 2; px < bounds.getRight() - 2; px += 4)
-                g.fillRect(px, py, 2, 2);
+        // 按下态的像素抖动点阵只属于像素风格
+        if (PinkXP::getCurrentSkin() == PinkXP::SkinId::pinkXP)
+        {
+            g.setColour(PinkXP::pink200);
+            for (int py = bounds.getY() + 3; py < bounds.getBottom() - 2; py += 4)
+                for (int px = bounds.getX() + 3 + ((py / 4) % 2) * 2; px < bounds.getRight() - 2; px += 4)
+                    g.fillRect(px, py, 2, 2);
+        }
     }
     else
     {
@@ -2668,15 +4272,32 @@ void PinkXPLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& butt
     //   的 0.9 收紧影响，中英文界面字形/大小完全一致。
     //   混排文本（如「高级 ▸」）由 drawText 拆 run：CJK 留中文字体，
     //   ▸ 用英文字体 —— 整串换字体会让中文消失。
-    const bool symbolsOnly = PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
+    //   组件可用属性 "y2k.iconFont" 强制整颗用英文 UI 字体（计算器等纯拉丁控件：
+    //   CJK 界面的中文字体没有粗体、笔画明显比英文界面的像素字体细，同一排按钮
+    //   会一半粗一半细 —— v3.4.4 bug2）。
+    const bool forceIconFont = (bool) button.getProperties().getWithDefault ("y2k.iconFont", false);
+    const bool symbolsOnly = forceIconFont || PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
 
     auto area = button.getLocalBounds();
     if (shouldDrawButtonAsDown || button.getToggleState())
         area.translate(1, 1);
 
+    // 字号上限：字体行高不得超过按钮高度（VT323 1.30 系数在 22px 按钮里会溢出）。
+    //   字体高度与名义字号成正比 → 按比例把名义字号收回来，像素复古不受影响
+    //   （Silkscreen 12 → 18px ≤ 按钮高度）。
+    const float nominal = symbolsOnly ? 14.0f : 12.0f;
+    const auto  probe   = symbolsOnly
+                            ? PinkXP::SymbolGlyphs::iconFont (nominal, juce::Font::bold)
+                            : PinkXP::SymbolGlyphs::buttonFont (shown, nominal, juce::Font::bold);
+    const float maxH    = (float) button.getHeight();
+    const float fontSize = (probe.getHeight() > maxH && probe.getHeight() > 0.0f)
+                               ? nominal * maxH / probe.getHeight()
+                               : nominal;
+
     // 静态位图缓存（mac 性能）：与 SymbolGlyphs::drawText(shown, area, centred, baseFont) 等价
+    //   垂直位置由位图内的光学居中（FontOptics）负责，不同字体都落在按钮视觉中心
     PinkXP::drawCachedSymbolText (g, shown, area, juce::Justification::centred,
-                                  symbolsOnly ? 14.0f : 12.0f, juce::Font::bold, textColour,
+                                  fontSize, juce::Font::bold, textColour,
                                   symbolsOnly ? PinkXP::StaticTextFont::icon
                                               : PinkXP::StaticTextFont::button,
                                   juce::Colours::transparentBlack, false);
@@ -2689,13 +4310,21 @@ juce::Font PinkXPLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHei
 
 int PinkXPLookAndFeel::getTextButtonWidthToFitText (juce::TextButton& b, int buttonHeight)
 {
-    // 测量与 drawButtonText 用同一套"按文本选字体 + run 化"，避免混排宽度不一致
+    // 测量与 drawButtonText 用同一套"按文本选字体 + run 化 + 高度上限"，避免宽度不一致
     const juce::String shown = y2k::tr (b.getButtonText());
-    const juce::Font font = PinkXP::SymbolGlyphs::isSymbolsOnly (shown)
-        ? PinkXP::SymbolGlyphs::iconFont (14.0f, juce::Font::bold)
-        : PinkXP::SymbolGlyphs::buttonFont (shown,
-                                            juce::jmin (14.0f, buttonHeight * 0.55f),
-                                            juce::Font::bold);
+    const bool forceIconFont = (bool) b.getProperties().getWithDefault ("y2k.iconFont", false);
+    const bool symbolsOnly = forceIconFont || PinkXP::SymbolGlyphs::isSymbolsOnly (shown);
+    const float nominal = symbolsOnly ? 14.0f : juce::jmin (14.0f, buttonHeight * 0.55f);
+    const juce::Font probe = symbolsOnly
+        ? PinkXP::SymbolGlyphs::iconFont (nominal, juce::Font::bold)
+        : PinkXP::SymbolGlyphs::buttonFont (shown, nominal, juce::Font::bold);
+    const float maxH = (float) juce::jmax (1, buttonHeight);
+    const float fontSize = (probe.getHeight() > maxH && probe.getHeight() > 0.0f)
+                               ? nominal * maxH / probe.getHeight()
+                               : nominal;
+    const juce::Font font = symbolsOnly
+        ? PinkXP::SymbolGlyphs::iconFont (fontSize, juce::Font::bold)
+        : PinkXP::SymbolGlyphs::buttonFont (shown, fontSize, juce::Font::bold);
     return (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (shown, font)) + buttonHeight;
 }
 
@@ -2803,11 +4432,15 @@ void PinkXPLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
     {
         const float alpha = label.isEnabled() ? 1.0f : 0.5f;
         const juce::String shown = y2k::tr (label.getText());
-        const juce::Font baseFont = getLabelFont (label);
 
         g.setColour (label.findColour (juce::Label::textColourId).withMultipliedAlpha (alpha));
 
         const auto textArea = getLabelBorderSize (label).subtractedFrom (label.getLocalBounds());
+
+        // 字号上限：行高明显超过标签可用高度时收回来（高行框字体在窄条里会溢出）。
+        //   +1 容差：像素复古 11pt→16.5px 落在 16px 标签里保持旧观感，不触发收缩。
+        const juce::Font baseFont = PinkXP::fitFontToHeight (getLabelFont (label),
+                                                             (float) textArea.getHeight() + 1.0f);
 
         // 只有"含装饰符号"的文本才走 run 化绘制（CJK + 符号混排时符号换英文
         //   字体，CJK 留中文字体）；其余文本保持 drawFittedText 的原有缩放 /
@@ -2824,7 +4457,16 @@ void PinkXPLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
         {
             const juce::Font font (PinkXP::SymbolGlyphs::rebase (baseFont, shown));
             g.setFont (font);
-            g.drawFittedText (shown, textArea, label.getJustificationType(),
+
+            // 单行 + 垂直居中：先按字形带做光学修正（跨字体一致），
+            //   多行 / 顶底对齐保持 drawFittedText 的原行为
+            auto drawArea = textArea.toFloat();
+            if (! shown.containsChar ('\n')
+                && (label.getJustificationType().getOnlyVerticalFlags()
+                        & juce::Justification::verticallyCentred) != 0)
+                drawArea.translate (0.0f, PinkXP::opticalNudge (font));
+
+            g.drawFittedText (shown, drawArea.toNearestInt(), label.getJustificationType(),
                               juce::jmax (1, (int) ((float) textArea.getHeight() / font.getHeight())),
                               label.getMinimumHorizontalScale());
         }
@@ -2845,9 +4487,9 @@ void PinkXPLookAndFeel::drawComboBoxTextWhenNothingSelected (juce::Graphics& g, 
     g.setColour (findColour (juce::ComboBox::textColourId).withMultipliedAlpha (0.5f));
 
     const juce::String shown = y2k::tr (box.getTextWhenNothingSelected());
-    const auto baseFont = label.getLookAndFeel().getLabelFont (label);
-
     const auto textArea = getLabelBorderSize (label).subtractedFrom (label.getBounds());
+    const auto baseFont = PinkXP::fitFontToHeight (label.getLookAndFeel().getLabelFont (label),
+                                                   (float) textArea.getHeight() + 1.0f);
 
     const auto runs = PinkXP::SymbolGlyphs::splitRuns (shown);
     const bool needsRunLayout = runs.size() > 1 || (runs.size() == 1 && runs[0].symbol);
@@ -2860,7 +4502,13 @@ void PinkXPLookAndFeel::drawComboBoxTextWhenNothingSelected (juce::Graphics& g, 
 
     const juce::Font font (PinkXP::SymbolGlyphs::rebase (baseFont, shown));
     g.setFont (font);
-    g.drawFittedText (shown, textArea, label.getJustificationType(),
+
+    auto drawArea = textArea.toFloat();
+    if ((label.getJustificationType().getOnlyVerticalFlags()
+            & juce::Justification::verticallyCentred) != 0)
+        drawArea.translate (0.0f, PinkXP::opticalNudge (font));
+
+    g.drawFittedText (shown, drawArea.toNearestInt(), label.getJustificationType(),
                       juce::jmax (1, (int) ((float) textArea.getHeight() / font.getHeight())),
                       label.getMinimumHorizontalScale());
 }
@@ -2903,11 +4551,18 @@ void PinkXPLookAndFeel::drawScrollbar(juce::Graphics& g, juce::ScrollBar& bar,
     if (track.isEmpty())
         return;
 
+    const auto skin = PinkXP::getCurrentSkin();
+    const bool flatSkin = PinkXP::skinUsesFlatControls (skin);
+
     // 轨道：比底色略深的凹槽 + 1px 内框（像素风，硬边不圆角）
     g.setColour (PinkXP::content.darker (0.05f));
     g.fillRect (track);
-    g.setColour (PinkXP::ink.withAlpha (0.18f));
-    g.drawRect (track, 1);
+    if (! flatSkin)
+    {
+        g.setColour (skin == PinkXP::SkinId::crt ? PinkXP::sel.withAlpha (0.45f)
+                                                 : PinkXP::ink.withAlpha (0.18f));
+        g.drawRect (track, 1);
+    }
 
     if (thumbSize <= 0)
         return;
@@ -2924,6 +4579,38 @@ void PinkXPLookAndFeel::drawScrollbar(juce::Graphics& g, juce::ScrollBar& bar,
     const auto base = isMouseDown ? PinkXP::pink600
                      : isMouseOver ? PinkXP::pink500
                                    : PinkXP::pink400;
+
+    if (flatSkin)
+    {
+        // 扁平类风格：无描边胶囊滑块（霓虹额外加一圈灯管描边）
+        const auto tf = thumb.toFloat().reduced (1.0f);
+        const float rad = juce::jmin (tf.getWidth(), tf.getHeight()) * 0.5f;
+        g.setColour (base);
+        g.fillRoundedRectangle (tf, rad);
+        if (skin == PinkXP::SkinId::neon)
+        {
+            g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.35f));
+            g.drawRoundedRectangle (tf.reduced (0.5f), rad, 1.0f);
+        }
+        return;
+    }
+
+    if (skin == PinkXP::SkinId::chrome)
+    {
+        // 千禧金属：沿短轴的铬质渐变（中间亮、两侧暗）
+        const auto tf = thumb.toFloat();
+        juce::ColourGradient grad = isScrollbarVertical
+            ? juce::ColourGradient (base.darker (0.25f), tf.getX(), 0.0f,
+                                    base.darker (0.25f), tf.getRight(), 0.0f, false)
+            : juce::ColourGradient (base.darker (0.25f), 0.0f, tf.getY(),
+                                    base.darker (0.25f), 0.0f, tf.getBottom(), false);
+        grad.addColour (0.40, base.interpolatedWith (juce::Colours::white, 0.45f));
+        g.setGradientFill (grad);
+        g.fillRect (thumb);
+        g.setColour (PinkXP::dark);
+        g.drawRect (thumb, 1);
+        return;
+    }
 
     g.setColour (base);
     g.fillRect (thumb);
@@ -3102,10 +4789,23 @@ void PinkXPLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height,
     // 2) 右侧"▼"按钮区：用一条像素竖线与文本区域分隔
     if (buttonX > 2)
     {
-        g.setColour(PinkXP::shdw);
-        g.fillRect(buttonX, 2, 1, height - 4);
-        g.setColour(PinkXP::hl);
-        g.fillRect(buttonX + 1, 2, 1, height - 4);
+        if (PinkXP::skinUsesFlatControls (PinkXP::getCurrentSkin()))
+        {
+            g.setColour(PinkXP::skinHairlineOn(PinkXP::btnFace, 0.18f));
+            g.fillRect(buttonX, 4, 1, height - 8);
+        }
+        else if (PinkXP::getCurrentSkin() == PinkXP::SkinId::crt)
+        {
+            g.setColour(PinkXP::sel.withAlpha(0.6f));
+            g.fillRect(buttonX, 2, 1, height - 4);
+        }
+        else
+        {
+            g.setColour(PinkXP::shdw);
+            g.fillRect(buttonX, 2, 1, height - 4);
+            g.setColour(PinkXP::hl);
+            g.fillRect(buttonX + 1, 2, 1, height - 4);
+        }
     }
 
     // 3) 像素三角箭头（用填充矩形阶梯组成，保持 8-bit 感）
@@ -3140,6 +4840,43 @@ void PinkXPLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& l
                     box.findColour(juce::ComboBox::textColourId));
 }
 
+juce::PopupMenu::Options PinkXP::withFullScreenMenuArea (juce::PopupMenu::Options options,
+                                                          juce::Component& anchor)
+{
+    // 需要放宽菜单允许区域的三种场景（默认区域 = display->userArea）：
+    //   1) stick 驻留态（Windows）：AppBar 把条带从 userArea 挖掉，控件位于
+    //      条带内（userArea 之外），默认 clamp 会把菜单整体推到条带上方；
+    //   2) macOS 原生全屏：窗口铺满 totalArea（覆盖菜单栏/Dock），但 JUCE 报告的
+    //      display->userArea 仍扣除了菜单栏/Dock —— 底部工具栏里的控件正好落在
+    //      这段被扣除的区域内，默认 clamp 会把菜单推到控件上方"隔一段距离"；
+    //   3) 控件中心本来就在 userArea 之外（贴边的条状窗口等）。
+    bool needsOverride = isStickDockActive();
+
+   #if JUCE_MAC
+    if (! needsOverride)
+        if (auto* top = anchor.getTopLevelComponent())
+            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+                needsOverride = rw->isFullScreen();
+   #endif
+
+    const auto anchorScreen = anchor.getScreenBounds();
+    const auto display = juce::Desktop::getInstance().getDisplays()
+                             .getDisplayForPoint (anchorScreen.getCentre());
+    if (display == nullptr)
+        return options;
+
+    // 工作区内的控件（例如浮动窗口）不受影响，保持默认锚点与约束。
+    if (! needsOverride && display->userArea.contains (anchorScreen.getCentre()))
+        return options;
+
+    // 放宽允许区域到整个显示器，让菜单按默认逻辑贴着控件展开（可以盖在
+    //   条带 / 全屏底边上）。withParentAreaOverride 是本仓库 JUCE 的扩展
+    //   （见 juce_PopupMenu.h），全平台可用。
+    Y2K_DIAG ("UIPOPUP", "menu area override applied (stick / fullscreen / off userArea)");
+    return options.withParentAreaOverride (
+        display->safeAreaInsets.subtractedFrom (display->totalArea));
+}
+
 juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce::ComboBox& box,
                                                                             juce::Label& label)
 {
@@ -3148,41 +4885,8 @@ juce::PopupMenu::Options PinkXPLookAndFeel::getOptionsForComboBoxPopupMenu (juce
     //   时间戳，两条日志的时间差就是"点击 → 弹菜单"的延迟。
     Y2K_DIAG ("UIPOPUP", "combobox showPopup (getOptionsForComboBoxPopupMenu)");
 
-    auto options = juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu (box, label);
-
-    // 需要放宽菜单允许区域的两种场景（默认区域 = display->userArea）：
-    //   1) stick 驻留态（Windows）：AppBar 把条带从 userArea 挖掉，下拉框位于
-    //      条带内（userArea 之外），默认 clamp 会把菜单整体推到条带上方；
-    //   2) macOS 原生全屏：窗口铺满 totalArea（覆盖菜单栏/Dock），但 JUCE 报告的
-    //      display->userArea 仍扣除了菜单栏/Dock —— 底部工具栏里的下拉框正好落在
-    //      这段被扣除的区域内，默认 clamp 会把菜单推到控件上方"隔一段距离"。
-    bool needsOverride = PinkXP::isStickDockActive();
-
-   #if JUCE_MAC
-    if (! needsOverride)
-        if (auto* top = box.getTopLevelComponent())
-            if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
-                needsOverride = rw->isFullScreen();
-   #endif
-
-    if (! needsOverride)
-        return options;
-
-    const auto boxScreen = box.getScreenBounds();
-    const auto display = juce::Desktop::getInstance().getDisplays()
-                             .getDisplayForPoint (boxScreen.getCentre());
-    if (display == nullptr)
-        return options;
-
-    // 工作区内的下拉（例如浮动窗口）不受影响，保持默认锚点与约束。
-    if (display->userArea.contains (boxScreen.getCentre()))
-        return options;
-
-    // 放宽允许区域到整个显示器，让菜单按默认逻辑贴着下拉框展开（可以盖在
-    //   条带 / 全屏底边上）。withParentAreaOverride 是本仓库 JUCE 的扩展
-    //   （见 juce_PopupMenu.h），全平台可用。
-    return options.withParentAreaOverride (
-        display->safeAreaInsets.subtractedFrom (display->totalArea));
+    return PinkXP::withFullScreenMenuArea (
+        juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu (box, label), box);
 }
 
 // ==========================================================

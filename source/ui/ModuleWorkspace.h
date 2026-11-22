@@ -69,7 +69,14 @@ enum class ModuleType
     tempoKey,
 
     // v2.9.9 补充：录音机（红点按钮录制 pre-gain 原始输入，32-bit float WAV）
-    recorder
+    recorder,
+
+    // v3.3：电脑状态（CPU / GPU / 温度 / 内存 / 显存 / 磁盘 / 网络 / 电池），
+    //   数据来自 source/system/SystemStats 后台采集线程，不订阅 AnalyserHub
+    systemMonitor,
+
+    // v3.3：小工具（计算器 / 取色器 / 秒表 / 倒计时 / 音频换算 / 时钟 / 便签）
+    utility
 };
 
 juce::String getModuleDisplayName(ModuleType t);
@@ -81,7 +88,7 @@ ModuleType   stringToModuleType(const juce::String& s, bool* ok = nullptr);
 // ------------------------------------------------------------
 // ThemeSwatchBar —— 参考 Win XP 画图底部调色板样式的主题选择器
 //   调色板重构（R1）布局：
-//     [当前主题预览块] [预设色票 x12] [我的主题 xN(角标)] [+] [主题名]
+//     [当前主题预览块] [预设色票 x12] [我的主题 xN(角标)] [+] [SKIN] [主题名]
 //   超宽时支持滚轮横向滚动。
 // ------------------------------------------------------------
 class ThemeSwatchBar : public juce::Component,
@@ -108,12 +115,28 @@ private:
     juce::Rectangle<int> getUserSwatchBounds(int index) const;
     juce::Rectangle<int> getNewButtonBounds() const;
 
-    // hitTest：kind = 0 无 / 1 预览块 / 2 预设 / 3 我的主题 / 4 "+"
+    // hitTest：kind = 0 无 / 1 预览块 / 2 预设 / 3 我的主题 / 4 "+" / 5 视觉风格（SKIN）
     struct Hit { int kind = 0; int index = -1; };
     Hit hitTest(juce::Point<int> p) const;
 
     int  totalContentWidth() const;
     void updateScrollLimits();
+
+    // 宽度不足时的让位规则（bug1）：右侧固定保留"+"/SKIN 与内边距，色票数量随
+    //   剩余宽度递减 —— 预设色票优先让位，其次才是"我的主题"色票；
+    //   不再出现 SKIN 按钮被右侧控制区挡住的情况。
+    int  reservedTailWidth() const;      // 从最后一个色票之后到右边界的固定占用
+    int  visiblePresetCount() const;     // 实际显示的预设色票数量
+    int  visibleUserCount() const;       // 实际显示的"我的主题"色票数量
+
+    // 宽度装不下全部预设色票时，在可见色票右侧显示一个"…"展开按钮，
+    //   点开是全部官方预设的菜单 —— 保证任何宽度下都能选到每一个预设（bug3）。
+    //   三个函数共用 presetStartX() / presetAvailWidth()，避免各处口径漂移。
+    int  presetStartX() const;
+    int  presetAvailWidth() const;
+    bool presetOverflowVisible() const;
+    juce::Rectangle<int> overflowButtonBounds() const;
+    void showPresetOverflowMenu();
 
     Hit hoverHit_;
     int  scrollX_ = 0;
@@ -210,6 +233,21 @@ struct ParamDef
 };
 
 class ModuleControlDrawer; // 定义见 ModulePanel 之后
+
+// ------------------------------------------------------------
+// 低频组件的整组件位图缓存（v3.4.x 性能，实现见 ModulePanel.cpp）
+//   Editor GL 合成下，任何组件 repaint 都会让其矩形内的所有组件按 z 序重画。
+//   低频组件（电脑状态、计算器、悬停提示……）一旦叠在每帧刷新的模块上，
+//   就会被"陪着"每帧整块重画。挂上缓存后只有它自己失效的区域才重画进缓存，
+//   被连带重绘时只需一次贴图。
+//   · 仅 GL 合成目标启用；浮动窗口（CoreGraphics / Direct2D）照原路径绘制；
+//   · 缓存是设备分辨率的软件 Image，不持有任何 GL 资源（GL 上下文重建安全）。
+//   只适合自身刷新率低（≤ 约 20Hz）的组件；每帧自绘的组件挂上反而更慢。
+// ------------------------------------------------------------
+namespace y2k::ui
+{
+    void setGlSafeImageCache (juce::Component& c, bool enabled);
+}
 
 // ------------------------------------------------------------
 // ModulePanel —— 所有分析模块的 Pink XP 像素窗口基类
@@ -431,6 +469,12 @@ protected:
     //   仅为画布（overlay 绘制范围），见 GlDirectModuleBase。
     virtual juce::Rectangle<int> getFrameRepaintBounds();
 
+    // 绿幕风格（PinkXP::isChromaKeySkin）下保留的"数据画布"（模块本地坐标）：
+    //   未悬停时画布以外一律盖成纯绿；返回空 = 本模块不支持绿幕，整块纯绿。
+    //   支持的模块（Milkdrop / 示波器 / 波形 / 频谱 / 语谱图 / 3D 语谱 / 响度）
+    //   覆写返回自己的画布，并在画布内自行把背景画成纯绿、跳过网格 / 刻度 / 图例。
+    virtual juce::Rectangle<int> getChromaKeyCanvas() { return {}; }
+
     juce::Rectangle<int> getCloseButtonBounds() const;
     juce::Rectangle<int> getPopOutButtonBounds() const;  // 弹出/停靠按钮边界
     juce::Rectangle<int> getControlButtonBounds() const; // 控制面板（齿轮）按钮边界
@@ -455,6 +499,30 @@ private:
     Edge detectEdge(juce::Point<int> pos) const;
     void updateCursorFor(Edge e);
     void layoutControlDrawer();
+
+    // ------------------------------------------------------------
+    // bug1：点击模块"内部"也要置顶
+    //   · 只点外框 / 标题栏时事件落在面板自己身上 → mouseDown 里的
+    //     toFront + onBroughtToFront 正常执行；
+    //   · 点到内部子组件（小工具模块的计算器按钮 / 便签输入框、Milkdrop
+    //     控制栏、抽屉控件……）时事件被子组件吃掉，面板收不到 mouseDown，
+    //     于是模块不会被提到最前，也不会通知 workspace 取消图片聚焦 /
+    //     重排贴纸与 VirtuPet。
+    //   · 这里给面板挂一个"深层鼠标监听"（wantsEventsForAllNestedChildComponents）：
+    //     凡是落在本面板子组件上的按下，都补一次置顶；面板自身的点击由
+    //     mouseDown 处理，监听里显式跳过，避免重复执行。
+    //   · 只用 toFront(false)：子组件（例如便签 TextEditor）需要保留键盘焦点。
+    // ------------------------------------------------------------
+    struct ChildClickToFront : public juce::MouseListener
+    {
+        explicit ChildClickToFront (ModulePanel& p) noexcept : panel (p) {}
+        void mouseDown (const juce::MouseEvent& e) override;
+        ModulePanel& panel;
+    };
+
+    void bringToFrontFromChildClick();
+
+    ChildClickToFront childClickToFront { *this };
 
     bool controlPanelEnabled_ = false;
     bool controlPanelOpen_    = false;

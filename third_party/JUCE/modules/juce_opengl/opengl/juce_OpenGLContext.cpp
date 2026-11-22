@@ -1411,6 +1411,12 @@ void OpenGLContext::setComponentRepaintsPacedToDisplay (bool shouldPace) noexcep
    #endif
 }
 
+void OpenGLContext::triggerRepaintPacedToDisplay()
+{
+    if (auto* cachedImage = getCachedImage())
+        cachedImage->requestComponentRepaint();
+}
+
 OpenGLContext::RenderStats OpenGLContext::takeRenderStats() noexcept
 {
     RenderStats s;

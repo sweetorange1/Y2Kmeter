@@ -242,6 +242,12 @@ private:
         bool wasCustom = false;
         int  themeId = 0;
         y2kpal::ThemeSpec spec;
+
+        // 打开时的官方预设装饰覆盖（PinkXP::PresetDecor 的展开，避免头文件依赖 PinkXPStyle）
+        bool            decorActive  = false;
+        int             decorThemeId = 0;
+        y2kpal::Pattern decorPattern = y2kpal::Pattern::Checker;
+        int             decorIcon    = -1;
     };
 
     // ---- 控件 ----
@@ -287,6 +293,17 @@ private:
     //   避免每帧触发桌面纹理重烘焙 + 全模块重绘的卡顿），松手统一提交。
     bool hueDragging_    = false;
     bool sliderDragging_ = false;
+
+    // 官方预设下只改桌面纹理 / 标题图标：不经 OKLCH 生成器（保留预设手工配色，
+    //   否则会被"双色反推 + 护栏"的近似色整套替换 → 跳色）。
+    //   一旦改了任何配色参数（色相 / 明暗 / 滑条 / 和谐 / 角色 / 随机 / 粘贴…）即退出该模式。
+    bool presetDecorMode_  = false;   // 编辑起点是官方预设，且尚未改过配色参数
+    bool presetDecorDirty_ = false;   // 预设模式下已改过装饰
+    int  presetDecorIcon_  = -1;      // 预设模式下用户挑的图标（-1 = 沿用预设自带）
+    void decorChanged();              // 纹理 / 图标变化统一入口
+    void applyPresetDecorNow();
+    void syncIconButtonsForPreset();  // 预设图标不在候选里时取消全部图标按钮的选中态
+    void restoreSnapshotPreset();     // 对比 / 还原：恢复打开时的预设 + 其装饰覆盖
 
     // 标题栏 × 按钮 hover/pressed 状态（自绘，复刻 ModulePanel 样式）
     bool closeHovered_  = false;

@@ -516,16 +516,20 @@ void Spectrogram3DModule::buildGlSnapshot()
             bv += 36;
         };
         // 与 PinkXP::drawSunken(g, canvas, PinkXP::content) 逐笔对应
+        //   绿幕：9 个矩形全部纯绿（保持背景段顶点数固定，不改段布局）
+        const bool ck = PinkXP::isChromaKeySkin();
+        const auto green = PinkXP::chromaKeyGreen();
+        auto pick = [&] (juce::Colour c) { return ck ? green : c; };
         auto cr = canvas.toFloat();
-        pushRect (cr, PinkXP::content);
-        pushRect ({ cr.getX(), cr.getY(), (float) cr.getWidth(), 2.0f }, PinkXP::dark);
-        pushRect ({ cr.getX(), cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::dark);
-        pushRect ({ cr.getX(), cr.getBottom() - 2.0f, (float) cr.getWidth(), 2.0f }, PinkXP::hl);
-        pushRect ({ cr.getRight() - 2.0f, cr.getY(), 2.0f, (float) cr.getHeight() }, PinkXP::hl);
-        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, (float) cr.getWidth() - 4.0f, 1.0f }, PinkXP::shdw);
-        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, PinkXP::shdw);
-        pushRect ({ cr.getX() + 2.0f, cr.getBottom() - 3.0f, (float) cr.getWidth() - 4.0f, 1.0f }, juce::Colours::white);
-        pushRect ({ cr.getRight() - 3.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, juce::Colours::white);
+        pushRect (cr, pick (PinkXP::content));
+        pushRect ({ cr.getX(), cr.getY(), (float) cr.getWidth(), 2.0f }, pick (PinkXP::dark));
+        pushRect ({ cr.getX(), cr.getY(), 2.0f, (float) cr.getHeight() }, pick (PinkXP::dark));
+        pushRect ({ cr.getX(), cr.getBottom() - 2.0f, (float) cr.getWidth(), 2.0f }, pick (PinkXP::hl));
+        pushRect ({ cr.getRight() - 2.0f, cr.getY(), 2.0f, (float) cr.getHeight() }, pick (PinkXP::hl));
+        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, (float) cr.getWidth() - 4.0f, 1.0f }, pick (PinkXP::shdw));
+        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, pick (PinkXP::shdw));
+        pushRect ({ cr.getX() + 2.0f, cr.getBottom() - 3.0f, (float) cr.getWidth() - 4.0f, 1.0f }, pick (juce::Colours::white));
+        pushRect ({ cr.getRight() - 3.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, pick (juce::Colours::white));
     }
 
     // 绘制段描述：背景 + 逐层[条带 + 轮廓]
@@ -600,6 +604,8 @@ void Spectrogram3DModule::buildGlSnapshot()
         }
 
         // 轮廓线顶点（GL_LINES，白色 25% alpha）：顶部折线（画在本层条带之后）
+        //   绿幕：alpha 置 0（静音时每层轮廓都压在基线上，会在绿幕上叠出一片网格）
+        const float outlineAlpha = PinkXP::isChromaKeySkin() ? 0.0f : 0.25f;
         for (int i = 0; i < numBins; ++i)
         {
             const float mag = row[(size_t) i];
@@ -609,7 +615,7 @@ void Spectrogram3DModule::buildGlSnapshot()
             const float top = baseY - (float) idx * inv255 * projMaxH;
             *v++ = x;
             *v++ = top;
-            *v++ = 1.0f; *v++ = 1.0f; *v++ = 1.0f; *v++ = 0.25f;
+            *v++ = 1.0f; *v++ = 1.0f; *v++ = 1.0f; *v++ = outlineAlpha;
         }
     }
 
@@ -772,11 +778,18 @@ void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
         depthPalettes.resize ((size_t) nRows);
 
     // 深度 fade 目标：主题模式向画布底色融合，热力图模式向深蓝黑融合
-    const juce::Colour fadeTarget = useThemeColours() ? PinkXP::content : juce::Colour (8, 8, 24);
+    //   绿幕：远处层与低能量条带都融进纯绿（抠像后自然淡出）
+    const bool chromaKey = PinkXP::isChromaKeySkin();
+    const juce::Colour fadeTarget = chromaKey ? PinkXP::chromaKeyGreen()
+                                  : useThemeColours() ? PinkXP::content : juce::Colour (8, 8, 24);
     // 先算基准色板（无深度 fade）
     std::array<juce::Colour, 256> basePalette;
     for (int i = 0; i < 256; ++i)
-        basePalette[(size_t) i] = valueToColour ((float) i * (1.0f / 255.0f));
+    {
+        const float t = (float) i * (1.0f / 255.0f);
+        basePalette[(size_t) i] = chromaKey ? PinkXP::chromaKeyFade (valueToColour (t), t)
+                                            : valueToColour (t);
+    }
 
     for (int d = 0; d < nRows; ++d)
     {
@@ -872,7 +885,7 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     // 底衬（Image-local 坐标 → 由变换转为 scaled 坐标）
     //   先整图铺底（FBO Image 无初始内容且避免每帧 BitmapData clear 的昂贵路径）
     juce::Rectangle<int> imgCanvas (0, 0, cw, ch);
-    ig.setColour (PinkXP::content);
+    ig.setColour (PinkXP::isChromaKeySkin() ? PinkXP::chromaKeyGreen() : PinkXP::content);
     ig.fillRect (imgCanvas.toFloat());
     drawBackground (ig, imgCanvas);
 
@@ -934,6 +947,10 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
 
         // 顶部轮廓线：复用循环外 Path 对象，clear() 后重建，
         //   避免每层分配/销毁的堆开销（VTune 显示 HeapAlloc 位居热点前列）
+        //   绿幕：不画（与 GL 路径 alpha=0 一致）
+        if (PinkXP::isChromaKeySkin())
+            continue;
+
         outline.clear();
         outline.startNewSubPath(binX[0], baseY);
         outline.lineTo         (binX[0], binTopY[0]);
@@ -951,6 +968,12 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
 // ----------------------------------------------------------
 void Spectrogram3DModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (canvas);
+        return;
+    }
     PinkXP::drawSunken (g, canvas, PinkXP::content);
 }
 
@@ -959,6 +982,9 @@ void Spectrogram3DModule::drawBackground (juce::Graphics& g, juce::Rectangle<int
 // ----------------------------------------------------------
 void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+        return;   // 绿幕：刻度 / 提示文字不画
+
     g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
 
     // 频率标签（浮绘在底部）

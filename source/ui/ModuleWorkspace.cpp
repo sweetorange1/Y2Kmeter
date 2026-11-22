@@ -48,11 +48,17 @@ namespace
         return opt.getDefaultFile();
     }
 
-    void clearVirtuPetFocusVisuals (juce::OwnedArray<ModulePanel>& modules)
+    // 「点别处 → 收起 VirtuPet 的聚焦视觉（HUD / 删除按钮）」。
+    //   except 语义与 clearMilkdropFocus 完全一致：被点击的那块（含点子组件
+    //   触发的置顶）必须保留自己的 focus。VirtuPet 目前没有子控件，这条 except
+    //   暂时等价于旧行为；但只要将来给它加任何子组件，无条件的清理就会复现
+    //   v3.4.5 修掉的"Milkdrop 控制台点一下就消失"。
+    void clearVirtuPetFocusVisuals (juce::OwnedArray<ModulePanel>& modules,
+                                    const ModulePanel* except = nullptr)
     {
         for (auto* m : modules)
         {
-            if (m == nullptr || m->getModuleType() != ModuleType::virtuPet)
+            if (m == nullptr || m == except || m->getModuleType() != ModuleType::virtuPet)
                 continue;
 
             if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (m))
@@ -60,11 +66,19 @@ namespace
         }
     }
 
-    void clearMilkdropFocus (juce::OwnedArray<ModulePanel>& modules)
+    // 「点别处 → 收起 Milkdrop 控制台」。
+    //   except = 刚被置顶的那块模块（它自己刚点开的控制台必须保留）。
+    //   ★ v3.4.5 修复：onBroughtToFront 里无条件清掉**所有** Milkdrop 的 focus，
+    //     会连带清掉刚刚被点击的那一块 —— v3.4.1 的 ChildClickToFront 深层鼠标
+    //     监听在目标 mouseDown 之后才触发，于是"点击控制栏按钮"这个动作会先
+    //     置 pressedOverlayBtn_、再立刻被 setFocusVisual(false) 清空并隐藏控制台，
+    //     表现为"控制台弹一下就消失 / 按钮点不动"。所以必须跳过调用者自己。
+    void clearMilkdropFocus (juce::OwnedArray<ModulePanel>& modules,
+                             const ModulePanel* except = nullptr)
     {
         for (auto* m : modules)
         {
-            if (m == nullptr || m->getModuleType() != ModuleType::milkdrop)
+            if (m == nullptr || m == except || m->getModuleType() != ModuleType::milkdrop)
                 continue;
 
             if (auto* milkdrop = dynamic_cast<MilkdropModule*> (m))
@@ -216,6 +230,8 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::milkdrop:         return "milkdrop";
         case ModuleType::tempoKey:         return "tempo_key";
         case ModuleType::recorder:          return "recorder";
+        case ModuleType::systemMonitor:     return "system_monitor";
+        case ModuleType::utility:           return "utility";
     }
 
     return "eq";
@@ -257,6 +273,8 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
         { "milkdrop",          ModuleType::milkdrop },
         { "tempo_key",         ModuleType::tempoKey },
         { "recorder",          ModuleType::recorder },
+        { "system_monitor",    ModuleType::systemMonitor },
+        { "utility",           ModuleType::utility },
     };
     for (auto& p : kv)
         if (s == p.k)
@@ -385,6 +403,9 @@ public:
     void paint (juce::Graphics& g) override
     {
         if (img == nullptr || img->pixelImage.isNull()) return;
+
+        // 绿幕：桌面贴画同属"非数据"内容，不画（透出下方纯绿画布）
+        if (PinkXP::isChromaKeySkin()) return;
 
         // 把 Graphics 原点临时平移到 workspace 坐标系（layer 在父坐标系里
         //   的位置等于 getX()/getY()；setOrigin(-x,-y) 后 g 的 (0,0)
@@ -1656,8 +1677,10 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     //   · 仅在 focusedPerlerIdx 有效时执行 repaint，避免无聚焦时的无谓刷新
     panel.onBroughtToFront = [this](ModulePanel& p)
     {
-        clearVirtuPetFocusVisuals (modules);
-        clearMilkdropFocus (modules);
+        // 只收"别人"的聚焦视觉：被点击的这块（含点子组件触发的置顶）必须保留
+        // 自己刚打开的 HUD / 控制台，否则会出现"点一下就消失"。
+        clearVirtuPetFocusVisuals (modules, &p);
+        clearMilkdropFocus (modules, &p);
 
         if (focusedPerlerIdx >= 0)
         {
@@ -2598,6 +2621,8 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     int themeKey = static_cast<int>(PinkXP::getCurrentThemeId()) * 100;
     if (PinkXP::isCustomThemeActive())
         themeKey += static_cast<int>(PinkXP::getCurrentThemeSpec().brightness);
+    // 视觉风格改变 drawSunken 的质感 → 并入 key（themeKey < 10000）
+    themeKey += static_cast<int>(PinkXP::getCurrentSkin()) * 10000;
 
     if (! canvasBgCacheDirty
         && canvasBgCache.isValid()
@@ -2609,9 +2634,20 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     canvasBgCache = juce::Image (juce::Image::ARGB, w, h, true);
     juce::Graphics cg (canvasBgCache);
 
-    // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
-    PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
-                        PinkXP::content.withAlpha (0.70f));
+    // 绿幕：工作区画布整块纯绿（不画凹槽 / 网格点阵）；
+    //   用户主动打开的 Grid 叠加线仍保留（布局辅助，可随时关掉）
+    const bool chromaKey = PinkXP::isChromaKeySkin();
+    if (chromaKey)
+    {
+        cg.setColour (PinkXP::chromaKeyGreen());
+        cg.fillAll();
+    }
+    else
+    {
+        // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
+        PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
+                            PinkXP::content.withAlpha (0.70f));
+    }
 
     // 2) 网格点阵 —— 转换为 Image-local 坐标
     auto canvas = getCanvasArea();
@@ -2621,11 +2657,14 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
         canvas.getWidth(),
         canvas.getHeight());
 
-    cg.setColour (PinkXP::pink200.withAlpha (0.35f));
-    for (int y = localCanvas.getY(); y < localCanvas.getBottom(); y += gridSize)
+    if (! chromaKey)
     {
-        for (int x = localCanvas.getX(); x < localCanvas.getRight(); x += gridSize * 2)
-            cg.fillRect (x, y, 1, 1);
+        cg.setColour (PinkXP::pink200.withAlpha (0.35f));
+        for (int y = localCanvas.getY(); y < localCanvas.getBottom(); y += gridSize)
+        {
+            for (int x = localCanvas.getX(); x < localCanvas.getRight(); x += gridSize * 2)
+                cg.fillRect (x, y, 1, 1);
+        }
     }
 
     // 3) Grid 叠加线
@@ -2979,7 +3018,7 @@ void ModuleWorkspace::paint(juce::Graphics& g)
     // ------------------------------------------------------
     // 引导提示：当 chrome 可见、且用户尚未拖入任何图片时，在 canvas 右下角
     // 给出 PNG/JPG/BMP/GIF 拖拽提示。一旦有图或用户点击了 Hide，此提示隐藏。
-    if (chromeVisible && perlerImages.isEmpty())
+    if (chromeVisible && perlerImages.isEmpty() && ! PinkXP::isChromaKeySkin())
     {
         auto canvas = getCanvasArea();
         // 右下角留 12px 边距；上下两行文案；使用 ink 色弱化透明度，不抢视觉
@@ -3227,6 +3266,15 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
     //   层级由 z-order 保证（底板 → slider），不再在 paintOverChildren 里手绘。
     //   旧实现在这里用 chromeVisible 作为入口条件（Hide 浮层态恒为 false），
     //   导致弹窗只剩轨道与控制头、边框轮廓丢失。
+
+    // 绿幕：底部工具栏（含其上所有子控件）未悬停 Editor chrome 时盖成纯绿。
+    //   工作区自身不是绿幕区域，isChromaRevealed 会向上找到 Editor。
+    if (PinkXP::isChromaKeySkin() && chromeVisible && ! minimalMode_
+        && ! PinkXP::isChromaRevealed (*this))
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (getToolbarArea());
+    }
 
     if (! hoverPreviewActive)
         return;
@@ -4966,6 +5014,30 @@ namespace
     constexpr int kSwatchGap  = 3;    // 色票间距
     constexpr int kGroupGap   = 10;   // 组间间距
     constexpr int kBarLeftPad = 6;    // 整体左内边距
+    constexpr int kBarRightPad = 8;   // 整体右内边距（缩进，见 bug1）
+}
+
+namespace
+{
+    // 视觉风格入口："+" 右侧的小按钮（[+] [SKIN] [主题名]），点击弹出风格菜单。
+    //   宽度按当前语言译文测量；几何只由 "+" 按钮位置推导，不新增成员状态。
+    juce::String skinButtonText()
+    {
+        return y2k::tr ("SKIN");
+    }
+
+    juce::Font skinButtonFont()
+    {
+        return PinkXP::SymbolGlyphs::buttonFont (skinButtonText(), 10.0f, juce::Font::bold);
+    }
+
+    juce::Rectangle<int> skinButtonBoundsAfter (juce::Rectangle<int> newButton)
+    {
+        const int textW = (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (skinButtonText(),
+                                                                               skinButtonFont()));
+        return { newButton.getRight() + PinkXP::ui (6), newButton.getY(),
+                 textW + PinkXP::ui (12), newButton.getHeight() };
+    }
 }
 
 namespace
@@ -5025,11 +5097,14 @@ juce::Rectangle<int> ThemeSwatchBar::getPresetSwatchBounds(int index) const
 
 juce::Rectangle<int> ThemeSwatchBar::getUserSwatchBounds(int index) const
 {
-    const int presetCount = (int) PinkXP::getAllThemes().size();
+    // 起点跟随"实际显示的预设色票数量"（bug1：宽度不足时预设让位给 SKIN 按钮）；
+    //   预设装不下时还要多让一个"…"展开按钮的位置（bug3）。
+    const int presetCount = visiblePresetCount();
+    const int presetSlots = presetCount + (presetOverflowVisible() ? 1 : 0);
     const int usersX = PinkXP::ui (kBarLeftPad)
                      + juce::jmin(getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
                      + PinkXP::ui (kGroupGap)
-                     + presetCount * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap))
+                     + presetSlots * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap))
                      + PinkXP::ui (kGroupGap);
     const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
     return { usersX - scrollX_ + index * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)),
@@ -5038,20 +5113,125 @@ juce::Rectangle<int> ThemeSwatchBar::getUserSwatchBounds(int index) const
 
 juce::Rectangle<int> ThemeSwatchBar::getNewButtonBounds() const
 {
-    const auto& lib = PinkXP::ThemeLibrary::instance();
-    const int x = (lib.size() > 0)
-        ? getUserSwatchBounds(lib.size() - 1).getRight() + PinkXP::ui (6)
+    const int users = visibleUserCount();
+    const int x = (users > 0)
+        ? getUserSwatchBounds(users - 1).getRight() + PinkXP::ui (6)
         : getUserSwatchBounds(0).getX();
     const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
     return { x, y, PinkXP::ui (kSwatchH), PinkXP::ui (kSwatchH) };
 }
 
-int ThemeSwatchBar::totalContentWidth() const
+int ThemeSwatchBar::reservedTailWidth() const
+{
+    // "+" 按钮 + SKIN 按钮 + SKIN 后的组间距 + 右内边距（都从当前宽度里先扣掉）
+    const int plusW  = PinkXP::ui (kSwatchH);
+    const int skinW  = skinButtonBoundsAfter ({ 0, 0, plusW, plusW }).getWidth();
+    return PinkXP::ui (6) + plusW + PinkXP::ui (6) + skinW + PinkXP::ui (kBarRightPad);
+}
+
+int ThemeSwatchBar::presetStartX() const
+{
+    return PinkXP::ui (kBarLeftPad)
+         + juce::jmin (getHeight() - PinkXP::ui (6), PinkXP::ui (kPreviewW))
+         + PinkXP::ui (kGroupGap);
+}
+
+// 预设色票可用宽度：扣掉左侧固定部分、尾部固定占用与"我的主题"色票区。
+int ThemeSwatchBar::presetAvailWidth() const
+{
+    const int step   = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int users  = visibleUserCount();
+    const int usersW = users > 0 ? users * step - PinkXP::ui (kSwatchGap) + PinkXP::ui (kGroupGap) : 0;
+    return getWidth() - presetStartX() - reservedTailWidth() - usersW;
+}
+
+// 是否要显示"…"：装不下全部预设，且让出一个色票的位置后还放得下按钮。
+bool ThemeSwatchBar::presetOverflowVisible() const
+{
+    const int total = (int) PinkXP::getAllThemes().size();
+    if (total <= 0)
+        return false;
+
+    const int step  = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int avail = presetAvailWidth();
+    if (avail < PinkXP::ui (kSwatchW))
+        return false;
+
+    const int fits = juce::jlimit (0, total, (avail + PinkXP::ui (kSwatchGap)) / step);
+    if (fits >= total)
+        return false;
+
+    // 只要还放得下按钮本身就要显示 —— 极窄时宁可一个色票都不画，也要留出入口
+    return avail >= PinkXP::ui (kSwatchW);
+}
+
+int ThemeSwatchBar::visiblePresetCount() const
+{
+    const int total = (int) PinkXP::getAllThemes().size();
+    if (total <= 0)
+        return 0;
+
+    const int step  = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    const int avail = presetAvailWidth();
+    if (avail < PinkXP::ui (kSwatchW))
+        return 0;
+
+    // 最后一个色票后面不需要再留 gap
+    const int fits = juce::jlimit (0, total, (avail + PinkXP::ui (kSwatchGap)) / step);
+    if (fits >= total || ! presetOverflowVisible())
+        return fits;
+
+    // 装不下全部：给"…"展开按钮留一个位置（它排在最后一个可见色票之后）。
+    //   连"色票 + 按钮"都放不下时返回 0（只显示按钮），保证任何宽度都能选到全部预设。
+    const int avail2 = avail - (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap));
+    if (avail2 < PinkXP::ui (kSwatchW))
+        return 0;
+
+    return juce::jlimit (0, total - 1, (avail2 + PinkXP::ui (kSwatchGap)) / step);
+}
+
+juce::Rectangle<int> ThemeSwatchBar::overflowButtonBounds() const
+{
+    if (! presetOverflowVisible())
+        return {};
+
+    const int y = (getHeight() - PinkXP::ui (kSwatchH)) / 2;
+    const int x = presetStartX() - scrollX_
+                + visiblePresetCount() * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap));
+    return { x, y, PinkXP::ui (kSwatchW), PinkXP::ui (kSwatchH) };
+}
+
+int ThemeSwatchBar::visibleUserCount() const
 {
     const auto& lib = PinkXP::ThemeLibrary::instance();
-    const int usersW = lib.size() > 0
-        ? lib.size() * (PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap)) - PinkXP::ui (kSwatchGap) : 0;
-    return getNewButtonBounds().getRight() + PinkXP::ui (kGroupGap) + PinkXP::ui (90);  // 90 = 主题名最小宽度
+    const int total = lib.size();
+    if (total <= 0)
+        return 0;
+
+    const int step   = PinkXP::ui (kSwatchW) + PinkXP::ui (kSwatchGap);
+    // 分给"我的主题"的额度：扣掉左侧固定部分 + 尾部固定占用。
+    const int avail = getWidth() - presetStartX() - reservedTailWidth() - PinkXP::ui (kGroupGap);
+    if (avail < PinkXP::ui (kSwatchW))
+        return 0;
+
+    int cap = (avail + PinkXP::ui (kSwatchGap)) / step;
+
+    // 宽度够时给预设色票留至少 4 个位置：用户主题存很多时不至于把预设全挤掉。
+    const int totalPresets = (int) PinkXP::getAllThemes().size();
+    if (totalPresets > 0 && getWidth() >= PinkXP::ui (260))
+    {
+        const int reserveForPresets = juce::jmin (totalPresets, 4) * step + PinkXP::ui (kGroupGap);
+        cap = juce::jmax (0, (avail - reserveForPresets + PinkXP::ui (kSwatchGap)) / step);
+    }
+
+    return juce::jlimit (0, total, cap);
+}
+
+int ThemeSwatchBar::totalContentWidth() const
+{
+    // 内容已按宽度自适应（预设让位），横向滚动只剩极小概率的极端组合，
+    //   这里返回真实右边界，滚动极限自然为 0。
+    return skinButtonBoundsAfter (getNewButtonBounds()).getRight() + PinkXP::ui (kBarRightPad);
 }
 
 void ThemeSwatchBar::updateScrollLimits()
@@ -5066,17 +5246,25 @@ ThemeSwatchBar::Hit ThemeSwatchBar::hitTest(juce::Point<int> p) const
         return { 1, 0 };
 
     const auto& themes = PinkXP::getAllThemes();
-    for (int i = 0; i < (int) themes.size(); ++i)
+    for (int i = 0, n = juce::jmin (visiblePresetCount(), (int) themes.size()); i < n; ++i)
         if (getPresetSwatchBounds(i).contains(p))
             return { 2, i };
 
+    // "…" 展开按钮（装不下的预设收在这里，bug3）。排在"我的主题"之前判断：
+    //   它紧贴最后一个可见预设色票，与用户色票区不重叠但顺序更自然。
+    if (const auto ov = overflowButtonBounds(); ! ov.isEmpty() && ov.contains (p))
+        return { 6, 0 };
+
     const auto& lib = PinkXP::ThemeLibrary::instance();
-    for (int i = 0; i < lib.size(); ++i)
+    for (int i = 0, n = juce::jmin (visibleUserCount(), lib.size()); i < n; ++i)
         if (getUserSwatchBounds(i).contains(p))
             return { 3, i };
 
     if (getNewButtonBounds().contains(p))
         return { 4, 0 };
+
+    if (skinButtonBoundsAfter (getNewButtonBounds()).contains (p))
+        return { 5, 0 };
 
     return {};
 }
@@ -5157,7 +5345,7 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
 
     // ---- 预设色票（12 个，外观不变）----
     const auto& themes = PinkXP::getAllThemes();
-    for (int i = 0; i < (int) themes.size(); ++i)
+    for (int i = 0, n = juce::jmin (visiblePresetCount(), (int) themes.size()); i < n; ++i)
     {
         const auto& th = themes[(size_t) i];
         drawSwatch(getPresetSwatchBounds(i), th.swatch,
@@ -5166,10 +5354,33 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
                    false);
     }
 
+    // ---- "…"：装不下的预设收进这里（bug3）----
+    if (const auto ov = overflowButtonBounds(); ! ov.isEmpty())
+    {
+        const bool hovered = hoverHit_.kind == 6;
+
+        PinkXP::drawRaised (g, ov, PinkXP::btnFace);
+        if (hovered)
+        {
+            g.setColour (PinkXP::sel.withAlpha (0.35f));
+            g.fillRect (ov.reduced (1));
+        }
+
+        // 三个点用像素方块画（不依赖字体里有没有省略号字形）
+        const int dot = juce::jmax (2, PinkXP::ui (2));
+        const int gap = juce::jmax (1, PinkXP::ui (1));
+        const int totalW = dot * 3 + gap * 2;
+        int dx = ov.getCentreX() - totalW / 2;
+        const int dy = ov.getCentreY() - dot / 2;
+        g.setColour (PinkXP::ink);
+        for (int i = 0; i < 3; ++i, dx += dot + gap)
+            g.fillRect (dx, dy, dot, dot);
+    }
+
     // ---- 我的主题（R1/R11：与预设同款色票 + 角标区分）----
     const auto& lib = PinkXP::ThemeLibrary::instance();
     const bool customActive = PinkXP::isCustomThemeActive();
-    for (int i = 0; i < lib.size(); ++i)
+    for (int i = 0, n = juce::jmin (visibleUserCount(), lib.size()); i < n; ++i)
     {
         drawSwatch(getUserSwatchBounds(i),
                    quickAccentForSpec(lib.themes()[(size_t) i].spec),
@@ -5202,11 +5413,21 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
         }
     }
 
+    // ---- 视觉风格入口（SKIN）：外观本身随当前风格绘制，所见即所选 ----
+    const auto skinBtn = skinButtonBoundsAfter (getNewButtonBounds());
+    if (skinBtn.getX() < getWidth() && skinBtn.getRight() > 0)
+    {
+        PinkXP::drawRaised (g, skinBtn, hoverHit_.kind == 5 ? PinkXP::pink200 : PinkXP::btnFace);
+        g.setColour (PinkXP::ink);
+        PinkXP::SymbolGlyphs::drawText (g, skinButtonText(), skinBtn,
+                                        juce::Justification::centred, skinButtonFont());
+    }
+
     // ---- 右侧当前主题名 ----
     {
         const auto& th = PinkXP::getCurrentTheme();
-        const int tx = getNewButtonBounds().getRight() + PinkXP::ui (kGroupGap);
-        const int tw = juce::jmax(0, getWidth() - tx - 4);
+        const int tx = skinBtn.getRight() + PinkXP::ui (kGroupGap);
+        const int tw = juce::jmax(0, getWidth() - tx - PinkXP::ui (kBarRightPad));
         if (tw > 10 && tx < getWidth())
         {
             const juce::String shown = y2k::tr (th.displayName);
@@ -5253,6 +5474,13 @@ void ThemeSwatchBar::mouseMove(const juce::MouseEvent& e)
                 setTooltip(y2k::help::make ("New palette",
                                             "Open Palette Studio to build a new theme from the current one."));
                 break;
+            case 5:
+                setTooltip(y2k::help::make ("Visual Style",
+                                            "Switch the shape and texture of the whole interface.\n"
+                                            "Colours still follow the current theme.\n"
+                                            "Each style also brings its own font.\n"
+                                            "Green Screen: everything except the meter data turns pure green for keying."));
+                break;
             default:
                 setTooltip({});
                 break;
@@ -5292,7 +5520,88 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
         PinkXP::ThemeLibrary::instance().applyThemeAt(h.index);
         if (auto* top = getTopLevelComponent()) top->repaint();
         else                                    repaint();
+        return;
     }
+
+    if (h.kind == 6)
+    {
+        showPresetOverflowMenu();
+        return;
+    }
+
+    if (h.kind == 5)
+    {
+        // 视觉风格菜单：条目 id = SkinId + 1（0 保留给"未选择"）
+        juce::PopupMenu m;
+        m.setLookAndFeel (&getPinkXPLookAndFeel());
+        const auto current = PinkXP::getCurrentSkin();
+        for (const auto& s : PinkXP::getAllSkins())
+            m.addItem (1 + (int) s.id, s.displayName, true, s.id == current);
+
+        const auto area = localAreaToGlobal (skinButtonBoundsAfter (getNewButtonBounds()));
+
+        // bug2：macOS 原生全屏下 display->userArea 仍扣除了菜单栏/Dock，而底部工具栏
+        //   正好落在这段被扣除的区域内 —— JUCE 会把菜单 clamp 到 userArea，表现为
+        //   "菜单跑到按钮上方很远"。与右侧布局预设 / 音频源下拉同一套修正。
+        auto options = PinkXP::withFullScreenMenuArea (
+            juce::PopupMenu::Options().withTargetComponent (this)
+                                      .withTargetScreenArea (area),
+            *this);
+
+        juce::Component::SafePointer<ThemeSwatchBar> safe (this);
+        m.showMenuAsync (options,
+                         [safe] (int result)
+                         {
+                             if (result <= 0)
+                                 return;
+                             PinkXP::applySkin (PinkXP::skinFromInt (result - 1));
+                             if (safe == nullptr)
+                                 return;
+                             if (auto* top = safe->getTopLevelComponent()) top->repaint();
+                             else                                          safe->repaint();
+                         });
+    }
+}
+
+// bug3：宽度装不下的官方预设收进"…"菜单 —— 任何窗口宽度下都能选到全部预设。
+void ThemeSwatchBar::showPresetOverflowMenu()
+{
+    juce::PopupMenu m;
+    m.setLookAndFeel (&getPinkXPLookAndFeel());
+
+    const auto& themes = PinkXP::getAllThemes();
+    const auto current = PinkXP::getCurrentThemeId();
+
+    for (int i = 0; i < (int) themes.size(); ++i)
+    {
+        const auto& th = themes[(size_t) i];
+        // 用色票颜色作文字色：一眼能看出是哪种配色
+        m.addColouredItem (i + 1, y2k::tr (th.displayName), th.swatch, true, th.id == current);
+    }
+
+    const auto area = localAreaToGlobal (overflowButtonBounds());
+    auto options = PinkXP::withFullScreenMenuArea (
+        juce::PopupMenu::Options().withTargetComponent (this)
+                                  .withTargetScreenArea (area),
+        *this);
+
+    juce::Component::SafePointer<ThemeSwatchBar> safe (this);
+    m.showMenuAsync (options, [safe] (int result)
+    {
+        if (result <= 0)
+            return;
+
+        const auto& list = PinkXP::getAllThemes();
+        const int index = result - 1;
+        if (index < 0 || index >= (int) list.size())
+            return;
+
+        PinkXP::applyTheme (list[(size_t) index].id);
+        if (safe == nullptr)
+            return;
+        if (auto* top = safe->getTopLevelComponent()) top->repaint();
+        else                                          safe->repaint();
+    });
 }
 
 void ThemeSwatchBar::mouseWheelMove(const juce::MouseEvent&,
@@ -5378,13 +5687,17 @@ void HideChromeButton::paintButton(juce::Graphics& g, bool isMouseOver, bool isB
     //   已是物理像素（PinkXP::ui(22) 乘过 uiScale），getFont 又乘一次 uiScale
     //   → 双重缩放。低分辨率屏幕（uiScale<1）下字号被压小，高分屏被放大，
     //   win/mac 两端同源，只是低分辨率设备上更明显。
-    g.setFont(PinkXP::getFont(12.0f, juce::Font::bold));
+    // 与 PinkXPLookAndFeel::drawButtonText 同一套口径：字号上限 + 光学居中
+    const auto btnFont = PinkXP::fitFontToHeight (PinkXP::getFont(12.0f, juce::Font::bold),
+                                                  (float) r.getHeight());
+    g.setFont(btnFont);
     g.setColour(PinkXP::ink);
     // 水平 padding 只留 1px —— "Show" 四个像素字母 + 字符间距比 "Hide" 宽，
     //   之前 reduced(4, 2) 会在 btnW=52 / font≈12pt 下把 "w" 切掉半像素。
     auto textArea = r.reduced(1, 2);
     if (isButtonDown) textArea.translate(1, 1);
-    g.drawText(y2k::tr (getButtonText()), textArea,
+    g.drawText(y2k::tr (getButtonText()),
+               textArea.toFloat().translated (0.0f, PinkXP::opticalNudge (btnFont)),
                juce::Justification::centred, false);
 }
 

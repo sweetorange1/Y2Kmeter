@@ -591,10 +591,11 @@ void OscilloscopeModule::buildGlSnapshot()
         pushQuadVerts (snap->vertices, r.getX(), r.getY(), r.getRight(), r.getBottom(), c);
     };
 
-    // ---- 背景：凹陷底（框架 helper）+ 点阵 + 十字 + 虚线 ----
+    // ---- 背景：凹陷底（框架 helper）+ 点阵 + 十字 + 虚线（绿幕：只铺纯绿）----
+    const bool chromaKey = PinkXP::isChromaKeySkin();
+    appendSunkenFrame (snap->vertices, canvas);
+    if (! chromaKey)
     {
-        appendSunkenFrame (snap->vertices, canvas);
-
         const auto dot = PinkXP::pink200.withAlpha (0.35f);
         constexpr int dotStep = 8;
         for (int y = inner.getY(); y < inner.getBottom(); y += dotStep)
@@ -696,8 +697,8 @@ void OscilloscopeModule::buildGlSnapshot()
         const float baseRadius = (float) juce::jmin (innerXY.getWidth(), innerXY.getHeight()) * 0.45f;
         const float gain = autoGainFactor;
 
-        // 标尺环：4 个同心 1px 圆环 → 64 段细 quad
-        if (showRings)
+        // 标尺环：4 个同心 1px 圆环 → 64 段细 quad（绿幕不画）
+        if (showRings && ! chromaKey)
         {
             const auto ringCol = PinkXP::pink200.withAlpha (0.30f);
             const float rr0 = ringCol.getFloatRed(), rg0 = ringCol.getFloatGreen(),
@@ -812,6 +813,10 @@ juce::Rectangle<int> OscilloscopeModule::getGlCanvasBounds (juce::Rectangle<int>
 
 void OscilloscopeModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
 {
+    // 绿幕：图例 / 模式说明 / 标尺环 dB 标签都不画
+    if (PinkXP::isChromaKeySkin())
+        return;
+
     // 接管时只画图例/说明文字（GL 内容之上的 overlay）
     g.setColour (PinkXP::ink.withAlpha (0.85f));
     g.setFont   (PinkXP::getAxisFont (9.0f, juce::Font::plain));
@@ -913,6 +918,13 @@ void OscilloscopeModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<
 // ----------------------------------------------------------
 void OscilloscopeModule::drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
+    if (PinkXP::isChromaKeySkin())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (canvas);
+        return;
+    }
+
     PinkXP::drawSunken(g, canvas, PinkXP::content);
 
     auto inner = canvas.reduced(2);
@@ -975,6 +987,9 @@ void OscilloscopeModule::drawWaveform(juce::Graphics& g, juce::Rectangle<int> ca
         g.strokePath(pathR, juce::PathStrokeType(1.4f));
     }
 
+    if (PinkXP::isChromaKeySkin())
+        return;   // 绿幕：不画通道说明
+
     // 左下角说明（与 GL overlay 一致）
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
@@ -1014,9 +1029,10 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
     const float cy = (float) inner.getCentreY();
     const float baseRadius = (float) juce::jmin(inner.getWidth(), inner.getHeight()) * 0.45f;
     const float gain = autoGainFactor;
+    const bool  chromaKey = PinkXP::isChromaKeySkin();
 
-    // ---- 标尺环 ----
-    if (showRings)
+    // ---- 标尺环（绿幕不画）----
+    if (showRings && ! chromaKey)
     {
         const float ringFrac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
         g.setColour(PinkXP::pink200.withAlpha(0.30f));
@@ -1086,7 +1102,9 @@ void OscilloscopeModule::drawXY(juce::Graphics& g, juce::Rectangle<int> canvas, 
         g.fillRectList (all);
     }
 
-    // 左下角模式说明 + 当前增益
+    // 左下角模式说明 + 当前增益（绿幕不画）
+    if (chromaKey)
+        return;
     g.setColour(PinkXP::ink.withAlpha(0.85f));
     g.setFont(PinkXP::getAxisFont(9.0f, juce::Font::plain));
     const juce::String hint = rotate45 ? "M/S" : "X=L  Y=R";

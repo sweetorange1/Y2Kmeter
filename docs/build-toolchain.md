@@ -17,7 +17,7 @@
 - `third_party/JUCE` 源码直接入库、构建优先（`FETCHCONTENT_SOURCE_DIR_JUCE` 指向它）；`build/msvc` 曾错误指向 `D:/Code/_deps/JUCE`（缺补丁 0005/0006，配置期校验会失败），勿用。
 - 补丁流程（改 JUCE 源码时）：
   1. 在 `third_party/JUCE` 源码处加 `[Y2K patch]` 注释（说明原因 + 替代方案）；
-  2. 导出 diff 到 `third_party/juce_patches/`（0001~0006）；
+  2. 导出 diff 到 `third_party/juce_patches/`（0001~0008）；
   3. 补 `Y2KJucePatches.cmake` 的配置期校验标记；
   4. 更新 `third_party/juce_patches/README.md` 表格。
 - 升级 JUCE：按源码内 `[Y2K patch]` 注释逐条回贴补丁。
@@ -27,7 +27,7 @@
 
 1. `CMakeLists.txt`：`project(Y2Kmeter VERSION x.y.z)` + 两个 `juce_add_plugin(... VERSION x.y.z)`（共 3 处）。
 2. `Y2Kmeter_installer.iss`：`MyAppVersion` 等版本字段。
-3. `PluginEditor.cpp`：`"vx.y.z"` 字面量 3 处 —— `getStringWidth` 一处（含 debug/正式两变体）+ `versionText` 两处。当前约 1055/1056、1098、4629 行（行号会漂移，以 `grep "v3.2.0"` 为准）。
+3. `PluginEditor.cpp`：`"vx.y.z"` 字面量 3 处 —— `getStringWidth` 一处（含 debug/正式两变体）+ `versionText` 两处。当前约 1056/1057、1099、4730 行（行号会漂移，以 `grep "v3.4.5"` 为准）。
 4. `README.md` 徽章、文档版本声明（`PROJECT_OVERVIEW.md` §1.1）。
 
 ## 4. `ModuleType` 枚举规则
@@ -35,7 +35,7 @@
 - **只追加、不重排**（保护旧存档里 `LayoutPreset` id 与字符串映射）。
 - **新增模块类型**要同步 8 处（详见 analysis-modules.md「新模块注册」）。
 - **删除/替换类型**额外两条：
-  - `stringToModuleType` 保留旧字符串 → 新类型映射（旧存档兼容的唯一防线，缺了旧存档模块会静默丢失）；
+  - `stringToModuleType` 保留旧字符串 → 新类型映射（旧存档兼容的唯一防线，缺了旧存档模块会无提示地丢失）；
   - `PerformanceCounterSystem::moduleTypeNameById` 重编号（ID 按枚举序数编排）。
 
 ## 5. 何时必须全量构建（否则 `0x80000003` STATUS_BREAKPOINT / ABI 错配）

@@ -117,6 +117,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：保留瀑布波形画布，基准线 / 分区虚线 / 标注不画
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getCanvasBounds (getContentBounds()); }
 
 private:
     // 每个像素列的聚合数据

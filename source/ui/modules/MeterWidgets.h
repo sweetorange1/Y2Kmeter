@@ -44,7 +44,10 @@ namespace y2k::meter
         if (bar.getWidth() <= 4 || bar.getHeight() <= 3) return;
         tNorm = juce::jlimit (0.0f, 1.0f, tNorm);
 
-        PinkXP::drawSunken (g, bar, PinkXP::content.darker (0.04f));
+        // 绿幕：不画凹槽与未点亮格子（只留点亮的电平格）
+        const bool chromaKey = PinkXP::isChromaKeySkin();
+        if (! chromaKey)
+            PinkXP::drawSunken (g, bar, PinkXP::content.darker (0.04f));
         auto inner = bar.reduced (2);
         if (inner.getWidth() <= 2 || inner.getHeight() <= 1) return;
 
@@ -76,6 +79,8 @@ namespace y2k::meter
             }
             else
             {
+                if (chromaKey)
+                    continue;
                 g.setColour (base.withAlpha (0.15f));
             }
             g.fillRect (x, inner.getY(), cellW, inner.getHeight());
@@ -88,7 +93,10 @@ namespace y2k::meter
                              float v, const juce::String& unit, float tNorm,
                              float flash = 0.0f, float pulsePhase = 0.0f)
     {
-        PinkXP::drawSunken (g, r, PinkXP::content);
+        // 绿幕：底板 / 呼吸灯不画；标签 + 数字 + 单位 + 点亮的电平格作为"数值读数"保留
+        const bool chromaKey = PinkXP::isChromaKeySkin();
+        if (! chromaKey)
+            PinkXP::drawSunken (g, r, PinkXP::content);
         auto inner = r.reduced (6);
 
         juce::Rectangle<int> barArea;
@@ -104,6 +112,7 @@ namespace y2k::meter
         PinkXP::drawCachedText (g, label, titleRow, juce::Justification::centredLeft,
                                 9.0f, juce::Font::bold, PinkXP::ink.withAlpha (0.85f));
 
+        if (! chromaKey)
         {
             const int sz = 6;
             auto dot = juce::Rectangle<int> (titleRow.getRight() - sz - 2,

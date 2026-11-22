@@ -866,7 +866,7 @@ PalettePanel::PalettePanel()
     patternCombo_.onChange = [this]
     {
         spec_.pattern = (y2kpal::Pattern) (patternCombo_.getSelectedId() - 1);
-        specChanged();
+        decorChanged();
     };
     addAndMakeVisible(patternCombo_);
 
@@ -881,7 +881,8 @@ PalettePanel::PalettePanel()
             if (iconBtns_[i].getToggleState())
             {
                 spec_.titleIcon = (uint8_t) i;
-                specChanged();
+                presetDecorIcon_ = i;
+                decorChanged();
             }
         };
         addAndMakeVisible(iconBtns_[i]);
@@ -1185,12 +1186,43 @@ void PalettePanel::applyCurrentSpec()      { applySpecImmediately(); }
 
 void PalettePanel::applySpecImmediately()
 {
+    // 任何走生成器的提交都意味着配色参数已改：退出"预设只改装饰"模式
+    presetDecorMode_ = false;
     if (compareHeld_) return;
     PinkXP::applyThemeFromSpec(spec_, "Custom");
 
     // ComboBox 内嵌 Label 不自动跟随 LnF —— 单独刷新面板内的下拉框，
     //   避免全局 sendLookAndFeelChange 递归整棵组件树（拖动卡顿源）。
     patternCombo_.lookAndFeelChanged();
+}
+
+void PalettePanel::decorChanged()
+{
+    // 官方预设 + 尚未改配色：只换纹理 / 图标，不重新生成配色（修复预设下跳色）
+    if (presetDecorMode_)
+    {
+        presetDecorDirty_ = true;
+        applyPresetDecorNow();
+        return;
+    }
+    specChanged();
+}
+
+void PalettePanel::applyPresetDecorNow()
+{
+    if (compareHeld_) return;
+    PinkXP::applyPresetDecor(spec_.pattern, presetDecorIcon_);
+    patternCombo_.lookAndFeelChanged();
+}
+
+void PalettePanel::syncIconButtonsForPreset()
+{
+    if (! presetDecorMode_ || presetDecorIcon_ >= 0)
+        return;
+    // 预设自带图标不在 8 个候选里（如 ◎ / ■ / ○）：不选中任何按钮，避免误导
+    if (PinkXP::titleIconIndexOf(PinkXP::getCurrentTheme().titleIconText) < 0)
+        for (auto& b : iconBtns_)
+            b.setToggleState(false, juce::dontSendNotification);
 }
 
 void PalettePanel::specChanged()
@@ -1298,14 +1330,32 @@ void PalettePanel::enterCompare()
     if (snapshot_.wasCustom)
         PinkXP::applyThemeFromSpec(snapshot_.spec, PinkXP::getCustomThemeName());
     else
-        PinkXP::applyTheme((PinkXP::ThemeId) snapshot_.themeId);
+        restoreSnapshotPreset();
 }
 
 void PalettePanel::exitCompare()
 {
     if (!compareHeld_) return;
     compareHeld_ = false;
+    if (presetDecorMode_)
+    {
+        // 预设只改装饰：未改过时 enterCompare 恢复的就是当前状态，无需再提交
+        if (presetDecorDirty_)
+            applyPresetDecorNow();
+        return;
+    }
     applySpecImmediately();
+}
+
+void PalettePanel::restoreSnapshotPreset()
+{
+    PinkXP::PresetDecor d;
+    d.active         = snapshot_.decorActive;
+    d.id             = (PinkXP::ThemeId) snapshot_.decorThemeId;
+    d.pattern        = snapshot_.decorPattern;
+    d.titleIconIndex = snapshot_.decorIcon;
+    PinkXP::setPresetDecor(d);
+    PinkXP::applyTheme((PinkXP::ThemeId) snapshot_.themeId);
 }
 
 // ==================================================
@@ -1316,10 +1366,17 @@ void PalettePanel::revertToSnapshot()
     if (snapshot_.wasCustom)
         PinkXP::applyThemeFromSpec(snapshot_.spec, PinkXP::getCustomThemeName());
     else
-        PinkXP::applyTheme((PinkXP::ThemeId) snapshot_.themeId);
+        restoreSnapshotPreset();
+
+    // 还原到预设起点 = 重新进入"预设只改装饰"模式
+    presetDecorMode_  = ! snapshot_.wasCustom;
+    presetDecorDirty_ = false;
+    presetDecorIcon_  = (snapshot_.decorActive && snapshot_.decorThemeId == snapshot_.themeId)
+                            ? snapshot_.decorIcon : -1;
 
     spec_ = snapshot_.spec;
     loadSpecIntoUi(spec_);
+    syncIconButtonsForPreset();
     regenerateAndRefresh();
 }
 
@@ -1385,6 +1442,7 @@ void PalettePanel::saveCurrentAsUserTheme()
         //   写进用户级文件（Y2Kmeter.themeLibrary.xml），不再依赖
         //   Standalone 退出时的 persistToSettings / 宿主工程状态。
         PinkXP::applyUserTheme(spec_, name);
+        presetDecorMode_ = false;   // 已转为命名的生成器主题
         myThemesList_.refreshLayout();
         myThemesList_.repaint();
         showToast(y2k::trf("Saved: {0}", name));
@@ -1537,15 +1595,29 @@ void PalettePanel::show()
     snapshot_.wasCustom = PinkXP::isCustomThemeActive();
     snapshot_.themeId = (int) PinkXP::getCurrentThemeId();
     snapshot_.spec = PinkXP::getCurrentThemeSpec();
+    {
+        const auto decor = PinkXP::getPresetDecor();
+        snapshot_.decorActive  = decor.active;
+        snapshot_.decorThemeId = (int) decor.id;
+        snapshot_.decorPattern = decor.pattern;
+        snapshot_.decorIcon    = decor.titleIconIndex;
+    }
 
     // 编辑起点 = 当前主题的 spec
     spec_ = PinkXP::getCurrentThemeSpec();
+
+    // 官方预设起步：先进入"只改装饰"模式（改纹理 / 图标不重算配色）
+    presetDecorMode_  = ! snapshot_.wasCustom;
+    presetDecorDirty_ = false;
+    presetDecorIcon_  = (snapshot_.decorActive && snapshot_.decorThemeId == snapshot_.themeId)
+                            ? snapshot_.decorIcon : -1;
 
     pickingRole_ = -1;
     compareHeld_ = false;
     svPicker_.setVisible(false);
 
     loadSpecIntoUi(spec_);
+    syncIconButtonsForPreset();
     regenerateAndRefresh();
     updatePanelHeight();
 
@@ -1777,8 +1849,8 @@ void PalettePanel::paint(juce::Graphics& g)
     auto bar = inner.removeFromTop(PinkXP::ui(22));
     PinkXP::drawPinkTitleBar(g, bar, y2k::tr("PALETTE STUDIO"), 12.0f);
 
-    // 标题栏下沿深色分割线（与 ModulePanel 一致：在标题栏底边外再补 1px）
-    g.setColour(PinkXP::dark);
+    // 标题栏下沿分割线（与 ModulePanel 一致：在标题栏底边外再补 1px）
+    g.setColour(PinkXP::titleBarDividerColour());
     g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
 
     // 右上角 × 关闭按钮：完全复刻 ModulePanel 的自绘样式
@@ -1790,12 +1862,9 @@ void PalettePanel::paint(juce::Graphics& g)
         else
             PinkXP::drawRaised(g, cb, closeHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
 
-        g.setColour(PinkXP::ink);
-        g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
         auto cbText = cb;
-        cbText.translate(0, -1);
         if (closePressed_) cbText.translate(1, 1);
-        g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
+        PinkXP::SymbolGlyphs::drawIconGlyph (g, "x", cbText, 11.0f, PinkXP::ink, 0, -1);
     }
 }
 

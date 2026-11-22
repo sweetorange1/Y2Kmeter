@@ -267,7 +267,10 @@ void LoudnessModule::drawMeterBar(juce::Graphics& g,
                                    const MeterBar& bar,
                                    bool isLUFS) const
 {
-    PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
+    // 绿幕：不画凹槽与未点亮格子，只留点亮的电平格 + 峰值线
+    const bool chromaKey = PinkXP::isChromaKeySkin();
+    if (! chromaKey)
+        PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
 
     const int padding = 3;
     auto inner = barArea.reduced(padding);
@@ -298,6 +301,8 @@ void LoudnessModule::drawMeterBar(juce::Graphics& g,
         const float rowDb   = juce::jmap(rowNorm, -60.0f, 0.0f);
 
         // 未点亮格子用同色 0.15 alpha：视觉上是"色带随电平从底向上点亮"
+        if (chromaKey && ! lit)
+            continue;
         const auto base = isLUFS ? lufsToColour(rowDb) : dbToColour(rowDb);
         g.setColour(lit ? base : base.withAlpha(0.15f));
         g.fillRect(offsetX, y, colW, cellSize);
@@ -319,6 +324,9 @@ void LoudnessModule::drawMeterBar(juce::Graphics& g,
 // ==========================================================
 void LoudnessModule::drawScale(juce::Graphics& g, juce::Rectangle<int> scaleArea) const
 {
+    if (PinkXP::isChromaKeySkin())
+        return;   // 绿幕：dB 刻度尺不画
+
     g.setFont(PinkXP::getAxisFont(9.0f));
     g.setColour(PinkXP::ink.withAlpha(0.75f));
 
@@ -476,8 +484,8 @@ void LoudnessModule::layoutContent(juce::Rectangle<int> contentBounds)
 // ==========================================================
 void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
-    // 内容区底色（深色主题下也保持浅色）
-    g.setColour(PinkXP::btnFace);
+    // 内容区底色（深色主题下也保持浅色；绿幕下纯绿）
+    g.setColour(PinkXP::isChromaKeySkin() ? PinkXP::chromaKeyGreen() : PinkXP::btnFace);
     g.fillRect(contentBounds);
 
     if (style == Style::ledBars) paintLedBars (g, contentBounds);
@@ -503,8 +511,12 @@ void LoudnessModule::paintReadouts(juce::Graphics& g, juce::Rectangle<int>)
 
 void LoudnessModule::paintLedBars(juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
-    rebuildStaticLayerIfNeeded(contentBounds);
-    drawStaticLayer(g, contentBounds);
+    // 绿幕：静态层（凹槽 + 暗格 + 刻度）整层不画
+    if (! PinkXP::isChromaKeySkin())
+    {
+        rebuildStaticLayerIfNeeded(contentBounds);
+        drawStaticLayer(g, contentBounds);
+    }
 
     for (size_t i = 0; i < slots.size() && i < barAreas.size(); ++i)
         drawMeterBar(g, barAreas[i], *slots[i].bar, slots[i].isLufs);

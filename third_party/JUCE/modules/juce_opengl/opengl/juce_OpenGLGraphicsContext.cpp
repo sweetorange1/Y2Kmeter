@@ -1302,36 +1302,113 @@ struct StateHelpers
 
         void bindTextureForGradient (ActiveTextures& activeTextures, const ColourGradient& gradient)
         {
+            // [Y2Kmeter patch] 渐变颜色表纹理按"颜色停靠点"复用，且跨帧保留：
+            //   · setFillType 每次换填充（哪怕只是换成纯色）都会 resetGradient，原实现于是
+            //     对每一次渐变填充都重新生成 256 像素颜色表并 glTexImage2D 上传；
+            //   · 原纹理归属本 GLState（每次 paint 新建、析构时全部删除），跨帧无法复用。
+            //   界面皮肤大量使用同样的几组渐变（抬头 / 凸起边框 / 按钮），每帧上百次重复
+            //   上传。颜色表只取决于停靠点（位置 + 颜色），与几何无关 —— 按停靠点在挂到
+            //   OpenGLContext 的共享存储里查找，命中直接绑定。存储是上下文的关联对象，
+            //   上下文销毁时在 GL 线程上随之释放（与 JUCE 的 CachedImageList 相同）。
+            if (gradientStore == nullptr)
+            {
+                // 未关联上下文（不应发生）：退回原实现语义的单纹理路径
+                if (gradientNeedsRefresh || fallbackGradient == nullptr)
+                {
+                    gradientNeedsRefresh = false;
+                    if (fallbackGradient == nullptr)
+                    {
+                        activeTextures.clear();
+                        fallbackGradient = std::make_unique<OpenGLTexture>();
+                    }
+                    PixelARGB lookup[gradientTextureSize];
+                    gradient.createLookupTable (lookup);
+                    fallbackGradient->loadARGB (lookup, gradientTextureSize, 1);
+                }
+                activeTextures.bindTexture (fallbackGradient->getTextureID());
+                return;
+            }
+
             if (gradientNeedsRefresh)
             {
                 gradientNeedsRefresh = false;
-
-                if (gradientTextures.size() < numGradientTexturesToCache)
-                {
-                    activeGradientIndex = gradientTextures.size();
-                    activeTextures.clear();
-                    gradientTextures.add (new OpenGLTexture());
-                }
-                else
-                {
-                    activeGradientIndex = (activeGradientIndex + 1) % numGradientTexturesToCache;
-                }
-
-                JUCE_CHECK_OPENGL_ERROR;
-                PixelARGB lookup[gradientTextureSize];
-                gradient.createLookupTable (lookup);
-                gradientTextures.getUnchecked (activeGradientIndex)->loadARGB (lookup, gradientTextureSize, 1);
+                activeGradientTexture = gradientStore->getTextureFor (activeTextures, gradient);
             }
 
-            activeTextures.bindTexture (gradientTextures.getUnchecked (activeGradientIndex)->getTextureID());
+            activeTextures.bindTexture (activeGradientTexture);
+        }
+
+        void attachGradientStore (OpenGLContext& context)
+        {
+            gradientStore = GradientTextureStore::get (context);
         }
 
         enum { gradientTextureSize = 256 };
 
     private:
-        enum { numTexturesToCache = 8, numGradientTexturesToCache = 10 };
-        OwnedArray<OpenGLTexture> textures, gradientTextures;
-        int activeGradientIndex = 0;
+        struct GradientTextureStore final : public ReferenceCountedObject
+        {
+            using Key = std::vector<std::pair<double, uint32>>;
+
+            static GradientTextureStore* get (OpenGLContext& c)
+            {
+                const char id[] = "Y2K.GradientTextures";
+                auto* store = static_cast<GradientTextureStore*> (c.getAssociatedObject (id));
+
+                if (store == nullptr)
+                {
+                    store = new GradientTextureStore();
+                    c.setAssociatedObject (id, store);
+                }
+
+                return store;
+            }
+
+            GLuint getTextureFor (ActiveTextures& activeTextures, const ColourGradient& gradient)
+            {
+                scratchKey.clear();
+                const int n = gradient.getNumColours();
+                for (int i = 0; i < n; ++i)
+                    scratchKey.emplace_back (gradient.getColourPosition (i), gradient.getColour (i).getARGB());
+
+                for (size_t i = 0; i < keys.size(); ++i)
+                    if (keys[i] == scratchKey)
+                        return textures.getUnchecked ((int) i)->getTextureID();
+
+                int index;
+                if (textures.size() < maxTextures)
+                {
+                    index = textures.size();
+                    activeTextures.clear();
+                    textures.add (new OpenGLTexture());
+                    keys.emplace_back();
+                }
+                else
+                {
+                    index = nextToReplace;
+                    nextToReplace = (nextToReplace + 1) % maxTextures;
+                }
+
+                JUCE_CHECK_OPENGL_ERROR;
+                PixelARGB lookup[gradientTextureSize];
+                gradient.createLookupTable (lookup);
+                textures.getUnchecked (index)->loadARGB (lookup, gradientTextureSize, 1);
+                keys[(size_t) index] = scratchKey;
+                return textures.getUnchecked (index)->getTextureID();
+            }
+
+            static constexpr int maxTextures = 128;   // 每张 256×1 ARGB = 1KB
+            OwnedArray<OpenGLTexture> textures;
+            std::vector<Key> keys;
+            Key scratchKey;
+            int nextToReplace = 0;
+        };
+
+        enum { numTexturesToCache = 8 };
+        OwnedArray<OpenGLTexture> textures;
+        ReferenceCountedObjectPtr<GradientTextureStore> gradientStore;
+        std::unique_ptr<OpenGLTexture> fallbackGradient;
+        GLuint activeGradientTexture = 0;
         bool gradientNeedsRefresh = true;
     };
 
@@ -1629,6 +1706,7 @@ struct GLState
         activeTextures.clear();
         shaderQuadQueue.initialise();
         cachedImageList = CachedImageList::get (t.context);
+        textureCache.attachGradientStore (t.context);   // [Y2Kmeter patch] 跨帧渐变纹理
         JUCE_CHECK_OPENGL_ERROR
     }
 

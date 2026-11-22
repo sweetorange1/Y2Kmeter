@@ -231,6 +231,21 @@ namespace y2k::help
                     "- SAVE LAST N s: grab the last N seconds from the 60 s buffer.\n"
                     "The folder opens after saving.");
 
+            case ModuleType::systemMonitor:
+                return make (name,
+                    "Computer status: CPU, GPU, temperatures, memory, video memory, disk, network and battery.\n"
+                    "Style (cards / bars / graphs / compact), items, refresh rate and units sit behind the gear button.\n"
+                    "Hover a temperature to see where it comes from.\n"
+                    "On Windows the CPU temperature is read from HWiNFO or LibreHardwareMonitor when one of them is running.\n"
+                    "Read-only: it only reads public system counters and installs no drivers.");
+
+            case ModuleType::utility:
+                return make (name,
+                    "Handy desk tools in one module.\n"
+                    "Choose the tool behind the gear button: calculator, colour picker, stopwatch, timer,\n"
+                    "audio calculator (tempo / note / gain / samples), clock or notes.\n"
+                    "Each tool keeps its contents when you switch away and back.");
+
             default:
                 break;
         }
@@ -265,6 +280,10 @@ Y2KTooltipWindow::Y2KTooltipWindow (juce::Component* parentComponent)
     //   · 避免出现在光标下时抢走 hover（TooltipWindow::mouseEnter 会立即隐藏自己）；
     //   · getComponentUnderMouse 永远不会命中提示框本身。
     setInterceptsMouseClicks (false, false);
+
+    // 提示框内容静态，但常悬停在 Milkdrop / 示波器等每帧刷新的模块上方：
+    //   挂位图缓存，避免每帧重新排版 + 逐字绘制（mac 上曾占 GL 线程约 10%）
+    y2k::ui::setGlSafeImageCache (*this, true);
 
     // 低频回收"鼠标已离开本 peer"的旧提示（见 StaleTipGuard 注释）
     staleTipGuard.startTimerHz (8);

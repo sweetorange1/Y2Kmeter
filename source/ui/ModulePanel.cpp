@@ -7,6 +7,128 @@
 #include "source/perf/PerformanceCounterSystem.h"
 #include "source/perf/FramePerfLog.h"
 #include "source/diag/Y2KDiagLog.h"
+#include <juce_opengl/juce_opengl.h>
+
+// ============================================================
+// GlSafeComponentImageCache —— y2k::ui::setGlSafeImageCache 的实现
+//   （设计说明见 ModuleWorkspace.h 的声明处）
+//   与 JUCE 自带 setBufferedToImage（StandardCachedComponentImage）的区别：
+//     · 只在绘制目标是 OpenGL 合成时启用，其它目标直接 paintEntireComponent，
+//       行为与未缓存完全一致；
+//     · 缓存固定 SoftwareImageType：JUCE 的 GL 渲染器与软件渲染器共用同一套
+//       EdgeTable 光栅化，画面一致；且不持有 GL 帧缓冲 —— 自带实现在 GL 下会用
+//       OpenGLImageType，Editor 的 GL 上下文重建（换 peer 等）后析构会在新上下文
+//       里误删同名对象；
+//     · 设备像素缩放 / 尺寸变化时自动重建。
+// ============================================================
+namespace
+{
+    class GlSafeComponentImageCache final : public juce::CachedComponentImage
+    {
+    public:
+        explicit GlSafeComponentImageCache (juce::Component& c) noexcept : owner (c) {}
+
+        void paint (juce::Graphics& g) override
+        {
+            auto& ctx = g.getInternalContext();
+
+            // 判断绘制目标本身是否 GL 合成（不能用"当前线程有无 GL 上下文"：
+            //   GL 线程上的离屏软件绘制同样有 current context，见 PROJECT_OVERVIEW §6.5）
+            const auto preferredType = ctx.getPreferredImageTypeForTemporaryImages();
+            if (dynamic_cast<const juce::OpenGLImageType*> (preferredType.get()) == nullptr)
+            {
+                owner.paintEntireComponent (g, false);
+                return;
+            }
+
+            const float scale = ctx.getPhysicalPixelScaleFactor();
+            const auto compBounds = owner.getLocalBounds();
+
+            if (compBounds.isEmpty() || ! (scale > 0.0f))
+                return;
+
+            // 位图按"设备像素"取整（向上）：图像像素与屏幕像素 1:1。绘制时用
+            //   scale(1/scale) + 低质量采样 —— JUCE renderImage 判定为纯平移后四舍五入
+            //   到整像素直接贴图（见 RenderingHelpers::renderImage）。Windows 125% /
+            //   150% 等小数缩放下也不会因 w/iw 的取整误差退化成插值采样而发虚；
+            //   多出的不足 1px 由父组件按子组件边界裁掉。
+            const juce::Rectangle<int> imageBounds (0, 0,
+                                                    (int) std::ceil ((float) compBounds.getWidth()  * scale - 0.001f),
+                                                    (int) std::ceil ((float) compBounds.getHeight() * scale - 0.001f));
+
+            if (imageBounds.isEmpty())
+                return;
+
+            // 外观代次（主题 / 皮肤 / 配色）变化 → 整张缓存作废：
+            //   缓存只按"自己失效的区域"重画，主题变化时只有被 repaint 波及的区域会更新，
+            //   典型症状是模块抬头停在旧主题色（内容区因为逐帧刷新反而是新的）。
+            const auto appearance = PinkXP::getAppearanceGeneration();
+            if (appearance != cachedAppearance)
+            {
+                cachedAppearance = appearance;
+                validArea.clear();
+            }
+
+            if (image.isNull() || image.getBounds() != imageBounds || cachedScale != scale)
+            {
+                // 恒用清空的 ARGB：小数缩放下右 / 下边不足 1px 的余量保持透明，
+                //   不会露出未初始化像素（RGB 位图不清空）
+                image = juce::Image (juce::Image::ARGB,
+                                     imageBounds.getWidth(), imageBounds.getHeight(),
+                                     true, juce::SoftwareImageType());
+                cachedScale = scale;
+                validArea.clear();
+            }
+
+            if (! validArea.containsRectangle (compBounds))
+            {
+                juce::Graphics imG (image);
+                auto& lg = imG.getInternalContext();
+                lg.addTransform (juce::AffineTransform::scale (scale));
+
+                for (auto& r : validArea)
+                    lg.excludeClipRectangle (r);
+
+                if (! owner.isOpaque())
+                {
+                    lg.setFill (juce::Colours::transparentBlack);
+                    lg.fillRect (compBounds, true);
+                    lg.setFill (juce::Colours::black);
+                }
+
+                owner.paintEntireComponent (imG, true);
+                validArea = compBounds;
+            }
+
+            g.setColour (juce::Colours::black.withAlpha (owner.getAlpha()));
+            g.setImageResamplingQuality (juce::Graphics::lowResamplingQuality);   // 父组件已 ScopedSaveState
+            g.drawImageTransformed (image, juce::AffineTransform::scale (1.0f / scale), false);
+        }
+
+        bool invalidateAll() override                                 { validArea.clear(); return true; }
+        bool invalidate (const juce::Rectangle<int>& area) override   { validArea.subtract (area); return true; }
+        void releaseResources() override                              { image = {}; validArea.clear(); }
+
+    private:
+        juce::Component& owner;
+        juce::Image image;
+        juce::RectangleList<int> validArea;
+        float cachedScale = 0.0f;
+        juce::uint32 cachedAppearance = 0;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlSafeComponentImageCache)
+    };
+}
+
+void y2k::ui::setGlSafeImageCache (juce::Component& c, bool enabled)
+{
+    const bool has = dynamic_cast<GlSafeComponentImageCache*> (c.getCachedComponentImage()) != nullptr;
+
+    if (enabled && ! has)
+        c.setCachedComponentImage (new GlSafeComponentImageCache (c));
+    else if (! enabled && has)
+        c.setCachedComponentImage (nullptr);
+}
 
 namespace
 {
@@ -137,6 +259,8 @@ juce::String getModuleDisplayName(ModuleType t)
         case ModuleType::milkdrop:         return "Milkdrop";
         case ModuleType::tempoKey:         return "Tempo / Key";
         case ModuleType::recorder:          return "Recorder";
+        case ModuleType::systemMonitor:     return "System Monitor";
+        case ModuleType::utility:           return "Tools";
 
         default:                            return "Module";
 
@@ -165,14 +289,46 @@ ModulePanel::ModulePanel(ModuleType type)
     //   覆盖这里的默认值，以获得"透背景叠加"的效果；那类模块必须用自己的
     //   repaintSelfAndParent 机制来避免拖影，属于 per-module 决策。
     setOpaque (true);
+
+    // 绿幕风格：每个模块是独立的悬停显示区域（见 PinkXP::isChromaRevealed）
+    PinkXP::markChromaRegion (*this);
+
+    // bug1：点击内部子组件也要置顶（见头文件 ChildClickToFront 说明）
+    addMouseListener (&childClickToFront, /*wantsEventsForAllNestedChildComponents=*/ true);
 }
 
 ModulePanel::~ModulePanel()
 {
+    // 监听器是本对象的成员，先摘掉再析构，避免监听列表持有悬空指针
+    removeMouseListener (&childClickToFront);
+
     // 模块销毁时摘掉注册/监听，避免"点空白处收起"持有悬空指针
     openDrawerPanels().removeAllInstancesOf (this);
     if (openDrawerPanels().isEmpty())
         detachDrawerDismissListener();
+}
+
+void ModulePanel::ChildClickToFront::mouseDown (const juce::MouseEvent& e)
+{
+    auto* origin = e.originalComponent;
+
+    // 落在面板自己身上的按下由 ModulePanel::mouseDown 处理，这里不重复执行
+    if (origin == nullptr || origin == &panel || ! panel.isParentOf (origin))
+        return;
+
+    panel.bringToFrontFromChildClick();
+}
+
+void ModulePanel::bringToFrontFromChildClick()
+{
+    if (! isVisible())
+        return;
+
+    // 不抢键盘焦点：内部控件（便签 TextEditor / 计算器按钮）需要保留自己的焦点
+    toFront (false);
+
+    if (onBroughtToFront)
+        onBroughtToFront (*this);
 }
 
 bool ModulePanel::isVisuallyActiveInWorkspace() const noexcept
@@ -561,8 +717,8 @@ void ModulePanel::paint(juce::Graphics& g)
     {
         PinkXP::drawPinkTitleBar(g, tb, titleText, 12.0f);
 
-        // 标题栏下沿深色分割线（凸出边框外 1px）
-        g.setColour(PinkXP::dark);
+        // 标题栏下沿分割线（凸出边框外 1px；霓虹风格下是灯管亮色，让光漏进内容区）
+        g.setColour(PinkXP::titleBarDividerColour());
         g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 1);
 
         // 3. 关闭按钮（×）
@@ -572,13 +728,11 @@ void ModulePanel::paint(juce::Graphics& g)
         else
             PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
 
-        g.setColour(PinkXP::ink);
-        // 图标字符（× / - / =）：恒用英文 UI 字体，不随语言切换变样
-        g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
+        // 图标字符（× / - / =）：恒用英文 UI 字体，不随语言切换变样；
+        //   非像素风格下按字形墨迹居中（切风格换字体后不再上下跑位）
         auto cbText = cb;
-        cbText.translate(0, -1);
         if (closeButtonPressed) cbText.translate(1, 1);
-        g.drawText(y2k::tr ("x"), cbText, juce::Justification::centred, false);
+        PinkXP::SymbolGlyphs::drawIconGlyph (g, "x", cbText, 11.0f, PinkXP::ink, 0, -1);
 
         // 3.5. 弹出/停靠按钮（仅在 Standalone 模式或已处于浮动态时绘制）
         if (popOutEnabled_ || isFloating_)
@@ -589,12 +743,10 @@ void ModulePanel::paint(juce::Graphics& g)
             else
                 PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
 
-            g.setColour(PinkXP::ink);
-            g.setFont(PinkXP::SymbolGlyphs::iconFont(11.0f, juce::Font::bold));
             auto popBtnText = popBtn;
-            popBtnText.translate(0, -1);
             if (popOutButtonPressed_) popBtnText.translate(1, 1);
-            g.drawText(y2k::tr (isFloating_ ? "=" : "-"), popBtnText, juce::Justification::centred, false);
+            PinkXP::SymbolGlyphs::drawIconGlyph (g, isFloating_ ? "=" : "-", popBtnText, 11.0f,
+                                                 PinkXP::ink, 0, -1);
         }
 
         // 3.6. 控制面板（齿轮）按钮：仅声明了控制面板的模块显示
@@ -691,6 +843,29 @@ void ModulePanel::paintOverChildren(juce::Graphics& g)
             juce::Graphics::ScopedSaveState ss (g);
             g.excludeClipRegion (drawer);
             toyState->paint (g);
+        }
+    }
+
+    // 绿幕：未悬停时把外壳（标题栏 / 边框 / 按钮 / 控件条 / 抽屉）整块盖成纯绿，
+    //   只留 getChromaKeyCanvas() 返回的数据画布（不支持的模块返回空 = 整块纯绿）。
+    //   画在所有子组件与 Toybox actor 之上；GL 直渲染的画布挖洞区不在覆盖范围内。
+    if (PinkXP::isChromaKeySkin() && ! isBareMode() && ! PinkXP::isChromaRevealed (*this))
+    {
+        const auto green = PinkXP::chromaKeyGreen();
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            const auto keep = getChromaKeyCanvas();
+            if (! keep.isEmpty())
+                g.excludeClipRegion (keep);
+            g.setColour (green);
+            g.fillRect (getLocalBounds());
+        }
+
+        const auto drawer = getControlDrawerBounds();
+        if (! drawer.isEmpty())
+        {
+            g.setColour (green);
+            g.fillRect (drawer);
         }
     }
 

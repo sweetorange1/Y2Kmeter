@@ -15,6 +15,16 @@
   `repaintHover` 的补齐定时器兜底，避免十字线停在上一帧位置。嵌入态（GL 直渲染）
   不节流，行为与旧版逐像素一致。
 
+### 1.1 组件层性能规则（v3.4.3）
+
+- **组件层每次 repaint 都会让脏区内所有组件按 z 序重画**（不是只画发起者）。一个"内容很少变"的组件只要压在每帧刷新的模块上，就会每帧整块重画。低频组件（电脑状态、计算器、悬停提示……）用 `y2k::ui::setGlSafeImageCache()`（实现见 `ModulePanel.cpp`）挂整组件位图缓存：只有自己失效的区域才重画进缓存，被连带重绘时只贴一张图。
+  - 缓存固定用软件 Image、只在 GL 合成目标启用（判据 `getPreferredImageTypeForTemporaryImages()` 是否为 `OpenGLImageType`，**不要**用 `getCurrentContext() != nullptr`，见 §2.1）；浮动态窗口照原路径画。
+  - 不要给每帧自绘的组件挂（等于多画一次 + 每帧上传纹理）。
+- **"画一次复用"的缓存必须并入 `PinkXP::getAppearanceGeneration()`**（主题 / 皮肤 / 自定义配色变化 +1）。否则只有被 repaint 波及的区域会更新：典型症状是"模块内容在动、抬头颜色停在上一个主题"，切主题后必须删掉重加模块才恢复（v3.4.3 踩过）。`setGlSafeImageCache` 已内置该判断。
+- **渐变填充不便宜**：JUCE 的 GL 渲染器每次换填充都会丢掉缓存的"渐变颜色表纹理"。本仓库补丁 0007 按颜色停靠点复用、并把纹理挂在 `OpenGLContext` 关联对象上跨帧保留 —— 新皮肤大量使用渐变时这是关键项。
+- **`g.drawRect(r, 1)` 在 GL 下走 EdgeTable + 多矩形裁剪求交**（比 4 次 `fillRect` 贵一个数量级）。每帧重绘的 chrome 边框用 4 次 `fillRect`（见 `PinkXP::chromeFrame`）。
+- GL 直渲染模块的 overlay 里，静态文字走 `PinkXP::drawCachedText`，动态数值才走 `drawText`。`drawCachedText` 有 `Rectangle<int>` / `Rectangle<float>` 两个重载，花括号实参 `{x,y,w,h}` 会二义，必须显式写类型。
+
 ## 2. GL Image 消费规则（macOS 崩溃高发区）
 
 1. **`OpenGLContext::getCurrentContext() != nullptr` 只说明"有 GL 上下文"，不等于"画进 GL"**。GL 线程上的离屏软件绘制（`createComponentSnapshot`）同样满足。判据要用"绘制目标身份"，不是上下文存在性。
@@ -32,7 +42,7 @@
 - projectM handle 必须在 GL 线程创建/销毁；析构先同步 detach 等 GL 收尾。
 - `componentPaintingEnabled(true)` 下 CachedImage 会被 ModulePanel 底色覆盖 → paintContent 用 `drawImageAt` 覆盖。
 - `GLint/GLuint` 是全局作用域（khrplatform.h），**不加** `juce::gl::` 前缀。
-- `glBlitFramebuffer` 格式不匹配时驱动静默丢弃，`glError` 仍为 0。
+- `glBlitFramebuffer` 格式不匹配时显卡驱动会直接丢弃该次拷贝，`glError` 仍为 0。
 - `triggerRepaint()` 不可靠驱动 UI 重绘；用 `juce::Timer`（消息线程回调）才可靠。
 - 不要在 `paint`/`paintContent` 内调 `repaint()`（干扰 CachedImage）。
 - `hasKeyboardFocus()` 是组件级 API，判断窗口激活要用 `TopLevelWindow::getActiveTopLevelWindow()`。
@@ -57,6 +67,10 @@
 - 单字符/短文本最易踩：0.5px 就足以让第一颗 glyph 完全消失（表现为"标签随机丢失"，与主题/窗口宽度无关）。
 - 自建文本位图缓存：宽度必须 `ceil` 并留余量，不能用 `round`。
 - `PinkXP::getFont()` 有 **1.5× 放大**（正文），窄标签走位图要按 1.5× 反推尺寸，或直接 `axisFont=true`（坐标轴专用，不缩放）。
+- **垂直居中统一走 `PinkXP::FontOptics`**（`opticalNudge` / `fitFontToHeight`，v3.4.1）：`drawText(..., centred)` 是按**行框**居中的，各字体 ascent/descent 比例不同 → 换皮肤 / 换字体后同一控件里的文字漂 0.5~2px。规则：拉丁字体对齐像素复古基准（默认皮肤零回归），CJK 字体按方块字墨迹精确居中。**不要再写 `translate(0, -1)` 这类手调补偿**，那是按某一套字体调的，换字体就会跑。
+- **图标字符走 `SymbolGlyphs::drawIconGlyph`**：按字形**轮廓墨迹**居中。注意 `GlyphArrangement::getBoundingBox` / `PositionedGlyph::getBounds` 返回的是**行框**（advance × ascent+descent），拿它做"居中"等于没居中（`_` 依旧贴底、`*` 依旧顶天）；真实墨迹必须 `PositionedGlyph::createPath(path)` 后取 `path.getBounds()`。
+- 徽标 / 标题这类"整张位图"摆放：对齐的是位图里的**文字排版框**（`StaticText::boxTop / boxHeight`），不是整张位图 —— 位图底部多留 1px，居中整图会让文字永远高 1px。
+- **自适应字号（按可用宽度逐轮缩字号）必须缓存结果**（`SystemMonitorModule` 的 `fitFont`）：每次绘制 5 轮 `GlyphArrangement::getStringWidth`，在低频组件上会被连带重绘放大到每帧数十次。同理，分段描边能合并成一条 Path 就合并（同色同 alpha 的段互不重叠时结果完全一致）。
 
 ## 6. Milkdrop 效果系统（v2.6.x 起，详见 PROJECT_OVERVIEW.md §3.4）
 

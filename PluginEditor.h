@@ -288,6 +288,13 @@ private:
     //   · 每个模块都走 createModule() 的构造默认值，不加载存档里的 <state>。
     void applyFullScreenTilePreset (int presetId);
 
+    // bug4：目标预设不是全屏磁贴预设、而窗口正处于 mac 原生全屏时，先退出全屏再应用。
+    //   macOS 的退出全屏动画是异步的（窗口几何在动画结束时才由系统恢复），
+    //   所以这里轮询等待 isFullScreen() 变 false，再重新走 applyLayoutPreset。
+    static void continueLayoutPresetAfterFullScreenExit (
+        juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> self,
+        int presetId, int triesLeft);
+
     // stick 模式是否激活（Windows 专属；非 Windows 恒 false，paint 无需 #if 即可判断）
     bool isStickActive() const noexcept { return stickActive; }
 

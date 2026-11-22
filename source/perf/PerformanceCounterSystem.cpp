@@ -83,6 +83,8 @@ juce::String moduleTypeNameById(int id)
         case 21: return "milkdrop";
         case 22: return "tempoKey";
         case 23: return "recorder";
+        case 24: return "systemMonitor";
+        case 25: return "utility";
         default: return juce::String("unknown(") + juce::String(id) + ")";
     }
 }

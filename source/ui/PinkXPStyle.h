@@ -108,6 +108,12 @@ namespace PinkXP
                                           const juce::String& title,
                                           float fontHeight = 11.0f);
 
+    // 标题栏下沿分割线的颜色（调用方在 drawPinkTitleBar 之后自己画 1~2px）。
+    //   · 默认 = pinkXP 的深色硬线（dark）；
+    //   · 霓虹赛博 = 灯管亮色 —— 让标题栏底部的辉光"漏"进内容区，
+    //     深色硬线会把光切断，整条抬头看起来就发闷。
+    juce::Colour titleBarDividerColour() noexcept;
+
     // 在 iconArea 中央以 colour 绘制一个文本符号图标（由主题配置）
     // shadowColour 是阴影/bevel 底色，应从标题栏背景衍生以保持一致的凸起效果
     void drawTitleIconText(juce::Graphics& g,
@@ -160,7 +166,17 @@ namespace PinkXP
     //   · 英文 / 未声明字体的语言 → 内置 Silkscreen-Regular.ttf
     //   · 其它语言 → 语言包 @font 指定的字体（如中文 ChillBitmap_16px）
     //   同一字体只创建一次 Typeface（进程内缓存，见 releaseTypefaceCache）。
+    //   v3.4：字体同时跟随视觉风格（Skin）——
+    //   · 英文 / 无 @font 语言：按风格取内置英文字体（像素复古 Silkscreen /
+    //     千禧金属 Exo 2 / 现代简约 Inter / 玻璃 Nunito / 霓虹 Orbitron /
+    //     CRT VT323 / Fluent Open Sans / 绿幕 Inter）；
+    //   · 中文：像素复古 / CRT 沿用语言包像素字（ChillBitmap），其余风格改用
+    //     Noto Sans SC（思源黑体）；其它带 @font 的语言始终用语言包字体。
     juce::Typeface::Ptr loadActiveTypeface();
+
+    // 当前已加载的字体是否与"当前风格 + 当前语言"应选的字体不一致
+    //   （切换风格后 Editor 据此重新 loadActiveTypeface + 刷新布局）
+    bool activeTypefaceStale();
 
     // 释放 loadActiveTypeface 的缓存（Editor 析构时调用，规避 DLL 卸载期悬垂引用）
     void releaseTypefaceCache();
@@ -168,12 +184,56 @@ namespace PinkXP
     // 字体代次：每次 initCustomTypeface +1（供文字位图等缓存做键）
     juce::uint32 getFontGeneration() noexcept;
 
+    // 外观代次：主题 / 皮肤 / 自定义配色任一变化 +1（v3.4.4）。
+    //   整组件位图缓存（y2k::ui::setGlSafeImageCache）与其它"画一次复用"的缓存
+    //   必须比对它 —— 否则主题变化时只有自己主动重绘的区域会更新，
+    //   例如模块抬头只被"内容区刷新"带着重画时颜色会停在上一个主题。
+    juce::uint32 getAppearanceGeneration() noexcept;
+
     // 取自定义字体（按激活字体）
     // 注意：为整体可读性，此函数会对高度做 1.5x 放大（坐标轴刻度请用 getAxisFont）
     juce::Font getFont(float height, int styleFlags = juce::Font::plain);
 
     // 坐标轴刻度专用字体：不做放大，保持原始 height
     juce::Font getAxisFont(float height, int styleFlags = juce::Font::plain);
+
+    // ==========================================================
+    // 文本光学排版（跨字体统一）—— 所有"控件内单行文字 / 图标字符"都走这里
+    //
+    //   背景：JUCE 的 drawText(..., centred) 是按**字体行框**（ascent+descent）
+    //   垂直居中的。行框在字形上下留的白并不对称，而每个字体的 ascent/descent
+    //   比例、大写高（cap height）、下伸部深度都不一样，于是：
+    //     · 同一段文字换字体后在控件里上下漂 0.5~2px（按钮文字"看着偏下"）；
+    //     · 单个图标字符（_ * x L）漂得更狠 —— _ 贴下边缘、* 顶到上边缘。
+    //   这里统一改成按**字形带**（glyph band）居中：
+    //     · 拉丁文本：上沿 = 大写高（小写词也按大写字顶对齐 → 相邻控件基线一致），
+    //       下沿 = 下伸墨迹的一半（无下伸部的词补半格，整排文字不会视觉偏下）；
+    //     · CJK 文本：上/下沿取方块字的实测墨迹（方块字占满 em 框）；
+    //     · 单个图标字符：直接按该字符的墨迹包围盒居中（见 drawIconGlyph）。
+    //   度量全部运行时实测（GlyphArrangement，不依赖字体表 / 平台差异），
+    //   按 (typeface, 高度) 缓存，绘制路径上零额外塑形开销。
+    // ==========================================================
+    struct FontOptics
+    {
+        float lineAscent   = 0.0f;   // JUCE 行框（px）
+        float lineDescent  = 0.0f;
+        float capHeight    = 0.0f;   // 大写字母墨迹高（px）
+        float descenderInk = 0.0f;   // 下伸部墨迹深度（px）
+        float latinBandTop = 0.0f, latinBandBottom = 0.0f;   // 相对基线（上负下正）
+        float cjkBandTop   = 0.0f, cjkBandBottom   = 0.0f;
+        float nudge        = 0.0f;   // 统一修正量（px，正 = 下移）
+    };
+
+    // 取某个 Font 的光学度量（进程内缓存；仅消息线程 / GL 渲染线程调用）
+    const FontOptics& getFontOptics (const juce::Font& font);
+
+    // 该字体下所有单行文本应额外下移的像素数（正 = 下移）。
+    //   按**字体**给出（不按字符串）：同一字体里中英混排共享基线，不会各跳各的。
+    float opticalNudge (const juce::Font& font);
+
+    // 高度上限钳制：字体行高超过 maxHeight 时等比缩到 maxHeight。
+    //   用于定高控件（按钮 / 标签 / 图标位），避免 VT323 这类高行框字体撑破控件。
+    juce::Font fitFontToHeight (juce::Font font, float maxHeight);
 
     // ==========================================================
     // 符号字形集中管理（界面国际化补充）
@@ -230,6 +290,23 @@ namespace PinkXP
         //   与表情字符同理：这类符号的字形属于品牌视觉的一部分，
         //   不应因中英文切换而跟着换字体变样。
         static juce::Font iconFont (float height, int styleFlags = juce::Font::plain);
+
+        // 图标按钮的字符绘制：把 glyph 画在 area 的"视觉中心"。
+        //   · drawText(..., Justification::centred) 是按字体行框（ascent + descent）
+        //     垂直居中的：不同风格的字体 x-height / descent 比例差别很大
+        //     （Orbitron / Exo 2 / VT323 / Open Sans ...），同一个 x / _ / * / L
+        //     会上下漂 1~3px，表现为"切风格后标题栏按钮字符跑位"。
+        //   · 这里改用 GlyphArrangement 取真实墨迹包围盒再对齐中心，任何字体下
+        //     都落在按钮的视觉中心。
+        //   · 像素复古（SkinId::pinkXP）仍走旧路径（行框居中 + 调用方手调偏移），
+        //     保证默认风格逐像素不变；pixelSkinDx / pixelSkinDy 即那组旧偏移。
+        static void drawIconGlyph (juce::Graphics& g,
+                                   const juce::String& glyph,
+                                   juce::Rectangle<int> area,
+                                   float fontHeight,
+                                   juce::Colour colour,
+                                   int pixelSkinDx = 0,
+                                   int pixelSkinDy = 0);
 
         // ∞ 专用：与语言无关的等比符号字体。
         //   中文像素字体里 ∞ 是空白字形，英文 UI 字体（Silkscreen）也没有它，
@@ -429,6 +506,16 @@ namespace PinkXP
     // ==========================================================
     juce::Component* getInWindowMenuHost (juce::Component* targetComponent);
 
+    // 菜单允许区域修正（bug2）：默认允许区域是 display->userArea，但
+    //   · stick 驻留态（Windows）：控件位于 AppBar 条带内（userArea 之外）；
+    //   · macOS 原生全屏：窗口铺满 totalArea（盖住菜单栏/Dock），而 userArea 仍扣除了它们；
+    //   · 控件中心本来就不在 userArea 内（贴边条状窗口等）。
+    //   这些情况下 JUCE 会把菜单 clamp 到 userArea，表现为"菜单跑到离控件很远的地方"。
+    //   命中任一条件时把允许区域放宽到整块显示器（扣掉安全区），菜单就会贴着
+    //   anchor 展开。ComboBox 下拉与自绘按钮的 PopupMenu 都应经过这里。
+    juce::PopupMenu::Options withFullScreenMenuArea (juce::PopupMenu::Options options,
+                                                     juce::Component& anchor);
+
     // 格式化频率读数：<1kHz 显示 "xxx Hz"，>=1kHz 显示 "x.x kHz"
     juce::String formatFreqHz(float hz);
 
@@ -553,6 +640,27 @@ namespace PinkXP
     //   · 否则从当前主题的 Accent/Background 反推（"基于预设新建"入口，R10）。
     y2kpal::ThemeSpec getCurrentThemeSpec();
 
+    // ---- 官方预设的装饰覆盖（桌面纹理 / 标题图标）----
+    //   调色工作室在预设主题下只改纹理 / 图标时走这里：保留预设的手工配色，
+    //   不经过 OKLCH 生成器重算（否则整套颜色会被反推近似色替换 → 跳色）。
+    //   覆盖只对 id 对应的预设生效；切到其它预设或生成器主题时自动失效。
+    struct PresetDecor
+    {
+        bool            active         = false;
+        ThemeId         id             = ThemeId::blackPink;
+        y2kpal::Pattern pattern        = y2kpal::Pattern::Checker;
+        int             titleIconIndex = -1;   // -1 = 沿用预设自带图标；0..7 = 调色工作室候选图标
+    };
+
+    PresetDecor getPresetDecor();
+    // 只写状态不提交（启动 / 读工程时在 applyTheme 之前调用；active=false 即清除）
+    void setPresetDecor(const PresetDecor& decor);
+    // 对当前主题立即生效并提交：预设 → 写装饰覆盖（配色不变）；
+    //   生成器主题 → 只改其 spec 的 pattern / titleIcon（同 spec 生成，配色同样不变）
+    void applyPresetDecor(y2kpal::Pattern pattern, int titleIconIndex);
+    // 图标文本在调色工作室 8 个候选中的索引；不在候选中返回 -1
+    int titleIconIndexOf(const char* iconText);
+
     // 供 ThemeLibrary 应用"我的主题"（命名主题，随 ui.themeLibrary 持久化）
     void applyUserTheme(const y2kpal::ThemeSpec& spec, const juce::String& name);
 
@@ -569,6 +677,73 @@ namespace PinkXP
     //   界面语言切换后复用这条链路：各模块订阅回调里本来就会失效静态文字层 /
     //   GL 快照 / 位图缓存并重绘，换字体后需要的正是同一套刷新。
     void notifyThemeSubscribers();
+
+    // ======================================================
+    // 视觉风格（Skin）—— 与颜色主题正交
+    //   颜色主题决定"用什么颜色"，风格决定"形状与质感"（凸起/凹陷/按下/
+    //   标题栏/硬阴影/桌面底纹/滚动条）。所有风格都只读取当前主题的配色槽位，
+    //   因此任意主题 × 任意风格都可组合。
+    //   · 分派点：drawRaised / drawRaisedFrame / drawSunken / drawPressed /
+    //     drawHardShadow / drawDesktop / drawPinkTitleBar / PinkXPLookAndFeel，
+    //     以及 GL 直渲染的 GlDirectModuleBase::appendSunkenFrame。
+    //   · 外框厚度保持 2px（与旧版一致），调用方的内缩布局不受影响。
+    //   · SkinId 按整数持久化（ui.skinId / 插件态 skinId）：只追加不重排。
+    // ======================================================
+    enum class SkinId
+    {
+        pinkXP = 0,   // 像素复古（Win95/XP 2px 硬斜角，默认，外观与旧版完全一致）
+        chrome = 1,   // 千禧金属（拉丝金属渐变 + 镜面高光 + 铬质标题栏）
+        modern = 2,   // 现代简约（扁平 + 1px 细描边 + 小控件圆角 + 柔和阴影）
+        glass  = 3,   // 玻璃（窗口内模拟毛玻璃：纵向通透渐变 + 上沿镜面高光 + 半透明细边；全部不透明绘制）
+        neon   = 4,   // 霓虹赛博（深色桌面 + 透视网格 + 发光灯管描边 + 彩色辉光阴影）
+        crt    = 5,   // CRT 终端（磷光单色描边 + 扫描线 + 暗角；等宽终端字体）
+        fluent = 6,   // Win11 Fluent（Mica 质感桌面 + 细描边 + 小控件大圆角 + 柔和投影）
+        greenScreen = 7 // 绿幕（视频抠像：桌面 / 外壳 / 网格 / 刻度全部纯绿 #00FF00，只留数据图形与数值读数）
+    };
+
+    struct SkinInfo
+    {
+        SkinId      id;
+        const char* displayName;   // 英文源文案（翻译键）
+    };
+
+    const std::vector<SkinInfo>& getAllSkins();
+    SkinId getCurrentSkin() noexcept;
+    // 越界 / 未知值回退 pinkXP（旧存档 / 新版存档回退旧版时的兜底）
+    SkinId skinFromInt (int raw) noexcept;
+    // 切换风格：失效桌面纹理缓存 + 广播主题订阅（各模块静态层 / GL 快照随之重建）
+    void applySkin (SkinId id);
+
+    // 风格辅助：在 fill 上取一条可见的细描边色（不透明；亮底压暗、暗底提亮）。
+    //   现代简约风格的 CPU 描边与 GL 画布凹槽共用，保证两条绘制路径一致。
+    juce::Colour skinHairlineOn (juce::Colour fill, float amount = 0.20f) noexcept;
+
+    // 风格是否使用"扁平小控件"（圆角按钮 / 胶囊滚动条 / 细分隔线）：
+    //   modern / glass / fluent / greenScreen / neon。LnF 与 GL 凹槽共用同一判定。
+    bool skinUsesFlatControls (SkinId id) noexcept;
+
+    // ======================================================
+    // 绿幕（SkinId::greenScreen）—— 给视频创作者录屏抠像
+    //   · 桌面 / 工作区画布 / 工具栏 / 标题栏 / 模块外壳：未悬停时一律纯绿；
+    //     鼠标悬停在某个模块（或 Editor 自身 chrome）上时该区域按正常外观显示。
+    //   · 支持的模块（ModulePanel::getChromaKeyCanvas 返回非空）：画布内背景
+    //     纯绿、不画网格 / 刻度 / 图例，只留数据图形与数值读数；
+    //     其它模块未悬停时整块纯绿。
+    //   · 悬停判定：进程内单个 20Hz 定时器轮询鼠标所在的"绿幕区域"
+    //     （markChromaRegion 标记的最近祖先组件），变化时只重绘新旧两个区域。
+    //     定时器只在绿幕风格下懒创建，离开绿幕 / Editor 析构时释放。
+    // ======================================================
+    bool         isChromaKeySkin() noexcept;
+    juce::Colour chromaKeyGreen() noexcept;                    // 0xFF00FF00
+    // 强度色阶抠像：t（0..1 强度）很低时返回纯绿，过渡段向原色渐变，其余原样
+    //   （语谱图 / 3D 瀑布的"静音"像素直接落成绿幕，抠像后透明）
+    juce::Colour chromaKeyFade (juce::Colour c, float t) noexcept;
+    // 把组件标记为绿幕悬停区域（ModulePanel / Editor 构造时调用）
+    void markChromaRegion (juce::Component& c);
+    // c 所属的绿幕区域当前是否处于"悬停显示"状态；非绿幕风格恒为 true
+    bool isChromaRevealed (const juce::Component& c);
+    // 释放悬停轮询定时器（Editor 析构时调用，规避 DLL 卸载期静态析构 Timer）
+    void releaseChromaHoverTracker();
 }
 
 // ==========================================================
