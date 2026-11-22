@@ -3851,6 +3851,9 @@ void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
     // 地接收按下鼠标后的移动事件，尤其当组件树中存在原生 HWND 子窗口时）
     if (isDraggingSlider_)
     {
+        // 与 color / wave / tweak 各分支保持一致：拖动中刷新 overlay 活跃时间，
+        // 否则拖满 4 s 会被 checkOverlayAutoHide 判成 idle 而把控制栏藏掉。
+        touchOverlayIdleTimer();
         auto content = getContentBounds();
         auto topBar = content.withHeight(26);
         auto autoRow = getAutoRowBounds(topBar);

@@ -1571,6 +1571,13 @@ private:
         //    后续我们要做的物理覆盖不会被 PropertiesFile 的析构 flush 抢跑。
         props->saveIfNeeded();
 
+        // 1.5) 覆盖前备份当前 settings：万一导入的存档是坏的 / 解析不了，
+        //      用它把磁盘和内存一起还原，避免"存档坏了还照常重启"。
+        //      TemporaryFile 析构时自动删除，不会在用户目录留下垃圾；
+        //      临时名不带 .settings 后缀，也不会被 Steam Auto-Cloud 同步。
+        juce::TemporaryFile backup (dest);
+        const bool hasBackup = dest.copyFileTo (backup.getFile());
+
         // 2) 物理覆盖 settings 文件
         const bool ok = src.copyFileTo (dest);
         if (! ok)
@@ -1591,8 +1598,35 @@ private:
         //   仍是旧界面（布局 / 主题 / 窗口全部没变）。
         //   reload() 让内存与刚导入的文件一致（存档里的 key 覆盖内存值），
         //   之后这些善后写入只会补上 audioSetup 等与本机相关的键。
+        //   ★ 注意 JUCE 的 reload() 是"合并"而不是"替换"（loadAsXml 只 set 不
+        //     clear）：存档里缺失的 key 会保留内存旧值。对完整导出的存档没有
+        //     影响，但不要据此认为内存与文件逐 key 相等。
         if (! props->reload())
-            DBG ("handleImportSettings: settings reload after import failed");
+        {
+            // 存档解析失败：把磁盘还原成导入前的文件，内存仍是导入前的旧表
+            //（reload 失败不会清空内存），随后中止本次导入 —— 不重启、不退出。
+            DBG ("handleImportSettings: settings reload failed; rolling back → "
+                 + dest.getFullPathName());
+
+            bool rolledBack = false;
+            if (hasBackup)
+                rolledBack = backup.getFile().copyFileTo (dest) && props->reload();
+
+            if (! rolledBack)
+            {
+                // 没有可用备份：至少把内存旧表写回，别在磁盘上留一个坏文件。
+                props->setNeedsToBeSaved (true);
+                props->saveIfNeeded();
+            }
+
+            return;
+        }
+
+        // 2.6) 成就累计值同样来自 settings（steam.runtimeSeconds / steam.preset*）。
+        //      y2k::ach 在 initialise() 时只读一次并缓存在内存里，reload() 不会碰
+        //      到它；不重新 attach 的话，退出时 detach() 会把**导入前**的进度写
+        //      回去，把存档里的数值覆盖掉（界面正常但成就进度回退）。
+        y2k::ach::attach (*props);
 
         // 3) 锁死 persistAllSettings / 任何后续 flushCurrentStateToDisk ——
         //    不让关闭路径把当前内存运行时状态（尤其是 filterState 布局 XML）

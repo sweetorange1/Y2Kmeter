@@ -48,11 +48,17 @@ namespace
         return opt.getDefaultFile();
     }
 
-    void clearVirtuPetFocusVisuals (juce::OwnedArray<ModulePanel>& modules)
+    // 「点别处 → 收起 VirtuPet 的聚焦视觉（HUD / 删除按钮）」。
+    //   except 语义与 clearMilkdropFocus 完全一致：被点击的那块（含点子组件
+    //   触发的置顶）必须保留自己的 focus。VirtuPet 目前没有子控件，这条 except
+    //   暂时等价于旧行为；但只要将来给它加任何子组件，无条件的清理就会复现
+    //   v3.4.5 修掉的"Milkdrop 控制台点一下就消失"。
+    void clearVirtuPetFocusVisuals (juce::OwnedArray<ModulePanel>& modules,
+                                    const ModulePanel* except = nullptr)
     {
         for (auto* m : modules)
         {
-            if (m == nullptr || m->getModuleType() != ModuleType::virtuPet)
+            if (m == nullptr || m == except || m->getModuleType() != ModuleType::virtuPet)
                 continue;
 
             if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (m))
@@ -62,7 +68,7 @@ namespace
 
     // 「点别处 → 收起 Milkdrop 控制台」。
     //   except = 刚被置顶的那块模块（它自己刚点开的控制台必须保留）。
-    //   ★ v3.4.3 后续修复：onBroughtToFront 里无条件清掉**所有** Milkdrop 的 focus，
+    //   ★ v3.4.5 修复：onBroughtToFront 里无条件清掉**所有** Milkdrop 的 focus，
     //     会连带清掉刚刚被点击的那一块 —— v3.4.1 的 ChildClickToFront 深层鼠标
     //     监听在目标 mouseDown 之后才触发，于是"点击控制栏按钮"这个动作会先
     //     置 pressedOverlayBtn_、再立刻被 setFocusVisual(false) 清空并隐藏控制台，
@@ -1655,9 +1661,9 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     //   · 仅在 focusedPerlerIdx 有效时执行 repaint，避免无聚焦时的无谓刷新
     panel.onBroughtToFront = [this](ModulePanel& p)
     {
-        clearVirtuPetFocusVisuals (modules);
-        // 只收"别人"的 Milkdrop 控制台：被点击的这块（含点子组件触发的置顶）
-        // 必须保留刚打开的控制台，否则控制栏会出现"点一下就消失"。
+        // 只收"别人"的聚焦视觉：被点击的这块（含点子组件触发的置顶）必须保留
+        // 自己刚打开的 HUD / 控制台，否则会出现"点一下就消失"。
+        clearVirtuPetFocusVisuals (modules, &p);
         clearMilkdropFocus (modules, &p);
 
         if (focusedPerlerIdx >= 0)
