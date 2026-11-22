@@ -507,17 +507,33 @@ ModuleWorkspace::ModuleWorkspace()
     audioSourceBox.addItem (audioSourceItems[0].displayName, 1);
     audioSourceBox.setSelectedId (1, juce::dontSendNotification);
     audioSourceBox.setTooltip (y2k::help::make ("Audio source",
-        "What Y2Kmeter listens to. System Output (Loopback) meters everything your "
-        "computer plays; pick a microphone / input device to meter that instead."));
+        "What Y2Kmeter listens to. Output meters everything your computer plays; "
+        "Microphone meters your input device."
+       #if JUCE_WINDOWS
+        "\nApp Audio Capture lists the apps that are playing audio right now; "
+        "pick one to meter only that app's sound. "
+        "Apps that are silent at the moment are under All Apps at the end of that list."
+        "\nIf the chosen app quits, Y2Kmeter waits for it to come back."
+       #endif
+        ));
     audioSourceLabel.setTooltip (audioSourceBox.getTooltip());
 
     // 显式挂 Pink XP LookAndFeel —— 保证下拉框 / 弹出菜单的配色与主题统一
     //（否则 ComboBox 会使用 LookAndFeel_V4 的默认浅蓝色，跟粉色主题格格不入）
     audioSourceBox.setLookAndFeel (&getPinkXPLookAndFeel());
 
+    // 弹出前让宿主刷新动态条目（程序列表）
+    audioSourceBox.onAboutToShowPopup = [this]()
+    {
+        if (onAudioSourceListRequested)
+            onAudioSourceListRequested();
+    };
+
     audioSourceBox.onChange = [this]()
     {
-        const int idx = audioSourceBox.getSelectedItemIndex();
+        // 条目 ID = audioSourceItems 下标 + 1（见 setAudioSourceItems）：
+        //   直接用 ID 反查，顶层条目与子菜单里的条目走同一条路。
+        const int idx = audioSourceBox.getSelectedId() - 1;
         if (idx < 0 || idx >= audioSourceItems.size()) return;
         const auto sourceId  = audioSourceItems.getReference (idx).sourceId;
         const auto isLoopback = audioSourceItems.getReference (idx).isLoopback;
@@ -4039,6 +4055,55 @@ bool ModuleWorkspace::hitTest (int x, int y)
 // ==========================================================
 // 音频信号来源下拉框 —— 外部填充 / 查询接口
 // ==========================================================
+namespace
+{
+    // 把 items[i...] 里 submenuPath 以 prefix 开头的**连续**条目加进 menu：
+    //   路径正好等于 prefix → 普通条目；路径更深 → 递归成子菜单（支持任意层）。
+    //   条目 ID 一律 = 下标 + 1（各层共用同一套 ID，ComboBox 会递归查找）。
+    // 返回这一层（含子层）是否包含当前选中项：包含时给子菜单标题也打勾，
+    //   这样不展开子菜单也能看出"现在选的是它里面的某一项"。
+    bool addAudioSourceMenuItems (juce::PopupMenu& menu,
+                                  const juce::Array<ModuleWorkspace::AudioSourceItem>& items,
+                                  int& i,
+                                  const juce::StringArray& prefix,
+                                  int selectIdx)
+    {
+        bool holdsSelection = false;
+
+        while (i < items.size())
+        {
+            const auto& it   = items.getReference (i);
+            const auto& path = it.submenuPath;
+
+            bool underPrefix = path.size() >= prefix.size();
+            for (int k = 0; underPrefix && k < prefix.size(); ++k)
+                underPrefix = (path[k] == prefix[k]);
+            if (! underPrefix)
+                break;   // 这一项属于上层（或别的分支），交还给调用方
+
+            if (path.size() == prefix.size())
+            {
+                // sourceId 为空 = 提示行：灰显、不可选
+                menu.addItem (i + 1, it.displayName, it.sourceId.isNotEmpty());
+                holdsSelection = holdsSelection || (i == selectIdx);
+                ++i;
+                continue;
+            }
+
+            juce::StringArray childPrefix (prefix);
+            childPrefix.add (path[prefix.size()]);
+
+            juce::PopupMenu sub;
+            const bool childHolds = addAudioSourceMenuItems (sub, items, i, childPrefix, selectIdx);
+            menu.addSubMenu (path[prefix.size()], sub, true,
+                             std::unique_ptr<juce::Drawable>(), childHolds);
+            holdsSelection = holdsSelection || childHolds;
+        }
+
+        return holdsSelection;
+    }
+}
+
 void ModuleWorkspace::setAudioSourceItems (const juce::Array<AudioSourceItem>& items,
                                            const juce::String& selectedSourceId)
 {
@@ -4047,16 +4112,17 @@ void ModuleWorkspace::setAudioSourceItems (const juce::Array<AudioSourceItem>& i
 
     int selectIdx = -1;
     for (int i = 0; i < audioSourceItems.size(); ++i)
-    {
-        const auto& it = audioSourceItems.getReference (i);
-        audioSourceBox.addItem (it.displayName, i + 1);
-        if (it.sourceId == selectedSourceId)
+        if (selectedSourceId.isNotEmpty()   // 空 sourceId 是提示行，不能被"选中"
+            && audioSourceItems.getReference (i).sourceId == selectedSourceId)
             selectIdx = i;
-    }
 
     // 若外部指定了 selectedSourceId 则按它选；否则默认选第 0 项（不触发回调，避免启动抖动）
     if (selectIdx < 0 && ! audioSourceItems.isEmpty())
         selectIdx = 0;
+
+    // 顶层条目 + 按 submenuPath 逐级展开的子菜单（见 addAudioSourceMenuItems）
+    int next = 0;
+    addAudioSourceMenuItems (*audioSourceBox.getRootMenu(), audioSourceItems, next, {}, selectIdx);
 
     if (selectIdx >= 0)
         audioSourceBox.setSelectedId (selectIdx + 1, juce::dontSendNotification);
@@ -4064,7 +4130,7 @@ void ModuleWorkspace::setAudioSourceItems (const juce::Array<AudioSourceItem>& i
 
 juce::String ModuleWorkspace::getSelectedAudioSourceId() const
 {
-    const int idx = audioSourceBox.getSelectedItemIndex();
+    const int idx = audioSourceBox.getSelectedId() - 1;   // ID = 下标 + 1
     if (idx < 0 || idx >= audioSourceItems.size()) return {};
     return audioSourceItems.getReference (idx).sourceId;
 }

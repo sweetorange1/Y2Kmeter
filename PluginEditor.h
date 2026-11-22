@@ -169,6 +169,7 @@ public:
         juce::String displayName;
         juce::String sourceId;
         bool         isLoopback = false;
+        juce::StringArray submenuPath;      // 所在子菜单的路径（逐级一个名字）；空 = 顶层条目
     };
 
     void setAudioSourceItems (const juce::Array<AudioSourceEntry>& items,
@@ -176,6 +177,9 @@ public:
 
     // 订阅下拉切换（sourceId 为添加时传入的 ID）
     std::function<void(const juce::String& sourceId, bool isLoopback)> onAudioSourceChanged;
+
+    // 下拉菜单即将弹出 → Standalone App 借此刷新程序列表（回调里调 setAudioSourceItems）
+    std::function<void()> onAudioSourceListRequested;
 
     // ======================================================
     // 预设 Save/Load 透传回调（由 ModuleWorkspace 的 Save/Load 按钮触发）

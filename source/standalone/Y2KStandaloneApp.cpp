@@ -69,8 +69,10 @@
 #include "../steam/Y2KSteam.h"
 #include "../steam/Y2KAchievements.h"
 
-// WASAPI Loopback 采集器（捕捉系统混音输出）
+// WASAPI Loopback 采集器（捕捉系统混音输出 / 定向程序输出）
 #include "WasapiLoopbackCapture.h"
+// 定向程序采集的目标枚举（Source 下拉里的程序列表；非 Windows 为空实现）
+#include "AppAudioTargets.h"
 
 // macOS 桌面音频采集器（ScreenCaptureKit）+ 音频调试转储器
 // 这两个头文件本身也由 CMakeLists 仅在 APPLE 分支加入 target_sources，
@@ -720,6 +722,15 @@ public:
                         handleAudioSourceChanged (sourceId, isLoopback);
                     };
 
+                    // Source 下拉即将弹出 → 重新枚举"可定向采集的程序"并刷新条目
+                    //   （程序随时开关，列表只在用户要看的那一刻刷新，平时零开销）
+                    y2kEditor->onAudioSourceListRequested = [this]()
+                    {
+                        appTargets = appaudio::listCapturableApps();
+                        if (cachedEditor != nullptr)
+                            populateAudioSources (*cachedEditor);
+                    };
+
                     // 预设 Save/Load —— 由 ModuleWorkspace 的 Save/Load 按钮触发，
                     //   Editor 透传过来。真正的 settings 文件读写只能在 Standalone App
                     //   这边做（PropertiesFile 的 storage 参数归这里持有）。
@@ -745,9 +756,13 @@ public:
                    #endif
 
                     // 4.1) 恢复上次的 audio source（默认 "loopback:default"）
+                    //   · "app:<exe>" = 定向程序采集（仅 Windows）。程序此刻没在运行也照常恢复：
+                    //     采集器会等它启动。其他平台读到这种值时按"系统输出"处理。
                     const auto savedSource = getUserSettings()
                         .getValue ("audio.sourceId", "loopback:default");
-                    const bool savedLoopback = savedSource.startsWith ("loopback");
+                    const bool savedLoopback = savedSource.startsWith ("loopback")
+                                            || savedSource.startsWith (kAppSourcePrefix);
+                    rememberedAppDisplayName = getUserSettings().getValue ("audio.appDisplayName", {});
                     handleAudioSourceChanged (savedSource, savedLoopback);
                     syncDropdownToCurrentDevice (*y2kEditor);
 
@@ -1696,8 +1711,12 @@ private:
             s.setValue ("ui.alwaysOnTop",    cachedEditor->isAlwaysOnTopActive());
         }
 
-        // getCurrentSourceId 已经封装了 loopback vs mic 的判定
+        // getCurrentSourceId 已经封装了 loopback vs mic vs 定向程序 的判定
         s.setValue ("audio.sourceId", getCurrentSourceId());
+        // 定向程序采集：连同显示名一起记住 —— 下次启动时程序可能还没开，
+        //   没法再从 exe 读版本信息，下拉里要有个像样的名字可显示。
+        s.setValue ("audio.appDisplayName",
+                    currentAppExe().isNotEmpty() ? currentAppDisplayName() : juce::String());
 
        #if ! JUCE_WINDOWS
         // 非 Windows：Output 语义走"虚拟回环输入设备"。记住上次命中的名字，
@@ -1752,13 +1771,23 @@ private:
     }
 
     // ----------------------------------------------------
-    // 音频源下拉：只暴露两个"语义化"的选项，避免把 N 个后端 × M 块物理设备的
+    // 音频源下拉：只暴露"语义化"的选项，避免把 N 个后端 × M 块物理设备的
     // 笛卡尔积全部罗列出来造成困扰。
     //
     //   1) Microphone Input      —— 系统当前默认的输入设备（麦克风/声卡输入）
     //                              sourceId = "input:default"
     //   2) System Output (Loopback) —— 系统默认渲染端点的混音输出（WASAPI loopback）
     //                              sourceId = "loopback:default"
+    //   3) 定向程序（仅 Windows 10 2004+）—— 收在 "App Audio Capture" 子菜单里，
+    //      每个**此刻正在出声**的程序一项（音频会话处于 Active 状态），
+    //      只采那个程序（含子进程）的声音，同 OBS 的 Application Audio Capture。
+    //      · 一个都没有时放一行灰显提示，子菜单不会凭空消失；
+    //      · 列表最后是 "All Apps" 二级子菜单：其余没在出声的程序
+    //        （有会话但静音的 + 只有窗口的），暂停中的播放器在这里选；
+    //                              sourceId = "app:<exe 文件名>"，如 "app:chrome.exe"
+    //      · 列表来自 appTargets（下拉弹出前重新枚举，见 onAudioSourceListRequested）；
+    //      · 当前正在采集的程序即使已退出 / 不在列表里也保留一项，
+    //        否则下拉框没东西可选中（此时采集器在等它重新启动）。
     //
     // 切换逻辑见 handleAudioSourceChanged()。
     // ----------------------------------------------------
@@ -1776,10 +1805,110 @@ private:
                      "loopback:default",
                      true });
 
+        // 选项 3..N：定向程序 —— 收进 "App Audio Capture" 子菜单：
+        //   · 正在出声的程序直接列在子菜单里；
+        //   · 其余程序收在子菜单末尾的 "All Apps" 二级子菜单里。
+        //   同一个子菜单的条目必须连续添加（见 ModuleWorkspace 的 addAudioSourceMenuItems）。
+        const juce::StringArray appMenu  { kAppSubmenuName };
+        const juce::StringArray restMenu { kAppSubmenuName, kAllAppsSubmenuName };
+        const juce::String      currentExe = currentAppExe();
+
+        auto addApp = [&] (const appaudio::AppAudioTarget& app, const juce::StringArray& menu)
+        {
+            // 当前目标沿用 currentExe 的大小写，保证与 getCurrentSourceId() 逐字相等
+            const bool isCurrent = app.exeName.equalsIgnoreCase (currentExe);
+            items.add ({ clipAppDisplayName (app.displayName),
+                         makeAppSourceId (isCurrent ? currentExe : app.exeName),
+                         true,
+                         menu });
+        };
+
+        int numDirectItems = 0;
+        for (const auto& app : appTargets)
+        {
+            if (app.isActive)
+            {
+                addApp (app, appMenu);
+                ++numDirectItems;
+            }
+        }
+
+        if (currentExe.isNotEmpty() && findAppTarget (currentExe) == nullptr)
+        {
+            // 当前目标已退出（采集器在等它回来）：哪个列表里都没有，单独保留一项
+            items.add ({ clipAppDisplayName (currentAppDisplayName()),
+                         makeAppSourceId (currentExe),
+                         true,
+                         appMenu });
+            ++numDirectItems;
+        }
+
+        if (numDirectItems == 0 && appaudio::isProcessLoopbackSupported())
+        {
+            // 系统支持、但此刻没有任何程序在出声：留一行灰显提示（sourceId 为空 = 不可选）
+            items.add ({ "No apps are playing audio",
+                         juce::String(),
+                         true,
+                         appMenu });
+        }
+
+        for (const auto& app : appTargets)
+            if (! app.isActive)
+                addApp (app, restMenu);
+
         editor.setAudioSourceItems (items, getCurrentSourceId());
     }
 
-    // 拼装"当前正在使用的音频源"的 sourceId（只会返回两种语义化值之一）
+    // "app:<exe>" 形式的 sourceId（定向程序采集）的构造 / 反解。
+    //   反解：不是这种 sourceId 时返回空串（= 没有定向目标）。
+    static juce::String makeAppSourceId (const juce::String& exeName)
+    {
+        return kAppSourcePrefix + exeName;
+    }
+
+    static juce::String appExeFromSourceId (const juce::String& sourceId)
+    {
+        return sourceId.startsWith (kAppSourcePrefix)
+                   ? sourceId.fromFirstOccurrenceOf (kAppSourcePrefix, false, false).trim()
+                   : juce::String();
+    }
+
+    // 回环采集器当前的定向目标 exe（空 = 整机输出 / 没在回环）。只在消息线程调用。
+    juce::String currentAppExe() const
+    {
+        return (loopback != nullptr && loopbackActive.load (std::memory_order_acquire))
+                   ? loopback->getTargetProcess()
+                   : juce::String();
+    }
+
+    const appaudio::AppAudioTarget* findAppTarget (const juce::String& exeName) const
+    {
+        for (const auto& app : appTargets)
+            if (app.exeName.equalsIgnoreCase (exeName))
+                return &app;
+        return nullptr;
+    }
+
+    // 当前目标的显示名：列表里有就用列表的，其次用记住的，最后退回 exe 去扩展名
+    juce::String currentAppDisplayName() const
+    {
+        const juce::String exe = currentAppExe();
+        if (const auto* app = findAppTarget (exe))
+            return app->displayName;
+
+        return rememberedAppDisplayName.isNotEmpty() ? rememberedAppDisplayName
+                                                     : appaudio::fallbackDisplayName (exe);
+    }
+
+    // 版本资源里的描述偶尔很长，下拉菜单里截一下
+    static juce::String clipAppDisplayName (const juce::String& name)
+    {
+        constexpr int maxChars = 40;
+        return name.length() > maxChars ? name.substring (0, maxChars - 3).trimEnd() + "..."
+                                        : name;
+    }
+
+    // 拼装"当前正在使用的音频源"的 sourceId（三种语义化值之一）
     juce::String getCurrentSourceId() const
     {
         // loopbackActive = Windows WASAPI loopback 或 macOS ScreenCaptureKit 采集进行中
@@ -1787,7 +1916,12 @@ private:
         // 其中 virtualLoopbackInputActive 默认恒为 false，Windows 路径行为与原版一致。
         if (loopbackActive.load (std::memory_order_acquire)
             || virtualLoopbackInputActive.load (std::memory_order_acquire))
-            return "loopback:default";
+        {
+            // 回环采集器当前的目标是某个程序而不是整机输出
+            const juce::String appExe = currentAppExe();
+            return appExe.isNotEmpty() ? makeAppSourceId (appExe)
+                                       : juce::String ("loopback:default");
+        }
 
         return "input:default";
     }
@@ -1798,6 +1932,8 @@ private:
     //                         同时关闭 AudioDeviceManager 的物理设备（避免双路 push）
     //   · "input:default"    → 停掉 Loopback（若在跑），打开系统默认输入设备
     //                         （让 AudioDeviceManager 自己挑当前 deviceType 下的默认）
+    //   · "app:<exe>"        → （仅 Windows）同一个采集器改成进程级回环，只采该程序；
+    //                         失败时回退到 "loopback:default"
     // ----------------------------------------------------
     void handleAudioSourceChanged (const juce::String& sourceId, bool isLoopback)
     {
@@ -1822,31 +1958,54 @@ private:
         if (isLoopback)
         {
            #if JUCE_WINDOWS
+            // 回环采集的目标：空 = 整机输出；非空 = 定向程序（"app:<exe>"，进程级回环，
+            //   只采这个程序连同它的子进程）。两者走同一条路，只有失败时的回退不同。
+            const juce::String appExe = appExeFromSourceId (sourceId);
+
             // 1) 先停硬件输入 → AudioDeviceManager 把输入通道清零
             //    （保留输出设备不变；setAudioDeviceSetup 的 err 我们不强求成功）
             disableHardwareInput();
 
             // 2) 启动 Loopback 采集线程
-            if (! startLoopbackCapture())
+            if (startLoopbackCapture (appExe))
             {
-                juce::AlertWindow::showAsync (
-                    juce::MessageBoxOptions()
-                        .withIconType (juce::MessageBoxIconType::WarningIcon)
-                        .withTitle (y2k::tr ("System Loopback error"))
-                        .withMessage (y2k::tr ("Failed to start system output loopback:") + "\n"
-                                        + (loopback != nullptr ? loopback->getLastError() : y2k::tr ("(unknown)"))
-                                        + "\n\n" + y2k::tr ("Falling back to Microphone."))
-                        .withButton (y2k::tr ("OK")),
-                    nullptr);
+                // 记住显示名：程序退出后下拉里仍要显示它（采集器在等它回来）。
+                //   列表里查不到（启动时恢复上次的目标）就沿用从 settings 读回来的名字。
+                if (const auto* app = findAppTarget (appExe))
+                    rememberedAppDisplayName = app->displayName;
 
-                // 回退到"麦克风输入"
-                enableDefaultInput();
-                if (cachedEditor != nullptr)
-                    syncDropdownToCurrentDevice (*cachedEditor);
+                DBG ("[Y2K] WASAPI Loopback capture started.");
                 return;
             }
 
-            DBG ("[Y2K] WASAPI Loopback capture started.");
+            const juce::String errorDetail = (loopback != nullptr ? loopback->getLastError()
+                                                                  : y2k::tr ("(unknown)"));
+            const bool isAppCapture = appExe.isNotEmpty();
+
+            juce::AlertWindow::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle (y2k::tr (isAppCapture ? "Application audio capture error"
+                                                      : "System Loopback error"))
+                    .withMessage (isAppCapture
+                                      ? y2k::tr ("Failed to capture audio from this app:") + "\n"
+                                            + appExe + "\n" + errorDetail
+                                            + "\n\n" + y2k::tr ("Falling back to Output.")
+                                      : y2k::tr ("Failed to start system output loopback:") + "\n"
+                                            + errorDetail
+                                            + "\n\n" + y2k::tr ("Falling back to Microphone."))
+                    .withButton (y2k::tr ("OK")),
+                nullptr);
+
+            // 定向程序失败 → 回退到"整机输出"（它再失败会继续回退到麦克风）；
+            // 整机输出失败 → 回退到"麦克风输入"
+            if (isAppCapture)
+                handleAudioSourceChanged ("loopback:default", true);
+            else
+                enableDefaultInput();
+
+            if (cachedEditor != nullptr)
+                syncDropdownToCurrentDevice (*cachedEditor);
             return;
            #elif JUCE_MAC
             // macOS：优先使用 ScreenCaptureKit 直接采集系统输出音频（无需 BlackHole）
@@ -2116,8 +2275,11 @@ private:
 
     // ----------------------------------------------------
     // WASAPI Loopback —— 启停
+    //   targetExe 为空 = 整机输出（默认渲染端点回环）；
+    //   非空（如 "chrome.exe"）= 定向程序采集（进程级回环）。
+    //   两种目标共用同一个采集器 / 同一条 onAudio 链路，区别只在采集器内部怎么开流。
     // ----------------------------------------------------
-    bool startLoopbackCapture()
+    bool startLoopbackCapture (const juce::String& targetExe = {})
     {
         if (pluginHolder == nullptr || pluginHolder->processor == nullptr)
             return false;
@@ -2127,6 +2289,20 @@ private:
 
         auto* y2kProc = dynamic_cast<Y2KmeterAudioProcessor*> (pluginHolder->processor.get());
         if (y2kProc == nullptr) return false;
+
+        // 已经在采同一个目标：什么都不用动
+        //   （也避免在采集线程运行期间改写 onAudio 这个 std::function）
+        if (loopback->isRunning() && loopback->getTargetProcess().equalsIgnoreCase (targetExe))
+        {
+            loopbackActive.store (true, std::memory_order_release);
+            return true;
+        }
+
+        // 目标变了（整机 ↔ 某程序 / 程序 A → 程序 B），或上次的线程已自行退出：
+        //   先同步停掉旧线程，再换目标。不走 stopLoopbackCapture() ——
+        //   那会把 holder callback 接回去、马上又要摘掉，白白重启一次物理设备。
+        loopback->stop();
+        loopback->setTargetProcess (targetExe);
 
         // 关键：先彻底断开 pluginHolder 对 deviceManager 的 audio callback，
         //       确保 loopback 运行期间只有采集线程在 push AnalyserHub，杜绝并发 UAF
@@ -2189,15 +2365,20 @@ private:
             y2kProc->registerLoopbackRenderTime (elapsedMs, n, sr);
         };
 
+        const juce::String targetLabel = targetExe.isEmpty() ? juce::String ("output") : targetExe;
+        juce::ignoreUnused (targetLabel);   // 只给诊断日志用（日志关闭时宏不求值）
+
         if (! loopback->start())
         {
             // 启动失败：恢复 holder callback，避免普通设备模式下也丢输入
+            y2k::diag::setChannelActive (y2k::diag::Channel::Audio, false);
+            loopbackActive.store (false, std::memory_order_release);
             attachHolderCallback();
-            Y2K_DIAGC ("AUDIO", "loopback start FAILED: " + loopback->getLastError());
+            Y2K_DIAGC ("AUDIO", "loopback start FAILED (target=" + targetLabel + "): " + loopback->getLastError());
             return false;
         }
 
-        Y2K_DIAGC ("AUDIO", "loopback start OK");
+        Y2K_DIAGC ("AUDIO", "loopback start OK (target=" + targetLabel + ")");
         y2k::diag::setChannelActive (y2k::diag::Channel::Audio, true);
         loopbackActive.store (true, std::memory_order_release);
         return true;
@@ -2473,10 +2654,21 @@ private:
     //   · 用于 ChangeListener 回调里刷新下拉框；不拥有生命周期
     Y2KmeterAudioProcessorEditor*                   cachedEditor = nullptr;
 
-    // WASAPI Loopback 采集器 —— 在"System Output (Loopback)"选项被选中时启用
+    // WASAPI Loopback 采集器 —— 选中 "Output"（整机输出）或某个定向程序时启用
     std::unique_ptr<WasapiLoopbackCapture>          loopback;
     std::atomic<bool>                               loopbackActive { false };
     std::atomic<double>                             loopbackLastSampleRate { 0.0 };
+
+    // 定向程序采集（Application Audio Capture，仅 Windows）。以下均只在消息线程访问。
+    //   当前目标 exe 不单独存：以采集器为准，见 currentAppExe()。
+    //   · appTargets               —— Source 下拉里的程序列表缓存（下拉弹出前刷新）
+    //   · rememberedAppDisplayName —— 当前目标的显示名。程序没在运行、读不到版本信息时
+    //     用它显示；随 settings 持久化（audio.appDisplayName）
+    static constexpr const char* kAppSourcePrefix = "app:";
+    static constexpr const char* kAppSubmenuName  = "App Audio Capture";   // Source 下拉里的子菜单名（翻译键）
+    static constexpr const char* kAllAppsSubmenuName = "All Apps";         // 其下"没在出声的程序"二级子菜单名（翻译键）
+    juce::Array<appaudio::AppAudioTarget>           appTargets;
+    juce::String                                    rememberedAppDisplayName;
 
     // WASAPI 采集线程应用前置增益用的临时缓冲（与 macGainScratch 同思路）。
     //   只在采集线程内访问，预分配后避免逐块堆分配。
