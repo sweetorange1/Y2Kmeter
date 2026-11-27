@@ -41,7 +41,7 @@
 ## 1. 项目概述
 
 ### 1.1 项目定位
-- **产品名**：`Y2Kmeter` （版本：`3.4.5`）
+- **产品名**：`Y2Kmeter` （版本：`3.5.0`）
 - **产品形态**：一款 **音频分析仪/音频计量插件**（纯分析，不产生音频输出的插件模式），带有强烈的 **Y2K / Windows 95-98-XP 像素复古粉色（Pink XP）** 视觉主题。
 - **产品分类**：`VST3_CATEGORIES = "Analyzer" "Fx"`（DAW 分类中会被识别为分析仪）。
 - **发行形态**（在 [CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 中通过 `juce_add_plugin` 定义）：
@@ -52,7 +52,7 @@
 
 ### 1.2 主要功能一览
 
-**① 音频分析与计量**（可组合模块见 §3.4；v3.1 起响度 / 示波器 / 相位 / 动态四类各合并为一个模块，另有 1 个已下线模块 `eq`(拼豆频谱)；由 `AnalyserHub` 的 6 路分析统一驱动、按引用计数按需启用）
+**① 音频分析与计量**（可组合模块见 §3.4；v3.1 起响度 / 示波器 / 相位 / 动态四类各合并为一个模块；由 `AnalyserHub` 的 6 路分析统一驱动、按引用计数按需启用）
 
 > **v3.1 模块控制面板**：每个模块标题栏有齿轮按钮，点开在模块内展开可收起的参数抽屉（显示项、样式、速度、FFT scale、频段染色、齿音阈值等）；**收起时模块外观与旧版一致**，旧存档与布局预设照常加载。示波器 / 波形历史去掉 Freeze 按钮：示波器**按住画布慢放 50 倍**，波形历史**按住画布完全冻结**，松手都直接回实时。详见 [docs/analysis-modules.md](docs/analysis-modules.md) §7。
 
@@ -97,6 +97,14 @@
 > · **Milkdrop 控制台点一下就消失**：`ModuleWorkspace` 的 `onBroughtToFront` 原来无条件 `clearMilkdropFocus(modules)`，把**刚被点击的那一块**也一起失焦。v3.4.1 的 `ChildClickToFront` 深层鼠标监听在目标 `mouseDown` **之后**才触发，于是"点控制台按钮"= 先置 `pressedOverlayBtn_`、再立刻被 `setFocusVisual(false)` 清空并隐藏控制栏 —— 表现为嵌入态点视频区看不到控制台、点抬头能弹出来但按钮点不动且一按就消失（脱离态不在 `modules` 里，所以正常）。现在 `clearMilkdropFocus` 接受 `except` 参数，`onBroughtToFront` 传入被置顶的 `&p` 跳过自己；画布空白处点击仍清全部。见 `source/ui/ModuleWorkspace.cpp`。
 > · **Load 存档重启后界面毫无变化**（Standalone）：`handleImportSettings` 只做了 `copyFileTo` 物理覆盖，但内存里的 `PropertiesFile` 仍是**导入前**的旧运行时状态 —— 退出路径上 `StandalonePluginHolder` 析构的 `saveAudioDeviceState()`、`ach::detach()`、`appProperties.saveIfNeeded()` 都会把整份内存属性表写回磁盘 → 刚导入的存档被旧进程原样盖回。现在拷贝成功后立刻 `props->reload()`，随后的善后写入只补 `audioSetup` 等本机键，存档内容不再丢失。
 
+> **v3.5.0 本轮变更**（社区 PR 合入 + 全模块风格工艺重构 + 正交真透明/绿幕 + 布局预设重做 + 浮动态全量 GL 化）：
+> · **社区 PR 贡献**：合入 `@StageGuard`（[PR #8](https://github.com/sweetorange1/Y2Kmeter/pull/8)）的 Standalone Windows 10 2004+ 定向程序音频采集（`AppAudioTargets.h/.cpp` + `WasapiLoopbackCapture` 进程树回环 + 高采样率 `SilencePacer` 追赶修复 + 采集线程原子错误处理，详见 §5.2.1）；吸纳 `@Chillizu`（[PR #7](https://github.com/sweetorange1/Y2Kmeter/pull/7)）示波器关闭 `Auto zoom` 时清空周期峰值统计状态改进。
+> · **视觉风格 × 全模块工艺深度耦合（`SkinCraft.h/.cpp`）**：建立 6 套正交视觉皮肤（像素复古 / 千禧金属 / 现代简约（合并原 Win11 Fluent）/ 玻璃 / 霓虹赛博 / CRT 终端）与全部 16 类存活模块（CPU 与 GL 双路径）的统一工艺映射；清除像素复古模式下人为添加锯齿的平滑圆弧/曲线与 3D 语谱图白色虚线，修复 3D 语谱图山脊轮廓线（`showRidges`）实效。
+> · **正交背景模式（`BackdropMode`：Normal / Green Screen / Transparent）**：从 `SkinId` 拆出至 SKIN 二级子菜单，绿幕与真透明直接继承当前视觉皮肤的仪表工艺；Windows 真透明模式由 `WS_EX_LAYERED` 软合成改为 **DWM 硬件 Alpha**（`DwmEnableBlurBehindWindow` + JUCE 补丁 0009 `PFD_SUPPORT_COMPOSITION` + GL FBO 0 `glClearColor(0,0,0,0)`），彻底消除全屏 ~10fps 性能崩塌与立体声场卡死。
+> · **核心模块重构与精修**：VU 表重构为**指针式（4 样式，`VuNeedleRenderer.inl`）+ 横向条形（5 样式，`VuBarRenderer.inl`）双家族**，新增 Mono / Stereo L/R（单表同轴双针）/ Left / Right 四声道模式；频谱消除能量幕逐列渐变风暴；波形历史改 O(新增列) 列主序预乘环形纹理增量 `TexRowPatch`（根治大窗与脱离卡死）、消除 1×1 白点边缘、提亮音高模式着色、用 `Symmetric` 开关取代原 `Outline`；参数面板（`ModuleControlDrawer`）升级为 3 级智能外部弹出面板；清理已废弃的空壳 `EqModule`。
+> · **场景化布局预设重构**：删除历史旧预设，重构为 4 分组 14 套常规预设 + 4 套 Stick 吸附条（全覆盖 16 类存活模块、零重叠、含 `Stereo Map` 正式入组）。
+> · **浮动态（pop-out 窗口）全量迁移 OpenGL（`GlDirectRenderer.h`）**：16 类非 MilkDrop 浮动态模块与主窗口共享 `GlDirectRenderer` + 独立 `OpenGLContext` + Windows DWM 硬件透明，解除 30Hz 浮动态限流，达成脱离/嵌入外观与帧率 100% 统一；并彻底修复 `Spectrogram 3D` 脱离↔回停偶发 `0xc0000409 / abort()` 闪退（回调栈拷贝 + `callAsync` 异步毁窗、`clearContentComponent()`、禁跨上下文 `OpenGLImageType`、GL detach 原子守卫）。
+
 > **v3.4.2 本轮变更**（调色工作室 × 视觉风格；细节见 §4.6）：
 > · **官方预设下只改桌面纹理 / 标题图标不再跳色**：旧逻辑任何改动都会走 `applyThemeFromSpec`（双色反推 + OKLCH 生成器 + 护栏）→ 整套手工配色被近似色替换。现在预设起步时面板处于"只改装饰"模式，纹理 / 图标经 `PinkXP::applyPresetDecor` 写成**预设装饰覆盖**（`PresetDecor`，只换 `desktopPattern` / `titleIconText`，配色原样）；一旦改了色相 / 明暗 / 滑条 / 和谐 / 角色 / 随机 / 粘贴等配色参数才转为生成器主题。对比 / 还原会连同打开时的装饰覆盖一起恢复。持久化：Standalone `ui.presetPattern` / `ui.presetIcon`、插件态 `presetPattern` / `presetIcon`（-1 / 缺键 = 预设原样）。
 > · **桌面纹理在所有风格下生效**（绿幕除外）：`drawDesktop` 把纹理抽成 `drawDesktopPatternLayer`，各风格先画自己的底色 / 氛围，再按风格质感叠加用户选择的纹理（千禧金属 = 蚀刻、现代 / Fluent = 低对比压纹、玻璃 = 光团下的透出纹理、霓虹 = 地平线以上的灯管色图案（替代旧固定星点）、CRT = 扫描线下的磷光余辉）。像素复古与旧版逐像素一致；`kDesktopPatternVersion` 升到 4。
@@ -110,11 +118,10 @@
 - **示波器**：Waveform / X-Y / Lissajous 李萨如图
 - **持续滚动瀑布波形**（Waveform）
 - **频谱瀑布图**（Spectrogram 像素方格风格 / Spectrogram 3D 三维曲面）
-- **指针式 VU 表**（Analogue VU；六种表盘：指针式 半圆 / 复古扇形，横向式 横向刻度条 / LED 梯柱 / 极简游标 / 镜像刻度；单指针或 L/R 双针 + LED 信号灯，非对称弹道）
+- **VU 表**（v3.5.0 重构为双家族：指针式 4 样式 Studio / Vintage / Dual arc / Retro warm + 横向条形 5 样式 Studio bar / LED blocks / LED ladder / Mirrored / Minimal；Mono / Stereo L/R（单表同轴双针）/ L / R 四声道模式 + LED 信号灯 + 背光与多套配色）
 - **声像雷达**（Stereo Field，半圆雷达，幅度驱动声像位置）
-- **频谱声像图**（Stereo Map，按频率逐段对比 L/R：PAN 轴 ±1 声像偏向（上=L / 中=居中 / 下=R），MONO 轴为**倒置的单声道保留量**（上=100% 干净 / 下=50% 满幅抵消）；**未发布**）
+- **频谱声像图**（Stereo Map，按频率逐段对比 L/R：PAN 轴 ±1 声像偏向（上=L / 中=居中 / 下=R），MONO 轴为**倒置的单声道保留量**（上=100% 干净 / 下=50% 满幅抵消）；v3.5.0 已正式纳入布局预设）
 - **实时节拍 / 音乐调性**（Tempo / Key：BPM + 大调 / 自然小调 / 和声小调 / 旋律小调 + 关系调 + 可解释置信度；工作线程分析，未加载模块时完全不运行）
-- **（已下线）拼豆频谱**（`Spectrum Perlerbeads` / `ModuleType::eq`，Y2K 主题的拼豆格子频谱，**仅可视化，不做实际 EQ 处理**）：v3.0.6 起因性能问题暂时从产品中移除 —— 不进"添加模块"菜单，旧存档里的 `type="eq"` 节点在加载时**同位置同尺寸**迁移成 `spectrum`。
 
 > v3.1 起，实时 LUFS / 真峰值 / 相位相关 / 相位平衡 / 动态 Meters / DR / Crest 已作为"项目开关"并入响度 / 相位 / 动态模块，复用同一路分析结果，后端零新增计算。旧存档里的这些类型字符串仍可加载。
 
@@ -142,20 +149,22 @@
 - **调色板重构（v2.10）**：左下角「Palette Studio」面板 —— 色相环 + 明暗（Dark/Light/Auto）+ 氛围 + 和谐方式 + 随机；`OKLCH` 感知均匀色彩空间 + Recipe 配方 + WCAG 对比度护栏（自动修复可读性）；支持 7 个语义角色微调（自动/手动锁定）、撤销/重做（40 步）、A/B 对比、迷你预览卡、质量徽章
 - **我的主题**（自定义 = 一等公民）：可命名保存 ≤24 套（独立存档到 `%APPDATA%\Y2Kmeter.themeLibrary.xml`，Load 存档只合并、不覆盖）、重命名/删除/排序、分享码（`Y2KT1-xxxx` ≤80 字符）复制/粘贴、`.y2kpalette` 文件导入导出、桌面纹理（7 种）+ 标题图标（8 候选）自选、恢复默认（Reset）
 - **7 种桌面纹理**：棋盘格 / 像素星星 / 网格扫描线 / 大圆点 / 泡泡 / 斜条纹 / 爱心
-- **视觉风格（Skin，与颜色主题正交）**：主题色票条 `+` 右侧的 `SKIN` 按钮切换 —— 像素复古（默认，外观与旧版一致）/ 千禧金属（拉丝金属桌面 + 铬质渐变 + 镜面高光）/ 现代简约（扁平 + 1px 细描边 + 小控件圆角 + 柔和阴影）/ 玻璃（窗口内模拟毛玻璃，全部不透明绘制）/ 霓虹赛博（合成波桌面 + 灯管描边 + 彩色辉光）/ CRT 终端（磷光单色 + 扫描线 + 暗角）/ Win11 Fluent（Mica 桌面 + 细描边 + 小控件大圆角；模块外框仍直角）/ **绿幕**（给视频创作者抠像，见下）。只改外壳层（模块外框 / 标题栏 / 按钮 / 下拉 / 滑条 / 滚动条 / 菜单 / 提示框 / 桌面 / GL 画布凹槽），颜色仍取当前主题；桌面纹理在所有风格下都生效（绿幕除外），由各风格按自身质感叠加在风格底色之上
-- **风格字体**：每种风格配一套英文字体（Silkscreen / Exo 2 / Inter / Nunito / Orbitron / VT323 / Open Sans / 绿幕 Inter，`PinkXPStyle.cpp` 的 `skinFontSpec`，`scale` 为相对 Silkscreen 的字号系数）；中文界面在像素复古 / CRT 下沿用语言包像素字 ChillBitmap，其余风格改用 Noto Sans SC。切风格 → Editor 主题回调发现 `activeTypefaceStale()` → 异步走 `applyLanguageChange()` 换字体 + 重排。字体资源在 `ttf/skin/`（独立 binary data target `Y2KSkinFontData`，许可证 `ttf/skin/licenses/`）
-- **绿幕风格**（`SkinId::greenScreen`）：桌面 / 工作区画布 / 底部工具栏 / Editor 标题栏 / 模块外壳在鼠标未悬停时一律纯绿 `#00FF00`（`PinkXP::isChromaRevealed` 用 20Hz 轮询判定鼠标所在区域，悬停的模块或 Editor chrome 按正常外观显示）。支持的模块覆写 `ModulePanel::getChromaKeyCanvas()` 保留数据画布：Milkdrop / 示波器 / 波形历史 / 频谱 / 语谱图（静音像素经 `chromaKeyFade` 渐隐为绿）/ 3D 语谱 / 响度（只留点亮电平格 + 标签 + 数值）；画布内背景纯绿、不画网格 / 坐标刻度 / 图例。其它模块未悬停时整块纯绿
+- **视觉风格（Skin，与颜色主题正交，v3.5.0 深度耦合全模块工艺）**：主题色票条 `+` 右侧的 `SKIN` 按钮切换 **6 套视觉皮肤** —— 像素复古（默认，1998-2002 硬件像素工艺）/ 千禧金属（拉丝金属 + 铬质渐变 + 镜面高光）/ 现代简约（演播室极简 1px 细描边 + 微圆角，原 Win11 Fluent 已合并至此并兼容旧存档）/ 玻璃（窗口内模拟毛玻璃，全部不透明绘制）/ 霓虹赛博（合成波桌面 + 灯管描边 + 彩色辉光）/ CRT 终端（磷光单色 + 扫描线 + 暗角）。通过 `SkinCraft.h/.cpp` 统一驱动外壳与全部 16 类模块的材质、表盘、网格与光效，颜色仍取当前主题；桌面纹理在所有风格下都生效（绿幕 / 真透明除外）。
+- **风格字体**：6 套皮肤各配英文字体（Silkscreen / Exo 2 / Inter / Nunito / Orbitron / VT323，`PinkXPStyle.cpp` 的 `skinFontSpec`）；中文界面在像素复古 / CRT 下沿用语言包像素字 ChillBitmap，其余风格改用 Noto Sans SC。切风格 → Editor 主题回调发现 `activeTypefaceStale()` → 异步走 `applyLanguageChange()` 换字体 + 重排。字体资源在 `ttf/skin/`（`Y2KSkinFontData`，SIL OFL 1.1）。
+- **正交背景模式（`BackdropMode`，v3.5.0 从 `SkinId` 拆出）**：位于 `SKIN` 菜单下的二级子选项区，提供 **正常（Normal）/ 绿幕（Green Screen）/ 真透明（Transparent）** 三档，直接继承用户当前选中的视觉风格仪表工艺（旧存档 `skinId=7` 自动映射为 `BackdropMode::greenScreen`）。绿幕与透明下桌面 / 工具栏 / 标题栏 / 模块外壳在鼠标未悬停时变为纯绿 `#00FF00` 或全透明（Windows 真透明走 DWM 硬件 Alpha，见 `docs/rendering-gl.md` §1.2），悬停处自动显现操作界面；支持的数据画布保留图形与读数、隐藏网格与图例。
 - 拖入图片生成「拼豆像素画」贴到桌面背景
 
-**⑤ 布局预设**（11 个常规 + 3 个 stick 条状变体，编号 4 / 8 已废弃）
+**⑤ 布局预设**（v3.5.0 重构：4 分组 14 套常规预设 + 4 套 Stick 吸附条）
 
-- 默认网格 / 横向铺满（顶部 / 底部）/ MV（全屏 + 模块条 + Milkdrop）/ Studio Monitor 双行监听 / Focus + Sidecar 主视觉 + 仪表列 / Broadcast Loudness 广播响度合规 / Only Milkdrop 全屏单模块
-- **全屏磁贴预设**（14/15/16，提炼自用户三份 Save 存档 `频谱为主` / `所有模块全部放到屏幕里` / `多功能集合`）：下拉名 `FULL: SPECTRUM` / `FULL: ALL MODULES` / `FULL: MULTI COMBO`。三者都是全屏且锁死窗口尺寸；只复刻模块类型与位置尺寸，**不含 VirtuPet**、**不带任何模块内部设置**，模块一律用各自独立的构造默认值（详见 §4.4）。
-- **stick 条状变体**（仅 stick 模式下出现在下拉里，条高同为 250px，只是条内模块不同）：`BAR: CLASSIC` 经典条 / `BAR: SPECTROGRAM`（3D 瀑布 → 2D 瀑布）/ `BAR: MILKDROP`（Stereo Field → Milkdrop）/ `BAR: SPEC + MILK`（两者叠加）
+- **日常与桌面**：默认工作区（`Default Workspace`）/ 紧凑迷你条（`Compact Mini Bar`）/ 桌面状态伴侣（`Desktop Companion`）/ 顶部任务条（`Top Dock Bar`）/ 底部任务条（`Bottom Dock Bar`）
+- **混音与音频分析**：混音工作台（`Mixing Console`）/ 母带与广播响度（`Mastering & Broadcast`）/ 人声与播客录制（`Vocal & Podcast`）/ DJ 节拍与调性（`DJ & Beat Analysis`）
+- **视觉与直播**：直播 / OBS 挂件（`Stream / OBS Overlay`，适配绿幕/透明）/ 音乐视觉 MV（`Music Visualizer (MV)`）/ 沉浸 MilkDrop（`Pure MilkDrop`）
+- **全屏指挥台**：全屏频谱与声场精析（`Full: Deep Analysis`，10 模块声学分析墙）/ 全屏全模块工作台（`Full: All-in-One`，17 块无缝密排覆盖全部 16 类功能模块）
+- **Stick 驻留态吸附条**（仅 Stick 驻留态显示，条高 250px）：`Bar: Classic` / `Bar: Mixing` / `Bar: Visuals` / `Bar: Desk Companion`
 
 **⑥ 桌面集成（Standalone 专属）**
 
-- 音频源选择（用户在下拉里显式选择其一，程序不会自行开启）：麦克风输入 / 系统正在播放的音频（Windows：WASAPI Loopback；macOS：ScreenCaptureKit 音频输出流）
+- 音频源选择：麦克风 / 桌面系统音频采集（macOS 走 ScreenCaptureKit、Windows 走 WASAPI Loopback）/ **定向程序音频采集**（仅 Windows 10 2004+：Source 下拉的 "App Audio Capture" 子菜单里列出此刻正在出声的程序，其余程序收在末尾的 "All Apps" 二级子菜单，选中后只采该程序连同其子进程的声音，同 OBS 的 Application Audio Capture；详见 §5.2.1）
 - 无边框窗口 + 自定义标题栏（关闭 / 置顶 / 最小化 / 布局锁定 / 双击标题栏全屏）
 - 模块脱离 / 停靠（浮动窗口）、预设导出 / 导入（Save / Load）
 - 版本更新检查、可选的匿名环境统计（安装时授权，默认关闭）、新手引导（右键添加 VirtuPet → 播放音频孵化）
@@ -276,10 +285,10 @@
 │    UiFrameClock    —— 自适应帧率的 UI 时钟                       │
 ├────────────────────────────────────────────────────────────────┤
 │  Modules 层（source/ui/modules）                                 │
-│    EqModule / LoudnessModule / OscilloscopeModule /             │
-│    SpectrumModule / PhaseModule / DynamicsModule /              │
-│    WaveformModule / SpectrogramModule / Spectrogram3DModule /   │
-│    VuMeterModule / StereoField / StereoMap / VirtuPetModule     │
+│    LoudnessModule / OscilloscopeModule / SpectrumModule /       │
+│    PhaseModule / DynamicsModule / WaveformModule /              │
+│    SpectrogramModule / Spectrogram3DModule / VuMeterModule /    │
+│    StereoField / StereoMap / VirtuPetModule                     │
 │    （v3.1：响度 / 示波器 / 相位 / 动态各自合并为单一模块，          │
 │     旧细分类型仅作存档别名保留；每个模块有齿轮「控制面板」）        │
 ├────────────────────────────────────────────────────────────────┤
@@ -333,10 +342,12 @@
 | [ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h) | `ModuleType` 枚举 / `ModulePanel` 基类 / `ModuleWorkspace` 主类 / `ThemeSwatchBar` / `HideChromeButton`（**同一个头包含多个类**，同样为避免 MSVC 串扰）|
 | [ModuleWorkspace.cpp](/I:/Y2KMeter/source/ui/ModuleWorkspace.cpp) | 拖拽 / 网格吸附 / 布局持久化 / 拼豆图片 / 底部 toolbar / 添加菜单 / 鼠标事件 |
 | [ModulePanel.cpp](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 各模块统一的像素窗口：标题栏 + 齿轮（控制面板）/ 弹出 / 关闭按钮 + 边缘/角拖拽缩放 + 右下 CPU 小字 |
-| [ModuleControlDrawer.h/.cpp](/I:/Y2KMeter/source/ui/ModuleControlDrawer.h) | **v3.1** 模块控制面板抽屉：覆盖式盖在内容区顶部，由 `ModulePanel::buildParamDefs()` 的参数表生成控件（choice / toggle / slider，分组、条件可见、窄模块换行、超高滚动），自己不存状态 |
+| [ModuleControlDrawer.h/.cpp](/I:/Y2KMeter/source/ui/ModuleControlDrawer.h) | **v3.1 / v3.5 外部弹出**模块控制面板抽屉：3 级智能外部落位（工作区侧边 → 临时独立窗口 → 兜底内嵌），由 `ModulePanel::buildParamDefs()` 参数表动态生成控件，自己不存状态 |
+| [GlDirectModule.h/.cpp](/I:/Y2KMeter/source/ui/GlDirectModule.h) + [GlDirectRenderer.h](/I:/Y2KMeter/source/ui/GlDirectRenderer.h) | **v2.9.4 / v3.5 统一嵌入+浮动 GL 管线**：`GlDirectModuleBase` 供模块产出 GL 快照与增量纹理补丁；`GlDirectRenderer` 按 GL 上下文实例化，由 `Editor` 与 `FloatingModuleWindow` 共用，实现脱离/嵌入外观与帧率 100% 统一 |
+| [SkinCraft.h/.cpp](/I:/Y2KMeter/source/ui/SkinCraft.h) | **v3.5** 跨模块视觉风格工艺引擎：`SkinTokens`（纯数据工艺令牌表，CPU + GL 共用）与 `Craft::*` 原语，将 6 套视觉皮肤与全部 16 类模块的表盘/灯块/网格/凹槽质感深度耦合 |
 | [HoldSlowMo.h](/I:/Y2KMeter/source/ui/HoldSlowMo.h) | **v3.1** 按住交互共享状态机（示波器 = 慢放 50 倍 / 波形历史、语谱图 = 完全冻结，松手回实时；频谱保留自己的实现） |
 | [ModulePanel.h](/I:/Y2KMeter/source/ui/ModulePanel.h) | **只是一个兼容 shim**，内部只 `#include "source/ui/ModuleWorkspace.h"` |
-| [PinkXPStyle.h/.cpp](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 主题系统（12 预设 + 生成器 custom）+ 19 色槽位 + 扩展槽（`accent2`/`chartRamp[8]`/`danger`/`warn`/`ok`）+ OKLab 渐变采样 + 桌面纹理 + `PinkXPLookAndFeel` |
+| [PinkXPStyle.h/.cpp](/I:/Y2KMeter/source/ui/PinkXPStyle.h) | 主题系统（12 预设 + 生成器 custom）+ 6 皮肤（`SkinId`）+ 正交背景模式（`BackdropMode`）+ 19 色槽位 + 扩展槽（`accent2`/`chartRamp[8]`/`danger`/`warn`/`ok`）+ OKLab 渐变采样 + 桌面纹理 + `FontOptics` + `PinkXPLookAndFeel` |
 | [source/ui/palette/](/I:/Y2KMeter/source/ui/palette/) | 调色板重构模块：`OkLchUtils`（OKLCH/色域裁剪/WCAG）、`ThemeSpec`（意图参数+分享码）、`PaletteGenerator`（Recipe+护栏，纯 C++）、`ThemeLibrary`（我的主题）、`PalettePanel`（新面板 UI） |
 | [UiFrameClock.h/.cpp](/I:/Y2KMeter/source/ui/UiFrameClock.h) | 统一 UI 帧时钟（阶段1性能改造，目前尚未强制接线，主流数据流仍走 `AnalyserHub::FrameDispatcher`） |
 | [HoverHelp.h/.cpp](/I:/Y2KMeter/source/ui/HoverHelp.h) | 悬停提示：`y2k::help` 文案库（模块详细说明 / 全局开关持久化）+ `Y2KTooltipWindow`（统一解析控件 / 模块 / 自绘按钮提示，仪表内容区静止才弹出）；绘制在 `PinkXPLookAndFeel::drawTooltip`（详见 [docs/ui-features.md](docs/ui-features.md)） |
@@ -348,18 +359,17 @@
 
 | 文件 | 模块 | 数据源 |
 | --- | --- | --- |
-| [EqModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/EqModule.h) | `EqModule`（Y2K 像素频谱可视化，非真实 EQ） | `Spectrum` |
 | [LoudnessModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/LoudnessModule.h) | `LoudnessModule`（**v3.1 合并**原 实时 LUFS / 真峰值 / 响度主表：项目开关 M / S / I / TP / RMS + 样式「灯条 / 数字读数」） | `Loudness` |
 | [OscilloscopeModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/OscilloscopeModule.h) | `OscilloscopeModule`（**v3.1 合并**原 OscilloscopeWave：显示类型 波形 / X-Y / 李萨如，波形可选 L / R / 双声道（配色跟随主题）；X-Y / 李萨如可开**频段染色**；Freeze 按钮取消，改**按住画布慢放 50 倍**；v1.8.4 起 XY/Lissajous 峰值驱动自动缩放 + 同心标尺环） | `Oscilloscope` |
 | [SpectrumModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrumModule.h) | `SpectrumModule`（频谱 + peak hold；**v3.1** 顶部四按钮（Peak / Sharp / 曲线 / 通道）搬进控制面板，另加 **FFT scale**（log / mel / linear）与 **Slope**（0–12 dB/oct，默认 4.5，0 = 关闭）；按住画布 = 慢放，悬停读数按追加音名） | `Spectrum` |
 | [PhaseModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/PhaseModule.h) | `PhaseModule`（Goniometer + Correlation Dial + Width/Balance Bar；**v3.1 合并**原相位相关 / 相位平衡：四个项目可独立开关，相位图 / 条形各有样式；按启用项动态订阅 Phase / Oscilloscope） | `Phase` + `Oscilloscope` |
 | [DynamicsModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/DynamicsModule.h) | `DynamicsModule`（Peak/RMS 柱 + DR short / integrated + Crest 值 + Crest 历史；**v3.1 合并**原 DynamicsMeters / DR / Crest：六个项目可独立开关，读数样式，历史跨度 1–35 s 可调且持久化） | `Dynamics` |
-| [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形，像素列；**v3.1** 工具栏 / SPEED 栏 / Freeze 取消：着色来源（Pitch / Loudness / Sibilance）、速度、**双声道上下分轨**、**齿音识别阈值**都在控制面板，按住画布完全冻结） | `Oscilloscope` |
-| [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成；**v3.1** 控制面板：滚动方向 上 / 下 / 左 / 右、shaper、速度、颜色、FFT scale；上 / 下方向走"展开成无环形纹理"路径；**按住画布完全冻结**，悬停读数在冻结时追加音名） | `Spectrum` |
-| [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（**v3.1** 控制面板：颜色模式 Theme / Heat / Grey / Ice、深度方向 右后 / 左后、速度；v1.8.6 新增 3D 频谱曲面图；v1.9.0~v1.9.4 P1~P4 四轮 CPU 性能优化；v2.2.5 GPU Shader 迁移 → 15+ 轮调试后回退为纯 CPU；v2.2.5~v2.2.6 P5~P6 进一步优化：visibleRows 150→100、repaint 节流 20ms、Path 对象循环外复用 clear()） | `Spectrum` |
-| [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) | `VuMeterModule`（**表盘样式六种**：0 半圆 / 1 复古扇形 / 2 横向刻度条 / 3 LED 梯柱 / 4 极简游标 / 5 镜像刻度，同一条 dBFS 线性刻度；指针样式 Thin line / Wedge / Stereo L/R（横向式里控制游标形状）；信号灯开关）。**v3.1：原 `LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` 类已并入 Loudness / Phase / Dynamics 模块，只剩枚举值作为旧存档别名** | 视模块而定 |
-| [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向；**自动缩放**：1 s 周期峰值归一 + 10% 死区，雷达轮廓固定、dB 标签按增益换算 + 渐隐残影；**v3.1** 控制面板：点大小 1–6 px、点消失速度、频段染色（三路各自一条残影轨迹）） | `Oscilloscope` |
-| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**未发布/开发中**：两个模式在 v3.1 起由控制面板切换（顶部按钮取消），并新增 FFT scale —— `PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道后的保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消，曲线越往下越糟）；频率轴 20Hz–20kHz（对数 / 梅尔 / 线性），384×240 默认尺寸，GL 直渲染 + CPU 回退双路径，含悬停标尺与点击读数气泡；**按住画布 = 慢放**（幅度类量只拖慢回落沿 50 倍；声像是有符号量，两个方向同速放慢），按住时悬停读数追加音名） | `Spectrum`（L/R 分路 + mid 单声道路） |
+| [WaveformModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/WaveformModule.h) | `WaveformModule`（滚动瀑布波形；**v3.5** 重写为 O(新增列) 列主序预乘环形纹理 + 增量 `TexRowPatch` 上传，消除大窗/脱离卡死与 1×1 白点边缘；音高着色提亮至 `chartRamp[0.42..1.0]` + 亮度下限；用 `Symmetric` 对称开关取代原 `Outline`；支持 Pitch/Loudness/Sibilance、双声道分轨、齿音阈值、按住冻结） | `Oscilloscope` |
+| [SpectrogramModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SpectrogramModule.h) | `SpectrogramModule`（像素方格频谱瀑布图，双路 FFT 合成；控制面板支持滚动方向 上/下/左/右、shaper、速度、颜色、FFT scale；按住画布完全冻结，悬停读数追加音名） | `Spectrum` |
+| [Spectrogram3DModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/Spectrogram3DModule.h) | `Spectrogram3DModule`（3D 频谱山峰曲面图，已接入 `GlDirectModuleBase` + 纯 `SoftwareImageType` CPU 回退；v3.5 修复山脊轮廓线开关实效、移除像素风格白色虚线、修复脱离↔回停偶发闪退） | `Spectrum` |
+| [FineSplitModules.h/.cpp](/I:/Y2KMeter/source/ui/modules/FineSplitModules.h) + [VuNeedleRenderer.inl](/I:/Y2KMeter/source/ui/modules/VuNeedleRenderer.inl) + [VuBarRenderer.inl](/I:/Y2KMeter/source/ui/modules/VuBarRenderer.inl) | `VuMeterModule`（**v3.5 双家族重构**：指针式 4 样式 Studio / Vintage / Dual arc / Retro warm + 条形 5 样式 Studio bar / LED blocks / LED ladder / Mirrored / Minimal；支持 Mono / Stereo L/R（指针式为单表同轴双针）/ Left / Right 四声道模式、5 套配色与背光）。**v3.1：原 `LufsRealtime` / `TruePeak` / `PhaseCorrelation` / `PhaseBalance` / `DynamicsMeters` / `DynamicsDr` / `DynamicsCrest` 已并入 Loudness / Phase / Dynamics 模块，仅保留枚举作为旧存档别名** | 视模块而定 |
+| [StereoFieldModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoFieldModule.h) | `StereoFieldModule`（v2.7.0 新增：半圆雷达声像指示，`peak=max(|L|,|R|)` 驱动径向距离、`balance=(|R|-|L|)/(|L|+|R|)` 驱动方向；自动缩放 + 渐隐残影 + 频段染色三路独立 FBO 残影；v3.5 接入全皮肤工艺与 DWM 真透明修复） | `Oscilloscope` |
+| [StereoMapModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/StereoMapModule.h) | `StereoMapModule`（**v3.5 已正式入组预设**：`PAN` 按频率对比 L/R 频谱、纵轴声像偏向 ±1（上 L 下 R）；`MONO` 显示切单声道保留量，**上下倒置**（顶 = 100% 干净、底 = 50% 满幅抵消）；支持 FFT scale、Curve/Fill/Columns、峰值保持、按住慢放与悬停音名读数；GL 直渲染 + CPU 回退双路径） | `Spectrum`（L/R 分路 + mid 单声道路） |
 | [TempoKeyModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/TempoKeyModule.h) | `TempoKeyModule`（**v2.9.9 补充**：BPM 大字 + 调性大字 + 关系调副行 + 置信度条；START/STOP/RESET（未启动时 RESET 会自动 START，连续 3 s 无信号自动 reset）；点击 BPM 列弹 `x2 / /2` 气泡、点击 KEY 列弹 7 个音名气泡（复用 Toybox readout bubble）；字号按实测字宽收缩，窄尺寸不裁字） | `MusicAnalysis` |
 | [VirtuPetModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/VirtuPetModule.h) | `VirtuPetModule`（宠物状态机 + 精灵图动画） | `Loudness`（用信号强度驱动饥饿/健康）|
 | [SystemMonitorModule.h/.cpp](/I:/Y2KMeter/source/ui/modules/SystemMonitorModule.h) | `SystemMonitorModule`（**v3.3** 电脑状态：CPU / 温度 / GPU / 内存 / 显存 / 磁盘 / 网络 / 电池，四种样式；悬停温度显示数据来源与读不到时的解决办法） | `y2k::sys::Sampler`（[source/system/SystemStats.h](/I:/Y2KMeter/source/system/SystemStats.h)，后台线程，不走 AnalyserHub）|
@@ -374,7 +384,8 @@
 | 文件 | 作用 |
 | --- | --- |
 | [Y2KStandaloneApp.cpp](/I:/Y2KMeter/source/standalone/Y2KStandaloneApp.cpp) | 自实现 `juce::JUCEApplication` + `Y2KMainWindow`（DocumentWindow）替换 JUCE 内建的 `StandaloneFilterApp`；启动 → 加载 settings → 创建 Processor+Editor → 绑定 Loopback 音源 → 恢复主题/FPS/位置/尺寸/固定态 |
-| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：直接调用 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`，读取"系统默认播放端点"输出（用户选中该音源后才启动），输出统一立体声 float32 |
+| [WasapiLoopbackCapture.h/.cpp](/I:/Y2KMeter/source/standalone/WasapiLoopbackCapture.h) | Windows：裸 WASAPI 回环采集器，输出统一立体声 float32。两种目标共用一条采集循环：① 整机输出（默认）= 默认播放端点 + `AUDCLNT_STREAMFLAGS_LOOPBACK`；② 定向程序（`setTargetProcess("chrome.exe")`）= 进程级回环（`ActivateAudioInterfaceAsync` + `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`），目标没在运行时进入"等待"并持续输出静音，启动后自动接上 |
+| [AppAudioTargets.h/.cpp](/I:/Y2KMeter/source/standalone/AppAudioTargets.h) | Windows：定向程序采集的目标枚举 / 解析（`y2k::appaudio`）。`listCapturableApps()` 返回全量列表（音频会话 + 可见顶层窗口），每项带 `isActive`（有 Active 状态的音频会话 = 此刻正在出声），按 exe 去重、解析到同名进程树根、显示名取版本资源 FileDescription；`resolveTargetProcessId()` 把 exe 名解析成当前该采的 PID。非 Windows 为空实现 |
 | [MacDesktopAudioCapture.h/.mm](/I:/Y2KMeter/source/standalone/MacDesktopAudioCapture.h) | macOS：`ScreenCaptureKit` 获取桌面音频（Objective-C++） |
 | [AudioDumpRecorder.h/.cpp](/I:/Y2KMeter/source/standalone/AudioDumpRecorder.h) | **仅 macOS**，通过环境变量 `Y2KM_AUDIO_DUMP` 系列开启，把音频原样落盘做调试 |
 
@@ -433,15 +444,13 @@
 ### 4.4 `ModuleWorkspace`（[ModuleWorkspace.h](/I:/Y2KMeter/source/ui/ModuleWorkspace.h)）
 - **模块工厂**：`setModuleFactory(f)`，Editor 侧会按 `ModuleType` 构造具体 `ModulePanel` 派生类（见 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 的 `createModule`）。
 - **底部 Toolbar 组件**（自左至右）：`ThemeSwatchBar` → 布局预设下拉 + Save/Load → Grid → FPS → GAIN → Source → Hide。
-- **布局预设** `LayoutPreset`：`defaultGrid=1 / horizontalFull=2 / horizontalBottom=3 / mv=5 / studioMonitor=6 / focusSidecar=7 / broadcastLoudness=9 / onlyMilkdrop=10 / fullSpectrumFocus=14 / fullAllModules=15 / fullMultiCombo=16`（编号 `4`、`8` 已废弃，保留空洞以兼容历史存档）；另有三条 stick 条状变体 `stickBarSpectrogram=11 / stickBarMilkdrop=12 / stickBarSpecMilk=13`。枚举只追加不重排，保护旧存档里记录的 preset id。
-  - **Horizontal Bar T/B (2/3)**：横向铺满屏幕宽度，默认模块横向等分 canvas；Preset 2 贴屏幕顶部、Preset 3 贴屏幕底部。默认模块序列为 `Spectrogram3D / LUFS RT / VU / StereoField / Spectrum / OscWave / Waveform`（v2.7.3 起将 `Dynamics` 替换为 `LUFS RT` 并拉短，`VU`/`StereoField` 拉宽以适配低分辨率屏幕）。
-  - **stick 条状变体 (11/12/13)**：只在 stick 驻留态的下拉里出现（避免改窗口形状破坏 AppBar 占位）。三条与 2/3 共用**同一套**"屏幕宽 × 条高 250"几何 + 网格对齐 + redock 流程，仅条内模块序列/宽度权重不同：11 = `Spectrogram` 替换 `Spectrogram3D`；12 = `Milkdrop` 替换 `StereoField`（权重 2.2，窄条靠加宽才看得清）；13 = 两者同时替换。贴顶/贴底由当前 dock 侧（T/B）决定，`applyLayoutPreset` 用 `stickActive ? stickBottomAligned : (presetId==3)` 判定；应用后回写 `ModuleWorkspace::setStickPresetLabel()`，下拉 placeholder 显示当前条状预设名。
-  - **MV (Preset 5)**：**Windows** 铺满当前显示器 userArea（视觉等同全屏）；**macOS** 铺满 totalArea 后调用 `rw->setFullScreen(true)` 进入系统原生全屏（隐藏菜单栏/Dock）。上方 180px 横向模块条（同 Preset 2 的 7 个默认模块），下方 Milkdrop 模块占满剩余 canvas 区域。代码位于 `applyLayoutPreset` case 5。
-  - **Studio Monitor (6)**：双行监听——上排频谱行（`Spectrum / Spectrogram / Waveform`，拉宽 ≈1.5:1 保证频率信号可读）+ 下排仪表行（`VU / StereoField / LUFS RT / TruePeak`，半圆仪表保持 ≈2:1 避免空白）。
-  - **Focus + Sidecar (7)**：左 65% `Spectrogram` 主视觉（普通瀑布，帧率友好）+ 右 35% `VU / StereoField / LUFS RT` 竖排。
-  - **Broadcast Loudness (9)**：上排响度读数（`LUFS RT / TruePeak / Dynamics DR / Dynamics Crest`）+ 下排仪表（`VU / StereoField / Dynamics Meters`）。
-  - **Only Milkdrop (10)**：全屏（Windows userArea / macOS 原生全屏）+ 单个最大化 `Milkdrop` 模块。
-  - **全屏磁贴预设 (14/15/16)**：由用户三份 Save 存档（`.settings` → `filterState` → `<PBEQ_Layout>`）提炼，静态表在 `PluginEditor.cpp` 匿名 namespace 的 `kFullSpectrumTiles / kFullAllModulesTiles / kFullMultiComboTiles`（9 / **25** / 10 块；v3.0.6 起 15 号按最新存档 `Y2Kmeter_all.settings` 重排并去掉已下线的拼豆频谱）。只取 `<Module>` 的 `type + x/y/w/h`（参考画布 2560×1328，均为 8px 网格对齐），**丢弃 VirtuPet 节点与除"显示模式"以外的全部 `<state>` 子节点**；显示模式由 `FullScreenTile::mode` 逐块指定（-1 = 用模块默认），覆盖 `oscilloscope`(波形/X-Y/李萨如) / `oscilloscopeWave`(左/右/双) / `stereoMap`(PAN/MONO) / `spectrogram`(Classic/Sharp/Sharper) —— 全部模块预设里三块示波器、三块示波波形、两块声像图在存档里本来就是**不同模式**。`applyFullScreenTilePreset()` 复制 Preset 10 的全屏几何（Windows 物理口径 userArea / macOS totalArea + 原生全屏、resizeLimits 锁死），按当前 canvas 归一化映射并吸附 8px 网格后逐块 `createModule()` + `setBounds()` + `addModule(false)`。切换预设时用户当前养着的 VirtuPet 仍按 `applyLayoutPreset` 末尾的既有机制保留到右下角（存档里的宠物状态不复刻）。
+- **布局预设** `LayoutPreset`（v3.5.0 场景化重构，全部采用存活模块、零重叠）：
+  - **日常与桌面**：`defaultGrid=1`（默认双行工作区）、`horizontalFull=2` / `horizontalBottom=3`（顶/底部 250px 任务条）、`compactMiniBar=4`（960×248 精简浮动条）、`desktopCompanion=5`（系统监控 + 时钟 + 便签 + 频谱/VU/波形 + MilkDrop）。
+  - **混音与音频分析**：`mixingConsole=6`（双行均衡监听）、`masteringBroadcast=7`（母带与广播响度合规）、`vocalPodcast=8`（齿音波形 + 录音机 + 响度 + 复古 VU + 调性 + 秒表）、`djBeatLive=9`（BPM/调性 + 双声道波形 + 双针 VU + 频谱 + 雷达 + 3D 语谱）。
+  - **视觉与直播**：`streamOverlay=10`（1200×280 极简横排，适配绿幕 / 真透明）、`musicVisualizerMv=11`（全屏：顶部仪表条 + 下方超大 MilkDrop）、`onlyMilkdrop=12`（全屏单模块 MilkDrop）。
+  - **全屏指挥台**：`fullDeepAnalysis=13`（10 模块工程级声学分析墙）、`fullAllInOne=14`（17 块无缝密排覆盖全部 16 类功能模块）。
+  - **Stick 驻留态吸附条**（仅 stick 模式显示，条高 250px）：`Bar: Classic (2/3)` / `stickBarMixing=15` / `stickBarVisuals=16` / `stickBarDesk=17`；应用后回写 `setStickPresetLabel()`。
+  - 全屏类预设（11/12/13/14）统一走 `applyLayoutPreset` 全屏几何与 `resizeLimits` 管理（详见 `docs/window-layout.md` §6.1），切换预设保留当前养着的 VirtuPet 到右下角。
 - **拼豆像素画（PerlerImage）**：拖入图片 → 按 `cellSize`（默认 4，范围 1..15）降采样 + 每格取原图平均色 → 生成像素画 → 作为 canvas 底图；每张贴画对应一个 `PerlerImageLayer` 子 Component 与模块**同 z-order 层级**。
 - **P4 debounce**：`LayoutChangeCoalescer`（16ms 单发计时器），大量小改动只派发 1 次 `onLayoutChanged`。
 - **hit-test 挖洞**：`setHitTestHoles`，chrome 隐藏态下让浮层按钮的鼠标事件冒泡回 Editor。
@@ -469,7 +478,7 @@
 - **UI 密度缩放（v2.7.5 新增）**：`uiScale() / ui(px) / setUiScale() / uiScaleForDisplay(userArea)` —— 按屏幕逻辑分辨率自动分级（0.75~1.0），统一缩放标题栏 / 工具栏 / 模块 chrome 尺寸与正文字号，解决低分辨率屏幕上"非仪表部分过大、仪表区被压缩"的问题；支持多屏跨屏自动校准。
 - **悬停标尺公共辅助（v2.7.0 新增）**：`formatFreqHz(hz)` 格式化频率读数（`<1kHz → "xxx Hz"`，`≥1kHz → "x.x kHz"`）；`noteNameForHz(hz)` 频率 → 音名（十二平均律 A4 = 440 Hz，如 `"A4"`，越界返回空串）；`drawHoverRuler(g, canvas, pos, readout)` 在仪表区绘制十字线 + 鼠标右上方读数框（自动越界回退），供频谱类/时序类模块复用。
 - **默认主题（v2.7.0 变更）**：全局默认主题由 `winXP` 改为 `blackPink`（首次无存档启动时的缺省配色）。
-- **视觉风格（Skin）**：`SkinId`（`pinkXP=0 / chrome=1 / modern=2 / glass=3 / neon=4 / crt=5 / fluent=6 / greenScreen=7`，按整数持久化，**只追加不重排**）+ `getAllSkins / getCurrentSkin / skinFromInt / applySkin / skinHairlineOn / skinUsesFlatControls`。分派点只有：`drawRaised / drawRaisedFrame / drawSunken / drawPressed / drawHardShadow / drawDesktop / drawPinkTitleBar / titleBarDividerColour`、`PinkXPLookAndFeel`（按下点阵、滚动条、下拉分隔线）、GL 侧 `GlDirectModuleBase::appendSunkenFrame`（CPU / GL 两条路径必须同步改）。外框总厚保持 2px，调用方内缩布局不受影响；`pinkXP` 分支即旧代码。`applySkin` 会失效桌面纹理并走 `notifyThemeSubscribers()`；按 themeId 做键的缓存要把风格并入键（如 `ModuleWorkspace::rebuildCanvasBgCacheIfNeeded`）。持久化：Standalone `ui.skinId`、插件态 `skinId`（缺键不覆盖）。
+- **视觉风格（Skin）与正交背景模式（BackdropMode，v3.5.0 重构）**：`SkinId`（`pinkXP=0 / chrome=1 / modern=2 / glass=3 / neon=4 / crt=5`；历史值 `fluent=6` 兼容映射至 `modern`，`greenScreen=7` 兼容迁移至 `BackdropMode::greenScreen`，按整数持久化且**只追加不重排**）+ `BackdropMode`（`normal=0 / greenScreen=1 / transparent=2`）。`SkinCraft.h/.cpp` 提供纯数据 `SkinTokens` 令牌表与 `Craft::*` 工艺原语，将 6 套风格深度耦合到外壳及全部 16 类模块的 CPU / GL 双路径（外框总厚仍保持 2px 直角）。`applySkin` / `applyBackdropMode` 会失效桌面纹理、递增 `getAppearanceGeneration()` 并走 `notifyThemeSubscribers()`。持久化：Standalone `ui.skinId` / `ui.backdropMode`、插件态 `skinId` / `backdropMode`（缺键不覆盖）。
 
 ---
 
@@ -518,6 +527,27 @@ main
      3. delete processor
      4. 保存 settings
 ```
+
+### 5.2.1 Standalone 音频源（Source 下拉）
+
+`sourceId` 是音频源的稳定标识，同时也是 settings 里 `audio.sourceId` 的持久化值：
+
+| sourceId | 含义 | 实现 |
+| --- | --- | --- |
+| `input:default` | 麦克风 / 默认输入设备 | JUCE `AudioDeviceManager` → `processBlock` |
+| `loopback:default` | 整机输出 | Win `WasapiLoopbackCapture`（端点回环）/ macOS `MacDesktopAudioCapture` / 其他平台虚拟回环输入设备 |
+| `app:<exe 文件名>` | 定向程序（如 `app:chrome.exe`，**仅 Windows 10 2004+**） | `WasapiLoopbackCapture::setTargetProcess` → 进程级回环 |
+
+定向程序采集的要点（改这块前必读）：
+
+- **目标用 exe 文件名而不是 PID**：PID 每次启动都变，exe 名可跨重启持久化。显示名另存 `audio.appDisplayName`（程序没开时读不到版本信息）。
+- **解析到同名进程树根 + `INCLUDE_TARGET_PROCESS_TREE`**：Chrome / Electron 的声音由子进程发出，直接采子进程会漏、采根进程才全。
+- **目标没在运行不算失败**：采集线程进入"等待"（按真实墙钟每 1 秒重新解析一次目标），期间按墙钟节奏输出静音（表头归零、波形照滚）；程序启动 / 重启后自动接上。首次建流期间若目标进程恰好退出也平滑转入等待；非常规采样率被拒时自动回退 48 kHz 重试。只有系统不支持、或存活进程建不起流才算 `start()` 失败 → 弹窗并回退到 `loopback:default`。
+- **进程级回环的虚拟设备不支持 `GetMixFormat`**（`E_NOTIMPL`）：格式由我们指定（float32 立体声，采样率取默认播放端点，与整机回环一致 → 两种模式切换不触发下游重新 `prepare`）。
+- **激活回调必须实现 `IAgileObject`**：`ActivateAudioInterfaceAsync` 在系统工作线程回调，缺这个标记会封送失败。`ProcessLoopbackActivation` 用 WRL 的 `RuntimeClass<ClassicCom, FtmBase, ...>` 实现（与微软示例同一写法）。
+- **程序列表只在下拉弹出前刷新**（`ModuleWorkspace::onAudioSourceListRequested` → Standalone 里重新调 `appaudio::listCapturableApps()`），平时零开销；当前目标即使已退出也保留一项。下拉条目 ID = `audioSourceItems` 下标 + 1，取选中项统一用 `getSelectedId() - 1`。程序列表收在 "App Audio Capture" 子菜单里（`AudioSourceItem::submenuPath` 是子菜单路径（`StringArray`，逐级一个名字），相邻的同路径项归一个子菜单，同一子菜单的条目必须连续添加；子菜单名同时是翻译键；当前选中项在子菜单里时标题也打勾；`sourceId` 为空的条目是灰显提示行，用于"当前没有程序在播放声音"）。
+- **程序列表的口径是"Active 会话"，不是"有会话"**：音频会话建立后只要进程活着就一直是 Inactive、不会过期（实测流全部释放后直到进程退出才 Expired），所以按"未过期会话"列会把 QQ / Discord / Steam 这类开过一次音频就再没出声的程序全列出来。EarTrumpet 源码（`AudioDeviceSessionCollection` / `AudioDeviceSession.State`）本身并不按"是否在出声"过滤，只剔除 Expired / 已断开（`OnSessionDisconnected`、进程退出）/ 被迁到别的设备的会话，而且这些状态是它常驻后台靠事件累积出来的，一次性快照拿不到；所以这里不照搬它，改用 `AudioSessionStateActive` 作为快照下"真正有音频活动"的判据。没在出声的程序（暂停中的播放器、只发提示音的程序、还没碰过音频的程序）不进主列表，统一收在末尾的 "All Apps" 二级子菜单里。
+- 整机回环与定向程序共用同一个采集器对象、同一条 `onAudio` → `AnalyserHub::pushStereo` 链路；换目标时先 `stop()`（同步 join）再 `setTargetProcess()`，不要在采集线程运行期间改 `onAudio`。
 
 ### 5.3 布局持久化流程
 
@@ -598,8 +628,8 @@ main
 - **Windows**：
   - 强制静态 CRT（`MultiThreaded` / `MultiThreadedDebug`）—— 干净 Win10/11 免装 VC redist。
   - 首次 Editor 可用时 **强制关闭 Direct2D 渲染**（切软光栅/GDI），避免 AMD 显卡驱动在 DLL 卸载时的 loader lock 死锁。
-  - Standalone Loopback 直接调用 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`（不引入第三方音频库）。
-  - 链接 `ole32 / uuid / avrt`。
+  - Standalone Loopback 用裸 WASAPI + `AUDCLNT_STREAMFLAGS_LOOPBACK`；定向程序采集用进程级回环（Windows 10 2004 / build 19041 起，旧系统下拉里不出现程序列表）。
+  - 链接 `ole32 / uuid / avrt / mmdevapi / version`（后两者：`ActivateAudioInterfaceAsync`、读 exe 版本资源做显示名）。
 - **macOS**：
   - 启用 Objective-C++（`enable_language(OBJCXX)`），仅编译 `.mm` 文件时用。
   - 桌面音频走 `ScreenCaptureKit`（macOS 13+）；链接 `ScreenCaptureKit / AVFoundation / CoreMedia / Foundation`。
@@ -615,7 +645,8 @@ main
 - 构造末尾 `openGLContext.attachTo(*this)`，析构最开始显式 `detach()` 兜底。
 - Editor 实现 `juce::OpenGLRenderer`，在 `renderOpenGL()` 中完成所有 GPU 模块渲染。
 - projectM 使用 `openglRenderFrameFbo(fbo_id)` 渲染到独立 offscreen FBO，再跨 FBO `glBlitFramebuffer` 搬运到各模块在 FBO 0（CachedImage）上的正确位置。
-- ★ **永远不 clear FBO 0**（CachedImage 合成面）——clear 会破坏 JUCE 已合成的所有组件 UI。
+- ★ **永远不在非透明模式 clear FBO 0**（CachedImage 合成面）——clear 会破坏 JUCE 已合成的所有组件 UI；仅在 `BackdropMode::transparent` 真透明模式下于合成前清 `glClearColor(0, 0, 0, 0)`，配合 Windows DWM 硬件透明（`DwmEnableBlurBehindWindow` + 补丁 0009 `PFD_SUPPORT_COMPOSITION`）实现全速每像素 Alpha 合成。
+- **浮动态全量 GL 化（v3.5.0）**：`GlDirectRenderer`（`source/ui/GlDirectRenderer.h`）从 Editor 抽离为按上下文独立实例，`FloatingModuleWindow` 与主窗口共用同一套 GL 直渲染管线与 DWM 真透明，脱离/停靠外观与帧率完全一致；所有模块离屏回退缓存一律使用 `SoftwareImageType`（严禁 `OpenGLImageType`），浮动窗口停靠/关闭一律经 `MessageManager::callAsync` + `SafePointer` + `clearContentComponent()` 异步安全收尾。
 - 插件宿主与 Standalone **共用**，宿主下 JUCE 会为 Editor 创建 GL 子层不影响宿主窗口其余部分。
 - 坐标系统：`getLocalPoint(milk, point)` 纯组件树遍历 + `openGLContext.getRenderingScale()` DPI 缩放 + Y-flip。
 - ★ **vendored JUCE 有本地补丁**（含 mac GL 的 VBO orphaning、repaint 按显示器刷新合并、Font 比较快速路径、渐变纹理跨帧复用等），补丁清单 / 升级流程见 [third_party/juce_patches/README.md](third_party/juce_patches/README.md)；改 JUCE 源码必须同步导出补丁并补配置期校验标记（否则 CMake 配置会报错）。
@@ -648,7 +679,7 @@ main
 **帧率无关动画（[FramePacing.h](/I:/Y2KMeter/source/ui/FramePacing.h)）**
 - 所有"每帧系数"按 **120Hz 标定**（= 旧版默认分发率，换算后 120Hz 下观感与旧版一致），
   用 `alphaForDt / stepForDt / framesToSec` 按 `frame.dtSec` 换算。已覆盖：Dynamics（平滑/峰值保持/
-  Crest 历史带）、Loudness、Eq（peak 下落）、Phase、Spectrum（曲线平滑）、FineSplit 全族
+  Crest 历史带）、Loudness、Phase、Spectrum（曲线平滑）、FineSplit 全族
   （LUFS/TruePeak/PhaseBalance/DynamicsMeters/DR 的平滑、闪烁、心跳相位、TP 保持）、
   StereoField（残影衰减）、DynamicsCrest（历史带按 30 样本/秒时间推进，修复 120Hz 下
   "20s 跨度实际只有 5 秒"的旧 bug）。
@@ -697,7 +728,7 @@ main
 | `Y2K_PGO_MODE` | OFF | 可切 GENERATE / USE 做 PGO |
 
 ### 6.8 版本号 / Bundle ID 一致性
-- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.4.5`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
+- CMake 里 `project(Y2Kmeter VERSION x.y.z)` 与 `juce_add_plugin(... VERSION x.y.z)`（[CMakeLists.txt](/I:/Y2KMeter/CMakeLists.txt) 共 3 处 `VERSION`，当前 `3.5.0`）**必须一致**，任何版本号变更都要同步 [Y2Kmeter_installer.iss](/I:/Y2KMeter/Y2Kmeter_installer.iss) 里的版本字段，**同时**修改 [PluginEditor.cpp](/I:/Y2KMeter/PluginEditor.cpp) 里 3 处 `"vx.y.z"` 字面量（`getStringWidth` 一处，含 debug/正式两变体；`versionText` 两处），以及 [README.md](/I:/Y2KMeter/README.md) 的版本徽章。
 - `BUNDLE_ID = cn.iisaacbeats.Y2Kmeter` **不要改**，改了会导致所有用户 DAW 里的插件实例丢失识别。
 
 ### 6.9 VirtuPet 资源约定

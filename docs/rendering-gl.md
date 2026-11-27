@@ -1,19 +1,19 @@
 # 渲染 / GL / OpenGL / Milkdrop / Spectrogram3D
 
-## 1. 渲染架构现状
+## 1. 渲染架构现状（v3.5.0 统一嵌入 + 浮动 GL 管线）
 
 - **Editor 级 `juce::OpenGLContext`**（`componentPaintingEnabled=true`，`attachTo(*this)`）使主窗口进入 GPU 合成管线 → 所有组件 paint 走统一 GPU → 单次 SwapBuffers → Z-order 正确、零遮盖。**OpenGLContext 必须放在类末尾**（保证反向析构时最先 detach），构造末尾 `attachTo`、析构起始 `detach`。
-- **GL 直渲染模块框架 `GlDirectModuleBase`**（v2.9.4 引入）：派生类实现 4 个纯虚 `buildGlSnapshot` / `getGlCanvasBounds` / `paintGlOverlay` / `paintLegacyContent`，GL 直渲染 + CPU 回退双路径，**两条路径绘制内容必须一致**。
+- **GL 直渲染模块框架 `GlDirectModuleBase` + 共享渲染器 `GlDirectRenderer`**（`source/ui/GlDirectRenderer.h`，v3.5.0 抽离）：派生类实现 4 个纯虚 `buildGlSnapshot` / `getGlCanvasBounds` / `paintGlOverlay` / `paintLegacyContent`，GL 直渲染 + CPU 回退双路径，**两条路径绘制内容与 `SkinCraft` 工艺必须一致**。`Spectrogram3DModule` 也已接入 `GlDirectModuleBase`（纹理上传 + 增量绘制）。
+- **浮动态模块（pop-out 窗口）全量迁移 OpenGL（v3.5.0）**：`FloatingModuleWindow`（非 MilkDrop 的全部 16 类模块）现在自带独立的 `juce::OpenGLContext` + 独立 `GlDirectRenderer` 实例，并在 Windows 真透明模式下同步启用 DWM 硬件 Alpha（见 §1.2）。挂载成功后标记 `panel->setFloatingGlHosted(true)`：`GlDirectModuleBase::wantsGlSnapshot()` 返回 `true`（走与嵌入态完全一致的 GL 管线），同时解除 `ModulePanel` 的 30Hz 浮动态重绘节流，达成脱离/嵌入视觉样式与帧率 100% 统一。只有当浮动窗口未挂 GL 或 GL 不可用时，才退回消息线程软件光栅化并保持 30Hz 限流 + `repaintHover` 补齐定时器兜底。
+- **浮动窗口 GL 生命周期与异步销毁铁律（v3.5.0 修复 S3D 脱离↔回停闪退）**：
+  - `FloatingModuleWindow::detachGlContext()` 必须带 `std::atomic<bool> glClosing_` 守卫，无条件调用 `glContext_.detach()` → `setRenderer(nullptr)` → `glDirectRenderer_.reset()`，绝不在 GL 线程可能仍活跃时提前销毁 `glDirectRenderer_` 或子组件。
+  - 从浮动窗口点击「停靠 / 关闭」必须经 `MessageManager::callAsync` + `SafePointer` 推迟到 `WM_LBUTTONUP` 之后，通过 `clearContentComponent()` 卸载内容（绝不用 `setContentNonOwned(panel, false)` 覆盖），再同步释放窗口，彻底杜绝 `WM_LBUTTONUP` 同步毁窗与 `std::function` 自覆写 UAF。
 - **Milkdrop**（libprojectM 4 native OpenGL）用**独立** GL context（`componentPaintingEnabled=false`），单实例互斥（`std::atomic gActiveProjectMInstances`）。
-- **Spectrogram3D** 最终是**纯 CPU**（曾 GPU shader 迁移，15+ 轮调试后回退）。
-- **浮动态模块（pop-out 窗口）= 纯 CPU 软件绘制**：模块被移出 Editor 组件树后，
-  Editor 的 GL 遍历不再覆盖它（`GlDirectModuleBase::wantsGlSnapshot()` 浮动态返回
-  false），每帧都退化成消息线程上的整区软件光栅化。再叠加"按住拖拽 + 悬停标尺"的
-  高频鼠标事件（高回报率鼠标可达数百 Hz）就会把消息线程打满，表现为**整个进程**
-  卡顿 → `ModulePanel` 把浮动态的逐帧重绘（`repaintFrameContent`）与悬停重绘
-  （`repaintHover`）统一限流到 `floatingRepaintHz`（30Hz）；被限流丢掉的悬停帧由
-  `repaintHover` 的补齐定时器兜底，避免十字线停在上一帧位置。嵌入态（GL 直渲染）
-  不节流，行为与旧版逐像素一致。
+
+### 1.2 真透明模式与 Windows DWM 硬件 Alpha（v3.5.0）
+
+- `BackdropMode::transparent` 与 `SkinId` 完全正交，继承当前皮肤的全部仪表工艺，仅将背景替换成透明。
+- **Windows 禁止走 `WS_EX_LAYERED` 软件合成**：全屏多模块下 `UpdateLayeredWindow` 会把帧率打到 ~10fps 并导致立体声场 FBO 卡死。v3.5.0 改用 **DWM 硬件透明**：`DwmEnableBlurBehindWindow`（1×1 不可见 HRGN 触发每像素 Alpha 合成）+ vendored JUCE 补丁 **0009**（`juce_OpenGL_windows.h` 启用 `PFD_SUPPORT_COMPOSITION` 与带 Alpha 位像素格式优选）+ GL 渲染入口清 FBO 0 `glClearColor(0, 0, 0, 0)`（仅透明模式清底，非透明模式仍严禁 clear FBO 0）。主窗口与浮动窗口走同一套逻辑。
 
 ### 1.1 组件层性能规则（v3.4.3）
 
@@ -30,7 +30,7 @@
 1. **`OpenGLContext::getCurrentContext() != nullptr` 只说明"有 GL 上下文"，不等于"画进 GL"**。GL 线程上的离屏软件绘制（`createComponentSnapshot`）同样满足。判据要用"绘制目标身份"，不是上下文存在性。
 2. **`OpenGLImageType` 的 Image 只能喂给 GL 上下文**。跨后端消费（CG / Direct2D / 软件光栅）中只有 Windows 软件光栅恰好容错；macOS 会越界读崩溃（Windows 不炸）。
 3. **`Image::BitmapData` 的 `lineStride` 可为负**（bottom-up），`data` 也不一定指向首行。把 `data` 当连续 buffer 喂第三方 API（`CFDataCreate`+`CGImageCreate`）必炸。
-4. **`createComponentSnapshot` 是"软件绘制"强信号**：新增此类调用点时，模块内部离屏缓存类型必须匹配；持 GL 纹理 Image 的模块要读 `ModulePanel::setSoftwarePaintTarget()/isSoftwarePaintTarget()` 回退软件 Image（目前 `Spectrogram3DModule`）。
+4. **`createComponentSnapshot` 是"软件绘制"强信号**：新增此类调用点时，模块内部离屏缓存类型必须匹配；**v3.5.0 起所有模块（含 `Spectrogram3DModule`）的离屏回退缓存一律固定使用 `juce::SoftwareImageType()`，严禁再创建 `juce::OpenGLImageType()`**。原因：模块脱离/停靠会在 Editor 与 `FloatingModuleWindow` 两个独立 `OpenGLContext` 之间迁移，`OpenGLImageType` 内部持有创建时的裸 `OpenGLContext*`，跨上下文析构或读写必然触发悬垂指针 / `abort()` 崩溃。
 
 ## 3. Milkdrop（projectM）避坑清单
 

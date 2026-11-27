@@ -66,7 +66,7 @@ private:
         static constexpr float peakHoldDuration = 3000.0f; // 3s
         static constexpr float peakFallRate     = 0.02f;   // 每帧衰减量（dB）
 
-        void update(float newValue, float deltaMs)
+        void update(float newValue, float deltaMs, float holdDurationMs)
         {
             if (! std::isfinite(newValue))
                 newValue = -144.0f;
@@ -85,7 +85,7 @@ private:
             else
             {
                 peakHoldMs += deltaMs;
-                if (peakHoldMs > peakHoldDuration)
+                if (peakHoldMs > holdDurationMs)
                     peakValue -= y2k::pacing::stepForDt (peakFallRate, dtSec);
             }
             peakValue = juce::jmax(-144.0f, peakValue);
@@ -115,13 +115,14 @@ private:
     void drawMeterBar(juce::Graphics& g, juce::Rectangle<int> barArea, const MeterBar& bar, bool isLUFS) const;
     void drawScale(juce::Graphics& g, juce::Rectangle<int> scaleArea) const;
     void drawMeterBarStaticLayer(juce::Graphics& g, juce::Rectangle<int> barArea, bool isLUFS) const;
-    static int firstVisibleRowForValue(float value, int numRows) noexcept;
+    int firstVisibleRowForValue(float value, int numRows) const noexcept;
 
     void rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds);
     void drawStaticLayer(juce::Graphics& g, juce::Rectangle<int> contentBounds) const;
     void invalidateStaticLayer();
 
-    static float valueToNorm(float val) noexcept;
+    float valueToNorm(float val) const noexcept;
+    float targetLufsDb() const noexcept;
     static juce::Colour lufsToColour(float lufs) noexcept;
     static juce::Colour dbToColour(float db) noexcept;
 
@@ -130,6 +131,10 @@ private:
 
     Items items;
     Style style = Style::ledBars;
+    int   targetPreset = 0;        // 0 Off / 1 -23 / 2 -16 / 3 -14 / 4 -9 / 5 -6 LUFS
+    float floorDb      = -60.0f;   // 刻度下限：-72 / -60 / -48 / -36 dB
+    bool  showPeakHold = true;     // LED 灯条峰值保持线
+    float peakHoldSec  = 3.0f;     // 峰值保持时长（0.5..5.0 s）
 
     // 灯条：M S I TP-L TP-R RMS-L RMS-R（按项过滤后排进 slots）
     MeterBar barM, barS, barI, barTpL, barTpR, barRmsL, barRmsR;
@@ -157,6 +162,8 @@ private:
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
     int staticLayerBarCount = -1;
+    juce::uint32 staticLayerAppearanceGen = 0;
+    juce::uint32 staticLayerFontGen       = 0;
     int themeSubToken = -1;
 
     static constexpr int cellSize  = 6;

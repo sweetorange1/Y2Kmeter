@@ -700,9 +700,10 @@ void Y2KmeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     // 调色板重构（R19）：主题状态随宿主工程保存。
     //   Standalone 的主题由 Y2KStandaloneApp 的 ui.* 键独立管理，这里同样写出，
     //   但读取端会跳过 Standalone（见 setStateInformation），避免两套互相覆盖。
-    root.setProperty ("themeId",   (int) PinkXP::getCurrentThemeId(),   nullptr);
-    root.setProperty ("skinId",    (int) PinkXP::getCurrentSkin(),      nullptr);
-    root.setProperty ("themeName", PinkXP::getCustomThemeName(),        nullptr);
+    root.setProperty ("themeId",      (int) PinkXP::getCurrentThemeId(),   nullptr);
+    root.setProperty ("skinId",       (int) PinkXP::getCurrentSkin(),      nullptr);
+    root.setProperty ("backdropMode", (int) PinkXP::getBackdropMode(),     nullptr);
+    root.setProperty ("themeName",    PinkXP::getCustomThemeName(),        nullptr);
     root.setProperty ("themeSpec",
                       juce::String(PinkXP::getCurrentThemeSpec().shareCode()), nullptr);
     {
@@ -815,9 +816,22 @@ void Y2KmeterAudioProcessor::setStateInformation(const void* data, int sizeInByt
             PinkXP::applyTheme(target);
         }
 
-        // 视觉风格：缺键不覆盖（旧工程保持当前风格）
-        if (root.hasProperty ("skinId"))
-            PinkXP::applySkin (PinkXP::skinFromInt ((int) root.getProperty ("skinId", 0)));
+        // 视觉风格 + 背景模式：缺键不覆盖（兼容旧工程 skinId=7 遗留绿幕值）
+        const bool hasSkin     = root.hasProperty ("skinId");
+        const bool hasBackdrop = root.hasProperty ("backdropMode");
+        if (! hasBackdrop && hasSkin
+            && PinkXP::isLegacyGreenScreenSkinInt ((int) root.getProperty ("skinId", 0)))
+        {
+            PinkXP::applySkin (PinkXP::SkinId::pinkXP);
+            PinkXP::applyBackdropMode (PinkXP::BackdropMode::greenScreen);
+        }
+        else
+        {
+            if (hasSkin)
+                PinkXP::applySkin (PinkXP::skinFromInt ((int) root.getProperty ("skinId", 0)));
+            if (hasBackdrop)
+                PinkXP::applyBackdropMode (PinkXP::backdropModeFromInt ((int) root.getProperty ("backdropMode", 0)));
+        }
     }
 
     // Milkdrop 整体染色 + 效果（旧存档缺失时保持默认值）

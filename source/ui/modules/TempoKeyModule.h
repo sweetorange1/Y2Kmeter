@@ -43,6 +43,13 @@ public:
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
+    // ---- 持久化 + 控制面板 ----
+    juce::ValueTree saveModuleSpecificState() const override;
+    void restoreModuleSpecificState (const juce::ValueTree& state) override;
+    void   buildParamDefs (std::vector<ParamDef>& out) const override;
+    double getParamValue  (const juce::String& id) const override;
+    void   setParamValue  (const juce::String& id, double v) override;
+
     // ---- Toybox：点击 BPM 列 / KEY 列弹数据气泡（覆盖通用 ✨ 兜底）----
     //   BPM 列 → "x2 = 240.0  /2 = 60.0"
     //   KEY 列 → 当前调式的 7 个音名（按调号正确拼写）
@@ -52,6 +59,7 @@ public:
 protected:
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
     void layoutContent (juce::Rectangle<int> contentBounds) override;
+    juce::Rectangle<int> getChromaKeyCanvas() override;
 
 private:
     // 绘制与点击命中共用同一套几何，避免两边算出来的列位置不一致
@@ -66,13 +74,15 @@ private:
 
     // 该调式的 7 个音名（含正确升降号），例如 Eb minor → "Eb F Gb Ab Bb Cb Db"
     static juce::String scaleNoteNames (int root, y2k::music::Mode mode);
+    static juce::String camelotCode (int root, y2k::music::Mode mode);
 
     void refreshButtons();
+    void syncChildChromeVisibility();
     void onStartStopClicked();
     void onResetClicked();
 
-    static juce::String formatBpm (const y2k::music::Result& r);
-    static juce::String formatKey (const y2k::music::Result& r);
+    juce::String formatBpm (const y2k::music::Result& r) const;
+    juce::String formatKey (const y2k::music::Result& r) const;
     static juce::String formatAge (double updatedMs);
     static juce::Colour statusColour (y2k::music::Status s);
 
@@ -81,8 +91,20 @@ private:
     y2k::music::Result latest;
     double lastRepaintMs = 0.0;
 
+    // 控制面板参数（默认与旧版完全一致）
+    bool showBpm        = true;
+    bool showKey        = true;
+    int  keyNotation    = 0;     // 0=Standard, 1=Camelot, 2=Both
+    bool showRelative   = true;
+    int  bpmPrecision   = 0;     // 0=0.1 BPM, 1=Integer
+    bool showConfidence = true;
+    bool showStatus     = true;
+
     juce::TextButton btnStartStop { "STOP" };
     juce::TextButton btnReset     { "RESET" };
+
+    int themeSubToken     = -1;
+    int chromaRevealToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TempoKeyModule)
 };

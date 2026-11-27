@@ -65,6 +65,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：保留内容区的数据图形（点云 / 指针 / 电平条 / 数值读数），凹槽框与静态网格在绘制时跳过
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getContentBounds(); }
 
 private:
     struct Items
@@ -95,6 +97,10 @@ private:
     Items items;
     GonioStyle gonioStyle = GonioStyle::dots;
     BarStyle   barStyle   = BarStyle::segmented;
+    float gonioGain       = 1.0f;   // Goniometer 缩放（0.5..3.0x）
+    float gonioSize       = 2.0f;   // Goniometer 点大小 / 线宽（1.0..4.0 px）
+    float smoothingScale  = 1.0f;   // 相关度 / 宽度 / 平衡响应速度（0.2..3.0x）
+    bool  showGonioGrid   = true;   // Goniometer 菱形边框、十字线与 M/S/L/R 标签
     bool oscRetained = false, phaseRetained = false;
 
     juce::Array<float> oscL, oscR;
@@ -112,6 +118,8 @@ private:
 
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
+    juce::uint32 staticLayerAppearanceGen = 0;
+    juce::uint32 staticLayerFontGen       = 0;
     int themeSubToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PhaseModule)

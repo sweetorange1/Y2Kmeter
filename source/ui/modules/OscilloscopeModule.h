@@ -53,11 +53,11 @@ public:
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseUp   (const juce::MouseEvent& e) override;
 
-    // ---- Toybox：拍立得快照（反馈 C1，GL 代表 L1 效果）----
+    // ---- Toybox：波形冲浪珠 / 散点轨道电子（零遮挡，随按住慢放自动子弹时间退让）----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
-    double lastToyPokeTime_ = 0.0;   // 防连点冷却
+    double lastToyPokeTime_ = 0.0;   // 轻量连点防抖
 
     // ---- 持久化 + 控制面板 ----
     juce::ValueTree saveModuleSpecificState() const override;
@@ -128,6 +128,12 @@ private:
     bool  showRings   = true;     // X-Y / Lissajous 标尺环
     float dotSize     = 2.0f;     // 散点边长（px，1–6）
     float fadeSpeed   = 1.0f;     // 残影消失速度倍率（1.0 = 经典拖尾）
+    float timeScale   = 1.0f;     // 时域窗口缩放（0.25..1.0，越小越放大单周期）
+    float waveGainDb  = 0.0f;     // 波形纵向增益（-12..+18 dB）
+    float lineWidth   = 1.4f;     // 波形主线宽（1.0..4.0 px）
+    bool  fillWave    = false;    // 波形到零线的半透明填充
+    bool  showGrid    = true;     // 背景点阵 / 十字轴 / 分区虚线
+    float scatterGainDb = 0.0f;   // X-Y / 李萨如关闭自动缩放时的手动增益（-12..+18 dB）
 
     // 快照（UI 线程独占使用）：实时窗口，或慢放时从历史读出的窗口
     juce::Array<float> snapshotL;
@@ -155,11 +161,15 @@ private:
 
     juce::Image staticLayer;
     juce::Rectangle<int> staticLayerContentBounds;
+    juce::uint32 staticLayerAppearanceGen = 0;
+    juce::uint32 staticLayerFontGen       = 0;
     int themeSubToken = -1;
 
     // 方案 A：动态层缓存
     juce::Image dynamicLayer;
     juce::Rectangle<int> dynamicLayerCanvasBounds; // 以 canvas 坐标系存
+    juce::uint32 dynamicLayerAppearanceGen = 0;
+    juce::uint32 dynamicLayerFontGen       = 0;
     bool        dynamicLayerDirty = true;
 
     // 粗粒度指纹：采样长度 + 首/中/尾元素 —— 用来判断 snapshot 是否真的变了

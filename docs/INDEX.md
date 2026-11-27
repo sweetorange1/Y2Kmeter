@@ -23,7 +23,7 @@
 
 ## 关键事实速查（版本 / 目录）
 
-- 当前版本：`3.4.5`（CMakeLists `project(Y2Kmeter VERSION 3.4.5)`）。
+- 当前版本：`3.5.0`（CMakeLists `project(Y2Kmeter VERSION 3.5.0)`）。
 - 构建目录：Release = `cmake-build-release-visual-studio`；诊断包 RelWithDebInfo = `cmake-build-relwithdebinfo-visual-studio-ninja`。
-- vendored JUCE：`third_party/JUCE`（补丁 0001~0008 已打入源码，diff 在 `third_party/juce_patches/`）。
-- 未发布/开发中的模块：`Stereo Map`（`ModuleType::stereoMap`）。
+- vendored JUCE：`third_party/JUCE`（补丁 0001~0009 已打入源码，diff 在 `third_party/juce_patches/`）。
+- 全量 16 类存活模块（含 `Stereo Map`）已全面接入 v3.5.0 场景化布局预设与全风格耦合工艺。

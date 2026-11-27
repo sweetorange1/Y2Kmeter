@@ -169,7 +169,7 @@ namespace PinkXP
     //   v3.4：字体同时跟随视觉风格（Skin）——
     //   · 英文 / 无 @font 语言：按风格取内置英文字体（像素复古 Silkscreen /
     //     千禧金属 Exo 2 / 现代简约 Inter / 玻璃 Nunito / 霓虹 Orbitron /
-    //     CRT VT323 / Fluent Open Sans / 绿幕 Inter）；
+    //     CRT VT323 / 绿幕 Inter）；
     //   · 中文：像素复古 / CRT 沿用语言包像素字（ChillBitmap），其余风格改用
     //     Noto Sans SC（思源黑体）；其它带 @font 的语言始终用语言包字体。
     juce::Typeface::Ptr loadActiveTypeface();
@@ -691,14 +691,14 @@ namespace PinkXP
     // ======================================================
     enum class SkinId
     {
-        pinkXP = 0,   // 像素复古（Win95/XP 2px 硬斜角，默认，外观与旧版完全一致）
+        pinkXP = 0,   // 像素复古（Win95/XP 2px 硬斜角，默认，纯正 1998-2002 像素工艺）
         chrome = 1,   // 千禧金属（拉丝金属渐变 + 镜面高光 + 铬质标题栏）
-        modern = 2,   // 现代简约（扁平 + 1px 细描边 + 小控件圆角 + 柔和阴影）
+        modern = 2,   // 现代简约（演播室极简：1px 细描边 + 微抬升边 + 4-5px 圆角 + 轻 Mica 桌面）
         glass  = 3,   // 玻璃（窗口内模拟毛玻璃：纵向通透渐变 + 上沿镜面高光 + 半透明细边；全部不透明绘制）
         neon   = 4,   // 霓虹赛博（深色桌面 + 透视网格 + 发光灯管描边 + 彩色辉光阴影）
         crt    = 5,   // CRT 终端（磷光单色描边 + 扫描线 + 暗角；等宽终端字体）
-        fluent = 6,   // Win11 Fluent（Mica 质感桌面 + 细描边 + 小控件大圆角 + 柔和投影）
-        greenScreen = 7 // 绿幕（视频抠像：桌面 / 外壳 / 网格 / 刻度全部纯绿 #00FF00，只留数据图形与数值读数）
+        fluent = 6,   // [已合并至 modern] 保留枚举整数兼容旧存档；skinFromInt(6) / applySkin(6) 均映射至 modern
+        greenScreen = 7 // [已迁移至 BackdropMode::greenScreen] 保留枚举整数兼容旧存档；applySkin(7) 切背景模式不改视觉风格
     };
 
     struct SkinInfo
@@ -707,11 +707,12 @@ namespace PinkXP
         const char* displayName;   // 英文源文案（翻译键）
     };
 
+    // 返回全部 6 套纯视觉风格（背景模式 BackdropMode 与视觉风格完全正交）
     const std::vector<SkinInfo>& getAllSkins();
     SkinId getCurrentSkin() noexcept;
-    // 越界 / 未知值回退 pinkXP（旧存档 / 新版存档回退旧版时的兜底）
+    // 越界 / 未知值 / 遗留 greenScreen(7) 回退 pinkXP(0)；遗留 fluent(6) 映射至 modern(2)
     SkinId skinFromInt (int raw) noexcept;
-    // 切换风格：失效桌面纹理缓存 + 广播主题订阅（各模块静态层 / GL 快照随之重建）
+    // 切换视觉风格（保持当前 BackdropMode 不变）；传入遗留 SkinId::greenScreen 时转为切换绿幕背景模式
     void applySkin (SkinId id);
 
     // 风格辅助：在 fill 上取一条可见的细描边色（不透明；亮底压暗、暗底提亮）。
@@ -719,29 +720,55 @@ namespace PinkXP
     juce::Colour skinHairlineOn (juce::Colour fill, float amount = 0.20f) noexcept;
 
     // 风格是否使用"扁平小控件"（圆角按钮 / 胶囊滚动条 / 细分隔线）：
-    //   modern / glass / fluent / greenScreen / neon。LnF 与 GL 凹槽共用同一判定。
+    //   modern / glass / neon。LnF 与 GL 凹槽共用同一判定。
     bool skinUsesFlatControls (SkinId id) noexcept;
 
     // ======================================================
-    // 绿幕（SkinId::greenScreen）—— 给视频创作者录屏抠像
-    //   · 桌面 / 工作区画布 / 工具栏 / 标题栏 / 模块外壳：未悬停时一律纯绿；
-    //     鼠标悬停在某个模块（或 Editor 自身 chrome）上时该区域按正常外观显示。
-    //   · 支持的模块（ModulePanel::getChromaKeyCanvas 返回非空）：画布内背景
-    //     纯绿、不画网格 / 刻度 / 图例，只留数据图形与数值读数；
-    //     其它模块未悬停时整块纯绿。
-    //   · 悬停判定：进程内单个 20Hz 定时器轮询鼠标所在的"绿幕区域"
-    //     （markChromaRegion 标记的最近祖先组件），变化时只重绘新旧两个区域。
-    //     定时器只在绿幕风格下懒创建，离开绿幕 / Editor 析构时释放。
+    // 背景模式（BackdropMode）—— 与 6 套视觉风格及所有配色主题 100% 正交
+    //   · normal      : 非绿幕模式（正常不透明桌面与外壳）
+    //   · greenScreen : 绿幕模式（#00FF00 纯绿抠像，完整继承当前视觉风格的仪表工艺与字体）
+    //   · transparent : 透明模式（真透明覆层 + 点击穿透，完整继承当前视觉风格的仪表工艺与字体）
+    //   悬停显露：进程内单个 20Hz 定时器轮询鼠标所在区域（透明模式下自动使用纯 JUCE 几何
+    //   绕过 Win32 WS_EX_LAYERED alpha==0 点击穿透），变化时重绘新旧区域并通知订阅者。
     // ======================================================
+    enum class BackdropMode
+    {
+        normal      = 0,
+        greenScreen = 1,
+        transparent = 2
+    };
+
+    BackdropMode getBackdropMode() noexcept;
+    BackdropMode backdropModeFromInt (int raw) noexcept;
+    void         applyBackdropMode (BackdropMode mode);
+
+    // 兼容旧存档：判断旧 skinId 整数是否为遗留绿幕值 (7)
+    bool         isLegacyGreenScreenSkinInt (int raw) noexcept;
+
+    // 当前是否处于抠像 / 透明背景模式（greenScreen 与 transparent 均返回 true）
     bool         isChromaKeySkin() noexcept;
-    juce::Colour chromaKeyGreen() noexcept;                    // 0xFF00FF00
-    // 强度色阶抠像：t（0..1 强度）很低时返回纯绿，过渡段向原色渐变，其余原样
-    //   （语谱图 / 3D 瀑布的"静音"像素直接落成绿幕，抠像后透明）
+    bool         isGreenScreenBackdrop() noexcept;
+    bool         isTransparentBackdrop() noexcept;
+    // 背景清屏色：greenScreen -> 0xFF00FF00，transparent -> 0x00000000（normal 回退纯绿）
+    juce::Colour chromaKeyBackdropColour() noexcept;
+    juce::Colour chromaKeyGreen() noexcept;                    // 恒返回 0xFF00FF00
+    // 强度色阶抠像：
+    //   · greenScreen：t<=kGate 返回纯绿，过渡段向原色渐变；
+    //   · transparent：t<=kGate 返回 alpha=0，过渡段平滑拉升 alpha（零绿边）；
+    //   · normal：原样返回 c。
     juce::Colour chromaKeyFade (juce::Colour c, float t) noexcept;
-    // 把组件标记为绿幕悬停区域（ModulePanel / Editor 构造时调用）
+    // 把组件标记为抠像/透明悬停显露区域（ModulePanel / Editor 构造时调用）
     void markChromaRegion (juce::Component& c);
-    // c 所属的绿幕区域当前是否处于"悬停显示"状态；非绿幕风格恒为 true
+    // 为悬停区域挂接可选的 chrome-only 命中谓词（用于透明模式下仅标题栏/工具栏显露 Editor chrome，
+    //   工作区空白缝隙保持 100% 透明与点击穿透；传空函数可清除谓词）
+    void markChromaChromeOnlyArea (juce::Component& root,
+                                   std::function<bool(juce::Point<int> localPos)> isChromeHit);
+    // c 所属的区域当前是否处于"悬停显示"状态；非抠像/透明模式恒为 true
     bool isChromaRevealed (const juce::Component& c);
+    // 订阅悬停显露区域变化（离开抠像/透明模式时也会以 (prev, nullptr) 通知）
+    using ChromaRevealCallback = std::function<void(juce::Component* prev, juce::Component* next)>;
+    int  subscribeChromaRevealChanged (ChromaRevealCallback cb);
+    void unsubscribeChromaRevealChanged (int token);
     // 释放悬停轮询定时器（Editor 析构时调用，规避 DLL 卸载期静态析构 Timer）
     void releaseChromaHoverTracker();
 }
@@ -792,6 +819,9 @@ public:
                            bool isTicked, bool hasSubMenu,
                            const juce::String& text, const juce::String& shortcutKeyText,
                            const juce::Drawable* icon, const juce::Colour* textColour) override;
+
+    void drawPopupMenuSectionHeader(juce::Graphics&, const juce::Rectangle<int>& area,
+                                    const juce::String& sectionName) override;
     juce::Font getPopupMenuFont() override;
 
     // 全局字体兜底：任何通过 LookAndFeel 请求 Typeface 的控件都优先使用

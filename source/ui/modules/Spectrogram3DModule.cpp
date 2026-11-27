@@ -1,6 +1,7 @@
 #include "source/ui/modules/Spectrogram3DModule.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 #include "source/ui/HoverHelp.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
@@ -9,6 +10,71 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+
+namespace
+{
+    struct RidgeStyle
+    {
+        juce::Colour colour;
+        float        baseAlpha = 0.0f;
+        float        cpuWidth  = 0.6f;
+    };
+
+    inline RidgeStyle resolveRidgeStyle (const PinkXP::SkinTokens& tokens,
+                                         bool showRidges,
+                                         bool darkScene) noexcept
+    {
+        if (! showRidges)
+            return { juce::Colours::white, 0.0f, 0.0f };
+
+        // 清晰克制的 3D 等高线山脊轮廓：深底浅色高光、浅底深色描边、霓虹/CRT 辉光描边，
+        //   开关切换对比一目了然且始终保持平滑抗锯齿（绝无锯齿虚线/碎点）
+        const juce::Colour darkCrest   = PinkXP::pink50.interpolatedWith (juce::Colours::white, 0.50f);
+        const juce::Colour lightCrest  = PinkXP::pink700.interpolatedWith (PinkXP::ink, 0.50f);
+        const juce::Colour neonGlow    = PinkXP::sel.interpolatedWith (juce::Colours::white, 0.42f);
+        const juce::Colour crtPhosphor = PinkXP::sel.interpolatedWith (juce::Colours::white, 0.34f);
+        const juce::Colour glassCrest  = darkScene
+            ? PinkXP::pink50.interpolatedWith (juce::Colours::white, 0.58f)
+            : PinkXP::pink700.interpolatedWith (PinkXP::ink, 0.45f);
+        const juce::Colour chromeCrest = darkScene
+            ? PinkXP::hl.interpolatedWith (juce::Colours::white, 0.62f)
+            : PinkXP::dark.interpolatedWith (PinkXP::ink, 0.55f);
+
+        const bool isNeon   = (tokens.frameStyle == PinkXP::FrameStyle::neonTube);
+        const bool isCrt    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+        const bool isGlass  = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+        const bool isChrome = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+
+        // 抠像 / 透明模式：用户显式开启山脊线时不抑制，渲染柔和清晰的 0.38 轮廓（静音底仍为 alpha=0）
+        if (tokens.isChromaKey)
+        {
+            const juce::Colour col = isNeon   ? neonGlow
+                                   : isCrt    ? crtPhosphor
+                                   : isGlass  ? glassCrest
+                                   : isChrome ? chromeCrest
+                                              : (darkScene ? darkCrest : lightCrest);
+            return { col, 0.38f, 1.15f };
+        }
+
+        if (isNeon)
+            return { neonGlow, 0.65f, 1.35f * tokens.strokeWidthScale };
+
+        if (isCrt)
+            return { crtPhosphor, 0.60f, 1.30f * tokens.strokeWidthScale };
+
+        if (isGlass)
+            return { glassCrest, darkScene ? 0.50f : 0.46f, 1.20f * tokens.strokeWidthScale };
+
+        if (isChrome)
+            return { chromeCrest, darkScene ? 0.54f : 0.50f, 1.22f * tokens.strokeWidthScale };
+
+        return {
+            darkScene ? darkCrest : lightCrest,
+            darkScene ? 0.56f : 0.52f,
+            1.25f
+        };
+    }
+}
 
 // ==========================================================
 // Spectrogram3DModule
@@ -28,16 +94,19 @@ Spectrogram3DModule::Spectrogram3DModule (AnalyserHub& h)
 
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
-        // GL 快照底色跟随主题（瀑布图基色走下方 depthPalettesDirty 重建）
+        // 先标脏色板并失效离屏图像缓存，再重建 GL 快照，避免快照继续消费旧主题色板
+        depthPalettesDirty   = true;
+        imageCacheDirty      = true;
+        cached3DImage        = juce::Image();
+        cachedAppearanceGen_ = 0;
+        cachedFontGen_       = 0;
         buildGlSnapshot();
-        // 主题切换 → 山峰主题色与背景 fade 目标变化 → 重建色板 + 重绘
-        depthPalettesDirty = true;
-        imageCacheDirty    = true;
         repaint();
     });
 
     // 预分配历史缓冲 + 幅度→色板 LUT
     buildMagLut();
+    rebuildBinTiltGain();
     ensureHistory (defaultHistoryLen);
     depthPalettes.resize (visibleRows);
 }
@@ -62,63 +131,189 @@ juce::ValueTree Spectrogram3DModule::saveModuleSpecificState() const
 {
     juce::ValueTree s ("state");
     s.setProperty ("useThemeColours", useThemeColours(), nullptr);   // 保留旧键，降级打开仍能还原着色
-    s.setProperty ("colourMode", colourMode, nullptr);
-    s.setProperty ("depthDir",   depthDir, nullptr);
-    s.setProperty ("speed",      (double) pixelsPerSecond, nullptr);
+    s.setProperty ("colourMode",  colourMode, nullptr);
+    s.setProperty ("depthDir",    depthDir, nullptr);
+    s.setProperty ("speed",       (double) pixelsPerSecond, nullptr);
+    s.setProperty ("floorDb",     (double) floorDb, nullptr);
+    s.setProperty ("ceilDb",      (double) ceilDb, nullptr);
+    s.setProperty ("slope",       (double) slopeDbPerOct, nullptr);
+    s.setProperty ("depthFade",   (double) depthFadePct, nullptr);
+    s.setProperty ("heightScale", (double) heightScale, nullptr);
+    s.setProperty ("showRidges",  showRidges, nullptr);
+    s.setProperty ("shaper",      shaperMode, nullptr);
+    s.setProperty ("fftScale",    (int) fftScale, nullptr);
+    s.setProperty ("freqRange",   freqRange, nullptr);
+    s.setProperty ("showLabels",  showLabels, nullptr);
     return s;
 }
 
 void Spectrogram3DModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
     if (state.hasProperty ("colourMode"))
-        colourMode = juce::jlimit (0, 3, (int) state.getProperty ("colourMode"));
+        colourMode = juce::jlimit (0, 7, (int) state.getProperty ("colourMode"));
     else if (state.hasProperty ("useThemeColours"))
         colourMode = (bool) state.getProperty ("useThemeColours") ? 0 : 1;
 
-    if (state.hasProperty ("depthDir")) depthDir = juce::jlimit (0, 1, (int) state.getProperty ("depthDir"));
+    if (state.hasProperty ("depthDir"))    depthDir = juce::jlimit (0, 1, (int) state.getProperty ("depthDir"));
     if (state.hasProperty ("speed"))
         pixelsPerSecond = juce::jlimit (10.0f, 200.0f, (float) (double) state.getProperty ("speed"));
+    if (state.hasProperty ("floorDb"))     floorDb = juce::jlimit (-110.0f, -40.0f, (float) (double) state.getProperty ("floorDb"));
+    if (state.hasProperty ("ceilDb"))      ceilDb  = juce::jlimit (-30.0f, 0.0f, (float) (double) state.getProperty ("ceilDb"));
+    if (floorDb > ceilDb - 10.0f)          floorDb = ceilDb - 10.0f;
+    if (state.hasProperty ("slope"))       slopeDbPerOct = juce::jlimit (0.0f, 9.0f, (float) (double) state.getProperty ("slope"));
+    if (state.hasProperty ("depthFade"))   depthFadePct  = juce::jlimit (0.0f, 100.0f, (float) (double) state.getProperty ("depthFade"));
+    if (state.hasProperty ("heightScale")) heightScale   = juce::jlimit (0.3f, 2.0f, (float) (double) state.getProperty ("heightScale"));
+    if (state.hasProperty ("showRidges"))  showRidges    = (bool) state.getProperty ("showRidges");
+    if (state.hasProperty ("shaper"))      shaperMode    = juce::jlimit (0, 2, (int) state.getProperty ("shaper"));
+    if (state.hasProperty ("fftScale"))    fftScale      = y2k::fscale::fromIndex ((int) state.getProperty ("fftScale"));
+    if (state.hasProperty ("freqRange"))   freqRange     = juce::jlimit (0, 3, (int) state.getProperty ("freqRange"));
+    if (state.hasProperty ("showLabels"))  showLabels    = (bool) state.getProperty ("showLabels");
 
-    // 着色模式 / 深度方向变化 → 色板、投影与缓存重建
+    buildMagLut();
+    rebuildBinTiltGain();
     depthPalettesDirty = true;
     imageCacheDirty    = true;
     lastCanvasW = -1;
     refreshControlPanel();
+    buildGlSnapshot();
     repaint();
 }
 
 void Spectrogram3DModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
     out.push_back (ParamDef::choice ("colourMode", "Colours",
-        { "Theme", "Heat", "Grey", "Ice" },
-        "Theme follows the current colour theme. Heat is the classic blue-to-red map. "
-        "Grey is black to white. Ice runs dark blue to white.").in ("Look"));
+        { "Theme", "Heat", "Grey", "Ice", "Magma", "Inferno", "Plasma", "Viridis" },
+        "Theme follows the current colour theme. Magma, Inferno, Plasma and Viridis are perceptually uniform "
+        "studio colormaps. Heat, Grey and Ice are classic ramps.").in ("Colour"));
+    out.push_back (ParamDef::slider ("floorDb", "Floor", -110.0, -40.0, 2.0, " dB",
+        "Lowest level shown on the 3D floor. Raise it to flatten quiet background haze; lower it to lift soft tails.")
+        .in ("Colour"));
+    out.push_back (ParamDef::slider ("ceilDb", "Ceiling", -30.0, 0.0, 2.0, " dB",
+        "Level that reaches full height and peak colour. Lowering Ceiling makes quieter mixes rise taller.")
+        .in ("Colour"));
+    out.push_back (ParamDef::slider ("slope", "Tilt", 0.0, 9.0, 0.5, " dB/oct",
+        "Boosts higher frequencies around a 1 kHz pivot so hi-hats and upper harmonics rise evenly with bass.")
+        .in ("Colour"));
+    out.push_back (ParamDef::slider ("depthFade", "Depth fog", 0.0, 100.0, 5.0, " %",
+        "How strongly distant slices fade into the background. 0% keeps far history bright and crisp.")
+        .in ("Colour"));
+
     out.push_back (ParamDef::choice ("depthDir", "Depth direction",
         { "Back-right", "Back-left" },
         "Which way older slices recede. Back-right is the classic view; Back-left mirrors the landscape.")
-        .in ("Look"));
+        .in ("3D View"));
+    out.push_back (ParamDef::slider ("heightScale", "Peak height", 0.3, 2.0, 0.1, " x",
+        "Vertical elevation multiplier for the 3D spectrum ridges.")
+        .in ("3D View"));
+    out.push_back (ParamDef::toggle ("showRidges", "Ridge lines",
+        "Draw crisp highlight outlines along the crest of each 3D slice. Turn OFF for a smooth shaded terrain.")
+        .in ("3D View"));
+    out.push_back (ParamDef::choice ("shaper", "Sharpening",
+        { "Classic", "Sharp", "Sharper" },
+        "Classic: smooth raw FFT magnitude. Sharp: frequency reassignment blended with classic body for continuous note lines. "
+        "Sharper: pure frequency reassignment that collapses tones into razor-thin particle beams.")
+        .in ("3D View"));
     out.push_back (ParamDef::slider ("speed", "Speed", 10.0, 200.0, 1.0, " px/s",
-        "How fast the landscape rolls back. Slower keeps a longer history.").in ("Look"));
+        "How fast the landscape rolls back. Slower keeps a longer history.").in ("3D View"));
+
+    out.push_back (ParamDef::choice ("fftScale", "FFT scale",
+        { "Log", "Mel", "Linear" },
+        "How frequency is laid out along the frequency axis. Log gives every octave equal room, "
+        "Mel follows pitch perception, Linear gives equal Hz per pixel.")
+        .in ("Axis"));
+    out.push_back (ParamDef::choice ("freqRange", "Freq range",
+        { "Full", "Music", "Vocal", "Bass" },
+        "Zooms the frequency view: Full (20-20k Hz), Music (30-12k Hz), Vocal (80-8k Hz), or Bass (20-1k Hz).")
+        .in ("Axis"));
+    out.push_back (ParamDef::toggle ("showLabels", "Labels",
+        "Show frequency ticks and older/newer direction hints. Turn OFF for a clean borderless waterfall.")
+        .in ("Axis"));
 }
 
 double Spectrogram3DModule::getParamValue (const juce::String& id) const
 {
-    if (id == "colourMode") return (double) colourMode;
-    if (id == "depthDir")   return (double) depthDir;
-    if (id == "speed")      return (double) pixelsPerSecond;
+    if (id == "colourMode")  return (double) colourMode;
+    if (id == "floorDb")     return (double) floorDb;
+    if (id == "ceilDb")      return (double) ceilDb;
+    if (id == "slope")       return (double) slopeDbPerOct;
+    if (id == "depthFade")   return (double) depthFadePct;
+    if (id == "depthDir")    return (double) depthDir;
+    if (id == "heightScale") return (double) heightScale;
+    if (id == "showRidges")  return showRidges ? 1.0 : 0.0;
+    if (id == "shaper")      return (double) shaperMode;
+    if (id == "speed")       return (double) pixelsPerSecond;
+    if (id == "fftScale")    return (double) (int) fftScale;
+    if (id == "freqRange")   return (double) freqRange;
+    if (id == "showLabels")  return showLabels ? 1.0 : 0.0;
     return 0.0;
 }
 
 void Spectrogram3DModule::setParamValue (const juce::String& id, double v)
 {
-    if (id == "colourMode")      { colourMode = juce::jlimit (0, 3, juce::roundToInt (v)); depthPalettesDirty = true; }
-    else if (id == "depthDir")   { depthDir = juce::jlimit (0, 1, juce::roundToInt (v)); lastCanvasW = -1; }
-    else if (id == "speed")      { pixelsPerSecond = juce::jlimit (10.0f, 200.0f, (float) v); return; }
+    if (id == "colourMode")       { colourMode = juce::jlimit (0, 7, juce::roundToInt (v)); depthPalettesDirty = true; }
+    else if (id == "floorDb")     { floorDb = juce::jlimit (-110.0f, ceilDb - 10.0f, (float) v); buildMagLut(); }
+    else if (id == "ceilDb")      { ceilDb  = juce::jlimit (floorDb + 10.0f, 0.0f, (float) v); buildMagLut(); }
+    else if (id == "slope")       { slopeDbPerOct = juce::jlimit (0.0f, 9.0f, (float) v); rebuildBinTiltGain(); }
+    else if (id == "depthFade")   { depthFadePct = juce::jlimit (0.0f, 100.0f, (float) v); depthPalettesDirty = true; }
+    else if (id == "depthDir")    { depthDir = juce::jlimit (0, 1, juce::roundToInt (v)); lastCanvasW = -1; }
+    else if (id == "heightScale") { heightScale = juce::jlimit (0.3f, 2.0f, (float) v); lastCanvasW = -1; }
+    else if (id == "showRidges")  { showRidges = (v >= 0.5); }
+    else if (id == "shaper")      { shaperMode = juce::jlimit (0, 2, juce::roundToInt (v)); }
+    else if (id == "speed")       { pixelsPerSecond = juce::jlimit (10.0f, 200.0f, (float) v); return; }
+    else if (id == "fftScale")    { fftScale = y2k::fscale::fromIndex (juce::roundToInt (v)); rebuildBinTiltGain(); }
+    else if (id == "freqRange")   { freqRange = juce::jlimit (0, 3, juce::roundToInt (v)); rebuildBinTiltGain(); }
+    else if (id == "showLabels")  { showLabels = (v >= 0.5); }
     else return;
 
     imageCacheDirty = true;
     buildGlSnapshot();
     repaint();
+}
+
+float Spectrogram3DModule::activeMinFreqHz() const noexcept
+{
+    switch (freqRange)
+    {
+        case 1: return 30.0f;
+        case 2: return 80.0f;
+        case 3: return 20.0f;
+        default: return minFreqHz;
+    }
+}
+
+float Spectrogram3DModule::activeMaxFreqHz() const noexcept
+{
+    switch (freqRange)
+    {
+        case 1: return 12000.0f;
+        case 2: return 8000.0f;
+        case 3: return 1000.0f;
+        default: return maxFreqHz;
+    }
+}
+
+void Spectrogram3DModule::rebuildBinTiltGain()
+{
+    binTiltGain_.assign ((size_t) juce::jmax (1, numBins), 1.0f);
+    const double sr = hub.getSampleRate();
+    const double nyquist = (sr > 0.0) ? sr * 0.5 : 24000.0;
+    tiltSampleRate_ = sr;
+    if (slopeDbPerOct <= 1.0e-5f)
+        return;
+
+    const double fMin = (double) activeMinFreqHz();
+    const double fMax = juce::jmin ((double) activeMaxFreqHz(), nyquist * 0.95);
+    if (fMax <= fMin)
+        return;
+
+    const double denom = (double) juce::jmax (1, numBins - 1);
+    for (int i = 0; i < numBins; ++i)
+    {
+        const double u = (double) i / denom;
+        const double f = y2k::fscale::fromUnit (fftScale, u, fMin, fMax);
+        const float tiltDb = slopeDbPerOct * (float) std::log2 (juce::jmax (20.0, f) / 1000.0);
+        binTiltGain_[(size_t) i] = std::pow (10.0f, tiltDb * 0.05f);
+    }
 }
 
 // ----------------------------------------------------------
@@ -145,8 +340,12 @@ bool Spectrogram3DModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) co
 
 void Spectrogram3DModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 {
-    // 反馈 C7：不要气泡频率读数，只保留火山 + 余烬 + 旗帜
-    ctx.addModuleActor (makeVolcanoActor (hit.pos, { 6.0f, 10.0f }));
+    const auto canvas = getToyCanvasBounds();
+    juce::Point<float> depthVec { projSlantX, -projSlantY };
+    if (std::hypot (depthVec.x, depthVec.y) < 1.0e-4f)
+        depthVec = { depthDir == 1 ? -0.45f : 0.45f, -0.89f };
+
+    ctx.addModuleActorCapped (makeSpec3DPulseActor (hit.pos, canvas, depthVec), 6);
 }
 
 void Spectrogram3DModule::layoutContent (juce::Rectangle<int> contentBounds)
@@ -250,8 +449,8 @@ void Spectrogram3DModule::recomputeProjection (int canvasW, int canvasH)
     //   有信号时峰值堆叠在地板之上，超出顶部由 clipRegion 裁剪。
     const float slantY = (float) (canvasH - 4) / depthSpanY;
 
-    // 幅度高度
-    const float maxH = (float) canvasH * heightRatio;
+    // 幅度高度（受 heightScale 调节）
+    const float maxH = (float) canvasH * heightRatio * heightScale;
 
     // 原点（最新切片左下角）
     const float originX = padL;
@@ -290,6 +489,13 @@ float Spectrogram3DModule::freqToScreenX (int binIndex, int totalBins) const
 juce::Colour Spectrogram3DModule::valueToColour (float t) const noexcept
 {
     t = juce::jlimit (0.0f, 1.0f, t);
+    auto sampleRamp = [] (const juce::Colour* stops, int n, float u) noexcept -> juce::Colour
+    {
+        const float pos = juce::jlimit (0.0f, 1.0f, u) * (float) (n - 1);
+        const int idx = juce::jmin (n - 2, (int) pos);
+        return stops[idx].interpolatedWith (stops[idx + 1], pos - (float) idx);
+    };
+
     switch (colourMode)
     {
         case 2: return juce::Colour::fromFloatRGBA (t, t, t, 1.0f);   // Grey
@@ -297,9 +503,49 @@ juce::Colour Spectrogram3DModule::valueToColour (float t) const noexcept
         {
             const juce::Colour stops[] = { juce::Colour (0xff04081c), juce::Colour (0xff1c4aa0),
                                            juce::Colour (0xff4cc0e8), juce::Colour (0xfff2fbff) };
-            const float pos = t * 3.0f;
-            const int   i   = juce::jmin (2, (int) pos);
-            return stops[i].interpolatedWith (stops[i + 1], pos - (float) i);
+            return sampleRamp (stops, 4, t);
+        }
+        case 4:                                                        // Magma
+        {
+            const juce::Colour stops[] = {
+                juce::Colour (0xff050410), juce::Colour (0xff2b115f),
+                juce::Colour (0xff721f81), juce::Colour (0xffb73779),
+                juce::Colour (0xfff1605d), juce::Colour (0xfffeb078),
+                juce::Colour (0xfffcfdbf)
+            };
+            return sampleRamp (stops, 7, t);
+        }
+        case 5:                                                        // Inferno
+        {
+            const juce::Colour stops[] = {
+                juce::Colour (0xff04030b), juce::Colour (0xff280b53),
+                juce::Colour (0xff65156e), juce::Colour (0xff9f2a63),
+                juce::Colour (0xffd44842), juce::Colour (0xfff57d15),
+                juce::Colour (0xfffac228), juce::Colour (0xfffcffa4)
+            };
+            return sampleRamp (stops, 8, t);
+        }
+        case 6:                                                        // Plasma
+        {
+            const juce::Colour stops[] = {
+                juce::Colour (0xff0d0887), juce::Colour (0xff46039f),
+                juce::Colour (0xff7201a8), juce::Colour (0xff9c179e),
+                juce::Colour (0xffbd3786), juce::Colour (0xffd8576b),
+                juce::Colour (0xffed7953), juce::Colour (0xfffb9f3a),
+                juce::Colour (0xfff0f921)
+            };
+            return sampleRamp (stops, 9, t);
+        }
+        case 7:                                                        // Viridis
+        {
+            const juce::Colour stops[] = {
+                juce::Colour (0xff440154), juce::Colour (0xff482878),
+                juce::Colour (0xff3e4989), juce::Colour (0xff31688e),
+                juce::Colour (0xff26828e), juce::Colour (0xff1f9e89),
+                juce::Colour (0xff35b779), juce::Colour (0xff6ece58),
+                juce::Colour (0xfffde725)
+            };
+            return sampleRamp (stops, 9, t);
         }
         case 1:  return heatValueToColour (t);
         default: return themeValueToColour (t);
@@ -410,14 +656,7 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     const auto plot   = canvas.reduced (2);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
 
-    // 让 Hub 直接按 numBins 个对数频率点返回双路合并的线性幅度
-    const double nyquist = hub.getSampleRate() * 0.5;
-    const float  fMin    = minFreqHz;
-    const float  fMax    = juce::jmin (maxFreqHz, (float) (nyquist * 0.95));
-
-    hub.getSpectrumMagnitudesBlended (rowMagBuf, numBins, fMin, fMax);
-
-    // ---- 速度解耦 ----
+    // ---- 速度解耦（先判断是否需要推新列，跳过奇数 tick / nCols==0 帧的无用频谱重采样）----
     const double now = juce::Time::getMillisecondCounterHiRes();
     float dtMs = 0.0f;
     if (lastFrameMs > 0.0)
@@ -441,6 +680,34 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (nCols == 0)
         return;
 
+    // 按当前 freqRange / fftScale / shaper 获取线性幅度（仅在确需推列时执行）
+    const double sr      = hub.getSampleRate();
+    const double nyquist = (sr > 0.0) ? sr * 0.5 : 24000.0;
+    if (std::abs (sr - tiltSampleRate_) > 1.0)
+        rebuildBinTiltGain();
+
+    const float fMin = activeMinFreqHz();
+    const float fMax = juce::jmin (activeMaxFreqHz(), (float) (nyquist * 0.95));
+    if (fMax <= fMin) return;
+
+    if (shaperMode == 0)
+    {
+        hub.getSpectrumMagnitudesBlended (rowMagBuf, numBins, fMin, fMax, false, fftScale);
+    }
+    else if (shaperMode == 1)
+    {
+        hub.getSpectrumReassignedBlended (rowMagBuf, numBins, fMin, fMax, fftScale);
+        hub.getSpectrumMagnitudesBlended (classicMagBuf, numBins, fMin, fMax, false, fftScale);
+        constexpr float kClassicFloorScale = 0.35481339f; // -9 dB
+        for (int i = 0; i < numBins && i < rowMagBuf.size() && i < classicMagBuf.size(); ++i)
+            rowMagBuf.setUnchecked (i, juce::jmax (std::abs (rowMagBuf.getUnchecked (i)),
+                                                   std::abs (classicMagBuf.getUnchecked (i)) * kClassicFloorScale));
+    }
+    else
+    {
+        hub.getSpectrumReassignedBlended (rowMagBuf, numBins, fMin, fMax, fftScale);
+    }
+
     // 连续 push nCols 帧（都是当前幅度快照）
     for (int k = 0; k < nCols; ++k)
         pushFrame (rowMagBuf);
@@ -449,8 +716,9 @@ void Spectrogram3DModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // v2.9.3：更新 GL 直渲染快照（UI 线程，推列后数据已变化）
     buildGlSnapshot();
 
-    // v2.9：去掉 20ms（≈50fps）硬编码节流；仅在本帧确有新列推入时重绘
-    repaintFrameContent();
+    // GL 已接管且无悬停标尺时直接唤醒宿主 GL 线程，免除软件 CachedImage 重绘
+    if (hoverActive || ! requestGlFrameOnly())
+        repaintFrameContent();
 }
 
 // ----------------------------------------------------------
@@ -477,78 +745,49 @@ void Spectrogram3DModule::buildGlSnapshot()
         return;
 
     recomputeProjection (plot.getWidth(), plot.getHeight());
+    const auto curAppGen = PinkXP::getAppearanceGeneration();
+    if (curAppGen != paletteAppearanceGen_)
+    {
+        depthPalettesDirty    = true;
+        paletteAppearanceGen_ = curAppGen;
+    }
+
     const int effRows = juce::jmin (historyLen, juce::jmin (juce::jmax (1, frameCount), visibleRows));
     if (depthPalettesDirty || depthPalettesRows != effRows)
         rebuildDepthPalettes (effRows);
 
+    const auto& tokens    = PinkXP::getSkinTokens();
+    const bool  darkScene = (! useThemeColours()) || (PinkXP::content.getPerceivedBrightness() <= 0.55f);
+    const auto  ridge     = resolveRidgeStyle (tokens, showRidges, darkScene);
+
     auto snap = beginGlSnapshot();
-    // v2.9.4：逻辑 FBO 渲染（与 Waveform 同路径 —— 内容自包含在独立 FBO，
-    //   与组件缓存的交互和旧版"逻辑纹理 + 放大"一致，规避后缓冲直渲染在
-    //   dock/聚焦时的透明与拖影问题）
+    // v2.9.4：逻辑 FBO 渲染；3D 曲面与山脊始终保持平滑抗锯齿（snapToPixels = false）
+    snap->snapToPixels    = false;
     snap->renderToLogical = true;
-    snap->logicalW = canvas.getWidth();
-    snap->logicalH = canvas.getHeight();
-    snap->canvasLocal = canvas;
+    snap->logicalW        = canvas.getWidth();
+    snap->logicalH        = canvas.getHeight();
+    snap->canvasLocal     = canvas;
+    snap->fxRect          = canvas;
 
-    const int strips = numBins - 1;
+    const int  strips        = numBins - 1;
+    const bool drawRidges    = (ridge.baseAlpha > 0.001f);
+    const int  maxLayerVerts = strips * 6 + (drawRidges ? strips * 6 : 0);
 
-    // 单一顶点流布局（条带 triangles 与轮廓 lines 混排在同一 VBO，
-    //   逐层 drawArrays 用 offset 区分）：[背景 9 矩形][层0 条带+轮廓]...
-    //   层序 = 旧→新（新层后画覆盖旧层，3D 前后层次正确）。
-    constexpr int kBgRectCount = 9;
-    constexpr int kBgVertices  = kBgRectCount * 6;
-    const int vertsPerLayer = strips * 6;
-    const int linesPerLayer = numBins;
-    snap->vertices.resize ((size_t) (kBgVertices + effRows * (vertsPerLayer + linesPerLayer)) * 6);
-
-    {
-        float* bv = snap->vertices.data();
-        auto pushRect = [&] (juce::Rectangle<float> r, juce::Colour c)
-        {
-            const float x0 = r.getX(), y0 = r.getY(), x1 = r.getRight(), y1 = r.getBottom();
-            const float rr = c.getFloatRed(), gg = c.getFloatGreen(),
-                        bb = c.getFloatBlue(), aa = c.getFloatAlpha();
-            const float quad[36] = {
-                x0, y0, rr, gg, bb, aa,  x1, y0, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
-                x1, y0, rr, gg, bb, aa,  x1, y1, rr, gg, bb, aa,  x0, y1, rr, gg, bb, aa,
-            };
-            std::memcpy (bv, quad, sizeof (quad));
-            bv += 36;
-        };
-        // 与 PinkXP::drawSunken(g, canvas, PinkXP::content) 逐笔对应
-        //   绿幕：9 个矩形全部纯绿（保持背景段顶点数固定，不改段布局）
-        const bool ck = PinkXP::isChromaKeySkin();
-        const auto green = PinkXP::chromaKeyGreen();
-        auto pick = [&] (juce::Colour c) { return ck ? green : c; };
-        auto cr = canvas.toFloat();
-        pushRect (cr, pick (PinkXP::content));
-        pushRect ({ cr.getX(), cr.getY(), (float) cr.getWidth(), 2.0f }, pick (PinkXP::dark));
-        pushRect ({ cr.getX(), cr.getY(), 2.0f, (float) cr.getHeight() }, pick (PinkXP::dark));
-        pushRect ({ cr.getX(), cr.getBottom() - 2.0f, (float) cr.getWidth(), 2.0f }, pick (PinkXP::hl));
-        pushRect ({ cr.getRight() - 2.0f, cr.getY(), 2.0f, (float) cr.getHeight() }, pick (PinkXP::hl));
-        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, (float) cr.getWidth() - 4.0f, 1.0f }, pick (PinkXP::shdw));
-        pushRect ({ cr.getX() + 2.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, pick (PinkXP::shdw));
-        pushRect ({ cr.getX() + 2.0f, cr.getBottom() - 3.0f, (float) cr.getWidth() - 4.0f, 1.0f }, pick (juce::Colours::white));
-        pushRect ({ cr.getRight() - 3.0f, cr.getY() + 2.0f, 1.0f, (float) cr.getHeight() - 4.0f }, pick (juce::Colours::white));
-    }
-
-    // 绘制段描述：背景 + 逐层[条带 + 轮廓]
-    snap->segments.push_back ({ 0, kBgVertices, Primitive::Triangles });
-    {
-        int offset = kBgVertices;
-        for (int s = 0; s < effRows; ++s)
-        {
-            snap->segments.push_back ({ offset, vertsPerLayer, Primitive::Triangles });
-            offset += vertsPerLayer;
-            snap->segments.push_back ({ offset, linesPerLayer, Primitive::Lines });
-            offset += linesPerLayer;
-        }
-    }
+    // 单一三角形顶点流布局：[令牌驱动凹槽背景][层0 条带(+山脊丝带)]...
+    //   层序 = 旧→新（新层后画覆盖旧层，3D 前后层次正确），全三角化实现 Windows / macOS Core Profile 3.2
+    //   一致的 ~1.25px 抗锯齿等高线山脊，并合并为单次 GL draw call。
+    snap->vertices.reserve ((size_t) (96 + effRows * maxLayerVerts) * 6);
+    appendWellFrame (snap->vertices, canvas, PinkXP::content);
 
     const float inv255 = 1.0f / 255.0f;
     const float ox = (float) plot.getX();
     const float oy = (float) plot.getY();
-    float* v = snap->vertices.data() + (size_t) kBgVertices * 6;  // 条带顶点从背景之后开始
+    const float halfW = 0.5f * ridge.cpuWidth;
+    const float rr = ridge.colour.getFloatRed();
+    const float rg = ridge.colour.getFloatGreen();
+    const float rb = ridge.colour.getFloatBlue();
+    const int   ridgeFloorIdx = tokens.isChromaKey ? 15 : 2;
+    const float ridgeRampInv  = tokens.isChromaKey ? (1.0f / 14.0f) : (1.0f / 10.0f);
 
     // v2.9.3：按"旧层→新层"顺序构建顶点流。GPU 按提交顺序光栅化，
     //   与旧软件路径（renderToImage 的 d 从 effRows-1 递减到 0）一致 ——
@@ -562,13 +801,20 @@ void Spectrogram3DModule::buildGlSnapshot()
         const float baseY  = oy + projOriginY - (float) d * projSlantY;
         const float depthX = (float) d * projSlantX;
 
-        // 该层颜色：magToIdx → depthPalettes（ARGB → RGBA floats）
+        // 该层颜色与几何：mag * binTiltGain → magToIdx → depthPalettes
         std::array<float, 256 * 4> rgba;
+        std::array<float, 256>     binX, binTopY;
+        std::array<int,   256>     binIdx;
+        jassert (numBins <= 256);
         for (int i = 0; i < numBins; ++i)
         {
-            const float mag = row[(size_t) i];
-            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
-            const int   idx = (int) magToIdx[(size_t) mi];
+            const float gain = (i < (int) binTiltGain_.size()) ? binTiltGain_[(size_t) i] : 1.0f;
+            const float mag  = juce::jlimit (0.0f, 1.0f, row[(size_t) i] * gain);
+            const int   mi   = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
+            const int   idx  = (int) magToIdx[(size_t) mi];
+            binIdx[(size_t) i]  = idx;
+            binX[(size_t) i]    = ox + projOriginX + depthX + (float) i * projBinWidth;
+            binTopY[(size_t) i] = baseY - (float) idx * inv255 * projMaxH;
             const juce::Colour c = depthPalettes[(size_t) d][(size_t) idx];
             rgba[(size_t) i * 4 + 0] = c.getFloatRed();
             rgba[(size_t) i * 4 + 1] = c.getFloatGreen();
@@ -577,47 +823,119 @@ void Spectrogram3DModule::buildGlSnapshot()
         }
 
         // 条带三角形（GL_TRIANGLES，6 顶点/条带，颜色与顶部 y 取自该列幅度）
-        //   —— 同层内先画条带，轮廓线随后（与旧软件路径一致）
+        //   —— 同层内先画条带，山脊丝带随后（与旧软件路径严格同序）
         for (int i = 0; i < strips; ++i)
         {
-            const float mag = row[(size_t) i];
-            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
-            const int   idx = (int) magToIdx[(size_t) mi];
-            const float x0  = ox + projOriginX + depthX + (float) i * projBinWidth;
+            const float a = rgba[(size_t) i * 4 + 3];
+            if (a <= 0.001f)
+                continue;
+
+            const float x0  = binX[(size_t) i];
             const float x1  = x0 + projBinWidth;
-            const float top = baseY - (float) idx * inv255 * projMaxH;
+            const float top = binTopY[(size_t) i];
             const float yb  = baseY;
 
             const float r = rgba[(size_t) i * 4 + 0];
             const float g = rgba[(size_t) i * 4 + 1];
             const float b = rgba[(size_t) i * 4 + 2];
-            const float a = rgba[(size_t) i * 4 + 3];
 
-            // 三角形 1: (x0,top) (x1,top) (x0,yb)
-            *v++ = x0; *v++ = top; *v++ = r; *v++ = g; *v++ = b; *v++ = a;
-            *v++ = x1; *v++ = top; *v++ = r; *v++ = g; *v++ = b; *v++ = a;
-            *v++ = x0; *v++ = yb;  *v++ = r; *v++ = g; *v++ = b; *v++ = a;
-            // 三角形 2: (x1,top) (x1,yb) (x0,yb)
-            *v++ = x1; *v++ = top; *v++ = r; *v++ = g; *v++ = b; *v++ = a;
-            *v++ = x1; *v++ = yb;  *v++ = r; *v++ = g; *v++ = b; *v++ = a;
-            *v++ = x0; *v++ = yb;  *v++ = r; *v++ = g; *v++ = b; *v++ = a;
+            const float q[36] = {
+                x0, top, r, g, b, a,  x1, top, r, g, b, a,  x0, yb, r, g, b, a,
+                x1, top, r, g, b, a,  x1, yb,  r, g, b, a,  x0, yb, r, g, b, a,
+            };
+            snap->vertices.insert (snap->vertices.end(), q, q + 36);
         }
 
-        // 轮廓线顶点（GL_LINES，白色 25% alpha）：顶部折线（画在本层条带之后）
-        //   绿幕：alpha 置 0（静音时每层轮廓都压在基线上，会在绿幕上叠出一片网格）
-        const float outlineAlpha = PinkXP::isChromaKeySkin() ? 0.0f : 0.25f;
+        // 山脊等高线丝带（GL_TRIANGLES 限幅斜接带，~1.25px 抗锯齿，静音底保持 alpha=0）
+        if (! drawRidges)
+            continue;
+
+        const float depthFrac    = (effRows > 1) ? (float) d / (float) (effRows - 1) : 0.0f;
+        const float outlineAlpha = ridge.baseAlpha * (1.0f - 0.70f * depthFrac);
+
+        std::array<float, 256> offX, offY, elevA;
         for (int i = 0; i < numBins; ++i)
         {
-            const float mag = row[(size_t) i];
-            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
-            const int   idx = (int) magToIdx[(size_t) mi];
-            const float x   = ox + projOriginX + depthX + (float) i * projBinWidth;
-            const float top = baseY - (float) idx * inv255 * projMaxH;
-            *v++ = x;
-            *v++ = top;
-            *v++ = 1.0f; *v++ = 1.0f; *v++ = 1.0f; *v++ = outlineAlpha;
+            const int idx = binIdx[(size_t) i];
+            elevA[(size_t) i] = (idx <= ridgeFloorIdx)
+                                    ? 0.0f
+                                    : juce::jlimit (0.0f, 1.0f, (float) (idx - ridgeFloorIdx) * ridgeRampInv);
+        }
+
+        for (int i = 0; i < numBins; ++i)
+        {
+            float n0x = 0.0f, n0y = 1.0f;
+            float n1x = 0.0f, n1y = 1.0f;
+            bool has0 = false, has1 = false;
+            if (i > 0)
+            {
+                const float dx = binX[(size_t) i]    - binX[(size_t) i - 1];
+                const float dy = binTopY[(size_t) i] - binTopY[(size_t) i - 1];
+                const float l  = std::sqrt (dx * dx + dy * dy);
+                if (l > 1.0e-5f) { n0x = -dy / l; n0y = dx / l; has0 = true; }
+            }
+            if (i + 1 < numBins)
+            {
+                const float dx = binX[(size_t) i + 1]    - binX[(size_t) i];
+                const float dy = binTopY[(size_t) i + 1] - binTopY[(size_t) i];
+                const float l  = std::sqrt (dx * dx + dy * dy);
+                if (l > 1.0e-5f) { n1x = -dy / l; n1y = dx / l; has1 = true; }
+            }
+
+            float ax = 0.0f, ay = 1.0f;
+            float miterScale = 1.0f;
+            if (has0 && has1)
+            {
+                ax = n0x + n1x;
+                ay = n0y + n1y;
+                const float l = std::sqrt (ax * ax + ay * ay);
+                if (l > 1.0e-5f)
+                {
+                    ax /= l;
+                    ay /= l;
+                    const float dot = n0x * ax + n0y * ay;
+                    miterScale = 1.0f / juce::jmax (0.65f, dot);
+                }
+                else
+                {
+                    ax = n0x;
+                    ay = n0y;
+                }
+            }
+            else if (has0) { ax = n0x; ay = n0y; }
+            else if (has1) { ax = n1x; ay = n1y; }
+
+            offX[(size_t) i] = ax * halfW * miterScale;
+            offY[(size_t) i] = ay * halfW * miterScale;
+        }
+
+        for (int i = 0; i < strips; ++i)
+        {
+            const float a0 = outlineAlpha * elevA[(size_t) i];
+            const float a1 = outlineAlpha * elevA[(size_t) i + 1];
+            if (a0 <= 0.001f && a1 <= 0.001f)
+                continue;
+
+            const float p0x = binX[(size_t) i]        + offX[(size_t) i];
+            const float p0y = binTopY[(size_t) i]     + offY[(size_t) i];
+            const float p1x = binX[(size_t) i + 1]    + offX[(size_t) i + 1];
+            const float p1y = binTopY[(size_t) i + 1] + offY[(size_t) i + 1];
+            const float p2x = binX[(size_t) i]        - offX[(size_t) i];
+            const float p2y = binTopY[(size_t) i]     - offY[(size_t) i];
+            const float p3x = binX[(size_t) i + 1]    - offX[(size_t) i + 1];
+            const float p3y = binTopY[(size_t) i + 1] - offY[(size_t) i + 1];
+
+            const float q[36] = {
+                p0x, p0y, rr, rg, rb, a0,  p1x, p1y, rr, rg, rb, a1,  p2x, p2y, rr, rg, rb, a0,
+                p1x, p1y, rr, rg, rb, a1,  p3x, p3y, rr, rg, rb, a1,  p2x, p2y, rr, rg, rb, a0,
+            };
+            snap->vertices.insert (snap->vertices.end(), q, q + 36);
         }
     }
+
+    const int totalVerts = (int) (snap->vertices.size() / 6);
+    if (totalVerts > 0)
+        snap->segments.push_back ({ 0, totalVerts, Primitive::Triangles });
 
     publishGlSnapshot (std::move (snap));
 }
@@ -647,8 +965,17 @@ void Spectrogram3DModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle
     const auto canvas = getCanvasBounds (contentBounds);
     const auto plot   = canvas.reduced (2);
 
-    g.setColour (PinkXP::btnFace);
-    g.fillRect (contentBounds);
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool chromaHidden = PinkXP::isChromaKeySkin() && ! PinkXP::isChromaRevealed (*this);
+    if (! (chromaHidden && PinkXP::isTransparentBackdrop()))
+    {
+        g.setColour (chromaHidden
+                         ? PinkXP::chromaKeyGreen()
+                         : (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel
+                                ? PinkXP::btnFace
+                                : PinkXP::face));
+        g.fillRect (contentBounds);
+    }
 
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
         return;
@@ -656,30 +983,31 @@ void Spectrogram3DModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle
     const int effLen = juce::jmax (1, frameCount);
     if (effLen <= 0) return;
 
-    // 离屏 Image 缓存：数据脏 / canvas 尺寸变化 / GL 上下文变化 / 目标类型
-    // 变化时重建。
-    //   每层全量 strokePath（配 Path 复用）已消除 P6 降频的视觉回退。
-    //   ⚠ GL 纹理 Image 只能画进 GL 目标。软件目标（hover 预览快照等）必须
-    //     改用软件 Image，否则 macOS CoreGraphics 会越界读崩溃（详见
-    //     renderToImage 注释）。缓存类型不匹配时也必须重建，否则会残留
-    //     另一条路径的 Image。
-    auto* const currentGl = juce::OpenGLContext::getCurrentContext();
-    const bool  wantGlImage = ! isSoftwarePaintTarget() && currentGl != nullptr;
+    const auto  curAppGen   = PinkXP::getAppearanceGeneration();
+    const auto  curFontGen  = PinkXP::getFontGeneration();
 
     if (imageCacheDirty || cached3DImage.isNull()
-        || cachedGlImage != wantGlImage
-        || (wantGlImage && glImageContext != static_cast<void*> (currentGl))
         || cachedCanvasW != canvas.getWidth()
-        || cachedCanvasH != canvas.getHeight())
+        || cachedCanvasH != canvas.getHeight()
+        || cachedAppearanceGen_ != curAppGen
+        || cachedFontGen_ != curFontGen)
     {
-        renderToImage(canvas);
-        imageCacheDirty = false;
+        if (cachedAppearanceGen_ != curAppGen)
+            depthPalettesDirty = true;
+        renderToImage (canvas);
+        imageCacheDirty      = false;
+        cachedAppearanceGen_ = curAppGen;
+        cachedFontGen_       = curFontGen;
     }
 
     // P4: 将降分辨率 Image 放大到 canvas 尺寸（单次 drawImage 完成上采样 blit）
+    g.setOpacity (1.0f);
     g.drawImage (cached3DImage,
                  canvas.getX(), canvas.getY(), canvas.getWidth(), canvas.getHeight(),
                  0, 0, cached3DImage.getWidth(), cached3DImage.getHeight());
+
+    // 画布光学质感覆层（与 GL s3dSkinFxShader 对齐：CRT 扫描线+暗角 / Glass 镜面 / Neon 内沿辉光）
+    PinkXP::Craft::drawCanvasFinishOverlay (g, canvas);
 
     // 轴标签浮绘在 3D 视图上方（不进入 Image，保证文字清晰度）
     drawAxisLabels (g, plot);
@@ -722,19 +1050,19 @@ void Spectrogram3DModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int>
 
     const double sampleRate = hub.getSampleRate();
     const double nyquist    = (sampleRate > 0.0) ? sampleRate * 0.5 : 24000.0;
-    const double fMin       = (double) minFreqHz;
-    const double fMax       = juce::jmin((double) maxFreqHz, nyquist);
+    const double fMin       = (double) activeMinFreqHz();
+    const double fMax       = juce::jmin ((double) activeMaxFreqHz(), nyquist * 0.95);
 
-    // X → 频率（对数；频率轴宽度 = projBinWidth × (numBins-1)）
-    const float freqAxisW = projBinWidth * (float)(numBins - 1);
-    const float t = (float)(hoverPos.x - canvas.getX() - projOriginX)
-                  / juce::jmax(1.0f, freqAxisW);
-    const double logA   = std::log10(fMin);
-    const double logB   = std::log10(fMax);
-    const float  freqHz = (float) std::pow(10.0,
-        logA + juce::jlimit(0.0, 1.0, (double) t) * (logB - logA));
+    // X → 频率（按当前 fftScale 换算）
+    const float freqAxisW = projBinWidth * (float) (numBins - 1);
+    const float t = juce::jlimit (0.0f, 1.0f,
+        (float) (hoverPos.x - canvas.getX() - projOriginX) / juce::jmax (1.0f, freqAxisW));
+    const float freqHz = (float) y2k::fscale::fromUnit (fftScale, (double) t, fMin, fMax);
 
-    const juce::String readout = PinkXP::formatFreqHz(freqHz);
+    juce::String readout = PinkXP::formatFreqHz(freqHz);
+    const juce::String note = PinkXP::noteNameForHz(freqHz);
+    if (note.isNotEmpty())
+        readout += "  " + note;
     PinkXP::drawHoverRuler(g, canvas, hoverPos, readout);
 }
 
@@ -747,11 +1075,12 @@ void Spectrogram3DModule::drawHoverRuler(juce::Graphics& g, juce::Rectangle<int>
 // ----------------------------------------------------------
 void Spectrogram3DModule::buildMagLut()
 {
+    const float span = juce::jmax (1.0f, ceilDb - floorDb);
     for (int i = 0; i < 4096; ++i)
     {
         const float mag = (float) i * (1.0f / 4095.0f);
         const float db  = juce::Decibels::gainToDecibels (juce::jmax (1.0e-7f, mag));
-        const float t01 = juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
+        const float t01 = juce::jlimit (0.0f, 1.0f, (db - floorDb) / span);
         magToIdx[(size_t) i] = (uint8_t) juce::jlimit (0, 255, (int) std::lround (t01 * 255.0f));
     }
 }
@@ -778,10 +1107,13 @@ void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
         depthPalettes.resize ((size_t) nRows);
 
     // 深度 fade 目标：主题模式向画布底色融合，热力图模式向深蓝黑融合
-    //   绿幕：远处层与低能量条带都融进纯绿（抠像后自然淡出）
-    const bool chromaKey = PinkXP::isChromaKeySkin();
-    const juce::Colour fadeTarget = chromaKey ? PinkXP::chromaKeyGreen()
-                                  : useThemeColours() ? PinkXP::content : juce::Colour (8, 8, 24);
+    //   · 绿幕：远处层与低能量条带融进纯绿（抠像后自然淡出）
+    //   · 透明：保持山脊纯色 RGB，仅衰减 alpha 至 0（零绿边、零黑雾）
+    const bool greenBackdrop       = PinkXP::isGreenScreenBackdrop();
+    const bool transparentBackdrop = PinkXP::isTransparentBackdrop();
+    const bool chromaKey           = PinkXP::isChromaKeySkin();
+    const juce::Colour fadeTarget  = greenBackdrop ? PinkXP::chromaKeyGreen()
+                                   : useThemeColours() ? PinkXP::content : juce::Colour (8, 8, 24);
     // 先算基准色板（无深度 fade）
     std::array<juce::Colour, 256> basePalette;
     for (int i = 0; i < 256; ++i)
@@ -791,13 +1123,15 @@ void Spectrogram3DModule::rebuildDepthPalettes (int nRows)
                                             : valueToColour (t);
     }
 
+    const float maxFade = juce::jlimit (0.0f, 1.0f, depthFadePct * 0.01f);
     for (int d = 0; d < nRows; ++d)
     {
         const float depthFade = (nRows > 1) ? (float) d / (float) (nRows - 1) : 0.0f;
-        const float fadeAmt   = depthFade * 0.65f;
+        const float fadeAmt   = depthFade * maxFade;
         for (int i = 0; i < 256; ++i)
-            depthPalettes[(size_t) d][(size_t) i] =
-                basePalette[(size_t) i].interpolatedWith (fadeTarget, fadeAmt);
+            depthPalettes[(size_t) d][(size_t) i] = transparentBackdrop
+                ? basePalette[(size_t) i].withMultipliedAlpha (1.0f - fadeAmt)
+                : basePalette[(size_t) i].interpolatedWith (fadeTarget, fadeAmt);
     }
 
     depthPalettesRows  = nRows;
@@ -836,46 +1170,25 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     const int rw = juce::jmax (8, (int) ((float) cw * scale));
     const int rh = juce::jmax (8, (int) ((float) ch * scale));
 
-    // v2.9.2：GL 上下文可用时使用 FBO 驻留 Image —— 12600 次 fillRect 由
-    //   GPU 光栅化、drawImage 直接复用 FBO 纹理（零上传），绕开 CPU 软光栅
-    //   与每帧整图纹理重传两大成本。上下文不可用（软光栅回退 / 浮动窗口
-    //   过渡态）时回退软件 Image。
-    //
-    //   ⚠ 仅在"绘制目标本身就是 GL 目标"时才允许创建 GL 纹理 Image：
-    //     OpenGL 纹理 Image 的 BitmapData 是"负 lineStride + 末行指针"，
-    //     juce_CoreGraphicsContext_mac.mm::createCGImage 会把整块内存直接交给
-    //     CFDataCreate（bytesPerRow 还会被当成巨大的 size_t），macOS 下必然
-    //     越界读 → _platform_memmove 崩溃闪退。
-    //     Windows 的软件光栅器按行寻址（lineStride 可为负），所以只在 mac 上炸。
-    //     典型触发：添加模块菜单 hover 预览走 createComponentSnapshot —— 虽然
-    //     GL 渲染线程上 getCurrentContext() 非空，但目标是软件 Image。
-    auto* ctx = isSoftwarePaintTarget() ? nullptr : juce::OpenGLContext::getCurrentContext();
+    // 回退绘制路径恒使用 SoftwareImageType：
+    //   · 正常运行时 Spectrogram3D 在停靠态与脱离态均走 GlDirectRenderer GPU 直绘，
+    //     本函数仅在 GL 不可用或跨上下文迁移的首帧过渡期触发；
+    //   · 严禁使用 OpenGLImageType（OpenGLFrameBufferImage 内部持有原 OpenGLContext 的裸引用，
+    //     脱离窗口销毁后再次替换/析构 cached3DImage 会解引用已释放上下文，并在 Editor 活跃
+    //     上下文里误删同名 FBO/纹理句柄，引发偶发闪退与画面损坏）。
+    glImageContext = nullptr;
+    if (cached3DImage.isNull()
+        || cachedGlImage
+        || cached3DImage.getWidth()  != rw
+        || cached3DImage.getHeight() != rh)
+    {
+        cached3DImage = juce::Image (juce::Image::ARGB, rw, rh, true, juce::SoftwareImageType());
+        cachedGlImage = false;
+    }
 
-    if (ctx != nullptr)
-    {
-        if (cached3DImage.isNull()
-            || ! cachedGlImage
-            || glImageContext != static_cast<void*> (ctx)
-            || cached3DImage.getWidth()  != rw
-            || cached3DImage.getHeight() != rh)
-        {
-            cached3DImage = juce::Image (juce::OpenGLImageType().create (juce::Image::ARGB, rw, rh, false));
-            glImageContext = static_cast<void*> (ctx);
-            cachedGlImage  = true;
-        }
-    }
-    else
-    {
-        glImageContext = nullptr;
-        if (cached3DImage.isNull()
-            || cachedGlImage
-            || cached3DImage.getWidth()  != rw
-            || cached3DImage.getHeight() != rh)
-        {
-            cached3DImage = juce::Image (juce::Image::ARGB, rw, rh, true);
-            cachedGlImage = false;
-        }
-    }
+    const bool transparentBackdrop = PinkXP::isTransparentBackdrop();
+    if (transparentBackdrop)
+        cached3DImage.clear (cached3DImage.getBounds(), juce::Colours::transparentBlack);
 
     juce::Graphics ig (cached3DImage);
     // P4: 缩放变换 —— 后续所有 fillRect/strokePath 用全尺寸 cw×ch 坐标，
@@ -883,11 +1196,15 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
     ig.addTransform (juce::AffineTransform::scale (scale));
 
     // 底衬（Image-local 坐标 → 由变换转为 scaled 坐标）
-    //   先整图铺底（FBO Image 无初始内容且避免每帧 BitmapData clear 的昂贵路径）
+    //   · 透明模式已清空为纯 alpha=0，不铺不透明底色
+    //   · 正常/绿幕先整图铺底（FBO Image 无初始内容且避免每帧 BitmapData clear 的昂贵路径）
     juce::Rectangle<int> imgCanvas (0, 0, cw, ch);
-    ig.setColour (PinkXP::isChromaKeySkin() ? PinkXP::chromaKeyGreen() : PinkXP::content);
-    ig.fillRect (imgCanvas.toFloat());
-    drawBackground (ig, imgCanvas);
+    if (! transparentBackdrop)
+    {
+        ig.setColour (PinkXP::isGreenScreenBackdrop() ? PinkXP::chromaKeyGreen() : PinkXP::content);
+        ig.fillRect (imgCanvas.toFloat());
+        drawBackground (ig, imgCanvas);
+    }
 
     const auto plot = imgCanvas.reduced (2);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
@@ -896,9 +1213,20 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
 
     const int effRows = juce::jmin (historyLen, juce::jmin (effLen, visibleRows));
 
-    // 深度色板只在投影/行数变化时重建
+    const auto curAppGen = PinkXP::getAppearanceGeneration();
+    if (curAppGen != paletteAppearanceGen_)
+    {
+        depthPalettesDirty    = true;
+        paletteAppearanceGen_ = curAppGen;
+    }
+
+    // 深度色板只在投影/行数/外观代次变化时重建
     if (depthPalettesDirty || depthPalettesRows != effRows)
         rebuildDepthPalettes (effRows);
+
+    const auto& tokens    = PinkXP::getSkinTokens();
+    const bool  darkScene = (! useThemeColours()) || (PinkXP::content.getPerceivedBrightness() <= 0.55f);
+    const auto  ridge     = resolveRidgeStyle (tokens, showRidges, darkScene);
 
     const float ox = (float) plot.getX();
     const float oy = (float) plot.getY();
@@ -908,7 +1236,9 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
 
     // Path 对象复用：clear() 替代每层重建，避免 VTune 报告的 HeapAlloc 热点
     juce::Path outline;
-    const juce::PathStrokeType outlineStroke(0.6f);
+    const juce::PathStrokeType outlineStroke (juce::jmax (0.5f, ridge.cpuWidth),
+                                              juce::PathStrokeType::curved,
+                                              juce::PathStrokeType::rounded);
 
     // v2.9.2：恢复旧版单遍全高绘制。上一版"楔形裁剪"虽减少像素量，但轮廓线
     //   超出楔形部分不再被后续层覆盖，露出逐列竖线（立方体 + 分界线观感），
@@ -926,10 +1256,10 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
         jassert (numBins <= 256);
         for (int i = 0; i < numBins; ++i)
         {
-            // P3: magToIdx LUT 替代 gainToDecibels + jlimit + lround
-            const float mag = row[(size_t) i];
-            const int   mi  = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
-            const int   idx = (int) magToIdx[(size_t) mi];
+            const float gain = (i < (int) binTiltGain_.size()) ? binTiltGain_[(size_t) i] : 1.0f;
+            const float mag  = juce::jlimit (0.0f, 1.0f, row[(size_t) i] * gain);
+            const int   mi   = juce::jlimit (0, 4095, (int) (mag * 4095.0f));
+            const int   idx  = (int) magToIdx[(size_t) mi];
 
             binX[(size_t) i]    = ox + projOriginX + depthX + (float) i * projBinWidth;
             binTopY[(size_t) i] = baseY - (float) idx * (1.0f / 255.0f) * projMaxH;
@@ -938,28 +1268,48 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
 
         for (int i = 0; i < numBins - 1; ++i)
         {
-            // P3: 深度色板直接查表，替代 interpolatedWith
-            ig.setColour (depthPalettes[(size_t) d][(size_t) colIdx[(size_t) i]]);
+            // P3: 深度色板直接查表，替代 interpolatedWith（透明模式跳过 alpha=0 静音底列）
+            const auto col = depthPalettes[(size_t) d][(size_t) colIdx[(size_t) i]];
+            if (col.getAlpha() == 0)
+                continue;
+            ig.setColour (col);
             const float top = binTopY[(size_t) i];
             const float h   = juce::jmax (0.5f, baseY - top);
             ig.fillRect (binX[(size_t) i], top, projBinWidth, h);
         }
 
-        // 顶部轮廓线：复用循环外 Path 对象，clear() 后重建，
-        //   避免每层分配/销毁的堆开销（VTune 显示 HeapAlloc 位居热点前列）
-        //   绿幕：不画（与 GL 路径 alpha=0 一致）
-        if (PinkXP::isChromaKeySkin())
+        // 顶部等高线山脊轮廓：与 GL 路径 1:1 对齐（跳过静音底，平滑抗锯齿）
+        if (ridge.baseAlpha <= 0.001f)
             continue;
 
+        const int ridgeFloorIdx = tokens.isChromaKey ? 15 : 2;
         outline.clear();
-        outline.startNewSubPath(binX[0], baseY);
-        outline.lineTo         (binX[0], binTopY[0]);
+        bool inRidge = false;
         for (int i = 0; i < numBins - 1; ++i)
-            outline.lineTo(binX[(size_t)i + 1], binTopY[(size_t)i + 1]);
-        outline.lineTo(binX[(size_t)(numBins - 1)], baseY);
+        {
+            const bool elevated = (colIdx[(size_t) i] > ridgeFloorIdx) || (colIdx[(size_t) i + 1] > ridgeFloorIdx);
+            if (elevated)
+            {
+                if (! inRidge)
+                {
+                    outline.startNewSubPath (binX[(size_t) i], binTopY[(size_t) i]);
+                    inRidge = true;
+                }
+                outline.lineTo (binX[(size_t) i + 1], binTopY[(size_t) i + 1]);
+            }
+            else
+            {
+                inRidge = false;
+            }
+        }
 
-        ig.setColour(juce::Colours::white.withAlpha(0.25f));
-        ig.strokePath(outline, outlineStroke);
+        if (! outline.isEmpty())
+        {
+            const float depthFrac  = (effRows > 1) ? (float) d / (float) (effRows - 1) : 0.0f;
+            const float layerAlpha = ridge.baseAlpha * (1.0f - 0.70f * depthFrac);
+            ig.setColour (ridge.colour.withAlpha (layerAlpha));
+            ig.strokePath (outline, outlineStroke);
+        }
     }
 }
 
@@ -968,87 +1318,152 @@ void Spectrogram3DModule::renderToImage (juce::Rectangle<int> canvas)
 // ----------------------------------------------------------
 void Spectrogram3DModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
-    if (PinkXP::isChromaKeySkin())
+    if (PinkXP::isTransparentBackdrop())
+        return;
+    if (PinkXP::isGreenScreenBackdrop())
     {
         g.setColour (PinkXP::chromaKeyGreen());
         g.fillRect (canvas);
         return;
     }
-    PinkXP::drawSunken (g, canvas, PinkXP::content);
+    PinkXP::Craft::drawPanelWell (g, canvas, PinkXP::content, PinkXP::WellKind::canvas);
 }
 
 // ----------------------------------------------------------
-// 轴标签 —— 频率标签在底部，older/newer 提示在顶部/左边
+// 轴标签 —— 频率标签在底部，older/newer 提示在顶部/右下（耦合 Craft::drawBadgePill）
 // ----------------------------------------------------------
 void Spectrogram3DModule::drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
-    if (PinkXP::isChromaKeySkin())
-        return;   // 绿幕：刻度 / 提示文字不画
+    if (PinkXP::isChromaKeySkin() || ! showLabels)
+        return;   // 绿幕或关闭刻度标签：不画
 
-    g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
+    const auto& tokens    = PinkXP::getSkinTokens();
+    const bool  darkScene = (! useThemeColours()) || (PinkXP::content.getPerceivedBrightness() <= 0.55f);
+    const bool  isNeon    = (tokens.frameStyle == PinkXP::FrameStyle::neonTube);
+    const bool  isCrt     = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const bool  isGlass   = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
 
-    // 频率标签（浮绘在底部）
+    juce::Colour badgeFill;
+    juce::Colour badgeBorder;
+    if (isNeon)
+    {
+        badgeFill   = PinkXP::content.interpolatedWith (juce::Colours::black, 0.52f).withAlpha (0.90f);
+        badgeBorder = PinkXP::sel.withAlpha (0.86f);
+    }
+    else if (isCrt)
+    {
+        badgeFill   = PinkXP::content.interpolatedWith (juce::Colours::black, 0.45f).withAlpha (0.92f);
+        badgeBorder = PinkXP::sel.withAlpha (0.86f);
+    }
+    else if (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel)
+    {
+        badgeFill   = darkScene ? juce::Colour (0xd80c0a14) : PinkXP::btnFace.withAlpha (0.92f);
+        badgeBorder = darkScene ? PinkXP::pink300.withAlpha (0.78f) : PinkXP::dark.withAlpha (0.85f);
+    }
+    else if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+    {
+        badgeFill   = darkScene
+                          ? PinkXP::face.interpolatedWith (juce::Colour (0xff1a1d24), 0.52f).withAlpha (0.90f)
+                          : PinkXP::face.interpolatedWith (PinkXP::hl, 0.28f).withAlpha (0.92f);
+        badgeBorder = darkScene
+                          ? PinkXP::hl.interpolatedWith (juce::Colours::white, 0.35f).withAlpha (0.36f)
+                          : PinkXP::dark.withAlpha (0.48f);
+    }
+    else if (isGlass)
+    {
+        badgeFill   = darkScene
+                          ? juce::Colour (0xb2161c28)
+                          : PinkXP::face.interpolatedWith (juce::Colours::white, 0.35f).withAlpha (0.82f);
+        badgeBorder = darkScene
+                          ? juce::Colours::white.withAlpha (0.30f)
+                          : PinkXP::dark.withAlpha (0.24f);
+    }
+    else if (tokens.frameStyle == PinkXP::FrameStyle::modernStudio)
+    {
+        badgeFill   = darkScene ? juce::Colour (0xb8101218)
+                                : PinkXP::content.interpolatedWith (PinkXP::face, 0.48f).withAlpha (0.88f);
+        badgeBorder = darkScene ? juce::Colours::white.withAlpha (0.16f)
+                                : PinkXP::skinHairlineOn (PinkXP::face, 0.22f);
+    }
+    else
+    {
+        badgeFill   = darkScene ? juce::Colour (0xc8101018) : PinkXP::face.withAlpha (0.86f);
+        badgeBorder = darkScene ? juce::Colours::white.withAlpha (0.24f) : PinkXP::dark.withAlpha (0.30f);
+    }
+    const juce::Colour badgeText = PinkXP::readableInkOn (badgeFill.withAlpha (1.0f));
+    const float labelPt = isNeon ? 7.6f : (isCrt ? 8.5f : 9.0f);
+    const float dirPt   = isNeon ? 7.8f : 8.5f;
+
+    g.setFont (PinkXP::getAxisFont (labelPt, juce::Font::plain));
+
+    const int ow = (isCrt || isNeon) ? 68 : 60, oh = 13;
+    const juce::Rectangle<int> topBadge (canvas.getX() + 2,          canvas.getY() + 2,          ow, oh);
+    const juce::Rectangle<int> botBadge (canvas.getRight() - ow - 2, canvas.getBottom() - oh - 2, ow, oh);
+
+    // 频率标签（按 freqRange 自动筛可见刻度，并避让右下 newer 徽章）
     struct L { float hz; const char* label; };
     const L labels[] = {
-        {  100.0f, "100" },
-        { 1000.0f,  "1k" },
-        {10000.0f, "10k" },
+        {    50.0f,  "50" },
+        {   100.0f, "100" },
+        {   250.0f, "250" },
+        {   500.0f, "500" },
+        {  1000.0f,  "1k" },
+        {  4000.0f,  "4k" },
+        { 10000.0f, "10k" },
     };
 
     const double sampleRate = hub.getSampleRate();
     const double nyquist    = (sampleRate > 0.0) ? sampleRate * 0.5 : 24000.0;
-    const double fMin       = (double) minFreqHz;
-    const double fMax       = juce::jmin ((double) maxFreqHz, nyquist);
+    const double fMin       = (double) activeMinFreqHz();
+    const double fMax       = juce::jmin ((double) activeMaxFreqHz(), nyquist * 0.95);
+    int lastDrawnRight = -9999;
 
+    const int minBw = (isCrt || isNeon) ? 32 : 26;
+    const int bh    = 13;
     for (auto& l : labels)
     {
         if ((double) l.hz < fMin || (double) l.hz > fMax) continue;
 
-        const double logA = std::log10 (fMin);
-        const double logB = std::log10 (fMax);
-        const double t    = (std::log10 ((double) l.hz) - logA) / juce::jmax (1.0e-9, logB - logA);
+        const double t = y2k::fscale::toUnit (fftScale, (double) l.hz, fMin, fMax);
 
-        // 频率轴在屏幕上的实际范围：
-        //   起点 = canvas.getX() + projOriginX
-        //   宽度 = projBinWidth × (numBins-1)（与 recomputeProjection 的 freqTotalW 等价）
-        // 不使用 canvas 全宽，因为深度偏移占用了剩余 ~18% 宽度
         const float freqAxisW = projBinWidth * (float) (numBins - 1);
         const int x = canvas.getX() + (int) std::round ((double) projOriginX + t * (double) freqAxisW);
-        const int y = canvas.getBottom() - 13;
 
-        g.setColour (PinkXP::ink.withAlpha (0.55f));
-        g.fillRect (x - 12, y, 24, 11);
-        // 静态标签位图缓存（v2.9.6 性能）
         const auto img = PinkXP::cachedStaticText (
-            g, l.label, 9.0f, juce::Font::plain, PinkXP::hl,
+            g, l.label, labelPt, juce::Font::plain, badgeText,
             juce::Colours::transparentBlack, true);
-        if (img.isValid())
+        const int bw = juce::jlimit (minBw, 44, img.isValid() ? (img.getWidth() + 8) : minBw);
+        const int bx = juce::jlimit (canvas.getX() + 1, juce::jmax (canvas.getX() + 1, canvas.getRight() - bw - 1), x - bw / 2);
+        const int by = juce::jmax (canvas.getY() + 1, canvas.getBottom() - bh - 2);
+        if (bx < lastDrawnRight + 4) continue;
+        if (bx + bw > botBadge.getX() - 3)
+            continue;
+        lastDrawnRight = bx + bw;
+
+        const juce::Rectangle<int> tagRect (bx, by, bw, bh);
+
+        PinkXP::Craft::drawBadgePill (g, tagRect, badgeFill, badgeBorder);
+
+        if (img.isValid() && img.getWidth() <= bw - 4)
         {
-            img.drawAt (g, (float) (x - img.getWidth() / 2), (float) (y + (11 - img.getHeight()) / 2));
+            g.setOpacity (1.0f);
+            img.drawAt (g, (float) (bx + (bw - img.getWidth()) / 2), (float) (by + (bh - img.getHeight()) / 2));
         }
         else
         {
-            g.setColour (PinkXP::hl);
-            g.drawText (y2k::tr (l.label), x - 12, y, 24, 11, juce::Justification::centred, false);
+            g.setColour (badgeText);
+            g.drawFittedText (y2k::tr (l.label), tagRect.reduced (2, 0), juce::Justification::centred, 1, 0.70f);
         }
     }
 
-    // older/newer 提示（浮绘在左上和右下）
+    // older/newer 提示（浮绘在左上和右下，耦合 Craft::drawBadgePill）
     {
-        g.setColour (PinkXP::ink.withAlpha (0.45f));
+        PinkXP::Craft::drawBadgePill (g, topBadge, badgeFill, badgeBorder);
+        PinkXP::Craft::drawBadgePill (g, botBadge, badgeFill, badgeBorder);
 
-        const int ow = 56, oh = 11;
-        g.fillRect (canvas.getX() + 2,                canvas.getY() + 2, ow, oh);
-        g.fillRect (canvas.getRight() - ow - 2,       canvas.getBottom() - oh - 2, ow, oh);
-
-        g.setColour (PinkXP::hl);
-        // "↗ older" / "newer ↙" 含箭头符号：按 run 绘制（中文译文是
-        //   "↗ 较早" —— 整串换英文 UI 字体会让 CJK 在 mac 上消失）
         PinkXP::drawCachedSymbolText (g, juce::String::fromUTF8 ("\xe2\x86\x97 older"),
-                                      juce::Rectangle<int> (canvas.getX() + 2, canvas.getY() + 2, ow, oh),
-                                      juce::Justification::centred, 8.5f, juce::Font::plain, PinkXP::hl);
+                                      topBadge, juce::Justification::centred, dirPt, juce::Font::plain, badgeText);
         PinkXP::drawCachedSymbolText (g, juce::String::fromUTF8 ("newer \xe2\x86\x99"),
-                                      juce::Rectangle<int> (canvas.getRight() - ow - 2, canvas.getBottom() - oh - 2, ow, oh),
-                                      juce::Justification::centred, 8.5f, juce::Font::plain, PinkXP::hl);
+                                      botBadge, juce::Justification::centred, dirPt, juce::Font::plain, badgeText);
     }
 }

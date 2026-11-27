@@ -854,7 +854,7 @@ void AnalyserHub::pushSamplesToSpectrum(const float* left, const float* right, i
             }
         }
 
-        // 2) 像素 EQ 用的粗粒度平滑频谱
+        // 2) 粗粒度平滑频谱（兼容快照 / GpuUniforms）
         for (int iBin = 0; iBin < spectrumBins; ++iBin)
         {
             const float norm  = static_cast<float> (iBin) / static_cast<float> (juce::jmax(1, spectrumBins - 1));

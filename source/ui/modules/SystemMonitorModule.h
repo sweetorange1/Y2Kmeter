@@ -34,8 +34,13 @@ public:
 
     HoverHelp getHoverHelp (juce::Point<int> localPos) const override;
 
+    // ---- Toybox（v3.5）：PCB 电路走线脉冲 ----
+    bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
+    void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
+
 protected:
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getContentBounds(); }
 
 private:
     enum Item
@@ -61,6 +66,7 @@ private:
 
     void timerCallback() override;
     void updateSubscription();
+    void syncBackdropMode();
 
     std::vector<View> buildViews() const;
     juce::Colour levelColour (Item item, float frac, float rawValue) const;
@@ -107,6 +113,9 @@ private:
     std::vector<std::pair<Item, juce::Rectangle<int>>> hitTiles;
 
     mutable std::vector<float> histA, histB;
+
+    int themeSubToken     = -1;
+    int chromaRevealToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SystemMonitorModule)
 };

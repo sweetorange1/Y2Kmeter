@@ -89,6 +89,13 @@ public:
     void   setParamValue  (const juce::String& id, double v) override;
     void setDualChannel (bool b);
     void setSibilanceThresholdDb (float db);
+    void setSymmetric (bool on);
+    bool isSymmetric() const noexcept { return symmetric; }
+    void setGainDb (float db);
+    void setFloorDb (float db);
+    void setShowRms (bool on);
+    void setScrollDirection (int dir);
+    void setShowGuides (bool on);
 
     // ---- Toybox（v3.0.0）：人浪（§8.3 / 反馈 C3 加电平读数）----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
@@ -133,15 +140,18 @@ private:
         float sib   = 0.0f;       // 本列齿音强度 0..1（带通 + 包络 + 迟滞门限检测器输出）
         float pitchNote = 60.0f;  // 产出该列时的平滑 MIDI 音高（音域 → 主题色阶位置）
         float pitchConf = 0.0f;   // 产出该列时的音高置信度
-        float minV2 = 0.0f, maxV2 = 0.0f, db2 = -96.0f, sib2 = 0.0f;   // 双声道 B 组（右声道）
+        float minV2 = 0.0f, maxV2 = 0.0f, rms2 = 0.0f, db2 = -96.0f, sib2 = 0.0f;   // 双声道 B 组（右声道）
     };
 
     // 单列的绘制参数 —— GL 与 legacy 两条路径共用同一套解算，保证观感一致
     struct ColumnPaint
     {
-        int          yMin  = 0;
-        int          hLine = 1;
+        int          yMin     = 0;
+        int          hLine    = 1;
         juce::Colour colour { juce::Colours::transparentBlack };
+        int          yRmsMin  = 0;
+        int          hRmsLine = 0;
+        juce::Colour rmsColour { juce::Colours::transparentBlack };
     };
 
     // chanB = true 取 B 组（双声道的右声道）
@@ -196,8 +206,17 @@ private:
     void updateSamplesPerColumn();
     void resetAccumulator();
 
-    void drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const;
-    void drawWaveform  (juce::Graphics& g, juce::Rectangle<int> canvas) const;
+    // ---- 增量环形像素缓冲（GL / 浮窗软绘统一数据源，O(新增列数)）----
+    void ensureRingSurface (int innerW, int innerH);
+    void invalidateRingVisuals();
+    void rasterizeColumnSlot (int slot);
+    void rasterizeAllRingColumns();
+    void updateRingAfterDrain (int drainedCount);
+    void syncSoftwareRingImage (int innerW, int innerH) const;
+
+    void drawBackground    (juce::Graphics& g, juce::Rectangle<int> canvas) const;
+    void drawWaveform      (juce::Graphics& g, juce::Rectangle<int> canvas) const;
+    void drawOverlayGuides (juce::Graphics& g, juce::Rectangle<int> canvas) const;
 
     juce::Rectangle<int> getCanvasBounds  (juce::Rectangle<int> content) const;
 
@@ -216,7 +235,7 @@ private:
     float accSumSq = 0.0f;
     float accSibMax = 0.0f;      // 本列内齿音强度的峰值保持
     int   accCount = 0;
-    float accMin2 = 1.0f, accMax2 = -1.0f, accSibMax2 = 0.0f;   // 双声道 B 组
+    float accMin2 = 1.0f, accMax2 = -1.0f, accSumSq2 = 0.0f, accSibMax2 = 0.0f;   // 双声道 B 组
 
     // 齿音检测（带通 + 包络 + 迟滞门限）
     //   逐样本推进，时间常数固定 —— 不随 SPEED / 列宽变化。
@@ -242,6 +261,12 @@ private:
     ColorSource colorSource      = ColorSource::pitch;
     bool        spectrumRetained = false;
     bool        dualChannel      = false;   // 双声道：上 L / 下 R 两条波形
+    bool        symmetric        = false;   // 上下对称峰值镜像（取代旧版 WaveStyle）
+    float       gainDb           = 0.0f;    // 纵向缩放增益（-12..+18 dB）
+    float       floorDb          = -80.0f;  // 静音隐藏门限（-90..-30 dB）
+    bool        showRms          = false;   // 叠加内层 RMS 核心包络
+    int         scrollDirection  = 0;       // 0 Leftwards（最新在右）/ 1 Rightwards（最新在左）
+    bool        showGuides       = true;    // 零线 / 分区虚线 / 时长提示
 
     // 最近一帧的音高估计（新产出的列会带上它）
     float currentPitchNote = 60.0f;
@@ -259,6 +284,29 @@ private:
 
     // 主题订阅 token（保留：切换主题时 GL 快照要重建）
     int themeSubToken = -1;
+
+    // 增量环形像素缓冲（列主序预乘 BGRA：ringW_ 列 × ringH_ 像素）
+    mutable std::vector<juce::uint32> ringColMajor_;
+    mutable int          ringW_ = 0;
+    mutable int          ringH_ = 0;
+    mutable juce::uint64 colSeq_ = 1;
+    mutable juce::uint64 ringFullGen_ = 1;
+    mutable bool         ringFullRebuild_ = true;
+    mutable juce::uint32 lastRasterAppearanceGen_ = 0;
+
+    // 浮动态 / 软绘回退的 SoftwareImageType 环形位图（按需增量同步）
+    mutable juce::Image  waveSwImg_;
+    mutable juce::uint64 swImgSyncedSeq_ = 0;
+    mutable juce::uint64 swImgSyncedFullGen_ = 0;
+    mutable bool         swImgDirty_ = true;
+
+    // 静态背景 + 参考线顶点缓存（尺寸 / 皮肤 / 参考线 / 双声道不变时不重算）
+    std::vector<float>   glBgVertsCache_;
+    juce::Rectangle<int> glBgCachedCanvas_;
+    juce::uint32         glBgCachedAppearanceGen_ = 0;
+    bool                 glBgCachedGuides_ = true;
+    bool                 glBgCachedDual_ = false;
+    bool                 glBgDirty_ = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformModule)
 };

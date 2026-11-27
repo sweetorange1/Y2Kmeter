@@ -1,6 +1,7 @@
 #include "source/ui/modules/UtilityModule.h"
 
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 
 using y2k::util::ToolKind;
 
@@ -25,26 +26,54 @@ UtilityModule::UtilityModule()
 
     themeToken = PinkXP::subscribeThemeChanged ([this]
     {
+        syncBackdropMode();
         if (view != nullptr)
             view->themeChanged();
         repaint();
     });
 
+    chromaRevealToken = PinkXP::subscribeChromaRevealChanged ([this] (juce::Component* prev, juce::Component* next)
+    {
+        if (prev == this || next == this || next == nullptr)
+        {
+            syncBackdropMode();
+            repaint();
+        }
+    });
+
     setTool (ToolKind::calculator, true);
 
-    // 低频交互模块：常被摆在每帧刷新的模块上方，挂位图缓存避免被"陪着"每帧
-    //   整块重画（计算器 20 个按钮 + 文本，mac 上曾是 GL 线程主要热点之一）
-    y2k::ui::setGlSafeImageCache (*this, true);
+    // 低频交互模块：正常/绿幕挂位图缓存；透明模式下自动关闭缓存并设为非不透明
+    syncBackdropMode();
 }
 
 UtilityModule::~UtilityModule()
 {
+    if (chromaRevealToken >= 0)
+    {
+        PinkXP::unsubscribeChromaRevealChanged (chromaRevealToken);
+        chromaRevealToken = -1;
+    }
+
     if (themeToken >= 0)
         PinkXP::unsubscribeThemeChanged (themeToken);
 
     if (view != nullptr)
         view->onStateChanged = nullptr;
     view.reset();
+}
+
+void UtilityModule::syncBackdropMode()
+{
+    const bool transparent = PinkXP::isTransparentBackdrop();
+    setOpaque (! transparent);
+    y2k::ui::setGlSafeImageCache (*this, ! transparent);
+
+    if (view != nullptr)
+    {
+        const bool hideInteractive = transparent && ! PinkXP::isChromaRevealed (*this);
+        view->setBackdropChromeHidden (hideInteractive);
+    }
 }
 
 void UtilityModule::updateTitle()
@@ -89,14 +118,17 @@ void UtilityModule::setTool (ToolKind kind, bool force)
 
     view->onStateChanged = [this]
     {
+        setLastChangedParamFocusHint ("inline");
         if (onParamChangedByUser)
             onParamChangedByUser (*this);
+        setLastChangedParamFocusHint ({});
     };
 
     // z 序放在最底层：控制面板抽屉 / 其它子组件始终盖在工具上面
     addAndMakeVisible (*view, 0);
     layoutContent (getContentBounds());
     updateTitle();
+    syncBackdropMode();
     repaint();
 }
 
@@ -111,8 +143,62 @@ void UtilityModule::layoutContent (juce::Rectangle<int> contentBounds)
 
 void UtilityModule::paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
-    g.setColour (PinkXP::btnFace);
-    g.fillRect (contentBounds);
+    const auto& tokens = PinkXP::getSkinTokens();
+    if (PinkXP::isGreenScreenBackdrop())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (contentBounds);
+    }
+    else if (! PinkXP::isTransparentBackdrop())
+    {
+        if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.05f : 0.11f),
+                                       0.0f, (float) contentBounds.getY(),
+                                       PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.06f : 0.04f),
+                                       0.0f, (float) contentBounds.getBottom(), false);
+            grad.addColour (0.38, PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.03f : 0.06f));
+            grad.addColour (0.52, PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.03f : 0.02f));
+            g.setGradientFill (grad);
+            g.fillRect (contentBounds);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.06f : 0.15f),
+                                       0.0f, (float) contentBounds.getY(),
+                                       PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.05f : 0.03f),
+                                       0.0f, (float) contentBounds.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRect (contentBounds);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube
+                 || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            const float darken = (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+                                     ? (isDark ? 0.16f : 0.07f)
+                                     : (isDark ? 0.10f : 0.03f);
+            g.setColour (PinkXP::face.interpolatedWith (juce::Colours::black, darken));
+            g.fillRect (contentBounds);
+        }
+        else
+        {
+            g.setColour (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel ? PinkXP::btnFace : PinkXP::face);
+            g.fillRect (contentBounds);
+        }
+    }
+}
+
+juce::Rectangle<int> UtilityModule::getChromaKeyCanvas()
+{
+    if (view == nullptr)
+        return {};
+    const auto r = view->getChromaKeyRect();
+    if (r.isEmpty())
+        return {};
+    return r.translated (view->getX(), view->getY());
 }
 
 // ----------------------------------------------------------

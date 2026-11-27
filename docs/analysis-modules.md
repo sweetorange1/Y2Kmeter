@@ -53,9 +53,9 @@
 4. 滚动历史常驻内存（60s×2ch×4B ≈ 23MB@48k，96k 约 46MB）；有输入才分配。
 5. 录制中移除模块/关界面会立即收尾并保存，不留半截文件。
 
-## 6. Stereo Map（`ModuleType::stereoMap`，未发布）
+## 6. Stereo Map（`ModuleType::stereoMap`）
 
-**现状**：已入库但**版本未 bump、未进任何布局预设**。两个模式 PAN（按频率声像 ±1）/ MONO（切单声道相位抵消量，上下倒置）。GL 直渲染 + CPU 回退双路径。v3.1 起模式切换与 FFT scale 在控制面板里（顶部工具条与说明文字已取消），见 §7。
+**现状（v3.5.0）**：已正式发布并纳入 v3.5.0 场景化布局预设（`Mixing Console` / `Mastering & Broadcast` / `Full: Deep Analysis` / `Full: All-in-One` / `Bar: Mixing`）。两个模式 PAN（按频率声像 ±1）/ MONO（切单声道相位抵消量，上下倒置）。GL 直渲染 + CPU 回退双路径，并完整耦合 6 套视觉皮肤。v3.1 起模式切换与 FFT scale 在控制面板里（顶部工具条与说明文字已取消），见 §7。
 
 **待办 / 已知缺口**：
 1. 三路 FFT 的 CPU 成本未测量 —— 用 `PerformanceCounterSystem`（RelWithDebInfo + `Y2K_ENABLE_PERF_COUNTERS=1`）对比「有/无 Stereo Map」的 CPU 与帧率；超标则改"仅 stereoMap 被 retain 时才跑 L/R"。
@@ -74,8 +74,8 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 
 ### 7.1 控制面板框架
 
-- **入口**：标题栏 `[齿轮][弹出][关闭]`。仅 `setControlPanelEnabled(true)` 的模块显示齿轮（不含速度/调性、录音、ProjectM、VirtuPet）。
-- **抽屉**：`ModuleControlDrawer`（`source/ui/ModuleControlDrawer.h/.cpp`）首次点开时懒创建，**覆盖式**盖在内容区顶部，高度上限 = 内容区 80%（超出内部滚动）。不改变画布尺寸 —— Spectrogram 改尺寸会 `ensureGrid` 清历史，所以抽屉绝不挤占画布。
+- **入口**：标题栏 `[齿轮][弹出][关闭]`。仅 `setControlPanelEnabled(true)` 的模块显示齿轮（不含录音、ProjectM、VirtuPet）。
+- **外部弹出面板（v3.5）**：`ModuleControlDrawer`（`source/ui/ModuleControlDrawer.h/.cpp`）首次点开时懒创建，不再盖住模块自身内容，而是走 3 级智能外部落位（`ModulePanel::computeControlDrawerPlacement`）：① 优先在 `ModuleWorkspace` 内模块四侧（右 / 左 / 下 / 上）挑选完整容纳且最少遮挡其他模块的空位；② 若模块为浮动窗口、已最大化，或窗口过矮导致高度受限（可见度 <65%），自动提升为独立临时桌面窗口（`addToDesktop(windowIsTemporary)`）挂在模块外侧；③ 仅当模块铺满整块屏幕、四周无任何物理空间时，才退化为模块内右上角紧凑卡片。面板自带可拖拽迷你标题条与关闭按钮，支持按 Esc 或点击外部自动收起；不改变模块画布尺寸。
 - **展开状态不进存档**，加载后一律收起；布局锁定时仍可调（不是布局操作）；浮动窗口里同样可用。
 - **点击别处自动收起**：抽屉打开时把 `DrawerDismissListener` 挂到当前窗口的 topLevel（`addMouseListener(..., true)`，窗口内任何组件的鼠标按下都会通知到），命中规则在 `ModulePanel::closeOpenControlDrawers(source, pos)`：点在抽屉内部（含子控件）或任一模块的齿轮按钮上不关，其余位置一律收起；**同时只允许开一个抽屉**（`setControlPanelOpen(true)` 会先关掉别人的）。抽屉全关时订阅自动摘掉，平时零开销。
 - **Toybox**：抽屉及其子控件标记 `toy.optOut`，点击不触发彩蛋；按住慢放的 `mouseDown` 也排除抽屉区域。
@@ -120,17 +120,18 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 
 | 模块 | 参数 |
 | --- | --- |
-| 响度 `loudness` | `style`（灯条 / 数字读数）、`itemM` `itemS` `itemI` `itemTp` `itemRms` |
-| VU `vuMeter` | `dialStyle`（**六种表盘**：Half circle / Vintage fan / Bar scale / LED ladder / Minimal / Mirror，0..5）、`needleStyle`（Thin line / Wedge / Stereo L/R；横向式表盘里改为指示器形态：发丝 / 填充楔形 / L、R 分轨）、`showLed` |
-| 示波器 `oscilloscope` | `displayMode`（波形 / X-Y / 李萨如）、`waveChannel`（L / R / 双）、`bandColour`（三路点云染色，仅 X-Y / 李萨如）、`crossLow` `crossHigh`（默认 200 / 2000 Hz）、`dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`autoGain`、`showRings`（波形配色固定跟随主题 `chartRamp`；旧存档的 `waveColour` 键被忽略） |
-| 频谱 `spectrum` | `peakHold`、`sharp`、`slope`（0–12 dB/oct，默认 4.5 = 旧 SLOPE 开关"开"；0 = 关；旧存档的布尔 `slope` 读档时迁移为 4.5 / 0）、`curve`（Smooth / Semi / Raw）、`channel`（Mid / Mid+Side / L+R）、`fftScale` |
-| 相位 `phase` | `itemGonio` `itemCorr` `itemWidth` `itemBal`、`gonioStyle`（点阵 / 轨迹）、`barStyle`（像素格 / 实心） |
-| 动态 `dynamics` | `itemPeak` `itemRms` `itemDrShort` `itemDrInt` `itemCrest` `itemHist`、`style`（大数字 / 进度条+数字）、`histSpan`（1–35 s，原先不持久化） |
-| 语谱图 `spectrogram` | `direction`（左 / 右 / 上 / 下）、`speed`（5–120 px/s，原先不持久化）、`shaper`（Classic / Sharp / Sharper）、`colour`（Theme / Heat / Grey / Ice）、`fftScale` |
-| 语谱图 3D `spectrogram3d` | `colourMode`（Theme / Heat / Grey / Ice）、`depthDir`（右后方 / 左后方）、`speed` |
-| 波形历史 `waveform` | `colorSource`（Pitch / Loudness / Sibilance）、`sibThreshold`（-60…-10 dB，默认 -35）、`speed`、`dual`（上 L / 下 R 双声道） |
-| 立体声场 `stereoField` | `dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`bandColour`（三路独立轨迹）、`crossLow` `crossHigh`（默认 200 / 2000 Hz） |
-| 立体声频段图 `stereoMap` | `mode`（Pan / Mono check）、`fftScale` |
+| 响度 `loudness` | `style`（灯条 / 数字读数）、`itemM` `itemS` `itemI` `itemTp` `itemRms`、`targetLufs`（Off / -23 EBU / -16 Apple / -14 Stream / -9 Club / -6 Loud 目标参考线）、`floorDb`（-72 / -60 / -48 / -36 dB）、`peakHold`、`peakHoldSec`（0.5–5.0 s） |
+| VU `vuMeter` | **v3.5.0 双家族架构**（`VuNeedleRenderer.inl` + `VuBarRenderer.inl`）：`meterType`（Needle / Bar）、`needleDialStyle`（Studio / Vintage / Dual arc / Retro warm）、`barDialStyle`（Studio bar / LED blocks / LED ladder / Mirrored / Minimal）、`colorMap`（Theme / Studio / Warm VU / MiniMeter / Ice）、`needleShape`（Thin / Tapered / Glow）、`barDensity`（Chunky / Medium / Fine）、`barFinish`（Smooth / Notched / Glow）、`channels`（Mono (L+R) / Stereo L/R（指针式为单表同轴双针） / Left (L) / Right (R)）、`showLed`、`showReadout`、`peakHold`、`backlight`、`ballistics`（Slow / Classic / Fast / Snappy）、`rmsWindowMs`（10–40 ms）、`peakHoldSec`（0.5–4.0 s）、`trimDb`（-12…+12 dB）、`scaleRange`（-24..+3 / -36..+3 / -48..+3 / -60..0 dB）、`warnDb`（-6 / -3 / -1 / 0 dB） |
+| 示波器 `oscilloscope` | `displayMode`（波形 / X-Y / 李萨如）、`showGrid`、`waveChannel`（L / R / 双）、`timeScale`（0.25–1.0×）、`waveGainDb`（-12…+18 dB）、`lineWidth`（1–4 px）、`fillWave`、`bandColour`（三路点云染色，仅 X-Y / 李萨如）、`crossLow` `crossHigh`（默认 200 / 2000 Hz）、`dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`autoGain`（关闭时重置 `periodicMaxAccum`/`prevPeriodicMax`/`lastPeriodicGainUpdateMs`）、`scatterGainDb`（-12…+18 dB，关闭自动缩放时生效）、`showRings` |
+| 频谱 `spectrum` | `fillStyle`（7 样式：含 Energy Curtain 能量幕 / Fill / Outline / Columns / Mirrored / Glow 等，v3.5.0 消除能量幕逐列渐变风暴）、`colorMap`（7 配色方案）、`energyContrast`、`barBands`、`curve`（Smooth / Semi / Raw）、`channel`（Mid / Mid+Side / L+R）、`sharp`、`release`（0.2–3.0×）、`peakHold`、`peakFall`（2–24 dB/s）、`floorDb`（-100…-40 dB）、`ceilDb`（-24…+6 dB）、`slope`（0–12 dB/oct，默认 4.5）、`fftScale`、`freqRange`（Full / Music / Vocal / Bass）、`showGrid`、`showLabels` |
+| 相位 `phase` | `itemGonio` `itemCorr` `itemWidth` `itemBal`、`gonioStyle`（点阵 / 轨迹）、`gonioGain`（0.5–3.0×）、`gonioSize`（1–4 px）、`showGrid`、`barStyle`（像素格 / 实心）、`smoothing`（0.2–3.0×） |
+| 动态 `dynamics` | `itemPeak` `itemRms` `itemDrShort` `itemDrInt` `itemCrest` `itemHist`、`barFloorDb`（-72 / -60 / -48 / -36 dB）、`peakHold`、`style`（大数字 / 进度条+数字）、`histSpan`（1–35 s）、`histStyle`（Filled / Curve）、`histMaxDb`（15–40 dB） |
+| 语谱图 `spectrogram` | `colour`（Theme / Heat / Grey / Ice / Magma / Inferno / Plasma / Viridis）、`floorDb`（-110…-30 dB，默认 -84）、`ceilDb`（-36…0 dB，默认 -8）、`gamma`（0.40…2.50，默认 1.15）、`slope`（0…9 dB/oct，默认 3.0）、`shaper`（Classic / Sharp 频率重分配+经典底衬 / Sharper 纯频率重分配粒子束）、`timeSmooth`（0…80%，默认 15%）、`smooth`（GL_LINEAR 平滑，默认开）、`pixelSize`（1–4 px）、`fftScale`、`freqRange`（Full / Music / Vocal / Bass）、`showGrid`、`showLabels`、`direction`（左 / 右 / 上 / 下）、`speed`（5–120 px/s） |
+| 语谱图 3D `spectrogram3d` | `colourMode`（Theme / Heat / Grey / Ice / Magma / Inferno / Plasma / Viridis）、`floorDb`（-110…-40 dB）、`ceilDb`（-30…0 dB）、`slope`（0…9 dB/oct）、`depthFade`（0…100%）、`depthDir`（右后方 / 左后方）、`heightScale`（0.3–2.0×）、`showRidges`（v3.5.0 修复山脊轮廓线清晰度并移除像素风格白色虚线）、`shaper`（Classic / Sharp / Sharper）、`speed`、`fftScale`、`freqRange`、`showLabels` |
+| 波形历史 `waveform` | `colorSource`（Pitch（v3.5.0 提亮至 `chartRamp[0.42..1.0]` + 亮度下限）/ Loudness / Sibilance）、`sibThreshold`（-60…-10 dB，默认 -35）、`showRms`（内层 RMS 核心带）、`symmetric`（**v3.5.0 新增**对称显示开关，取代原 `style` 中的 Outline；兼容旧存档 `style` 键）、`gainDb`（-12…+18 dB）、`floorDb`（-90…-30 dB）、`dual`（上 L / 下 R 双声道）、`direction`（左 / 右）、`speed`、`showGuides`；v3.5.0 底层改 O(新增列) 列主序预乘环形纹理增量 `TexRowPatch` 上传并消除 1×1 白点边缘 |
+| 立体声场 `stereoField` | `dotShape`（Square / Glow）、`dotSize`（1–6 px，默认 2）、`fadeSpeed`（0.2–4×，默认 1）、`autoGain`（自动缩放，默认开）、`manualGainDb`（-12…+18 dB，关闭自动缩放时生效）、`bandColour`（三路独立轨迹）、`crossLow` `crossHigh`（默认 200 / 2000 Hz）、`showRings`、`showLabels` |
+| 立体声频段图 `stereoMap` | `mode`（Pan / Mono check）、`style`（Curve / Fill / Columns）、`smoothing`（0.2–3.0×）、`peakHold`（峰值包络）、`cancelScale`（20–100%）、`fftScale`、`freqRange`、`showGrid`、`showLabels` |
+| 速度 / 调性 `tempoKey` | `showBpm`、`showKey`、`keyNotation`（Standard / Camelot / Std + Camelot）、`showRelative`、`bpmPrecision`（0.1 BPM / Integer）、`showConfidence`、`showStatus` |
 | 电脑状态 `systemMonitor`（v3.3） | `style`（Cards / Bars / Graphs / Compact）、`itemCpu` `itemCpuTemp` `itemGpu` `itemGpuTemp` `itemRam` `itemVram` `itemDisk` `itemNet` `itemBattery`、`perCore`、`infoBar`、`colourByLoad`、`tempUnit`（摄氏 / 华氏）、`interval`（0.5–5 s，默认 1）、`histSpan`（15–600 s，默认 60） |
 | 小工具 `utility`（v3.3） | `tool`（Calculator / Colour Picker / Stopwatch / Timer / Audio Calc / Clock / Notes）；各工具参数存在 `<tools>` 下以工具名命名的子节点：`calcTape`、`pickFormat` `pickAutoCopy`、`swHundredths`、`tmSound` `tmFlash`、`cvA4`、`clkStyle` `clk24h` `clkSeconds` `clkDate`、`noteSize` |
 
@@ -150,7 +151,7 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 - `source/analysis/OscHistory.h`：示波器样本的长环形历史，容量 2^18（48 kHz ≈ 5.5 s，96 kHz ≈ 2.7 s）。用 `oscTotalSamples` 做差在 UI 线程接续新增样本；**只在按住期间分配并录制**，不按住零成本。慢放读指针只落后实时，超容量时被夹回最老可读位置。
 - **波形历史是「完全冻结」而不是慢放**：按住期间 `onFrame` 只同步实时游标（`lastOscTotal`）、不消费任何样本；按下瞬间还会清空待写列与半列累加，保证画面当场停住。松手后从最新位置继续滚动，冻结期间的样本直接跳过（不补播）。因此波形历史不再使用 `OscHistory`（长历史只服务示波器）。
 - **示波器抽点必须按绝对样本索引对齐**（`snapshotBaseIndex`）：波形折线是「每 stride 个样本取 1 点」画的（stride ≈ 窗口样本数 / 画布宽度，2048 px 窗口下约 5）。慢放时窗口每帧只前进十几个样本，若按「窗口第 0 个样本」开始抽点，抽到的样本每帧换一批，同一波形被抽成两三种不同形状 —— 现场表现为「大量毛刺 + 两个状态来回闪」。把抽点集合锁到样本流上（`(base + i) % stride == 0`）后只剩平移，形状不再跳。X-Y / 李萨如走全点散点，不受影响。
-- **悬停读数里的音名**：语谱图在冻结时、频谱在按住慢放时，读数末尾追加鼠标所在频率的音名（`PinkXP::noteNameForHz`，十二平均律 A4 = 440 Hz）。不按住时语谱图不显示音名 —— 画面在滚动，同一点的数值会一直变，这是和波形历史保持一致的口径。三个模块的悬停都重写了 `mouseDrag`，按住拖动时十字线与读数持续跟随鼠标（JUCE 在按住期间只派发 `mouseDrag`）。
+- **悬停读数里的音名**：所有频谱类模块（`Spectrum` / `Spectrogram` / `Spectrogram3D` / `StereoMap`）悬停时即直接在读数末尾追加鼠标所在频率坐标对应的音名（`PinkXP::noteNameForHz`，十二平均律 A4 = 440 Hz），无需再按住鼠标；波形历史（`Waveform`）的 PITCH 模式因纵轴是电平而非频率，仍只在冻结时显示该列对应音名。按住拖动时十字线与读数仍由 `mouseDrag` 持续跟随。
 - 老存档里的 `frozen=1` 丢弃，加载后为未冻结（新设计没有锁存式冻结）。
 
 ### 7.7 频段染色与齿音阈值
@@ -172,7 +173,7 @@ v3.1 把各模块零散暴露的按钮 / 滑条统一收进「控制面板」，
 3. 老存档里 `frozen=1` 的示波器 / 波形历史加载后为未冻结。
 4. 响度、动态等合并模块复用了原绘制代码，但没有做逐像素对比。
 5. 未做（方案中的「补充项」）：响度目标线与 LUFS-I 手动复位、VU 刻度范围、立体声频段图频带数。
-6. 待核实（代码与文档原本就有出入，未改行为）：`LoudnessModule` 的 L/R 柱实为 RMS 而 `HoverHelp` 写的是 Peak；Spectrogram 的 Sharper 与 Sharp 数据源相同；`DynamicsModule` 的 Crest 历史窗口约 1 s 而悬停标尺按 4 s 标注。
+6. 待核实（代码与文档原本就有出入，未改行为）：`LoudnessModule` 的 L/R 柱实为 RMS 而 `HoverHelp` 写的是 Peak；`DynamicsModule` 的 Crest 历史窗口约 1 s 而悬停标尺按 4 s 标注。
 
 ### 7.10 测试与验证
 
@@ -231,11 +232,11 @@ GL 直渲染模块的顶点是**模块本地坐标**，渲染器只设 `glViewpo
     | 镜像刻度 | 两条贴刻度的窄条 + 贯穿中脊的发丝针 | 两条楔形条（外沿张开成喇叭口）+ 前沿线 + 指向中脊的三角 | 满高矩形条 + 声道色粗端帽 |
 
     三色分区填充统一走 `fillZonedShape`（竖条裁剪），任意形状（矩形 / 楔形 / 梯形）共用。
-  - **Toybox**：LED 处点击 = 迪斯科灯（六种共用）；指针式（0 / 1）其余区域 = 指针虚影（未改）；横向式走 `toyPokeLinear`，每种表盘一个专属玩具（几何取 `dialGeom.bandTop/bandBottom/rowTop/rowBot`，实现在 `ToyModuleFx.cpp`）：
-    - 横向刻度条 = **弹簧游标** `makeSliderFlickActor`：幽灵游标被拽到点击处，拖一根锯齿弹簧、带过冲弹回真实电平，身后残影；气泡 `dB + %`；
-    - LED 梯柱 = **跑马冲顶** `makeLedChaseActor`：从最左一格跑马点亮到点击那格，顶帽弹飞后落回弹三下（倒挂行往下飞）；气泡 `PEAK x dB`；
-    - 极简游标 = **卷尺** `makeMeasureTapeActor`：从当前游标拉出卷尺量到点击处，标出相差多少 dB，最后卷回；
-    - 镜像刻度 = **水滴涟漪** `makeMirrorRippleActor`：水滴落到中脊，以中脊为水面上下对称荡开三圈（裁在两条填充条外沿之间）；气泡 `dB + %`。
+  - **Toybox**：LED 处点击 = 霓虹光晕脉冲环（六种共用）；指针式（0 / 1）其余区域 = 指针弹拨虚影 `makeGhostNeedleActor`（从点击角以欠阻尼弹簧回弹到真实指针角并留 8 层荧光扇形残影）；横向式走 `toyPokeLinear`，每种表盘一个专属玩具（几何取 `dialGeom.bandTop/bandBottom/rowTop/rowBot`，实现在 `ToyModuleFx.cpp`）：
+    - 横向刻度条 = **荧光弹簧游标** `makeSliderFlickActor`：幽灵游标被拽到点击处，拖一根荧光弹簧、带过冲弹回真实电平，身后渐隐残影；
+    - LED 梯柱 = **跑马冲顶** `makeLedChaseActor`：从最左一格跑马点亮到点击那格，顶帽弹飞溅微火花后落回弹三下（倒挂行往下飞）；
+    - 极简游标 = **卷尺** `makeMeasureTapeActor`：从当前游标拉出卷尺量到点击处，内置标出相差多少 dB，最后卷回；
+    - 镜像刻度 = **双色水滴涟漪** `makeMirrorRippleActor`：荧光水滴落到中脊，以中脊为水面上下对称荡开三圈双色涟漪（裁在两条填充条外沿之间）。
   - LED 六种样式统一右上角（`ledBounds` 不再按样式分支）；横向式由 `linearBody` 在顶部让出"标题小字 + LED"一行。
   - 新样式颜色全部取 `PinkXP::` 主题变量（`ink / ok / warn / danger / pink500~700 / btnFace / hl`）；旧存档里的 `dialStyle = 1 / 2`（原弧形 / 梯形）原地显示为复古扇形 / 横向刻度条。
 - **响度灯条读数**：底部数字改用 `PinkXP::pink600`（与「数字读数」样式的大数字同色；深色主题下 pink 阶梯越靠后越亮，所以更清楚）。灯条布局由 `barLayoutArea()` 统一计算：左/上 6px、右/下 2px，刻度列 30 → 22px；静态层、柱区、刻度、标签共用同一份几何。

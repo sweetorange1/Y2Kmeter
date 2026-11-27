@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
 #include <vector>
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
@@ -8,21 +9,19 @@
 #include "source/analysis/AnalyserHub.h"
 
 // ==========================================================
-// SpectrogramModule —— Pink XP 像素风"实时频谱瀑布图"
+// SpectrogramModule —— 高可调实时频谱瀑布图（v3.5 视觉重构版）
 //
-// 功能概述：
-//   * 订阅 AnalyserHub::Kind::Spectrum（复用 SpectrumModule 用的同一路
-//     1024 bin FFT 幅度快照）—— 后端音频线程零新增计算。
-//   * 把画布切成一张【方格网】：行数 rows × 列数 cols。默认每格是
-//     cellPx × cellPx 的正方形像素块；当用户拉伸模块时，格子数量
-//     保持不变，每格的 cellW / cellH 自动按画布尺寸重算 —— 这时
-//     格子变成统一的长方形（所有格子仍然一致）。
-//   * 每帧根据当前 FFT 幅度算一列新的网格值（对数频率纵轴、dBFS →
-//     归一化强度 t∈[0,1]），环形写入；paint 时用 fillRect 画出整张网格。
-//   * 颜色：跟随当前主题，从 pink700 (深) → pink100 (浅) 线性渐变，
-//     对应 低电平 → 高电平。切换主题时全局调色板会自动刷新。
-//
-// 数据源：AnalyserHub::getSpectrumMagnitudesBlended（v2.9.6 单路 FFT，size 用户可选）
+//   核心特性：
+//     * 订阅 AnalyserHub::Kind::Spectrum（复用 SpectrumModule 同一路 FFT 快照），
+//       后端音频线程零新增计算。
+//     * gridData 存原始 dB，使得调色盘 / 底噪门限（Floor）/ 峰值上限（Ceiling）/
+//       对比度（Contrast）/ 高频倾斜（Tilt）都能**实时重绘整屏历史**（含冻结态）。
+//     * 3 档清晰度：Classic（平滑原谱）/ Sharp（频率重分配叠加经典底衬）/
+//       Sharper（纯频率重分配粒子束，低频 bassline 完全收束）+ 可调时间平滑（Time smooth）。
+//     * 8 套色谱（增强多段 Theme / Heat / Grey / Ice / Magma / Inferno / Plasma / Viridis）、
+//       平滑插值（GL_LINEAR）与像素块粒度（1..4 px）自由切换，兼顾专业高清与 Y2K 像素风。
+//     * 4 档频率视野（Full / Music / Vocal / Bass）+ 可开关参考网格与刻度标签；
+//       悬停即显示频率 + 相对时间 + 音名，按住画布冻结画面。
 // ==========================================================
 
 class SpectrogramModule : public GlDirectModuleBase,
@@ -35,49 +34,72 @@ public:
     // AnalyserHub::FrameListener
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
-    // 鼠标悬停标尺：仪表区域内十字线 + 频率/时间读数
+    // 鼠标悬停标尺：仪表区域内十字线 + 频率 / 时间 / 音名读数
     void mouseMove (const juce::MouseEvent& e) override;
-    void mouseDrag (const juce::MouseEvent& e) override;   // 按住拖动时读数也要跟随鼠标
+    void mouseDrag (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
 
     // ---- 按住冻结：按住画布左键 → 停止推进新列（画面完全静止），松手继续滚动 ----
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseUp   (const juce::MouseEvent& e) override;
 
-    // 默认每格像素尺寸（正方形），决定"默认状态下"方格是多大像素
+    // 像素块粒度（1 = 精细高清，2..4 = 复古像素块）
     void  setCellPx (int px);
     int   getCellPx() const noexcept { return cellPx; }
 
     // ---- 显示模式（Classic / Sharp / Sharper）----
-    //   Classic : 原始幅度谱（不锐化）
-    //   Sharp   : 频率轴锐化（unsharp mask，谱线变锐）
-    //   Sharper : 频率轴 + 时间轴锐化（瞬态更突出）
     enum class DisplayMode : int { Classic = 0, Sharp = 1, Sharper = 2 };
     void        setDisplayMode (DisplayMode m);
     DisplayMode getDisplayMode() const noexcept { return displayMode; }
 
-    // v2.9.3：持久化显示模式（Classic / Sharp / Sharper）
-    // v3.1：另存 speed / direction / colour / fftScale（均为缺键保持默认 = 旧外观）
+    // 滚动方向：Left（默认）新数据从右侧进入；Up/Down 时间纵向、频率横向
+    enum class Direction : int { Left = 0, Right = 1, Up = 2, Down = 3 };
+
+    // 颜色色谱（0..3 保持旧存档索引兼容；4..7 为新增专业感知均匀色谱）
+    enum class ColourScheme : int
+    {
+        Theme   = 0,
+        Heat    = 1,
+        Grey    = 2,
+        Ice     = 3,
+        Magma   = 4,
+        Inferno = 5,
+        Plasma  = 6,
+        Viridis = 7
+    };
+
+    // 频率视野预设：全频 / 音乐主频 / 人声 / 低频重低音
+    enum class FreqRange : int
+    {
+        Full  = 0,   // 20 Hz - 20 kHz
+        Music = 1,   // 30 Hz - 12 kHz
+        Vocal = 2,   // 80 Hz - 8 kHz
+        Bass  = 3    // 20 Hz - 1 kHz
+    };
+
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
 
-    // ---- 控制面板（v3.1）：滚动方向 / shaper 模式 / 速度 / 颜色 / FFT scale ----
+    // ---- 控制面板参数 ----
     void   buildParamDefs (std::vector<ParamDef>& out) const override;
     double getParamValue  (const juce::String& id) const override;
     void   setParamValue  (const juce::String& id, double v) override;
 
-    // 滚动方向 = 画面内容移动的方向。Left（默认，旧外观）：新数据从右侧进入、画面向左移动，
-    //   时间横向、频率纵向。Up / Down：时间纵向、频率横向（低频在左）。
-    enum class Direction : int { Left = 0, Right = 1, Up = 2, Down = 3 };
-    // 颜色：Theme 跟随主题（旧外观）；其余是固定色阶
-    enum class ColourScheme : int { Theme = 0, Heat = 1, Grey = 2, Ice = 3 };
+    void setDirection     (Direction d);
+    void setColourScheme  (ColourScheme c);
+    void setFftScale      (y2k::fscale::Scale s);
+    void setScrollSpeed   (float pxPerSec);
+    void setFloorDb       (float db);
+    void setCeilDb        (float db);
+    void setContrast      (float g);
+    void setSlopeDbPerOct (float dbPerOct);
+    void setTimeSmooth    (float pct0To80);
+    void setSmoothPixels  (bool on);
+    void setFreqRange     (FreqRange r);
+    void setShowGrid      (bool on);
+    void setShowLabels    (bool on);
 
-    void setDirection (Direction d);
-    void setColourScheme (ColourScheme c);
-    void setFftScale (y2k::fscale::Scale s);
-    void setScrollSpeed (float pxPerSec);
-
-    // ---- Toybox（v3.0.0）：贴纸炸弹（§8.3）----
+    // ---- Toybox ----
     juce::Rectangle<int> getToyCanvasBounds() const { return getCanvasBounds (getContentBounds()); }
     float getToyScrollPxPerSec() const { return pixelsPerSecond; }
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
@@ -87,54 +109,46 @@ protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
     void resized() override;
 
-    // ---- GlDirectModuleBase 钩子（v2.9.5 迁移，纹理通道）----
+    // ---- GlDirectModuleBase 钩子（纹理通道）----
     void buildGlSnapshot() override;
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
-    // 绿幕：保留瀑布画布（静音像素在 intensityToColour 里渐隐为纯绿）
     juce::Rectangle<int> getChromaKeyCanvas() override { return getCanvasBounds (getContentBounds()); }
 
 private:
-    // ---- 布局 ----
+    static constexpr float kSilenceDb = -144.0f;
+
     juce::Rectangle<int> getCanvasBounds (juce::Rectangle<int> content) const;
 
-    // 确保 grid 的 rows/cols 与 canvas 尺寸 + cellPx 一致；变化则重建
+    float activeMinFreqHz() const noexcept;
+    float activeMaxFreqHz() const noexcept;
+
     void ensureGrid (int canvasW, int canvasH);
-
-    // 把当前已合并到「rows 个对数频率点」的线性幅度写到 grid 的 writeCol 列
-    //   （Classic 用原始幅度；Sharp/Sharper 用重分配后的幅度，见 onFrame）
-    void pushColumn (const juce::Array<float>& rowsMags);
-
-    // 方案 B：把 grid 的"最新一列强度"写入离屏 Image 的对应像素列。
-    //   · Image 的每个像素 = grid 的一格（按 Image 尺寸等比映射），
-    //     paint 时一次性 drawImage 贴屏，开销 O(canvas_pixels) 但常数极低，
-    //     远低于 rows×cols 次 fillRect。
-    //   · 只重绘"新进来的一列"，其它列完全不动。
+    void pushColumn (const std::vector<float>& rowsDb);
     void writeLatestColumnToImage();
-
-    // 方案 B：根据当前 rows / cols 重建离屏 Image（仅在尺寸变化时）
     void ensureImage();
-
-    // 方案 B：把整个 gridData 重新画到 Image 上（尺寸变化/首帧时用）
     void redrawFullImage();
 
-    // 左侧滚动的推进速度控制
-    //   pixelsPerSecond = 目标"滚动速度"（像素列/秒），与 UI 帧率解耦
-    //   —— 不论 Hub 30/60 Hz 分发，画面横向推进速度始终目标押到
-    //   pixelsPerSecond 列/秒。
+    // 重建 256 级调色 LUT（含 Contrast 幂曲线与绿幕抠像）及每行频率倾斜补偿表
+    void rebuildPaletteLut();
+    void rebuildRowTiltLut();
+    void invalidateVisualGrading (bool paletteDirty = true, bool tiltDirty = true);   // 调色/量程/倾斜改变：保留历史，按需重绘整屏
 
-    // 强度 t∈[0,1] → 色彩：从 base 色（无信号）到 accent 色（满信号）的线性渐变
     juce::Colour intensityToColour (float t) const noexcept;
+    inline juce::uint32 dbRowToArgb (float rawDb, int r) const noexcept
+    {
+        const float tilt = (r >= 0 && r < (int) rowTiltDb_.size()) ? rowTiltDb_[(size_t) r] : 0.0f;
+        const float t = juce::jlimit (0.0f, 1.0f, (rawDb + tilt - floorDb) * invDbSpan_);
+        const int idx = juce::jlimit (0, 255, (int) (t * 255.0f + 0.5f));
+        return paletteLut_[(size_t) idx];
+    }
 
-    // 频率 → 网格行号（0 = 顶 = 高频；rows-1 = 底 = 低频）
-    static int freqToGridRow (double freqHz, double minHz, double maxHz, int rows) noexcept;
+    bool isDarkPalette() const noexcept;
 
-    // 绘制底衬、轴标签
     void drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawAxisLabels (juce::Graphics& g, juce::Rectangle<int> canvas) const;
 
-    // 取 grid 里第 c 列第 r 行的强度（环形列）
     inline float at (int r, int c) const noexcept
     {
         return gridData[(size_t) (r * cols + c)];
@@ -144,92 +158,86 @@ private:
         gridData[(size_t) (r * cols + c)] = v;
     }
 
-    // ---- 成员 ----
-    AnalyserHub& hub;
-
-    // 每格默认边长（像素）。默认状态下格子是 cellPx × cellPx 的正方形；
-    // 拉伸模块时格子数量保持不变，像素尺寸会统一变成长方形。
-    int cellPx = 1;
-
-    // 网格尺寸（rows = 纵向频率数，cols = 横向时间数）
-    int rows = 0;
-    int cols = 0;
-
-    // 行×列 的强度网格，值域 [0,1]。按行优先布局：index = r*cols + c
-    std::vector<float> gridData;
-
-    // 环形列写入指针：下一列要写的位置
-    int writeCol = 0;
-
-    // ---- 方案 B：离屏 Image 缓存 ----
-    //   imageBuf 的宽 = cols，高 = rows，一像素对应一格。
-    //   paint 时 drawImage(imageBuf, canvas, ...) 直接缩放贴屏，
-    //   不再每帧 rows×cols 次 fillRect。
-    juce::Image imageBuf;
-
-    // 画布尺寸缓存（仅用于判断是否需要重建 grid）
-    int lastCanvasW = 0;
-    int lastCanvasH = 0;
-
-    // 每帧复用的"rows 长度线性幅度"缓冲，避免 onFrame 里反复分配
-    juce::Array<float> rowMagBuf;
-
-    // v2.9.5：纹理像素缓存（增量着色 —— 只有新列重新调色，其余复用；
-    //   12 万像素全量 interpolatedWith 每帧 ~2.4ms，是消息线程卡顿主因）
-    std::vector<juce::uint32> texPixelsCache_;
-    bool texCacheValid_ = false;
-    int  lastBuiltWriteCol_ = -1;   // 上次构建时 writeCol（用于整区间增量更新：
-                                    //   低帧率一帧 push 多列，只更新最后一列会让
-                                    //   中间列残留环形位置的历史数据 → 黑线）
-
-    // ---- 滚动速度解耦 —— 按实时时间推进列数，清除 "帧率×1 列"的耦合 ----
-    float  pixelsPerSecond  = 60.0f;   // 默认 60 px/s（滚动速度，与 UI 帧率解耦）
-    double lastFrameMs      = 0.0;     // 上一次 onFrame 时刻（毫秒）
-    float  columnAccumulator = 0.0f;   // 累计的小数列值，⏲外部当 1 列抽走
-
-    // ---- 控制面板参数（构造默认 = 旧外观）----
-    Direction    direction    = Direction::Left;
-    ColourScheme colourScheme = ColourScheme::Theme;
-    y2k::fscale::Scale fftScale = y2k::fscale::Scale::log;
-    bool isVertical() const noexcept { return direction == Direction::Up || direction == Direction::Down; }
-
-    // 把 gridData 的最近 cols 列按当前方向展开成无环形的纹理像素（Right / Up / Down 用；
-    //   Left 走原来的双拷贝环形零 memmove 路径）。W×H 写入 outW/outH。
     void buildUnrolledTexture (std::vector<juce::uint32>& out, int& outW, int& outH) const;
-    // 当前方向 + FFT scale 下，屏幕上的位置（plot 内 [0,1] 的频率轴位置）→ 频率；
-    //   以及悬停点 → (频率, 距今秒数)
     void hoverToFreqAndAge (juce::Rectangle<int> canvas, juce::Point<int> p,
                             float& freqHz, float& secondsAgo) const;
 
-    // ---- 显示模式状态 ----
-    //   Classic : 原始幅度谱（getSpectrumMagnitudesBlended）
-    //   Sharp   : 频率重分配（getSpectrumReassignedBlended，能量凝聚成粒子）
-    //   Sharper : 频率重分配（时间重分配作为后续增强）
-    DisplayMode displayMode = DisplayMode::Sharp;   // 默认 Sharp
-    // 主题订阅 token：切换主题时重新下发 Label / Slider textBox 的墨色
+    void refreshSpectrogramColours();
+    bool syncAppearanceIfChanged();
+    void drawHoverRuler (juce::Graphics& g, juce::Rectangle<int> canvas);
+
+    // ---- 成员 ----
+    AnalyserHub& hub;
+
+    int cellPx = 1;
+    int rows   = 0;
+    int cols   = 0;
+
+    // 行×列 原始 dB 历史网格（r=0 顶=高频，r=rows-1 底=低频），无信号初始化为 kSilenceDb
+    std::vector<float> gridData;
+    int writeCol = 0;
+
+    juce::Image imageBuf;
+    bool imageBufDirty_ = true;
+    int lastCanvasW = 0;
+    int lastCanvasH = 0;
+
+    // 每帧复用工作缓冲（零堆分配）
+    juce::Array<float> rowMagBuf;
+    juce::Array<float> classicMagBuf;
+    std::vector<float> colDbBuf;
+    std::vector<float> smoothColDb;     // Time smooth 状态
+
+    // 256 级 ARGB 查表 + 每行高频倾斜补偿（dB）
+    std::array<juce::uint32, 256> paletteLut_ {};
+    std::vector<float>            rowTiltDb_;
+    double                        tiltSampleRate_ = 0.0;
+    float                         invDbSpan_ = 1.0f / 76.0f;
+
+    // GL 增量纹理像素缓存（Left 环形双拷贝 / Right·Up·Down 展开缓存共用）
+    std::vector<juce::uint32> texPixelsCache_;
+    bool         texCacheValid_      = false;
+    int          lastBuiltWriteCol_  = -1;
+    int          texCacheW_          = 0;
+    int          texCacheH_          = 0;
+    Direction    lastBuiltDir_       = Direction::Left;
+    juce::uint64 texDataGen_         = 1;     // 纹理内容/过滤/尺寸代次（永不为 0，0 保留为未上传/已重置态）
+    bool         lastUploadedLinear_ = true;  // 最近一次触发上传时的 smoothPixels 状态
+
+    // 滚动速度（与 UI 帧率解耦）
+    float  pixelsPerSecond   = 60.0f;
+    double lastFrameMs       = 0.0;
+    float  columnAccumulator = 0.0f;
+
+    // ---- 用户可调参数 ----
+    Direction          direction     = Direction::Left;
+    ColourScheme       colourScheme  = ColourScheme::Theme;
+    DisplayMode        displayMode   = DisplayMode::Sharp;
+    y2k::fscale::Scale fftScale      = y2k::fscale::Scale::log;
+    FreqRange          freqRange     = FreqRange::Full;
+
+    float floorDb       = -84.0f;   // 底噪门限（-110 .. -30 dB）
+    float ceilDb        =  -8.0f;   // 峰值上限（-36 .. 0 dB）
+    float contrastGamma =   1.15f;  // 对比度幂曲线（0.40 .. 2.50）
+    float slopeDbPerOct =   3.0f;   // 高频倾斜补偿（0.0 .. 9.0 dB/oct，1 kHz 为支点）
+    float timeSmoothPct =  15.0f;   // 时间平滑（0 .. 80 %）
+    bool  smoothPixels  =  true;    // GL_LINEAR / 中等采样平滑
+    bool  showGrid      =  true;    // 细频率参考线
+    bool  showLabels    =  true;    // 刻度标签与 older/newer 提示
+
+    bool isVertical() const noexcept { return direction == Direction::Up || direction == Direction::Down; }
+
     int themeSubToken = -1;
-
-    // 显示参数
-    static constexpr float minFreqHz = 20.0f;
-    static constexpr float maxFreqHz = 20000.0f;
-    static constexpr float minDb     = -90.0f; // 最暗端
-    static constexpr float maxDb     =   0.0f; // 最亮端
-
-    // ---- Spectrogram 配色：base（无信号底色）→ accent（满信号主色）线性渐变 ----
-    //   跟随当前主题，custom 主题下 base=secondary（右侧基色）、accent=primary（左侧强调色）；
-    //   预设主题下 base=content（模块画布底色）、accent=swatch（主题色票）。
+    juce::uint32 lastAppearanceGen_ = 0;
+    juce::uint32 lastFontGen_       = 0;
     juce::Colour spectrogramBaseColour_;
     juce::Colour spectrogramAccentColour_;
 
-    // 根据当前主题刷新 spectrogramBaseColour_ / spectrogramAccentColour_
-    void refreshSpectrogramColours();
-
-    // ---- 鼠标悬停标尺 ----
-    void drawHoverRuler(juce::Graphics& g, juce::Rectangle<int> canvas);
+    // 鼠标悬停标尺
     juce::Point<int> hoverPos;
     bool             hoverActive = false;
 
-    // ---- 按住冻结 ----
+    // 按住冻结
     HoldSlowMo hold;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrogramModule)

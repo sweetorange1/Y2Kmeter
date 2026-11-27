@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
 #include <vector>
 #include "source/ui/GlDirectModule.h"
 #include "source/analysis/AnalyserHub.h"
@@ -88,6 +89,31 @@ public:
     double getParamValue  (const juce::String& id) const override;
     void   setParamValue  (const juce::String& id, double v) override;
 
+    // ---- 显示风格与频率视野（v3.5 / v3.6）----
+    //   注意：fill=0, line=1, bars=2, glow=3 保持原枚举序数向后兼容，新增项依次追加。
+    enum class FillStyle { fill = 0, line = 1, bars = 2, glow = 3, energy = 4, led = 5, mirror = 6 };
+    enum class ColorMap  { theme = 0, miniMeter = 1, magma = 2, inferno = 3, plasma = 4, ice = 5, rainbow = 6 };
+    enum class BarBands  { b31 = 0, b64 = 1, b96 = 2, b128 = 3 };
+    enum class FreqRange { full = 0, music = 1, vocal = 2, bass = 3 };
+
+    void      setFillStyle      (FillStyle s);
+    FillStyle getFillStyle() const noexcept { return fillStyle; }
+    void      setColorMap       (ColorMap m);
+    ColorMap  getColorMap() const noexcept { return colorMap; }
+    void      setEnergyContrast (float c);
+    float     getEnergyContrast() const noexcept { return energyContrast; }
+    void      setBarBands       (BarBands b);
+    BarBands  getBarBands() const noexcept { return barBands; }
+    int       getBarBandCount() const noexcept;
+    void      setFreqRange      (FreqRange r);
+    FreqRange getFreqRange() const noexcept { return freqRange; }
+    void      setFloorDb        (float db);
+    void      setCeilDb         (float db);
+    void      setReleaseScale   (float mult);
+    void      setPeakFallRate   (float dbPerSec);
+    void      setShowGrid       (bool on);
+    void      setShowLabels     (bool on);
+
     // ---- FFT scale（横坐标刻度）：Log（默认，旧外观）/ Mel / Linear ----
     void setFftScale (y2k::fscale::Scale s);
     y2k::fscale::Scale getFftScale() const noexcept { return fftScale; }
@@ -130,6 +156,22 @@ private:
     void rebuildDisplay();
     void ensureDisplayCache (int numPoints);
 
+    // ---- 能量色谱与频段聚合辅助（GL / CPU 双路径共用）----
+    void         ensureEnergyLut() const;
+    juce::Colour sampleEnergyPalette   (float t) const noexcept;
+    juce::Colour energyContourColour   (bool darkCanvas) const noexcept;
+    juce::Colour energySecondaryColour (bool darkCanvas) const noexcept;
+    void         buildSubdividedCurve  (const std::vector<float>& dbVals,
+                                        const std::vector<float>& freqs,
+                                        juce::Rectangle<int> canvas,
+                                        juce::Rectangle<int> inner,
+                                        bool smooth, int subdiv,
+                                        std::vector<float>& outX,
+                                        std::vector<float>& outY) const;
+    void         computeBandLevels     (std::vector<float>& outMainDb,
+                                        std::vector<float>* outPeakDb,
+                                        std::vector<float>* outSecondaryDb) const;
+
     // ---- 绘制 ----
     void drawBackground(juce::Graphics& g, juce::Rectangle<int> canvas) const;
     void drawGrid      (juce::Graphics& g, juce::Rectangle<int> canvas) const;
@@ -143,10 +185,14 @@ private:
     float freqToX(float freqHz, juce::Rectangle<int> canvas) const;
     // X 像素坐标 → 频率
     float xToFreq(float x, juce::Rectangle<int> canvas) const;
+    float activeMinFreqHz() const noexcept;
+    float activeMaxFreqHz() const noexcept;
+
     // 频率 → [0,1] 的横向位置（freqToX / 曲线定位共用）
     float unitOfHz(float freqHz) const noexcept
     {
-        return (float) y2k::fscale::toUnit (fftScale, (double) freqHz, (double) minFreqHz, (double) maxFreqHz);
+        return (float) y2k::fscale::toUnit (fftScale, (double) freqHz,
+                                            (double) activeMinFreqHz(), (double) activeMaxFreqHz());
     }
     // 当前刻度下的纵向网格频率（major 带实线/标签，minor 为淡线）
     void gridFreqs (std::vector<float>& major, std::vector<float>& minor) const;
@@ -207,12 +253,37 @@ private:
         return channelMode != ChannelMode::mid && ! secondaryDb.empty();
     }
 
-    // 显示参数
+    // 显示参数（默认与旧外观逐像素一致）
     static constexpr float minFreqHz = 20.0f;
     static constexpr float maxFreqHz = 20000.0f;
-    static constexpr float minDb     = -80.0f;
-    static constexpr float maxDb     = 0.0f;
-    static constexpr float peakFallRatePerSec = 6.0f;    // dB/s 持续下降速率（无 hold/阈值，peak 线始终缓慢下落）
+    float floorDb          = -80.0f;
+    float ceilDb           =   0.0f;
+    float peakFallRate     =   6.0f;    // dB/s 持续下降速率
+    float releaseScale     =   1.0f;    // 曲线回落速度倍率（0.2..3.0）
+    FillStyle fillStyle    = FillStyle::energy;
+    ColorMap  colorMap     = ColorMap::theme;
+    float     energyContrast = 1.25f;   // 能量着色反差幂次（0.5..2.5）
+    BarBands  barBands     = BarBands::b64;
+    FreqRange freqRange    = FreqRange::full;
+    bool  showGrid         = true;
+    bool  showLabels       = true;
+
+    // Bars / LED 专用分频段峰值保持（仅在 peakHoldEnabled 开启时追踪并绘制浮空峰帽 / 峰砖）
+    std::vector<float> barPeakDb;
+    mutable std::vector<float> bandLevelScratch_;
+    mutable std::vector<float> bandPeakScratch_;
+    mutable std::vector<float> bandSecScratch_;
+
+    // 能量着色 256 阶预烘焙 LUT（按 colorMap + 主题键懒更新，GL / CPU 逐像素一致）
+    mutable std::array<juce::Colour, 256> energyLut_ {};
+    mutable ColorMap      energyLutMap_      = ColorMap::theme;
+    mutable juce::uint32  energyLutThemeKey_ = 0;
+    mutable bool          energyLutValid_    = false;
+
+    // GL / CPU 共用的细分折线临时缓冲（每帧复用，避免堆分配）
+    mutable std::vector<float> subX_, subY_, subX2_, subY2_, subPx_, subPy_;
+    mutable std::vector<juce::Point<float>> polyPtsScratch_;
+    mutable juce::Image energyCpuCache_; // 浮动态/软绘能量幕直写位图（SoftwareImageType，避免逐列 ColourGradient 卡顿）
 
     // 新模块默认：Peak 关（不画峰值虚线）+ Semi 曲线（细节与平滑折中）
     bool peakHoldEnabled = false;
@@ -254,11 +325,15 @@ private:
     //   在 120Hz 下是本模块最大的开销。
     mutable juce::Image  staticLayer_;
     mutable juce::Rectangle<int> staticLayerBounds_;
-    mutable float        staticLayerScale_     = 0.0f;
-    mutable juce::uint32 staticLayerColourKey_ = 0;
-    mutable bool         curve_cache_dirty_    = true; // 兼容保留：onFrame 标脏（不再触发重建）
+    mutable float        staticLayerScale_         = 0.0f;
+    mutable juce::uint32 staticLayerColourKey_     = 0;
+    mutable juce::uint32 staticLayerAppearanceGen_ = 0;
+    mutable juce::uint32 staticLayerFontGen_       = 0;
+    mutable bool         staticLayerChromaHidden_  = false;
+    mutable bool         curve_cache_dirty_        = true; // 兼容保留：onFrame 标脏（不再触发重建）
     void renderStaticLayer (juce::Rectangle<int> content, float physicalScale) const;
     static juce::uint32 computeThemeColourKey() noexcept;
+    int themeSubToken = -1;
 
     // ---- 控制面板参数 ----
     y2k::fscale::Scale fftScale = y2k::fscale::Scale::log;   // 构造默认 = 旧外观

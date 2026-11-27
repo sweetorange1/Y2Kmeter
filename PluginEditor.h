@@ -13,6 +13,7 @@ class ModuleWorkspace;
 class ModulePanel;
 enum class ModuleType;
 class MilkdropTintPass;  // 整体染色后处理着色器，完整定义在 MilkdropModule.h
+class GlDirectRenderer;  // 跨宿主共享 GL 直渲染管线，完整定义在 source/ui/GlDirectRenderer.h
 class ToyDirector;       // Toybox 点击互动主管（完整定义在 source/ui/toys/ToyKit.h）
 class Y2KTooltipWindow;  // 悬停提示窗口（完整定义在 source/ui/HoverHelp.h）
 
@@ -169,6 +170,8 @@ public:
         juce::String displayName;
         juce::String sourceId;
         bool         isLoopback = false;
+        juce::StringArray submenuPath;      // 所在子菜单的路径（逐级一个名字）；空 = 顶层条目
+        bool         separatorBefore = false; // 该项（或其所属子菜单入口）前插一条分隔线
     };
 
     void setAudioSourceItems (const juce::Array<AudioSourceEntry>& items,
@@ -176,6 +179,9 @@ public:
 
     // 订阅下拉切换（sourceId 为添加时传入的 ID）
     std::function<void(const juce::String& sourceId, bool isLoopback)> onAudioSourceChanged;
+
+    // 下拉菜单即将弹出 → Standalone App 借此刷新程序列表（回调里调 setAudioSourceItems）
+    std::function<void()> onAudioSourceListRequested;
 
     // ======================================================
     // 预设 Save/Load 透传回调（由 ModuleWorkspace 的 Save/Load 按钮触发）
@@ -232,6 +238,10 @@ public:
     //   · 重绘标题栏以刷新按钮按下/抬起外观
     void setAlwaysOnTopActive (bool shouldBeOnTop);
 
+    // 背景模式运行时控制 Editor OpenGLContext 摘挂（Standalone Transparent Overlay 需先摘除 GL，
+    //   避免子 GL HWND 遮断 Win32 WS_EX_LAYERED 逐像素透明，使 GL 直渲染模块自动回退 CPU 路径）
+    void setOpenGlEnabledForBackdrop (bool enabled);
+
     // 从持久化恢复 FPS 限制值（Standalone 启动时调用）
     void RestoreFpsLimit (int hz);
 
@@ -268,20 +278,12 @@ private:
     // 应用布局预设：
     //   presetId = 1 (defaultGrid)        = 默认布局（十个默认模块 + 默认窗口 960×640）
     //   presetId = 2 (horizontalFull)     = 横向铺满当前屏幕宽度（贴屏幕顶部）
-    //   presetId = 3 (horizontalBottom)   = 横向铺满当前屏幕宽度（贴屏幕底部）
-    //   presetId = 5 (mv)                 = 全屏 + 上方横向模块条 + 下方 Milkdrop
-    //   presetId = 6 (studioMonitor)      = 双行监听（仪表行 + 波形行）
-    //   presetId = 7 (focusSidecar)       = 主视觉 + 右侧仪表列
-    //   presetId = 9 (broadcastLoudness)  = 广播响度合规
-    //   presetId = 10 (onlyMilkdrop)      = 全屏 + 单个最大化 Milkdrop
-    //   presetId = 14/15/16               = 全屏磁贴预设（只取存档布局，模块默认设置）
+    // 应用布局预设（v3.5 全新多场景布局体系，覆盖日常桌面/混音母带/人声播客/DJ/直播/MV/全屏指挥台）
     //   · 由 ModuleWorkspace::onLayoutPresetChanged 触发（参数用 int 承载枚举值，
     //     以避免在此头文件里 include 完整的 ModuleWorkspace.h）
     void applyLayoutPreset (int presetId);
 
-    // 全屏磁贴预设（14/15/16）：窗口铺满屏幕，按归一化矩形把模块密排到 canvas。
-    //   · 只参考用户存档的模块排布（类型 + 位置尺寸），不含 VirtuPet；
-    //   · 每个模块都走 createModule() 的构造默认值，不加载存档里的 <state>。
+    // 全屏磁贴预设：窗口铺满屏幕，按归一化矩形将现行模块无缝密排到 canvas。
     void applyFullScreenTilePreset (int presetId);
 
     // bug4：目标预设不是全屏磁贴预设、而窗口正处于 mac 原生全屏时，先退出全屏再应用。
@@ -447,7 +449,7 @@ private:
     //   · 插件（VST3/AU）与 Standalone 统一逻辑，不再区分宿主模式。
     void applyAdaptiveFrameRate (float measuredFps);
 
-    // 模块工厂（仅 Phase A：支持 EQ；其他类型为 Phase B-D 预留）
+    // 模块工厂
     std::unique_ptr<ModulePanel> createModule(ModuleType type);
 
     // ======================================================
@@ -531,6 +533,9 @@ private:
 
     // 主题变更订阅 token
     int themeSubToken = 0;
+    // 抠像 / 透明模式悬停显露变更订阅 token（同步顶部 chrome 浮层显隐）
+    int chromaRevealSubToken = 0;
+    void syncEditorChromeAlpha();
 
     // 界面语言切换（y2k::i18n）：换字体 → 广播主题刷新（各模块失效文字缓存）
     //   → 控件重取 LookAndFeel 字体 → 工具栏重排 → 全量重绘。运行时生效、无需重启。
@@ -794,41 +799,18 @@ private:
                                         bool milkdropReady, unsigned int milkdropBlitSourceFbo);
     // Win 性能优化：projectM 渲染 + 染色后处理（GL 线程；可在锁外预渲染里调用）
     unsigned int renderMilkdropFrameCore (int fboW, int fboH, bool forceRender);
-    std::unique_ptr<juce::OpenGLShaderProgram> s3dShader;
-    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTransformUniform;
-    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dNdcUniform;
-    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dSnapUniform;
-    // v2.9.5：纹理 shader（纹理通道 quad 绘制 + trail FBO 合成）
-    std::unique_ptr<juce::OpenGLShaderProgram> s3dTexShader;
-    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTexTransformUniform;
-    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTexNdcUniform;
-    std::unique_ptr<juce::OpenGLShaderProgram::Uniform> s3dTexWindowUniform;
-    int s3dTexPosAttrib = 0, s3dTexUvAttrib = 1;
-    unsigned int s3dVao = 0;       // VAO：attrib 布局容器（VBO 为 per-module 懒创建）
-    unsigned int s3dQuadVbo = 0;   // v2.9.5：临时 quad VBO（纹理 quad / trail 衰减 quad 专用 ——
-                                    //   不能借模块 glVbo，否则 needUpload=false 帧会用残留的
-                                    //   quad 数据当快照顶点画 → 全部模块画面污染）
-    int s3dPosAttrib = 0, s3dColAttrib = 1;
-    bool s3dShaderUseChecked = false;
-    bool s3dGlReady = false;
-
-    // —— 外网 v3.0.0 回退路径（RTX 3070 / NVIDIA 595.79 现场）——
-    //   该驱动下 renderToLogical 模块的 glBlitFramebuffer 每帧报 GL_INVALID_OPERATION
-    //   （0x502），blit 被整帧丢弃 → 模块永远画不出新内容，只留上一帧残影，
-    //   而 Milkdrop 因 projectM 直接渲染到后缓冲不受影响。
-    //   首帧做一次探测：若 blit 后出现 GL 错误，就永久切到"纹理 quad 合成"
-    //   回退路径（不依赖 blit）。
-    bool s3dBlitProbed    = false;
-    bool s3dBlitBroken    = false;
+    // Editor 侧 GL 直渲染管线（与 FloatingModuleWindow 共享同一套 GlDirectRenderer 实现）
+    std::unique_ptr<GlDirectRenderer> glDirectRenderer_;
 
     // ================================================================
-    // 模块浮动窗口（Standalone 模式下的模块弹出/脱离功能）
-    //   · FloatingModuleWindow 封装一个独立的 DocumentWindow，
-    //     内部持有已脱离的 ModulePanel。
-    //   · 关闭浮动窗口时自动将模块 dock 回 workspace 原始位置。
-    //   · floatingWindows_ 由 Editor 统一管理生命周期。
+    // 模块浮动窗口（Standalone 模式下的模块弹出/脱离功能，v3.5 全量迁移至 OpenGL）
+    //   · FloatingModuleWindow 封装独立 DocumentWindow + 专属 OpenGLContext +
+    //     GlDirectRenderer，所有脱离模块（除自带 GLView 的 Milkdrop 外）与停靠态
+    //     共享 100% 一致的 GPU 渲染管线、后处理与满帧率刷新。
+    //   · 关闭浮动窗口时先安全 detach GL 上下文，再将模块 dock 回 workspace。
     // ================================================================
     class FloatingModuleWindow : public juce::DocumentWindow,
+                                 public juce::OpenGLRenderer,
                                  private juce::AsyncUpdater
     {
     public:
@@ -838,12 +820,27 @@ private:
                              std::function<void(ModulePanel&, juce::Rectangle<int>)> onDock,
                              Y2KmeterAudioProcessorEditor* editor);
         ~FloatingModuleWindow() override;
+        void paint (juce::Graphics& g) override;
         void closeButtonPressed() override;
         void resized() override;
         juce::BorderSize<int> getBorderThickness() const override;
         juce::Rectangle<int> getSavedBounds() const noexcept { return savedBounds_; }
         ModulePanel& getModulePanel() const noexcept { return module_; }
         void setLayoutLocked(bool locked);
+
+        // OpenGLRenderer（独立浮窗 GPU 合成 + GlDirectRenderer 直绘）
+        void newOpenGLContextCreated() override;
+        void renderOpenGL() override;
+        void openGLContextClosing() override;
+
+        // 浮窗 GL 生命周期与背景模式同步
+        void attachGlContextIfEligible();
+        void detachGlContext();
+        void requestGlFrame();
+        void syncBackdropTransparency();
+        void setOpenGlEnabledForBackdrop (bool enabled);
+        bool isGlAttached() const noexcept { return glContext_.isAttached(); }
+        juce::int64 getGlFrameCount() const noexcept { return glFrameCounter_.load (std::memory_order_relaxed); }
 
         // v3.0.1：抬头双击 → 伪全屏 / 恢复
         //   Windows：铺满当前显示器 userArea（已扣任务栏，不覆盖任务栏）；
@@ -873,7 +870,7 @@ private:
         ModulePanel& module_;
         juce::Rectangle<int> savedBounds_;
         std::function<void(ModulePanel&, juce::Rectangle<int>)> onDock_;
-        Y2KmeterAudioProcessorEditor* editor_;  // 用于 Milkdrop resize 时触发 GL 重绘
+        Y2KmeterAudioProcessorEditor* editor_;  // 用于 Milkdrop resize 时触发 GL 重绘 / dock 时恢复请求器
         bool floatingLockLimitsValid_ = false;
         int floatingLockMinW_ = 0;
         int floatingLockMinH_ = 0;
@@ -887,10 +884,21 @@ private:
         // 浮动窗口是独立的顶层 peer，Editor 的提示窗口管不到这里 —— 每个浮动窗口
         //   自带一个（以窗口自身为宿主）。
         std::unique_ptr<Y2KTooltipWindow> tooltip_;
+
+        // 浮窗专属 GL 直渲染管线与 OpenGLContext（glContext_ 声明在末尾以保证反向析构优先销毁）
+        std::unique_ptr<GlDirectRenderer> glDirectRenderer_;
+        bool                              glEnabledForModule_    = false;
+        bool                              transparentDwmApplied_ = false;
+        std::atomic<bool>                 glClosing_ { false };
+        std::atomic<juce::int64>          glFrameCounter_ { 0 };
+        juce::OpenGLContext               glContext_;
     };
 
     // v3.0.1：找到 panel 所属的浮动窗口并切换其伪全屏
     void toggleFloatingModuleFullScreen (ModulePanel& panel);
+    // 统一浮窗停靠 / 关闭入口（由点击回调经 callAsync 异步调用，杜绝 WM_LBUTTONUP 重入与闭包自毁 UAF）
+    void dockFloatingModule  (ModulePanel* panel, juce::Rectangle<int> savedBounds);
+    void closeFloatingModule (ModulePanel* panel);
 
     std::vector<std::unique_ptr<FloatingModuleWindow>> floatingWindows_;
 
@@ -1053,6 +1061,24 @@ private:
     std::vector<float>     milkdrop_last_real_pcm_;
     unsigned int           milkdrop_last_real_frames_ = 0;
     bool                   milkdrop_has_ever_received_pcm_ = false;
+
+    // Standalone 顶层窗口级撤回快捷键监听：删掉模块后焦点可能退回 Y2KMainWindow，
+    //   挂在顶层窗口上可确保 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 始终可达（TextEditor 聚焦时自动让行）。
+    class TopLevelUndoKeyListener : public juce::KeyListener
+    {
+    public:
+        explicit TopLevelUndoKeyListener (Y2KmeterAudioProcessorEditor& e) : editor_ (e) {}
+        bool keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent) override;
+    private:
+        Y2KmeterAudioProcessorEditor& editor_;
+    };
+    TopLevelUndoKeyListener topLevelUndoKeyListener_ { *this };
+    juce::Component::SafePointer<juce::Component> topLevelUndoKeyHost_;
+    void syncTopLevelUndoKeyListener();
+
+    // 布局预设切换等改变主窗口尺寸的撤回事务：一并捕获与还原窗口几何/全屏/约束
+    juce::ValueTree captureHostWindowState();
+    void            restoreHostWindowState (const juce::ValueTree& state);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Y2KmeterAudioProcessorEditor)
 };

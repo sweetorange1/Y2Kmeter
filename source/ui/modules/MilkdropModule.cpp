@@ -15,6 +15,7 @@
 #include "MilkdropModule_mac.h"
 #endif
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 #include "source/ui/HoverHelp.h"
 #include "source/diag/Y2KDiagLog.h"
 #include "source/Y2KLogging.h"
@@ -1700,39 +1701,263 @@ MilkdropModule::~MilkdropModule()
     glView.reset(); // 现在可以安全地销毁子组件
 }
 
+int MilkdropModule::resolveLivePresetIndex() const
+{
+  if (pendingPresetTarget_ >= 0)
+  {
+    // 若渲染器已经切到该目标，自动交还实时追踪（否则在 GL 消费前保持确定性目标）
+    if (glView != nullptr && glView->GetCurrentPresetIndex() == pendingPresetTarget_)
+      pendingPresetTarget_ = -1;
+    else
+      return pendingPresetTarget_;
+  }
+  if (glView != nullptr)
+  {
+    const int live = glView->GetCurrentPresetIndex();
+    if (live >= 0)
+      return live;
+  }
+  return restored_preset_index_;
+}
+
+void MilkdropModule::notifyBeforeUserEdit()
+{
+  const int liveIdx = resolveLivePresetIndex();
+  if (liveIdx >= 0)
+    restored_preset_index_ = liveIdx;
+  syncVisualFromEditor();
+  syncWaveFromEditor();
+  if (onWillChangeParamByUser)
+    onWillChangeParamByUser (*this);
+}
+
+void MilkdropModule::notifyAfterUserEdit(const juce::String& actionLabel,
+                                         const juce::String& focusHint,
+                                         const juce::String& coalesceKey)
+{
+  setLastChangedParamActionLabel (actionLabel);
+  setLastChangedParamFocusHint   (focusHint);
+  setLastChangedParamCoalesceKey (coalesceKey);
+  if (onParamChangedByUser)
+    onParamChangedByUser (*this);
+  setLastChangedParamActionLabel ({});
+  setLastChangedParamFocusHint   ({});
+  setLastChangedParamCoalesceKey ({});
+}
+
+void MilkdropModule::revealUndoTarget(const juce::String& focusHint)
+{
+  // 收起其它模块可能打开的设置抽屉，避免挡住 MilkDrop 控制器
+  ModulePanel::closeOpenControlDrawers (nullptr, {});
+
+  // 强制聚焦并刷新 4s 自动隐藏计时器，确保顶部控制栏立即可见
+  if (! focused_)
+    setFocusVisual (true);
+  touchOverlayIdleTimer();
+
+  auto closeAllSubPanels = [this]()
+  {
+    isAutoRowExpanded_  = false;
+    isColorPanelOpen_   = false;
+    isEffectsPanelOpen_ = false;
+    isWavePanelOpen_    = false;
+    isTweakPanelOpen_   = false;
+  };
+
+  if (focusHint == "color")
+  {
+    closeAllSubPanels();
+    isColorPanelOpen_ = true;
+    syncVisualFromEditor();
+  }
+  else if (focusHint == "effects")
+  {
+    closeAllSubPanels();
+    isEffectsPanelOpen_ = true;
+    syncVisualFromEditor();
+  }
+  else if (focusHint == "wave")
+  {
+    closeAllSubPanels();
+    isWavePanelOpen_ = true;
+    syncWaveFromEditor();
+  }
+  else if (focusHint == "tweak")
+  {
+    closeAllSubPanels();
+    isTweakPanelOpen_ = true;
+    syncVisualFromEditor();
+  }
+  else if (focusHint == "auto_row")
+  {
+    closeAllSubPanels();
+    isAutoRowExpanded_ = true;
+  }
+  else if (focusHint == "auto")
+  {
+    // 仅收起与 auto 互斥的四个子面板；isAutoRowExpanded_ 已由 restoreModuleSpecificState 与 isAutoMode_ 同步
+    isColorPanelOpen_   = false;
+    isEffectsPanelOpen_ = false;
+    isWavePanelOpen_    = false;
+    isTweakPanelOpen_   = false;
+  }
+  else if (focusHint == "reset_all")
+  {
+    // 同步全部视觉与波形缓存（保留已展开的子面板同步刷新，或直接清晰展示顶部控制栏）
+    syncVisualFromEditor();
+    syncWaveFromEditor();
+  }
+
+  layoutContent (getContentBounds());
+  repaint();
+  if (glView != nullptr)
+    glView->repaint();
+#if JUCE_MAC
+  UpdateOverlayViewPlacement();
+  if (overlayView_ != nullptr && overlayView_->isOnDesktop())
+    overlayView_->repaint();
+#endif
+}
+
+void MilkdropModule::notifyUserGestureEnd()
+{
+  if (onParamGestureEnded)
+    onParamGestureEnded (*this);
+}
+
 juce::ValueTree MilkdropModule::saveModuleSpecificState() const
 {
   juce::ValueTree s("state");
-  if (glView != nullptr && (isFloating() || restored_preset_index_ < 0))
-    glView->SyncOwnerPresetIndexFromRenderer();
-  const int idx = restored_preset_index_;
+  const int idx = resolveLivePresetIndex();
   if (idx >= 0)
+  {
+    restored_preset_index_ = idx;
     s.setProperty("presetIndex", idx, nullptr);
+  }
   s.setProperty("autoMode", isAutoMode_, nullptr);
   s.setProperty("autoInterval", autoIntervalSeconds_, nullptr);
   s.setProperty("autoBeatMode", autoModeIsBeat_, nullptr);
   s.setProperty("autoBeats", autoBeats_, nullptr);
+  s.setProperty("keyboardEnabled", keyboardControlEnabled_, nullptr);
+
+  // 序列化全局视觉状态（color / effects / tweak），用于 Ctrl+Z 撤回重做与完整布局还原
+  const MilkdropVisualState vis = (editor_ != nullptr) ? editor_->GetMilkdropVisualState() : visualState_;
+  {
+    juce::ValueTree vt("visual");
+    vt.setProperty("tintR", (double) vis.tint_r, nullptr);
+    vt.setProperty("tintG", (double) vis.tint_g, nullptr);
+    vt.setProperty("tintB", (double) vis.tint_b, nullptr);
+    vt.setProperty("brightness", (double) vis.brightness, nullptr);
+    for (const auto& def : GetMilkdropEffectDefs())
+      if (def.implemented && def.get(vis))
+        vt.setProperty(def.display_name, true, nullptr);
+    for (int i = 0; i < MilkdropVisualOffsetState::kParamCount; ++i)
+      if (std::fabs(vis.offset.value[i]) > 1e-6f)
+        vt.setProperty("off" + juce::String(i), (double) vis.offset.value[i], nullptr);
+    for (int i = 0; i < MilkdropVisualOffsetState::kIntParamCount; ++i)
+      if (vis.offset.ivalue[i] != 0)
+        vt.setProperty("ioff" + juce::String(i), vis.offset.ivalue[i], nullptr);
+    s.appendChild(vt, nullptr);
+  }
+
+  // 序列化简单波形覆盖状态（wave）
+  const MilkdropWaveState wv = (editor_ != nullptr) ? editor_->GetMilkdropWaveState() : waveState_;
+  {
+    juce::ValueTree wt("wave");
+    wt.setProperty("enabled",  wv.enabled,  nullptr);
+    wt.setProperty("mode",     wv.mode,     nullptr);
+    wt.setProperty("x",        (double) wv.x, nullptr);
+    wt.setProperty("y",        (double) wv.y, nullptr);
+    wt.setProperty("r",        (double) wv.r, nullptr);
+    wt.setProperty("g",        (double) wv.g, nullptr);
+    wt.setProperty("b",        (double) wv.b, nullptr);
+    wt.setProperty("a",        (double) wv.a, nullptr);
+    wt.setProperty("mystery",  (double) wv.mystery, nullptr);
+    wt.setProperty("usedots",  wv.usedots,  nullptr);
+    wt.setProperty("thick",    wv.thick,    nullptr);
+    wt.setProperty("additive", wv.additive, nullptr);
+    wt.setProperty("brighten", wv.brighten, nullptr);
+    s.appendChild(wt, nullptr);
+  }
+
   return s;
 }
 
 void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
 {
+  const int prevIdx = resolveLivePresetIndex();
+
+  // 1) 恢复视觉状态（color / effects / tweak）
+  if (auto vt = state.getChildWithName("visual"); vt.isValid())
+  {
+    MilkdropVisualState v;
+    v.tint_r     = juce::jlimit(kTintMin, kTintMax, (float) (double) vt.getProperty("tintR", 1.0));
+    v.tint_g     = juce::jlimit(kTintMin, kTintMax, (float) (double) vt.getProperty("tintG", 1.0));
+    v.tint_b     = juce::jlimit(kTintMin, kTintMax, (float) (double) vt.getProperty("tintB", 1.0));
+    v.brightness = juce::jlimit(kBrightMin, kBrightMax, (float) (double) vt.getProperty("brightness", 1.0));
+    for (const auto& def : GetMilkdropEffectDefs())
+      if (def.implemented)
+        def.set(v, (bool) vt.getProperty(def.display_name, false));
+    for (int i = 0; i < MilkdropVisualOffsetState::kParamCount; ++i)
+      v.offset.value[i] = (float) (double) vt.getProperty("off" + juce::String(i), 0.0);
+    for (int i = 0; i < MilkdropVisualOffsetState::kIntParamCount; ++i)
+      v.offset.ivalue[i] = (int) vt.getProperty("ioff" + juce::String(i), 0);
+    visualState_ = v;
+    applyVisualToEditor();
+  }
+
+  // 2) 恢复波形覆盖状态（wave），若发生变更则标记需重载当前预设使注入生效
+  bool waveChanged = false;
+  if (auto wt = state.getChildWithName("wave"); wt.isValid())
+  {
+    const MilkdropWaveState prevW = (editor_ != nullptr) ? editor_->GetMilkdropWaveState() : waveState_;
+    MilkdropWaveState w;
+    w.enabled  = (bool) wt.getProperty("enabled", false);
+    w.mode     = juce::jlimit(0, 15, (int) wt.getProperty("mode", 6));
+    w.x        = (float) (double) wt.getProperty("x", 0.5);
+    w.y        = (float) (double) wt.getProperty("y", 0.5);
+    w.r        = (float) (double) wt.getProperty("r", 1.0);
+    w.g        = (float) (double) wt.getProperty("g", 1.0);
+    w.b        = (float) (double) wt.getProperty("b", 1.0);
+    w.a        = (float) (double) wt.getProperty("a", 1.0);
+    w.mystery  = (float) (double) wt.getProperty("mystery", 0.0);
+    w.usedots  = (bool) wt.getProperty("usedots", false);
+    w.thick    = (bool) wt.getProperty("thick", false);
+    w.additive = (bool) wt.getProperty("additive", false);
+    w.brighten = (bool) wt.getProperty("brighten", false);
+    waveChanged = (w.enabled != prevW.enabled || w.mode != prevW.mode
+                   || std::fabs(w.x - prevW.x) > 1e-4f || std::fabs(w.y - prevW.y) > 1e-4f
+                   || std::fabs(w.r - prevW.r) > 1e-4f || std::fabs(w.g - prevW.g) > 1e-4f
+                   || std::fabs(w.b - prevW.b) > 1e-4f || std::fabs(w.a - prevW.a) > 1e-4f
+                   || std::fabs(w.mystery - prevW.mystery) > 1e-4f
+                   || w.usedots != prevW.usedots || w.thick != prevW.thick
+                   || w.additive != prevW.additive || w.brighten != prevW.brighten);
+    waveState_ = w;
+    applyWaveToEditor();
+  }
+
+  // 3) 恢复预设索引（仅在目标预设真的变了或 wave 覆盖变更时才跳转重载，避免撤回 color/effects 时重播预设）
+  bool jumpedPreset = false;
   if (state.hasProperty("presetIndex"))
   {
     int idx = static_cast<int>(state.getProperty("presetIndex"));
-    // 范围校验由 newOpenGLContextCreated 负责（此时 presetPaths 可能还未扫描）
     if (idx >= 0)
     {
       restored_preset_index_ = idx;
-      // 嵌入态由 Editor 全局 projectM 渲染：restore 时直接入队跳转
-      // 请求，Editor 的 newOpenGLContextCreated 会在 GL 上下文就绪后消费该请求
-      // 加载对应预设（对齐 Standalone 4.5 的恢复路径）。浮动态走 GLView
-      // 本地渲染，由 GLView::newOpenGLContextCreated 读 restored_preset_index_ 恢复，
-      // 无需此跳转。越界由消费端（Editor newOpenGLContextCreated）兜底为 0。
-      if (editor_ != nullptr)
-        editor_->RequestMilkdropPresetJump(idx);
+      if (idx != prevIdx || waveChanged)
+      {
+        pendingPresetTarget_ = idx;
+        if (isFloating() && glView != nullptr)
+          glView->RequestPresetJump(idx);
+        else if (editor_ != nullptr)
+          editor_->RequestMilkdropPresetJump(idx);
+        jumpedPreset = true;
+      }
     }
   }
+  if (waveChanged && ! jumpedPreset)
+    reloadCurrentPresetForWave();
+
   if (state.hasProperty("autoMode"))
   {
     isAutoMode_ = static_cast<bool>(state.getProperty("autoMode"));
@@ -1751,11 +1976,25 @@ void MilkdropModule::restoreModuleSpecificState(const juce::ValueTree& state)
     autoBeats_ = juce::jlimit(kMinAutoBeats, kMaxAutoBeats,
                               static_cast<int>(state.getProperty("autoBeats")));
   }
+  if (state.hasProperty("keyboardEnabled"))
+    keyboardControlEnabled_ = static_cast<bool>(state.getProperty("keyboardEnabled"));
+  else if (state.hasProperty("keyboardDisabled"))
+    keyboardControlEnabled_ = ! static_cast<bool>(state.getProperty("keyboardDisabled"));
   // Standalone（无宿主 playhead）下 BPM 同步模式不可用，回退时间模式。
   //   覆盖旧存档（无 autoBeatMode 字段，默认 beat）在 Standalone 下恢复后
   //   auto 开启却无法切换的边界情况。
   if (autoModeIsBeat_ && !isHostPlayheadAvailable())
     autoModeIsBeat_ = false;
+
+  if (editor_ != nullptr)
+    editor_->pushMilkdropAutomationParams();
+  repaint();
+  if (glView != nullptr)
+    glView->repaint();
+#if JUCE_MAC
+  if (overlayView_ != nullptr && overlayView_->isOnDesktop())
+    overlayView_->repaint();
+#endif
 }
 
 juce::Rectangle<int> MilkdropModule::GetContentLocalBounds() const {
@@ -1766,8 +2005,11 @@ void MilkdropModule::paint(juce::Graphics& g) {
   // Editor::renderOpenGL 已经将 projectM 帧渲染到 Editor CachedImage FBO 中
   // 本模块内容区屏幕坐标对应的区域。这里绘制卡片外壳（边框、标题栏、关闭按钮），
   // 内容区保持透明以保留 GPU 渲染的 projectM 帧。
-  // 裸模式（milkdrop-only）下跳过卡片外壳，让 projectM 帧铺满整个面板。
-  if (! isBareMode())
+  // 裸模式（milkdrop-only）或透明模式未悬停时跳过卡片外壳，保持纯 alpha=0。
+  const bool transparentHidden = PinkXP::isTransparentBackdrop()
+                                 && ! isBareMode()
+                                 && ! PinkXP::isChromaRevealed (*this);
+  if (! isBareMode() && ! transparentHidden)
   {
     const auto bounds = getLocalBounds();
 
@@ -1800,29 +2042,47 @@ void MilkdropModule::paint(juce::Graphics& g) {
   g.setColour(PinkXP::titleBarDividerColour());
   g.fillRect(tb.getX(), tb.getBottom(), tb.getWidth(), 2);
 
-  // 3. 关闭按钮（×）—— 借用基类的 pressed/hover 标志，与 ModulePanel 风格一致
-  auto cb = getCloseButtonBounds();
-  if (closeButtonPressed)
-    PinkXP::drawPressed(g, cb, PinkXP::pink100);
-  else
-    PinkXP::drawRaised(g, cb, closeButtonHovered ? PinkXP::pink200 : PinkXP::btnFace);
-  auto cbText = cb;
-  if (closeButtonPressed) cbText.translate(1, 1);
-  PinkXP::SymbolGlyphs::drawIconGlyph (g, "x", cbText, 11.0f, PinkXP::ink, 0, -1);
-
-  // 3.5. 弹出/停靠按钮
-  if (isPopOutEnabled() || isFloating())
+  // 3. 关闭按钮（×）与 3.5 弹出/停靠按钮 —— 随 SkinTokens 统一工艺
+  const auto& chromeTokens = PinkXP::getSkinTokens();
+  const bool modernTitleBtns = (chromeTokens.frameStyle == PinkXP::FrameStyle::modernStudio);
+  auto drawTitleGlyphBtn = [&](juce::Rectangle<int> r, const char* glyph, bool hovered, bool pressed)
   {
-    auto popBtn = getPopOutButtonBounds();
-    if (popOutButtonPressed_)
-      PinkXP::drawPressed(g, popBtn, PinkXP::pink100);
+    if (modernTitleBtns)
+    {
+      const auto rf = r.toFloat();
+      const float rad = juce::jmin(3.5f, rf.getHeight() * 0.35f);
+      if (pressed || hovered)
+      {
+        g.setColour(PinkXP::selInk.withAlpha(pressed ? 0.24f : 0.15f));
+        g.fillRoundedRectangle(rf, rad);
+        g.setColour(PinkXP::selInk.withAlpha(0.28f));
+        g.drawRoundedRectangle(rf.reduced(0.5f), rad, 1.0f);
+      }
+      auto tr = r;
+      if (pressed) tr.translate(0, 1);
+      PinkXP::SymbolGlyphs::drawIconGlyph(g, glyph, tr, 11.0f,
+                                          PinkXP::selInk.withAlpha(hovered || pressed ? 1.0f : 0.88f), 0, -1);
+    }
     else
-      PinkXP::drawRaised(g, popBtn, popOutButtonHovered_ ? PinkXP::pink200 : PinkXP::btnFace);
-    auto popBtnText = popBtn;
-    if (popOutButtonPressed_) popBtnText.translate(1, 1);
-    PinkXP::SymbolGlyphs::drawIconGlyph (g, isFloating() ? "=" : "-", popBtnText, 11.0f,
-                                         PinkXP::ink, 0, -1);
-  }
+    {
+      const auto state = pressed ? PinkXP::ControlState::pressed
+                       : hovered ? PinkXP::ControlState::hover
+                                 : PinkXP::ControlState::normal;
+      const auto fill  = pressed ? PinkXP::pink100
+                       : hovered ? PinkXP::pink200
+                                 : PinkXP::btnFace;
+      PinkXP::Craft::drawControlChrome(g, r, fill, state);
+      auto tr = r;
+      if (pressed) tr.translate(1, 1);
+      PinkXP::SymbolGlyphs::drawIconGlyph(g, glyph, tr, 11.0f, PinkXP::readableInkOn(fill), 0, -1);
+    }
+  };
+
+  drawTitleGlyphBtn(getCloseButtonBounds(), "x", closeButtonHovered, closeButtonPressed);
+
+  if (isPopOutEnabled() || isFloating())
+    drawTitleGlyphBtn(getPopOutButtonBounds(), isFloating() ? "=" : "-",
+                      popOutButtonHovered_, popOutButtonPressed_);
   } // if (!isBareMode())
 
   // 4. 内容区叠加控件（不填充背景 — projectM 帧已由 GPU 渲染）
@@ -1886,6 +2146,9 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
     }
   }
 
+  const bool transparentBackdrop = PinkXP::isTransparentBackdrop();
+  const bool transparentHidden   = transparentBackdrop && ! PinkXP::isChromaRevealed (*this);
+
   // 浮动态由 GLView 自己的 native OpenGL surface 直接渲染 projectM。
   // 不再绘制 Editor 共享帧，避免画面继续受主窗口 FBO 0 尺寸裁剪。
   if (isFloating())
@@ -1896,7 +2159,7 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
       auto snapshot = (glView != nullptr) ? glView->GetLastFrameSnapshot() : juce::Image();
       if (snapshot.isValid())
         g.drawImage(snapshot, content.toFloat());
-      else
+      else if (! transparentBackdrop)
         g.fillAll(juce::Colours::black);
     }
   }
@@ -1910,23 +2173,31 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
       }
       else
       {
-        g.fillAll(juce::Colours::black);
-        auto msg = glView->GetError().isEmpty()
-                       ? juce::String("Milkdrop initializing...")
-                       : y2k::trf ("Milkdrop error: {0}", y2k::tr (glView->GetError()));
-        g.setColour(juce::Colours::grey);
-        g.setFont(juce::Font(12.0f));
-        g.drawText(y2k::tr (msg), content, juce::Justification::centred, false);
+        if (! transparentBackdrop)
+          g.fillAll(juce::Colours::black);
+        if (! transparentHidden)
+        {
+          auto msg = glView->GetError().isEmpty()
+                         ? juce::String("Milkdrop initializing...")
+                         : y2k::trf ("Milkdrop error: {0}", y2k::tr (glView->GetError()));
+          g.setColour(juce::Colours::grey);
+          g.setFont(juce::Font(12.0f));
+          g.drawText(y2k::tr (msg), content, juce::Justification::centred, false);
+        }
       }
     }
   } else {
-    g.fillAll(juce::Colours::black);
-    g.setColour(juce::Colours::grey);
-    g.setFont(juce::Font(12.0f));
-    g.drawText(y2k::tr ("Milkdrop initializing..."), content, juce::Justification::centred, false);
+    if (! transparentBackdrop)
+      g.fillAll(juce::Colours::black);
+    if (! transparentHidden)
+    {
+      g.setColour(juce::Colours::grey);
+      g.setFont(juce::Font(12.0f));
+      g.drawText(y2k::tr ("Milkdrop initializing..."), content, juce::Justification::centred, false);
+    }
   }
 
-  if (glView != nullptr && glView->IsRenderReady())
+  if (! transparentHidden && glView != nullptr && glView->IsRenderReady())
     PaintLoadingIndicator(g, content);
 
   // 控制栏（overlay control bar）以 CPU paint 叠加方式绘制在 GL 帧之上。
@@ -1935,7 +2206,7 @@ void MilkdropModule::paintContent(juce::Graphics& g, juce::Rectangle<int> conten
   //   macOS 的 overlayView_（顶层子 NSWindow）同样绘制控制栏，只是用于保证
   //     原生 NSOpenGLView（浮动态）/ 合成层之外的稳定可见性；同时它承载
   //     自己的悬停提示窗口（见 OverlayView::getTooltip）。
-  if (focused_ && glView != nullptr) {
+  if (focused_ && glView != nullptr && ! transparentHidden) {
     auto topBar = content.withHeight(26);
     paintOverlayControlBar(g, topBar);
     paintLibraryButtons(g, content);
@@ -2002,22 +2273,93 @@ void MilkdropModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
 void MilkdropModule::nextPreset()
 {
-    if (glView != nullptr) glView->RequestPresetDelta (+1);
+    if (glView == nullptr) return;
+    const int total = glView->GetTotalPresetCount();
+    if (total > 0)
+    {
+        int cur = resolveLivePresetIndex();
+        if (cur < 0 || cur >= total) cur = 0;
+        const int next = (cur + 1) % total;
+        notifyBeforeUserEdit();
+        pendingPresetTarget_   = next;
+        restored_preset_index_ = next;
+        glView->RequestPresetJump (next);
+        pendingPresetTarget_   = next;
+        restored_preset_index_ = next;
+        notifyAfterUserEdit (y2k::tr ("MilkDrop preset"), "preset");
+        return;
+    }
+    glView->RequestPresetDelta (+1);
 }
 
 void MilkdropModule::prevPreset()
 {
-    if (glView != nullptr) glView->RequestPresetDelta (-1);
+    if (glView == nullptr) return;
+    const int total = glView->GetTotalPresetCount();
+    if (total > 0)
+    {
+        int cur = resolveLivePresetIndex();
+        if (cur < 0 || cur >= total) cur = 0;
+        const int prev = (cur - 1 + total) % total;
+        notifyBeforeUserEdit();
+        pendingPresetTarget_   = prev;
+        restored_preset_index_ = prev;
+        glView->RequestPresetJump (prev);
+        pendingPresetTarget_   = prev;
+        restored_preset_index_ = prev;
+        notifyAfterUserEdit (y2k::tr ("MilkDrop preset"), "preset");
+        return;
+    }
+    glView->RequestPresetDelta (-1);
 }
 
 void MilkdropModule::randomPreset()
 {
-    if (glView != nullptr) glView->RequestPresetRandom();
+    if (glView == nullptr) return;
+    const int total = glView->GetTotalPresetCount();
+    if (total > 0)
+    {
+        const int cur = resolveLivePresetIndex();
+        int next = 0;
+        if (total > 1)
+        {
+            if (cur >= 0 && cur < total)
+            {
+                next = juce::Random::getSystemRandom().nextInt (total - 1);
+                if (next >= cur) ++next;
+            }
+            else
+            {
+                next = juce::Random::getSystemRandom().nextInt (total);
+            }
+        }
+        notifyBeforeUserEdit();
+        pendingPresetTarget_   = next;
+        restored_preset_index_ = next;
+        glView->RequestPresetJump (next);
+        pendingPresetTarget_   = next;
+        restored_preset_index_ = next;
+        notifyAfterUserEdit (y2k::tr ("MilkDrop preset"), "preset");
+        return;
+    }
+    glView->RequestPresetRandom();
 }
 
 void MilkdropModule::jumpToPresetIndex(int index)
 {
-    if (glView != nullptr) glView->RequestPresetJump(index);
+    if (glView == nullptr) return;
+    const int total = glView->GetTotalPresetCount();
+    if (total > 0)
+        index = juce::jlimit (0, total - 1, index);
+    if (index < 0)
+        return;
+    notifyBeforeUserEdit();
+    pendingPresetTarget_   = index;
+    restored_preset_index_ = index;
+    glView->RequestPresetJump (index);
+    pendingPresetTarget_   = index;
+    restored_preset_index_ = index;
+    notifyAfterUserEdit (y2k::tr ("MilkDrop preset"), "preset");
 }
 
 // ==========================================================
@@ -2072,6 +2414,8 @@ void MilkdropModule::GLView::paint(juce::Graphics& g) {
   // paintAutoControlRow，保证 cachedNameArea_ / cachedAutoTimeLabel_ 的
   // 命中测试坐标仍与 owner 坐标一致。
   if (!owner_.isFloating() || !owner_.focused_)
+    return;
+  if (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (owner_))
     return;
 
   auto content = owner_.getContentBounds();
@@ -3000,9 +3344,9 @@ void MilkdropModule::checkOverlayAutoHide()
   if (!focused_)
     return;
 
-  // color / effects 面板展开期间不自动隐藏，避免用户调整参数时控制台中途消失。
+  // color / effects / wave / tweak 面板展开期间不自动隐藏，避免用户调整或撤回查看参数时控制台中途消失。
   // auto 模式下允许自动隐藏：进入"纯粹可视化"状态，hover 时重新显示控制栏。
-  if (isColorPanelOpen_ || isEffectsPanelOpen_)
+  if (isColorPanelOpen_ || isEffectsPanelOpen_ || isWavePanelOpen_ || isTweakPanelOpen_)
     return;
 
   // overlay 无交互超过 4 秒 → 自动隐藏
@@ -3044,6 +3388,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         auto sliderBounds = getSliderBounds(autoRow);
         if (sliderBounds.expanded(4).contains(e.getPosition()))
         {
+            notifyBeforeUserEdit();
             isDraggingSlider_ = true;
             if (!focused_)
                 setFocusVisual(true);
@@ -3079,6 +3424,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         // Reset 按钮点击（重置 RGB + Bright 四行）
         if (getTintResetBounds(panel).contains(e.getPosition()))
         {
+            notifyBeforeUserEdit();
             if (!focused_)
                 setFocusVisual(true);
             touchOverlayIdleTimer();
@@ -3087,6 +3433,8 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             visualState_.tint_b = 1.0f;
             visualState_.brightness = 1.0f;
             applyVisualToEditor();
+            notifyAfterUserEdit (y2k::tr ("MilkDrop color"), "color");
+            repaint(topBar);
             repaint(panel);
             glView->repaint();
             return;
@@ -3098,6 +3446,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             auto sb = getTintSliderBounds(panel, row);
             if (sb.expanded(6).contains(e.getPosition()))
             {
+                notifyBeforeUserEdit();
                 draggingTintRow_ = row;
                 if (!focused_)
                     setFocusVisual(true);
@@ -3105,6 +3454,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                 float proportion = static_cast<float>(e.getPosition().x - sb.getX())
                                    / static_cast<float>(sb.getWidth());
                 updateTintFromSlider(row, proportion);
+                repaint(topBar);
                 repaint(panel);
                 glView->repaint();
                 return;
@@ -3122,6 +3472,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         // Reset 按钮点击（重置所有已实现效果）
         if (getEffectsResetBounds(panel).contains(e.getPosition()))
         {
+            notifyBeforeUserEdit();
             if (!focused_)
                 setFocusVisual(true);
             touchOverlayIdleTimer();
@@ -3129,6 +3480,8 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                 if (def.implemented)
                     def.set(visualState_, false);
             applyVisualToEditor();
+            notifyAfterUserEdit (y2k::tr ("MilkDrop effects"), "effects");
+            repaint(topBar);
             repaint(panel);
             glView->repaint();
             return;
@@ -3145,6 +3498,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                     setFocusVisual(true);
                 touchOverlayIdleTimer();
                 toggleEffectSwitch(row);
+                repaint(topBar);
                 repaint(panel);
                 glView->repaint();
                 return;
@@ -3162,12 +3516,15 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         // Reset 按钮点击（恢复默认，关闭覆盖）
         if (getWaveResetBounds(panel).contains(e.getPosition()))
         {
+            notifyBeforeUserEdit();
             if (!focused_)
                 setFocusVisual(true);
             touchOverlayIdleTimer();
             waveState_.reset();
             applyWaveToEditor();
             reloadCurrentPresetForWave();
+            notifyAfterUserEdit (y2k::tr ("MilkDrop wave"), "wave");
+            repaint(topBar);
             repaint(panel);
             glView->repaint();
             return;
@@ -3177,6 +3534,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         auto stepper = getWaveModeStepperBounds(panel);
         if (stepper.contains(e.getPosition()))
         {
+            notifyBeforeUserEdit();
             if (!focused_)
                 setFocusVisual(true);
             touchOverlayIdleTimer();
@@ -3186,6 +3544,8 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             waveState_.enabled = true;
             applyWaveToEditor();
             reloadCurrentPresetForWave();
+            notifyAfterUserEdit (y2k::tr ("MilkDrop wave"), "wave");
+            repaint(topBar);
             repaint(panel);
             glView->repaint();
             return;
@@ -3197,6 +3557,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             auto sw = getWaveSwitchBounds(panel, idx);
             if (sw.expanded(4).contains(e.getPosition()))
             {
+                notifyBeforeUserEdit();
                 if (!focused_)
                     setFocusVisual(true);
                 touchOverlayIdleTimer();
@@ -3208,6 +3569,8 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                 waveState_.enabled = true;
                 applyWaveToEditor();
                 reloadCurrentPresetForWave();
+                notifyAfterUserEdit (y2k::tr ("MilkDrop wave"), "wave");
+                repaint(topBar);
                 repaint(panel);
                 glView->repaint();
                 return;
@@ -3220,6 +3583,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             auto sb = getWaveSliderBounds(panel, row);
             if (sb.expanded(6).contains(e.getPosition()))
             {
+                notifyBeforeUserEdit();
                 draggingWaveRow_ = row;
                 if (!focused_)
                     setFocusVisual(true);
@@ -3227,6 +3591,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                 float proportion = static_cast<float>(e.getPosition().x - sb.getX())
                                    / static_cast<float>(sb.getWidth());
                 updateWaveFromSlider(row, proportion);
+                repaint(topBar);
                 repaint(panel);
                 glView->repaint();
                 return;
@@ -3244,11 +3609,14 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
         // Reset 按钮点击（恢复默认，所有偏移归零，实时生效）
         if (getTweakResetBounds(panel).contains(e.getPosition()))
         {
+            notifyBeforeUserEdit();
             if (!focused_)
                 setFocusVisual(true);
             touchOverlayIdleTimer();
             visualState_.offset.reset();
             applyVisualToEditor();
+            notifyAfterUserEdit (y2k::tr ("MilkDrop tweak"), "tweak");
+            repaint(topBar);
             repaint(panel);
             glView->repaint();
             return;
@@ -3260,6 +3628,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             auto sb = getTweakIntSliderBounds(panel, row);
             if (sb.expanded(6).contains(e.getPosition()))
             {
+                notifyBeforeUserEdit();
                 draggingTweakIntRow_ = row;
                 if (!focused_)
                     setFocusVisual(true);
@@ -3267,6 +3636,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                 float proportion = static_cast<float>(e.getPosition().x - sb.getX())
                                    / static_cast<float>(sb.getWidth());
                 updateTweakIntFromSlider(row, proportion);
+                repaint(topBar);
                 repaint(panel);
                 glView->repaint();
                 return;
@@ -3279,6 +3649,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
             auto sb = getTweakSliderBounds(panel, row);
             if (sb.expanded(6).contains(e.getPosition()))
             {
+                notifyBeforeUserEdit();
                 draggingTweakRow_ = row;
                 if (!focused_)
                     setFocusVisual(true);
@@ -3286,6 +3657,7 @@ void MilkdropModule::mouseDown(const juce::MouseEvent& e)
                 float proportion = static_cast<float>(e.getPosition().x - sb.getX())
                                    / static_cast<float>(sb.getWidth());
                 updateTweakFromSlider(row, proportion);
+                repaint(topBar);
                 repaint(panel);
                 glView->repaint();
                 return;
@@ -3334,6 +3706,8 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
         // 拖动结束提交：把 auto_interval 回写宿主参数，避免 10Hz pull 反向覆盖。
         if (editor_ != nullptr)
             editor_->pushMilkdropAutomationParams();
+        notifyAfterUserEdit (y2k::tr ("MilkDrop auto"), "auto_row");
+        notifyUserGestureEnd();
         repaint();
         glView->repaint();
         return;
@@ -3343,6 +3717,8 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     if (draggingTintRow_ >= 0)
     {
         draggingTintRow_ = -1;
+        notifyAfterUserEdit (y2k::tr ("MilkDrop color"), "color");
+        notifyUserGestureEnd();
         repaint();
         glView->repaint();
         return;
@@ -3353,6 +3729,8 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     {
         draggingWaveRow_ = -1;
         reloadCurrentPresetForWave();
+        notifyAfterUserEdit (y2k::tr ("MilkDrop wave"), "wave");
+        notifyUserGestureEnd();
         repaint();
         glView->repaint();
         return;
@@ -3362,6 +3740,8 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     if (draggingTweakIntRow_ >= 0)
     {
         draggingTweakIntRow_ = -1;
+        notifyAfterUserEdit (y2k::tr ("MilkDrop tweak"), "tweak");
+        notifyUserGestureEnd();
         repaint();
         glView->repaint();
         return;
@@ -3371,6 +3751,8 @@ void MilkdropModule::mouseUp(const juce::MouseEvent& e)
     if (draggingTweakRow_ >= 0)
     {
         draggingTweakRow_ = -1;
+        notifyAfterUserEdit (y2k::tr ("MilkDrop tweak"), "tweak");
+        notifyUserGestureEnd();
         repaint();
         glView->repaint();
         return;
@@ -3707,6 +4089,14 @@ ModulePanel::HoverHelp MilkdropModule::getHoverHelp (juce::Point<int> pos) const
             case OverlayButton::kTweak:
                 return tip (make ("Tweak", "Open the tweak panel: zoom, rotate, warp, shift, stretch and "
                                            "mirror-fold the final picture in real time."));
+            case OverlayButton::kResetAll:
+                return tip (make ("Reset all", "Reset all color, effects, wave and tweak adjustments back to defaults."));
+            case OverlayButton::kKeyLock:
+                return tip (keyboardControlEnabled_
+                    ? make ("Keyboard control: ON",
+                            "Left / Right / Space switch MilkDrop presets. Click to disable keyboard shortcuts.")
+                    : make ("Keyboard control: OFF",
+                            "Left / Right / Space preset shortcuts are disabled. Click to re-enable."));
             case OverlayButton::kLike:
             {
                 bool liked = false;
@@ -3949,17 +4339,37 @@ void MilkdropModule::mouseExit(const juce::MouseEvent& e)
 
 // ---- 叠加层布局辅助 ----
 
-// 控制栏文字按钮统一宽度（auto / color / effects / wave / tweak）：
-//   按当前语言的按钮文本测量（中文模式下"颜色/效果/波形/画面/自动"两字等宽，
+namespace
+{
+    bool isWaveStateDefault (const MilkdropWaveState& wv) noexcept
+    {
+        return ! wv.enabled
+            && wv.mode == 6
+            && std::fabs (wv.x - 0.5f) <= 1e-4f
+            && std::fabs (wv.y - 0.5f) <= 1e-4f
+            && std::fabs (wv.r - 1.0f) <= 1e-4f
+            && std::fabs (wv.g - 1.0f) <= 1e-4f
+            && std::fabs (wv.b - 1.0f) <= 1e-4f
+            && std::fabs (wv.a - 1.0f) <= 1e-4f
+            && std::fabs (wv.mystery)  <= 1e-4f
+            && ! wv.usedots
+            && ! wv.thick
+            && ! wv.additive
+            && ! wv.brighten;
+    }
+}
+
+// 控制栏文字按钮统一宽度（auto / color / effects / wave / tweak / reset / keys）：
+//   按当前语言的按钮文本测量（中文模式下"颜色/效果/波形/画面/重置/自动/键盘"两字等宽，
 //   按钮不再长短不一），与绘制处 getFont(8.0f, bold) 同字体同字号。
 int MilkdropModule::overlayTextBtnWidth()
 {
-    static const char* const kLabels[] = { "auto", "color", "effects", "wave", "tweak" };
+    static const char* const kLabels[] = { "auto", "color", "effects", "wave", "tweak", "reset", "keys" };
     const auto font = PinkXP::getFont (8.0f, juce::Font::bold);
 
     int w = 32;   // 最小宽度（图标按钮 22 + 余量）
     for (const auto* t : kLabels)
-        w = juce::jmax (w, juce::GlyphArrangement::getStringWidthInt (font, y2k::tr (t)) + 10);
+        w = juce::jmax (w, juce::GlyphArrangement::getStringWidthInt (font, y2k::tr (t)) + 8);
     return w;
 }
 
@@ -3969,35 +4379,74 @@ juce::Rectangle<int> MilkdropModule::getOverlayBounds(juce::Rectangle<int> conte
     return content.withHeight(juce::jmin(kBarHeight, content.getHeight()));
 }
 
+MilkdropModule::OverlayBarLayout MilkdropModule::computeOverlayBarLayout(
+    juce::Rectangle<int> overlay) const
+{
+    constexpr int kBtnSize           = 22;
+    constexpr int kNumTextBtns       = 7;   // keys / reset / tweak / wave / effects / color / auto
+    constexpr int kPreferredMinNameW = 32;  // 窄宽度（如默认 400px）下优先给预设名留出空间，且不与 < 重叠
+
+    const int idealTextBtnW = overlayTextBtnWidth();
+    int edgePad  = 4;
+    int gap      = 3;
+    int textBtnW = idealTextBtnW;
+
+    const int idealNonNameW = 2 * edgePad + 3 * kBtnSize + 4 + (kNumTextBtns + 1) * gap
+                            + kNumTextBtns * idealTextBtnW;
+    if (overlay.getWidth() - idealNonNameW < kPreferredMinNameW)
+    {
+        edgePad = 3;
+        gap     = 2;
+        const int fixedWithName = 2 * edgePad + 3 * kBtnSize + 4 + (kNumTextBtns + 1) * gap;
+        const int availWithName = overlay.getWidth() - fixedWithName - kPreferredMinNameW;
+        const int availNoName   = overlay.getWidth() - (2 * edgePad + 3 * kBtnSize + 2 + (kNumTextBtns + 1) * gap);
+
+        if (availWithName >= kNumTextBtns * 28)
+            textBtnW = juce::jmin (idealTextBtnW, availWithName / kNumTextBtns);
+        else
+            textBtnW = juce::jlimit (0, idealTextBtnW, availNoName / kNumTextBtns);
+    }
+
+    const int btnY = overlay.getY() + 2;
+
+    OverlayBarLayout l;
+    l.prevBtn     = { overlay.getX() + edgePad, btnY, kBtnSize, kBtnSize };
+    l.randomBtn   = { overlay.getRight() - edgePad - kBtnSize, btnY, kBtnSize, kBtnSize };
+    l.nextBtn     = { l.randomBtn.getX() - gap - kBtnSize, btnY, kBtnSize, kBtnSize };
+    l.autoBtn     = { l.nextBtn.getX() - gap - textBtnW, btnY, textBtnW, kBtnSize };
+    l.colorBtn    = { l.autoBtn.getX() - gap - textBtnW, btnY, textBtnW, kBtnSize };
+    l.effectsBtn  = { l.colorBtn.getX() - gap - textBtnW, btnY, textBtnW, kBtnSize };
+    l.waveBtn     = { l.effectsBtn.getX() - gap - textBtnW, btnY, textBtnW, kBtnSize };
+    l.tweakBtn    = { l.waveBtn.getX() - gap - textBtnW, btnY, textBtnW, kBtnSize };
+    l.resetAllBtn = { l.tweakBtn.getX() - gap - textBtnW, btnY, textBtnW, kBtnSize };
+    l.keyLockBtn  = { l.resetAllBtn.getX() - gap - textBtnW, btnY, textBtnW, kBtnSize };
+
+    const int nameW = juce::jmax(0, l.keyLockBtn.getX() - l.prevBtn.getRight() - 4);
+    l.nameArea = { l.prevBtn.getRight() + 2, overlay.getY(), nameW, overlay.getHeight() };
+    return l;
+}
+
 MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
     juce::Point<int> pos, juce::Rectangle<int> overlay) const
 {
     if (! overlay.contains(pos))
         return OverlayButton::kNone;
 
-    constexpr int kBtnSize = 22;
-    constexpr int kPadding = 4;
+    const auto l = computeOverlayBarLayout(overlay);
 
-    auto prevBtn    = juce::Rectangle<int>(overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto randomBtn  = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize);
-    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
+    if (l.prevBtn.contains(pos))     return OverlayButton::kPrev;
+    if (l.keyLockBtn.contains(pos))  return OverlayButton::kKeyLock;
+    if (l.resetAllBtn.contains(pos)) return OverlayButton::kResetAll;
+    if (l.tweakBtn.contains(pos))    return OverlayButton::kTweak;
+    if (l.waveBtn.contains(pos))     return OverlayButton::kWave;
+    if (l.effectsBtn.contains(pos))  return OverlayButton::kEffects;
+    if (l.colorBtn.contains(pos))    return OverlayButton::kColor;
+    if (l.autoBtn.contains(pos))     return OverlayButton::kAuto;
+    if (l.nextBtn.contains(pos))     return OverlayButton::kNext;
+    if (l.randomBtn.contains(pos))   return OverlayButton::kRandom;
 
-    if (prevBtn.contains(pos))     return OverlayButton::kPrev;
-    if (tweakBtn.contains(pos))    return OverlayButton::kTweak;
-    if (waveBtn.contains(pos))     return OverlayButton::kWave;
-    if (effectsBtn.contains(pos))  return OverlayButton::kEffects;
-    if (colorBtn.contains(pos))    return OverlayButton::kColor;
-    if (autoBtn.contains(pos))     return OverlayButton::kAuto;
-    if (nextBtn.contains(pos))     return OverlayButton::kNext;
-    if (randomBtn.contains(pos))   return OverlayButton::kRandom;
-
-    // name area：覆盖 < 和 [1:1] 之间的空余区域
-    if (cachedNameArea_.contains(pos))
+    // name area：覆盖 < 和最左侧功能按钮之间的空余区域
+    if (! cachedNameArea_.isEmpty() && cachedNameArea_.contains(pos))
         return OverlayButton::kPresetName;
 
     return OverlayButton::kNone;
@@ -4006,98 +4455,21 @@ MilkdropModule::OverlayButton MilkdropModule::hitTestOverlayButton(
 juce::Rectangle<int> MilkdropModule::getOverlayButtonRect(
     juce::Rectangle<int> overlay, OverlayButton btn) const
 {
-    constexpr int kBtnSize = 22;
-    constexpr int kPadding = 4;
+    const auto l = computeOverlayBarLayout(overlay);
 
     switch (btn)
     {
-    case OverlayButton::kPrev:
-        return { overlay.getX() + kPadding, overlay.getY() + 2, kBtnSize, kBtnSize };
-    case OverlayButton::kRandom:
-        return { overlay.getRight() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize };
-    case OverlayButton::kNext:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        return { randomBtn.getX() - kPadding - kBtnSize, overlay.getY() + 2, kBtnSize, kBtnSize };
-    }
-    case OverlayButton::kAuto:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        return autoBtn;
-    }
-    case OverlayButton::kColor:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        return { autoBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
-    }
-    case OverlayButton::kEffects:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        return { colorBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
-    }
-    case OverlayButton::kWave:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                               overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        return { effectsBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
-    }
-    case OverlayButton::kTweak:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        auto colorBtn  = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                               overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                               overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        return { waveBtn.getX() - kPadding - overlayTextBtnWidth(), overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize };
-    }
-    // 分辨率切换按钮已全平台阉割
-#if 0
-    case OverlayButton::kRenderScale:
-    {
-        auto randomBtn = juce::Rectangle<int>(overlay.getRight() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto nextBtn   = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize,
-                                              overlay.getY() + 2, kBtnSize, kBtnSize);
-        auto autoBtn   = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(),
-                                              overlay.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-        auto resBtn    = juce::Rectangle<int>(autoBtn.getX() - kPadding - kResBtnW,
-                                              overlay.getY() + 2, kResBtnW, kBtnSize);
-        return resBtn;
-    }
-#endif
+    case OverlayButton::kPrev:       return l.prevBtn;
+    case OverlayButton::kRandom:     return l.randomBtn;
+    case OverlayButton::kNext:       return l.nextBtn;
+    case OverlayButton::kAuto:       return l.autoBtn;
+    case OverlayButton::kColor:      return l.colorBtn;
+    case OverlayButton::kEffects:    return l.effectsBtn;
+    case OverlayButton::kWave:       return l.waveBtn;
+    case OverlayButton::kTweak:      return l.tweakBtn;
+    case OverlayButton::kResetAll:   return l.resetAllBtn;
+    case OverlayButton::kKeyLock:    return l.keyLockBtn;
+    case OverlayButton::kPresetName: return l.nameArea;
     default:
         return {};
     }
@@ -4107,15 +4479,17 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
 {
     switch (btn)
     {
-    case OverlayButton::kPrev:   prevPreset();              break;
-    case OverlayButton::kNext:   nextPreset();              break;
-    case OverlayButton::kRandom: randomPreset();            break;
-    case OverlayButton::kPresetName: showPresetJumpDialog();   break;
-    case OverlayButton::kAuto:       toggleAutoMode();          break;
-    case OverlayButton::kColor:      toggleColorPanel();        break;
-    case OverlayButton::kEffects:    toggleEffectsPanel();      break;
-    case OverlayButton::kWave:       toggleWavePanel();         break;
-    case OverlayButton::kTweak:      toggleTweakPanel();        break;
+    case OverlayButton::kPrev:       prevPreset();                    break;
+    case OverlayButton::kNext:       nextPreset();                    break;
+    case OverlayButton::kRandom:     randomPreset();                  break;
+    case OverlayButton::kPresetName: showPresetJumpDialog();          break;
+    case OverlayButton::kAuto:       toggleAutoMode();                break;
+    case OverlayButton::kColor:      toggleColorPanel();              break;
+    case OverlayButton::kEffects:    toggleEffectsPanel();            break;
+    case OverlayButton::kWave:       toggleWavePanel();               break;
+    case OverlayButton::kTweak:      toggleTweakPanel();              break;
+    case OverlayButton::kResetAll:   resetAllUserEffects();           break;
+    case OverlayButton::kKeyLock:    toggleKeyboardControlEnabled();  break;
     // 分辨率切换按钮已全平台阉割
 #if 0
     case OverlayButton::kRenderScale: glView->RequestRenderScale(); break;
@@ -4124,225 +4498,891 @@ void MilkdropModule::executeOverlayAction(OverlayButton btn)
     }
 }
 
-// ---- 叠加层绘制 ----
+void MilkdropModule::setKeyboardControlEnabled(bool enabled)
+{
+    if (keyboardControlEnabled_ == enabled)
+        return;
+
+    keyboardControlEnabled_ = enabled;
+    repaint();
+    if (glView != nullptr)
+        glView->repaint();
+#if JUCE_MAC
+    if (overlayView_ != nullptr && overlayView_->isOnDesktop())
+        overlayView_->repaint();
+#endif
+}
+
+void MilkdropModule::toggleKeyboardControlEnabled()
+{
+    notifyBeforeUserEdit();
+    setKeyboardControlEnabled(! keyboardControlEnabled_);
+    notifyAfterUserEdit (y2k::tr ("MilkDrop keys"), "keys");
+}
+
+bool MilkdropModule::hasAnyUserVisualOverrides() const
+{
+    const MilkdropVisualState vis = (editor_ != nullptr) ? editor_->GetMilkdropVisualState() : visualState_;
+    if (! vis.isNeutral())
+        return true;
+
+    const MilkdropWaveState wv = (editor_ != nullptr) ? editor_->GetMilkdropWaveState() : waveState_;
+    return ! isWaveStateDefault (wv);
+}
+
+void MilkdropModule::resetAllUserEffects()
+{
+    syncVisualFromEditor();
+    syncWaveFromEditor();
+
+    if (visualState_.isNeutral() && isWaveStateDefault (waveState_))
+        return;
+
+    notifyBeforeUserEdit();
+    if (focused_)
+        touchOverlayIdleTimer();
+
+    visualState_.tint_r     = 1.0f;
+    visualState_.tint_g     = 1.0f;
+    visualState_.tint_b     = 1.0f;
+    visualState_.brightness = 1.0f;
+    for (const auto& def : GetMilkdropEffectDefs())
+        if (def.implemented)
+            def.set (visualState_, false);
+    visualState_.offset.reset();
+
+    const bool hadWave = waveState_.enabled;
+    waveState_.reset();
+
+    applyVisualToEditor();
+    applyWaveToEditor();
+    if (hadWave)
+        reloadCurrentPresetForWave();
+
+    notifyAfterUserEdit (y2k::tr ("MilkDrop reset all"), "reset_all");
+
+    repaint();
+    if (glView != nullptr)
+        glView->repaint();
+#if JUCE_MAC
+    if (overlayView_ != nullptr && overlayView_->isOnDesktop())
+        overlayView_->repaint();
+#endif
+}
+
+// ---- 叠加层绘制（风格化工艺原语：跟随 SkinTokens / Craft）----
+
+namespace
+{
+    void drawMilkdropOverlaySurface (juce::Graphics& g, juce::Rectangle<int> r, bool isTopBar)
+    {
+        if (r.isEmpty())
+            return;
+
+        const auto& t = PinkXP::getSkinTokens();
+        switch (t.frameStyle)
+        {
+            case PinkXP::FrameStyle::pixelBevel:
+            {
+                // Pixel XP：0px 锐利暗色控制台 + Win95 1px 内高光 / 底部清晰分割线
+                g.setColour (juce::Colour (0x08, 0x07, 0x0d).withAlpha (isTopBar ? 0.85f : 0.81f));
+                g.fillRect (r);
+                g.setColour (PinkXP::hl.withAlpha (isTopBar ? 0.28f : 0.18f));
+                g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+                g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+                g.setColour (PinkXP::dark.withAlpha (0.90f));
+                g.fillRect (r.getRight() - 1, r.getY(), 1, r.getHeight());
+                g.setColour (PinkXP::pink300.withAlpha (isTopBar ? 0.78f : 0.56f));
+                g.fillRect (r.getX(), r.getBottom(), r.getWidth(), 1);
+                return;
+            }
+
+            case PinkXP::FrameStyle::machinedChrome:
+            {
+                // Millennium Chrome：阳极枪灰 / 拉丝钢 4-stop 控制台面板（38% 折痕高光 + 顶沿镜面 + 底部机加工接缝）
+                const float a = isTopBar ? 0.89f : 0.85f;
+                juce::ColourGradient grad (juce::Colour (0x36, 0x3a, 0x44).withAlpha (a), 0.0f, (float) r.getY(),
+                                           juce::Colour (0x0c, 0x0e, 0x13).withAlpha (a), 0.0f, (float) r.getBottom(), false);
+                grad.addColour (0.38, juce::Colour (0x22, 0x25, 0x2e).withAlpha (a));
+                grad.addColour (0.42, juce::Colour (0x15, 0x17, 0x1e).withAlpha (a));
+                g.setGradientFill (grad);
+                g.fillRect (r);
+                // 顶部 1px 锐利镜面铬沿 + 左右拉丝钢边缝
+                g.setColour (juce::Colours::white.withAlpha (isTopBar ? 0.34f : 0.24f));
+                g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+                g.setColour (juce::Colours::white.withAlpha (0.12f));
+                g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+                g.setColour (juce::Colours::black.withAlpha (0.58f));
+                g.fillRect (r.getRight() - 1, r.getY(), 1, r.getHeight());
+                // 底部 2px 机加工金属接缝（1px 暗槽 + 1px 主题金属亮沿）
+                g.setColour (juce::Colours::black.withAlpha (0.78f));
+                g.fillRect (r.getX(), r.getBottom() - 1, r.getWidth(), 1);
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.32f)
+                                        .withAlpha (isTopBar ? 0.78f : 0.56f));
+                g.fillRect (r.getX(), r.getBottom(), r.getWidth(), 1);
+                return;
+            }
+
+            case PinkXP::FrameStyle::frostedGlass:
+            {
+                // Frosted Glass：暗烟熏水晶玻璃控制台（顶部 42% 凸面玻璃穹顶高光带 + 1px 亮冰白顶沿 + 折射底边）
+                const float a = isTopBar ? 0.84f : 0.80f;
+                juce::ColourGradient grad (juce::Colour (0x24, 0x2a, 0x38).withAlpha (a), 0.0f, (float) r.getY(),
+                                           juce::Colour (0x0b, 0x0e, 0x16).withAlpha (a + 0.04f), 0.0f, (float) r.getBottom(), false);
+                g.setGradientFill (grad);
+                g.fillRect (r);
+                auto sheen = r.withHeight (juce::jmax (3, r.getHeight() * 42 / 100));
+                juce::ColourGradient dome (juce::Colours::white.withAlpha (0.14f), 0.0f, (float) sheen.getY(),
+                                           juce::Colours::white.withAlpha (0.02f), 0.0f, (float) sheen.getBottom(), false);
+                g.setGradientFill (dome);
+                g.fillRect (sheen);
+                g.setColour (juce::Colours::white.withAlpha (isTopBar ? 0.36f : 0.26f));
+                g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+                g.setColour (juce::Colours::white.withAlpha (0.12f));
+                g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+                g.fillRect (r.getRight() - 1, r.getY(), 1, r.getHeight());
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.32f)
+                                        .withAlpha (isTopBar ? 0.72f : 0.52f));
+                g.fillRect (r.getX(), r.getBottom(), r.getWidth(), 1);
+                return;
+            }
+
+            case PinkXP::FrameStyle::neonTube:
+            {
+                // Neon Cyber：深黑曜石赛博控制台 + 顶部微激光沿 + 底部双通道发光霓虹底轨
+                g.setColour (juce::Colour (0x07, 0x05, 0x0e).withAlpha (isTopBar ? 0.90f : 0.86f));
+                g.fillRect (r);
+                g.setColour (PinkXP::sel.withAlpha (0.28f));
+                g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+                g.setColour (PinkXP::sel.withAlpha (0.30f));
+                g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+                g.fillRect (r.getRight() - 1, r.getY(), 1, r.getHeight());
+                // 双通道发光霓虹底轨（宽柔光晕 + 灼热白芯）
+                g.setColour (PinkXP::sel.withAlpha (isTopBar ? 0.30f : 0.22f));
+                g.fillRect (r.getX(), r.getBottom() - 2, r.getWidth(), 3);
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.42f)
+                                        .withAlpha (isTopBar ? 0.95f : 0.74f));
+                g.fillRect (r.getX(), r.getBottom(), r.getWidth(), 1);
+                return;
+            }
+
+            case PinkXP::FrameStyle::crtPhosphor:
+            {
+                // CRT Terminal：0px 深色荧光终端控制台 + 2px 水平扫描线 + 锐利 1px 荧光边框
+                g.setColour (juce::Colour (0x04, 0x09, 0x06).withAlpha (isTopBar ? 0.90f : 0.86f));
+                g.fillRect (r);
+                g.setColour (juce::Colours::black.withAlpha (0.20f));
+                for (int py = r.getY() + 1; py < r.getBottom(); py += 2)
+                    g.fillRect (r.getX(), py, r.getWidth(), 1);
+                g.setColour (PinkXP::sel.withAlpha (isTopBar ? 0.82f : 0.64f));
+                g.drawRect (r, 1);
+                g.fillRect (r.getX(), r.getBottom(), r.getWidth(), 1);
+                return;
+            }
+
+            case PinkXP::FrameStyle::modernStudio:
+            default:
+            {
+                // Modern Minimal：细腻哑光演播室暗色控制台 + 1px 精致细边框
+                const float a = isTopBar ? 0.84f : 0.80f;
+                juce::ColourGradient grad (juce::Colour (0x18, 0x1a, 0x20).withAlpha (a), 0.0f, (float) r.getY(),
+                                           juce::Colour (0x0f, 0x11, 0x16).withAlpha (a), 0.0f, (float) r.getBottom(), false);
+                g.setGradientFill (grad);
+                g.fillRect (r);
+                g.setColour (juce::Colours::white.withAlpha (0.09f));
+                g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+                if (! isTopBar)
+                {
+                    // 子面板左右微细描边，增强弹出层级辨识
+                    g.setColour (juce::Colours::white.withAlpha (0.08f));
+                    g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+                    g.fillRect (r.getRight() - 1, r.getY(), 1, r.getHeight());
+                }
+                g.setColour (PinkXP::sel.withAlpha (isTopBar ? 0.52f : 0.36f));
+                g.fillRect (r.getX(), r.getBottom(), r.getWidth(), 1);
+                return;
+            }
+        }
+    }
+
+    // 返回该按钮状态下推荐的高对比文字/图标颜色
+    juce::Colour drawMilkdropOverlayButton (juce::Graphics& g,
+                                            juce::Rectangle<int> r,
+                                            bool active,
+                                            bool hovered,
+                                            bool pressed,
+                                            bool muted = false,
+                                            bool accentAlert = false,
+                                            bool translucentActive = false)
+    {
+        if (r.isEmpty())
+            return juce::Colour (0xEE, 0xEE, 0xEE);
+
+        const auto& t = PinkXP::getSkinTokens();
+        switch (t.frameStyle)
+        {
+            case PinkXP::FrameStyle::pixelBevel:
+            {
+                // Pixel XP：全态纯正 0px Win95 硬斜角按钮（绝无圆角，绝无平框混搭）
+                if (pressed || (active && ! translucentActive))
+                {
+                    const auto fill = pressed ? PinkXP::pink200 : PinkXP::pink100;
+                    PinkXP::drawPressed (g, r, fill);
+                    if (active && r.getWidth() >= 8 && r.getHeight() >= 8)
+                    {
+                        g.setColour (PinkXP::sel);
+                        g.fillRect (r.getX() + 2, r.getBottom() - 3, r.getWidth() - 4, 2);
+                    }
+                    return PinkXP::readableInkOn (fill);
+                }
+                if (active && translucentActive)
+                {
+                    g.setColour (PinkXP::pink300.withAlpha (0.34f));
+                    g.fillRect (r);
+                    g.setColour (PinkXP::dark.withAlpha (0.92f));
+                    g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+                    g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+                    g.setColour (PinkXP::hl.withAlpha (0.72f));
+                    g.fillRect (r.getX() + 1, r.getBottom() - 1, r.getWidth() - 1, 1);
+                    g.fillRect (r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 1);
+                    return PinkXP::pink200;
+                }
+                if (hovered)
+                {
+                    PinkXP::drawRaised (g, r, PinkXP::pink200);
+                    return PinkXP::readableInkOn (PinkXP::pink200);
+                }
+
+                // 常规暗底 Win95 凸起斜角按键
+                const auto bg = accentAlert ? PinkXP::pink500.withAlpha (0.58f)
+                              : muted       ? juce::Colour (0x24, 0x23, 0x2c).withAlpha (0.74f)
+                                            : juce::Colour (0x35, 0x33, 0x40).withAlpha (0.86f);
+                g.setColour (bg);
+                g.fillRect (r);
+                // 外层 1px 硬斜角 + 内层 1px 暗斜角
+                g.setColour (PinkXP::hl.withAlpha (accentAlert ? 0.75f : (muted ? 0.28f : 0.62f)));
+                g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+                g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+                g.setColour (PinkXP::dark.withAlpha (0.95f));
+                g.fillRect (r.getX(), r.getBottom() - 1, r.getWidth(), 1);
+                g.fillRect (r.getRight() - 1, r.getY(), 1, r.getHeight());
+                if (r.getWidth() >= 5 && r.getHeight() >= 5)
+                {
+                    g.setColour (PinkXP::shdw.withAlpha (muted ? 0.35f : 0.68f));
+                    g.fillRect (r.getX() + 1, r.getBottom() - 2, r.getWidth() - 2, 1);
+                    g.fillRect (r.getRight() - 2, r.getY() + 1, 1, r.getHeight() - 2);
+                }
+                return accentAlert ? PinkXP::pink50
+                     : muted       ? juce::Colour (0xDD, 0xDD, 0xDD).withAlpha (0.58f)
+                                   : juce::Colour (0xEE, 0xEE, 0xEE);
+            }
+
+            case PinkXP::FrameStyle::machinedChrome:
+            {
+                // Millennium Chrome：阳极枪灰 / 拉丝铝硬件按键（全态 0px 机加工斜角 + 4-stop 折痕高光）
+                if (pressed || (active && ! translucentActive))
+                {
+                    const auto fill = pressed ? PinkXP::pink200 : PinkXP::btnFace;
+                    PinkXP::Craft::drawControlChrome (g, r, fill,
+                                                      pressed ? PinkXP::ControlState::pressed : PinkXP::ControlState::active,
+                                                      0.0f);
+                    return PinkXP::readableInkOn (fill);
+                }
+
+                const auto base = (active && translucentActive) ? PinkXP::sel.interpolatedWith (juce::Colour (0x2c, 0x30, 0x3a), 0.55f).withAlpha (0.86f)
+                                : hovered     ? juce::Colour (0x4c, 0x52, 0x60).withAlpha (0.92f)
+                                : accentAlert ? PinkXP::sel.interpolatedWith (juce::Colour (0x36, 0x22, 0x2a), 0.45f).withAlpha (0.86f)
+                                : muted       ? juce::Colour (0x24, 0x26, 0x2e).withAlpha (0.76f)
+                                              : juce::Colour (0x36, 0x3a, 0x45).withAlpha (0.88f);
+                juce::ColourGradient grad (base.interpolatedWith (juce::Colours::white, hovered ? 0.34f : 0.26f),
+                                           0.0f, (float) r.getY(),
+                                           base.darker (0.22f),
+                                           0.0f, (float) r.getBottom(), false);
+                grad.addColour (0.38, base.interpolatedWith (juce::Colours::white, 0.08f));
+                grad.addColour (0.42, base.darker (0.06f));
+                g.setGradientFill (grad);
+                g.fillRect (r);
+
+                g.setColour (juce::Colours::black.withAlpha (0.92f));
+                g.drawRect (r, 1);
+                if (r.getWidth() >= 4 && r.getHeight() >= 4)
+                {
+                    g.setColour (juce::Colours::white.withAlpha (hovered ? 0.54f : (muted ? 0.16f : 0.36f)));
+                    g.fillRect (r.getX() + 1, r.getY() + 1, r.getWidth() - 2, 1);
+                    g.fillRect (r.getX() + 1, r.getY() + 1, 1, r.getHeight() - 2);
+                    g.setColour (juce::Colours::black.withAlpha (0.42f));
+                    g.fillRect (r.getX() + 1, r.getBottom() - 2, r.getWidth() - 2, 1);
+                    g.fillRect (r.getRight() - 2, r.getY() + 1, 1, r.getHeight() - 2);
+                }
+                if ((active && translucentActive) && r.getWidth() >= 8 && r.getHeight() >= 8)
+                {
+                    // 锁定 / 自动开关硬件 LED 指示条
+                    g.setColour (PinkXP::sel);
+                    g.fillRect (r.getX() + 2, r.getBottom() - 3, r.getWidth() - 4, 2);
+                }
+                return (active && translucentActive) ? juce::Colours::white.withAlpha (0.96f)
+                     : accentAlert ? juce::Colours::white.withAlpha (0.96f)
+                     : hovered     ? juce::Colours::white.withAlpha (0.98f)
+                     : muted       ? juce::Colour (0xDD, 0xDD, 0xDD).withAlpha (0.58f)
+                                   : juce::Colour (0xF0, 0xF2, 0xF6);
+            }
+
+            case PinkXP::FrameStyle::frostedGlass:
+            {
+                // Frosted Glass：5px 圆角晶透玻璃胶囊按钮 + 顶部 44% 穹顶反光 + 底部莹光折射
+                const auto rf   = r.toFloat();
+                const float rad = juce::jmin (5.0f, juce::jmin (t.controlRadius, juce::jmin (rf.getWidth(), rf.getHeight()) * 0.48f));
+                const bool hot  = pressed || active;
+                const auto base = (active && translucentActive) ? PinkXP::sel.withAlpha (0.42f)
+                                : hot         ? PinkXP::sel.withAlpha (pressed ? 0.92f : 0.84f)
+                                : hovered     ? juce::Colours::white.withAlpha (0.28f)
+                                : accentAlert ? PinkXP::pink400.withAlpha (0.46f)
+                                : muted       ? juce::Colours::white.withAlpha (0.08f)
+                                              : juce::Colours::white.withAlpha (0.17f);
+                g.setColour (base);
+                g.fillRoundedRectangle (rf, rad);
+                if (! pressed && r.getHeight() >= 8)
+                {
+                    auto sheen = rf.reduced (1.5f);
+                    sheen.setHeight (juce::jmax (2.0f, rf.getHeight() * 0.44f));
+                    juce::ColourGradient dome (juce::Colours::white.withAlpha (hot ? 0.34f : 0.22f),
+                                               0.0f, sheen.getY(),
+                                               juce::Colours::white.withAlpha (0.03f),
+                                               0.0f, sheen.getBottom(), false);
+                    g.setGradientFill (dome);
+                    g.fillRoundedRectangle (sheen, juce::jmax (1.0f, rad - 1.5f));
+                }
+                const auto border = (hot || hovered) ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.38f).withAlpha (0.88f)
+                                  : accentAlert      ? PinkXP::pink200.withAlpha (0.92f)
+                                                     : juce::Colours::white.withAlpha (muted ? 0.18f : 0.34f);
+                g.setColour (border);
+                g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+                return (hot && ! translucentActive) ? PinkXP::readableInkOn (PinkXP::sel)
+                     : (active && translucentActive) ? juce::Colours::white.withAlpha (0.96f)
+                     : accentAlert ? PinkXP::pink50
+                     : muted       ? juce::Colour (0xDD, 0xDD, 0xDD).withAlpha (0.58f)
+                                   : juce::Colours::white.withAlpha (0.95f);
+            }
+
+            case PinkXP::FrameStyle::neonTube:
+            {
+                // Neon Cyber：2px 科技角暗烟熏 HUD 按键 + 双通道发光霓虹管边
+                const auto rf   = r.toFloat();
+                const float rad = juce::jmin (2.0f, juce::jmin (rf.getWidth(), rf.getHeight()) * 0.25f);
+                const bool hot  = pressed || active;
+                const auto bg   = (active && translucentActive) ? PinkXP::sel.withAlpha (0.32f)
+                                : hot         ? PinkXP::sel.withAlpha (pressed ? 0.48f : 0.34f)
+                                : hovered     ? PinkXP::sel.withAlpha (0.22f)
+                                : accentAlert ? PinkXP::pink400.withAlpha (0.34f)
+                                              : juce::Colour (0x0b, 0x07, 0x16).withAlpha (muted ? 0.68f : 0.86f);
+                g.setColour (bg);
+                g.fillRoundedRectangle (rf, rad);
+                if (hot || hovered || accentAlert)
+                {
+                    g.setColour (PinkXP::sel.withAlpha (0.42f));
+                    g.drawRoundedRectangle (rf.reduced (0.5f), rad, 2.0f);
+                    g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, hot ? 0.54f : 0.34f));
+                    g.drawRoundedRectangle (rf.reduced (1.0f), juce::jmax (0.5f, rad - 0.5f), 1.0f);
+                    if ((active && translucentActive) && r.getWidth() >= 8 && r.getHeight() >= 8)
+                    {
+                        g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.45f));
+                        g.fillRect (r.getX() + 2, r.getBottom() - 3, r.getWidth() - 4, 2);
+                    }
+                }
+                else
+                {
+                    g.setColour (PinkXP::sel.withAlpha (muted ? 0.34f : 0.62f));
+                    g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+                }
+                return (hot || accentAlert) ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.78f)
+                     : muted                ? juce::Colour (0xDD, 0xDD, 0xDD).withAlpha (0.56f)
+                                            : juce::Colour (0xF0, 0xEE, 0xF8);
+            }
+
+            case PinkXP::FrameStyle::crtPhosphor:
+            {
+                // CRT Terminal：0px 锐利荧光终端按键（激活/按下反相亮荧光底 + WCAG 可读字）
+                const bool hot = pressed || active;
+                if (hot && ! translucentActive)
+                {
+                    g.setColour (PinkXP::sel);
+                    g.fillRect (r);
+                    return PinkXP::readableInkOn (PinkXP::sel);
+                }
+                const auto bg = (active && translucentActive) ? PinkXP::sel.withAlpha (0.34f)
+                              : hovered     ? PinkXP::sel.withAlpha (0.24f)
+                              : accentAlert ? PinkXP::sel.withAlpha (0.32f)
+                                            : juce::Colour (0x05, 0x0b, 0x07).withAlpha (0.86f);
+                g.setColour (bg);
+                g.fillRect (r);
+                g.setColour (PinkXP::sel.withAlpha ((hovered || accentAlert || active) ? 0.96f : (muted ? 0.40f : 0.72f)));
+                g.drawRect (r, 1);
+                return (hovered || accentAlert || active) ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.30f)
+                     : muted                              ? PinkXP::sel.withAlpha (0.55f)
+                                                          : juce::Colour (0xEC, 0xF4, 0xEE);
+            }
+
+            case PinkXP::FrameStyle::modernStudio:
+            default:
+            {
+                // Modern Minimal：4-5px 圆角演播室胶囊键 + 清晰激活染色与细描边
+                const auto rf   = r.toFloat();
+                const float rad = juce::jmin (t.controlRadius, juce::jmin (rf.getWidth(), rf.getHeight()) * 0.48f);
+                const bool hot  = pressed || active;
+                const auto bg   = (active && translucentActive) ? PinkXP::sel.withAlpha (0.36f)
+                                : hot         ? PinkXP::sel.withAlpha (pressed ? 0.94f : 0.86f)
+                                : hovered     ? juce::Colours::white.withAlpha (0.20f)
+                                : accentAlert ? PinkXP::sel.withAlpha (0.28f)
+                                : muted       ? juce::Colours::white.withAlpha (0.055f)
+                                              : juce::Colours::white.withAlpha (0.115f);
+                g.setColour (bg);
+                g.fillRoundedRectangle (rf, rad);
+
+                if (hot && ! pressed && ! translucentActive && rf.getHeight() >= 10.0f)
+                {
+                    g.setColour (juce::Colours::white.withAlpha (0.12f));
+                    g.fillRoundedRectangle (rf.withHeight (rf.getHeight() * 0.45f), rad);
+                }
+
+                const auto border = hot         ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.22f)
+                                  : hovered     ? PinkXP::sel.withAlpha (0.78f)
+                                  : accentAlert ? PinkXP::sel.withAlpha (0.85f)
+                                                : juce::Colours::white.withAlpha (muted ? 0.12f : 0.20f);
+                g.setColour (border);
+                g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+                return (hot && ! translucentActive) ? PinkXP::readableInkOn (PinkXP::sel)
+                     : (active && translucentActive) ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f)
+                     : accentAlert ? juce::Colours::white.withAlpha (0.96f)
+                     : muted       ? juce::Colour (0xDD, 0xDD, 0xDD).withAlpha (0.52f)
+                                   : juce::Colour (0xF2, 0xF2, 0xF4);
+            }
+        }
+    }
+
+    void drawMilkdropOverlaySlider (juce::Graphics& g,
+                                    juce::Rectangle<int> sliderBounds,
+                                    float proportion,
+                                    juce::Colour fillCol,
+                                    bool dragging,
+                                    float neutralProportion = -1.0f)
+    {
+        if (sliderBounds.isEmpty())
+            return;
+
+        const auto& t = PinkXP::getSkinTokens();
+        const float p = juce::jlimit (0.0f, 1.0f, proportion);
+        const int valueX = sliderBounds.getX() + juce::roundToInt (sliderBounds.getWidth() * p);
+        const bool bipolar = (neutralProportion >= 0.0f);
+        const int neutralX = bipolar
+            ? (sliderBounds.getX() + juce::roundToInt (sliderBounds.getWidth() * juce::jlimit (0.0f, 1.0f, neutralProportion)))
+            : sliderBounds.getX();
+
+        const int fillLeft = bipolar ? juce::jmin (neutralX, valueX) : sliderBounds.getX();
+        const int fillW    = bipolar ? juce::jmax (1, std::abs (valueX - neutralX))
+                                     : juce::jmax (0, valueX - sliderBounds.getX());
+
+        const bool smooth = (t.frameStyle == PinkXP::FrameStyle::modernStudio
+                             || t.frameStyle == PinkXP::FrameStyle::frostedGlass);
+        const auto trackF = sliderBounds.toFloat();
+
+        // 1. 轨道与已填充条
+        if (t.frameStyle == PinkXP::FrameStyle::pixelBevel)
+        {
+            // Pixel XP：0px 锐利 Win95 凹陷暗槽 + 锐利直角像素填充条
+            g.setColour (juce::Colour (0x0c, 0x0b, 0x10).withAlpha (0.92f));
+            g.fillRect (sliderBounds);
+            g.setColour (PinkXP::dark.withAlpha (0.95f));
+            g.fillRect (sliderBounds.getX(), sliderBounds.getY(), sliderBounds.getWidth(), 1);
+            g.fillRect (sliderBounds.getX(), sliderBounds.getY(), 1, sliderBounds.getHeight());
+            g.setColour (PinkXP::hl.withAlpha (0.52f));
+            g.fillRect (sliderBounds.getX() + 1, sliderBounds.getBottom() - 1, sliderBounds.getWidth() - 1, 1);
+            g.fillRect (sliderBounds.getRight() - 1, sliderBounds.getY() + 1, 1, sliderBounds.getHeight() - 1);
+
+            const auto inner = sliderBounds.reduced (1);
+            if (fillW > 0 && ! inner.isEmpty())
+            {
+                const auto fillR = juce::Rectangle<int> (fillLeft, inner.getY(), fillW, inner.getHeight())
+                                       .getIntersection (inner);
+                if (! fillR.isEmpty())
+                {
+                    g.setColour (fillCol.withAlpha (0.88f));
+                    g.fillRect (fillR);
+                    if (fillR.getHeight() >= 3)
+                    {
+                        g.setColour (juce::Colours::white.withAlpha (0.28f));
+                        g.fillRect (fillR.getX(), fillR.getY(), fillR.getWidth(), 1);
+                    }
+                }
+            }
+        }
+        else if (smooth)
+        {
+            const bool isModern = (t.frameStyle == PinkXP::FrameStyle::modernStudio);
+            const auto drawTrack = isModern
+                                     ? trackF.withSizeKeepingCentre (trackF.getWidth(), juce::jmin (4.5f, trackF.getHeight()))
+                                     : trackF;
+            const float trackRad = juce::jmin (t.sliderTrackRadius, drawTrack.getHeight() * 0.5f);
+            g.setColour (juce::Colours::white.withAlpha (isModern ? 0.18f : 0.16f));
+            g.fillRoundedRectangle (drawTrack, trackRad);
+            g.setColour (juce::Colours::white.withAlpha (t.frameStyle == PinkXP::FrameStyle::frostedGlass ? 0.24f : 0.12f));
+            g.drawRoundedRectangle (drawTrack.reduced (0.5f), trackRad, 1.0f);
+
+            if (fillW > 0)
+            {
+                const auto fillF = juce::Rectangle<float> ((float) fillLeft, drawTrack.getY(),
+                                                           (float) fillW, drawTrack.getHeight())
+                                       .getIntersection (drawTrack);
+                if (fillF.getWidth() > 0.5f)
+                {
+                    g.setColour (fillCol.withAlpha (isModern ? 0.92f : 0.86f));
+                    g.fillRoundedRectangle (fillF, trackRad);
+                    if (t.frameStyle == PinkXP::FrameStyle::frostedGlass && fillF.getHeight() >= 4.0f)
+                    {
+                        auto sheen = fillF.withHeight (fillF.getHeight() * 0.45f);
+                        g.setColour (juce::Colours::white.withAlpha (0.30f));
+                        g.fillRoundedRectangle (sheen, juce::jmax (0.5f, trackRad * 0.7f));
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Chrome / Neon / CRT：0px 锐利材质轨道
+            g.setColour (juce::Colour (0x08, 0x0a, 0x0f).withAlpha (0.94f));
+            g.fillRect (sliderBounds);
+            const auto borderCol = (t.frameStyle == PinkXP::FrameStyle::machinedChrome)
+                                       ? PinkXP::dark
+                                       : PinkXP::sel.withAlpha (0.58f);
+            g.setColour (borderCol);
+            g.drawRect (sliderBounds, 1);
+
+            if (t.frameStyle == PinkXP::FrameStyle::machinedChrome && sliderBounds.getHeight() >= 4)
+            {
+                // CNC 凹槽顶部内阴影 + 底部微铬反光沿
+                g.setColour (juce::Colours::black.withAlpha (0.65f));
+                g.fillRect (sliderBounds.getX() + 1, sliderBounds.getY() + 1, sliderBounds.getWidth() - 2, 1);
+                g.setColour (juce::Colours::white.withAlpha (0.24f));
+                g.fillRect (sliderBounds.getX() + 1, sliderBounds.getBottom() - 1, sliderBounds.getWidth() - 2, 1);
+            }
+
+            const auto inner = sliderBounds.reduced (1);
+            if (fillW > 0 && ! inner.isEmpty())
+            {
+                const auto fillR = juce::Rectangle<int> (fillLeft, inner.getY(), fillW, inner.getHeight())
+                                       .getIntersection (inner);
+                if (! fillR.isEmpty())
+                {
+                    if (t.frameStyle == PinkXP::FrameStyle::machinedChrome)
+                    {
+                        // 3-band 金属宝石推子槽填充（顶高光折痕 + 饱满核心 + 底斜角阴影）
+                        juce::ColourGradient grad (fillCol.interpolatedWith (juce::Colours::white, 0.36f),
+                                                   0.0f, (float) fillR.getY(),
+                                                   fillCol.darker (0.26f),
+                                                   0.0f, (float) fillR.getBottom(), false);
+                        grad.addColour (0.42, fillCol);
+                        g.setGradientFill (grad);
+                        g.fillRect (fillR);
+                        if (fillR.getHeight() >= 3)
+                        {
+                            g.setColour (fillCol.interpolatedWith (juce::Colours::white, 0.55f).withAlpha (0.85f));
+                            g.fillRect (fillR.getX(), fillR.getY(), fillR.getWidth(), 1);
+                        }
+                    }
+                    else if (t.frameStyle == PinkXP::FrameStyle::neonTube)
+                    {
+                        // Neon Cyber：激光发光滑块填充（外柔光 + 灼热白芯激光束）
+                        g.setColour (fillCol.withAlpha (0.34f));
+                        g.fillRect (fillR.expanded (0, 1).getIntersection (sliderBounds));
+                        g.setColour (fillCol.withAlpha (0.90f));
+                        g.fillRect (fillR);
+                        g.setColour (fillCol.interpolatedWith (juce::Colours::white, 0.60f));
+                        g.fillRect (fillR.getX(), fillR.getCentreY(), fillR.getWidth(), 1);
+                    }
+                    else // crtPhosphor
+                    {
+                        g.setColour (fillCol.withAlpha (0.92f));
+                        g.fillRect (fillR);
+                        if (fillR.getHeight() >= 3)
+                        {
+                            g.setColour (fillCol.interpolatedWith (juce::Colours::white, 0.38f));
+                            g.fillRect (fillR.getX(), fillR.getCentreY(), fillR.getWidth(), 1);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 中性点刻度线（Tweak 双向滑块）
+        if (bipolar)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.55f));
+            g.fillRect (neutralX - 1, sliderBounds.getY() - 2, 2, sliderBounds.getHeight() + 4);
+        }
+
+        // 2. 滑块手柄（Pixel XP：0px 锐利方块斜角；Modern/Glass：圆润/圆形手柄）
+        constexpr int kKnobSize = 12;
+        const int knobX = juce::jlimit (sliderBounds.getX() - 2,
+                                        sliderBounds.getRight() - kKnobSize + 2,
+                                        valueX - kKnobSize / 2);
+        const auto knobBounds = juce::Rectangle<int> (
+            knobX, sliderBounds.getY() - (kKnobSize - sliderBounds.getHeight()) / 2,
+            kKnobSize, kKnobSize);
+
+        const auto thumbFill  = dragging ? PinkXP::pink200 : PinkXP::btnFace;
+        const auto thumbState = dragging ? PinkXP::ControlState::pressed : PinkXP::ControlState::normal;
+
+        if (t.frameStyle == PinkXP::FrameStyle::pixelBevel)
+        {
+            PinkXP::drawRaised (g, knobBounds, dragging ? PinkXP::pink200 : PinkXP::pink100);
+            // 中央 1px 像素刻槽（经典硬件推子触感）
+            g.setColour (PinkXP::shdw.withAlpha (0.75f));
+            g.fillRect (knobBounds.getCentreX() - 1, knobBounds.getY() + 3, 1, knobBounds.getHeight() - 6);
+            g.setColour (PinkXP::hl.withAlpha (0.85f));
+            g.fillRect (knobBounds.getCentreX(), knobBounds.getY() + 3, 1, knobBounds.getHeight() - 6);
+        }
+        else if (smooth)
+        {
+            if (t.frameStyle == PinkXP::FrameStyle::modernStudio)
+            {
+                // Modern Minimal：精致演播室纯圆推子头（轻阴影 + 锐利描边 + 拖动核心点）
+                const float dia = 11.0f;
+                const float cx  = (float) juce::jlimit (sliderBounds.getX() + 4, sliderBounds.getRight() - 4, valueX);
+                const float cy  = trackF.getCentreY();
+                const juce::Rectangle<float> circ (cx - dia * 0.5f, cy - dia * 0.5f, dia, dia);
+
+                g.setColour (juce::Colours::black.withAlpha (0.36f));
+                g.fillEllipse (circ.translated (0.0f, 1.0f));
+
+                g.setColour (dragging ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.35f)
+                                      : juce::Colour (0xf4, 0xf5, 0xf8));
+                g.fillEllipse (circ);
+
+                g.setColour (dragging ? PinkXP::sel : juce::Colours::black.withAlpha (0.45f));
+                g.drawEllipse (circ.reduced (0.5f), 1.15f);
+
+                if (dragging)
+                {
+                    g.setColour (PinkXP::sel);
+                    g.fillEllipse (cx - 1.75f, cy - 1.75f, 3.5f, 3.5f);
+                }
+            }
+            else
+            {
+                // Frosted Glass：晶透圆球水晶推子帽（柔和底影 + 玻璃珠球面渐变 + 左上镜面新月高光）
+                const float dia = 12.0f;
+                const float cx  = (float) juce::jlimit (sliderBounds.getX() + 4, sliderBounds.getRight() - 4, valueX);
+                const float cy  = trackF.getCentreY();
+                const juce::Rectangle<float> orb (cx - dia * 0.5f, cy - dia * 0.5f, dia, dia);
+
+                g.setColour (juce::Colours::black.withAlpha (0.34f));
+                g.fillEllipse (orb.translated (0.0f, 1.2f));
+                if (dragging)
+                {
+                    g.setColour (PinkXP::sel.withAlpha (0.42f));
+                    g.fillEllipse (orb.expanded (2.0f));
+                }
+
+                const auto orbBase = dragging ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.35f)
+                                              : juce::Colour (0xe6, 0xf0, 0xfa);
+                juce::ColourGradient grad (juce::Colours::white, cx, orb.getY(),
+                                           orbBase.darker (0.18f), cx, orb.getBottom(), false);
+                grad.addColour (0.55, orbBase);
+                g.setGradientFill (grad);
+                g.fillEllipse (orb);
+
+                // 顶部水晶穹顶高光点
+                g.setColour (juce::Colours::white.withAlpha (0.82f));
+                g.fillEllipse (orb.getX() + 2.5f, orb.getY() + 1.5f, dia - 5.0f, dia * 0.38f);
+
+                g.setColour (dragging ? PinkXP::sel : juce::Colours::white.withAlpha (0.62f));
+                g.drawEllipse (orb.reduced (0.5f), 1.0f);
+            }
+        }
+        else if (t.frameStyle == PinkXP::FrameStyle::machinedChrome)
+        {
+            // Millennium Chrome：CNC 机加工矩形拉丝金属推子帽（4-stop 金属折痕 + 顶左镜面沿 + 中央双像素蚀刻握槽）
+            const auto capBase = dragging ? PinkXP::sel.interpolatedWith (PinkXP::btnFace, 0.55f)
+                                          : PinkXP::btnFace.interpolatedWith (juce::Colours::white, 0.16f);
+            juce::ColourGradient grad (capBase.interpolatedWith (juce::Colours::white, 0.38f),
+                                       0.0f, (float) knobBounds.getY(),
+                                       capBase.darker (0.26f),
+                                       0.0f, (float) knobBounds.getBottom(), false);
+            grad.addColour (0.38, capBase.interpolatedWith (juce::Colours::white, 0.12f));
+            grad.addColour (0.42, capBase.darker (0.06f));
+            g.setGradientFill (grad);
+            g.fillRect (knobBounds);
+
+            g.setColour (PinkXP::dark);
+            g.drawRect (knobBounds, 1);
+            if (knobBounds.getWidth() >= 6 && knobBounds.getHeight() >= 6)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.76f));
+                g.fillRect (knobBounds.getX() + 1, knobBounds.getY() + 1, knobBounds.getWidth() - 2, 1);
+                g.fillRect (knobBounds.getX() + 1, knobBounds.getY() + 1, 1, knobBounds.getHeight() - 2);
+                // 中央 CNC 蚀刻握持刻度线（1px 暗刻槽 + 1px 亮铬反光沿）
+                const int cx = knobBounds.getCentreX();
+                g.setColour (PinkXP::dark.withAlpha (0.82f));
+                g.fillRect (cx - 1, knobBounds.getY() + 3, 1, knobBounds.getHeight() - 6);
+                g.setColour (juce::Colours::white.withAlpha (0.72f));
+                g.fillRect (cx, knobBounds.getY() + 3, 1, knobBounds.getHeight() - 6);
+            }
+        }
+        else if (t.frameStyle == PinkXP::FrameStyle::neonTube)
+        {
+            // Neon Cyber：发光菱形赛博推子头（外霓虹光晕 + 暗烟熏菱芯 + 炽白发光边）
+            const float cx = (float) juce::jlimit (sliderBounds.getX() + 4, sliderBounds.getRight() - 4, valueX);
+            const float cy = trackF.getCentreY();
+            const float r  = 6.5f;
+            juce::Path diamond;
+            diamond.startNewSubPath (cx,     cy - r);
+            diamond.lineTo          (cx + r, cy);
+            diamond.lineTo          (cx,     cy + r);
+            diamond.lineTo          (cx - r, cy);
+            diamond.closeSubPath();
+
+            g.setColour (PinkXP::sel.withAlpha (dragging ? 0.45f : 0.28f));
+            g.strokePath (diamond, juce::PathStrokeType (3.0f));
+            g.setColour (dragging ? PinkXP::sel : juce::Colour (0x12, 0x0b, 0x20));
+            g.fillPath (diamond);
+            g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, dragging ? 0.65f : 0.35f));
+            g.strokePath (diamond, juce::PathStrokeType (1.25f));
+            g.setColour (juce::Colours::white.withAlpha (0.90f));
+            g.fillRect (juce::roundToInt (cx) - 1, juce::roundToInt (cy) - 1, 2, 2);
+        }
+        else if (t.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+        {
+            // CRT Terminal：0px 方形荧光终端推子块 + 中央荧光准星
+            g.setColour (dragging ? PinkXP::sel : juce::Colour (0x06, 0x10, 0x0a));
+            g.fillRect (knobBounds);
+            g.setColour (PinkXP::sel);
+            g.drawRect (knobBounds, 1);
+            g.setColour (dragging ? PinkXP::readableInkOn (PinkXP::sel) : PinkXP::sel);
+            g.fillRect (knobBounds.getCentreX(), knobBounds.getY() + 3, 1, juce::jmax (2, knobBounds.getHeight() - 6));
+        }
+        else
+        {
+            PinkXP::Craft::drawControlChrome (g, knobBounds, thumbFill, thumbState, t.sliderThumbRadius);
+        }
+    }
+}
 
 void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<int> content)
 {
     constexpr int kBarHeight = 26;
-    constexpr int kBtnSize   = 22;
-    constexpr int kPadding   = 4;
 
     if (content.getHeight() < kBarHeight)
         return;
 
     auto bar = content.withHeight(kBarHeight);
+    const auto& tokens = PinkXP::getSkinTokens();
 
-    // 半透明暗底
-    g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.78f));
-    g.fillRect(bar);
+    // 风格化半透明暗色控制台容器
+    drawMilkdropOverlaySurface (g, bar, true);
 
-    // 底部分割线（粉色）
-    g.setColour(PinkXP::pink300.withAlpha(0.7f));
-    g.fillRect(bar.getX(), bar.getBottom(), bar.getWidth(), 1);
+    // 按钮位置: [<] nameArea [keys] [reset] [tweak] [wave] [effects] [color] [auto] [>] [?]
+    const auto layout = computeOverlayBarLayout(bar);
+    const auto& prevBtn     = layout.prevBtn;
+    const auto& keyLockBtn  = layout.keyLockBtn;
+    const auto& resetAllBtn = layout.resetAllBtn;
+    const auto& tweakBtn    = layout.tweakBtn;
+    const auto& waveBtn     = layout.waveBtn;
+    const auto& effectsBtn  = layout.effectsBtn;
+    const auto& colorBtn    = layout.colorBtn;
+    const auto& autoBtn     = layout.autoBtn;
+    const auto& nextBtn     = layout.nextBtn;
+    const auto& randomBtn   = layout.randomBtn;
+    const auto& nameArea    = layout.nameArea;
+    const int   idealTextBtnW = overlayTextBtnWidth();
 
-    // 按钮位置: [<] nameArea [tweak] [wave] [effects] [color] [auto] [>] [?]
-    auto prevBtn    = juce::Rectangle<int>(bar.getX() + kPadding, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto randomBtn  = juce::Rectangle<int>(bar.getRight() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto nextBtn    = juce::Rectangle<int>(randomBtn.getX() - kPadding - kBtnSize, bar.getY() + 2, kBtnSize, kBtnSize);
-    auto autoBtn    = juce::Rectangle<int>(nextBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto colorBtn   = juce::Rectangle<int>(autoBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto effectsBtn = juce::Rectangle<int>(colorBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto waveBtn    = juce::Rectangle<int>(effectsBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    auto tweakBtn   = juce::Rectangle<int>(waveBtn.getX() - kPadding - overlayTextBtnWidth(), bar.getY() + 2, overlayTextBtnWidth(), kBtnSize);
-    // tweak/wave/effects/color 按钮在所有平台都显示，nameArea 延伸到 tweakBtn 左侧
-    auto nameArea   = juce::Rectangle<int>(prevBtn.getRight() + 2, bar.getY(),
-                                          tweakBtn.getX() - prevBtn.getRight() - 4, kBarHeight);
+    auto drawTextBtnLabel = [&](const juce::String& label, juce::Rectangle<int> r, bool shiftDown)
+    {
+        if (r.isEmpty())
+            return;
+        if (shiftDown)
+            r.translate (1, 1);
+        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
+        if (r.getWidth() < idealTextBtnW)
+            g.drawFittedText(label, r.reduced(2, 0), juce::Justification::centred, 1, 0.72f);
+        else
+            g.drawText(label, r, juce::Justification::centred, false);
+    };
 
-    // 按钮绘制 lambda
+    // 图标按钮（< / > / ?）
     auto drawBtn = [&](juce::Rectangle<int> r, const juce::String& text, OverlayButton btn)
     {
-        bool hovered = (hoveredOverlayBtn_ == btn);
-        bool pressed = (pressedOverlayBtn_ == btn);
+        const bool hovered = (hoveredOverlayBtn_ == btn);
+        const bool pressed = (pressedOverlayBtn_ == btn);
 
+        const auto fg = drawMilkdropOverlayButton (g, r, false, hovered, pressed);
+        g.setColour (fg);
+        auto tr = r;
         if (pressed)
-            PinkXP::drawPressed(g, r, PinkXP::pink100);
-        else if (hovered)
-            PinkXP::drawRaised(g, r, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(r);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(r, 1);
-        }
-
-        g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
+            tr.translate (1, 1);
         // 图标字符（< / > / ?）：恒用英文 UI 字体，不随语言切换变样
-        g.setFont(PinkXP::SymbolGlyphs::iconFont(9.0f, juce::Font::bold));
-        g.drawText(y2k::tr (text), r, juce::Justification::centred, false);
+        g.setFont (PinkXP::SymbolGlyphs::iconFont (9.0f, juce::Font::bold));
+        g.drawText (y2k::tr (text), tr, juce::Justification::centred, false);
     };
 
     drawBtn(prevBtn,   "<",   OverlayButton::kPrev);
     drawBtn(nextBtn,   ">",   OverlayButton::kNext);
     drawBtn(randomBtn, "?",   OverlayButton::kRandom);
 
-    // 渲染分辨率按钮 [1:n]：全平台阉割，不绘制此按钮
-#if 0
+    // 面板切换 / 模式切换按钮统一走 drawMilkdropOverlayButton
+    auto drawToggleBtn = [&](juce::Rectangle<int> r, const char* key, OverlayButton btn, bool active)
     {
-      int s = 1;
-      if (isFloating()) {
-        if (glView != nullptr)
-          s = glView->GetLocalRenderScale();
-      } else if (editor_ != nullptr) {
-        s = editor_->GetMilkdropRenderScale();
-      }
-      juce::String label = juce::String("1:") + juce::String(s);
-      drawBtn(resBtn, label, OverlayButton::kRenderScale);
-    }
-#endif
+        const bool hovered = (hoveredOverlayBtn_ == btn);
+        const bool pressed = (pressedOverlayBtn_ == btn);
+        const auto fg = drawMilkdropOverlayButton (g, r, active, hovered, pressed);
+        g.setColour (fg);
+        drawTextBtnLabel (y2k::tr (key), r, pressed || active);
+    };
 
-    // color 按钮：染色控制器展开时用高亮 toggle 样式
+    drawToggleBtn (colorBtn,   "color",   OverlayButton::kColor,   isColorPanelOpen_);
+    drawToggleBtn (effectsBtn, "effects", OverlayButton::kEffects, isEffectsPanelOpen_);
+    drawToggleBtn (waveBtn,    "wave",    OverlayButton::kWave,    isWavePanelOpen_);
+    drawToggleBtn (tweakBtn,   "tweak",   OverlayButton::kTweak,   isTweakPanelOpen_);
+
+    // reset（一键全部重置）按钮：存在任何 color / effects / wave / tweak 覆盖时高亮提示，中性态柔和弱化
     {
-        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kColor);
-        bool pressed = (pressedOverlayBtn_ == OverlayButton::kColor);
-        bool active  = isColorPanelOpen_;
-
-        if (pressed || active)
-            PinkXP::drawPressed(g, colorBtn, PinkXP::pink100);
-        else if (hovered)
-            PinkXP::drawRaised(g, colorBtn, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(colorBtn);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(colorBtn, 1);
-        }
-
-        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
-        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText(y2k::tr ("color"), colorBtn, juce::Justification::centred, false);
+        const bool hovered      = (hoveredOverlayBtn_ == OverlayButton::kResetAll);
+        const bool pressed      = (pressedOverlayBtn_ == OverlayButton::kResetAll);
+        const bool hasOverrides = hasAnyUserVisualOverrides();
+        const auto fg = drawMilkdropOverlayButton (g, resetAllBtn, false, hovered, pressed,
+                                                   ! hasOverrides, hasOverrides);
+        g.setColour (fg);
+        drawTextBtnLabel (y2k::tr ("reset"), resetAllBtn, pressed);
     }
 
-    // effects 按钮：效果控制器展开时用高亮 toggle 样式
-    {
-        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kEffects);
-        bool pressed = (pressedOverlayBtn_ == OverlayButton::kEffects);
-        bool active  = isEffectsPanelOpen_;
-
-        if (pressed || active)
-            PinkXP::drawPressed(g, effectsBtn, PinkXP::pink100);
-        else if (hovered)
-            PinkXP::drawRaised(g, effectsBtn, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(effectsBtn);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(effectsBtn, 1);
-        }
-
-        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
-        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText(y2k::tr ("effects"), effectsBtn, juce::Justification::centred, false);
-    }
-
-    // wave 按钮：波形样式控制器展开时用高亮 toggle 样式
-    {
-        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kWave);
-        bool pressed = (pressedOverlayBtn_ == OverlayButton::kWave);
-        bool active  = isWavePanelOpen_;
-
-        if (pressed || active)
-            PinkXP::drawPressed(g, waveBtn, PinkXP::pink100);
-        else if (hovered)
-            PinkXP::drawRaised(g, waveBtn, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(waveBtn);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(waveBtn, 1);
-        }
-
-        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
-        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText(y2k::tr ("wave"), waveBtn, juce::Justification::centred, false);
-    }
-
-    // tweak 按钮：全局变换偏移控制器展开时用高亮 toggle 样式
-    {
-        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kTweak);
-        bool pressed = (pressedOverlayBtn_ == OverlayButton::kTweak);
-        bool active  = isTweakPanelOpen_;
-
-        if (pressed || active)
-            PinkXP::drawPressed(g, tweakBtn, PinkXP::pink100);
-        else if (hovered)
-            PinkXP::drawRaised(g, tweakBtn, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(tweakBtn);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(tweakBtn, 1);
-        }
-
-        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
-        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText(y2k::tr ("tweak"), tweakBtn, juce::Justification::centred, false);
-    }
-
-    // auto 按钮：轮播模式激活时用高亮 toggle 样式
-    {
-        bool hovered = (hoveredOverlayBtn_ == OverlayButton::kAuto);
-        bool pressed = (pressedOverlayBtn_ == OverlayButton::kAuto);
-        bool active  = isAutoMode_;
-
-        if (pressed || active)
-            PinkXP::drawPressed(g, autoBtn, PinkXP::pink100);
-        else if (hovered)
-            PinkXP::drawRaised(g, autoBtn, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(autoBtn);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(autoBtn, 1);
-        }
-
-        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xDD, 0xDD, 0xDD));
-        g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-        g.drawText(y2k::tr ("auto"), autoBtn, juce::Justification::centred, false);
-    }
-
-    // 预设名：格式 "3/100  presetName"
-    int idx = glView->GetCurrentPresetIndex();
-    int total = glView->GetTotalPresetCount();
-    juce::String presetDisplay;
-    if (total > 0 && idx >= 0)
-      presetDisplay = juce::String(idx + 1) + "/" + juce::String(total) + "  ";
-    presetDisplay += glView->GetCurrentPresetName();
-    if (presetDisplay.isEmpty())
-      presetDisplay = "(no preset)";
-
-    // 序号部分用粉色高亮，名称部分用白色
-    juce::String idxPart = juce::String(idx + 1) + "/" + juce::String(total) + "  ";
-    float idxW = PinkXP::getFont(9.0f, juce::Font::bold).getStringWidthFloat(y2k::tr (idxPart)) + 2.0f;
-
-    auto idxRect = nameArea.withWidth(juce::jmin((int)idxW, nameArea.getWidth()));
-    auto nameRect = nameArea.withTrimmedLeft(idxRect.getWidth());
+    drawToggleBtn (keyLockBtn, "keys", OverlayButton::kKeyLock, keyboardControlEnabled_);
+    drawToggleBtn (autoBtn,    "auto", OverlayButton::kAuto,    isAutoMode_);
 
     // 缓存 nameArea 供 hitTestOverlayButton 使用
     cachedNameArea_ = nameArea;
+    if (nameArea.getWidth() <= 0)
+        return;
 
-    // name area 交互视觉：hover 时底部淡粉线，pressed 时亮粉底色
+    // 预设名：格式 "3/100  presetName"；尚未载入预设时仅显示 "(no preset)"，不拼接无效 "0/0" 前缀
+    const int idx   = glView->GetCurrentPresetIndex();
+    const int total = glView->GetTotalPresetCount();
+    const bool hasValidIdx = (total > 0 && idx >= 0);
+
+    const juce::String idxPart = hasValidIdx
+        ? (juce::String(idx + 1) + "/" + juce::String(total) + "  ")
+        : juce::String();
+    juce::String namePart = glView->GetCurrentPresetName();
+    if (namePart.isEmpty() && ! hasValidIdx)
+        namePart = y2k::tr ("(no preset)");
+
+    // name area 交互视觉：hover 时底部淡粉线，pressed 时亮粉底色（遵循 SkinTokens 圆角）
     bool nameHovered = (hoveredOverlayBtn_ == OverlayButton::kPresetName);
     bool namePressed = (pressedOverlayBtn_ == OverlayButton::kPresetName);
     if (namePressed)
     {
         g.setColour(PinkXP::pink300.withAlpha(0.18f));
-        g.fillRect(nameArea);
+        if (! tokens.pixelSnapped && tokens.controlRadius > 0.5f)
+            g.fillRoundedRectangle(nameArea.toFloat(), juce::jmin(tokens.controlRadius, 4.0f));
+        else
+            g.fillRect(nameArea);
     }
     else if (nameHovered)
     {
@@ -4350,13 +5390,24 @@ void MilkdropModule::paintOverlayControlBar(juce::Graphics& g, juce::Rectangle<i
         g.fillRect(nameArea.getX(), nameArea.getBottom() - 1, nameArea.getWidth(), 1);
     }
 
-    g.setColour(PinkXP::pink300.withAlpha(namePressed ? 1.0f : 0.95f));
-    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    g.drawText(y2k::tr (idxPart), idxRect, juce::Justification::centredLeft, true);
+    auto nameRect = nameArea;
+    if (idxPart.isNotEmpty())
+    {
+        const float idxW = PinkXP::getFont(9.0f, juce::Font::bold).getStringWidthFloat(idxPart) + 2.0f;
+        const auto idxRect = nameArea.withWidth(juce::jmin((int)idxW, nameArea.getWidth()));
+        nameRect = nameArea.withTrimmedLeft(idxRect.getWidth());
 
-    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE).withAlpha(0.95f));
-    g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
-    g.drawText(y2k::tr (presetDisplay.substring(idxPart.length())), nameRect, juce::Justification::centredLeft, true);
+        g.setColour(PinkXP::pink300.withAlpha(namePressed ? 1.0f : 0.95f));
+        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+        g.drawText(idxPart, idxRect, juce::Justification::centredLeft, true);
+    }
+
+    if (namePart.isNotEmpty() && nameRect.getWidth() > 0)
+    {
+        g.setColour(juce::Colour(0xEE, 0xEE, 0xEE).withAlpha(0.95f));
+        g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
+        g.drawText(namePart, nameRect, juce::Justification::centredLeft, true);
+    }
 }
 
 // ---- 右下角收藏 / 切换库按钮 ----
@@ -4464,32 +5515,15 @@ void MilkdropModule::paintLibraryButtons(juce::Graphics& g, juce::Rectangle<int>
     auto drawIconBtn = [&](juce::Rectangle<int> r, OverlayButton btn,
                            bool active, const std::function<void(juce::Graphics&, juce::Rectangle<float>)>& icon)
     {
-        bool hovered = (hoveredOverlayBtn_ == btn);
-        bool pressed = (pressedOverlayBtn_ == btn);
-
+        const bool hovered = (hoveredOverlayBtn_ == btn);
+        const bool pressed = (pressedOverlayBtn_ == btn);
+        const auto fg = drawMilkdropOverlayButton (g, r, active, hovered, pressed,
+                                                   false, false, /*translucentActive*/ true);
+        g.setColour (fg);
+        auto iconRect = r.toFloat().reduced (5.0f);
         if (pressed)
-            PinkXP::drawPressed(g, r, PinkXP::pink100);
-        else if (active)
-        {
-            // 持续激活态（已收藏/已切换库）：半透明粉色底 + 半透明边框，
-            // 避免实心色块遮挡底层 Milkdrop 渲染的视频。
-            g.setColour(PinkXP::pink300.withAlpha(0.32f));
-            g.fillRect(r);
-            g.setColour(PinkXP::pink300.withAlpha(0.85f));
-            g.drawRect(r, 1);
-        }
-        else if (hovered)
-            PinkXP::drawRaised(g, r, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(r);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(r, 1);
-        }
-
-        g.setColour(active ? PinkXP::pink300 : juce::Colour(0xEE, 0xEE, 0xEE));
-        icon(g, r.toFloat().reduced(5.0f));
+            iconRect.translate (1.0f, 1.0f);
+        icon (g, iconRect);
     };
 
     // 收藏按钮（爱心）
@@ -4585,8 +5619,24 @@ void MilkdropModule::PaintLoadingIndicator(juce::Graphics& g, juce::Rectangle<in
   if (elapsed > fadeout)
     alpha = 0.8f * (1.0f - static_cast<float>(elapsed - fadeout) / static_cast<float>(kFadeMs));
 
-  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(alpha * 0.75f));
-  g.fillRoundedRectangle(bar.toFloat(), 3.0f);
+  const auto& tokens = PinkXP::getSkinTokens();
+  const float rad = (! tokens.pixelSnapped && tokens.badgeRadius > 0.5f)
+                      ? juce::jmin (tokens.badgeRadius, (float) bar.getHeight() * 0.5f)
+                      : 0.0f;
+
+  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(alpha * 0.78f));
+  if (rad > 0.5f)
+  {
+    g.fillRoundedRectangle(bar.toFloat(), rad);
+    g.setColour(PinkXP::pink300.withAlpha(alpha * 0.55f));
+    g.drawRoundedRectangle(bar.toFloat().reduced(0.5f), rad, 1.0f);
+  }
+  else
+  {
+    g.fillRect(bar);
+    g.setColour(PinkXP::pink300.withAlpha(alpha * 0.75f));
+    g.drawRect(bar, 1);
+  }
 
   g.setColour(PinkXP::pink300.withAlpha(alpha));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::plain));
@@ -4604,15 +5654,23 @@ MilkdropModule::AutoIntervalDialog::AutoIntervalDialog(
     setOpaque(false);
     setInterceptsMouseClicks(true, true);
 
+    const auto dlgStyle = PinkXP::getSkinTokens().frameStyle;
+    const bool themedDlg = (dlgStyle == PinkXP::FrameStyle::machinedChrome
+                            || dlgStyle == PinkXP::FrameStyle::frostedGlass
+                            || dlgStyle == PinkXP::FrameStyle::neonTube
+                            || dlgStyle == PinkXP::FrameStyle::crtPhosphor);
     editor_.setText(juce::String(current, 3));
     editor_.setFont(PinkXP::getFont(11.0f, juce::Font::plain));
     editor_.setColour(juce::TextEditor::backgroundColourId,
-                      PinkXP::pink50);
-    editor_.setColour(juce::TextEditor::textColourId, PinkXP::ink);
+                      themedDlg ? PinkXP::content : PinkXP::pink50);
+    editor_.setColour(juce::TextEditor::textColourId,
+                      themedDlg ? PinkXP::readableInkOn(PinkXP::content) : PinkXP::ink);
     editor_.setColour(juce::TextEditor::outlineColourId,
-                      PinkXP::pink600.withAlpha(0.6f));
+                      (dlgStyle == PinkXP::FrameStyle::neonTube || dlgStyle == PinkXP::FrameStyle::crtPhosphor)
+                          ? PinkXP::sel.withAlpha(0.75f)
+                          : (themedDlg ? PinkXP::dark.withAlpha(0.80f) : PinkXP::pink600.withAlpha(0.6f)));
     editor_.setColour(juce::TextEditor::focusedOutlineColourId,
-                      PinkXP::pink500.withAlpha(0.9f));
+                      themedDlg ? PinkXP::sel : PinkXP::pink500.withAlpha(0.9f));
     editor_.setInputRestrictions(8, "0123456789.");
     editor_.setSelectAllWhenFocused(true);
     AutoIntervalDialog* self = this;
@@ -4645,22 +5703,84 @@ void MilkdropModule::AutoIntervalDialog::paint(juce::Graphics& g)
         (getWidth() - kDlgW) / 2, (getHeight() - kDlgH) / 2,
         kDlgW, kDlgH);
 
-    // 面板底色跟随主题
-    g.setColour(PinkXP::content.withAlpha(0.95f));
-    g.fillRoundedRectangle(dlg.toFloat(), 4.0f);
-    g.setColour(PinkXP::pink300.withAlpha(0.7f));
-    g.drawRoundedRectangle(dlg.toFloat().reduced(0.5f), 4.0f, 1.5f);
+    // 对话框外壳与标题栏跟随当前 Skin
+    const auto& dlgTokens  = PinkXP::getSkinTokens();
+    const bool isChromeDlg = (dlgTokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+    const bool isGlassDlg  = (dlgTokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+    const bool isNeonDlg   = (dlgTokens.frameStyle == PinkXP::FrameStyle::neonTube);
+    const bool isCrtDlg    = (dlgTokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const bool hasStyledCard = (isChromeDlg || isGlassDlg || isNeonDlg || isCrtDlg);
+    PinkXP::drawRaised(g, dlg, PinkXP::face);
+    auto titleBar = juce::Rectangle<int>(dlg.getX() + 2, dlg.getY() + 2, dlg.getWidth() - 4, 22);
+    PinkXP::drawPinkTitleBar(g, titleBar, "Set Auto Interval", 10.0f);
+    g.setColour(PinkXP::titleBarDividerColour());
+    g.fillRect(titleBar.getX(), titleBar.getBottom(), titleBar.getWidth(), 1);
 
-    // 标题
-    g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-    g.drawText(y2k::tr ("Set Auto Interval"),
-               dlg.getX() + 14, dlg.getY() + 8,
-               dlg.getWidth() - 28, 20,
-               juce::Justification::centredLeft, false);
+    if (hasStyledCard)
+    {
+        const bool isDarkFace = PinkXP::face.getPerceivedBrightness() < 0.45f;
+        const auto plateFill  = isNeonDlg  ? (isDarkFace ? PinkXP::face.interpolatedWith(juce::Colours::black, 0.24f)
+                                                         : PinkXP::face.interpolatedWith(PinkXP::content, 0.48f))
+                              : isCrtDlg   ? PinkXP::content.interpolatedWith(PinkXP::face, 0.25f)
+                              : isGlassDlg ? (isDarkFace ? PinkXP::face.interpolatedWith(juce::Colours::white, 0.08f)
+                                                         : PinkXP::face.interpolatedWith(juce::Colours::white, 0.42f))
+                                           : (isDarkFace ? PinkXP::face.interpolatedWith(juce::Colours::white, 0.06f)
+                                                         : PinkXP::face.interpolatedWith(PinkXP::content, 0.36f));
+        const auto bodyPlate  = juce::Rectangle<int>(dlg.getX() + 8, titleBar.getBottom() + 4,
+                                                     dlg.getWidth() - 16, dlg.getHeight() - 68);
+        if (! dlgTokens.isChromaKey)
+        {
+            PinkXP::Craft::drawPanelWell(g, bodyPlate, plateFill, PinkXP::WellKind::card);
+        }
+        else if (isGlassDlg)
+        {
+            const auto rf = bodyPlate.toFloat();
+            g.setColour(plateFill);
+            g.fillRoundedRectangle(rf, dlgTokens.cardRadius);
+            g.setColour(PinkXP::dark.withAlpha(0.32f));
+            g.drawRoundedRectangle(rf.reduced(0.5f), dlgTokens.cardRadius, 1.0f);
+        }
+        else if (isNeonDlg || isCrtDlg)
+        {
+            g.setColour(plateFill);
+            g.fillRect(bodyPlate);
+            g.setColour(PinkXP::sel.withAlpha(isNeonDlg ? 0.80f : 0.72f));
+            g.drawRect(bodyPlate, 1);
+        }
+        else
+        {
+            g.setColour(plateFill);
+            g.fillRect(bodyPlate);
+            g.setColour(PinkXP::dark.withAlpha(0.78f));
+            g.drawRect(bodyPlate, 1);
+            g.setColour(PinkXP::hl.withAlpha(0.55f));
+            g.fillRect(bodyPlate.getX() + 1, bodyPlate.getY() + 1, bodyPlate.getWidth() - 2, 1);
+        }
+
+        const int seamY = dlg.getBottom() - 40;
+        if (isChromeDlg)
+        {
+            g.setColour(PinkXP::dark.withAlpha(isDarkFace ? 0.72f : 0.48f));
+            g.fillRect(dlg.getX() + 8, seamY, dlg.getWidth() - 16, 1);
+            g.setColour(PinkXP::hl.interpolatedWith(juce::Colours::white, 0.50f).withAlpha(isDarkFace ? 0.28f : 0.74f));
+            g.fillRect(dlg.getX() + 8, seamY + 1, dlg.getWidth() - 16, 1);
+        }
+        else if (isGlassDlg)
+        {
+            g.setColour(PinkXP::dark.withAlpha(isDarkFace ? 0.28f : 0.16f));
+            g.fillRect(dlg.getX() + 8, seamY, dlg.getWidth() - 16, 1);
+            g.setColour(juce::Colours::white.withAlpha(isDarkFace ? 0.16f : 0.65f));
+            g.fillRect(dlg.getX() + 8, seamY + 1, dlg.getWidth() - 16, 1);
+        }
+        else
+        {
+            g.setColour(PinkXP::sel.withAlpha(isNeonDlg ? 0.72f : 0.65f));
+            g.fillRect(dlg.getX() + 8, seamY, dlg.getWidth() - 16, 1);
+        }
+    }
 
     // 提示文字
-    g.setColour(PinkXP::pink700.withAlpha(0.75f));
+    g.setColour(PinkXP::readableInkOn(PinkXP::face).withAlpha(0.85f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
     g.drawText(y2k::tr ("Enter interval (1.0-60.0 seconds):"),
                dlg.getX() + 14, dlg.getY() + 28,
@@ -4670,16 +5790,18 @@ void MilkdropModule::AutoIntervalDialog::paint(juce::Graphics& g)
     // OK 按钮（右侧）
     auto goRect = juce::Rectangle<int>(
         dlg.getRight() - 66, dlg.getBottom() - 34, 54, 22);
-    PinkXP::drawRaised(g, goRect, PinkXP::btnFace);
-    g.setColour(PinkXP::ink);
+    const auto goFill = isCrtDlg ? PinkXP::sel : PinkXP::btnFace;
+    PinkXP::Craft::drawControlChrome(g, goRect, goFill,
+                                     hasStyledCard ? PinkXP::ControlState::active : PinkXP::ControlState::normal);
+    g.setColour(PinkXP::readableInkOn(goFill));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr ("OK"), goRect, juce::Justification::centred, false);
 
     // Cancel 按钮
     auto cancelRect = juce::Rectangle<int>(
         goRect.getX() - 62, dlg.getBottom() - 34, 54, 22);
-    PinkXP::drawRaised(g, cancelRect, PinkXP::btnFace);
-    g.setColour(PinkXP::ink);
+    PinkXP::Craft::drawControlChrome(g, cancelRect, PinkXP::btnFace, PinkXP::ControlState::normal);
+    g.setColour(PinkXP::readableInkOn(PinkXP::btnFace));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr ("Cancel"), cancelRect, juce::Justification::centred, false);
 }
@@ -4738,15 +5860,23 @@ MilkdropModule::PresetJumpDialog::PresetJumpDialog(
     setOpaque(false);
     setInterceptsMouseClicks(true, true);
 
+    const auto dlgStyle = PinkXP::getSkinTokens().frameStyle;
+    const bool themedDlg = (dlgStyle == PinkXP::FrameStyle::machinedChrome
+                            || dlgStyle == PinkXP::FrameStyle::frostedGlass
+                            || dlgStyle == PinkXP::FrameStyle::neonTube
+                            || dlgStyle == PinkXP::FrameStyle::crtPhosphor);
     editor_.setText(juce::String(current + 1));
     editor_.setFont(PinkXP::getFont(11.0f, juce::Font::plain));
     editor_.setColour(juce::TextEditor::backgroundColourId,
-                      PinkXP::pink50);
-    editor_.setColour(juce::TextEditor::textColourId, PinkXP::ink);
+                      themedDlg ? PinkXP::content : PinkXP::pink50);
+    editor_.setColour(juce::TextEditor::textColourId,
+                      themedDlg ? PinkXP::readableInkOn(PinkXP::content) : PinkXP::ink);
     editor_.setColour(juce::TextEditor::outlineColourId,
-                      PinkXP::pink600.withAlpha(0.6f));
+                      (dlgStyle == PinkXP::FrameStyle::neonTube || dlgStyle == PinkXP::FrameStyle::crtPhosphor)
+                          ? PinkXP::sel.withAlpha(0.75f)
+                          : (themedDlg ? PinkXP::dark.withAlpha(0.80f) : PinkXP::pink600.withAlpha(0.6f)));
     editor_.setColour(juce::TextEditor::focusedOutlineColourId,
-                      PinkXP::pink500.withAlpha(0.9f));
+                      themedDlg ? PinkXP::sel : PinkXP::pink500.withAlpha(0.9f));
     editor_.setInputRestrictions(6, "0123456789");
     editor_.setSelectAllWhenFocused(true);
     PresetJumpDialog* self = this;
@@ -4780,22 +5910,84 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
         (getWidth() - kDlgW) / 2, (getHeight() - kDlgH) / 2,
         kDlgW, kDlgH);
 
-    // 面板底色跟随主题
-    g.setColour(PinkXP::content.withAlpha(0.95f));
-    g.fillRoundedRectangle(dlg.toFloat(), 4.0f);
-    g.setColour(PinkXP::pink300.withAlpha(0.7f));
-    g.drawRoundedRectangle(dlg.toFloat().reduced(0.5f), 4.0f, 1.5f);
+    // 对话框外壳与标题栏跟随当前 Skin
+    const auto& dlgTokens  = PinkXP::getSkinTokens();
+    const bool isChromeDlg = (dlgTokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+    const bool isGlassDlg  = (dlgTokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+    const bool isNeonDlg   = (dlgTokens.frameStyle == PinkXP::FrameStyle::neonTube);
+    const bool isCrtDlg    = (dlgTokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const bool hasStyledCard = (isChromeDlg || isGlassDlg || isNeonDlg || isCrtDlg);
+    PinkXP::drawRaised(g, dlg, PinkXP::face);
+    auto titleBar = juce::Rectangle<int>(dlg.getX() + 2, dlg.getY() + 2, dlg.getWidth() - 4, 22);
+    PinkXP::drawPinkTitleBar(g, titleBar, "Jump to Preset", 10.0f);
+    g.setColour(PinkXP::titleBarDividerColour());
+    g.fillRect(titleBar.getX(), titleBar.getBottom(), titleBar.getWidth(), 1);
 
-    // 标题
-    g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-    g.drawText(y2k::tr ("Jump to Preset"),
-               dlg.getX() + 14, dlg.getY() + 8,
-               dlg.getWidth() - 28, 20,
-               juce::Justification::centredLeft, false);
+    if (hasStyledCard)
+    {
+        const bool isDarkFace = PinkXP::face.getPerceivedBrightness() < 0.45f;
+        const auto plateFill  = isNeonDlg  ? (isDarkFace ? PinkXP::face.interpolatedWith(juce::Colours::black, 0.24f)
+                                                         : PinkXP::face.interpolatedWith(PinkXP::content, 0.48f))
+                              : isCrtDlg   ? PinkXP::content.interpolatedWith(PinkXP::face, 0.25f)
+                              : isGlassDlg ? (isDarkFace ? PinkXP::face.interpolatedWith(juce::Colours::white, 0.08f)
+                                                         : PinkXP::face.interpolatedWith(juce::Colours::white, 0.42f))
+                                           : (isDarkFace ? PinkXP::face.interpolatedWith(juce::Colours::white, 0.06f)
+                                                         : PinkXP::face.interpolatedWith(PinkXP::content, 0.36f));
+        const auto bodyPlate  = juce::Rectangle<int>(dlg.getX() + 8, titleBar.getBottom() + 4,
+                                                     dlg.getWidth() - 16, dlg.getHeight() - 68);
+        if (! dlgTokens.isChromaKey)
+        {
+            PinkXP::Craft::drawPanelWell(g, bodyPlate, plateFill, PinkXP::WellKind::card);
+        }
+        else if (isGlassDlg)
+        {
+            const auto rf = bodyPlate.toFloat();
+            g.setColour(plateFill);
+            g.fillRoundedRectangle(rf, dlgTokens.cardRadius);
+            g.setColour(PinkXP::dark.withAlpha(0.32f));
+            g.drawRoundedRectangle(rf.reduced(0.5f), dlgTokens.cardRadius, 1.0f);
+        }
+        else if (isNeonDlg || isCrtDlg)
+        {
+            g.setColour(plateFill);
+            g.fillRect(bodyPlate);
+            g.setColour(PinkXP::sel.withAlpha(isNeonDlg ? 0.80f : 0.72f));
+            g.drawRect(bodyPlate, 1);
+        }
+        else
+        {
+            g.setColour(plateFill);
+            g.fillRect(bodyPlate);
+            g.setColour(PinkXP::dark.withAlpha(0.78f));
+            g.drawRect(bodyPlate, 1);
+            g.setColour(PinkXP::hl.withAlpha(0.55f));
+            g.fillRect(bodyPlate.getX() + 1, bodyPlate.getY() + 1, bodyPlate.getWidth() - 2, 1);
+        }
+
+        const int seamY = dlg.getBottom() - 40;
+        if (isChromeDlg)
+        {
+            g.setColour(PinkXP::dark.withAlpha(isDarkFace ? 0.72f : 0.48f));
+            g.fillRect(dlg.getX() + 8, seamY, dlg.getWidth() - 16, 1);
+            g.setColour(PinkXP::hl.interpolatedWith(juce::Colours::white, 0.50f).withAlpha(isDarkFace ? 0.28f : 0.74f));
+            g.fillRect(dlg.getX() + 8, seamY + 1, dlg.getWidth() - 16, 1);
+        }
+        else if (isGlassDlg)
+        {
+            g.setColour(PinkXP::dark.withAlpha(isDarkFace ? 0.28f : 0.16f));
+            g.fillRect(dlg.getX() + 8, seamY, dlg.getWidth() - 16, 1);
+            g.setColour(juce::Colours::white.withAlpha(isDarkFace ? 0.16f : 0.65f));
+            g.fillRect(dlg.getX() + 8, seamY + 1, dlg.getWidth() - 16, 1);
+        }
+        else
+        {
+            g.setColour(PinkXP::sel.withAlpha(isNeonDlg ? 0.72f : 0.65f));
+            g.fillRect(dlg.getX() + 8, seamY, dlg.getWidth() - 16, 1);
+        }
+    }
 
     // 提示文字
-    g.setColour(PinkXP::pink700.withAlpha(0.75f));
+    g.setColour(PinkXP::readableInkOn(PinkXP::face).withAlpha(0.85f));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::plain));
     g.drawText(y2k::trf ("Enter preset number ({0}-{1}):", 1, total_),
                dlg.getX() + 14, dlg.getY() + 28,
@@ -4805,16 +5997,18 @@ void MilkdropModule::PresetJumpDialog::paint(juce::Graphics& g)
     // Go 按钮（右侧）
     auto goRect = juce::Rectangle<int>(
         dlg.getRight() - 66, dlg.getBottom() - 34, 54, 22);
-    PinkXP::drawRaised(g, goRect, PinkXP::btnFace);
-    g.setColour(PinkXP::ink);
+    const auto goFill = isCrtDlg ? PinkXP::sel : PinkXP::btnFace;
+    PinkXP::Craft::drawControlChrome(g, goRect, goFill,
+                                     hasStyledCard ? PinkXP::ControlState::active : PinkXP::ControlState::normal);
+    g.setColour(PinkXP::readableInkOn(goFill));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr ("Go"), goRect, juce::Justification::centred, false);
 
     // Cancel 按钮
     auto cancelRect = juce::Rectangle<int>(
         goRect.getX() - 62, dlg.getBottom() - 34, 54, 22);
-    PinkXP::drawRaised(g, cancelRect, PinkXP::btnFace);
-    g.setColour(PinkXP::ink);
+    PinkXP::Craft::drawControlChrome(g, cancelRect, PinkXP::btnFace, PinkXP::ControlState::normal);
+    g.setColour(PinkXP::readableInkOn(PinkXP::btnFace));
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr ("Cancel"), cancelRect, juce::Justification::centred, false);
 }
@@ -4921,6 +6115,8 @@ void MilkdropModule::showAutoIntervalDialog()
 void MilkdropModule::OverlayView::paint(juce::Graphics& g)
 {
     if (!owner_.focused_ || owner_.glView == nullptr)
+        return;
+    if (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (owner_))
         return;
     auto localBounds = getLocalBounds();
     if (localBounds.isEmpty())
@@ -5146,6 +6342,7 @@ void MilkdropModule::UpdateOverlayViewPlacement()
 
 void MilkdropModule::toggleAutoMode()
 {
+  notifyBeforeUserEdit();
   if (!isAutoMode_)
   {
     // 开启 auto：进入自动轮播 + 展开时间控制条，收起其它面板。
@@ -5184,6 +6381,7 @@ void MilkdropModule::toggleAutoMode()
   // UI 修改 auto 状态 → 回写宿主参数，避免 10Hz pull 反向覆盖。
   if (editor_ != nullptr)
     editor_->pushMilkdropAutomationParams();
+  notifyAfterUserEdit (y2k::tr ("MilkDrop auto"), "auto");
 }
 
 void MilkdropModule::setAutoModeEnabled(bool enabled)
@@ -5252,7 +6450,11 @@ void MilkdropModule::checkAutoMode()
     if (bucket > lastBeatBucket_)
     {
       lastBeatBucket_ = bucket;
-      randomPreset();
+      // 后台自动轮播不进入 Ctrl+Z 撤回栈（避免淹没用户操作记录）
+      pendingPresetTarget_ = -1;
+      restored_preset_index_ = -1;
+      if (glView != nullptr)
+        glView->RequestPresetRandom();
     }
     else if (bucket < lastBeatBucket_)
     {
@@ -5268,12 +6470,16 @@ void MilkdropModule::checkAutoMode()
   if (now - lastAutoSwitchTime_ >= intervalMs)
   {
     lastAutoSwitchTime_ = now;
-    randomPreset();
+    pendingPresetTarget_ = -1;
+    restored_preset_index_ = -1;
+    if (glView != nullptr)
+      glView->RequestPresetRandom();
   }
 }
 
 void MilkdropModule::applyAutoInterval(float seconds)
 {
+  notifyBeforeUserEdit();
   seconds = juce::jlimit(kMinAutoInterval, kMaxAutoInterval, seconds);
   // 四舍五入到 0.001
   seconds = std::round(seconds * 1000.0f) / 1000.0f;
@@ -5285,6 +6491,7 @@ void MilkdropModule::applyAutoInterval(float seconds)
   // UI 修改 auto 间隔 → 回写宿主参数，避免 10Hz pull 反向覆盖。
   if (editor_ != nullptr)
     editor_->pushMilkdropAutomationParams();
+  notifyAfterUserEdit (y2k::tr ("MilkDrop auto"), "auto_row");
 }
 
 void MilkdropModule::updateAutoIntervalFromSlider(float proportion)
@@ -5330,6 +6537,7 @@ void MilkdropModule::toggleAutoModeType()
   if (! isHostPlayheadAvailable())
     return;
 
+  notifyBeforeUserEdit();
   autoModeIsBeat_ = !autoModeIsBeat_;
   // 切换模式后重置拍桶基准，避免用旧基准误触发切换。
   beatBucketInitialized_ = false;
@@ -5340,6 +6548,7 @@ void MilkdropModule::toggleAutoModeType()
   // UI 修改 auto 模式类型 → 回写宿主参数。
   if (editor_ != nullptr)
     editor_->pushMilkdropAutomationParams();
+  notifyAfterUserEdit (y2k::tr ("MilkDrop auto"), "auto_row");
 }
 
 void MilkdropModule::setAutoBeatMode(bool beatMode)
@@ -5408,14 +6617,10 @@ juce::Rectangle<int> MilkdropModule::getSliderBounds(juce::Rectangle<int> autoRo
 void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int> topBar)
 {
   auto autoRow = getAutoRowBounds(topBar);
+  const auto& tokens = PinkXP::getSkinTokens();
 
-  // 半透明暗底（比顶栏稍亮以区分层级）
-  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
-  g.fillRect(autoRow);
-
-  // 底部分割线
-  g.setColour(PinkXP::pink300.withAlpha(0.5f));
-  g.fillRect(autoRow.getX(), autoRow.getBottom(), autoRow.getWidth(), 1);
+  // 风格化半透明子面板容器
+  drawMilkdropOverlaySurface (g, autoRow, false);
 
   const auto mousePos = getMouseXYRelative();
 
@@ -5426,14 +6631,8 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
   {
     // 插件宿主模式：绘制可点击的模式切换按钮（时间 ↔ BPM）
     const bool hovered = modeBtn.contains (mousePos);
-    g.setColour (hovered
-        ? juce::Colour (0xFF, 0xFF, 0xFF).withAlpha (0.16f)
-        : juce::Colour (0xFF, 0xFF, 0xFF).withAlpha (0.08f));
-    g.fillRoundedRectangle (modeBtn.toFloat(), 3.0f);
-    g.setColour (PinkXP::pink300.withAlpha (hovered ? 1.0f : 0.8f));
-    g.drawRoundedRectangle (modeBtn.toFloat().reduced (0.5f, 0.5f), 3.0f, 1.0f);
-
-    g.setColour (autoModeIsBeat_ ? PinkXP::pink300 : juce::Colour (0xDD, 0xDD, 0xDD));
+    const auto fg = drawMilkdropOverlayButton (g, modeBtn, autoModeIsBeat_, hovered, false);
+    g.setColour (fg);
     g.setFont (PinkXP::getFont (9.0f, juce::Font::bold));
     g.drawText (y2k::tr (autoModeIsBeat_ ? "beat" : "sec"), modeBtn, juce::Justification::centred, false);
   }
@@ -5446,7 +6645,7 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
                 38, autoRow.getHeight(), juce::Justification::centredLeft, false);
   }
 
-  // ---- Slider 轨道与滑块 ----
+  // ---- Slider 轨道与滑块（经由 drawMilkdropOverlaySlider 跟随当前风格）----
   auto sliderBounds = getSliderBounds(autoRow);
   const float proportion = autoModeIsBeat_
       ? static_cast<float> (autoBeats_ - kMinAutoBeats)
@@ -5454,30 +6653,7 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
       : static_cast<float> (autoIntervalSeconds_ - kMinAutoInterval)
         / static_cast<float> (kMaxAutoInterval - kMinAutoInterval);
 
-  // 轨道底色
-  g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
-  g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
-
-  // 已填充部分
-  int fillW = static_cast<int>(sliderBounds.getWidth() * proportion);
-  if (fillW > 0)
-  {
-    g.setColour(PinkXP::pink300.withAlpha(0.7f));
-    g.fillRoundedRectangle(
-        juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(),
-                             fillW, sliderBounds.getHeight()).toFloat(), 2.0f);
-  }
-
-  // 滑块手柄（粉色小方块）
-  int knobX = sliderBounds.getX() + fillW - 4;
-  int knobSize = 12;
-  auto knobBounds = juce::Rectangle<int>(
-      knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
-      knobSize, knobSize);
-  g.setColour(isDraggingSlider_ ? PinkXP::pink200 : PinkXP::pink100);
-  g.fillRect(knobBounds);
-  g.setColour(PinkXP::pink600);
-  g.drawRect(knobBounds, 1);
+  drawMilkdropOverlaySlider (g, sliderBounds, proportion, PinkXP::pink300, isDraggingSlider_);
 
   // ---- 右侧数值标签 ----
   //   时间模式：如 "10.000s" / "1m30.000s"（可点击弹输入框）；
@@ -5505,13 +6681,17 @@ void MilkdropModule::paintAutoControlRow(juce::Graphics& g, juce::Rectangle<int>
       40, autoRow.getHeight());
   cachedAutoTimeLabel_ = valueLabelRect;  // 供 mouseDown/mouseMove hit-test
 
-  // 时间模式下标签可点击 → hover 微亮底色提示可点击
+  // 时间模式下标签可点击 → hover 微亮底色提示可点击（遵循 SkinTokens 圆角）
   const bool labelClickable = ! autoModeIsBeat_;
   bool labelHovered = labelClickable && valueLabelRect.contains (mousePos);
   if (labelHovered)
   {
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.08f));
-    g.fillRoundedRectangle(valueLabelRect.toFloat().reduced(2, 4), 2.0f);
+    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.10f));
+    const auto hoverR = valueLabelRect.reduced(2, 4);
+    if (! tokens.pixelSnapped && tokens.controlRadius > 0.5f)
+      g.fillRoundedRectangle(hoverR.toFloat(), juce::jmin(tokens.controlRadius, 3.0f));
+    else
+      g.fillRect(hoverR);
   }
 
   g.setColour(PinkXP::pink300.withAlpha(labelHovered ? 1.0f : 0.9f));
@@ -5733,8 +6913,10 @@ void MilkdropModule::toggleEffectSwitch(int row)
   const MilkdropEffectDef* def = GetImplementedMilkdropEffect(row);
   if (def == nullptr)
     return;
+  notifyBeforeUserEdit();
   def->set(visualState_, !def->get(visualState_));
   applyVisualToEditor();
+  notifyAfterUserEdit (y2k::tr ("MilkDrop effects"), "effects");
 }
 
 juce::Rectangle<int> MilkdropModule::getColorPanelBounds(juce::Rectangle<int> topBar) const
@@ -5771,39 +6953,25 @@ void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> top
   auto panel = getColorPanelBounds(topBar);
   cachedColorPanelRect_ = panel;
 
-  // 半透明暗底
-  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
-  g.fillRect(panel);
+  // 风格化半透明子面板容器
+  drawMilkdropOverlaySurface (g, panel, false);
 
-  // 底部分割线
-  g.setColour(PinkXP::pink300.withAlpha(0.5f));
-  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+  // Reset 按钮（先算位置，标题宽度自适应到按钮左侧，避免 VT323/Orbitron 截断）
+  auto resetRect = getTintResetBounds(panel);
+  cachedTintResetRect_ = resetRect;
 
   // 标题 "COLOR"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("COLOR"), panel.getX() + 6, panel.getY(),
-             60, 22, juce::Justification::centredLeft, false);
+  g.drawFittedText(y2k::tr ("COLOR"),
+                   juce::Rectangle<int>(panel.getX() + 6, panel.getY(),
+                                        juce::jmax(60, panel.getWidth() - resetRect.getWidth() - 16), 22),
+                   juce::Justification::centredLeft, 1, 0.78f);
 
-  // Reset 按钮
-  auto resetRect = getTintResetBounds(panel);
-  cachedTintResetRect_ = resetRect;
-  bool resetHovered = resetRect.contains(getMouseXYRelative());
-  if (resetHovered)
-  {
-    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
-    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
-  }
-  else
-  {
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-    g.fillRect(resetRect);
-    g.setColour(PinkXP::pink300.withAlpha(0.55f));
-    g.drawRect(resetRect, 1);
-    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
-  }
+  const bool resetHovered = resetRect.contains(getMouseXYRelative());
+  g.setColour (drawMilkdropOverlayButton (g, resetRect, false, resetHovered, false));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
+  g.drawFittedText(y2k::tr ("Reset"), resetRect.reduced(2, 0), juce::Justification::centred, 1, 0.72f);
 
   // RGB + Bright 四行滑块
   static const char* kLabels[4] = { "R", "G", "B", "Bri" };
@@ -5841,30 +7009,7 @@ void MilkdropModule::paintColorPanel(juce::Graphics& g, juce::Rectangle<int> top
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr (kLabels[row]), labelRect, juce::Justification::centredLeft, false);
 
-    // 轨道底色
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
-    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
-
-    // 已填充部分
-    int fillW = static_cast<int>(sliderBounds.getWidth() * proportion);
-    if (fillW > 0)
-    {
-      g.setColour(kRowColours[row].withAlpha(0.8f));
-      g.fillRoundedRectangle(
-          juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(),
-                               fillW, sliderBounds.getHeight()).toFloat(), 2.0f);
-    }
-
-    // 滑块手柄
-    int knobX = sliderBounds.getX() + fillW - 4;
-    int knobSize = 12;
-    auto knobBounds = juce::Rectangle<int>(
-        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
-        knobSize, knobSize);
-    g.setColour(draggingTintRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
-    g.fillRect(knobBounds);
-    g.setColour(PinkXP::pink600);
-    g.drawRect(knobBounds, 1);
+    drawMilkdropOverlaySlider (g, sliderBounds, proportion, kRowColours[row], draggingTintRow_ == row);
 
     // 右侧数值（百分比）
     auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 48, 20);
@@ -5957,41 +7102,30 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
   auto panel = getEffectsPanelBounds(topBar);
   cachedEffectsPanelRect_ = panel;
 
-  // 半透明暗底
-  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
-  g.fillRect(panel);
+  // 风格化半透明子面板容器
+  drawMilkdropOverlaySurface (g, panel, false);
 
-  // 底部分割线
-  g.setColour(PinkXP::pink300.withAlpha(0.5f));
-  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+  // Reset 按钮（先算位置，标题宽度自适应至按钮左侧，避免 VT323 下 "EFFECTS" 截断）
+  const auto mousePos = getMouseXYRelative();
+  auto resetRect = getEffectsResetBounds(panel);
+  cachedEffectsResetRect_ = resetRect;
 
   // 标题 "EFFECTS"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("EFFECTS"), panel.getX() + 6, panel.getY(),
-             60, 22, juce::Justification::centredLeft, false);
+  g.drawFittedText(y2k::tr ("EFFECTS"),
+                   juce::Rectangle<int>(panel.getX() + 6, panel.getY(),
+                                        juce::jmax(60, panel.getWidth() - resetRect.getWidth() - 16), 22),
+                   juce::Justification::centredLeft, 1, 0.78f);
 
-  // Reset 按钮
-  auto resetRect = getEffectsResetBounds(panel);
-  cachedEffectsResetRect_ = resetRect;
-  bool resetHovered = resetRect.contains(getMouseXYRelative());
-  if (resetHovered)
-  {
-    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
-    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
-  }
-  else
-  {
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-    g.fillRect(resetRect);
-    g.setColour(PinkXP::pink300.withAlpha(0.55f));
-    g.drawRect(resetRect, 1);
-    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
-  }
+  const bool resetHovered = resetRect.contains(mousePos);
+  g.setColour (drawMilkdropOverlayButton (g, resetRect, false, resetHovered, false));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
+  g.drawFittedText(y2k::tr ("Reset"), resetRect.reduced(2, 0), juce::Justification::centred, 1, 0.72f);
 
   // 开关按钮：基于效果注册表动态生成，按钮自身即开关（按下=开启，弹起=关闭）。
+  const bool isCrtEffects = (PinkXP::getSkinTokens().frameStyle == PinkXP::FrameStyle::crtPhosphor);
+  const auto toggleFont   = PinkXP::getFont(isCrtEffects ? 7.2f : 8.0f, juce::Font::bold);
   int row = 0;
   for (const auto& def : GetMilkdropEffectDefs())
   {
@@ -6000,22 +7134,15 @@ void MilkdropModule::paintEffectsPanel(juce::Graphics& g, juce::Rectangle<int> t
 
     const bool enabled = def.get(visualState_);
     auto toggle = getEffectsToggleBounds(panel, row);
+    const bool hovered = toggle.contains(mousePos);
 
+    g.setColour (drawMilkdropOverlayButton (g, toggle, enabled, hovered, false));
+    auto tr = toggle;
     if (enabled)
-    {
-      PinkXP::drawPressed(g, toggle, PinkXP::pink100);
-      g.setColour(PinkXP::pink300);
-    }
-    else
-    {
-      g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-      g.fillRect(toggle);
-      g.setColour(PinkXP::pink300.withAlpha(0.55f));
-      g.drawRect(toggle, 1);
-      g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
-    }
-    g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText(y2k::tr (def.display_name), toggle, juce::Justification::centred, false);
+      tr.translate (1, 1);
+    g.setFont(toggleFont);
+    g.drawFittedText(y2k::tr (def.display_name), tr.reduced(2, 0),
+                     juce::Justification::centred, 1, 0.72f);
     ++row;
   }
 }
@@ -6118,39 +7245,26 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
   auto panel = getWavePanelBounds(topBar);
   cachedWavePanelRect_ = panel;
 
-  // 半透明暗底
-  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
-  g.fillRect(panel);
+  // 风格化半透明子面板容器
+  drawMilkdropOverlaySurface (g, panel, false);
 
-  // 底部分割线
-  g.setColour(PinkXP::pink300.withAlpha(0.5f));
-  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+  // Reset 按钮（先算位置，标题宽度自适应至按钮左侧）
+  const auto mousePos = getMouseXYRelative();
+  auto resetRect = getWaveResetBounds(panel);
+  cachedWaveResetRect_ = resetRect;
 
   // 标题 "WAVE"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("WAVE"), panel.getX() + 6, panel.getY(),
-             60, 22, juce::Justification::centredLeft, false);
+  g.drawFittedText(y2k::tr ("WAVE"),
+                   juce::Rectangle<int>(panel.getX() + 6, panel.getY(),
+                                        juce::jmax(60, panel.getWidth() - resetRect.getWidth() - 16), 22),
+                   juce::Justification::centredLeft, 1, 0.78f);
 
-  // Reset 按钮
-  auto resetRect = getWaveResetBounds(panel);
-  cachedWaveResetRect_ = resetRect;
-  bool resetHovered = resetRect.contains(getMouseXYRelative());
-  if (resetHovered)
-  {
-    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
-    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
-  }
-  else
-  {
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-    g.fillRect(resetRect);
-    g.setColour(PinkXP::pink300.withAlpha(0.55f));
-    g.drawRect(resetRect, 1);
-    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
-  }
+  const bool resetHovered = resetRect.contains(mousePos);
+  g.setColour (drawMilkdropOverlayButton (g, resetRect, false, resetHovered, false));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
+  g.drawFittedText(y2k::tr ("Reset"), resetRect.reduced(2, 0), juce::Justification::centred, 1, 0.72f);
 
   // mode stepper：< 模式名 >
   {
@@ -6167,21 +7281,12 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
         const bool pressed = (waveModeStepperPressed_ == zone);
         const bool hovered = (waveModeStepperHover_ == zone);
 
+        g.setColour (drawMilkdropOverlayButton (g, r, false, hovered, pressed));
+        auto tr = r;
         if (pressed)
-            PinkXP::drawPressed(g, r, PinkXP::pink100);
-        else if (hovered)
-            PinkXP::drawRaised(g, r, PinkXP::pink200);
-        else
-        {
-            g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-            g.fillRect(r);
-            g.setColour(PinkXP::pink300.withAlpha(0.55f));
-            g.drawRect(r, 1);
-        }
-
-        g.setColour(pressed ? PinkXP::pink300 : juce::Colour(0xEE, 0xEE, 0xEE));
-        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-        g.drawText(y2k::tr (label), r, juce::Justification::centred, false);
+            tr.translate (1, 1);
+        g.setFont(PinkXP::SymbolGlyphs::iconFont(9.0f, juce::Font::bold));
+        g.drawText(y2k::tr (label), tr, juce::Justification::centred, false);
     };
 
     drawArrow(leftArrow,  "<", 0);
@@ -6232,30 +7337,7 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr (kLabels[row]), labelRect, juce::Justification::centredLeft, false);
 
-    // 轨道底色
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
-    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
-
-    // 已填充部分
-    int fillW = static_cast<int>(sliderBounds.getWidth() * proportion);
-    if (fillW > 0)
-    {
-      g.setColour(kRowColours[row].withAlpha(0.8f));
-      g.fillRoundedRectangle(
-          juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(),
-                               fillW, sliderBounds.getHeight()).toFloat(), 2.0f);
-    }
-
-    // 滑块手柄
-    int knobX = sliderBounds.getX() + fillW - 4;
-    int knobSize = 12;
-    auto knobBounds = juce::Rectangle<int>(
-        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
-        knobSize, knobSize);
-    g.setColour(draggingWaveRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
-    g.fillRect(knobBounds);
-    g.setColour(PinkXP::pink600);
-    g.drawRect(knobBounds, 1);
+    drawMilkdropOverlaySlider (g, sliderBounds, proportion, kRowColours[row], draggingWaveRow_ == row);
 
     // 右侧数值
     auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);
@@ -6276,22 +7358,14 @@ void MilkdropModule::paintWavePanel(juce::Graphics& g, juce::Rectangle<int> topB
                        : (idx == 2) ? waveState_.additive
                                     : waveState_.brighten;
     auto sw = getWaveSwitchBounds(panel, idx);
+    const bool hovered = sw.contains(mousePos);
 
+    g.setColour (drawMilkdropOverlayButton (g, sw, enabled, hovered, false));
+    auto tr = sw;
     if (enabled)
-    {
-      PinkXP::drawPressed(g, sw, PinkXP::pink100);
-      g.setColour(PinkXP::pink300);
-    }
-    else
-    {
-      g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-      g.fillRect(sw);
-      g.setColour(PinkXP::pink300.withAlpha(0.55f));
-      g.drawRect(sw, 1);
-      g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
-    }
+      tr.translate (1, 1);
     g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-    g.drawText(y2k::tr (kSwitchNames[idx]), sw, juce::Justification::centred, false);
+    g.drawText(y2k::tr (kSwitchNames[idx]), tr, juce::Justification::centred, false);
   }
 }
 
@@ -6381,39 +7455,25 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
   auto panel = getTweakPanelBounds(topBar);
   cachedTweakPanelRect_ = panel;
 
-  // 半透明暗底
-  g.setColour(juce::Colour(0x00, 0x00, 0x00).withAlpha(0.72f));
-  g.fillRect(panel);
+  // 风格化半透明子面板容器
+  drawMilkdropOverlaySurface (g, panel, false);
 
-  // 底部分割线
-  g.setColour(PinkXP::pink300.withAlpha(0.5f));
-  g.fillRect(panel.getX(), panel.getBottom(), panel.getWidth(), 1);
+  // Reset 按钮（先算位置，标题宽度自适应至按钮左侧）
+  auto resetRect = getTweakResetBounds(panel);
+  cachedTweakResetRect_ = resetRect;
 
   // 标题 "TWEAK"
   g.setColour(PinkXP::pink300.withAlpha(0.95f));
   g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("TWEAK"), panel.getX() + 6, panel.getY(),
-             60, 22, juce::Justification::centredLeft, false);
+  g.drawFittedText(y2k::tr ("TWEAK"),
+                   juce::Rectangle<int>(panel.getX() + 6, panel.getY(),
+                                        juce::jmax(60, panel.getWidth() - resetRect.getWidth() - 16), 22),
+                   juce::Justification::centredLeft, 1, 0.78f);
 
-  // Reset 按钮
-  auto resetRect = getTweakResetBounds(panel);
-  cachedTweakResetRect_ = resetRect;
-  bool resetHovered = resetRect.contains(getMouseXYRelative());
-  if (resetHovered)
-  {
-    PinkXP::drawRaised(g, resetRect, PinkXP::pink200);
-    g.setColour(juce::Colour(0xEE, 0xEE, 0xEE));
-  }
-  else
-  {
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.2f));
-    g.fillRect(resetRect);
-    g.setColour(PinkXP::pink300.withAlpha(0.55f));
-    g.drawRect(resetRect, 1);
-    g.setColour(juce::Colour(0xDD, 0xDD, 0xDD));
-  }
+  const bool resetHovered = resetRect.contains(getMouseXYRelative());
+  g.setColour (drawMilkdropOverlayButton (g, resetRect, false, resetHovered, false));
   g.setFont(PinkXP::getFont(8.0f, juce::Font::bold));
-  g.drawText(y2k::tr ("Reset"), resetRect, juce::Justification::centred, false);
+  g.drawFittedText(y2k::tr ("Reset"), resetRect.reduced(2, 0), juce::Justification::centred, 1, 0.72f);
 
   const auto* params = GetVisualOffsetParams();
   for (int row = 0; row < MilkdropVisualOffsetState::kParamCount; ++row)
@@ -6437,36 +7497,8 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr (params[row].display_name), labelRect, juce::Justification::centredLeft, false);
 
-    // 轨道底色
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
-    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
-
-    // 中性点与当前手柄的像素位置
-    const int neutralX = sliderBounds.getX() + juce::roundToInt(sliderBounds.getWidth() * neutral);
-    const int valueX   = sliderBounds.getX() + juce::roundToInt(sliderBounds.getWidth() * proportion);
-
-    // 已填充部分：从中性点到当前手柄。
-    const int fillX = juce::jmin(neutralX, valueX);
-    const int fillWidth = juce::jmax(1, juce::jmax(neutralX, valueX) - juce::jmin(neutralX, valueX));
-    g.setColour(PinkXP::pink200.withAlpha(0.8f));
-    g.fillRoundedRectangle(
-        juce::Rectangle<int>(fillX, sliderBounds.getY(), fillWidth, sliderBounds.getHeight()).toFloat(),
-        2.0f);
-
-    // 中性点刻度线
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.5f));
-    g.fillRect(neutralX - 1, sliderBounds.getY() - 2, 2, sliderBounds.getHeight() + 4);
-
-    // 滑块手柄
-    int knobX = valueX - 4;
-    int knobSize = 12;
-    auto knobBounds = juce::Rectangle<int>(
-        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
-        knobSize, knobSize);
-    g.setColour(draggingTweakRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
-    g.fillRect(knobBounds);
-    g.setColour(PinkXP::pink600);
-    g.drawRect(knobBounds, 1);
+    drawMilkdropOverlaySlider (g, sliderBounds, proportion, PinkXP::pink200,
+                               draggingTweakRow_ == row, neutral);
 
     // 右侧数值（显示偏移量，带正负号）
     auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);
@@ -6492,33 +7524,12 @@ void MilkdropModule::paintTweakPanel(juce::Graphics& g, juce::Rectangle<int> top
     g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
     g.drawText(y2k::tr (intParams[row].display_name), labelRect, juce::Justification::centredLeft, false);
 
-    // 轨道底色
-    g.setColour(juce::Colour(0xFF, 0xFF, 0xFF).withAlpha(0.18f));
-    g.fillRoundedRectangle(sliderBounds.toFloat(), 2.0f);
-
     // 当前值在轨道上的比例（value 0 与 1 均落在最左，因为滑块范围从 1 开始）。
     float proportion = static_cast<float>(value - min_v) / static_cast<float>(max_v - min_v);
     proportion = juce::jlimit(0.0f, 1.0f, proportion);
 
-    const int valueX = sliderBounds.getX() + juce::roundToInt(sliderBounds.getWidth() * proportion);
-
-    // 已填充部分：从最左到当前手柄。
-    const int fillWidth = juce::jmax(1, valueX - sliderBounds.getX());
-    g.setColour(PinkXP::pink200.withAlpha(0.8f));
-    g.fillRoundedRectangle(
-        juce::Rectangle<int>(sliderBounds.getX(), sliderBounds.getY(), fillWidth, sliderBounds.getHeight()).toFloat(),
-        2.0f);
-
-    // 滑块手柄
-    const int knobX = valueX - 4;
-    const int knobSize = 12;
-    auto knobBounds = juce::Rectangle<int>(
-        knobX, sliderBounds.getY() - (knobSize - sliderBounds.getHeight()) / 2,
-        knobSize, knobSize);
-    g.setColour(draggingTweakIntRow_ == row ? PinkXP::pink200 : PinkXP::pink100);
-    g.fillRect(knobBounds);
-    g.setColour(PinkXP::pink600);
-    g.drawRect(knobBounds, 1);
+    drawMilkdropOverlaySlider (g, sliderBounds, proportion, PinkXP::pink200,
+                               draggingTweakIntRow_ == row);
 
     // 右侧数值（整数值）
     auto valueRect = juce::Rectangle<int>(sliderBounds.getRight() + 4, labelY, 44, 20);

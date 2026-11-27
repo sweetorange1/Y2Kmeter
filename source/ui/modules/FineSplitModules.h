@@ -2,127 +2,139 @@
 
 #include <JuceHeader.h>
 #include <array>
+#include <vector>
 #include "source/ui/ModuleWorkspace.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/FramePacing.h"
 
 
 // ==========================================================
-// VuMeterModule —— Pink XP 像素风"模拟 VU 表"指针仪表
+// VuMeterModule —— 模拟指针 / 横向条形 双大类专业 VU 电平表
 //
-//   · 六种表盘（dialStyle 0..5，0 = 旧存档默认外观）：
-//       指针式
-//       · 0 半圆（经典）  —— 底边为直径的 180° 上半圆
-//       · 1 复古扇形      —— 窄开口小扇形（±47°）+ 粗弧轨 + 内侧细百分比副刻度弧，细长直针，0 dB 后整段转红，"VU" 字标
-//       横向式（不旋转，游标 / 灯格 / 填充条沿同一条 dBFS 线性轴移动）
-//       · 2 横向刻度条    —— 绿→黄→红分段粗横杆 + 上排斜刻度数字 + 下排百分比圆点，骑杆竖直游标
-//       · 3 LED 梯柱      —— 一排逐格加高的 LED 柱（阶梯剪影），按电平点亮
-//       · 4 极简游标      —— 大号数字读数 + 一根发丝刻度线 + 小游标
-//       · 5 镜像刻度      —— 刻度数字走中脊，上下两条镜像填充条（Stereo 时上 L 下 R）
-//     所有样式共用同一条 dBFS 线性映射（minDisplayDb … maxDisplayDb）。
-//   · 单指针（总电平：L/R 功率合成），订阅 Oscilloscope 从原始波形算瞬时 RMS
-//     → 后端零新增计算
-//   · 右上角圆形 LED 信号灯：
-//        无信号 (合成 dBFS <= ledSignalDbfs) → 暗灭
-//        正常有信号 (ledSignalDbfs < 合成 dBFS < warnDbfs) → 绿色 (慢速呼吸)
-//        危险  (合成 dBFS >= warnDbfs) → 红色 (快速脉动)
-//   · 指针非对称弹道：上升 τ≈80ms（追瞬态）、下降 τ≈350ms（模拟机械回落）
-//   · 刻度采用直接的 **dBFS**（minDisplayDb .. maxDisplayDb），与其他 Meter 统一；
-//     靠近 warnDbfs 的段红色警戒。
-//   · LED 变红阈值 = warnDbfs（表盘红色段起点）；LED 绿灯点亮阈值 = ledSignalDbfs，
-//     与表底刻度（minDisplayDb）解耦。
+//   · 两大顶级形态（MeterType）：
+//       1. Needle（指针式，4 种表盘）：
+//            · Studio     —— 180° 经典演播室半圆模拟表（宽屏立体声自动双表并排）
+//            · Vintage    —— ±47° 窄扇形复古硬件表窗 + 百分比副刻度 + 机械盖板
+//            · Dual arc   —— 240° 发光环弧现代仪表 + 实时弧尾辉光
+//            · Retro warm —— 经典背光暖色广播级 VU 机头表
+//       2. Bar（横向条形，5 种样式）：
+//            · Studio bar —— 顺滑 / 刻度分格 / 霓虹辉光演播室水平条
+//            · LED blocks —— 分段硬件 LED 方块条（三档密度）
+//            · LED ladder —— 逐格加高阶梯 LED 柱（立体声上下镜像）
+//            · Mirrored   —— 中脊 dB 刻度 + 上下对称镜像条
+//            · Minimal    —— 大号数字读数 + 极简精密水平丝带
+//   · 5 套色谱（ColorMap）：Theme（默认跟随当前皮肤）/ Studio / Warm VU / MiniMeter / Ice
+//   · 4 档量程（ScaleRange）：-24..+3 / -36..+3 / -48..+3 / -60..0 dBFS
+//   · 数据源：订阅 AnalyserHub::Kind::Oscilloscope 2048 样本原始波形自算瞬时 RMS，
+//     后端音频线程零新增计算。
 // ==========================================================
 class VuMeterModule : public ModulePanel,
-                     public AnalyserHub::FrameListener,
-                     private juce::Timer
+                      public AnalyserHub::FrameListener,
+                      private juce::Timer
 {
 public:
-    explicit VuMeterModule(AnalyserHub& hub);
+    enum class MeterType       { needle = 0, bar = 1 };
+    enum class NeedleDialStyle { studio = 0, vintage = 1, dualArc = 2, retroWarm = 3 };
+    enum class BarDialStyle    { studioBar = 0, ledBlocks = 1, ledLadder = 2, mirrored = 3, minimal = 4 };
+    enum class ColorMap        { theme = 0, studio = 1, warmVu = 2, miniMeter = 3, ice = 4 };
+    enum class NeedleShape     { thin = 0, tapered = 1, glow = 2 };
+    enum class BarDensity      { chunky = 0, medium = 1, fine = 2 };
+    enum class BarFinish       { smooth = 0, notched = 1, glow = 2 };
+    enum class ChannelMode     { mono = 0, stereo = 1, left = 2, right = 3 };
+    enum class ScaleRange      { r24 = 0, r36 = 1, r48 = 2, r60 = 3 };
+
+    explicit VuMeterModule (AnalyserHub& hub);
     ~VuMeterModule() override;
+
+    MeterType       getMeterType()       const noexcept { return meterType_; }
+    NeedleDialStyle getNeedleDialStyle() const noexcept { return needleDialStyle_; }
+    BarDialStyle    getBarDialStyle()    const noexcept { return barDialStyle_; }
+    ColorMap        getColorMap()        const noexcept { return colorMap_; }
+    NeedleShape     getNeedleShape()     const noexcept { return needleShape_; }
+    BarDensity      getBarDensity()      const noexcept { return barDensity_; }
+    BarFinish       getBarFinish()       const noexcept { return barFinish_; }
+    ChannelMode     getChannelMode()     const noexcept { return channelMode_; }
+    ScaleRange      getScaleRange()      const noexcept { return scaleRange_; }
+    bool            isPeakHoldEnabled()  const noexcept { return peakHold; }
+    bool            isBacklightEnabled() const noexcept { return backlight_; }
+    bool            isReadoutEnabled()   const noexcept { return showReadout_; }
 
     void onFrame (const AnalyserHub::FrameSnapshot& frame) override;
 
-    // ---- 持久化 + 控制面板（v3.1）----
-    //   dialStyle:   0 半圆（旧外观）/ 1 复古扇形 / 2 横向刻度条 / 3 LED 梯柱 / 4 极简游标 / 5 镜像刻度
-    //   needleStyle: 0 Line（旧外观）/ 1 Wedge（锥形）/ 2 Stereo（L、R 双指针）
-    //                横向式里统一成三种"指示器形态"：
-    //                0 细线 = 发丝游标 / 细柱；1 楔形 = 填充 + 锥形（楔形实体、大箭头）；
-    //                2 立体声 = L / R 分成两条独立轨道
+    // ---- 持久化 + 4 标签页控制面板（Style / Meter / Ballistics / Scale）----
     juce::ValueTree saveModuleSpecificState() const override;
     void restoreModuleSpecificState (const juce::ValueTree& state) override;
     void   buildParamDefs (std::vector<ParamDef>& out) const override;
     double getParamValue  (const juce::String& id) const override;
     void   setParamValue  (const juce::String& id, double v) override;
 
-    // ---- Toybox（v3.0.0）：迪斯科灯 + 指针虚影（§8.2）；横向式各有专属互动（toyPokeLinear）----
+    // ---- Toybox：迪斯科灯 + 指针虚影（支持单表/双表）+ 5 种横向条形专属互动 ----
     bool toyHitTest (juce::Point<int> panelPos, ToyHit& out) const override;
     void toyPoke    (const ToyHit& hit, ToyContext& ctx) override;
 
 protected:
-    void paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getContentBounds(); }
 
 private:
-    // 60Hz 动画 Tick：按真实 dt 推进 displayedL/R 朝目标 targetL/R 插值，
-    //   同时推进 LED 跟随值与脉动相位，并 repaint()。
-    //   这样即便后端 Loudness 快照仍按 400ms 粗颗粒更新，前端每帧都在
-    //   做子步插值，指针看起来是连续扫过的。
     void timerCallback() override;
 
-    // 画一条指针（几何取自最近一次 drawDial 的结果；只用于指针式样式 0 / 1）
-    void drawNeedle (juce::Graphics& g,
-                     float              valueDb,       // 当前 dBFS 值
-                     juce::Colour       colour,
-                     float              thickness,
-                     bool               wedge = false) const;
+    // ---- 共享刻度描述符（供指针式与条形渲染器共用）----
+    struct VuScaleTick
+    {
+        float       db;
+        bool        major;
+        const char* label;
+    };
 
-    // ---- 控制面板参数（构造默认 = 旧外观）----
-    static constexpr int numDialStyles = 6;   // dialStyle 取值 0 .. numDialStyles-1
-    // 复古扇形的半开口角（弧度，≈ 47°）：窄扇形，和样式 0 的 180° 半圆拉开剪影差异
-    static constexpr float fanHalfAngle = 0.82f;
-    int  dialStyle   = 0;
-    int  needleStyle = 0;
-    bool showLed     = true;
+    // ---- 控制面板参数与运行期峰值状态（.inl 渲染器可直接访问）----
+    MeterType       meterType_       = MeterType::needle;
+    NeedleDialStyle needleDialStyle_ = NeedleDialStyle::studio;
+    BarDialStyle    barDialStyle_    = BarDialStyle::studioBar;
+    ColorMap        colorMap_        = ColorMap::theme;
+    NeedleShape     needleShape_     = NeedleShape::tapered;
+    BarDensity      barDensity_      = BarDensity::medium;
+    BarFinish       barFinish_       = BarFinish::smooth;
+    ChannelMode     channelMode_     = ChannelMode::mono;
+    ScaleRange      scaleRange_      = ScaleRange::r36; // -36..+3 dB
+    bool            showLed          = true;
+    bool            showReadout_     = true;
+    bool            backlight_       = true;
+    bool            peakHold         = false;
+    float           peakHoldSec_     = 1.6f;  // 0.5..4.0 s hold before falling
+    float           trimDb           = 0.0f;
+    int             ballistics       = 1;     // 0 Slow / 1 Classic / 2 Fast / 3 Snappy
+    float           rmsWindowMs      = 20.0f;
+    float           warnDbfs         = 0.0f;
+    float           peakHoldL        = -144.0f;
+    float           peakHoldR        = -144.0f;
+    float           peakHoldMono     = -144.0f;
+    float           peakHoldTimerL   = 0.0f;
+    float           peakHoldTimerR   = 0.0f;
+    float           peakHoldTimerM   = 0.0f;
 
-    // 样式 2..5 是横向式：不旋转指针，指示器在各自的 draw*Dial 里一并画完
-    bool isLinearStyle() const noexcept { return dialStyle >= 2; }
-
-    // 画表盘底色 + 刻度 + 数字（按 dialStyle 分派）
-    void drawDial   (juce::Graphics& g,
-                     juce::Rectangle<int> dialArea,
-                     juce::Point<float>&  outPivot,
-                     float&               outRadius) const;
-    void drawVintageFanDial (juce::Graphics& g, juce::Rectangle<int> dialArea,
-                             juce::Point<float>& outPivot, float& outRadius) const;
-    void drawFanCap         (juce::Graphics& g) const;   // 复古扇形：盖在指针根部的半圆盖板
-    void drawStripDial      (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
-    void drawLedLadderDial  (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
-    void drawMinimalDial    (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
-    void drawMirrorDial     (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
-
-    // dB → 表盘归一化位置 [0,1]（minDisplayDb … maxDisplayDb）
-    float dialTFor (float db) const noexcept;
-    // 指针角度（弧度，0 = 正上，顺时针为正）；横向式恒为 0（玩具虚影竖直立在游标处）
-    float needleAngleFor  (float db) const noexcept;
-    // 当前样式下指针长度（像素）；横向式 = 游标 / 指示区高度
-    float needleLengthFor (float db) const noexcept;
-
-    // 最近一次 drawDial 产出的几何（指针 / 玩具虚影共用）
+    // ---- 最近一帧渲染产出的几何（指针叠层 / 宽屏双表 / 条形 / Toybox 共用）----
     struct DialGeom
     {
-        bool  valid  = false;               // 本帧表盘是否成功画出
+        bool  valid       = false;
+        bool  dualSide    = false;
+        float angleStart  = -juce::MathConstants<float>::halfPi;
+        float angleEnd    = +juce::MathConstants<float>::halfPi;
         juce::Point<float> pivot { 0.0f, 0.0f };
-        float radius    = 0.0f;             // 指针式：表盘基准半径；横向式：指示区高度
-        float needleLen = 0.0f;             // 复古扇形：指针长度（刺进刻度圈）
-        float capR      = 0.0f;             // 复古扇形：根部盖板半径
-        // 横向式：刻度轴两端与指示区纵向范围
+        float radius     = 0.0f;
+        float needleLen  = 0.0f;
+        float tailLen    = 6.0f;
+        float capR       = 0.0f;
+        juce::Point<float> pivotR { 0.0f, 0.0f };
+        float radiusR    = 0.0f;
+        float needleLenR = 0.0f;
+        float capRR      = 0.0f;
         float leftX       = 0.0f;
         float rightX      = 0.0f;
         float trackTop    = 0.0f;
         float trackBottom = 0.0f;
-        // 横向式：主指示带（刻度条横杆 / 梯柱 / 发丝线 / 镜像中脊）的纵向范围，玩具互动定位用
         float bandTop     = 0.0f;
         float bandBottom  = 0.0f;
-        // LED 梯柱：柱行（Stereo 两行；rowHang = 该行从顶部往下倒挂）
         int   ladderRows  = 0;
         float rowTop[2]   { 0.0f, 0.0f };
         float rowBot[2]   { 0.0f, 0.0f };
@@ -130,96 +142,71 @@ private:
     };
     mutable DialGeom dialGeom;
 
-    // 横向式：dB → 横向位置（与指针式同一条 dialTFor 线性映射）；以及反向（玩具读数用）
-    float linearXFor  (float db) const noexcept;
-    float linearDbForX(float x)  const noexcept;
-    // 横向式：扣掉顶部"标题 + LED"一行后的绘制区
+    // ---- 共享辅助 API（FineSplitModules.cpp 实现，供 VuNeedleRenderer.inl / VuBarRenderer.inl 调用）----
+    bool  isLinearStyle()       const noexcept { return meterType_ == MeterType::bar; }
+    bool  isStereoMode()        const noexcept { return channelMode_ == ChannelMode::stereo; }
+    bool  isSingleChannelMode() const noexcept { return channelMode_ == ChannelMode::left || channelMode_ == ChannelMode::right; }
+    float minDisplayDb()  const noexcept;
+    float maxDisplayDb()  const noexcept;
+    float cautionDbfs()   const noexcept;
+    float dialTFor        (float db) const noexcept;
+    float needleAngleFor  (float db) const noexcept;
+    float needleLengthFor (float db) const noexcept;
+    float linearXFor      (float db) const noexcept;
+    float linearDbForX    (float x)  const noexcept;
+    float currentMonoDbfs()      const noexcept;
+    float activeSingleDbfs()     const noexcept;
+    float activeSinglePeakDbfs() const noexcept;
+    const char* activeChannelTag() const noexcept;
+    void  getScaleTicks   (std::vector<VuScaleTick>& out) const;
+    juce::Colour vuPaletteColour (float t01, float dbVal, bool darkCanvas) const noexcept;
+    juce::Colour vuAlertColour() const noexcept;
+    juce::String formatDbReadout (float db) const;
     juce::Rectangle<float> linearBody (juce::Rectangle<int> dialArea) const;
+    juce::Rectangle<int>   ledBounds  (juce::Rectangle<int> area) const;
 
-    // 横向式的 Toybox 点击互动（每种表盘一种专属效果，见 toyPoke）
+    // ---- 指针式渲染器（实现于 VuNeedleRenderer.inl）----
+    void drawNeedleStudioDial    (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawNeedleVintageDial   (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawNeedleDualArcDial   (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawNeedleRetroWarmDial (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawNeedlePointer       (juce::Graphics& g, juce::Point<float> pivot, float length, float tailLen,
+                                  float angleRad, juce::Colour colour, float thickness,
+                                  NeedleShape shape, float alphaScale = 1.0f) const;
+    void drawNeedleOverlay       (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+
+    // ---- 横向条形渲染器（实现于 VuBarRenderer.inl）----
+    void drawBarStudioDial    (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawBarLedBlocksDial (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawBarLedLadderDial (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawBarMirrorDial    (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+    void drawBarMinimalDial   (juce::Graphics& g, juce::Rectangle<int> dialArea) const;
+
+    // ---- LED 信号灯 & 横向 Toybox ----
+    void drawLed       (juce::Graphics& g, juce::Rectangle<int> ledArea) const;
     void toyPokeLinear (const ToyHit& hit, ToyContext& ctx);
 
-    // 画 LED 信号灯（位置见 ledBounds）
-    void drawLed    (juce::Graphics& g,
-                     juce::Rectangle<int> ledArea) const;
-    // LED 位置：六种样式统一放右上角 —— 指针式的盘面顶角本来就空，横向式在
-    //   linearBody 里给顶部留了一行。绘制与玩具点击共用这一份。
-    juce::Rectangle<int> ledBounds(juce::Rectangle<int> area) const;
-
-    // dBFS 值 → 指针角度（弧度）
-    float vuToAngle(float valueDb) const noexcept;
-
-    // 计算当前帧的"单声道总电平"（dBFS） —— 基于已平滑的 displayedL/R
-    float currentMonoDbfs() const noexcept;
-
-    // ---- 成员 ----
+    // ---- 音频分析与弹道状态 ----
     AnalyserHub& hub;
+    int    themeSubToken = -1;
 
-    // -------- 解决"指针跟不上动态"的数据源方案 --------
-    //
-    //   问题背景：
-    //     后端 LoudnessMeter.updateSnapshot() 只在每个 400ms K-weighting
-    //     块边界刷新 rmsL/R；且 rmsL/R 本身是 100ms 滑窗 RMS，再叠上前端
-    //     的 τ=180ms 平滑后，指针相对 Waveform 会明显"慢一拍"，连续瞬态
-    //     期间指针持续悬在高位，回不来。
-    //
-    //   新方案（仍然零新增后端计算）：
-    //     · 订阅 AnalyserHub::Kind::Oscilloscope —— 它是 2048 样本的滚动
-    //       原始波形（Waveform 模块在用的同一数据源）。
-    //     · onFrame 里从 oscL/R 尾部取 ~20ms 样本自己算瞬时 RMS，作为
-    //       targetL/R。这比 Loudness 路的 100ms 滑窗/400ms 发布快一个
-    //       数量级，能贴合 Waveform 看到的动态。
-    //     · 指针用"非对称弹道"：上升 τ≈80ms（追瞬态）、下降 τ≈350ms
-    //       （模拟 VU 机械回落感；同时保证连续瞬态时能逐步"踩上"新的高
-    //       点而不是一直粘顶）。
-    //
-    // ----------------------------------------------------
+    float  targetL       = -144.0f;
+    float  targetR       = -144.0f;
+    float  displayedL    = -144.0f;
+    float  displayedR    = -144.0f;
+    float  ledLevelDb    = -144.0f;
+    double lastTickMs    = 0.0;
+    double lastOnFrameMs = 0.0;
+    float  pulsePhase    = 0.0f;
 
-    // 目标值（来自 onFrame，按原始样本逐帧刷新），单位 dBFS
-    float targetL    = -144.0f;
-    float targetR    = -144.0f;
+    void advanceBallistics (float dtMs);
 
-    // 显示值（由 60Hz Timer 按 dt 连续插值），单位 dBFS
-    float displayedL = -144.0f;
-    float displayedR = -144.0f;
-
-    // LED 快速跟随电平（dBFS），基于 displayed 合成 + 更短的衰减
-    float ledLevelDb = -144.0f;
-
-    // Timer tick 之间的真实时间（毫秒），用 HiRes counter 计算
-    double lastTickMs = 0.0;
-    double lastOnFrameMs = 0.0;          // v2.9：最近一次 onFrame 时间（兜底 Timer 判定用）
-    void advanceBallistics (float dtMs); // v2.9：弹道 / LED / 相位推进 + repaint
-
-    // 脉动相位（用于 LED 呼吸/脉动，也由 Timer 推进）
-    float pulsePhase = 0.0f;
-
-    // 瞬时 RMS 的样本窗口长度（毫秒）。20ms 在典型 44.1/48 kHz 下约
-    //   880/960 样本，远小于 oscilloscopeBufferSize=2048，够用。
+    static constexpr float fanHalfAngle       = 0.82f;
     static constexpr float instantRmsWindowMs = 20.0f;
+    static constexpr float tauRiseMs          = 80.0f;
+    static constexpr float tauFallMs          = 1200.0f;
+    static constexpr float tauMuteFallMs      = 1800.0f;
+    static constexpr float ledSignalDbfs      = -25.0f;
 
-    // 非对称弹道的时间常数（毫秒）
-    //   · 上升慢一点避免单样本尖峰把指针推到极值；取 80ms
-    //   · 下降保留经典 VU 机械回落感，取 1200ms —— 连续瞬态时由上升主导，
-    //     下降不会锁死指针；静音后也能缓慢落回
-    //   · 反馈修复（外网 #6）：静音（target=-144）时用更慢的独立时间常数，
-    //     避免"没信号的一瞬间表针打到底"的观感
-    static constexpr float tauRiseMs     = 80.0f;
-    static constexpr float tauFallMs     = 1200.0f;
-    static constexpr float tauMuteFallMs = 1800.0f;
-
-    // 刻度显示上下界（dBFS） —— 均匀等距从 -36 到 +3
-    static constexpr float minDisplayDb = -36.0f;
-    static constexpr float maxDisplayDb =  +3.0f;
-
-    // LED 绿灯点亮阈值（dBFS） —— 与表底刻度 minDisplayDb 解耦。
-    //   表底已扩展到 -36 以便捕捉更低瞬态，但 LED 仍在 -25 才点亮，
-    //   避免 -25~-36 之间的微弱底噪导致绿灯常亮。
-    static constexpr float ledSignalDbfs = -25.0f;
-
-    // 红色警戒段的起点（dBFS） —— 也是 LED 变红的同一个阈值
-    //   0 dBFS = 数字满刻度，到达即开始削波风险
-    static constexpr float warnDbfs     =   0.0f;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VuMeterModule)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VuMeterModule)
 };

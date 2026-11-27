@@ -31,6 +31,8 @@ set(Y2K_JUCE_PATCH_MARKERS
   # 0008 mac 显式出帧也按显示器刷新合并（v3.4.x mac 性能）
   "modules/juce_opengl/opengl/juce_OpenGLContext.h|triggerRepaintPacedToDisplay"
   "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|triggerRepaintPacedToDisplay"
+  # 0009 Win GL 启用 PFD_SUPPORT_COMPOSITION 支撑 DWM 硬件 Alpha 真透明（v3.5.0）
+  "modules/juce_opengl/native/juce_OpenGL_windows.h|kPfdSupportComposition"
 )
 
 function(y2k_verify_juce_patches juce_dir)

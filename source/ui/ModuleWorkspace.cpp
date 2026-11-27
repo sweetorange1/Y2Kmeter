@@ -1,5 +1,6 @@
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/ui/modules/VirtuPetModule.h"
 #include "source/ui/modules/MilkdropModule.h"
@@ -10,7 +11,10 @@
 #include "source/diag/Y2KDiagLog.h"
 #include "source/ui/HoverHelp.h"
 #include "source/i18n/Localisation.h"
+#include "source/standalone/AppAudioTargets.h"
 #include <cmath>
+#include <functional>
+#include <unordered_map>
 
 // ==========================================================
 // FPS 按钮专用的 mini LookAndFeel
@@ -22,6 +26,27 @@ namespace
 {
     // 悬停提示：右键菜单里"Hover Tips"开关的菜单项 ID（远离模块项 1..N）
     constexpr int kHoverTipsMenuItemId = 0x7100;
+
+    // 按 ModuleWorkspace 实例管理透明背景模式下的工具栏显隐同步与 ChromaReveal 订阅
+    //   · 独立存放于翻译单元内，不修改 ModuleWorkspace.h 类布局。
+    struct WorkspaceChromaState
+    {
+        int revealSubToken = -1;
+        std::function<void()> syncTransparentChrome;
+    };
+
+    std::unordered_map<const ModuleWorkspace*, WorkspaceChromaState>& workspaceChromaStates()
+    {
+        static std::unordered_map<const ModuleWorkspace*, WorkspaceChromaState> states;
+        return states;
+    }
+
+    void runWorkspaceTransparentSync (const ModuleWorkspace* ws)
+    {
+        auto& states = workspaceChromaStates();
+        if (auto it = states.find (ws); it != states.end() && it->second.syncTransparentChrome)
+            it->second.syncTransparentChrome();
+    }
 
     // 悬停提示：gain 按钮文案（带当前值，多处刷新共用）
     juce::String makeGainTooltip (float db)
@@ -83,6 +108,69 @@ namespace
 
             if (auto* milkdrop = dynamic_cast<MilkdropModule*> (m))
                 milkdrop->setFocusVisual (false);
+        }
+    }
+
+    void drawSkinToolbarDivider (juce::Graphics& g, int x, int y1, int y2)
+    {
+        if (x < 0 || y2 <= y1)
+            return;
+
+        const auto& tokens = PinkXP::getSkinTokens();
+        const int h = y2 - y1;
+        switch (tokens.frameStyle)
+        {
+            case PinkXP::FrameStyle::pixelBevel:
+                // 经典 Win95/XP 2px 蚀刻竖分隔线
+                g.setColour (PinkXP::shdw);
+                g.fillRect (x,     y1, 1, h);
+                g.setColour (PinkXP::hl);
+                g.fillRect (x + 1, y1, 1, h);
+                break;
+
+            case PinkXP::FrameStyle::machinedChrome:
+            {
+                // Millennium Chrome：2px 机加工蚀刻金属竖槽（1px 暗槽 + 1px 亮铬反光沿，深浅主题均衡）
+                const bool isDarkBar = PinkXP::btnFace.getPerceivedBrightness() < 0.45f;
+                g.setColour (PinkXP::dark.withAlpha (isDarkBar ? 0.78f : 0.56f));
+                g.fillRect (x,     y1, 1, h);
+                g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.55f)
+                                       .withAlpha (isDarkBar ? 0.34f : 0.80f));
+                g.fillRect (x + 1, y1, 1, h);
+                break;
+            }
+
+            case PinkXP::FrameStyle::frostedGlass:
+            {
+                // Frosted Glass：半透明明暗双细线分隔符
+                const bool isDarkBar = PinkXP::btnFace.getPerceivedBrightness() < 0.45f;
+                g.setColour (PinkXP::dark.withAlpha (isDarkBar ? 0.34f : 0.20f));
+                g.fillRect (x,     y1 + 1, 1, juce::jmax (1, h - 2));
+                g.setColour (juce::Colours::white.withAlpha (isDarkBar ? 0.20f : 0.72f));
+                g.fillRect (x + 1, y1 + 1, 1, juce::jmax (1, h - 2));
+                break;
+            }
+
+            case PinkXP::FrameStyle::neonTube:
+                // Neon Cyber：发光霓虹激光竖隔线（亮芯 + 柔光晕）
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.22f).withAlpha (0.78f));
+                g.fillRect (x,     y1, 1, h);
+                g.setColour (PinkXP::sel.withAlpha (0.24f));
+                g.fillRect (x + 1, y1, 1, h);
+                break;
+
+            case PinkXP::FrameStyle::crtPhosphor:
+                // CRT Terminal：锐利荧光刻度竖线（两端刻度点 + 清晰虚点段）
+                g.setColour (PinkXP::sel.withAlpha (0.72f));
+                for (int py = y1; py < y2; py += 3)
+                    g.fillRect (x, py, 1, juce::jmin (2, y2 - py));
+                break;
+
+            case PinkXP::FrameStyle::modernStudio:
+            default:
+                g.setColour (PinkXP::skinHairlineOn (PinkXP::btnFace, 0.17f));
+                g.fillRect (x, y1 + 2, 1, juce::jmax (1, h - 4));
+                break;
         }
     }
 
@@ -205,7 +293,6 @@ juce::String moduleTypeToString(ModuleType t)
 {
     switch (t)
     {
-        case ModuleType::eq:                return "eq";
         case ModuleType::loudness:          return "loudness";
         case ModuleType::oscilloscope:      return "oscilloscope";
         case ModuleType::spectrum:          return "spectrum";
@@ -234,18 +321,13 @@ juce::String moduleTypeToString(ModuleType t)
         case ModuleType::utility:           return "utility";
     }
 
-    return "eq";
+    return "unknown";
 }
 
 ModuleType stringToModuleType(const juce::String& s, bool* ok)
 {
     struct KV { const char* k; ModuleType v; };
     static const KV kv[] = {
-        // v3.0.6：拼豆频谱（"eq"）因性能问题暂时下线。
-        //   旧存档 / 旧预设里的 "eq" 节点在这里直接迁移成 spectrum ——
-        //   布局加载只认 type 字符串，x/y/w/h 原样保留，于是旧工程里那块
-        //   "拼豆频谱"会被换成同位置、同尺寸的普通频谱。
-        { "eq",                 ModuleType::spectrum },
         { "loudness",           ModuleType::loudness },
         { "oscilloscope",       ModuleType::oscilloscope },
         { "spectrum",           ModuleType::spectrum },
@@ -283,8 +365,8 @@ ModuleType stringToModuleType(const juce::String& s, bool* ok)
             return p.v;
         }
     if (ok) *ok = false;
-    // 未知类型：调用方通常会据 ok==false 跳过；这里回退到 spectrum 而不是
-    //   已下线的 eq，避免任何"意外造出一个拼豆频谱"的路径。
+    // 未知/已移除类型（如旧存档中的 "eq"）：调用方根据 ok==false 跳过；
+    //   返回合法枚举值作兜底。
     return ModuleType::spectrum;
 }
 
@@ -506,18 +588,37 @@ ModuleWorkspace::ModuleWorkspace()
     audioSourceBox.clear (juce::dontSendNotification);
     audioSourceBox.addItem (audioSourceItems[0].displayName, 1);
     audioSourceBox.setSelectedId (1, juce::dontSendNotification);
-    audioSourceBox.setTooltip (y2k::help::make ("Audio source",
-        "What Y2Kmeter listens to. System Output (Loopback) meters everything your "
-        "computer plays; pick a microphone / input device to meter that instead."));
+    juce::String sourceTipBody =
+        "What Y2Kmeter listens to. Output meters everything your computer plays; "
+        "Microphone meters your input device.";
+    // 按运行时能力判断是否附带 App Audio Capture 说明（仅 Windows 10 2004+，旧系统与 macOS 不显示该子菜单）
+    if (y2k::appaudio::isProcessLoopbackSupported())
+    {
+        sourceTipBody
+            << "\nApp Audio Capture lists the apps that are playing audio right now; "
+               "pick one to meter only that app's sound. "
+               "Apps that are silent at the moment are under All Apps at the end of that list."
+            << "\nIf the chosen app quits, Y2Kmeter waits for it to come back.";
+    }
+    audioSourceBox.setTooltip (y2k::help::make ("Audio source", sourceTipBody));
     audioSourceLabel.setTooltip (audioSourceBox.getTooltip());
 
     // 显式挂 Pink XP LookAndFeel —— 保证下拉框 / 弹出菜单的配色与主题统一
     //（否则 ComboBox 会使用 LookAndFeel_V4 的默认浅蓝色，跟粉色主题格格不入）
     audioSourceBox.setLookAndFeel (&getPinkXPLookAndFeel());
 
+    // 弹出前让宿主刷新动态条目（程序列表）
+    audioSourceBox.onAboutToShowPopup = [this]()
+    {
+        if (onAudioSourceListRequested)
+            onAudioSourceListRequested();
+    };
+
     audioSourceBox.onChange = [this]()
     {
-        const int idx = audioSourceBox.getSelectedItemIndex();
+        // 条目 ID = audioSourceItems 下标 + 1（见 setAudioSourceItems）：
+        //   直接用 ID 反查，顶层条目与子菜单里的条目走同一条路。
+        const int idx = audioSourceBox.getSelectedId() - 1;
         if (idx < 0 || idx >= audioSourceItems.size()) return;
         const auto sourceId  = audioSourceItems.getReference (idx).sourceId;
         const auto isLoopback = audioSourceItems.getReference (idx).isLoopback;
@@ -657,14 +758,53 @@ ModuleWorkspace::ModuleWorkspace()
         if (onInputGainChanged)
             onInputGainChanged (inputGainDb);
 
-        notifyLayoutChanged();
+        if (gainSliderDragging)
+        {
+            gainDragDirty_ = true;
+        }
+        else
+        {
+            notifyLayoutChanged();
+            commitUndoFromBaseline (y2k::tr ("Input gain"), "workspace:inputGain", false,
+                                    {}, "workspace:inputGain");
+        }
         repaint();
     };
-    // 拖拽生命周期：拖动期间禁止隐藏弹窗 / 重设 bounds（见头文件 gainSliderDragging 注释）
-    gainSlider.onDragStart = [this]() { gainSliderDragging = true; };
+    // 拖拽生命周期：拖动期间禁止隐藏弹窗 / 重设 bounds（见头文件 gainSliderDragging 注释），
+    //   同时仅在 onDragStart 捕获一次变更前快照、onDragEnd 统一提交 1 条撤回记录，避免逐帧全工作区快照。
+    gainSlider.onDragStart = [this]()
+    {
+        gainSliderDragging = true;
+        gainDragDirty_     = false;
+        if (! undoSuspended_ && ! suspendNotifications)
+            gainDragPreChangeTree_ = saveLayoutTree();
+        else
+            gainDragPreChangeTree_ = juce::ValueTree();
+    };
     gainSlider.onDragEnd = [this]()
     {
-        gainSliderDragging = false;
+        const bool wasDragging = gainSliderDragging;
+        const bool changed     = gainDragDirty_;
+        auto preTree           = gainDragPreChangeTree_;
+        gainSliderDragging     = false;
+        gainDragDirty_         = false;
+        gainDragPreChangeTree_ = juce::ValueTree();
+
+        if (wasDragging && changed)
+        {
+            notifyLayoutChanged();
+            if (! undoSuspended_ && ! suspendNotifications)
+            {
+                if (preTree.isValid())
+                    recordUndoStep (preTree, saveLayoutTree(), y2k::tr ("Input gain"), {}, false,
+                                    {}, {}, {}, "workspace:inputGain");
+                else
+                    commitUndoFromBaseline (y2k::tr ("Input gain"), {}, false,
+                                            {}, "workspace:inputGain");
+            }
+        }
+
+        breakUndoCoalesce();
 
         // 拖动中被延后的关闭请求在这里补齐：若此刻工具栏本就不该显示，收起弹窗。
         if (! isToolbarShown())
@@ -706,6 +846,7 @@ ModuleWorkspace::ModuleWorkspace()
         canvasBgCacheDirty = true;  // P7：Grid 叠加线变化 → 下次 paint 重建缓存
         repaint();
         notifyLayoutChanged();
+        commitUndoFromBaseline (y2k::tr ("Toggle grid"), {}, false);
     };
     addAndMakeVisible (gridBtn);
 
@@ -714,8 +855,8 @@ ModuleWorkspace::ModuleWorkspace()
     //     颜色跟随主题；nothing-selected 文本作为占位，选中后触发 onLayoutPresetChanged
     layoutPresetBox.setTextWhenNothingSelected ("preset");
     layoutPresetBox.setTooltip (y2k::help::make ("Layout presets",
-        "Rearrange the whole workspace in one click: default grid, horizontal bars, MV, "
-        "studio monitor, broadcast loudness, full-screen tiles and more. "
+        "Rearrange the workspace in one click for everyday desktop, mixing, mastering, "
+        "vocal/podcast, DJ, streaming overlays, MV and full-screen command centers. "
         "Replaces the current module layout."));
     layoutPresetBox.setLookAndFeel (&getPinkXPLookAndFeel());
     rebuildLayoutPresetItems();
@@ -863,6 +1004,87 @@ ModuleWorkspace::ModuleWorkspace()
     //   同理 audioSourceBox 的 label 颜色由 LookAndFeel 缓存决定，这里
     //   用 sendLookAndFeelChange() 触发 JUCE 的 colourChanged() 从 LookAndFeel
     //   重新取色（PinkXPStyle::applyTheme 已经刷新了 LnF 的 ColourScheme 缓存）。
+    {
+        auto& st = workspaceChromaStates()[this];
+        juce::Component::SafePointer<ModuleWorkspace> safe (this);
+
+        st.syncTransparentChrome = [safe]()
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr)
+                return;
+
+            const bool transparent = PinkXP::isTransparentBackdrop();
+            if (transparent)
+            {
+                if (self->isOpaque())
+                    self->setOpaque (false);
+                if (self->toolbarBackdrop != nullptr && self->toolbarBackdrop->isOpaque())
+                    self->toolbarBackdrop->setOpaque (false);
+                if (self->toolbarOverflowBackdrop != nullptr && self->toolbarOverflowBackdrop->isOpaque())
+                    self->toolbarOverflowBackdrop->setOpaque (false);
+                if (self->gainPopupBackdrop != nullptr && self->gainPopupBackdrop->isOpaque())
+                    self->gainPopupBackdrop->setOpaque (false);
+            }
+
+            const bool hideToolbar = transparent && ! PinkXP::isChromaRevealed (*self);
+            const float targetAlpha = hideToolbar ? 0.0f : 1.0f;
+
+            bool anyChanged = false;
+            auto syncAlpha = [&] (juce::Component* c, float a)
+            {
+                if (c != nullptr && std::abs (c->getAlpha() - a) > 0.001f)
+                {
+                    c->setAlpha (a);
+                    anyChanged = true;
+                }
+            };
+
+            juce::Component* toolbarComps[] = {
+                &self->themeBar, &self->audioSourceLabel, &self->audioSourceBox,
+                &self->fpsLabel, &self->fpsBtn, &self->langBtn,
+                &self->fftSizeLabel, &self->fftSizeBtn, &self->gridBtn,
+                &self->layoutPresetBox, &self->savePresetBtn, &self->loadPresetBtn,
+                &self->stickBtn, &self->stickExitBtn, &self->stickToggleBtn,
+                &self->toolbarOverflowBtn, &self->gainBtn, &self->gainSlider,
+                self->toolbarBackdrop.get(), self->toolbarOverflowBackdrop.get(),
+                self->gainPopupBackdrop.get()
+            };
+            for (auto* c : toolbarComps)
+                syncAlpha (c, targetAlpha);
+
+            syncAlpha (&self->hideBtn, targetAlpha);
+
+            if (anyChanged)
+            {
+                const auto tb = self->getToolbarArea();
+                self->repaint (tb);
+                if (auto* parent = self->getParentComponent())
+                    parent->repaint (tb + self->getPosition());
+            }
+        };
+
+        st.revealSubToken = PinkXP::subscribeChromaRevealChanged ([safe] (juce::Component* prev, juce::Component* next)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr)
+                return;
+
+            const bool relevant = (prev == nullptr && next == nullptr)
+                               || prev == self || next == self
+                               || (prev != nullptr && prev->isParentOf (self))
+                               || (next != nullptr && next->isParentOf (self));
+            if (! relevant)
+                return;
+
+            runWorkspaceTransparentSync (self);
+            const auto tb = self->getToolbarArea();
+            self->repaint (tb);
+            if (auto* parent = self->getParentComponent())
+                parent->repaint (tb + self->getPosition());
+        });
+    }
+
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
         fpsLabel.setColour (juce::Label::textColourId, PinkXP::ink);
@@ -884,15 +1106,33 @@ ModuleWorkspace::ModuleWorkspace()
 
         // hover 预览快照使用旧主题配色渲染，主题变更后必须清空重建
         hoverPreviewCache.clear();
+
+        // 背景模式 / 视觉风格切换时同步画布缓存与透明工具栏显隐状态
+        canvasBgCacheDirty = true;
+        runWorkspaceTransparentSync (this);
+        repaint();
+        if (auto* parent = getParentComponent())
+            parent->repaint (getBoundsInParent());
     });
     // 构造时全局调色板可能尚未被 PluginEditor 的 applyTheme 覆盖，
     //   先按当前值设一次；即便日后再切主题，上面的订阅也会刷新。
     fpsLabel.setColour (juce::Label::textColourId, PinkXP::ink);
     audioSourceLabel.setColour (juce::Label::textColourId, PinkXP::ink);
+    runWorkspaceTransparentSync (this);
 }
 
 ModuleWorkspace::~ModuleWorkspace()
 {
+    {
+        auto& states = workspaceChromaStates();
+        if (auto it = states.find (this); it != states.end())
+        {
+            if (it->second.revealSubToken > 0)
+                PinkXP::unsubscribeChromaRevealChanged (it->second.revealSubToken);
+            states.erase (it);
+        }
+    }
+
     // P4：停止 debounce 计时器，防止析构后 timer 回调到已销毁对象。
     //   不再在此处 flush 待决的 onLayoutChanged —— Editor 析构已在 dock 操作
     //   前显式保存最终布局并清零 onLayoutChanged，此处的 flush 是多余的且可能
@@ -900,6 +1140,7 @@ ModuleWorkspace::~ModuleWorkspace()
     //   注：stopTimer 仍必须调用，否则 timer 可能在析构中途回调到已销毁的 this。
     layoutChangeCoalescer.stopTimer();
     layoutChangePending = false;
+    toastTimer_.stopTimer();
 
     // 如果析构时 gainPopup 仍处打开态（监听器还挂在 topLevel），必须先摘下来，
     // 否则后续 mouseDown 会回调到已销毁的 this → 崩溃。
@@ -933,6 +1174,26 @@ ModuleWorkspace::~ModuleWorkspace()
     {
         PinkXP::unsubscribeThemeChanged (themeSubToken);
         themeSubToken = -1;
+    }
+
+    // 析构成员按声明逆序进行：undoStack_ / pendingPreChangeTree_ 会先于 modules / gainSlider 销毁，
+    // 在进入成员析构前解绑滑块与面板撤回回调，防止析构期回调访问已销毁的撤回状态。
+    undoSuspended_         = true;
+    gainSliderDragging     = false;
+    gainDragDirty_         = false;
+    pendingPreChangeTree_  = juce::ValueTree();
+    gainDragPreChangeTree_ = juce::ValueTree();
+    gainSlider.onDragStart   = nullptr;
+    gainSlider.onValueChange = nullptr;
+    gainSlider.onDragEnd     = nullptr;
+    for (auto* m : modules)
+    {
+        if (m != nullptr)
+        {
+            m->onWillChangeParamByUser = nullptr;
+            m->onParamChangedByUser    = nullptr;
+            m->onParamGestureEnded     = nullptr;
+        }
     }
 }
 
@@ -1015,6 +1276,7 @@ void ModuleWorkspace::setGainPopupVisible (bool shouldBeVisible)
         }
     }
 
+    runWorkspaceTransparentSync (this);
     repaint();
 }
 
@@ -1034,9 +1296,13 @@ juce::Rectangle<int> ModuleWorkspace::getGainPopupBounds() const
 
 void ModuleWorkspace::GainPopupBackdrop::paint (juce::Graphics& g)
 {
-    const auto local = getLocalBounds();
+    if (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (owner))
+        return;
 
-    // 凸起面板（2px 硬边框 + 高光/暗影），XP 风格
+    const auto local = getLocalBounds();
+    const auto& tokens = PinkXP::getSkinTokens();
+
+    // 凸起面板（全风格随 PinkXP::drawRaised 自动切换质感）
     PinkXP::drawRaised (g, local, PinkXP::btnFace);
 
     // 0 dB 参考竖线：slider 是后加的子组件，会盖在上层，因此这里画在它下面
@@ -1045,18 +1311,63 @@ void ModuleWorkspace::GainPopupBackdrop::paint (juce::Graphics& g)
     {
         const int zeroX = sb.getX()
                         + (int) std::round (owner.gainSlider.getPositionOfValue (0.0)) - 1;
+        const int tickY = sb.getY() - 2;
+        const int tickH = sb.getHeight() + 4;
 
-        g.setColour (PinkXP::ink.withAlpha (0.65f));
-        g.fillRect (zeroX, sb.getY() - 2, 1, sb.getHeight() + 4);
-        g.setColour (PinkXP::hl.withAlpha (0.70f));
-        g.fillRect (zeroX + 1, sb.getY() - 2, 1, sb.getHeight() + 4);
+        if (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel)
+        {
+            g.setColour (PinkXP::ink.withAlpha (0.65f));
+            g.fillRect (zeroX, tickY, 1, tickH);
+            g.setColour (PinkXP::hl.withAlpha (0.70f));
+            g.fillRect (zeroX + 1, tickY, 1, tickH);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+        {
+            const bool isDarkBar = PinkXP::btnFace.getPerceivedBrightness() < 0.45f;
+            g.setColour (PinkXP::dark.withAlpha (isDarkBar ? 0.80f : 0.62f));
+            g.fillRect (zeroX, tickY, 1, tickH);
+            g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.52f)
+                                   .withAlpha (isDarkBar ? 0.38f : 0.78f));
+            g.fillRect (zeroX + 1, tickY, 1, tickH);
+            // 顶部/底部 3px 机加工 0 dB 刻度帽
+            g.setColour (PinkXP::sel.withAlpha (0.85f));
+            g.fillRect (zeroX - 1, tickY, 3, 1);
+            g.fillRect (zeroX - 1, tickY + tickH - 1, 3, 1);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+        {
+            const bool isDarkBar = PinkXP::btnFace.getPerceivedBrightness() < 0.45f;
+            g.setColour (PinkXP::dark.withAlpha (isDarkBar ? 0.36f : 0.24f));
+            g.fillRect (zeroX, tickY, 1, tickH);
+            g.setColour (juce::Colours::white.withAlpha (isDarkBar ? 0.24f : 0.72f));
+            g.fillRect (zeroX + 1, tickY, 1, tickH);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+        {
+            g.setColour (PinkXP::sel.withAlpha (0.26f));
+            g.fillRect (zeroX - 1, tickY, 3, tickH);
+            g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.35f).withAlpha (0.90f));
+            g.fillRect (zeroX, tickY, 1, tickH);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+        {
+            g.setColour (PinkXP::sel.withAlpha (0.85f));
+            g.fillRect (zeroX, tickY, 1, tickH);
+            g.fillRect (zeroX - 1, tickY, 3, 1);
+            g.fillRect (zeroX - 1, tickY + tickH - 1, 3, 1);
+        }
+        else
+        {
+            g.setColour (PinkXP::skinHairlineOn (PinkXP::btnFace, 0.36f));
+            g.fillRect (zeroX, tickY, 1, tickH);
+        }
     }
 
     // 右侧 dB 数值
     constexpr int valueW = 56;
     auto valueArea = local.withTrimmedRight (10).removeFromRight (valueW);
 
-    g.setColour (PinkXP::ink.withAlpha (0.92f));
+    g.setColour (PinkXP::readableInkOn (PinkXP::btnFace).withAlpha (0.92f));
     g.setFont (PinkXP::getFont (10.0f, juce::Font::plain));
     g.drawText (y2k::tr (juce::String (owner.inputGainDb, 1) + " dB"),
                 valueArea, juce::Justification::centredRight, false);
@@ -1372,6 +1683,7 @@ void ModuleWorkspace::toggleModuleMaximize (ModulePanel& panel)
         panel.setBounds (restore);
         panel.repaint();
         notifyLayoutChanged();
+        commitUndoFromBaseline (y2k::trf ("Restore {0}", y2k::tr (panel.getTitleText())), {}, true);
         return;
     }
 
@@ -1401,6 +1713,7 @@ void ModuleWorkspace::toggleModuleMaximize (ModulePanel& panel)
     maximizedPanel = &panel;
     panel.repaint();
     notifyLayoutChanged();
+    commitUndoFromBaseline (y2k::trf ("Maximize {0}", y2k::tr (panel.getTitleText())), {}, true);
 }
 
 // ==========================================================
@@ -1624,13 +1937,45 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
         if (toyDirector != nullptr)
             toyDirector->clock->cancelPanel (p);
         notifyLayoutChanged();
+        commitUndoFromBaseline (y2k::trf ("Move / resize {0}", y2k::tr (p.getTitleText())), {}, true);
     };
     panel.onBoundsDragging = [this](ModulePanel& p)
     {
         updateDragPreview(p);
     };
     panel.onCloseClicked   = [this](ModulePanel& p) { removeModule(p); };
-    panel.onParamChangedByUser = [this](ModulePanel&) { notifyLayoutChanged(); };
+    panel.onWillChangeParamByUser = [this](ModulePanel&)
+    {
+        if (! undoSuspended_ && ! suspendNotifications)
+            pendingPreChangeTree_ = saveLayoutTree();
+    };
+    panel.onParamChangedByUser = [this](ModulePanel& p)
+    {
+        notifyLayoutChanged();
+        const juce::String desc = p.getLastChangedParamActionLabel().isNotEmpty()
+                                      ? p.getLastChangedParamActionLabel()
+                                      : y2k::trf ("{0} settings", y2k::tr (p.getTitleText()));
+        const juce::String targetId   = p.getModuleId();
+        const juce::String focusHint  = p.getLastChangedParamFocusHint();
+        if (pendingPreChangeTree_.isValid())
+        {
+            auto before = pendingPreChangeTree_;
+            pendingPreChangeTree_ = juce::ValueTree();
+            if (! undoSuspended_ && ! suspendNotifications)
+                recordUndoStep (before, saveLayoutTree(), desc, p.getLastChangedParamCoalesceKey(), false,
+                                {}, {}, targetId, focusHint);
+        }
+        else
+        {
+            commitUndoFromBaseline (desc, p.getLastChangedParamCoalesceKey(), false,
+                                    targetId, focusHint);
+        }
+    };
+    panel.onParamGestureEnded = [this](ModulePanel&)
+    {
+        pendingPreChangeTree_ = juce::ValueTree();
+        breakUndoCoalesce();
+    };
     // v3.0.1：抬头双击 —— 浮动态交给 Editor（浮动窗口伪全屏），嵌入式就地最大化
     panel.onTitleDoubleClicked = [this](ModulePanel& p)
     {
@@ -1736,6 +2081,8 @@ void ModuleWorkspace::raisePerlerLayersAboveModules()
 ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool autoPosition)
 {
     jassert(panel != nullptr);
+    const juce::ValueTree beforeUndo = (! suspendNotifications && ! undoSuspended_)
+                                           ? saveLayoutTree() : juce::ValueTree();
     auto* raw = panel.get();
 
     if (raw->getModuleId().isEmpty())
@@ -1748,7 +2095,7 @@ ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool
     {
         // 优先使用具体模块在构造函数里声明的默认大小
         //   (setDefaultSize)，而非全局统一的 320×220；这样每种模块第一次
-        //   被加入就能回复到用户期望的尺寸（比如 EQ 6×4 大格→384×256）。
+        //   被加入就能回复到用户期望的尺寸（比如 Spectrum 6×4 大格→384×256）。
         const int w = juce::jmax(raw->getMinWidth(),  raw->getDefaultWidth());
         const int h = juce::jmax(raw->getMinHeight(), raw->getDefaultHeight());
         auto slot = findNextSlot(w, h);
@@ -1762,6 +2109,9 @@ ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool
     raisePerlerLayersAboveModules();
 
     notifyLayoutChanged();
+    if (beforeUndo.isValid())
+        recordUndoStep (beforeUndo, saveLayoutTree(),
+                        y2k::trf ("Add {0}", y2k::tr (raw->getTitleText())), {}, true);
 
     // 通知外部订阅者（如新手引导检测 VirtuPet 模块已添加）
     if (onModuleAdded)
@@ -1789,9 +2139,25 @@ void ModuleWorkspace::removeModule(ModulePanel& panel)
     {
         if (modules.getUnchecked(i) == &panel)
         {
+            // 若该模块控制面板正处于滑块拖拽中，在面板仍完整存活时先关闭以安全落盘/清理拖拽态
+            panel.setControlPanelOpen (false);
+
+            const juce::ValueTree beforeUndo = (! suspendNotifications && ! undoSuspended_)
+                                                   ? saveLayoutTree() : juce::ValueTree();
+            const juce::String title = panel.getTitleText();
+            const bool hadFocus = panel.hasKeyboardFocus (true);
+
             modules.remove(i);  // OwnedArray 会自动 delete
             repaint();
             notifyLayoutChanged();
+
+            if (beforeUndo.isValid())
+                recordUndoStep (beforeUndo, saveLayoutTree(),
+                                y2k::trf ("Delete {0}", y2k::tr (title)), {}, true);
+
+            // 若被删模块刚持有焦点，将焦点收回到工作区，确保立刻按 Ctrl+Z 即可撤回
+            if ((hadFocus || juce::Component::getCurrentlyFocusedComponent() == nullptr) && isShowing())
+                grabKeyboardFocus();
             return;
         }
     }
@@ -1842,6 +2208,7 @@ ModulePanel* ModuleWorkspace::popOutModule(ModulePanel& panel)
 
             repaint();
             notifyLayoutChanged();
+            syncUndoBaseline();
 
             // 通知 Editor 创建浮动窗口
             if (onModulePopOutRequested)
@@ -1888,6 +2255,7 @@ void ModuleWorkspace::dockModule(ModulePanel& panel, juce::Rectangle<int> savedB
 
     repaint();
     notifyLayoutChanged();
+    syncUndoBaseline();
 }
 
 // ----------------------------------------------------------
@@ -1897,9 +2265,18 @@ void ModuleWorkspace::dockModule(ModulePanel& panel, juce::Rectangle<int> savedB
 // ----------------------------------------------------------
 void ModuleWorkspace::clearAllModules()
 {
-    // OwnedArray 析构时会自动 delete 每个 ModulePanel
-    for (int i = modules.size(); --i >= 0;)
-        modules.remove (i);
+    pendingPreChangeTree_ = juce::ValueTree();
+
+    // OwnedArray 析构时会自动 delete 每个 ModulePanel；先在面板仍存活时静默收起抽屉，避免析构中途触发提交
+    {
+        const juce::ScopedValueSetter<bool> suspendUndo (undoSuspended_, true);
+        for (int i = modules.size(); --i >= 0;)
+        {
+            if (auto* m = modules.getUnchecked (i))
+                m->setControlPanelOpen (false);
+            modules.remove (i);
+        }
+    }
 
     // 注意：不清空 floatingModuleStates_。
     //   脱离态模块独立于布局管理 —— stick 切换 / 预设重建 canvas 时，
@@ -1935,7 +2312,7 @@ void ModuleWorkspace::autoLayout()
     {
         const int w = juce::jmax(m->getMinWidth(), cellW);
         // 模块高度优先走自己的 default，既保留各模块的设计比例
-        //  （如 Phase 6×3 vs EQ 6×4），又避免统一高度造成视觉高矮不一。
+        //  （如 Phase 6×3 vs Spectrum 6×4），又避免统一高度造成视觉高矮不一。
         const int h = juce::jmax(m->getMinHeight(), m->getDefaultHeight());
 
         if (col >= cols)
@@ -1979,9 +2356,9 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
     const bool  hasPlacement = (placeAtCanvasPos.x >= 0 && placeAtCanvasPos.y >= 0);
     const auto  canvas       = getCanvasArea();
     // 预览框大小：用"当前 hover 的模块类型"的默认尺寸；菜单刚弹出时还没
-    //   hover 某项，用 EQ 作为稳妥兜底（不影响菜单摆位计算）。
+    //   hover 某项，用 spectrum 作为稳妥兜底（不影响菜单摆位计算）。
     const auto  prevSize     = getDefaultSizeForType (hoverPreviewActive ? hoverPreviewType
-                                                                         : ModuleType::eq);
+                                                                         : ModuleType::spectrum);
     // 自动缩小：窗口过小时把预览框夹到 canvas 的实际尺寸，保持和真实插入
     //   路径（showMenuAsync lambda 中）的"模块不越过下方控制区"逻辑一致，
     //   用户看到的 ghost 与最终放下来的模块大小相符。
@@ -2234,6 +2611,8 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
 
         panel->setBounds(snapRect({ x, y, w, h }));
 
+        const juce::ValueTree beforeUndo = (! suspendNotifications && ! undoSuspended_)
+                                               ? saveLayoutTree() : juce::ValueTree();
         auto* raw = panel.get();
         if (raw->getModuleId().isEmpty())
             raw->setModuleId(juce::String(nextIdCounter++));
@@ -2241,7 +2620,11 @@ void ModuleWorkspace::showAddMenu(juce::Point<int> anchorScreenPos,
         hookPanel(*raw);
         modules.add(panel.release());
         raw->toFront(false);
+        raisePerlerLayersAboveModules();
         notifyLayoutChanged();
+        if (beforeUndo.isValid())
+            recordUndoStep (beforeUndo, saveLayoutTree(),
+                            y2k::trf ("Add {0}", y2k::tr (raw->getTitleText())), {}, true);
     });
 }
 
@@ -2418,7 +2801,7 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
     // 2) 左键：优先检查是否在已聚焦图片的 × 按钮/缩放手柄上
     if (e.mods.isLeftButtonDown())
     {
-        if (focusedPerlerIdx >= 0 && focusedPerlerIdx < perlerImages.size())
+        if (! PinkXP::isChromaKeySkin() && focusedPerlerIdx >= 0 && focusedPerlerIdx < perlerImages.size())
         {
             auto* fimg = perlerImages.getUnchecked (focusedPerlerIdx);
             const auto fb = fimg->getBounds();
@@ -2441,6 +2824,7 @@ void ModuleWorkspace::mouseDown(const juce::MouseEvent& e)
                 dirty = dirty.getUnion (getPerlerBeadsCheckboxBounds (fb).expanded (2));
                 repaint (dirty);
                 notifyLayoutChanged();
+                commitUndoFromBaseline (y2k::tr ("Edit sticker"), {}, true);
                 return;
             }
 
@@ -2605,8 +2989,9 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     int themeKey = static_cast<int>(PinkXP::getCurrentThemeId()) * 100;
     if (PinkXP::isCustomThemeActive())
         themeKey += static_cast<int>(PinkXP::getCurrentThemeSpec().brightness);
-    // 视觉风格改变 drawSunken 的质感 → 并入 key（themeKey < 10000）
+    // 视觉风格与背景模式改变画布背景 → 一并并入 key
     themeKey += static_cast<int>(PinkXP::getCurrentSkin()) * 10000;
+    themeKey += static_cast<int>(PinkXP::getBackdropMode()) * 100000;
 
     if (! canvasBgCacheDirty
         && canvasBgCache.isValid()
@@ -2618,15 +3003,20 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     canvasBgCache = juce::Image (juce::Image::ARGB, w, h, true);
     juce::Graphics cg (canvasBgCache);
 
-    // 绿幕：工作区画布整块纯绿（不画凹槽 / 网格点阵）；
-    //   用户主动打开的 Grid 叠加线仍保留（布局辅助，可随时关掉）
-    const bool chromaKey = PinkXP::isChromaKeySkin();
-    if (chromaKey)
+    // 背景模式：
+    //   · 绿幕（greenScreen）：整块纯绿（不画凹槽 / 网格点阵）；
+    //   · 透明（transparent）：保持 ARGB 纯透明（alpha=0，不画凹槽 / 网格点阵 / 绿底）；
+    //   · 非绿幕（normal）：常规 drawSunken + 网格点阵。
+    //   用户主动打开的 Grid 叠加线在三种模式下均保留（布局辅助，可随时关掉）。
+    const bool greenScreen = PinkXP::isGreenScreenBackdrop();
+    const bool transparent = PinkXP::isTransparentBackdrop();
+    const bool chromaKey   = greenScreen || transparent;
+    if (greenScreen)
     {
         cg.setColour (PinkXP::chromaKeyGreen());
         cg.fillAll();
     }
-    else
+    else if (! transparent)
     {
         // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
         PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
@@ -2643,7 +3033,12 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
 
     if (! chromaKey)
     {
-        cg.setColour (PinkXP::pink200.withAlpha (0.35f));
+        const auto& tokens = PinkXP::getSkinTokens();
+        const float dotAlpha = (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel) ? 0.35f
+                             : (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                                || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass) ? 0.20f
+                             : 0.28f;
+        cg.setColour (PinkXP::pink200.withAlpha (dotAlpha));
         for (int y = localCanvas.getY(); y < localCanvas.getBottom(); y += gridSize)
         {
             for (int x = localCanvas.getX(); x < localCanvas.getRight(); x += gridSize * 2)
@@ -2683,29 +3078,61 @@ void ModuleWorkspace::paintToolbarBackground (juce::Graphics& g, juce::Rectangle
 
     PinkXP::drawRaised (g, tb, PinkXP::btnFace);
 
-    // Toolbar 内的小竖线分隔符（XP 风格：1px 暗色 + 1px 高光色构成凹槽效果）
-    auto drawDivider = [&] (int x)
+    // 底部工具栏材质收边（仅作用于 Glass / Neon / CRT，不触碰 Pixel XP / Modern / Chrome）
     {
-        if (x < 0) return;
-        const int y1 = tb.getY()      + 6;
-        const int y2 = tb.getBottom() - 6;
-        g.setColour (PinkXP::shdw);
-        g.fillRect (x,     y1, 1, y2 - y1);
-        g.setColour (PinkXP::hl);
-        g.fillRect (x + 1, y1, 1, y2 - y1);
-    };
-    drawDivider (toolbarDividerX0);
-    drawDivider (toolbarDividerXFft);
-    drawDivider (toolbarDividerX1);
-    drawDivider (toolbarDividerXLang);
-    drawDivider (toolbarDividerX2);
-    drawDivider (toolbarDividerX3);
-    drawDivider (toolbarDividerXLayout);
-    drawDivider (toolbarDividerXStick);
+        const auto& tbTokens = PinkXP::getSkinTokens();
+        const bool isDarkBar = PinkXP::btnFace.getPerceivedBrightness() < 0.45f;
+        if (tbTokens.frameStyle == PinkXP::FrameStyle::frostedGlass && tb.getHeight() >= 8)
+        {
+            auto dome = tb.withHeight (juce::jmax (4, tb.getHeight() * 40 / 100));
+            juce::ColourGradient sheen (juce::Colours::white.withAlpha (isDarkBar ? 0.10f : 0.24f),
+                                        0.0f, (float) dome.getY(),
+                                        juce::Colours::white.withAlpha (0.01f),
+                                        0.0f, (float) dome.getBottom(), false);
+            g.setGradientFill (sheen);
+            g.fillRect (dome);
+            g.setColour (juce::Colours::white.withAlpha (isDarkBar ? 0.26f : 0.72f));
+            g.fillRect (tb.getX(), tb.getY() + 1, tb.getWidth(), 1);
+        }
+        else if (tbTokens.frameStyle == PinkXP::FrameStyle::neonTube)
+        {
+            // 暗烟熏霓虹灯箱工具栏：顶/底双通道霓虹亮轨
+            g.setColour (PinkXP::sel.withAlpha (0.24f));
+            g.fillRect (tb.getX(), tb.getY(), tb.getWidth(), 2);
+            g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.28f).withAlpha (0.82f));
+            g.fillRect (tb.getX(), tb.getY(), tb.getWidth(), 1);
+            g.setColour (PinkXP::sel.withAlpha (0.58f));
+            g.fillRect (tb.getX(), tb.getBottom() - 1, tb.getWidth(), 1);
+        }
+        else if (tbTokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+        {
+            // CRT 荧光终端工具栏：柔和 2px 水平扫描线 + 顶部 1px 荧光边线
+            g.setColour (juce::Colours::black.withAlpha (0.08f));
+            for (int py = tb.getY() + 2; py < tb.getBottom() - 1; py += 2)
+                g.fillRect (tb.getX(), py, tb.getWidth(), 1);
+            g.setColour (PinkXP::sel.withAlpha (0.72f));
+            g.fillRect (tb.getX(), tb.getY(), tb.getWidth(), 1);
+        }
+    }
+
+    // Toolbar 内的小竖线分隔符（随 SkinTokens 切换质感：Pixel XP 经典 2px 蚀刻，Modern 1px 细线等）
+    const int y1 = tb.getY()      + 6;
+    const int y2 = tb.getBottom() - 6;
+    drawSkinToolbarDivider (g, toolbarDividerX0,      y1, y2);
+    drawSkinToolbarDivider (g, toolbarDividerXFft,    y1, y2);
+    drawSkinToolbarDivider (g, toolbarDividerX1,      y1, y2);
+    drawSkinToolbarDivider (g, toolbarDividerXLang,   y1, y2);
+    drawSkinToolbarDivider (g, toolbarDividerX2,      y1, y2);
+    drawSkinToolbarDivider (g, toolbarDividerX3,      y1, y2);
+    drawSkinToolbarDivider (g, toolbarDividerXLayout, y1, y2);
+    drawSkinToolbarDivider (g, toolbarDividerXStick,  y1, y2);
 }
 
 void ModuleWorkspace::ToolbarOverlayBackdrop::paint (juce::Graphics& g)
 {
+    if (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (owner))
+        return;
+
     // backdrop 与 workspace 坐标原点不同：分隔线 x 是 workspace 坐标，平移到本地
     g.addTransform (juce::AffineTransform::translation ((float) -getX(), (float) -getY()));
     owner.paintToolbarBackground (g, getBounds());
@@ -2713,29 +3140,23 @@ void ModuleWorkspace::ToolbarOverlayBackdrop::paint (juce::Graphics& g)
 
 void ModuleWorkspace::ToolbarOverflowBackdrop::paint (juce::Graphics& g)
 {
+    if (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (owner))
+        return;
+
     g.addTransform (juce::AffineTransform::translation ((float) -getX(), (float) -getY()));
     const auto tb = getBounds();
     PinkXP::drawRaised (g, tb, PinkXP::btnFace);
 
-    auto drawDivider = [&] (int x)
-    {
-        if (x < 0) return;
-        const int y1 = tb.getY()      + 6;
-        const int y2 = tb.getBottom() - 6;
-        g.setColour (PinkXP::shdw);
-        g.fillRect (x,     y1, 1, y2 - y1);
-        g.setColour (PinkXP::hl);
-        g.fillRect (x + 1, y1, 1, y2 - y1);
-    };
-
-    drawDivider (owner.overflowDividerX0);
-    drawDivider (owner.overflowDividerXFft);
-    drawDivider (owner.overflowDividerX1);
-    drawDivider (owner.overflowDividerXLang);
-    drawDivider (owner.overflowDividerX2);
-    drawDivider (owner.overflowDividerX3);
-    drawDivider (owner.overflowDividerXLayout);
-    drawDivider (owner.overflowDividerXStick);
+    const int y1 = tb.getY()      + 6;
+    const int y2 = tb.getBottom() - 6;
+    drawSkinToolbarDivider (g, owner.overflowDividerX0,      y1, y2);
+    drawSkinToolbarDivider (g, owner.overflowDividerXFft,    y1, y2);
+    drawSkinToolbarDivider (g, owner.overflowDividerX1,      y1, y2);
+    drawSkinToolbarDivider (g, owner.overflowDividerXLang,   y1, y2);
+    drawSkinToolbarDivider (g, owner.overflowDividerX2,      y1, y2);
+    drawSkinToolbarDivider (g, owner.overflowDividerX3,      y1, y2);
+    drawSkinToolbarDivider (g, owner.overflowDividerXLayout, y1, y2);
+    drawSkinToolbarDivider (g, owner.overflowDividerXStick,  y1, y2);
 }
 
 void ModuleWorkspace::layoutOptionalToolbarControls (juce::Rectangle<int>& tb,
@@ -2971,21 +3392,27 @@ void ModuleWorkspace::paint(juce::Graphics& g)
 
     if (chromeVisible)
     {
+        const bool transparent = PinkXP::isTransparentBackdrop();
+
         // P7 · 画布背景（drawSunken + 网格点阵 + Grid 叠加线）使用离屏 Image 缓存。
-        //   每帧仅一次 drawImageAt，避免 ~13000 次 fillRect(1,1) 的循环绘制。
+        //   透明模式下未开启 Grid 时整块跳过，保持工作区空白处纯 alpha=0。
+        if (! transparent || gridOverlayVisible)
         {
-            Y2K_PERF_FRAME_SCOPE ("ws-rebuild-check");
-            rebuildCanvasBgCacheIfNeeded();
-        }
-        if (canvasBgCache.isValid())
-        {
-            Y2K_PERF_FRAME_SCOPE ("ws-bg-blit");
-            auto canvasOuter = minimalMode_ ? getLocalBounds()
-                                    : getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
-            g.drawImageAt (canvasBgCache, canvasOuter.getX(), canvasOuter.getY());
+            {
+                Y2K_PERF_FRAME_SCOPE ("ws-rebuild-check");
+                rebuildCanvasBgCacheIfNeeded();
+            }
+            if (canvasBgCache.isValid())
+            {
+                Y2K_PERF_FRAME_SCOPE ("ws-bg-blit");
+                auto canvasOuter = minimalMode_ ? getLocalBounds()
+                                        : getLocalBounds().withTrimmedBottom(PinkXP::ui(toolbarHeight));
+                g.drawImageAt (canvasBgCache, canvasOuter.getX(), canvasOuter.getY());
+            }
         }
 
-        // 底部工具栏：凸起面板（深色主题下也保持浅色底，让文字/色票可读）
+        // 底部工具栏：凸起面板（透明模式未悬停时跳过，保持 alpha=0；悬停时按当前 SkinId 完整显露）
+        if (! transparent || PinkXP::isChromaRevealed (*this))
         {
             Y2K_PERF_FRAME_SCOPE ("ws-toolbar");
             paintToolbarBackground (g, getToolbarArea());
@@ -3001,7 +3428,8 @@ void ModuleWorkspace::paint(juce::Graphics& g)
     //   · 仅裁剪到 canvas 区域内绘制，避免溢出到 toolbar。
     // ------------------------------------------------------
     // 引导提示：当 chrome 可见、且用户尚未拖入任何图片时，在 canvas 右下角
-    // 给出 PNG/JPG/BMP/GIF 拖拽提示。一旦有图或用户点击了 Hide，此提示隐藏。
+    // 给出 PNG/JPG/BMP/GIF 拖拽提示。一旦有图、处于键控背景（绿幕/透明）或被非不透明的
+    // VirtuPet 遮挡时隐藏，避免透字叠在桌宠身上。
     if (chromeVisible && perlerImages.isEmpty() && ! PinkXP::isChromaKeySkin())
     {
         auto canvas = getCanvasArea();
@@ -3020,21 +3448,39 @@ void ModuleWorkspace::paint(juce::Graphics& g)
         const int totalH = h1 + lineGap + h2;
         const int bottom = canvas.getBottom() - padding;
         const int right  = canvas.getRight()  - padding;
+        const int hintW  = juce::jmax ((int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (line1, fontMain)),
+                                       (int) std::ceil (PinkXP::SymbolGlyphs::getTextWidth (line2, fontSub)));
+        const juce::Rectangle<int> hintBounds (right - hintW - 8, bottom - totalH - 6,
+                                               hintW + 16, totalH + 12);
 
-        juce::Graphics::ScopedSaveState save (g);
-        g.reduceClipRegion (canvas);
+        bool overlapsVirtuPet = false;
+        for (auto* m : modules)
+        {
+            if (m != nullptr && m->isVisible() && m->getModuleType() == ModuleType::virtuPet
+                && m->getBounds().intersects (hintBounds))
+            {
+                overlapsVirtuPet = true;
+                break;
+            }
+        }
 
-        g.setColour (PinkXP::ink.withAlpha (0.55f));
-        g.setFont   (fontMain);
-        g.drawText  (y2k::tr (line1),
-                     juce::Rectangle<int> (right - 600, bottom - totalH, 600, h1),
-                     juce::Justification::centredRight, false);
+        if (! overlapsVirtuPet)
+        {
+            juce::Graphics::ScopedSaveState save (g);
+            g.reduceClipRegion (canvas);
 
-        g.setColour (PinkXP::ink.withAlpha (0.40f));
-        g.setFont   (fontSub);
-        g.drawText  (y2k::tr (line2),
-                     juce::Rectangle<int> (right - 600, bottom - h2, 600, h2),
-                     juce::Justification::centredRight, false);
+            g.setColour (PinkXP::ink.withAlpha (0.55f));
+            g.setFont   (fontMain);
+            g.drawText  (line1,
+                         juce::Rectangle<int> (right - 600, bottom - totalH, 600, h1),
+                         juce::Justification::centredRight, false);
+
+            g.setColour (PinkXP::ink.withAlpha (0.40f));
+            g.setFont   (fontSub);
+            g.drawText  (line2,
+                         juce::Rectangle<int> (right - 600, bottom - h2, 600, h2),
+                         juce::Justification::centredRight, false);
+        }
     }
 
     if (! perlerImages.isEmpty())
@@ -3084,7 +3530,7 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
     //   · 只在 focusedPerlerIdx 有效时绘制；装饰跟随图片的 topLeft 自然移动
     //     （因为 getBounds() / getHandleRect 等都是基于 workspace 坐标系）。
     // ------------------------------------------------------
-    if (focusedPerlerIdx >= 0 && focusedPerlerIdx < perlerImages.size())
+    if (! PinkXP::isChromaKeySkin() && focusedPerlerIdx >= 0 && focusedPerlerIdx < perlerImages.size())
     {
         juce::Graphics::ScopedSaveState save (g);
         g.reduceClipRegion (getCanvasArea());
@@ -3252,74 +3698,78 @@ void ModuleWorkspace::paintOverChildren (juce::Graphics& g)
     //   导致弹窗只剩轨道与控制头、边框轮廓丢失。
 
     // 绿幕：底部工具栏（含其上所有子控件）未悬停 Editor chrome 时盖成纯绿。
+    //   透明模式下工具栏背景已跳过且子控件 alpha=0，严禁此处刷绿！
     //   工作区自身不是绿幕区域，isChromaRevealed 会向上找到 Editor。
-    if (PinkXP::isChromaKeySkin() && chromeVisible && ! minimalMode_
+    if (PinkXP::isGreenScreenBackdrop() && chromeVisible && ! minimalMode_
         && ! PinkXP::isChromaRevealed (*this))
     {
         g.setColour (PinkXP::chromaKeyGreen());
         g.fillRect (getToolbarArea());
     }
 
-    if (! hoverPreviewActive)
-        return;
-
-    // 计算预览框位置 + 尺寸（落点已在 showAddMenu 中记录）
-    const auto sz = getDefaultSizeForType (hoverPreviewType);
-    auto canvas = getCanvasArea();
-    // 自动缩小：窗口过小装不下 default 时，把预览夹到 canvas 尺寸，
-    //   与 showMenuAsync 插入 lambda 中的"不越过下方控制区"逻辑保持一致，
-    //   用户看到的 ghost 与真实放下来的模块大小完全相符。
-    const int w = juce::jmin (sz.x, juce::jmax (1, canvas.getWidth()));
-    const int h = juce::jmin (sz.y, juce::jmax (1, canvas.getHeight()));
-    int x = hoverPreviewPos.x;
-    int y = hoverPreviewPos.y;
-    // 以触发位置为左上角，夹紧到 canvas 内
-    x = juce::jlimit (canvas.getX(), juce::jmax (canvas.getX(), canvas.getRight()  - w), x);
-    y = juce::jlimit (canvas.getY(), juce::jmax (canvas.getY(), canvas.getBottom() - h), y);
-    // 与模块添加时一致：snap 到 8px 网格
-    auto box = snapRect ({ x, y, w, h });
-
-    // 裁剪到 canvas 区域，避免预览覆盖 toolbar
-    juce::Graphics::ScopedSaveState save (g);
-    g.reduceClipRegion (canvas);
-
-    // 优先：用真实模块的空态快照（含标题栏 / 仪表骨架 / 按钮等子组件）
-    //   · createComponentSnapshot 已经渲染了子组件，但模块内部还没收到任何
-    //     分析帧，所以波形/数值区保持空态 —— 正好是"预览样式"
-    const juce::Image& snap = getHoverPreviewImage (hoverPreviewType);
-    if (snap.isValid())
+    if (hoverPreviewActive)
     {
-        g.setOpacity (0.55f);
-        g.drawImage (snap,
-                     box.toFloat(),
-                     juce::RectanglePlacement::stretchToFit);
-        g.setOpacity (1.0f);
+        // 计算预览框位置 + 尺寸（落点已在 showAddMenu 中记录）
+        const auto sz = getDefaultSizeForType (hoverPreviewType);
+        auto canvas = getCanvasArea();
+        // 自动缩小：窗口过小装不下 default 时，把预览夹到 canvas 尺寸，
+        //   与 showMenuAsync 插入 lambda 中的"不越过下方控制区"逻辑保持一致，
+        //   用户看到的 ghost 与真实放下来的模块大小完全相符。
+        const int w = juce::jmin (sz.x, juce::jmax (1, canvas.getWidth()));
+        const int h = juce::jmin (sz.y, juce::jmax (1, canvas.getHeight()));
+        int x = hoverPreviewPos.x;
+        int y = hoverPreviewPos.y;
+        // 以触发位置为左上角，夹紧到 canvas 内
+        x = juce::jlimit (canvas.getX(), juce::jmax (canvas.getX(), canvas.getRight()  - w), x);
+        y = juce::jlimit (canvas.getY(), juce::jmax (canvas.getY(), canvas.getBottom() - h), y);
+        // 与模块添加时一致：snap 到 8px 网格
+        auto box = snapRect ({ x, y, w, h });
+
+        // 裁剪到 canvas 区域，避免预览覆盖 toolbar
+        juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (canvas);
+
+        // 优先：用真实模块的空态快照（含标题栏 / 仪表骨架 / 按钮等子组件）
+        //   · createComponentSnapshot 已经渲染了子组件，但模块内部还没收到任何
+        //     分析帧，所以波形/数值区保持空态 —— 正好是"预览样式"
+        const juce::Image& snap = getHoverPreviewImage (hoverPreviewType);
+        if (snap.isValid())
+        {
+            g.setOpacity (0.55f);
+            g.drawImage (snap,
+                         box.toFloat(),
+                         juce::RectanglePlacement::stretchToFit);
+            g.setOpacity (1.0f);
+        }
+        else
+        {
+            // Fallback：factory 未绑定 / 渲染失败时，退回简易占位样式
+            g.setOpacity (0.55f);
+            PinkXP::drawRaised (g, box, PinkXP::content);
+
+            const int titleH = 20;
+            const juce::Rectangle<int> titleBar { box.getX(), box.getY(), box.getWidth(), titleH };
+            PinkXP::drawPinkTitleBar (g, titleBar, getModuleDisplayName (hoverPreviewType), 11.0f);
+
+            const auto body = box.withTrimmedTop (titleH).reduced (1);
+            g.setColour (PinkXP::ink.withAlpha (0.35f));
+            g.setFont   (PinkXP::getFont (28.0f, juce::Font::bold));
+            g.drawText  (y2k::tr ("+"), body, juce::Justification::centred, false);
+            g.setOpacity (1.0f);
+        }
+
+        // 虚线外框强调（粉色，带些 alpha），让用户一眼看出这是"待放置"而非"已有模块"
+        g.setColour (PinkXP::pink500.withAlpha (0.85f));
+        const float dashes[] = { 5.0f, 4.0f };
+        juce::Path frame;
+        frame.addRectangle (box.toFloat());
+        juce::Path dashed;
+        juce::PathStrokeType (1.5f).createDashedStroke (dashed, frame, dashes, 2);
+        g.strokePath (dashed, juce::PathStrokeType (1.5f));
     }
-    else
-    {
-        // Fallback：factory 未绑定 / 渲染失败时，退回简易占位样式
-        g.setOpacity (0.55f);
-        PinkXP::drawRaised (g, box, PinkXP::content);
 
-        const int titleH = 20;
-        const juce::Rectangle<int> titleBar { box.getX(), box.getY(), box.getWidth(), titleH };
-        PinkXP::drawPinkTitleBar (g, titleBar, getModuleDisplayName (hoverPreviewType), 11.0f);
-
-        const auto body = box.withTrimmedTop (titleH).reduced (1);
-        g.setColour (PinkXP::ink.withAlpha (0.35f));
-        g.setFont   (PinkXP::getFont (28.0f, juce::Font::bold));
-        g.drawText  (y2k::tr ("+"), body, juce::Justification::centred, false);
-        g.setOpacity (1.0f);
-    }
-
-    // 虚线外框强调（粉色，带些 alpha），让用户一眼看出这是"待放置"而非"已有模块"
-    g.setColour (PinkXP::pink500.withAlpha (0.85f));
-    const float dashes[] = { 5.0f, 4.0f };
-    juce::Path frame;
-    frame.addRectangle (box.toFloat());
-    juce::Path dashed;
-    juce::PathStrokeType (1.5f).createDashedStroke (dashed, frame, dashes, 2);
-    g.strokePath (dashed, juce::PathStrokeType (1.5f));
+    // v3.5：撤回 / 重做顶部浮层提示（画在所有模块之上）
+    drawStatusToast (g);
 }
 
 ModulePanel* ModuleWorkspace::getModuleAtScreenPoint (juce::Point<int> screenPos) const
@@ -3906,6 +4356,7 @@ void ModuleWorkspace::resized()
     }
     else if (! chromeTransitionActive && ! isLayoutLocked())
     {
+        bool anyClamped = false;
         for (auto* m : modules)
         {
             auto b = m->getBounds();
@@ -3923,8 +4374,13 @@ void ModuleWorkspace::resized()
             if (b.getY() > canvas.getBottom() - 1)   b.setY (canvas.getBottom() - b.getHeight());
 
             if (b != m->getBounds())
+            {
                 m->setBounds(b);
+                anyClamped = true;
+            }
         }
+        if (anyClamped && ! suspendNotifications && ! undoSuspended_)
+            syncUndoBaseline();
     }
 
     // ⚠ bug1 三次修复（2026-04-23）：
@@ -3950,6 +4406,12 @@ void ModuleWorkspace::resized()
 
     // v3.0.1：最大化中的模块跟随新的 canvas（窗口/预设尺寸变化后仍铺满）
     reapplyMaximizeIfNeeded();
+
+    // v3.5：外部模块设置面板跟随新画布重定位并保持在最前
+    ModulePanel::relayoutOpenControlDrawers();
+
+    // 同步透明背景模式下工具栏与浮层底板的透明度
+    runWorkspaceTransparentSync (this);
 }
 void ModuleWorkspace::setChromeVisible(bool shouldBeVisible)
 {
@@ -4039,6 +4501,60 @@ bool ModuleWorkspace::hitTest (int x, int y)
 // ==========================================================
 // 音频信号来源下拉框 —— 外部填充 / 查询接口
 // ==========================================================
+namespace
+{
+    // 把 items[i...] 里 submenuPath 以 prefix 开头的**连续**条目加进 menu：
+    //   路径正好等于 prefix → 普通条目；路径更深 → 递归成子菜单（支持任意层）。
+    //   条目 ID 一律 = 下标 + 1（各层共用同一套 ID，ComboBox 会递归查找）。
+    // 返回这一层（含子层）是否包含当前选中项：包含时给子菜单标题也打勾，
+    //   这样不展开子菜单也能看出"现在选的是它里面的某一项"。
+    bool addAudioSourceMenuItems (juce::PopupMenu& menu,
+                                  const juce::Array<ModuleWorkspace::AudioSourceItem>& items,
+                                  int& i,
+                                  const juce::StringArray& prefix,
+                                  int selectIdx)
+    {
+        bool holdsSelection = false;
+
+        while (i < items.size())
+        {
+            const auto& it   = items.getReference (i);
+            const auto& path = it.submenuPath;
+
+            bool underPrefix = path.size() >= prefix.size();
+            for (int k = 0; underPrefix && k < prefix.size(); ++k)
+                underPrefix = (path[k] == prefix[k]);
+            if (! underPrefix)
+                break;   // 这一项属于上层（或别的分支），交还给调用方
+
+            if (path.size() == prefix.size())
+            {
+                if (it.separatorBefore && menu.getNumItems() > 0)
+                    menu.addSeparator();
+                // sourceId 为空 = 提示行：灰显、不可选
+                menu.addItem (i + 1, it.displayName, it.sourceId.isNotEmpty());
+                holdsSelection = holdsSelection || (i == selectIdx);
+                ++i;
+                continue;
+            }
+
+            const bool sepBeforeSub = it.separatorBefore;
+            juce::StringArray childPrefix (prefix);
+            childPrefix.add (path[prefix.size()]);
+
+            juce::PopupMenu sub;
+            const bool childHolds = addAudioSourceMenuItems (sub, items, i, childPrefix, selectIdx);
+            if (sepBeforeSub && menu.getNumItems() > 0)
+                menu.addSeparator();
+            menu.addSubMenu (path[prefix.size()], sub, true,
+                             std::unique_ptr<juce::Drawable>(), childHolds);
+            holdsSelection = holdsSelection || childHolds;
+        }
+
+        return holdsSelection;
+    }
+}
+
 void ModuleWorkspace::setAudioSourceItems (const juce::Array<AudioSourceItem>& items,
                                            const juce::String& selectedSourceId)
 {
@@ -4047,16 +4563,17 @@ void ModuleWorkspace::setAudioSourceItems (const juce::Array<AudioSourceItem>& i
 
     int selectIdx = -1;
     for (int i = 0; i < audioSourceItems.size(); ++i)
-    {
-        const auto& it = audioSourceItems.getReference (i);
-        audioSourceBox.addItem (it.displayName, i + 1);
-        if (it.sourceId == selectedSourceId)
+        if (selectedSourceId.isNotEmpty()   // 空 sourceId 是提示行，不能被"选中"
+            && audioSourceItems.getReference (i).sourceId == selectedSourceId)
             selectIdx = i;
-    }
 
     // 若外部指定了 selectedSourceId 则按它选；否则默认选第 0 项（不触发回调，避免启动抖动）
     if (selectIdx < 0 && ! audioSourceItems.isEmpty())
         selectIdx = 0;
+
+    // 顶层条目 + 按 submenuPath 逐级展开的子菜单（见 addAudioSourceMenuItems）
+    int next = 0;
+    addAudioSourceMenuItems (*audioSourceBox.getRootMenu(), audioSourceItems, next, {}, selectIdx);
 
     if (selectIdx >= 0)
         audioSourceBox.setSelectedId (selectIdx + 1, juce::dontSendNotification);
@@ -4064,7 +4581,7 @@ void ModuleWorkspace::setAudioSourceItems (const juce::Array<AudioSourceItem>& i
 
 juce::String ModuleWorkspace::getSelectedAudioSourceId() const
 {
-    const int idx = audioSourceBox.getSelectedItemIndex();
+    const int idx = audioSourceBox.getSelectedId() - 1;   // ID = 下标 + 1
     if (idx < 0 || idx >= audioSourceItems.size()) return {};
     return audioSourceItems.getReference (idx).sourceId;
 }
@@ -4138,41 +4655,48 @@ void ModuleWorkspace::rebuildLayoutPresetItems()
 {
     layoutPresetBox.clear (juce::dontSendNotification);
 
-    // 驻留态：窗口已经是「屏幕宽 × 条高」，其它预设会把窗口改成别的形状
-    //   并破坏 AppBar 占位，因此只列出"条状"预设（全部共用同一套贴边/条高流程，
-    //   只换条内模块序列，不会把窗口搞大）。
-    //   · 用 placeholder 呈现分组名（selectedId 保持 0）：ComboBox 对"重复
-    //     选中同一项"不会发 onChange，若预选中，用户点它就没有任何反应。
+    // 驻留态（Windows AppBar）：窗口固定为「屏幕宽 × 条高」，只提供 4 套基于现行模块的条状预设
     if (stickActive)
     {
-        // 经典条的 id 必须跟当前驻留侧一致（2 = 贴顶 / 3 = 贴底），
-        //   其余变体的贴边方向由 Editor 按 stickBottomAligned 自动决定。
         const int classicId = stickBottomAligned ? (int) LayoutPreset::horizontalBottom
                                                  : (int) LayoutPreset::horizontalFull;
 
         layoutPresetBox.setTextWhenNothingSelected (stickPresetLabel);
-        layoutPresetBox.addItem ("BAR: CLASSIC",     classicId);
-        layoutPresetBox.addItem ("BAR: SPECTROGRAM", (int) LayoutPreset::stickBarSpectrogram);
-        layoutPresetBox.addItem ("BAR: MILKDROP",    (int) LayoutPreset::stickBarMilkdrop);
-        layoutPresetBox.addItem ("BAR: SPEC + MILK", (int) LayoutPreset::stickBarSpecMilk);
+        layoutPresetBox.addItem ("Bar: Classic",        classicId);
+        layoutPresetBox.addItem ("Bar: Mixing",         (int) LayoutPreset::stickBarMixing);
+        layoutPresetBox.addItem ("Bar: Visuals",        (int) LayoutPreset::stickBarVisuals);
+        layoutPresetBox.addItem ("Bar: Desk Companion", (int) LayoutPreset::stickBarDesk);
         layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
         return;
     }
 
     layoutPresetBox.setTextWhenNothingSelected ("preset");
-    layoutPresetBox.addItem ("Default",             (int) LayoutPreset::defaultGrid);
-    layoutPresetBox.addItem ("Horizontal Bar(T)",   (int) LayoutPreset::horizontalFull);
-    layoutPresetBox.addItem ("Horizontal Bar(B)",   (int) LayoutPreset::horizontalBottom);
-    layoutPresetBox.addItem ("MV",                  (int) LayoutPreset::mv);
-    layoutPresetBox.addItem ("Studio Monitor",      (int) LayoutPreset::studioMonitor);
-    layoutPresetBox.addItem ("Focus + Sidecar",     (int) LayoutPreset::focusSidecar);
-    layoutPresetBox.addItem ("Broadcast Loudness",  (int) LayoutPreset::broadcastLoudness);
-    layoutPresetBox.addItem ("Only Milkdrop",       (int) LayoutPreset::onlyMilkdrop);
-    // 全屏磁贴预设（14~16）：窗口铺满屏幕，模块排布来自用户自定义存档，
-    // 全部模块用默认设置、不含 VirtuPet（详见 PluginEditor::applyFullScreenTilePreset）。
-    layoutPresetBox.addItem ("FULL: SPECTRUM",      (int) LayoutPreset::fullSpectrumFocus);
-    layoutPresetBox.addItem ("FULL: ALL MODULES",   (int) LayoutPreset::fullAllModules);
-    layoutPresetBox.addItem ("FULL: MULTI COMBO",   (int) LayoutPreset::fullMultiCombo);
+
+    layoutPresetBox.addSectionHeading ("Everyday & Desktop");
+    layoutPresetBox.addItem ("Default Workspace",     (int) LayoutPreset::defaultGrid);
+    layoutPresetBox.addItem ("Compact Mini Bar",      (int) LayoutPreset::compactMiniBar);
+    layoutPresetBox.addItem ("Desktop Companion",     (int) LayoutPreset::desktopCompanion);
+    layoutPresetBox.addItem ("Top Dock Bar",          (int) LayoutPreset::horizontalFull);
+    layoutPresetBox.addItem ("Bottom Dock Bar",       (int) LayoutPreset::horizontalBottom);
+
+    layoutPresetBox.addSeparator();
+    layoutPresetBox.addSectionHeading ("Mixing & Audio Analysis");
+    layoutPresetBox.addItem ("Mixing Console",        (int) LayoutPreset::mixingConsole);
+    layoutPresetBox.addItem ("Mastering & Broadcast", (int) LayoutPreset::masteringBroadcast);
+    layoutPresetBox.addItem ("Vocal & Podcast",       (int) LayoutPreset::vocalPodcast);
+    layoutPresetBox.addItem ("DJ & Beat Analysis",    (int) LayoutPreset::djBeatLive);
+
+    layoutPresetBox.addSeparator();
+    layoutPresetBox.addSectionHeading ("Visuals & Streaming");
+    layoutPresetBox.addItem ("Stream / OBS Overlay",  (int) LayoutPreset::streamOverlay);
+    layoutPresetBox.addItem ("Music Visualizer (MV)", (int) LayoutPreset::musicVisualizerMv);
+    layoutPresetBox.addItem ("Pure MilkDrop",         (int) LayoutPreset::onlyMilkdrop);
+
+    layoutPresetBox.addSeparator();
+    layoutPresetBox.addSectionHeading ("Full Screen");
+    layoutPresetBox.addItem ("Full: Deep Analysis",   (int) LayoutPreset::fullDeepAnalysis);
+    layoutPresetBox.addItem ("Full: All-in-One",      (int) LayoutPreset::fullAllInOne);
+
     layoutPresetBox.setSelectedId (0, juce::dontSendNotification);
 }
 
@@ -4454,7 +4978,7 @@ void ModuleWorkspace::flushPendingLayoutChange()
 // Phase E —— 布局持久化（ValueTree）
 //
 // <PBEQ_Layout>
-//   <Module type="eq"         id="1" x="0" y="0" w="320" h="220" />
+//   <Module type="spectrum"   id="1" x="0" y="0" w="320" h="220" />
 //   <Module type="loudness"   id="2" x="..." .../>
 //   ...
 // </PBEQ_Layout>
@@ -4625,11 +5149,22 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree, bool impor
     if (tree.hasProperty ("inputGainDb"))
         setInputGainDb ((float) (double) tree.getProperty ("inputGainDb", 0.0));
 
+    pendingPreChangeTree_  = juce::ValueTree();
+    gainDragPreChangeTree_ = juce::ValueTree();
+    gainDragDirty_         = false;
+
     // 清空现有 canvas 模块 + 拼豆贴画。
     //   注意：不动 floatingModuleStates_ —— 布局槽只负责 canvas 内模块，
     //   脱离态模块由独立的浮动记录（loadFloatingModulesFromTree）维护。
-    for (int i = modules.size(); --i >= 0;)
-        modules.remove(i);
+    {
+        const juce::ScopedValueSetter<bool> suspendUndo (undoSuspended_, true);
+        for (int i = modules.size(); --i >= 0;)
+        {
+            if (auto* m = modules.getUnchecked (i))
+                m->setControlPanelOpen (false);
+            modules.remove(i);
+        }
+    }
     // 最大化态属于"上一个布局"，重建前先复位（SafePointer 会因模块析构置空，
     //   但还原 bounds / 画布尺寸快照是普通成员，必须显式清掉）。
     maximizedPanel = nullptr;
@@ -4802,6 +5337,9 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree, bool impor
     //   下层兄弟会被 JUCE 的遮挡裁剪吞掉（图片完全不可见，且点击也被模块接走），
     //   因此恢复后统一把图片层抬到模块之上。
     raisePerlerLayersAboveModules();
+
+    if (! undoSuspended_)
+        syncUndoBaseline();
 
     repaint();
     return true;
@@ -5205,110 +5743,482 @@ ThemeSwatchBar::Hit ThemeSwatchBar::hitTest(juce::Point<int> p) const
 
 void ThemeSwatchBar::paint(juce::Graphics& g)
 {
-    // ---- 左侧预览方块（复刻 XP 画图的前景/背景色预览块：双色对角斜分）----
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool smoothChip = (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                             || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+
+    // ---- 左侧预览方块（Pixel XP 复刻 MS-Paint 凹槽预览块；其余风格按 SkinTokens 呈现材质）----
     {
         const auto prev = getPreviewBounds();
         if (prev.getX() < getWidth() && prev.getRight() > 0)
         {
-            const auto& th  = PinkXP::getCurrentTheme();
+            const auto& th      = PinkXP::getCurrentTheme();
             const bool isCustom = PinkXP::isCustomThemeActive();
-            PinkXP::drawSunken(g, prev, juce::Colours::white);
-            auto inner = prev.reduced(3);
+            const auto colA     = isCustom ? PinkXP::getCustomPrimary()   : th.swatch;
+            const auto colB     = isCustom ? PinkXP::getCustomSecondary() : th.hl;
 
-            g.setColour(isCustom ? PinkXP::getCustomPrimary() : th.swatch);
-            g.fillRect(inner);
-
-            juce::Path tri;
-            tri.startNewSubPath((float) inner.getX(),     (float) inner.getY());
-            tri.lineTo        ((float) inner.getRight(),  (float) inner.getY());
-            tri.lineTo        ((float) inner.getX(),     (float) inner.getBottom());
-            tri.closeSubPath();
-            g.setColour(isCustom ? PinkXP::getCustomSecondary() : th.hl);
-            g.fillPath(tri);
-
-            // hover：提示"打开调色面板"
-            if (hoverHit_.kind == 1)
+            if (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel)
             {
-                g.setColour(PinkXP::ink.withAlpha(0.55f));
-                g.drawRect(prev.expanded(1), 1);
+                PinkXP::drawSunken (g, prev, juce::Colours::white);
+                auto inner = prev.reduced (3);
+
+                g.setColour (colA);
+                g.fillRect (inner);
+
+                juce::Path tri;
+                tri.startNewSubPath ((float) inner.getX(),     (float) inner.getY());
+                tri.lineTo          ((float) inner.getRight(), (float) inner.getY());
+                tri.lineTo          ((float) inner.getX(),     (float) inner.getBottom());
+                tri.closeSubPath();
+                g.setColour (colB);
+                g.fillPath (tri);
+
+                if (hoverHit_.kind == 1)
+                {
+                    g.setColour (PinkXP::ink.withAlpha (0.55f));
+                    g.drawRect (prev.expanded (1), 1);
+                }
+            }
+            else if (smoothChip)
+            {
+                const auto rf   = prev.toFloat();
+                const float rad = juce::jmin (tokens.controlRadius, juce::jmin (rf.getWidth(), rf.getHeight()) * 0.35f);
+                const auto innerF = rf.reduced (1.5f);
+                const float innerRad = juce::jmax (1.0f, rad - 1.0f);
+
+                g.setColour (PinkXP::btnFace);
+                g.fillRoundedRectangle (rf, rad);
+
+                {
+                    juce::Graphics::ScopedSaveState save (g);
+                    juce::Path clip;
+                    clip.addRoundedRectangle (innerF, innerRad);
+                    g.reduceClipRegion (clip);
+
+                    g.setColour (colA);
+                    g.fillRect (innerF);
+
+                    juce::Path tri;
+                    tri.startNewSubPath (innerF.getX(),     innerF.getY());
+                    tri.lineTo          (innerF.getRight(), innerF.getY());
+                    tri.lineTo          (innerF.getX(),     innerF.getBottom());
+                    tri.closeSubPath();
+                    g.setColour (colB);
+                    g.fillPath (tri);
+
+                    if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+                    {
+                        auto sheen = innerF.withHeight (innerF.getHeight() * 0.44f);
+                        juce::ColourGradient dome (juce::Colours::white.withAlpha (0.36f), 0.0f, sheen.getY(),
+                                                   juce::Colours::white.withAlpha (0.08f), 0.0f, sheen.getBottom(), false);
+                        g.setGradientFill (dome);
+                        g.fillRect (sheen);
+                    }
+                }
+
+                g.setColour (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass
+                                 ? PinkXP::dark.withAlpha (0.36f)
+                                 : PinkXP::skinHairlineOn (PinkXP::btnFace, 0.22f));
+                g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+
+                if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+                {
+                    g.setColour (juce::Colours::white.withAlpha (0.74f));
+                    g.fillRect (prev.getX() + 3, prev.getY() + 1, juce::jmax (1, prev.getWidth() - 6), 1);
+                }
+
+                if (hoverHit_.kind == 1)
+                {
+                    if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+                    {
+                        g.setColour (PinkXP::sel.withAlpha (0.34f));
+                        g.drawRoundedRectangle (rf.expanded (2.25f), rad + 2.25f, 1.5f);
+                    }
+                    g.setColour (PinkXP::sel.withAlpha (0.90f));
+                    g.drawRoundedRectangle (rf.expanded (1.5f).reduced (0.5f), rad + 1.5f, 1.5f);
+                }
+            }
+            else if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+            {
+                // Millennium Chrome：CNC 拉丝铬凹陷色票预览框（正常与键控悬停模式共用统一金属工艺）
+                g.setColour (PinkXP::dark);
+                g.fillRect (prev);
+
+                auto rim = prev.reduced (1);
+                g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.55f).withAlpha (0.78f));
+                g.fillRect (rim.getX(), rim.getY(), rim.getWidth(), 1);
+                g.fillRect (rim.getX(), rim.getY(), 1, rim.getHeight());
+                g.setColour (PinkXP::dark.withAlpha (0.82f));
+                g.fillRect (rim.getX(), rim.getBottom() - 1, rim.getWidth(), 1);
+                g.fillRect (rim.getRight() - 1, rim.getY(), 1, rim.getHeight());
+
+                auto inner = prev.reduced (2);
+                g.setColour (colA);
+                g.fillRect (inner);
+
+                juce::Path tri;
+                tri.startNewSubPath ((float) inner.getX(),     (float) inner.getY());
+                tri.lineTo          ((float) inner.getRight(), (float) inner.getY());
+                tri.lineTo          ((float) inner.getX(),     (float) inner.getBottom());
+                tri.closeSubPath();
+                g.setColour (colB);
+                g.fillPath (tri);
+
+                // 柔和 4-stop 拉丝金属釉面反光层（保色同时呈现阳极金属微光泽）
+                juce::ColourGradient sheen (juce::Colours::white.withAlpha (0.24f), 0.0f, (float) inner.getY(),
+                                            juce::Colours::black.withAlpha (0.14f), 0.0f, (float) inner.getBottom(), false);
+                sheen.addColour (0.38, juce::Colours::white.withAlpha (0.09f));
+                sheen.addColour (0.42, juce::Colours::black.withAlpha (0.04f));
+                g.setGradientFill (sheen);
+                g.fillRect (inner);
+
+                if (hoverHit_.kind == 1)
+                {
+                    g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.58f).withAlpha (0.90f));
+                    g.drawRect (prev.expanded (1), 1);
+                    g.setColour (PinkXP::sel);
+                    g.fillRect (prev.getX(), prev.getY() - 1, prev.getWidth(), 1);
+                }
+            }
+            else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+            {
+                // Neon Cyber：深色烟熏双通道霓虹色票预览框
+                g.setColour (juce::Colour (0x0a, 0x08, 0x12));
+                g.fillRect (prev);
+                auto inner = prev.reduced (2);
+
+                g.setColour (colA);
+                g.fillRect (inner);
+
+                juce::Path tri;
+                tri.startNewSubPath ((float) inner.getX(),     (float) inner.getY());
+                tri.lineTo          ((float) inner.getRight(), (float) inner.getY());
+                tri.lineTo          ((float) inner.getX(),     (float) inner.getBottom());
+                tri.closeSubPath();
+                g.setColour (colB);
+                g.fillPath (tri);
+
+                g.setColour (PinkXP::sel.withAlpha (0.38f));
+                g.drawRect (prev, 1);
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.30f).withAlpha (0.88f));
+                g.drawRect (prev.reduced (1), 1);
+
+                if (hoverHit_.kind == 1)
+                {
+                    g.setColour (PinkXP::sel.withAlpha (0.42f));
+                    g.drawRect (prev.expanded (2), 1);
+                    g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.45f));
+                    g.drawRect (prev.expanded (1), 1);
+                }
+            }
+            else
+            {
+                // CRT Terminal：0px 锐利荧光终端预览块 + 扫描线
+                g.setColour (PinkXP::content);
+                g.fillRect (prev);
+                auto inner = prev.reduced (2);
+
+                g.setColour (colA);
+                g.fillRect (inner);
+
+                juce::Path tri;
+                tri.startNewSubPath ((float) inner.getX(),     (float) inner.getY());
+                tri.lineTo          ((float) inner.getRight(), (float) inner.getY());
+                tri.lineTo          ((float) inner.getX(),     (float) inner.getBottom());
+                tri.closeSubPath();
+                g.setColour (colB);
+                g.fillPath (tri);
+
+                g.setColour (juce::Colours::black.withAlpha (0.16f));
+                for (int py = inner.getY() + 1; py < inner.getBottom(); py += 2)
+                    g.fillRect (inner.getX(), py, inner.getWidth(), 1);
+
+                g.setColour (PinkXP::sel.withAlpha (0.85f));
+                g.drawRect (prev, 1);
+
+                if (hoverHit_.kind == 1)
+                {
+                    g.setColour (PinkXP::sel);
+                    g.drawRect (prev.expanded (1), 1);
+                }
             }
         }
     }
 
-    // ---- 色票绘制公共逻辑 ----
+    // ---- 色票绘制公共逻辑（完全遵循 SkinTokens，Pixel XP 原汁原味 MS-Paint 调色板）----
     auto drawSwatch = [&](juce::Rectangle<int> r, juce::Colour fillColour,
                           bool isCurrent, bool isHover, bool withCornerMark)
     {
         if (r.getRight() <= 0 || r.getX() >= getWidth())
             return;
 
-        // XP 色块凹槽
-        g.setColour(PinkXP::dark);
-        g.fillRect(r.getX(), r.getY(), r.getWidth(), 1);
-        g.fillRect(r.getX(), r.getY(), 1, r.getHeight());
-        g.setColour(PinkXP::hl);
-        g.fillRect(r.getX() + 1, r.getBottom() - 1, r.getWidth() - 1, 1);
-        g.fillRect(r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 1);
+        const auto cornerInk = PinkXP::readableInkOn (fillColour);
 
-        g.setColour(fillColour);
-        g.fillRect(r.reduced(1));
+        if (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel)
+        {
+            // Pixel XP：经典 Win95 MS-Paint 锐利 2px 凹陷色票槽
+            g.setColour (PinkXP::dark);
+            g.fillRect (r.getX(), r.getY(), r.getWidth(), 1);
+            g.fillRect (r.getX(), r.getY(), 1, r.getHeight());
+            g.setColour (PinkXP::hl);
+            g.fillRect (r.getX() + 1, r.getBottom() - 1, r.getWidth() - 1, 1);
+            g.fillRect (r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 1);
 
-        // 我的主题角标：右上角小三角
+            g.setColour (fillColour);
+            g.fillRect (r.reduced (1));
+
+            if (withCornerMark)
+            {
+                juce::Path mark;
+                mark.startNewSubPath ((float) r.getRight() - 1, (float) r.getY() + 1);
+                mark.lineTo          ((float) r.getRight() - 1, (float) r.getY() + 6);
+                mark.lineTo          ((float) r.getRight() - 6, (float) r.getY() + 1);
+                mark.closeSubPath();
+                g.setColour (cornerInk);
+                g.fillPath (mark);
+            }
+
+            if (isCurrent)
+            {
+                g.setColour (PinkXP::ink);
+                g.drawRect (r.expanded (2), 2);
+            }
+            else if (isHover)
+            {
+                g.setColour (PinkXP::ink.withAlpha (0.55f));
+                g.drawRect (r.expanded (1), 1);
+            }
+            return;
+        }
+
+        if (smoothChip)
+        {
+            const auto rf   = r.toFloat();
+            const bool isGlassSwatch = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+            const float rad = juce::jmin (tokens.controlRadius, isGlassSwatch ? 5.0f : 4.0f);
+            const auto focusInk = PinkXP::readableInkOn (PinkXP::btnFace);
+
+            {
+                juce::Graphics::ScopedSaveState save (g);
+                juce::Path clip;
+                clip.addRoundedRectangle (rf, rad);
+                g.reduceClipRegion (clip);
+
+                g.setColour (fillColour);
+                g.fillRect (rf);
+
+                if (isGlassSwatch)
+                {
+                    auto sheen = rf.withHeight (rf.getHeight() * 0.46f);
+                    juce::ColourGradient dome (juce::Colours::white.withAlpha (0.40f), 0.0f, sheen.getY(),
+                                               juce::Colours::white.withAlpha (0.08f), 0.0f, sheen.getBottom(), false);
+                    g.setGradientFill (dome);
+                    g.fillRect (sheen);
+                    g.setColour (juce::Colours::white.withAlpha (0.16f));
+                    g.fillRect (rf.getX(), rf.getBottom() - 2.0f, rf.getWidth(), 2.0f);
+                }
+
+                if (withCornerMark)
+                {
+                    juce::Path mark;
+                    mark.startNewSubPath (rf.getRight(), rf.getY());
+                    mark.lineTo          (rf.getRight(), rf.getY() + 6.0f);
+                    mark.lineTo          (rf.getRight() - 6.0f, rf.getY());
+                    mark.closeSubPath();
+                    g.setColour (cornerInk);
+                    g.fillPath (mark);
+                }
+            }
+
+            g.setColour (isGlassSwatch
+                             ? PinkXP::dark.withAlpha (0.36f)
+                             : PinkXP::skinHairlineOn (fillColour, 0.22f));
+            g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+
+            if (isGlassSwatch)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.76f));
+                g.fillRect (r.getX() + 3, r.getY() + 1, juce::jmax (1, r.getWidth() - 6), 1);
+            }
+
+            if (isCurrent)
+            {
+                if (isGlassSwatch)
+                {
+                    // Frosted Glass：莹亮发光激活环（外柔光 + 内亮白折射环）
+                    g.setColour (PinkXP::sel.withAlpha (0.36f));
+                    g.drawRoundedRectangle (rf.expanded (2.5f), rad + 2.5f, 1.5f);
+                    g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.35f));
+                    g.drawRoundedRectangle (rf.expanded (1.25f), rad + 1.25f, 1.5f);
+                }
+                else
+                {
+                    // 演播室级激活聚焦环：1px 工具栏底色呼吸缝 + 1.6px 高对比外环
+                    g.setColour (PinkXP::btnFace);
+                    g.drawRoundedRectangle (rf.expanded (0.5f), rad + 0.5f, 1.0f);
+                    g.setColour (focusInk.withAlpha (0.92f));
+                    g.drawRoundedRectangle (rf.expanded (2.0f), rad + 2.0f, 1.6f);
+                }
+            }
+            else if (isHover)
+            {
+                g.setColour (isGlassSwatch ? PinkXP::sel.withAlpha (0.78f) : focusInk.withAlpha (0.55f));
+                g.drawRoundedRectangle (rf.expanded (1.25f).reduced (0.5f), rad + 1.25f, 1.2f);
+            }
+            return;
+        }
+
+        // Chrome / Neon / CRT：0px 材质化直角色票槽
+        if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+        {
+            // Millennium Chrome：CNC 机加工斜角金属色票槽（4-stop 釉面金属折痕 + 顶左镜面沿 + 底右暗沿）
+            g.setColour (PinkXP::dark.withAlpha (0.92f));
+            g.fillRect (r);
+            auto in = r.reduced (1);
+            juce::ColourGradient grad (fillColour.interpolatedWith (juce::Colours::white, 0.28f),
+                                       0.0f, (float) in.getY(),
+                                       fillColour.darker (0.14f),
+                                       0.0f, (float) in.getBottom(), false);
+            grad.addColour (0.38, fillColour.interpolatedWith (juce::Colours::white, 0.10f));
+            grad.addColour (0.42, fillColour);
+            g.setGradientFill (grad);
+            g.fillRect (in);
+
+            g.setColour (juce::Colours::white.withAlpha (0.60f));
+            g.fillRect (in.getX(), in.getY(), in.getWidth(), 1);
+            g.fillRect (in.getX(), in.getY(), 1, in.getHeight());
+            g.setColour (juce::Colours::black.withAlpha (0.28f));
+            g.fillRect (in.getX() + 1, in.getBottom() - 1, in.getWidth() - 1, 1);
+            g.fillRect (in.getRight() - 1, in.getY() + 1, 1, in.getHeight() - 1);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+        {
+            // Neon Cyber：暗烟熏外框 + 鲜明色芯 + 亮霓虹内沿
+            g.setColour (juce::Colour (0x0a, 0x08, 0x12));
+            g.fillRect (r);
+            g.setColour (fillColour);
+            g.fillRect (r.reduced (1));
+            g.setColour (fillColour.interpolatedWith (juce::Colours::white, 0.35f).withAlpha (0.85f));
+            g.drawRect (r, 1);
+        }
+        else // FrameStyle::crtPhosphor
+        {
+            g.setColour (fillColour);
+            g.fillRect (r.reduced (1));
+            g.setColour (juce::Colours::black.withAlpha (0.18f));
+            for (int py = r.getY() + 2; py < r.getBottom() - 1; py += 2)
+                g.fillRect (r.getX() + 1, py, r.getWidth() - 2, 1);
+            g.setColour (PinkXP::sel.withAlpha (0.80f));
+            g.drawRect (r, 1);
+        }
+
         if (withCornerMark)
         {
             juce::Path mark;
-            mark.startNewSubPath((float) r.getRight() - 1, (float) r.getY() + 1);
-            mark.lineTo((float) r.getRight() - 1, (float) r.getY() + 6);
-            mark.lineTo((float) r.getRight() - 6, (float) r.getY() + 1);
+            mark.startNewSubPath ((float) r.getRight() - 1, (float) r.getY() + 1);
+            mark.lineTo          ((float) r.getRight() - 1, (float) r.getY() + 6);
+            mark.lineTo          ((float) r.getRight() - 6, (float) r.getY() + 1);
             mark.closeSubPath();
-            g.setColour(PinkXP::ink);
-            g.fillPath(mark);
+            g.setColour (cornerInk);
+            g.fillPath (mark);
         }
 
         if (isCurrent)
         {
-            g.setColour(PinkXP::ink);
-            g.drawRect(r.expanded(2), 2);
+            if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+            {
+                // 亮金属激活表圈环（内暗槽分隔 + 外亮铬环 + 顶部/底部主题高光条）
+                g.setColour (PinkXP::dark.withAlpha (0.88f));
+                g.drawRect (r.expanded (1), 1);
+                g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.65f));
+                g.drawRect (r.expanded (2), 1);
+                g.setColour (PinkXP::sel);
+                g.fillRect (r.getX() - 1, r.getY() - 2, r.getWidth() + 2, 1);
+                g.fillRect (r.getX() - 1, r.getBottom() + 1, r.getWidth() + 2, 1);
+            }
+            else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+            {
+                // Neon Cyber：耀眼双层发光外光环
+                g.setColour (PinkXP::sel.withAlpha (0.34f));
+                g.drawRect (r.expanded (3), 1);
+                g.setColour (PinkXP::sel.withAlpha (0.68f));
+                g.drawRect (r.expanded (2), 1);
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f));
+                g.drawRect (r.expanded (1), 1);
+            }
+            else if (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+            {
+                // CRT Terminal：暗隔缝 + 反相亮荧光粗框
+                g.setColour (PinkXP::dark.withAlpha (0.85f));
+                g.drawRect (r.expanded (1), 1);
+                g.setColour (PinkXP::sel);
+                g.drawRect (r.expanded (2), 2);
+            }
+            else
+            {
+                g.setColour (PinkXP::ink);
+                g.drawRect (r.expanded (2), 2);
+            }
         }
         else if (isHover)
         {
-            g.setColour(PinkXP::ink.withAlpha(0.55f));
-            g.drawRect(r.expanded(1), 1);
+            if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+            {
+                g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.55f).withAlpha (0.90f));
+                g.drawRect (r.expanded (1), 1);
+            }
+            else
+            {
+                const auto hovCol = (tokens.frameStyle == PinkXP::FrameStyle::neonTube
+                                     || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+                                        ? PinkXP::sel.withAlpha (0.85f)
+                                        : PinkXP::ink.withAlpha (0.55f);
+                g.setColour (hovCol);
+                g.drawRect (r.expanded (1), 1);
+            }
         }
     };
 
-    // ---- 预设色票（12 个，外观不变）----
+    // ---- 预设色票（12 个）----
     const auto& themes = PinkXP::getAllThemes();
     for (int i = 0, n = juce::jmin (visiblePresetCount(), (int) themes.size()); i < n; ++i)
     {
         const auto& th = themes[(size_t) i];
-        drawSwatch(getPresetSwatchBounds(i), th.swatch,
-                   th.id == PinkXP::getCurrentThemeId(),
-                   hoverHit_.kind == 2 && hoverHit_.index == i,
-                   false);
+        drawSwatch (getPresetSwatchBounds (i), th.swatch,
+                    th.id == PinkXP::getCurrentThemeId(),
+                    hoverHit_.kind == 2 && hoverHit_.index == i,
+                    false);
     }
+
+    const bool keepCraftHover = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome
+                                 || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass
+                                 || tokens.frameStyle == PinkXP::FrameStyle::neonTube
+                                 || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
 
     // ---- "…"：装不下的预设收进这里（bug3）----
     if (const auto ov = overflowButtonBounds(); ! ov.isEmpty())
     {
-        const bool hovered = hoverHit_.kind == 6;
+        const bool hovered = (hoverHit_.kind == 6);
+        const auto ovFill  = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor && hovered) ? PinkXP::sel
+                           : (hovered && ! smoothChip && ! keepCraftHover) ? PinkXP::pink200
+                                                                           : PinkXP::btnFace;
+        PinkXP::Craft::drawControlChrome (g, ov, ovFill,
+                                          hovered ? PinkXP::ControlState::hover : PinkXP::ControlState::normal);
 
-        PinkXP::drawRaised (g, ov, PinkXP::btnFace);
-        if (hovered)
-        {
-            g.setColour (PinkXP::sel.withAlpha (0.35f));
-            g.fillRect (ov.reduced (1));
-        }
-
-        // 三个点用像素方块画（不依赖字体里有没有省略号字形）
-        const int dot = juce::jmax (2, PinkXP::ui (2));
-        const int gap = juce::jmax (1, PinkXP::ui (1));
+        // 三个点：像素/直角风格用锐利方块，平滑圆角风格用精致小圆点
+        const int dot    = juce::jmax (2, PinkXP::ui (2));
+        const int gap    = juce::jmax (1, PinkXP::ui (1));
         const int totalW = dot * 3 + gap * 2;
-        int dx = ov.getCentreX() - totalW / 2;
-        const int dy = ov.getCentreY() - dot / 2;
-        g.setColour (PinkXP::ink);
+        int dx           = ov.getCentreX() - totalW / 2;
+        const int dy     = ov.getCentreY() - dot / 2;
+        g.setColour (PinkXP::readableInkOn (ovFill));
         for (int i = 0; i < 3; ++i, dx += dot + gap)
-            g.fillRect (dx, dy, dot, dot);
+        {
+            if (smoothChip)
+                g.fillEllipse ((float) dx, (float) dy, (float) dot, (float) dot);
+            else
+                g.fillRect (dx, dy, dot, dot);
+        }
     }
 
     // ---- 我的主题（R1/R11：与预设同款色票 + 角标区分）----
@@ -5316,43 +6226,39 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
     const bool customActive = PinkXP::isCustomThemeActive();
     for (int i = 0, n = juce::jmin (visibleUserCount(), lib.size()); i < n; ++i)
     {
-        drawSwatch(getUserSwatchBounds(i),
-                   quickAccentForSpec(lib.themes()[(size_t) i].spec),
-                   customActive && PinkXP::getCustomThemeName() == lib.themes()[(size_t) i].name,
-                   hoverHit_.kind == 3 && hoverHit_.index == i,
-                   true);
+        drawSwatch (getUserSwatchBounds (i),
+                    quickAccentForSpec (lib.themes()[(size_t) i].spec),
+                    customActive && PinkXP::getCustomThemeName() == lib.themes()[(size_t) i].name,
+                    hoverHit_.kind == 3 && hoverHit_.index == i,
+                    true);
     }
 
-    // ---- "+" 新建/编辑入口（R1）----
+    // ---- "+" 新建/编辑入口（R1，经由 Craft::drawControlChrome 与当前风格统一）----
     {
         const auto r = getNewButtonBounds();
         if (r.getX() < getWidth() && r.getRight() > 0)
         {
-            g.setColour(PinkXP::dark);
-            g.fillRect(r.getX(), r.getY(), r.getWidth(), 1);
-            g.fillRect(r.getX(), r.getY(), 1, r.getHeight());
-            g.setColour(PinkXP::hl);
-            g.fillRect(r.getX() + 1, r.getBottom() - 1, r.getWidth() - 1, 1);
-            g.fillRect(r.getRight() - 1, r.getY() + 1, 1, r.getHeight() - 1);
-            g.setColour(PinkXP::btnFace);
-            g.fillRect(r.reduced(1));
-            g.setColour(PinkXP::ink);
-            g.setFont(PinkXP::getFont(11.0f, juce::Font::bold));
-            g.drawText(y2k::tr ("+"), r, juce::Justification::centred, false);
-            if (hoverHit_.kind == 4)
-            {
-                g.setColour(PinkXP::ink.withAlpha(0.55f));
-                g.drawRect(r.expanded(1), 1);
-            }
+            const bool hovered = (hoverHit_.kind == 4);
+            const auto fill    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor && hovered) ? PinkXP::sel
+                               : (hovered && ! smoothChip && ! keepCraftHover) ? PinkXP::pink200
+                                                                               : PinkXP::btnFace;
+            PinkXP::Craft::drawControlChrome (g, r, fill,
+                                              hovered ? PinkXP::ControlState::hover : PinkXP::ControlState::normal);
+            PinkXP::SymbolGlyphs::drawIconGlyph (g, "+", r, 11.0f, PinkXP::readableInkOn (fill), 0, 0);
         }
     }
 
-    // ---- 视觉风格入口（SKIN）：外观本身随当前风格绘制，所见即所选 ----
+    // ---- 视觉风格入口（SKIN）：经由 Craft::drawControlChrome 绘制，所见即所选 ----
     const auto skinBtn = skinButtonBoundsAfter (getNewButtonBounds());
     if (skinBtn.getX() < getWidth() && skinBtn.getRight() > 0)
     {
-        PinkXP::drawRaised (g, skinBtn, hoverHit_.kind == 5 ? PinkXP::pink200 : PinkXP::btnFace);
-        g.setColour (PinkXP::ink);
+        const bool hovered = (hoverHit_.kind == 5);
+        const auto fill    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor && hovered) ? PinkXP::sel
+                           : (hovered && ! smoothChip && ! keepCraftHover) ? PinkXP::pink200
+                                                                           : PinkXP::btnFace;
+        PinkXP::Craft::drawControlChrome (g, skinBtn, fill,
+                                          hovered ? PinkXP::ControlState::hover : PinkXP::ControlState::normal);
+        g.setColour (PinkXP::readableInkOn (fill));
         PinkXP::SymbolGlyphs::drawText (g, skinButtonText(), skinBtn,
                                         juce::Justification::centred, skinButtonFont());
     }
@@ -5361,11 +6267,11 @@ void ThemeSwatchBar::paint(juce::Graphics& g)
     {
         const auto& th = PinkXP::getCurrentTheme();
         const int tx = skinBtn.getRight() + PinkXP::ui (kGroupGap);
-        const int tw = juce::jmax(0, getWidth() - tx - PinkXP::ui (kBarRightPad));
+        const int tw = juce::jmax (0, getWidth() - tx - PinkXP::ui (kBarRightPad));
         if (tw > 10 && tx < getWidth())
         {
             const juce::String shown = y2k::tr (th.displayName);
-            g.setColour(PinkXP::ink);
+            g.setColour (PinkXP::readableInkOn (PinkXP::btnFace));
             PinkXP::SymbolGlyphs::drawText (g, shown,
                                             { tx, 0, tw, getHeight() },
                                             juce::Justification::centredLeft,
@@ -5413,7 +6319,7 @@ void ThemeSwatchBar::mouseMove(const juce::MouseEvent& e)
                                             "Switch the shape and texture of the whole interface.\n"
                                             "Colours still follow the current theme.\n"
                                             "Each style also brings its own font.\n"
-                                            "Green Screen: everything except the meter data turns pure green for keying."));
+                                            "Backdrop Mode: switch between Normal, Green Screen (chroma key) and Transparent Overlay while keeping your chosen visual style."));
                 break;
             default:
                 setTooltip({});
@@ -5465,12 +6371,26 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
 
     if (h.kind == 5)
     {
-        // 视觉风格菜单：条目 id = SkinId + 1（0 保留给"未选择"）
+        // 视觉风格与背景模式菜单（两者完全正交）：
+        //   · 顶层 6 项纯视觉风格（id = 1 + (int) s.id，仅切 SkinId，保留 BackdropMode）
+        //   · 二级子菜单 Backdrop Mode（id 100/101/102，仅切 BackdropMode，保留 SkinId）
         juce::PopupMenu m;
         m.setLookAndFeel (&getPinkXPLookAndFeel());
-        const auto current = PinkXP::getCurrentSkin();
+        const auto currentSkin     = PinkXP::getCurrentSkin();
+        const auto currentBackdrop = PinkXP::getBackdropMode();
+
         for (const auto& s : PinkXP::getAllSkins())
-            m.addItem (1 + (int) s.id, s.displayName, true, s.id == current);
+            m.addItem (1 + (int) s.id, s.displayName, true, s.id == currentSkin);
+
+        m.addSeparator();
+
+        juce::PopupMenu sub;
+        sub.addItem (100, y2k::tr ("Normal (Opaque)"),     true, currentBackdrop == PinkXP::BackdropMode::normal);
+        sub.addItem (101, y2k::tr ("Green Screen"),        true, currentBackdrop == PinkXP::BackdropMode::greenScreen);
+        sub.addItem (102, y2k::tr ("Transparent Overlay"), true, currentBackdrop == PinkXP::BackdropMode::transparent);
+        m.addSubMenu (y2k::tr ("Backdrop Mode"), sub, true,
+                      std::unique_ptr<juce::Drawable>(),
+                      currentBackdrop != PinkXP::BackdropMode::normal);
 
         const auto area = localAreaToGlobal (skinButtonBoundsAfter (getNewButtonBounds()));
 
@@ -5488,7 +6408,17 @@ void ThemeSwatchBar::mouseDown(const juce::MouseEvent& e)
                          {
                              if (result <= 0)
                                  return;
-                             PinkXP::applySkin (PinkXP::skinFromInt (result - 1));
+                             if (result >= 100 && result <= 102)
+                             {
+                                 const auto mode = (result == 101) ? PinkXP::BackdropMode::greenScreen
+                                                 : (result == 102) ? PinkXP::BackdropMode::transparent
+                                                                   : PinkXP::BackdropMode::normal;
+                                 PinkXP::applyBackdropMode (mode);
+                             }
+                             else if (result >= 1 && result < 100)
+                             {
+                                 PinkXP::applySkin (PinkXP::skinFromInt (result - 1));
+                             }
                              if (safe == nullptr)
                                  return;
                              if (auto* top = safe->getTopLevelComponent()) top->repaint();
@@ -5592,6 +6522,15 @@ void HideChromeButton::mouseExit(const juce::MouseEvent& e)
 
 void HideChromeButton::updateAlpha()
 {
+    if (PinkXP::isTransparentBackdrop())
+    {
+        if (auto* parent = getParentComponent(); parent != nullptr && ! PinkXP::isChromaRevealed (*parent))
+        {
+            setAlpha (0.0f);
+            return;
+        }
+    }
+
     // dimWhenIdle=false：始终不透明
     // dimWhenIdle=true ：鼠标悬停/按下时不透明；否则半透明
     if (! dimWhenIdle)
@@ -5607,32 +6546,51 @@ void HideChromeButton::updateAlpha()
 void HideChromeButton::paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown)
 {
     auto r = getLocalBounds();
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool smoothBtn = (! tokens.pixelSnapped && tokens.controlRadius > 0.5f);
+    const bool keepCraftHover = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome
+                                 || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass
+                                 || tokens.frameStyle == PinkXP::FrameStyle::neonTube
+                                 || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const auto fill = (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel)
+                        ? (isButtonDown ? PinkXP::btnFace : (isMouseOver ? PinkXP::pink100 : PinkXP::btnFace))
+                    : (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor && (isButtonDown || isMouseOver))
+                        ? PinkXP::sel
+                    : ((tokens.frameStyle == PinkXP::FrameStyle::frostedGlass
+                        || tokens.frameStyle == PinkXP::FrameStyle::neonTube) && isButtonDown)
+                        ? PinkXP::sel
+                        : (isButtonDown ? PinkXP::pink100
+                                        : ((isMouseOver && ! smoothBtn && ! keepCraftHover) ? PinkXP::pink100 : PinkXP::btnFace));
 
-    // Pink XP 风小按钮：凸起 / 按下凹陷（用 btnFace 保证深色主题下也可读）
-    if (isButtonDown)
-        PinkXP::drawPressed(g, r, PinkXP::btnFace);
+    if (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel)
+    {
+        // Pixel XP：保留经典 Win95 硬斜角按钮质感
+        if (isButtonDown)
+            PinkXP::drawPressed (g, r, PinkXP::btnFace);
+        else
+            PinkXP::drawRaised (g, r, isMouseOver ? PinkXP::pink100 : PinkXP::btnFace);
+    }
     else
-        PinkXP::drawRaised(g, r, isMouseOver ? PinkXP::pink100 : PinkXP::btnFace);
+    {
+        const auto state = ! isEnabled()  ? PinkXP::ControlState::disabled
+                         : isButtonDown   ? PinkXP::ControlState::pressed
+                         : isMouseOver    ? PinkXP::ControlState::hover
+                                          : PinkXP::ControlState::normal;
+        PinkXP::Craft::drawControlChrome (g, r, fill, state);
+    }
 
-    // 按钮文字
-    //   字号与 gridBtn / gainBtn / saveBtn 等普通 TextButton 保持一致：
-    //   与 PinkXPLookAndFeel::drawButtonText 相同，直接固定 12pt（getFont 内部
-    //   会做 1.5x 放大 + uiScale）。历史实现用 r.getHeight()*0.55，但按钮高度
-    //   已是物理像素（PinkXP::ui(22) 乘过 uiScale），getFont 又乘一次 uiScale
-    //   → 双重缩放。低分辨率屏幕（uiScale<1）下字号被压小，高分屏被放大，
-    //   win/mac 两端同源，只是低分辨率设备上更明显。
     // 与 PinkXPLookAndFeel::drawButtonText 同一套口径：字号上限 + 光学居中
-    const auto btnFont = PinkXP::fitFontToHeight (PinkXP::getFont(12.0f, juce::Font::bold),
+    const auto btnFont = PinkXP::fitFontToHeight (PinkXP::getFont (12.0f, juce::Font::bold),
                                                   (float) r.getHeight());
-    g.setFont(btnFont);
-    g.setColour(PinkXP::ink);
+    g.setFont (btnFont);
+    g.setColour (PinkXP::readableInkOn (fill));
     // 水平 padding 只留 1px —— "Show" 四个像素字母 + 字符间距比 "Hide" 宽，
     //   之前 reduced(4, 2) 会在 btnW=52 / font≈12pt 下把 "w" 切掉半像素。
-    auto textArea = r.reduced(1, 2);
-    if (isButtonDown) textArea.translate(1, 1);
-    g.drawText(y2k::tr (getButtonText()),
-               textArea.toFloat().translated (0.0f, PinkXP::opticalNudge (btnFont)),
-               juce::Justification::centred, false);
+    auto textArea = r.reduced (1, 2);
+    if (isButtonDown) textArea.translate (1, 1);
+    g.drawText (y2k::tr (getButtonText()),
+                textArea.toFloat().translated (0.0f, PinkXP::opticalNudge (btnFont)),
+                juce::Justification::centred, false);
 }
 
 // ==========================================================
@@ -6011,7 +6969,11 @@ void ModuleWorkspace::filesDropped (const juce::StringArray& files, int x, int y
         if (addPerlerImageFromFile (juce::File (f), dropPos))
             any = true;
     }
-    if (any) repaint();
+    if (any)
+    {
+        repaint();
+        commitUndoFromBaseline (y2k::tr ("Add sticker"), {}, true);
+    }
 }
 
 // ----------------------------------------------------------
@@ -6325,6 +7287,7 @@ void ModuleWorkspace::mouseUp (const juce::MouseEvent&)
             }
         }
         notifyLayoutChanged();
+        commitUndoFromBaseline (y2k::tr ("Edit sticker"), {}, true);
         return;
     }
 
@@ -6334,6 +7297,7 @@ void ModuleWorkspace::mouseUp (const juce::MouseEvent&)
         opacityDraggingIdx = -1;
         setMouseCursor (juce::MouseCursor::NormalCursor);
         notifyLayoutChanged();   // 透明度作为 perlerImage 状态的一部分需要保存
+        commitUndoFromBaseline (y2k::tr ("Edit sticker"), {}, true);
         return;
     }
 
@@ -6380,6 +7344,7 @@ void ModuleWorkspace::mouseUp (const juce::MouseEvent&)
             if (! newCheck.isEmpty()) refresh = refresh.getUnion (newCheck);
             if (! refresh.isEmpty()) repaint (refresh);
             notifyLayoutChanged();
+            commitUndoFromBaseline (y2k::tr ("Edit sticker"), {}, true);
         }
 
         resizingPerlerIdx   = -1;
@@ -6397,6 +7362,7 @@ void ModuleWorkspace::mouseUp (const juce::MouseEvent&)
         draggingPerlerIdx = -1;
         setMouseCursor (juce::MouseCursor::NormalCursor);
         notifyLayoutChanged();
+        commitUndoFromBaseline (y2k::tr ("Edit sticker"), {}, true);
     }
 }
 
@@ -6486,7 +7452,7 @@ void ModuleWorkspace::mouseExit (const juce::MouseEvent& e)
     if (deleteBtnHovered)
     {
         deleteBtnHovered = false;
-        if (focusedPerlerIdx >= 0 && focusedPerlerIdx < perlerImages.size())
+        if (! PinkXP::isChromaKeySkin() && focusedPerlerIdx >= 0 && focusedPerlerIdx < perlerImages.size())
             if (auto* fimg = perlerImages.getUnchecked (focusedPerlerIdx))
                 repaint (getDeleteBtnRect (fimg->getBounds()).expanded (2));
     }
@@ -6702,8 +7668,7 @@ juce::Rectangle<int> ModuleWorkspace::getPerlerBeadsCheckboxBoxRect (juce::Recta
 // ----------------------------------------------------------
 // 以 "圆环模式" 渲染一张拼豆贴画（见 PerlerImage::perlerBeadsMode）
 //   · 读取 pixelImage 每个 cell 的中心像素颜色
-//   · 外圆填充 cell，内圆镂空 → 使用非零环绕填充得到环形
-//   · 与 EqModule::drawEq 中的 "珠子" 视觉比例一致（内径 ≈ cell * 0.2）
+//   · 外圆填充 cell，内圆镂空 → 使用非零环绕填充得到环形（内径 ≈ cell * 0.2）
 // ----------------------------------------------------------
 void ModuleWorkspace::drawPerlerImageAsBeads (juce::Graphics& g, const PerlerImage& img, float opacity) const
 {
@@ -6722,7 +7687,7 @@ void ModuleWorkspace::drawPerlerImageAsBeads (juce::Graphics& g, const PerlerIma
     const juce::Image::BitmapData pixels (img.pixelImage, juce::Image::BitmapData::readOnly);
 
     const float outerR = (float) cs * 0.5f;
-    // 与 EqModule 一致的"珠子"内径比例；但当 cellSize 很小时保证至少 1px 以产生可见镂空
+    // "珠子"内径比例；但当 cellSize 很小时保证至少 1px 以产生可见镂空
     float innerR = (float) cs * 0.20f;
     if (cs <= 2) innerR = 0.0f;                    // 太小直接画实心点
     else         innerR = juce::jmax (innerR, 1.0f);
@@ -6983,6 +7948,9 @@ void ModuleWorkspace::deleteFocusedPerlerImage()
     if (! checkRect.isEmpty())
         dirty = dirty.getUnion (checkRect.expanded (4));
 
+    const juce::ValueTree beforeUndo = (! suspendNotifications && ! undoSuspended_)
+                                           ? saveLayoutTree() : juce::ValueTree();
+
     // 同步删除对应的 layer 子组件
     //   · 先删 layer（OwnedArray 会自动 delete Component，也会从 workspace
     //     的子组件列表移除），再删数据结构，避免 layer->img 的悬垂指针
@@ -6998,13 +7966,18 @@ void ModuleWorkspace::deleteFocusedPerlerImage()
     deleteBtnPressed    = false;
     repaint (dirty);
     notifyLayoutChanged();
+    if (beforeUndo.isValid())
+        recordUndoStep (beforeUndo, saveLayoutTree(), y2k::tr ("Delete sticker"), {}, true);
 }
 
 // ----------------------------------------------------------
-// 键盘：Delete 删除聚焦图片
+// 键盘：Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤回重做 + Delete 删除聚焦图片
 // ----------------------------------------------------------
 bool ModuleWorkspace::keyPressed (const juce::KeyPress& key)
 {
+    if (handleUndoRedoKeyPress (key))
+        return true;
+
     if (focusedPerlerIdx >= 0
         && (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey))
     {
@@ -7017,4 +7990,615 @@ bool ModuleWorkspace::keyPressed (const juce::KeyPress& key)
 void ModuleWorkspace::updatePerlerCursorFor (juce::Point<int> /*canvasPos*/)
 {
     // 保留占位：未来可根据命中的 handle 设置 LeftRight/UpDown/Diagonal 光标
+}
+
+// ==========================================================
+// v3.5 全局撤回 / 重做（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y）
+// ==========================================================
+namespace
+{
+    bool arePerlerNodesEqual (const juce::ValueTree& a, const juce::ValueTree& b)
+    {
+        std::vector<juce::ValueTree> pa, pb;
+        for (int i = 0; i < a.getNumChildren(); ++i)
+            if (a.getChild (i).hasType (kLayoutPerler))
+                pa.push_back (a.getChild (i));
+        for (int i = 0; i < b.getNumChildren(); ++i)
+            if (b.getChild (i).hasType (kLayoutPerler))
+                pb.push_back (b.getChild (i));
+        if (pa.size() != pb.size())
+            return false;
+        for (size_t i = 0; i < pa.size(); ++i)
+            if (! pa[i].isEquivalentTo (pb[i]))
+                return false;
+        return true;
+    }
+}
+
+void ModuleWorkspace::resetUndoHistory()
+{
+    undoStack_.clear();
+    redoStack_.clear();
+    undoTransactionDepth_ = 0;
+    undoTransactionBefore_ = juce::ValueTree();
+    undoTransactionBeforeWindow_ = juce::ValueTree();
+    undoTransactionCaptureWindow_ = false;
+    pendingPreChangeTree_  = juce::ValueTree();
+    gainDragPreChangeTree_ = juce::ValueTree();
+    gainDragDirty_         = false;
+    undoBaselineTree_ = saveLayoutTree();
+}
+
+void ModuleWorkspace::syncUndoBaseline()
+{
+    undoBaselineTree_ = saveLayoutTree();
+}
+
+void ModuleWorkspace::breakUndoCoalesce() noexcept
+{
+    if (! undoStack_.empty())
+        undoStack_.back().coalesceKey.clear();
+}
+
+void ModuleWorkspace::beginUndoTransaction (const juce::String& description,
+                                            bool structural,
+                                            bool captureWindow)
+{
+    if (undoTransactionDepth_ == 0)
+    {
+        undoTransactionBefore_        = saveLayoutTree();
+        undoTransactionBeforeWindow_  = (captureWindow && onCaptureHostWindowState)
+                                            ? onCaptureHostWindowState() : juce::ValueTree();
+        undoTransactionDesc_          = description;
+        undoTransactionStructural_    = structural;
+        undoTransactionCaptureWindow_ = captureWindow;
+        undoSuspended_                = true;
+    }
+    ++undoTransactionDepth_;
+}
+
+void ModuleWorkspace::endUndoTransaction()
+{
+    if (undoTransactionDepth_ <= 0)
+        return;
+
+    --undoTransactionDepth_;
+    if (undoTransactionDepth_ > 0)
+        return;
+
+    undoSuspended_ = false;
+    const auto after = saveLayoutTree();
+    const auto afterWin = (undoTransactionCaptureWindow_ && onCaptureHostWindowState)
+                              ? onCaptureHostWindowState() : juce::ValueTree();
+    if (undoTransactionBefore_.isValid())
+        recordUndoStep (undoTransactionBefore_, after, undoTransactionDesc_, {},
+                        undoTransactionStructural_, undoTransactionBeforeWindow_, afterWin);
+    else
+        undoBaselineTree_ = after;
+
+    undoTransactionBefore_        = juce::ValueTree();
+    undoTransactionBeforeWindow_  = juce::ValueTree();
+    undoTransactionDesc_.clear();
+    undoTransactionCaptureWindow_ = false;
+}
+
+void ModuleWorkspace::recordUndoStep (const juce::ValueTree& before,
+                                      const juce::ValueTree& after,
+                                      const juce::String& description,
+                                      const juce::String& coalesceKey,
+                                      bool structural,
+                                      const juce::ValueTree& beforeWindow,
+                                      const juce::ValueTree& afterWindow,
+                                      const juce::String& targetModuleId,
+                                      const juce::String& targetFocusHint)
+{
+    if (undoSuspended_ || suspendNotifications)
+        return;
+
+    if (! before.isValid() || ! after.isValid())
+    {
+        undoBaselineTree_ = after;
+        return;
+    }
+
+    const bool winChanged = beforeWindow.isValid() && afterWindow.isValid()
+                            && ! beforeWindow.isEquivalentTo (afterWindow);
+    if (before.isEquivalentTo (after) && ! winChanged)
+    {
+        undoBaselineTree_ = after;
+        return;
+    }
+
+    const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
+
+    // 同一连续滑块的密集修改（如拖动滑条 60 次 onValueChange）合并为单条撤回记录
+    if (coalesceKey.isNotEmpty()
+        && ! undoStack_.empty()
+        && undoStack_.back().coalesceKey == coalesceKey
+        && (nowMs - undoStack_.back().timestampMs) <= 800u)
+    {
+        undoStack_.back().afterTree   = after.createCopy();
+        undoStack_.back().timestampMs = nowMs;
+        if (targetModuleId.isNotEmpty())
+            undoStack_.back().targetModuleId = targetModuleId;
+        if (targetFocusHint.isNotEmpty())
+            undoStack_.back().targetFocusHint = targetFocusHint;
+        if (undoStack_.back().afterTree.isEquivalentTo (undoStack_.back().beforeTree))
+            undoStack_.pop_back();
+        redoStack_.clear();
+        undoBaselineTree_ = after;
+        return;
+    }
+
+    UndoEntry entry;
+    entry.beforeTree        = before.createCopy();
+    entry.afterTree         = after.createCopy();
+    if (beforeWindow.isValid()) entry.beforeWindowState = beforeWindow.createCopy();
+    if (afterWindow.isValid())  entry.afterWindowState  = afterWindow.createCopy();
+    entry.description       = description;
+    entry.coalesceKey       = coalesceKey;
+    entry.targetModuleId    = targetModuleId;
+    entry.targetFocusHint   = targetFocusHint;
+    entry.timestampMs       = nowMs;
+    entry.structural        = structural;
+
+    undoStack_.push_back (std::move (entry));
+    if (undoStack_.size() > kMaxUndoSteps)
+        undoStack_.erase (undoStack_.begin());
+
+    redoStack_.clear();
+    undoBaselineTree_ = after;
+}
+
+void ModuleWorkspace::commitUndoFromBaseline (const juce::String& description,
+                                              const juce::String& coalesceKey,
+                                              bool structural,
+                                              const juce::String& targetModuleId,
+                                              const juce::String& targetFocusHint)
+{
+    if (undoSuspended_ || suspendNotifications)
+        return;
+
+    const auto after = saveLayoutTree();
+    if (! undoBaselineTree_.isValid())
+    {
+        undoBaselineTree_ = after;
+        return;
+    }
+
+    recordUndoStep (undoBaselineTree_, after, description, coalesceKey, structural,
+                    {}, {}, targetModuleId, targetFocusHint);
+}
+
+void ModuleWorkspace::restoreSnapshotInPlace (const juce::ValueTree& targetTree)
+{
+    if (! targetTree.hasType (kLayoutRoot) || factory == nullptr)
+        return;
+
+    const juce::ScopedValueSetter<bool> suspendNotif (suspendNotifications, true);
+    const juce::ScopedValueSetter<bool> suspendUndo  (undoSuspended_, true);
+
+    layoutChangeCoalescer.stopTimer();
+    layoutChangePending = false;
+    pendingPreChangeTree_  = juce::ValueTree();
+    gainDragPreChangeTree_ = juce::ValueTree();
+    gainDragDirty_         = false;
+
+    // 1) 恢复网格可见性
+    if (targetTree.hasProperty ("gridVisible"))
+    {
+        const bool targetGrid = (bool) targetTree.getProperty ("gridVisible");
+        if (targetGrid != gridOverlayVisible)
+        {
+            gridOverlayVisible = targetGrid;
+            gridBtn.setToggleState (gridOverlayVisible, juce::dontSendNotification);
+            canvasBgCacheDirty = true;
+        }
+    }
+
+    // 2) 恢复全局分析输入增益
+    if (targetTree.hasProperty ("inputGainDb"))
+    {
+        const float targetGain = (float) (double) targetTree.getProperty ("inputGainDb", 0.0);
+        if (std::abs (targetGain - inputGainDb) > 0.0001f)
+        {
+            setInputGainDb (targetGain);
+            if (onInputGainChanged)
+                onInputGainChanged (inputGainDb);
+        }
+    }
+
+    // 3) 收集目标模块列表并比对当前存活模块（同 id + 同 type 就地保留，不销毁重建）
+    struct TargetMod
+    {
+        juce::ValueTree node;
+        ModuleType      type {};
+        juce::String    id;
+    };
+    std::vector<TargetMod> targets;
+    targets.reserve ((size_t) targetTree.getNumChildren());
+
+    for (int i = 0; i < targetTree.getNumChildren(); ++i)
+    {
+        const auto node = targetTree.getChild (i);
+        if (! node.hasType (kLayoutModule))
+            continue;
+        if ((bool) node.getProperty (kPropFloating, false))
+            continue;
+
+        bool ok = false;
+        const auto type = stringToModuleType (node.getProperty (kPropType).toString(), &ok);
+        if (! ok)
+            continue;
+
+        targets.push_back ({ node, type, node.getProperty (kPropId).toString() });
+    }
+
+    // 标记哪些当前存活模块需要保留
+    std::unordered_map<juce::String, ModulePanel*> keepById;
+    for (auto* m : modules)
+    {
+        if (m == nullptr) continue;
+        for (const auto& t : targets)
+        {
+            if (t.id.isNotEmpty() && m->getModuleId() == t.id && m->getModuleType() == t.type)
+            {
+                keepById[t.id] = m;
+                break;
+            }
+        }
+    }
+
+    // 移除不在目标快照中的模块
+    for (int i = modules.size(); --i >= 0;)
+    {
+        auto* m = modules.getUnchecked (i);
+        const bool keep = (m != nullptr && keepById.find (m->getModuleId()) != keepById.end());
+        if (! keep)
+        {
+            if (maximizedPanel.getComponent() == m)
+                maximizedPanel = nullptr;
+            if (m != nullptr)
+                m->setControlPanelOpen (false);
+            modules.remove (i);
+        }
+    }
+
+    // 重建被删模块 + 就地更新保留模块（恢复几何、z-order、最大化态与各自 <state>）
+    maximizedPanel = nullptr;
+    maximizedRestoreBounds = {};
+    maximizedAppliedSize   = {};
+    maximizedCanvasSize    = {};
+
+    int maxId = 0;
+    for (const auto& t : targets)
+    {
+        ModulePanel* panel = nullptr;
+        auto it = keepById.find (t.id);
+        const bool isKept = (it != keepById.end());
+
+        if (isKept)
+        {
+            panel = it->second;
+            if (t.id.isNotEmpty())
+                maxId = juce::jmax (maxId, t.id.getIntValue());
+        }
+        else
+        {
+            auto created = factory (t.type);
+            if (created == nullptr)
+                continue;
+            if (t.id.isNotEmpty())
+            {
+                created->setModuleId (t.id);
+                maxId = juce::jmax (maxId, t.id.getIntValue());
+            }
+            else
+            {
+                created->setModuleId (juce::String (nextIdCounter++));
+            }
+            panel = created.get();
+            addAndMakeVisible (*panel);
+            hookPanel (*panel);
+            modules.add (created.release());
+        }
+
+        const int x = (int) t.node.getProperty (kPropX, 0);
+        const int y = (int) t.node.getProperty (kPropY, 0);
+        const int w = juce::jmax (panel->getMinWidth(),  (int) t.node.getProperty (kPropW, panel->getDefaultWidth()));
+        const int h = juce::jmax (panel->getMinHeight(), (int) t.node.getProperty (kPropH, panel->getDefaultHeight()));
+        const juce::Rectangle<int> targetBounds { x, y, w, h };
+
+        if (panel->getBounds() != targetBounds)
+            panel->setBounds (targetBounds);
+
+        if (t.type == ModuleType::virtuPet)
+        {
+            if (auto* virtuPet = dynamic_cast<VirtuPetModule*> (panel))
+            {
+                const auto savedRole    = t.node.getProperty (kPropVirtuPetRoleName).toString();
+                const float savedHunger = (float) (double) t.node.getProperty (kPropVirtuPetHunger, 75.0);
+                const float savedHealth = (float) (double) t.node.getProperty (kPropVirtuPetHealth, 75.0);
+                virtuPet->restorePersistentState (savedRole, savedHunger, savedHealth);
+            }
+        }
+
+        const auto stateChild = t.node.getChildWithName ("state");
+        if (stateChild.isValid())
+        {
+            const bool needRestore = (! isKept) || (! stateChild.isEquivalentTo (panel->saveModuleSpecificState()));
+            if (needRestore)
+                panel->restoreModuleSpecificState (stateChild);
+        }
+
+        if ((bool) t.node.getProperty (kPropMaximized, false))
+        {
+            maximizedPanel = panel;
+            maximizedRestoreBounds = {
+                (int) t.node.getProperty (kPropRestoreX, x),
+                (int) t.node.getProperty (kPropRestoreY, y),
+                juce::jmax (panel->getMinWidth(),  (int) t.node.getProperty (kPropRestoreW, panel->getDefaultWidth())),
+                juce::jmax (panel->getMinHeight(), (int) t.node.getProperty (kPropRestoreH, panel->getDefaultHeight()))
+            };
+            maximizedAppliedSize = { panel->getWidth(), panel->getHeight() };
+            const auto canvasNow = getCanvasArea();
+            maximizedCanvasSize  = { canvasNow.getWidth(), canvasNow.getHeight() };
+        }
+
+        panel->toFront (false);
+    }
+
+    nextIdCounter = juce::jmax (nextIdCounter, maxId + 1);
+
+    // 4) 仅当拼豆贴画节点确实变化时才重建贴画（避免普通参数撤回触发磁盘重新解码图片）
+    const auto curTree = saveLayoutTree();
+    if (! arePerlerNodesEqual (curTree, targetTree))
+    {
+        perlerLayers.clear();
+        perlerImages.clear();
+        focusedPerlerIdx    = -1;
+        draggingPerlerIdx   = -1;
+        resizingPerlerIdx   = -1;
+        cellSizeDraggingIdx = -1;
+        pendingCellSize     = -1;
+        opacityDraggingIdx  = -1;
+        activeResizeHandle  = ResizeHandle::none;
+
+        for (int i = 0; i < targetTree.getNumChildren(); ++i)
+        {
+            const auto node = targetTree.getChild (i);
+            if (! node.hasType (kLayoutPerler))
+                continue;
+            const auto path = node.getProperty (kPropPath).toString();
+            if (path.isEmpty()) continue;
+            const juce::File f (path);
+            if (! f.existsAsFile()) continue;
+
+            const int  cw    = (int) node.getProperty (kPropCellsW,   0);
+            const int  ch    = (int) node.getProperty (kPropCellsH,   0);
+            const int  cs    = (int) node.getProperty (kPropCellSize, 0);
+            const int  px    = (int) node.getProperty (kPropX,        0);
+            const int  py    = (int) node.getProperty (kPropY,        0);
+            const bool beads = (bool) node.getProperty (kPropPerlerBeads, false);
+            const float op   = (float) (double) node.getProperty (kPropOpacity, 1.0);
+            const juce::Point<int> tl { px, py };
+            addPerlerImageFromFile (f, { 0, 0 }, cw, ch, &tl, cs);
+            if (perlerImages.size() > 0)
+            {
+                auto* last = perlerImages.getLast();
+                if (beads) last->perlerBeadsMode = true;
+                last->opacity = juce::jlimit (0.0f, 1.0f, op);
+            }
+        }
+    }
+
+    raisePerlerLayersAboveModules();
+    if (toolbarOverlayRevealed)
+        raiseToolbarOverlay();
+    else
+        hideBtn.toFront (false);
+
+    ModulePanel::relayoutOpenControlDrawers();
+    undoBaselineTree_ = saveLayoutTree();
+    repaint();
+}
+
+void ModuleWorkspace::revealUndoTarget (const UndoEntry& entry)
+{
+    const juce::ScopedValueSetter<bool> suspendUndo (undoSuspended_, true);
+
+    if (entry.targetModuleId.isNotEmpty())
+    {
+        if (gainPopupVisible)
+            setGainPopupVisible (false);
+
+        for (auto* m : modules)
+        {
+            if (m != nullptr && m->getModuleId() == entry.targetModuleId)
+            {
+                m->revealUndoTarget (entry.targetFocusHint);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (entry.targetFocusHint == "workspace:inputGain")
+    {
+        if (! gainPopupVisible && isToolbarShown())
+            setGainPopupVisible (true);
+    }
+}
+
+bool ModuleWorkspace::undo()
+{
+    if (undoStack_.empty())
+    {
+        showStatusToast (y2k::tr ("Nothing to undo"));
+        return false;
+    }
+
+    if (layoutLocked && undoStack_.back().structural)
+    {
+        showStatusToast (y2k::tr ("Layout is locked (L) - unlock to undo layout changes."));
+        return false;
+    }
+
+    UndoEntry entry = std::move (undoStack_.back());
+    undoStack_.pop_back();
+
+    // 先恢复宿主主窗口尺寸/位置/约束（如切换布局预设前），再恢复模块坐标，避免旧模块被新窗口尺寸误夹紧
+    if (entry.beforeWindowState.isValid() && onRestoreHostWindowState)
+    {
+        const juce::ScopedValueSetter<bool> suspendNotif (suspendNotifications, true);
+        const juce::ScopedValueSetter<bool> suspendUndo  (undoSuspended_, true);
+        onRestoreHostWindowState (entry.beforeWindowState);
+    }
+
+    restoreSnapshotInPlace (entry.beforeTree);
+    revealUndoTarget (entry);
+    redoStack_.push_back (entry);
+    if (redoStack_.size() > kMaxUndoSteps)
+        redoStack_.erase (redoStack_.begin());
+
+    notifyLayoutChanged();
+    showStatusToast (y2k::trf ("Undo: {0}", y2k::tr (entry.description)));
+    return true;
+}
+
+bool ModuleWorkspace::redo()
+{
+    if (redoStack_.empty())
+    {
+        showStatusToast (y2k::tr ("Nothing to redo"));
+        return false;
+    }
+
+    if (layoutLocked && redoStack_.back().structural)
+    {
+        showStatusToast (y2k::tr ("Layout is locked (L) - unlock to redo layout changes."));
+        return false;
+    }
+
+    UndoEntry entry = std::move (redoStack_.back());
+    redoStack_.pop_back();
+
+    if (entry.afterWindowState.isValid() && onRestoreHostWindowState)
+    {
+        const juce::ScopedValueSetter<bool> suspendNotif (suspendNotifications, true);
+        const juce::ScopedValueSetter<bool> suspendUndo  (undoSuspended_, true);
+        onRestoreHostWindowState (entry.afterWindowState);
+    }
+
+    restoreSnapshotInPlace (entry.afterTree);
+    revealUndoTarget (entry);
+    undoStack_.push_back (entry);
+    if (undoStack_.size() > kMaxUndoSteps)
+        undoStack_.erase (undoStack_.begin());
+
+    notifyLayoutChanged();
+    showStatusToast (y2k::trf ("Redo: {0}", y2k::tr (entry.description)));
+    return true;
+}
+
+bool ModuleWorkspace::handleUndoRedoKeyPress (const juce::KeyPress& key)
+{
+    // 若用户正在便签 / 音频换算 / 调色板命名 / 滑块文本框里打字，把 Ctrl+Z 留给 TextEditor 原生文字撤回
+    if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+        return false;
+
+    const auto mods = key.getModifiers();
+    const bool ctrlOrCmd = mods.isCommandDown() || mods.isCtrlDown();
+    if (! ctrlOrCmd || mods.isAltDown())
+        return false;
+
+    const int kc = key.getKeyCode();
+    if (! mods.isShiftDown() && (kc == 'Z' || kc == 'z'))
+    {
+        undo();
+        return true;
+    }
+    if ((mods.isShiftDown() && (kc == 'Z' || kc == 'z'))
+        || (! mods.isShiftDown() && (kc == 'Y' || kc == 'y')))
+    {
+        redo();
+        return true;
+    }
+    return false;
+}
+
+void ModuleWorkspace::showStatusToast (const juce::String& text)
+{
+    if (text.isEmpty())
+        return;
+
+    const auto oldBounds = lastToastBounds_;
+    toastText_    = text;
+    toastStartMs_ = juce::Time::getMillisecondCounter();
+    toastTimer_.startTimer (33);
+
+    if (! oldBounds.isEmpty())
+        repaint (oldBounds.expanded (4));
+    repaint (getCanvasArea().withHeight (juce::jmin (48, getCanvasArea().getHeight())));
+}
+
+void ModuleWorkspace::ToastTimer::timerCallback()
+{
+    const juce::uint32 elapsed = juce::Time::getMillisecondCounter() - owner.toastStartMs_;
+    if (elapsed >= kToastHoldMs + kToastFadeMs)
+    {
+        stopTimer();
+        const auto dirty = owner.lastToastBounds_;
+        owner.toastText_.clear();
+        owner.lastToastBounds_ = {};
+        if (! dirty.isEmpty())
+            owner.repaint (dirty.expanded (4));
+        return;
+    }
+
+    if (elapsed >= kToastHoldMs && ! owner.lastToastBounds_.isEmpty())
+        owner.repaint (owner.lastToastBounds_.expanded (4));
+}
+
+void ModuleWorkspace::drawStatusToast (juce::Graphics& g)
+{
+    if (toastText_.isEmpty())
+        return;
+
+    const juce::uint32 elapsed = juce::Time::getMillisecondCounter() - toastStartMs_;
+    if (elapsed >= kToastHoldMs + kToastFadeMs)
+        return;
+
+    float alpha = 1.0f;
+    if (elapsed > kToastHoldMs)
+        alpha = juce::jlimit (0.0f, 1.0f, 1.0f - (float) (elapsed - kToastHoldMs) / (float) kToastFadeMs);
+
+    const auto canvas = getCanvasArea();
+    if (canvas.getWidth() < 80 || canvas.getHeight() < 36)
+        return;
+
+    const auto font = PinkXP::getFont (11.0f, juce::Font::bold);
+    const int textW = juce::GlyphArrangement::getStringWidthInt (font, toastText_);
+    const int padX  = PinkXP::ui (12);
+    const int pillW = juce::jlimit (PinkXP::ui (96), juce::jmax (PinkXP::ui (96), canvas.getWidth() - 16),
+                                    textW + padX * 2 + PinkXP::ui (6));
+    const int pillH = PinkXP::ui (24);
+    const juce::Rectangle<int> pill (canvas.getCentreX() - pillW / 2,
+                                     canvas.getY() + PinkXP::ui (8),
+                                     pillW, pillH);
+    lastToastBounds_ = pill;
+
+    juce::Graphics::ScopedSaveState ss (g);
+    g.reduceClipRegion (canvas);
+    g.setOpacity (alpha);
+
+    PinkXP::drawRaised (g, pill, PinkXP::face);
+    // 左侧主题强调竖条
+    g.setColour (PinkXP::sel);
+    g.fillRect (pill.getX() + 2, pill.getY() + 2, PinkXP::ui (4), pill.getHeight() - 4);
+
+    const auto textRect = pill.withTrimmedLeft (PinkXP::ui (8)).withTrimmedRight (PinkXP::ui (6));
+    g.setFont (font);
+    g.setColour (PinkXP::readableInkOn (PinkXP::face));
+    g.drawFittedText (toastText_, textRect, juce::Justification::centred, 1, 0.85f);
 }

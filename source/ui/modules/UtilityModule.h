@@ -34,11 +34,13 @@ public:
 protected:
     void paintContent  (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
     void layoutContent (juce::Rectangle<int> contentBounds) override;
+    juce::Rectangle<int> getChromaKeyCanvas() override;
 
 private:
     void setTool (y2k::util::ToolKind kind, bool force = false);
     void captureCurrentToolState() const;
     void updateTitle();
+    void syncBackdropMode();
 
     y2k::util::ToolKind tool = y2k::util::ToolKind::calculator;
     std::unique_ptr<y2k::util::ToolView> view;
@@ -46,7 +48,8 @@ private:
     // 所有工具的状态（子节点名 = toolStateName）；save() 是 const，故 mutable
     mutable juce::ValueTree toolStates { "tools" };
 
-    int themeToken = -1;
+    int themeToken        = -1;
+    int chromaRevealToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (UtilityModule)
 };

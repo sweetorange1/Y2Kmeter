@@ -33,6 +33,21 @@ public:
         cancel = 1    // 逐频段 mono 兼容度（上 = 干净 / 下 = 严重抵消）
     };
 
+    enum class VisualStyle
+    {
+        curve = 0,    // 默认曲线（PAN 折线+点 / MONO 面积+线）
+        fill  = 1,    // 饱满带状填充
+        bars  = 2     // 分频段竖柱
+    };
+
+    enum class FreqRange
+    {
+        full  = 0,
+        music = 1,
+        vocal = 2,
+        bass  = 3
+    };
+
     explicit StereoMapModule (AnalyserHub& hub);
     ~StereoMapModule() override;
 
@@ -49,7 +64,14 @@ public:
     void   buildParamDefs (std::vector<ParamDef>& out) const override;
     double getParamValue  (const juce::String& id) const override;
     void   setParamValue  (const juce::String& id, double v) override;
-    void setFftScale (y2k::fscale::Scale s);
+    void setFftScale    (y2k::fscale::Scale s);
+    void setVisualStyle (VisualStyle s);
+    void setFreqRange   (FreqRange r);
+    void setSmoothing   (float mult);
+    void setPeakHold    (bool on);
+    void setCancelScalePct (float pct);
+    void setShowGrid    (bool on);
+    void setShowLabels  (bool on);
 
     // 鼠标悬停标尺：绘图区内十字线 + 频率/纵轴坐标读数
     void mouseMove (const juce::MouseEvent& e) override;
@@ -72,6 +94,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：保留立体声频谱图画布（曲线 / 带状填充 / 竖柱），凹槽 / 网格 / 标签不画
+    juce::Rectangle<int> getChromaKeyCanvas() override { return canvasBounds(); }
 
 private:
     void computeStereoMap (float dtSec);
@@ -84,20 +108,17 @@ private:
     juce::String makeDataReadout (float x, juce::Rectangle<int> plot) const;
     int  bandIndexForX (float x, juce::Rectangle<int> plot) const;
 
-    // 频率轴（按 fftScale：Log / Mel / Linear，范围 kMinFreq ~ kMaxFreq）
+    // 频率轴（按 fftScale 与 freqRange）
+    float activeMinFreqHz() const noexcept;
+    float activeMaxFreqHz() const noexcept;
     float freqAt (float norm01) const noexcept;
     float normFromFreq (float freqHz) const noexcept;
-    // 纵向网格线频率 / 底部标签频率（随刻度变化；Log 下与旧版逐项一致）
     void gridFreqs (std::vector<float>& lines, std::vector<float>& labels) const;
     static float xForNorm (float norm01, juce::Rectangle<int> plot) noexcept;
     static float normForX (float x, juce::Rectangle<int> plot) noexcept;
     static float panForY (float y, juce::Rectangle<int> plot) noexcept;
-    // MONO 纵轴（显示值 = 单声道保留量 = 1 - 真实抵消量）：
-    //   顶边 1（无抵消）/ 底边 1 - kCancelFullScale（满幅抵消）
-    static float compatForY (float y, juce::Rectangle<int> plot) noexcept;
-    // 真实抵消量 → 显示值（0..1）：满幅只需 kCancelFullScale 的真实抵消。
-    //   倒置后曲线 y = 顶边 + 显示值 × 高（显示值越大越往下 = 越糟）。
-    static float cancelToDisplay (float cancel) noexcept;
+    float compatForY (float y, juce::Rectangle<int> plot) const noexcept;
+    float cancelToDisplay (float cancel) const noexcept;
     static juce::String formatPan (float pan);
     static juce::String formatPercent (float v);
 
@@ -116,9 +137,18 @@ private:
     std::vector<float> strengthByBand;
     std::vector<float> levelDbByBand;  // 平滑后的原始电平（dBFS），仅用于读数
     std::vector<float> cancelByBand;   // 0 = mono 兼容 / 1 = 完全抵消（真实值，绘制时再放大）
+    std::vector<float> peakPanByBand;     // 峰值保持声像包络（按绝对偏移保持）
+    std::vector<float> peakCancelByBand;  // 峰值保持最大抵消量
 
     Mode mode = Mode::pan;
     y2k::fscale::Scale fftScale = y2k::fscale::Scale::log;   // 构造默认 = 旧外观
+    VisualStyle visualStyle = VisualStyle::curve;
+    FreqRange   freqRange   = FreqRange::full;
+    float smoothingScale    = 1.0f;    // 响应速度倍率（0.2..3.0）
+    bool  peakHoldEnabled   = false;   // 峰值保持包络线
+    float cancelFullScale   = 0.50f;   // MONO 满幅标定（0.20..1.00，默认 50%）
+    bool  showGrid          = true;
+    bool  showLabels        = true;
 
     // 鼠标悬停态（标尺）
     juce::Point<int> hoverPos;
@@ -130,6 +160,7 @@ private:
     static constexpr float kBulletTimeSlowdown = 50.0f;
 
     int cachedBandCount = 0;
+    int themeSubToken   = -1;
 
     // MONO 模式的满幅标定：真实抵消量达到这个比例时曲线就顶到天花板。
     //   0.5 = "抵消一半就满"。调小 → 更敏感（更容易顶满），调大 → 更迟钝。

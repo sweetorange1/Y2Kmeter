@@ -69,8 +69,14 @@
 #include "../steam/Y2KSteam.h"
 #include "../steam/Y2KAchievements.h"
 
-// WASAPI Loopback 采集器（捕捉系统混音输出）
+// WASAPI Loopback 采集器（捕捉系统混音输出 / 定向程序输出）
 #include "WasapiLoopbackCapture.h"
+// 定向程序采集的目标枚举（Source 下拉里的程序列表；非 Windows 为空实现）
+#include "AppAudioTargets.h"
+
+#if JUCE_WINDOWS
+ #include <dwmapi.h>
+#endif
 
 // macOS 桌面音频采集器（ScreenCaptureKit）+ 音频调试转储器
 // 这两个头文件本身也由 CMakeLists 仅在 APPLE 分支加入 target_sources，
@@ -393,6 +399,66 @@ static void resetTccIfVersionChanged (juce::ApplicationProperties& appProps)
 //   无原生标题栏、无边框；内容直接是 AudioProcessorEditor。
 //   关闭请求统一走 JUCEApplication::quit()。
 // ----------------------------------------------------------
+#if JUCE_WINDOWS
+namespace
+{
+    // Windows 10/11 GPU OpenGL 逐像素透明（DWM 硬件合成，无 WS_EX_LAYERED / UpdateLayeredWindow）：
+    //   · 动态加载 dwmapi.dll（零额外链接依赖）；
+    //   · 用空 HRGN (0,0,-1,-1) 调用 DwmEnableBlurBehindWindow 开启 DWM Alpha 合成（无高斯模糊、无非客户区阴影）；
+    //   · Windows 11 下同步关闭 DWMWA_BORDER_COLOR（避免 1px 主题色外框），退出透明时还原系统默认；
+    //   · 配合 WGL PFD_SUPPORT_COMPOSITION + 8bit alpha FBO 0，全屏多模块维持 60-120 FPS。
+    void applyWindowsDwmTransparency (HWND topHwnd, bool enable) noexcept
+    {
+        if (topHwnd == nullptr)
+            return;
+
+        using FnBlurBehind = HRESULT (WINAPI*) (HWND, const DWM_BLURBEHIND*);
+        using FnSetAttr    = HRESULT (WINAPI*) (HWND, DWORD, LPCVOID, DWORD);
+
+        struct DwmFns
+        {
+            FnBlurBehind blurBehind = nullptr;
+            FnSetAttr    setAttr    = nullptr;
+        };
+
+        static const DwmFns fns = []() -> DwmFns
+        {
+            DwmFns out;
+            HMODULE mod = GetModuleHandleW (L"dwmapi.dll");
+            if (mod == nullptr)
+                mod = LoadLibraryW (L"dwmapi.dll");
+            if (mod != nullptr)
+            {
+                out.blurBehind = reinterpret_cast<FnBlurBehind> (GetProcAddress (mod, "DwmEnableBlurBehindWindow"));
+                out.setAttr    = reinterpret_cast<FnSetAttr> (GetProcAddress (mod, "DwmSetWindowAttribute"));
+            }
+            return out;
+        }();
+
+        if (fns.blurBehind != nullptr)
+        {
+            HRGN emptyRgn = enable ? CreateRectRgn (0, 0, -1, -1) : nullptr;
+            DWM_BLURBEHIND bb {};
+            bb.dwFlags  = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+            bb.fEnable  = enable ? TRUE : FALSE;
+            bb.hRgnBlur = emptyRgn;
+            fns.blurBehind (topHwnd, &bb);
+            if (emptyRgn != nullptr)
+                DeleteObject (emptyRgn);
+        }
+
+        if (fns.setAttr != nullptr)
+        {
+            constexpr DWORD kDwmwaBorderColor  = 34;          // DWMWA_BORDER_COLOR (Win11+)
+            constexpr DWORD kDwmwaColorNone    = 0xFFFFFFFEu; // DWMWA_COLOR_NONE
+            constexpr DWORD kDwmwaColorDefault = 0xFFFFFFFFu; // DWMWA_COLOR_DEFAULT
+            const DWORD borderCol = enable ? kDwmwaColorNone : kDwmwaColorDefault;
+            fns.setAttr (topHwnd, kDwmwaBorderColor, &borderCol, sizeof (borderCol));
+        }
+    }
+}
+#endif
+
 class Y2KMainWindow  : public juce::DocumentWindow
 {
 public:
@@ -664,9 +730,23 @@ public:
                 Y2K_LOG ("[boot] preset theme applied");
             }
 
-            // 视觉风格（与颜色主题正交；缺键 = 像素复古，旧存档外观不变）
-            PinkXP::applySkin (PinkXP::skinFromInt (
-                getUserSettings().getIntValue ("ui.skinId", (int) PinkXP::SkinId::pinkXP)));
+            // 视觉风格 + 背景模式（100% 正交；兼容旧存档 ui.skinId=7 遗留绿幕值）
+            {
+                auto& s = getUserSettings();
+                const int  rawSkin     = s.getIntValue ("ui.skinId", (int) PinkXP::SkinId::pinkXP);
+                const bool hasBackdrop = s.containsKey ("ui.backdropMode");
+                if (! hasBackdrop && PinkXP::isLegacyGreenScreenSkinInt (rawSkin))
+                {
+                    PinkXP::applySkin (PinkXP::SkinId::pinkXP);
+                    PinkXP::applyBackdropMode (PinkXP::BackdropMode::greenScreen);
+                }
+                else
+                {
+                    PinkXP::applySkin (PinkXP::skinFromInt (rawSkin));
+                    PinkXP::applyBackdropMode (PinkXP::backdropModeFromInt (
+                        s.getIntValue ("ui.backdropMode", (int) PinkXP::BackdropMode::normal)));
+                }
+            }
             Y2K_LOG ("[boot] 1.15 theme restore done");
         }
 
@@ -678,11 +758,21 @@ public:
         pluginHolder->reloadPluginState();
 
         // 2) 构建无边框窗口
-        //    背景色用纯黑而非 LookAndFeel 默认灰色——Y2K 界面本身是暗黑风格，
-        //    黑色底色在首帧渲染前的瞬间几乎是不可感知的（而灰色会很明显地闪现）。
-        //    这是消除启动闪屏的最简方式：闪黑不闪灰。
-        mainWindow = std::make_unique<Y2KMainWindow> (getApplicationName(),
-                                                      juce::Colours::black);
+        //    · Windows：始终保持 mainWindow->setOpaque(true)（非 WS_EX_LAYERED，绝不走慢速
+        //      UpdateLayeredWindow），透明模式依靠 DwmEnableBlurBehindWindow + 硬件 OpenGL FBO 0
+        //      Alpha 通道实现 60-120 FPS 真透明；
+        //    · macOS：透明模式在 addToDesktop 前置 non-opaque + transparentBlack 走 CoreAnimation 透明。
+        const bool bootTransparent = PinkXP::isTransparentBackdrop();
+        mainWindow = std::make_unique<Y2KMainWindow> (
+            getApplicationName(),
+            bootTransparent ? juce::Colours::transparentBlack : juce::Colours::black);
+       #if JUCE_WINDOWS
+        // 注意：DocumentWindow/ResizableWindow 构造里按 bg.isOpaque() 设置了 opaque，
+        //   Windows 侧必须在其后显式拉回 setOpaque(true) 以避免触发 WS_EX_LAYERED！
+        mainWindow->setOpaque (true);
+       #else
+        mainWindow->setOpaque (! bootTransparent);
+       #endif
 
         // 3) 取插件自己的 Editor 作为窗口内容
         //    关键：使用 setContentNonOwned —— 由本 App 管理 editor 的生命周期。
@@ -720,6 +810,15 @@ public:
                         handleAudioSourceChanged (sourceId, isLoopback);
                     };
 
+                    // Source 下拉即将弹出 → 重新枚举"可定向采集的程序"并刷新条目
+                    //   （程序随时开关，列表只在用户要看的那一刻刷新，平时零开销）
+                    y2kEditor->onAudioSourceListRequested = [this]()
+                    {
+                        appTargets = appaudio::listCapturableApps();
+                        if (cachedEditor != nullptr)
+                            populateAudioSources (*cachedEditor);
+                    };
+
                     // 预设 Save/Load —— 由 ModuleWorkspace 的 Save/Load 按钮触发，
                     //   Editor 透传过来。真正的 settings 文件读写只能在 Standalone App
                     //   这边做（PropertiesFile 的 storage 参数归这里持有）。
@@ -745,9 +844,16 @@ public:
                    #endif
 
                     // 4.1) 恢复上次的 audio source（默认 "loopback:default"）
+                    //   · "app:<exe>" = 定向程序采集（仅 Windows）。程序此刻没在运行也照常恢复：
+                    //     采集器会等它启动。其他平台读到这种值时按"系统输出"处理。
                     const auto savedSource = getUserSettings()
                         .getValue ("audio.sourceId", "loopback:default");
-                    const bool savedLoopback = savedSource.startsWith ("loopback");
+                    const bool savedLoopback = savedSource.startsWith ("loopback")
+                                            || savedSource.startsWith (kAppSourcePrefix);
+                    rememberedAppExe         = appExeFromSourceId (savedSource);
+                    rememberedAppDisplayName = rememberedAppExe.isNotEmpty()
+                                                   ? getUserSettings().getValue ("audio.appDisplayName", {})
+                                                   : juce::String();
                     handleAudioSourceChanged (savedSource, savedLoopback);
                     syncDropdownToCurrentDevice (*y2kEditor);
 
@@ -833,9 +939,49 @@ public:
         //    chromeVisible 恢复通过 callAsync 延迟：setChromeVisible 内部依赖
         //    editor.isShowing() 和 canResizeWindow 的标准路径，必须在窗口可见后执行。
         Y2K_DIAGC ("BOOT", "mainWindow.addToDesktop begin");
+        {
+            const bool wantTransparent = PinkXP::isTransparentBackdrop();
+            mainWindow->setBackgroundColour (wantTransparent ? juce::Colours::transparentBlack
+                                                             : juce::Colours::black);
+           #if JUCE_WINDOWS
+            mainWindow->setOpaque (true); // 禁止 WS_EX_LAYERED，透明由下方 DWM + GPU GL 提供
+           #else
+            mainWindow->setOpaque (! wantTransparent);
+            if (cachedEditor != nullptr && wantTransparent)
+                cachedEditor->setOpaque (false);
+           #endif
+            lastAppliedTransparentBackdrop_ = wantTransparent;
+        }
         mainWindow->addToDesktop();
+       #if JUCE_WINDOWS
+        if (auto* bootPeer = mainWindow->getPeer())
+            if (bootPeer->getAvailableRenderingEngines().size() > 1)
+                bootPeer->setCurrentRenderingEngine (0); // 0 = Software Renderer（规避 AMD D2D 死锁）
+        if (PinkXP::isTransparentBackdrop())
+            applyWindowsDwmTransparency (reinterpret_cast<HWND> (mainWindow->getWindowHandle()), true);
+       #endif
         mainWindow->setVisible(true);
         Y2K_DIAGC ("BOOT", "mainWindow visible (首帧 GL 渲染即将开始)");
+
+        // 运行时监听背景模式切换（Normal/GreenScreen <-> Transparent）：
+        //   · Windows：瞬时切换 DwmEnableBlurBehindWindow，无需重建 peer / 摘挂 OpenGLContext；
+        //   · macOS  ：异步切换 non-opaque peer 与 OpenGLContext。
+        backdropThemeSubToken_ = PinkXP::subscribeThemeChanged ([this]()
+        {
+            if (shuttingDown_ || mainWindow == nullptr)
+                return;
+            if (PinkXP::isTransparentBackdrop() == lastAppliedTransparentBackdrop_)
+                return;
+           #if JUCE_WINDOWS
+            syncBackdropWindowMode();
+           #else
+            juce::MessageManager::callAsync ([this]()
+            {
+                if (! shuttingDown_)
+                    syncBackdropWindowMode();
+            });
+           #endif
+        });
 
         // 6.5) 200ms 心跳（Steam 官方要求 RunCallbacks 至少 1Hz）
         //      y2k::steam::tick()：驱动 Steam 回调（成就通知 / 云状态）。
@@ -927,6 +1073,13 @@ public:
     // --------------------------------------------------
     void shutdown() override
     {
+        shuttingDown_ = true;
+        if (backdropThemeSubToken_ >= 0)
+        {
+            PinkXP::unsubscribeThemeChanged (backdropThemeSubToken_);
+            backdropThemeSubToken_ = -1;
+        }
+
         // -3) 停掉心跳（Steam 回调在 SteamAPI_Shutdown 之后再泵会崩）
         stopTimer();
 
@@ -1444,9 +1597,10 @@ private:
             "ui.toyLevel",
             "ui.themeId",
             "ui.skinId",
+            "ui.backdropMode",
             "audio.sourceId",
             "milkdrop.currentPreset",
-            "filterState",     // 插件状态（EQ/布局 XML）— 保证用当前值重写
+            "filterState",     // 插件状态（模块/布局 XML）— 保证用当前值重写
             // 调色板重构（R22）：主题相关键纳入保护式重写，
             //   启动/退出路径不会被丢弃（custom 键仅在 custom 激活时重写）。
             "ui.customPrimary",
@@ -1468,7 +1622,7 @@ private:
     // 还是两条都走，本函数里的完整序列只会发生一次，保证：
     //   sanitize（清掉所有本版本管理的 key + 可能的老版本脏数据）
     //     → 窗口 bounds / UI / 音频源 / 主题 重写
-    //     → plugin state（EQ/布局 XML）重写
+    //     → plugin state（模块/布局 XML）重写
     //     → 立刻 saveIfNeeded 刷盘
     // 是一组"原子的覆盖写入"，绝不会出现"sanitize 跑了两次却只 save 一次
     // filterState"这种中间态 —— 那正是上个版本导致"每次重开回到默认状态"的 bug。
@@ -1696,8 +1850,12 @@ private:
             s.setValue ("ui.alwaysOnTop",    cachedEditor->isAlwaysOnTopActive());
         }
 
-        // getCurrentSourceId 已经封装了 loopback vs mic 的判定
+        // getCurrentSourceId 已经封装了 loopback vs mic vs 定向程序 的判定
         s.setValue ("audio.sourceId", getCurrentSourceId());
+        // 定向程序采集：连同显示名一起记住 —— 下次启动时程序可能还没开，
+        //   没法再从 exe 读版本信息，下拉里要有个像样的名字可显示。
+        s.setValue ("audio.appDisplayName",
+                    currentAppExe().isNotEmpty() ? currentAppDisplayName() : juce::String());
 
        #if ! JUCE_WINDOWS
         // 非 Windows：Output 语义走"虚拟回环输入设备"。记住上次命中的名字，
@@ -1709,8 +1867,9 @@ private:
         //   initialise() 里的 1.15) 分支读取并 applyTheme 恢复。
         //   · 主题在运行时被 ThemeSwatchBar::mouseDown → PinkXP::applyTheme 修改；
         //     这里只是在退出前快照一次 gCurrentThemeId。
-        s.setValue ("ui.themeId", (int) PinkXP::getCurrentThemeId());
-        s.setValue ("ui.skinId",  (int) PinkXP::getCurrentSkin());
+        s.setValue ("ui.themeId",      (int) PinkXP::getCurrentThemeId());
+        s.setValue ("ui.skinId",       (int) PinkXP::getCurrentSkin());
+        s.setValue ("ui.backdropMode", (int) PinkXP::getBackdropMode());
 
         // 官方预设的装饰覆盖（调色工作室在预设下改的桌面纹理 / 标题图标）
         {
@@ -1752,13 +1911,23 @@ private:
     }
 
     // ----------------------------------------------------
-    // 音频源下拉：只暴露两个"语义化"的选项，避免把 N 个后端 × M 块物理设备的
+    // 音频源下拉：只暴露"语义化"的选项，避免把 N 个后端 × M 块物理设备的
     // 笛卡尔积全部罗列出来造成困扰。
     //
     //   1) Microphone Input      —— 系统当前默认的输入设备（麦克风/声卡输入）
     //                              sourceId = "input:default"
     //   2) System Output (Loopback) —— 系统默认渲染端点的混音输出（WASAPI loopback）
     //                              sourceId = "loopback:default"
+    //   3) 定向程序（仅 Windows 10 2004+）—— 收在 "App Audio Capture" 子菜单里，
+    //      每个**此刻正在出声**的程序一项（音频会话处于 Active 状态），
+    //      只采那个程序（含子进程）的声音，同 OBS 的 Application Audio Capture。
+    //      · 一个都没有时放一行灰显提示，子菜单不会凭空消失；
+    //      · 列表最后是 "All Apps" 二级子菜单：其余没在出声的程序
+    //        （有会话但静音的 + 只有窗口的），暂停中的播放器在这里选；
+    //                              sourceId = "app:<exe 文件名>"，如 "app:chrome.exe"
+    //      · 列表来自 appTargets（下拉弹出前重新枚举，见 onAudioSourceListRequested）；
+    //      · 当前正在采集的程序即使已退出 / 不在列表里也保留一项，
+    //        否则下拉框没东西可选中（此时采集器在等它重新启动）。
     //
     // 切换逻辑见 handleAudioSourceChanged()。
     // ----------------------------------------------------
@@ -1776,10 +1945,119 @@ private:
                      "loopback:default",
                      true });
 
+        // 选项 3..N：定向程序 —— 收进 "App Audio Capture" 子菜单：
+        //   · 正在出声的程序直接列在子菜单里；
+        //   · 其余程序收在子菜单末尾的 "All Apps" 二级子菜单里。
+        //   同一个子菜单的条目必须连续添加（见 ModuleWorkspace 的 addAudioSourceMenuItems）。
+        const juce::StringArray appMenu  { kAppSubmenuName };
+        const juce::StringArray restMenu { kAppSubmenuName, kAllAppsSubmenuName };
+        const juce::String      currentExe = currentAppExe();
+
+        auto addApp = [&] (const appaudio::AppAudioTarget& app, const juce::StringArray& menu, bool sepBefore = false)
+        {
+            // 当前目标沿用 currentExe 的大小写，保证与 getCurrentSourceId() 逐字相等
+            const bool isCurrent = app.exeName.equalsIgnoreCase (currentExe);
+            items.add ({ clipAppDisplayName (app.displayName),
+                         makeAppSourceId (isCurrent ? currentExe : app.exeName),
+                         true,
+                         menu,
+                         sepBefore });
+        };
+
+        int numDirectItems = 0;
+        for (const auto& app : appTargets)
+        {
+            if (app.isActive)
+            {
+                addApp (app, appMenu);
+                ++numDirectItems;
+            }
+        }
+
+        if (currentExe.isNotEmpty() && findAppTarget (currentExe) == nullptr)
+        {
+            // 当前目标已退出（采集器在等它回来）：哪个列表里都没有，单独保留一项
+            items.add ({ clipAppDisplayName (currentAppDisplayName()),
+                         makeAppSourceId (currentExe),
+                         true,
+                         appMenu });
+            ++numDirectItems;
+        }
+
+        if (numDirectItems == 0 && appaudio::isProcessLoopbackSupported())
+        {
+            // 系统支持、但此刻没有任何程序在出声：留一行灰显提示（sourceId 为空 = 不可选）
+            items.add ({ "No apps are playing audio",
+                         juce::String(),
+                         true,
+                         appMenu });
+        }
+
+        bool firstInactive = true;
+        for (const auto& app : appTargets)
+        {
+            if (! app.isActive)
+            {
+                // 活跃程序区与 "All Apps" 二级子菜单之间加一条视觉分隔线
+                addApp (app, restMenu, firstInactive);
+                firstInactive = false;
+            }
+        }
+
         editor.setAudioSourceItems (items, getCurrentSourceId());
     }
 
-    // 拼装"当前正在使用的音频源"的 sourceId（只会返回两种语义化值之一）
+    // "app:<exe>" 形式的 sourceId（定向程序采集）的构造 / 反解。
+    //   反解：不是这种 sourceId 时返回空串（= 没有定向目标）。
+    static juce::String makeAppSourceId (const juce::String& exeName)
+    {
+        return kAppSourcePrefix + exeName;
+    }
+
+    static juce::String appExeFromSourceId (const juce::String& sourceId)
+    {
+        return sourceId.startsWith (kAppSourcePrefix)
+                   ? sourceId.fromFirstOccurrenceOf (kAppSourcePrefix, false, false).trim()
+                   : juce::String();
+    }
+
+    // 回环采集器当前的定向目标 exe（空 = 整机输出 / 没在回环）。只在消息线程调用。
+    juce::String currentAppExe() const
+    {
+        return (loopback != nullptr && loopbackActive.load (std::memory_order_acquire))
+                   ? loopback->getTargetProcess()
+                   : juce::String();
+    }
+
+    const appaudio::AppAudioTarget* findAppTarget (const juce::String& exeName) const
+    {
+        for (const auto& app : appTargets)
+            if (app.exeName.equalsIgnoreCase (exeName))
+                return &app;
+        return nullptr;
+    }
+
+    // 当前目标的显示名：列表里有就用列表的，其次用与当前 exe 匹配的记住值，最后退回 exe 去扩展名
+    juce::String currentAppDisplayName() const
+    {
+        const juce::String exe = currentAppExe();
+        if (const auto* app = findAppTarget (exe))
+            return app->displayName;
+
+        return (rememberedAppDisplayName.isNotEmpty() && exe.equalsIgnoreCase (rememberedAppExe))
+                   ? rememberedAppDisplayName
+                   : appaudio::fallbackDisplayName (exe);
+    }
+
+    // 版本资源里的描述偶尔很长，下拉菜单里截一下
+    static juce::String clipAppDisplayName (const juce::String& name)
+    {
+        constexpr int maxChars = 40;
+        return name.length() > maxChars ? name.substring (0, maxChars - 3).trimEnd() + "..."
+                                        : name;
+    }
+
+    // 拼装"当前正在使用的音频源"的 sourceId（三种语义化值之一）
     juce::String getCurrentSourceId() const
     {
         // loopbackActive = Windows WASAPI loopback 或 macOS ScreenCaptureKit 采集进行中
@@ -1787,7 +2065,12 @@ private:
         // 其中 virtualLoopbackInputActive 默认恒为 false，Windows 路径行为与原版一致。
         if (loopbackActive.load (std::memory_order_acquire)
             || virtualLoopbackInputActive.load (std::memory_order_acquire))
-            return "loopback:default";
+        {
+            // 回环采集器当前的目标是某个程序而不是整机输出
+            const juce::String appExe = currentAppExe();
+            return appExe.isNotEmpty() ? makeAppSourceId (appExe)
+                                       : juce::String ("loopback:default");
+        }
 
         return "input:default";
     }
@@ -1798,6 +2081,8 @@ private:
     //                         同时关闭 AudioDeviceManager 的物理设备（避免双路 push）
     //   · "input:default"    → 停掉 Loopback（若在跑），打开系统默认输入设备
     //                         （让 AudioDeviceManager 自己挑当前 deviceType 下的默认）
+    //   · "app:<exe>"        → （仅 Windows）同一个采集器改成进程级回环，只采该程序；
+    //                         失败时回退到 "loopback:default"
     // ----------------------------------------------------
     void handleAudioSourceChanged (const juce::String& sourceId, bool isLoopback)
     {
@@ -1822,31 +2107,67 @@ private:
         if (isLoopback)
         {
            #if JUCE_WINDOWS
+            // 回环采集的目标：空 = 整机输出；非空 = 定向程序（"app:<exe>"，进程级回环，
+            //   只采这个程序连同它的子进程）。两者走同一条路，只有失败时的回退不同。
+            const juce::String appExe = appExeFromSourceId (sourceId);
+
             // 1) 先停硬件输入 → AudioDeviceManager 把输入通道清零
             //    （保留输出设备不变；setAudioDeviceSetup 的 err 我们不强求成功）
             disableHardwareInput();
 
             // 2) 启动 Loopback 采集线程
-            if (! startLoopbackCapture())
+            if (startLoopbackCapture (appExe))
             {
-                juce::AlertWindow::showAsync (
-                    juce::MessageBoxOptions()
-                        .withIconType (juce::MessageBoxIconType::WarningIcon)
-                        .withTitle (y2k::tr ("System Loopback error"))
-                        .withMessage (y2k::tr ("Failed to start system output loopback:") + "\n"
-                                        + (loopback != nullptr ? loopback->getLastError() : y2k::tr ("(unknown)"))
-                                        + "\n\n" + y2k::tr ("Falling back to Microphone."))
-                        .withButton (y2k::tr ("OK")),
-                    nullptr);
+                // 记住显示名（与 exe 配对）：程序退出后下拉里仍要显示它（采集器在等它回来）。
+                //   切回整机输出时清空；切到另一目标且列表暂无时避免沿用上一个程序的旧名字。
+                if (appExe.isEmpty())
+                {
+                    rememberedAppExe.clear();
+                    rememberedAppDisplayName.clear();
+                }
+                else if (const auto* app = findAppTarget (appExe))
+                {
+                    rememberedAppExe         = appExe;
+                    rememberedAppDisplayName = app->displayName;
+                }
+                else if (! appExe.equalsIgnoreCase (rememberedAppExe))
+                {
+                    rememberedAppExe         = appExe;
+                    rememberedAppDisplayName.clear();
+                }
 
-                // 回退到"麦克风输入"
-                enableDefaultInput();
-                if (cachedEditor != nullptr)
-                    syncDropdownToCurrentDevice (*cachedEditor);
+                DBG ("[Y2K] WASAPI Loopback capture started.");
                 return;
             }
 
-            DBG ("[Y2K] WASAPI Loopback capture started.");
+            const juce::String errorDetail = (loopback != nullptr ? loopback->getLastError()
+                                                                  : y2k::tr ("(unknown)"));
+            const bool isAppCapture = appExe.isNotEmpty();
+
+            juce::AlertWindow::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle (y2k::tr (isAppCapture ? "Application audio capture error"
+                                                      : "System Loopback error"))
+                    .withMessage (isAppCapture
+                                      ? y2k::tr ("Failed to capture audio from this app:") + "\n"
+                                            + appExe + "\n" + errorDetail
+                                            + "\n\n" + y2k::tr ("Falling back to Output.")
+                                      : y2k::tr ("Failed to start system output loopback:") + "\n"
+                                            + errorDetail
+                                            + "\n\n" + y2k::tr ("Falling back to Microphone."))
+                    .withButton (y2k::tr ("OK")),
+                nullptr);
+
+            // 定向程序失败 → 回退到"整机输出"（它再失败会继续回退到麦克风）；
+            // 整机输出失败 → 回退到"麦克风输入"
+            if (isAppCapture)
+                handleAudioSourceChanged ("loopback:default", true);
+            else
+                enableDefaultInput();
+
+            if (cachedEditor != nullptr)
+                syncDropdownToCurrentDevice (*cachedEditor);
             return;
            #elif JUCE_MAC
             // macOS：优先使用 ScreenCaptureKit 直接采集系统输出音频（无需 BlackHole）
@@ -2116,8 +2437,11 @@ private:
 
     // ----------------------------------------------------
     // WASAPI Loopback —— 启停
+    //   targetExe 为空 = 整机输出（默认渲染端点回环）；
+    //   非空（如 "chrome.exe"）= 定向程序采集（进程级回环）。
+    //   两种目标共用同一个采集器 / 同一条 onAudio 链路，区别只在采集器内部怎么开流。
     // ----------------------------------------------------
-    bool startLoopbackCapture()
+    bool startLoopbackCapture (const juce::String& targetExe = {})
     {
         if (pluginHolder == nullptr || pluginHolder->processor == nullptr)
             return false;
@@ -2127,6 +2451,20 @@ private:
 
         auto* y2kProc = dynamic_cast<Y2KmeterAudioProcessor*> (pluginHolder->processor.get());
         if (y2kProc == nullptr) return false;
+
+        // 已经在采同一个目标：什么都不用动
+        //   （也避免在采集线程运行期间改写 onAudio 这个 std::function）
+        if (loopback->isRunning() && loopback->getTargetProcess().equalsIgnoreCase (targetExe))
+        {
+            loopbackActive.store (true, std::memory_order_release);
+            return true;
+        }
+
+        // 目标变了（整机 ↔ 某程序 / 程序 A → 程序 B），或上次的线程已自行退出：
+        //   先同步停掉旧线程，再换目标。不走 stopLoopbackCapture() ——
+        //   那会把 holder callback 接回去、马上又要摘掉，白白重启一次物理设备。
+        loopback->stop();
+        loopback->setTargetProcess (targetExe);
 
         // 关键：先彻底断开 pluginHolder 对 deviceManager 的 audio callback，
         //       确保 loopback 运行期间只有采集线程在 push AnalyserHub，杜绝并发 UAF
@@ -2189,15 +2527,20 @@ private:
             y2kProc->registerLoopbackRenderTime (elapsedMs, n, sr);
         };
 
+        const juce::String targetLabel = targetExe.isEmpty() ? juce::String ("output") : targetExe;
+        juce::ignoreUnused (targetLabel);   // 只给诊断日志用（日志关闭时宏不求值）
+
         if (! loopback->start())
         {
             // 启动失败：恢复 holder callback，避免普通设备模式下也丢输入
+            y2k::diag::setChannelActive (y2k::diag::Channel::Audio, false);
+            loopbackActive.store (false, std::memory_order_release);
             attachHolderCallback();
-            Y2K_DIAGC ("AUDIO", "loopback start FAILED: " + loopback->getLastError());
+            Y2K_DIAGC ("AUDIO", "loopback start FAILED (target=" + targetLabel + "): " + loopback->getLastError());
             return false;
         }
 
-        Y2K_DIAGC ("AUDIO", "loopback start OK");
+        Y2K_DIAGC ("AUDIO", "loopback start OK (target=" + targetLabel + ")");
         y2k::diag::setChannelActive (y2k::diag::Channel::Audio, true);
         loopbackActive.store (true, std::memory_order_release);
         return true;
@@ -2452,6 +2795,114 @@ private:
     }
 
     // ----------------------------------------------------
+    // 运行时同步顶层窗口的 OS 逐像素透明状态：
+    //   · Windows：保持 OpenGLContext 挂载与非 WS_EX_LAYERED（setOpaque(true)），仅通过
+    //     DwmEnableBlurBehindWindow(topHwnd) 瞬时开关 DWM 硬件 Alpha 合成（<1ms、全帧 60-120 FPS）；
+    //   · macOS  ：通过 NSWindow non-opaque + transparentBlack 配合 CoreAnimation 硬件透明。
+    // ----------------------------------------------------
+    void syncBackdropWindowMode()
+    {
+        if (shuttingDown_ || syncingBackdropPeer_ || mainWindow == nullptr || ! mainWindow->isShowing())
+            return;
+
+        const bool wantTransparent = PinkXP::isTransparentBackdrop();
+
+       #if JUCE_WINDOWS
+        if (wantTransparent == lastAppliedTransparentBackdrop_)
+            return;
+
+        struct ReentrancyGuard
+        {
+            bool& flag;
+            ~ReentrancyGuard() { flag = false; }
+        };
+        syncingBackdropPeer_ = true;
+        ReentrancyGuard guard { syncingBackdropPeer_ };
+        juce::ignoreUnused (guard);
+
+        // 先设背景色再拉回 setOpaque(true)，防止 ResizableWindow::setBackgroundColour 把窗口改成 WS_EX_LAYERED
+        mainWindow->setBackgroundColour (wantTransparent ? juce::Colours::transparentBlack
+                                                         : juce::Colours::black);
+        mainWindow->setOpaque (true);
+        applyWindowsDwmTransparency (reinterpret_cast<HWND> (mainWindow->getWindowHandle()), wantTransparent);
+
+        lastAppliedTransparentBackdrop_ = wantTransparent;
+        mainWindow->repaint();
+        if (cachedEditor != nullptr)
+            cachedEditor->repaint();
+       #else
+        auto* curPeer = mainWindow->getPeer();
+        const bool peerIsSemi = (curPeer != nullptr)
+                             && ((curPeer->getStyleFlags() & juce::ComponentPeer::windowIsSemiTransparent) != 0);
+
+        if (wantTransparent == lastAppliedTransparentBackdrop_ && peerIsSemi == wantTransparent)
+            return;
+
+        struct ReentrancyGuard
+        {
+            bool& flag;
+            ~ReentrancyGuard() { flag = false; }
+        };
+        syncingBackdropPeer_ = true;
+        ReentrancyGuard guard { syncingBackdropPeer_ };
+        juce::ignoreUnused (guard);
+
+        const auto savedBounds = mainWindow->getBounds();
+        const bool savedOnTop  = (cachedEditor != nullptr)
+                                     ? cachedEditor->isAlwaysOnTopActive()
+                                     : mainWindow->isAlwaysOnTop();
+
+        if (wantTransparent)
+        {
+            if (cachedEditor != nullptr)
+                cachedEditor->setOpenGlEnabledForBackdrop (false);
+
+            mainWindow->setOpaque (false);
+            mainWindow->setBackgroundColour (juce::Colours::transparentBlack);
+            if (cachedEditor != nullptr)
+                cachedEditor->setOpaque (false);
+
+            if (! peerIsSemi)
+            {
+                mainWindow->removeFromDesktop();
+                mainWindow->addToDesktop (mainWindow->getDesktopWindowStyleFlags());
+                mainWindow->setBounds (savedBounds);
+                mainWindow->setVisible (true);
+                if (cachedEditor != nullptr)
+                    cachedEditor->setAlwaysOnTopActive (savedOnTop);
+                else
+                    mainWindow->setAlwaysOnTop (savedOnTop);
+            }
+        }
+        else
+        {
+            mainWindow->setOpaque (true);
+            mainWindow->setBackgroundColour (juce::Colours::black);
+
+            if (peerIsSemi)
+            {
+                mainWindow->removeFromDesktop();
+                mainWindow->addToDesktop (mainWindow->getDesktopWindowStyleFlags());
+                mainWindow->setBounds (savedBounds);
+                mainWindow->setVisible (true);
+                if (cachedEditor != nullptr)
+                    cachedEditor->setAlwaysOnTopActive (savedOnTop);
+                else
+                    mainWindow->setAlwaysOnTop (savedOnTop);
+            }
+
+            if (cachedEditor != nullptr)
+                cachedEditor->setOpenGlEnabledForBackdrop (true);
+        }
+
+        lastAppliedTransparentBackdrop_ = wantTransparent;
+        mainWindow->repaint();
+        if (cachedEditor != nullptr)
+            cachedEditor->repaint();
+       #endif
+    }
+
+    // ----------------------------------------------------
     // 成员字段
     // ----------------------------------------------------
     juce::ApplicationProperties                     appProperties;
@@ -2473,10 +2924,22 @@ private:
     //   · 用于 ChangeListener 回调里刷新下拉框；不拥有生命周期
     Y2KmeterAudioProcessorEditor*                   cachedEditor = nullptr;
 
-    // WASAPI Loopback 采集器 —— 在"System Output (Loopback)"选项被选中时启用
+    // WASAPI Loopback 采集器 —— 选中 "Output"（整机输出）或某个定向程序时启用
     std::unique_ptr<WasapiLoopbackCapture>          loopback;
     std::atomic<bool>                               loopbackActive { false };
     std::atomic<double>                             loopbackLastSampleRate { 0.0 };
+
+    // 定向程序采集（Application Audio Capture，仅 Windows）。以下均只在消息线程访问。
+    //   当前目标 exe 不单独存：以采集器为准，见 currentAppExe()。
+    //   · appTargets               —— Source 下拉里的程序列表缓存（下拉弹出前刷新）
+    //   · rememberedAppDisplayName —— 当前目标的显示名。程序没在运行、读不到版本信息时
+    //     用它显示；随 settings 持久化（audio.appDisplayName）
+    static constexpr const char* kAppSourcePrefix = "app:";
+    static constexpr const char* kAppSubmenuName  = "App Audio Capture";   // Source 下拉里的子菜单名（翻译键）
+    static constexpr const char* kAllAppsSubmenuName = "All Apps";         // 其下"没在出声的程序"二级子菜单名（翻译键）
+    juce::Array<appaudio::AppAudioTarget>           appTargets;
+    juce::String                                    rememberedAppExe;
+    juce::String                                    rememberedAppDisplayName;
 
     // WASAPI 采集线程应用前置增益用的临时缓冲（与 macGainScratch 同思路）。
     //   只在采集线程内访问，预分配后避免逐块堆分配。
@@ -2511,6 +2974,12 @@ private:
     // initialise() 中途退出（Steam 要求通过客户端重启）时置位：
     //   此时窗口 / Editor / processor 都没建起来，shutdown() 不能再做状态快照。
     bool                                            bootAborted = false;
+
+    // 背景模式运行时透明 peer 同步状态
+    int                                             backdropThemeSubToken_ = -1;
+    bool                                            lastAppliedTransparentBackdrop_ = false;
+    bool                                            syncingBackdropPeer_ = false;
+    bool                                            shuttingDown_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Y2KStandaloneApp)
 };

@@ -57,13 +57,6 @@ namespace y2k::help
 
         switch (type)
         {
-            case ModuleType::eq:
-                return make (name,
-                    "Live spectrum drawn as a grid of pixel perler beads.\n"
-                    "- Top slider: visible frequency range (drag both ends).\n"
-                    "- SIZE: bead size in pixels.\n"
-                    "Visual only - it never changes your audio.");
-
             case ModuleType::loudness:
                 return make (name,
                     "ITU-R BS.1770-4 loudness at a glance.\n"
@@ -88,7 +81,7 @@ namespace y2k::help
             case ModuleType::spectrum:
                 return make (name,
                     "Real-time spectrum analyser (20 Hz - 20 kHz, log / mel / linear axis).\n"
-                    "- Hover the graph to read frequency and level (plus the note name while holding).\n"
+                    "- Hover the graph to read frequency, level and note name.\n"
                     "- Press and hold the mouse on the graph for bullet time: the "
                     "fall-off slows to 1/50 speed (ghost colour) until you release.\n"
                     "Peak hold, sharpening, slope, curve style, channel view and FFT scale all sit behind the gear button.");
@@ -174,10 +167,10 @@ namespace y2k::help
 
             case ModuleType::spectrogram:
                 return make (name,
-                    "Pixel spectrogram: frequency over time, scrolling continuously.\n"
+                    "Real-time spectrogram: frequency over time, scrolling continuously.\n"
                     "- Press and hold the picture to freeze it, release to continue from live.\n"
-                    "Direction, sharpening, scroll speed, colour scheme and FFT scale sit behind the gear button.\n"
-                    "Hover to read frequency and time (the note name appears while frozen).");
+                    "Colourmap, floor/ceiling/contrast/tilt, sharpening, smoothing, pixel size, frequency range, grid, direction and speed sit behind the gear button.\n"
+                    "Hover to read frequency, time and note name.");
 
             case ModuleType::spectrogram3d:
                 return make (name,
@@ -189,7 +182,7 @@ namespace y2k::help
                 return make (name,
                     "Stereo field radar. Direction = L / R balance, distance = level.\n"
                     "Auto-scales to the recent peak; the dB rings show the current scale.\n"
-                    "Dot size, fade speed and three-band colouring sit behind the gear button.");
+                    "Dot size, fade speed, auto zoom and three-band colouring sit behind the gear button.");
 
             case ModuleType::stereoMap:
                 return make (name,
@@ -197,8 +190,8 @@ namespace y2k::help
                     "- PAN: where each band sits (up = left, down = right).\n"
                     "- MONO: how much of each band survives a mono fold-down "
                     "(lower = more cancellation).\n"
-                    "Press and hold for bullet time and a note-name readout.\n"
-                    "Hover for a ruler; click for a data bubble. Mode and FFT scale sit behind the gear button.");
+                    "Press and hold for bullet time.\n"
+                    "Hover to read frequency, value and note name. Mode and FFT scale sit behind the gear button.");
 
             case ModuleType::virtuPet:
                 return make (name,
@@ -368,7 +361,7 @@ juce::String Y2KTooltipWindow::getTipFor (juce::Component& c)
 
     for (auto* p = &c; p != nullptr; p = p->getParentComponent())
     {
-        // 模块面板（含其任意子组件，如 Milkdrop 的 GLView、EQ 的像素图）
+        // 模块面板（含其任意子组件，如 Milkdrop 的 GLView）
         //   注意：模块里的 juce 按钮 / 滑块本身是 TooltipClient，会在下面的分支
         //   先于面板命中；只有"没有文案的子组件 / 面板自身"才走到这里。
         if (auto* panel = dynamic_cast<ModulePanel*> (p))

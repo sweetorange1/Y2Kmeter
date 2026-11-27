@@ -119,7 +119,16 @@ juce::Rectangle<int> ToyContext::contentBounds() const
 
 void ToyContext::addModuleActor (std::unique_ptr<ToyActor> a)
 {
-    if (state) state->actors.push_back (std::move (a));
+    if (state && a != nullptr) state->actors.push_back (std::move (a));
+}
+
+void ToyContext::addModuleActorCapped (std::unique_ptr<ToyActor> a, size_t maxActors)
+{
+    if (! state || a == nullptr) return;
+    const size_t cap = (maxActors < 1) ? 1 : maxActors;
+    while (state->actors.size() >= cap)
+        state->actors.erase (state->actors.begin());
+    state->actors.push_back (std::move (a));
 }
 
 // 坐标偏移包装（R11）：把面板局部坐标的 actor 转成 Editor 坐标，
@@ -515,15 +524,21 @@ void ToyOverlay::paint (juce::Graphics& g)
     //   actor 走这里），抽屉却是模块子组件 —— 不排除就会被盖住。
     //   把当前打开的抽屉矩形从裁剪区里扣掉，emoji 经过时自动"钻到面板后面"。
     juce::RectangleList<int> drawerRects;
+    const auto openDrawer = ModulePanel::getOpenInWindowDrawerBoundsIn (*this);
+    if (! openDrawer.isEmpty() && openDrawer.intersects (clip))
+        drawerRects.addWithoutMerging (openDrawer);
+
     for (auto& sp : clock.panels)
     {
         if (auto* p = sp.getComponent())
         {
             const auto drawer = p->getControlDrawerBounds();
-            if (! drawer.isEmpty() && drawer.intersects (clip))
+            if (! drawer.isEmpty())
             {
                 const auto tl = getLocalPoint (p, drawer.getTopLeft());
-                drawerRects.addWithoutMerging ({ tl.x, tl.y, drawer.getWidth(), drawer.getHeight() });
+                const juce::Rectangle<int> inOverlay (tl.x, tl.y, drawer.getWidth(), drawer.getHeight());
+                if (inOverlay.intersects (clip))
+                    drawerRects.addWithoutMerging (inOverlay);
             }
         }
     }

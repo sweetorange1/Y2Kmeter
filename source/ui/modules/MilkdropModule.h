@@ -215,9 +215,24 @@ public:
     void randomPreset();
     void jumpToPresetIndex(int index);  ///< UI 线程调用：请求跳转到指定预设索引
 
+    // === 键盘快捷键开关（顶部控制栏 "keys" / "键盘" 按钮：按下=启用，松开=禁用）===
+    bool isKeyboardControlEnabled() const noexcept { return keyboardControlEnabled_; }
+    void setKeyboardControlEnabled(bool enabled);
+    void toggleKeyboardControlEnabled();
+
+    // === 一键重置全部视觉 / 波形覆盖（color + effects + wave + tweak）===
+    bool hasAnyUserVisualOverrides() const;
+    void resetAllUserEffects();
+
     // === 焦点与叠加层交互 ===
     void setFocusVisual(bool shouldFocus);
     bool isFocused() const noexcept { return focused_; }  ///< overlay 控制栏当前是否可见（供 Editor 同步 resize 斜线显隐）
+    bool isColorPanelOpen() const noexcept { return isColorPanelOpen_; }
+    bool isEffectsPanelOpen() const noexcept { return isEffectsPanelOpen_; }
+    bool isWavePanelOpen() const noexcept { return isWavePanelOpen_; }
+    bool isTweakPanelOpen() const noexcept { return isTweakPanelOpen_; }
+    bool isAutoRowExpanded() const noexcept { return isAutoRowExpanded_; }
+    void revealUndoTarget (const juce::String& focusHint) override;
     void touchOverlayIdleTimer() { lastInteractionTime_ = juce::Time::getMillisecondCounter(); }
     void checkOverlayAutoHide();  ///< 由 GLView::timerCallback 在 UI 线程轮询调用
     void checkAutoMode();         ///< 由 GLView::timerCallback 在 UI 线程轮询，自动切换预设
@@ -512,15 +527,31 @@ private:
     bool focused_ { false };
 
     // 叠加层按钮类型
-    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects, kWave, kTweak, kLike, kLibraryToggle };
+    enum class OverlayButton { kNone, kPrev, kNext, kRandom, kPresetName, kAuto, kRenderScale, kColor, kEffects, kWave, kTweak, kResetAll, kKeyLock, kLike, kLibraryToggle };
     OverlayButton hoveredOverlayBtn_ { OverlayButton::kNone };
     OverlayButton pressedOverlayBtn_ { OverlayButton::kNone };
+
+    struct OverlayBarLayout
+    {
+        juce::Rectangle<int> prevBtn;
+        juce::Rectangle<int> keyLockBtn;
+        juce::Rectangle<int> resetAllBtn;
+        juce::Rectangle<int> tweakBtn;
+        juce::Rectangle<int> waveBtn;
+        juce::Rectangle<int> effectsBtn;
+        juce::Rectangle<int> colorBtn;
+        juce::Rectangle<int> autoBtn;
+        juce::Rectangle<int> nextBtn;
+        juce::Rectangle<int> randomBtn;
+        juce::Rectangle<int> nameArea;
+    };
 
     // 缓存 nameArea 矩形，供 mouseDown/Up/Move 中做 hit test
     juce::Rectangle<int> cachedNameArea_;
 
     // 辅助
     juce::Rectangle<int> getOverlayBounds(juce::Rectangle<int> content) const;
+    OverlayBarLayout computeOverlayBarLayout(juce::Rectangle<int> overlay) const;
     OverlayButton hitTestOverlayButton(juce::Point<int> pos, juce::Rectangle<int> overlay) const;
     juce::Rectangle<int> getOverlayButtonRect(juce::Rectangle<int> overlay, OverlayButton btn) const;
     void executeOverlayAction(OverlayButton btn);
@@ -554,6 +585,15 @@ private:
     void syncVisualFromEditor();                                        ///< 从 Editor 全局视觉状态读回本地缓存
     void applyVisualToEditor();                                         ///< 写回 Editor 全局视觉状态
     void updateTintFromSlider(int row, float proportion);               ///< 0=R,1=G,2=B,3=Bright
+
+    // ---- 撤回支持辅助（覆盖预设切换 / color / effects / wave / tweak / auto / keys）----
+    int  resolveLivePresetIndex() const;
+    void notifyBeforeUserEdit();
+    void notifyAfterUserEdit(const juce::String& actionLabel,
+                             const juce::String& focusHint = {},
+                             const juce::String& coalesceKey = {});
+    void notifyUserGestureEnd();
+    mutable int pendingPresetTarget_ { -1 }; ///< UI 线程确定性目标预设索引（GL 线程尚未消费前也能准确记录与连续撤回）
 
     // Bright 滑块非线性映射：使中性点 brightness=1.0 位于滑块正中间（比例 0.5），
     // 左端 0.0、右端 8.0，靠近两端时变化率放缓，便于精细调节暗部与强发光区域。
@@ -601,6 +641,9 @@ private:
     // overlay 最后一次交互时间（getMillisecondCounter），用于 idle 超时检测
     juce::uint32 lastInteractionTime_ { 0 };
 
+    // ---- 键盘控制开关 ----
+    bool keyboardControlEnabled_ { false }; ///< false(默认未按下) = 不受键盘控制；true(按下态) = 启用 Left/Right/Space 预设快捷键
+
     // ---- 自动轮播模式 ----
     bool isAutoMode_ { false };          ///< 自动轮播开关（控制 checkAutoMode 是否工作）
     bool isAutoRowExpanded_ { false };   ///< auto 控制条展开状态（与 color/effects/wave/tweak 面板互斥）
@@ -618,7 +661,7 @@ private:
 
     static constexpr float kAutoRowHeight = 28.0f;
     static constexpr int   kResBtnW  = 32;  // [1:n] 渲染缩放按钮
-    // 控制栏文字按钮（auto / color / effects / wave / tweak）统一宽度：
+    // 控制栏文字按钮（auto / color / effects / wave / tweak / reset / keys）统一宽度：
     //   按翻译后文本测量（中文两字等宽，不再按英文词长写死 32~46 而长短不一），
     //   测量与绘制同为 getFont(8.0f, bold) 口径。见 MilkdropModule.cpp。
     static int overlayTextBtnWidth();

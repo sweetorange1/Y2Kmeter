@@ -57,12 +57,23 @@
 - 改版本号后增量构建不重写 `*_resources.rc`（见 build-toolchain.md）。
 - **macOS 原生全屏的几何存档（v3.4.3 bug3）**：布局坐标是按退出时的 canvas 存的，几何必须存同一尺寸 —— `saveMainWindowBounds()` 在全屏态直接把当前（全屏）矩形写进 `window.*`（旧实现跳过写入、保留上一次的小窗口尺寸 → 重启后模块全挤在上方）。同时 `restoreMainWindowBounds()` 在 `window.nativeFullScreen=1` 时**跳过**旧几何恢复（本次启动会进全屏，小窗口只会闪一下）。
 
-## 6.1 布局预设与全屏状态（v3.4.3 bug4）
+## 6.1 布局预设与全屏状态（v3.4.3 bug4 / v3.5.0 场景化重构）
 
-- 全屏磁贴预设（14/15/16）在 mac 会 `setFullScreen(true)` 并把 Editor / 顶层窗口的 `resizeLimits` 锁死到整屏尺寸。
-- 因此 `applyLayoutPreset()` 做了两件事：①目标不是全屏磁贴预设且当前处于原生全屏 → 先 `setFullScreen(false)`，轮询到真的离开全屏（`continueLayoutPresetAfterFullScreenExit`，80ms × 40）再重新应用；②应用前统一放开 Editor / 窗口的 resizeLimits，各预设分支随后按自己的目标尺寸重设。
+- v3.5.0 删除历史旧预设，重构为 **4 分组 14 套常规预设 + 4 套 Stick 吸附条**（全部采用存活模块、零重叠、完整支持 Undo/Redo）：
+  - **日常与桌面**：`Default Workspace(1)` / `Compact Mini Bar(4)` / `Desktop Companion(5)` / `Top Dock Bar(2)` / `Bottom Dock Bar(3)`；
+  - **混音与音频分析**：`Mixing Console(6)` / `Mastering & Broadcast(7)` / `Vocal & Podcast(8)` / `DJ & Beat Analysis(9)`；
+  - **视觉与直播**：`Stream / OBS Overlay(10)` / `Music Visualizer (MV)(11)` / `Pure MilkDrop(12)`；
+  - **全屏指挥台**：`Full: Deep Analysis(13)` / `Full: All-in-One(14)`（17 块无缝密排覆盖全部 16 类功能模块）；
+  - **Stick 吸附条（仅驻留态）**：`Bar: Classic(2/3)` / `Bar: Mixing(15)` / `Bar: Visuals(16)` / `Bar: Desk Companion(17)`。
+- 全屏预设（`musicVisualizerMv(11)` / `onlyMilkdrop(12)` / `fullDeepAnalysis(13)` / `fullAllInOne(14)`）在 macOS 会 `setFullScreen(true)` 并把 Editor / 顶层窗口的 `resizeLimits` 锁死到整屏尺寸。
+- 因此 `applyLayoutPreset()` 做了两件事：①目标不是全屏预设且当前处于原生全屏 → 先 `setFullScreen(false)`，轮询到真的离开全屏（`continueLayoutPresetAfterFullScreenExit`，80ms × 40）再重新应用；②应用前统一放开 Editor / 窗口的 resizeLimits，各预设分支随后按自己的目标尺寸重设。
 - 漏掉①的表现：全屏预设切到默认 / 横条预设后窗口仍铺满整屏，只有模块被换掉。
 - 新增任何"直接改窗口尺寸"的入口，都要同样先放开 resizeLimits。
+
+## 6.2 浮动模块窗口的脱离 / 停靠 / 关闭时序（v3.5.0）
+
+- 浮动窗口（`FloatingModuleWindow`）现在运行独立 `OpenGLContext` + `GlDirectRenderer`（详见 `rendering-gl.md` §1）。
+- 点击浮动窗口标题栏的「停靠（Pop-out）」或「关闭（×）」按钮时，**不得在 `WM_LBUTTONUP` / `mouseUp` 栈帧内同步销毁窗口或原位覆写 `panel->onPopOutClicked`**：必须先把回调按值拷贝到局部栈变量，再经 `MessageManager::callAsync` + `SafePointer` 统一路由到 `dockFloatingModule()` / `closeFloatingModule()`，停靠前必须 `clearContentComponent()` 解除归属，且支持双击幂等去重。
 
 ## 7. 相关引用
 

@@ -388,7 +388,7 @@ public:
     //     刷新节奏天然一致；同时 hop=size/4 保证重分配谱图的无折叠范围
     //     恒为 ±2 bin（覆盖 Hann 主瓣，Sharp/Sharper 无折叠伪影）
     //   · 一次 FFT 同时产出：幅度（blended）、复频谱帧对（重分配谱图）、
-    //     160 bin 粗粒度谱（EqModule）
+    //     160 bin 粗粒度谱（兼容快照 / GpuUniforms）
     // ======================================================
 
     enum class Kind : int

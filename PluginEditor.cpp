@@ -5,13 +5,14 @@
 #include <cmath>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 #include "BinaryData.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/HoverHelp.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/palette/ThemeLibrary.h"
-#include "source/ui/modules/EqModule.h"
 #include "source/ui/modules/LoudnessModule.h"
 #include "source/ui/modules/OscilloscopeModule.h"
 #include "source/ui/modules/SpectrumModule.h"
@@ -33,6 +34,7 @@
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/MilkdropParamIds.h"
 #include "source/ui/GlDirectModule.h"
+#include "source/ui/GlDirectRenderer.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/perf/FramePerfLog.h"
 #include "source/diag/Y2KDiagLog.h"
@@ -45,6 +47,7 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <dwmapi.h>
 
 namespace {
     // Windows AppBar（SHAppBarMessage）封装：把顶层窗口注册为 AppBar，
@@ -100,6 +103,58 @@ namespace {
             return false;
 
         return MoveWindow (hwnd, r.getX(), r.getY(), r.getWidth(), r.getHeight(), TRUE) != FALSE;
+    }
+
+    // Windows DWM 硬件透明覆层开关（供独立 GL 浮窗同步真透明模式，与 Y2KMainWindow 完全一致）：
+    //   配合 WGL PFD_SUPPORT_COMPOSITION + 8bit alpha FBO 0，60-120 FPS 真透明零卡顿。
+    void y2kApplyWindowsDwmTransparency (HWND topHwnd, bool enable) noexcept
+    {
+        if (topHwnd == nullptr)
+            return;
+
+        using FnBlurBehind = HRESULT (WINAPI*) (HWND, const DWM_BLURBEHIND*);
+        using FnSetAttr    = HRESULT (WINAPI*) (HWND, DWORD, LPCVOID, DWORD);
+
+        struct DwmFns
+        {
+            FnBlurBehind blurBehind = nullptr;
+            FnSetAttr    setAttr    = nullptr;
+        };
+
+        static const DwmFns fns = []() -> DwmFns
+        {
+            DwmFns out;
+            HMODULE mod = GetModuleHandleW (L"dwmapi.dll");
+            if (mod == nullptr)
+                mod = LoadLibraryW (L"dwmapi.dll");
+            if (mod != nullptr)
+            {
+                out.blurBehind = reinterpret_cast<FnBlurBehind> (GetProcAddress (mod, "DwmEnableBlurBehindWindow"));
+                out.setAttr    = reinterpret_cast<FnSetAttr> (GetProcAddress (mod, "DwmSetWindowAttribute"));
+            }
+            return out;
+        }();
+
+        if (fns.blurBehind != nullptr)
+        {
+            HRGN emptyRgn = enable ? CreateRectRgn (0, 0, -1, -1) : nullptr;
+            DWM_BLURBEHIND bb {};
+            bb.dwFlags  = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+            bb.fEnable  = enable ? TRUE : FALSE;
+            bb.hRgnBlur = emptyRgn;
+            fns.blurBehind (topHwnd, &bb);
+            if (emptyRgn != nullptr)
+                DeleteObject (emptyRgn);
+        }
+
+        if (fns.setAttr != nullptr)
+        {
+            constexpr DWORD kDwmwaBorderColor  = 34;          // DWMWA_BORDER_COLOR (Win11+)
+            constexpr DWORD kDwmwaColorNone    = 0xFFFFFFFEu; // DWMWA_COLOR_NONE
+            constexpr DWORD kDwmwaColorDefault = 0xFFFFFFFFu; // DWMWA_COLOR_DEFAULT
+            const DWORD borderCol = enable ? kDwmwaColorNone : kDwmwaColorDefault;
+            fns.setAttr (topHwnd, kDwmwaBorderColor, &borderCol, sizeof (borderCol));
+        }
     }
 
     // 把窗口注册成 AppBar 并驻留到工作区顶/底边。
@@ -511,146 +566,294 @@ juce::Rectangle<int> resolveDisplayArea (const juce::Rectangle<int>& realArea)
 }
 
 // ----------------------------------------------------------
-// 是否为"横向条"预设（Preset 2/3 经典条 + 11~13 的 stick 变体）
-//   · 这些预设共用同一套流程：窗口切成「屏幕宽 × 条高（250）」→ 贴顶/贴底
-//     → 条内模块横向等分 → stick 态下重新提交 AppBar 占位；
-//   · 彼此只在条内模块序列 / 宽度权重上不同，条高一律不变，避免把窗口搞大。
+// 是否为"横向条"预设（顶部/底部任务条 + 3 套 stick 变体）
+//   · 共用同一套流程：窗口切成「屏幕宽 × 条高（250）」→ 贴顶/贴底 → 8px 网格对齐平铺。
 // ----------------------------------------------------------
 bool isHorizontalStripPreset (int presetId)
 {
     return presetId == (int) ModuleWorkspace::LayoutPreset::horizontalFull
         || presetId == (int) ModuleWorkspace::LayoutPreset::horizontalBottom
-        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpectrogram
-        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMilkdrop
-        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpecMilk;
+        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMixing
+        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarVisuals
+        || presetId == (int) ModuleWorkspace::LayoutPreset::stickBarDesk;
 }
 
-// 条状预设在 stick 下拉 placeholder 里显示的名字（与 ModuleWorkspace 的条目文案一致）
+// 条状预设在 stick 下拉 placeholder 里显示的名字（与 ModuleWorkspace 条目文案一致）
 juce::String stripPresetLabel (int presetId)
 {
-    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpectrogram) return "BAR: SPECTROGRAM";
-    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMilkdrop)    return "BAR: MILKDROP";
-    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpecMilk)    return "BAR: SPEC + MILK";
-    return "BAR: CLASSIC";
+    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMixing)  return "Bar: Mixing";
+    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarVisuals) return "Bar: Visuals";
+    if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarDesk)    return "Bar: Desk Companion";
+    return "Bar: Classic";
 }
 
 // ----------------------------------------------------------
-// 全屏磁贴预设（14~16）的静态布局表
-//   · 来源：用户用 Save 导出的自定义布局存档（`<PBEQ_Layout>` 节点）
-//       "频谱为主" / "所有模块全部放到屏幕里"（= Y2Kmeter_all.settings）/
-//       "多功能集合"
-//   · 只取 <Module> 的 type + x/y/w/h（参考画布 2560×1328），刻意丢弃：
-//       a) VirtuPet 模块（存档里的宠物角色 / 饱食度 / 健康度是运行时数据，
-//          且它是浮在别的模块上的贴片，不该固化进预设）；
-//       b) Milkdrop 预设索引 / 瀑布滚动速度 / 颜色来源等"内容级"状态 ——
-//          模块一律由 createModule() 以各自构造默认值创建；
-//       c) 唯一例外是**显示模式**（波形 / X-Y / 李萨如、左右 / 双声道、
-//          PAN / MONO、Classic / Sharp / Sharper）：同类型模块在存档里
-//          本来就用不同模式（例如全部模块预设里的两块声像图），
-//          丢了这个信息画面就会重复。用 tile.mode 显式指定。
-//   · 坐标保留存档原值（本身已 8px 网格对齐），应用时按当前 canvas 归一化
-//     映射，因此换屏幕 / 换分辨率后相对排布不变。
+// v3.5 全新多场景布局预设表（全部基于现行 17 类存活模块，零退役模块）
+//   · 使用归一化坐标 [0..1] 描述模块矩形，应用时通过统一 8px 网格映射函数换算：
+//     相邻模块共享同一浮点边界 → 任意分辨率（1080p / 1440p / 4K / 高分屏）均无缝密排、零重叠；
+//   · 可选携带最多 3 组现行模块参数种子（如 VU 双针/条模式、波形齿音/双声道、小工具时钟/便签等），
+//     每个场景开箱即达最佳观感。
 // ----------------------------------------------------------
-struct FullScreenTile
+struct PresetTile
 {
-    ModuleType type;
-    int x, y, w, h;
-
-    // 模块内部显示模式（-1 = 用模块自己构造默认值）
-    //   oscilloscope     → OscilloscopeModule::DisplayMode    (0 波形 / 1 X-Y / 2 李萨如)
-    //   oscilloscopeWave → OscilloscopeWaveModule::ChannelMode (0 左 / 1 右 / 2 双声道)
-    //   stereoMap        → StereoMapModule::Mode               (0 PAN / 1 MONO)
-    //   spectrogram      → SpectrogramModule::DisplayMode      (0 Classic / 1 Sharp / 2 Sharper)
-    int mode = -1;
+    ModuleType  type;
+    float       x0, y0, x1, y1;
+    const char* p1 = nullptr; double v1 = 0.0;
+    const char* p2 = nullptr; double v2 = 0.0;
+    const char* p3 = nullptr; double v3 = 0.0;
 };
 
-// 14 FULL: SPECTRUM —— 频谱为主（左侧三块大图 + 顶部波形 + 右侧仪表列）
-static const FullScreenTile kFullSpectrumTiles[] =
+struct PresetLayoutSpec
 {
-    { ModuleType::spectrum,         0,    0, 1816, 456 },
-    { ModuleType::loudness,      1816,  328,  248, 1000 },
-    { ModuleType::waveform,      1816,    0,  744, 328 },
-    { ModuleType::oscilloscopeWave, 2064, 328,  496, 368 },
-    { ModuleType::oscilloscope,  2064,  696,  496, 368 },
-    { ModuleType::recorder,      2064, 1064,  160, 264 },
-    { ModuleType::tempoKey,      2224, 1064,  328, 264 },
-    { ModuleType::spectrogram,      0,  456, 1816, 456 },
-    { ModuleType::stereoMap,        0,  912, 1816, 416 }
+    const PresetTile* tiles   = nullptr;
+    int               count   = 0;
+    int               targetW = 0;   // >0 表示窗口化目标宽；0 表示全屏铺满
+    int               targetH = 0;
 };
 
-// 15 FULL: ALL MODULES —— 所有模块全部放到屏幕里（25 块密排铺满整屏）
-//   · 布局完全取自用户存档 Y2Kmeter_all.settings（canvas 2560×1328，
-//     25 个模块，不含已下线的拼豆频谱）；
-//   · 3× oscilloscope（波形 / X-Y / 李萨如）、3× oscilloscope_wave
-//     （左 / 右 / 双声道）、2× stereo_map（PAN / MONO）、
-//     spectrogram（Sharp）都按存档里的**原始模式**还原。
-static const FullScreenTile kFullAllModulesTiles[] =
+// 1) Default Workspace（1120×680）：清晰双行平铺，零重叠，独立版 & DAW 通用
+static const PresetTile kPresetDefaultWorkspace[] =
 {
-    { ModuleType::oscilloscopeWave,  768,  256, 384, 256, 0 },  // 左声道
-    { ModuleType::dynamicsMeters,      0,  512, 256, 256 },
-    { ModuleType::oscilloscopeWave,    0,  256, 384, 256, 1 },  // 右声道
-    { ModuleType::oscilloscopeWave,  384,  256, 384, 256, 2 },  // 双声道
-    { ModuleType::oscilloscope,     2176,    0, 384, 256, 0 },  // 波形
-    { ModuleType::oscilloscope,     1792,    0, 384, 256, 1 },  // X-Y
-    { ModuleType::vuMeter,          1064,    0, 344, 256 },
-    { ModuleType::truePeak,          744,    0, 320, 256 },
-    { ModuleType::lufsRealtime,      424,    0, 320, 256 },
-    { ModuleType::loudness,            0,    0, 424, 256 },
-    { ModuleType::oscilloscope,     1408,    0, 384, 256, 2 },  // 李萨如
-    { ModuleType::stereoField,         0, 1064, 632, 264 },
-    { ModuleType::waveform,         1800,  512, 760, 256 },
-    { ModuleType::spectrogram3d,     824,  512, 464, 256 },
-    { ModuleType::spectrogram,       256,  512, 568, 256, 1 },  // Sharp
-    { ModuleType::stereoMap,         544,  768, 664, 296, 1 },  // MONO（单声道兼容度）
-    { ModuleType::tempoKey,          632, 1064, 416, 264 },
-    { ModuleType::recorder,         1048, 1064, 160, 264 },
-    { ModuleType::milkdrop,         1208,  768, 1352, 560 },
-    { ModuleType::dynamics,         1288,  512, 512, 256 },
-    { ModuleType::phaseBalance,     2368,  384, 192, 128 },
-    { ModuleType::phase,            1984,  256, 384, 256 },
-    { ModuleType::phaseCorrelation, 2368,  256, 192, 128 },
-    { ModuleType::spectrum,         1152,  256, 832, 256 },
-    { ModuleType::stereoMap,           0,  768, 544, 296, 0 },  // PAN（逐频段声像）
+    { ModuleType::spectrum,     0.00f, 0.00f, 0.46f, 0.52f },
+    { ModuleType::waveform,     0.46f, 0.00f, 0.78f, 0.52f },
+    { ModuleType::vuMeter,      0.78f, 0.00f, 1.00f, 0.52f, "channels", 1.0 },
+    { ModuleType::loudness,     0.00f, 0.52f, 0.25f, 1.00f },
+    { ModuleType::stereoField,  0.25f, 0.52f, 0.48f, 1.00f },
+    { ModuleType::oscilloscope, 0.48f, 0.52f, 0.73f, 1.00f, "displayMode", 0.0 },
+    { ModuleType::spectrogram,  0.73f, 0.52f, 1.00f, 1.00f, "displayMode", 1.0 }
 };
 
-// 16 FULL: MULTI COMBO —— 多功能集合（顶部通栏波形 + 中部频谱 + 右下可视化）
-static const FullScreenTile kFullMultiComboTiles[] =
+// 2) Compact Mini Bar（960×248）：精简悬浮条，不占满屏宽
+static const PresetTile kPresetCompactMiniBar[] =
 {
-    { ModuleType::loudness,         1816,  328,  248, 1000 },
-    { ModuleType::spectrogram,         0,  328,  576, 512 },
-    { ModuleType::spectrogram3d,       0,  840,  576, 488 },
-    { ModuleType::oscilloscopeWave,  576,  840,  672, 488 },
-    { ModuleType::oscilloscope,     1248,  840,  568, 488 },
-    { ModuleType::lufsRealtime,     2064,  328,  496, 256 },
-    { ModuleType::milkdrop,         2064,  584,  488, 376 },
-    { ModuleType::waveform,            0,    0, 2560, 328 },
-    { ModuleType::stereoMap,        2064,  960,  496, 368 },
-    { ModuleType::spectrum,          576,  328, 1240, 512 }
+    { ModuleType::vuMeter,  0.00f, 0.00f, 0.22f, 1.00f, "channels", 1.0 },
+    { ModuleType::spectrum, 0.22f, 0.00f, 0.56f, 1.00f },
+    { ModuleType::loudness, 0.56f, 0.00f, 0.74f, 1.00f, "style", 1.0 },
+    { ModuleType::waveform, 0.74f, 0.00f, 1.00f, 1.00f }
+};
+
+// 3) Desktop Companion（1360×720）：桌面日常伴侣（电脑状态 + 时钟 + 便签 + 音频 + MilkDrop）
+static const PresetTile kPresetDesktopCompanion[] =
+{
+    { ModuleType::systemMonitor, 0.00f, 0.00f, 0.30f, 0.65f },
+    { ModuleType::utility,       0.00f, 0.65f, 0.30f, 1.00f, "tool", 5.0 },  // Clock
+    { ModuleType::spectrum,      0.30f, 0.00f, 0.74f, 0.46f },
+    { ModuleType::milkdrop,      0.30f, 0.46f, 0.74f, 1.00f },
+    { ModuleType::vuMeter,       0.74f, 0.00f, 1.00f, 0.34f, "channels", 1.0 },
+    { ModuleType::waveform,      0.74f, 0.34f, 1.00f, 0.66f },
+    { ModuleType::utility,       0.74f, 0.66f, 1.00f, 1.00f, "tool", 6.0 }   // Notes
+};
+
+// 4) Mixing Console（1440×800）：专业双行混音工作台
+static const PresetTile kPresetMixingConsole[] =
+{
+    { ModuleType::spectrum,    0.00f, 0.00f, 0.44f, 0.52f },
+    { ModuleType::spectrogram, 0.44f, 0.00f, 0.74f, 0.52f, "displayMode", 1.0 },
+    { ModuleType::waveform,    0.74f, 0.00f, 1.00f, 0.52f },
+    { ModuleType::loudness,    0.00f, 0.52f, 0.21f, 1.00f },
+    { ModuleType::vuMeter,     0.21f, 0.52f, 0.40f, 1.00f, "channels", 1.0 },
+    { ModuleType::phase,       0.40f, 0.52f, 0.60f, 1.00f },
+    { ModuleType::stereoMap,   0.60f, 0.52f, 0.80f, 1.00f, "mode", 0.0 },
+    { ModuleType::dynamics,    0.80f, 0.52f, 1.00f, 1.00f }
+};
+
+// 5) Mastering & Broadcast（1440×780）：母带与广播响度合规
+static const PresetTile kPresetMasteringBroadcast[] =
+{
+    { ModuleType::loudness,  0.00f, 0.00f, 0.34f, 0.48f, "style", 1.0 },
+    { ModuleType::dynamics,  0.34f, 0.00f, 0.68f, 0.48f },
+    { ModuleType::vuMeter,   0.68f, 0.00f, 1.00f, 0.48f, "meterType", 1.0, "channels", 1.0 },
+    { ModuleType::spectrum,  0.00f, 0.48f, 0.38f, 1.00f },
+    { ModuleType::phase,     0.38f, 0.48f, 0.60f, 1.00f },
+    { ModuleType::stereoMap, 0.60f, 0.48f, 0.82f, 1.00f, "mode", 1.0 },  // Mono check
+    { ModuleType::waveform,  0.82f, 0.48f, 1.00f, 1.00f, "colorSource", 1.0 }
+};
+
+// 6) Vocal & Podcast（1280×680）：人声齿音检测 + 32-bit 录音 + 响度/复古表 + 秒表
+static const PresetTile kPresetVocalPodcast[] =
+{
+    { ModuleType::waveform, 0.00f, 0.00f, 0.48f, 0.52f, "colorSource", 2.0 }, // Sibilance
+    { ModuleType::spectrum, 0.48f, 0.00f, 0.82f, 0.52f },
+    { ModuleType::recorder, 0.82f, 0.00f, 1.00f, 0.52f },
+    { ModuleType::loudness, 0.00f, 0.52f, 0.30f, 1.00f },
+    { ModuleType::vuMeter,  0.30f, 0.52f, 0.56f, 1.00f, "meterType", 0.0, "needleDialStyle", 3.0 },
+    { ModuleType::tempoKey, 0.56f, 0.52f, 0.80f, 1.00f },
+    { ModuleType::utility,  0.80f, 0.52f, 1.00f, 1.00f, "tool", 2.0 }         // Stopwatch
+};
+
+// 7) DJ & Beat Analysis（1280×720）：BPM/调性 + 双声道波形 + 双针 VU + 柱状频谱 + 雷达 + 3D 语谱
+static const PresetTile kPresetDjBeatLive[] =
+{
+    { ModuleType::tempoKey,      0.00f, 0.00f, 0.28f, 0.48f },
+    { ModuleType::waveform,      0.28f, 0.00f, 0.74f, 0.48f, "dual", 1.0, "colorSource", 0.0 },
+    { ModuleType::vuMeter,       0.74f, 0.00f, 1.00f, 0.48f, "meterType", 0.0, "needleDialStyle", 2.0, "channels", 1.0 },
+    { ModuleType::spectrum,      0.00f, 0.48f, 0.42f, 1.00f, "fillStyle", 4.0 },
+    { ModuleType::stereoField,   0.42f, 0.48f, 0.70f, 1.00f },
+    { ModuleType::spectrogram3d, 0.70f, 0.48f, 1.00f, 1.00f }
+};
+
+// 8) Stream / OBS Overlay（1200×280）：极简直播挂件条（适配绿幕 / 透明覆层）
+static const PresetTile kPresetStreamOverlay[] =
+{
+    { ModuleType::vuMeter,  0.00f, 0.00f, 0.22f, 1.00f, "channels", 1.0 },
+    { ModuleType::spectrum, 0.22f, 0.00f, 0.56f, 1.00f },
+    { ModuleType::waveform, 0.56f, 0.00f, 0.80f, 1.00f },
+    { ModuleType::tempoKey, 0.80f, 0.00f, 1.00f, 1.00f }
+};
+
+// 9) Music Visualizer (MV)（全屏）：顶部 6 模块视觉监测条 + 下方超大 MilkDrop 舞台
+static const PresetTile kPresetMusicVisualizerMv[] =
+{
+    { ModuleType::spectrogram3d, 0.00f, 0.00f, 0.15f, 0.18f },
+    { ModuleType::vuMeter,       0.15f, 0.00f, 0.28f, 0.18f, "channels", 1.0 },
+    { ModuleType::spectrum,      0.28f, 0.00f, 0.52f, 0.18f },
+    { ModuleType::stereoField,   0.52f, 0.00f, 0.66f, 0.18f },
+    { ModuleType::waveform,      0.66f, 0.00f, 0.86f, 0.18f },
+    { ModuleType::tempoKey,      0.86f, 0.00f, 1.00f, 0.18f },
+    { ModuleType::milkdrop,      0.00f, 0.18f, 1.00f, 1.00f }
+};
+
+// 10) Pure MilkDrop（全屏）：单模块沉浸舞台
+static const PresetTile kPresetOnlyMilkdrop[] =
+{
+    { ModuleType::milkdrop, 0.00f, 0.00f, 1.00f, 1.00f }
+};
+
+// 11) Full: Deep Analysis（全屏）：12 块工程级频谱/语谱/声像/相位/动态全景分析墙
+static const PresetTile kPresetFullDeepAnalysis[] =
+{
+    // 左侧 64%：频谱 + 2D/3D 语谱 + 声像/单声道兼容双视图
+    { ModuleType::spectrum,      0.00f, 0.00f, 0.64f, 0.34f },
+    { ModuleType::spectrogram,   0.00f, 0.34f, 0.36f, 0.68f, "displayMode", 1.0 },
+    { ModuleType::spectrogram3d, 0.36f, 0.34f, 0.64f, 0.68f },
+    { ModuleType::stereoMap,     0.00f, 0.68f, 0.32f, 1.00f, "mode", 0.0 },
+    { ModuleType::stereoMap,     0.32f, 0.68f, 0.64f, 1.00f, "mode", 1.0 },
+    // 右侧 36%：双声道波形 + 响度/动态 + 相位/示波 X-Y + VU/调性
+    { ModuleType::waveform,      0.64f, 0.00f, 1.00f, 0.26f, "dual", 1.0 },
+    { ModuleType::loudness,      0.64f, 0.26f, 0.82f, 0.56f },
+    { ModuleType::dynamics,      0.82f, 0.26f, 1.00f, 0.56f },
+    { ModuleType::phase,         0.64f, 0.56f, 0.82f, 0.78f },
+    { ModuleType::oscilloscope,  0.82f, 0.56f, 1.00f, 0.78f, "displayMode", 1.0 },
+    { ModuleType::vuMeter,       0.64f, 0.78f, 0.82f, 1.00f, "channels", 1.0 },
+    { ModuleType::tempoKey,      0.82f, 0.78f, 1.00f, 1.00f }
+};
+
+// 12) Full: All-in-One（全屏）：无缝密排覆盖全部 16 类功能模块（零退役、零重叠、1080p+ 友好）
+static const PresetTile kPresetFullAllInOne[] =
+{
+    // 第 1 行：电脑状态 + 响度 + VU + 动态 + 调性 + 录音机
+    { ModuleType::systemMonitor, 0.00f, 0.00f, 0.22f, 0.24f },
+    { ModuleType::loudness,      0.22f, 0.00f, 0.39f, 0.24f },
+    { ModuleType::vuMeter,       0.39f, 0.00f, 0.54f, 0.24f, "channels", 1.0 },
+    { ModuleType::dynamics,      0.54f, 0.00f, 0.72f, 0.24f },
+    { ModuleType::tempoKey,      0.72f, 0.00f, 0.87f, 0.24f },
+    { ModuleType::recorder,      0.87f, 0.00f, 1.00f, 0.24f },
+    // 第 2 行：宽频谱 + 波形历史 + 时钟 + 便签
+    { ModuleType::spectrum,      0.00f, 0.24f, 0.42f, 0.50f },
+    { ModuleType::waveform,      0.42f, 0.24f, 0.72f, 0.50f },
+    { ModuleType::utility,       0.72f, 0.24f, 0.86f, 0.50f, "tool", 5.0 },
+    { ModuleType::utility,       0.86f, 0.24f, 1.00f, 0.50f, "tool", 6.0 },
+    // 第 3 行：2D 语谱 + 3D 语谱 + 相位 + 李萨如示波
+    { ModuleType::spectrogram,   0.00f, 0.50f, 0.28f, 0.76f, "displayMode", 1.0 },
+    { ModuleType::spectrogram3d, 0.28f, 0.50f, 0.54f, 0.76f },
+    { ModuleType::phase,         0.54f, 0.50f, 0.74f, 0.76f },
+    { ModuleType::oscilloscope,  0.74f, 0.50f, 1.00f, 0.76f, "displayMode", 2.0 },
+    // 第 4 行：声场雷达 + 频段声像 + 宽幅 MilkDrop
+    { ModuleType::stereoField,   0.00f, 0.76f, 0.24f, 1.00f },
+    { ModuleType::stereoMap,     0.24f, 0.76f, 0.50f, 1.00f, "mode", 0.0 },
+    { ModuleType::milkdrop,      0.50f, 0.76f, 1.00f, 1.00f }
+};
+
+// 横向任务条 / Stick 吸附条（4 套，全部基于现行存活模块）
+static const PresetTile kStripClassic[] =
+{
+    { ModuleType::spectrogram3d, 0.00f, 0.00f, 0.13f, 1.00f },
+    { ModuleType::loudness,      0.13f, 0.00f, 0.23f, 1.00f, "style", 1.0 },
+    { ModuleType::vuMeter,       0.23f, 0.00f, 0.35f, 1.00f, "channels", 1.0 },
+    { ModuleType::stereoField,   0.35f, 0.00f, 0.47f, 1.00f },
+    { ModuleType::spectrum,      0.47f, 0.00f, 0.68f, 1.00f },
+    { ModuleType::oscilloscope,  0.68f, 0.00f, 0.80f, 1.00f, "displayMode", 0.0 },
+    { ModuleType::waveform,      0.80f, 0.00f, 1.00f, 1.00f }
+};
+
+static const PresetTile kStripMixing[] =
+{
+    { ModuleType::spectrogram, 0.00f, 0.00f, 0.14f, 1.00f, "displayMode", 1.0 },
+    { ModuleType::loudness,    0.14f, 0.00f, 0.24f, 1.00f },
+    { ModuleType::vuMeter,     0.24f, 0.00f, 0.36f, 1.00f, "channels", 1.0 },
+    { ModuleType::phase,       0.36f, 0.00f, 0.48f, 1.00f },
+    { ModuleType::spectrum,    0.48f, 0.00f, 0.68f, 1.00f },
+    { ModuleType::stereoMap,   0.68f, 0.00f, 0.82f, 1.00f, "mode", 0.0 },
+    { ModuleType::waveform,    0.82f, 0.00f, 1.00f, 1.00f }
+};
+
+static const PresetTile kStripVisuals[] =
+{
+    { ModuleType::spectrogram, 0.00f, 0.00f, 0.13f, 1.00f, "displayMode", 1.0 },
+    { ModuleType::vuMeter,     0.13f, 0.00f, 0.24f, 1.00f, "channels", 1.0 },
+    { ModuleType::milkdrop,    0.24f, 0.00f, 0.54f, 1.00f },
+    { ModuleType::spectrum,    0.54f, 0.00f, 0.72f, 1.00f },
+    { ModuleType::tempoKey,    0.72f, 0.00f, 0.84f, 1.00f },
+    { ModuleType::waveform,    0.84f, 0.00f, 1.00f, 1.00f }
+};
+
+static const PresetTile kStripDeskCompanion[] =
+{
+    { ModuleType::systemMonitor, 0.00f, 0.00f, 0.20f, 1.00f },
+    { ModuleType::utility,       0.20f, 0.00f, 0.32f, 1.00f, "tool", 5.0 },
+    { ModuleType::vuMeter,       0.32f, 0.00f, 0.44f, 1.00f, "channels", 1.0 },
+    { ModuleType::spectrum,      0.44f, 0.00f, 0.68f, 1.00f },
+    { ModuleType::tempoKey,      0.68f, 0.00f, 0.81f, 1.00f },
+    { ModuleType::waveform,      0.81f, 0.00f, 1.00f, 1.00f }
 };
 
 bool isFullScreenTilePreset (int presetId)
 {
-    return presetId == (int) ModuleWorkspace::LayoutPreset::fullSpectrumFocus
-        || presetId == (int) ModuleWorkspace::LayoutPreset::fullAllModules
-        || presetId == (int) ModuleWorkspace::LayoutPreset::fullMultiCombo;
+    return presetId == (int) ModuleWorkspace::LayoutPreset::musicVisualizerMv
+        || presetId == (int) ModuleWorkspace::LayoutPreset::onlyMilkdrop
+        || presetId == (int) ModuleWorkspace::LayoutPreset::fullDeepAnalysis
+        || presetId == (int) ModuleWorkspace::LayoutPreset::fullAllInOne;
 }
 
-const FullScreenTile* fullScreenTilesForPreset (int presetId, int& count)
+PresetLayoutSpec resolvePresetSpec (int presetId)
 {
-    switch (presetId)
+    using LP = ModuleWorkspace::LayoutPreset;
+    switch ((LP) presetId)
     {
-        case (int) ModuleWorkspace::LayoutPreset::fullSpectrumFocus:
-            count = (int) (sizeof (kFullSpectrumTiles) / sizeof (kFullSpectrumTiles[0]));
-            return kFullSpectrumTiles;
-        case (int) ModuleWorkspace::LayoutPreset::fullAllModules:
-            count = (int) (sizeof (kFullAllModulesTiles) / sizeof (kFullAllModulesTiles[0]));
-            return kFullAllModulesTiles;
-        case (int) ModuleWorkspace::LayoutPreset::fullMultiCombo:
-            count = (int) (sizeof (kFullMultiComboTiles) / sizeof (kFullMultiComboTiles[0]));
-            return kFullMultiComboTiles;
+        case LP::defaultGrid:
+            return { kPresetDefaultWorkspace, (int) std::size (kPresetDefaultWorkspace), 1120, 680 };
+        case LP::compactMiniBar:
+            return { kPresetCompactMiniBar, (int) std::size (kPresetCompactMiniBar), 960, 248 };
+        case LP::desktopCompanion:
+            return { kPresetDesktopCompanion, (int) std::size (kPresetDesktopCompanion), 1360, 720 };
+        case LP::mixingConsole:
+            return { kPresetMixingConsole, (int) std::size (kPresetMixingConsole), 1440, 800 };
+        case LP::masteringBroadcast:
+            return { kPresetMasteringBroadcast, (int) std::size (kPresetMasteringBroadcast), 1440, 780 };
+        case LP::vocalPodcast:
+            return { kPresetVocalPodcast, (int) std::size (kPresetVocalPodcast), 1280, 680 };
+        case LP::djBeatLive:
+            return { kPresetDjBeatLive, (int) std::size (kPresetDjBeatLive), 1280, 720 };
+        case LP::streamOverlay:
+            return { kPresetStreamOverlay, (int) std::size (kPresetStreamOverlay), 1200, 280 };
+        case LP::musicVisualizerMv:
+            return { kPresetMusicVisualizerMv, (int) std::size (kPresetMusicVisualizerMv), 0, 0 };
+        case LP::onlyMilkdrop:
+            return { kPresetOnlyMilkdrop, (int) std::size (kPresetOnlyMilkdrop), 0, 0 };
+        case LP::fullDeepAnalysis:
+            return { kPresetFullDeepAnalysis, (int) std::size (kPresetFullDeepAnalysis), 0, 0 };
+        case LP::fullAllInOne:
+            return { kPresetFullAllInOne, (int) std::size (kPresetFullAllInOne), 0, 0 };
+        case LP::stickBarMixing:
+            return { kStripMixing, (int) std::size (kStripMixing), 0, 250 };
+        case LP::stickBarVisuals:
+            return { kStripVisuals, (int) std::size (kStripVisuals), 0, 250 };
+        case LP::stickBarDesk:
+            return { kStripDeskCompanion, (int) std::size (kStripDeskCompanion), 0, 250 };
+        case LP::horizontalFull:
+        case LP::horizontalBottom:
         default:
-            count = 0;
-            return nullptr;
+            return { kStripClassic, (int) std::size (kStripClassic), 0, 250 };
     }
 }
 
@@ -706,25 +909,281 @@ Y2KmeterAudioProcessorEditor::FloatingModuleWindow::FloatingModuleWindow(
 
 Y2KmeterAudioProcessorEditor::FloatingModuleWindow::~FloatingModuleWindow()
 {
+    // 最先解绑 GL 上下文：保证 GL 线程彻底退出并释放本上下文 VBO/FBO/纹理，
+    //   再销毁子组件/监听器，杜绝悬垂引用或跨上下文资源泄漏。
+    detachGlContext();
+
     tooltip_.reset();
 
     if (editor_ != nullptr && editor_->toyDirector != nullptr)
         module_.removeMouseListener (editor_->toyDirector.get());
 }
 
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::paint (juce::Graphics& g)
+{
+    // 模块填满整个独立浮窗：GL 渲染 / 透明覆层 / 桌宠模式下必须跳过 DocumentWindow 的
+    //   fillAll，否则不透明背景会盖住 FBO 0 的 GL 直绘画面或破坏逐像素透明！
+    if (glEnabledForModule_
+        || PinkXP::isTransparentBackdrop()
+        || module_.getModuleType() == ModuleType::virtuPet)
+        return;
+
+    juce::DocumentWindow::paint (g);
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::newOpenGLContextCreated()
+{
+    glContext_.setImageCacheSize (16 * 1024 * 1024);
+    if (glDirectRenderer_ == nullptr)
+        glDirectRenderer_ = std::make_unique<GlDirectRenderer>();
+    glDirectRenderer_->ensureInitialised (glContext_);
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::renderOpenGL()
+{
+    using namespace juce::gl;
+
+    if (glClosing_.load (std::memory_order_acquire))
+        return;
+
+    glFrameCounter_.fetch_add (1, std::memory_order_relaxed);
+
+    GLint origViewport[4];
+    glGetIntegerv (GL_VIEWPORT, origViewport);
+
+    const float dpiScale = static_cast<float> (glContext_.getRenderingScale());
+    const int   logicalH = getHeight();
+    const int   vw       = juce::jmax (1, juce::roundToInt ((float) getWidth() * dpiScale));
+    const int   vh       = juce::jmax (1, juce::roundToInt ((float) logicalH * dpiScale));
+
+    // 清空 FBO 0 后缓冲（透明覆层清为纯 alpha=0；绿幕清为纯绿；正常态清为卡片底色）
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    glViewport (0, 0, vw, vh);
+    glDisable (GL_SCISSOR_TEST);
+    glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (PinkXP::isTransparentBackdrop())
+    {
+        glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    else
+    {
+        const auto c = PinkXP::isGreenScreenBackdrop() ? PinkXP::chromaKeyGreen() : PinkXP::face;
+        glClearColor (c.getFloatRed(), c.getFloatGreen(), c.getFloatBlue(), 1.0f);
+    }
+    glClear (GL_COLOR_BUFFER_BIT);
+
+    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+    {
+        if (gmod->isVisible() && gmod->isShowing()
+            && glDirectRenderer_ != nullptr
+            && glDirectRenderer_->ensureInitialised (glContext_))
+        {
+            auto guard = glDirectRenderer_->beginFrame (vw, vh);
+            glDirectRenderer_->renderModule (*this, *gmod, dpiScale, logicalH, vh, vw, vh);
+            glDirectRenderer_->endFrame (guard);
+        }
+        else
+        {
+            gmod->diagSetVisible (false);
+        }
+    }
+
+    glViewport (origViewport[0], origViewport[1], origViewport[2], origViewport[3]);
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::openGLContextClosing()
+{
+    if (glDirectRenderer_ != nullptr)
+        glDirectRenderer_->releaseAll();
+
+    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+    {
+        gmod->glDirectActive.store (false, std::memory_order_release);
+        gmod->glTexUploadedGen.store (0, std::memory_order_release);
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::syncBackdropTransparency()
+{
+    const bool wantTransparent = PinkXP::isTransparentBackdrop();
+   #if JUCE_WINDOWS
+    setBackgroundColour (wantTransparent ? juce::Colours::transparentBlack : PinkXP::face);
+    setOpaque (true); // 严禁触发 WS_EX_LAYERED；由 DWM 硬件 Alpha 合成 OpenGL FBO 0
+    if (auto* hwnd = reinterpret_cast<HWND> (getWindowHandle()))
+    {
+        y2kApplyWindowsDwmTransparency (hwnd, wantTransparent);
+        transparentDwmApplied_ = wantTransparent;
+    }
+   #else
+    setBackgroundColour (wantTransparent ? juce::Colours::transparentBlack : PinkXP::face);
+    setOpaque (! wantTransparent);
+    if (glEnabledForModule_)
+        setOpenGlEnabledForBackdrop (! wantTransparent);
+   #endif
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::attachGlContextIfEligible()
+{
+    // Milkdrop 浮动态已自带独立原生 GLView + OpenGLContext，严禁重复挂载嵌套 GL 上下文
+    if (module_.getModuleType() == ModuleType::milkdrop)
+    {
+        glEnabledForModule_ = false;
+        return;
+    }
+
+    glEnabledForModule_ = true;
+    syncBackdropTransparency();
+
+   #if JUCE_WINDOWS
+    const bool attachNow = true;
+   #else
+    const bool attachNow = ! PinkXP::isTransparentBackdrop();
+   #endif
+
+    if (! attachNow)
+    {
+        module_.setFloatingGlHosted (false);
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+            gmod->setGlHostAvailable (false);
+        return;
+    }
+
+    glClosing_.store (false, std::memory_order_release);
+
+    if (! glContext_.isAttached())
+    {
+       #if JUCE_MAC
+        glContext_.setOpenGLVersionRequired (juce::OpenGLContext::openGL3_2);
+       #endif
+        glContext_.setRenderer (this);
+        glContext_.setContinuousRepainting (false);
+        glContext_.setComponentPaintingEnabled (true);
+       #if JUCE_MAC
+        glContext_.setComponentRepaintsPacedToDisplay (true);
+       #endif
+        glContext_.attachTo (*this);
+    }
+
+    const bool attached = glContext_.isAttached();
+    module_.setFloatingGlHosted (attached);
+
+    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+    {
+        gmod->setGlHostAvailable (attached);
+        if (attached)
+        {
+            juce::Component::SafePointer<FloatingModuleWindow> safeWin (this);
+            gmod->setGlFrameRequester ([safeWin]()
+            {
+                if (auto* w = safeWin.getComponent())
+                    w->requestGlFrame();
+            });
+            gmod->forceRebuildGlSnapshot();
+        }
+    }
+
+    if (attached)
+        requestGlFrame();
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::detachGlContext()
+{
+    glClosing_.store (true, std::memory_order_release);
+    cancelAsyncUpdates();
+
+    auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_);
+    if (gmod != nullptr)
+        gmod->setGlFrameRequester (nullptr);
+
+    // 必须无条件 detach：即使 nativeContext 暂时为空（isAttached()==false），attachment 可能仍已注册，
+    //   跳过 detach 会导致析构期 ComponentMovementWatcher 重入 attach/detach。
+    glContext_.detach();
+    glContext_.setRenderer (nullptr);
+    glDirectRenderer_.reset();
+
+    module_.setFloatingGlHosted (false);
+
+    if (gmod != nullptr)
+    {
+        gmod->glDirectActive.store (false, std::memory_order_release);
+        gmod->glTexUploadedGen.store (0, std::memory_order_release);
+        gmod->glForceTrailClear.store (true, std::memory_order_release);
+
+        if (editor_ != nullptr && ! editor_->editorBeingDestructed)
+        {
+            juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> safeEd (editor_);
+            gmod->setGlFrameRequester ([safeEd]()
+            {
+                if (auto* ed = safeEd.getComponent())
+                    ed->RequestGlFrame();
+            });
+            gmod->setGlHostAvailable (editor_->openGLContext.isAttached());
+        }
+        else
+        {
+            gmod->setGlFrameRequester (nullptr);
+            gmod->setGlHostAvailable (false);
+        }
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::requestGlFrame()
+{
+    if (! glClosing_.load (std::memory_order_acquire) && glContext_.isAttached())
+        glContext_.triggerRepaintPacedToDisplay();
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setOpenGlEnabledForBackdrop (bool enabled)
+{
+    if (! glEnabledForModule_)
+        return;
+
+    if (! enabled)
+    {
+        glClosing_.store (true, std::memory_order_release);
+        glContext_.detach();
+        glContext_.setRenderer (nullptr);
+        glDirectRenderer_.reset();
+        module_.setFloatingGlHosted (false);
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+        {
+            gmod->setGlHostAvailable (false);
+            if (gmod->glDirectActive.exchange (false, std::memory_order_acq_rel))
+                gmod->repaint();
+            gmod->glTexUploadedGen.store (0, std::memory_order_release);
+        }
+        repaint();
+        return;
+    }
+
+    if (! PinkXP::isTransparentBackdrop() && ! glContext_.isAttached())
+        attachGlContextIfEligible();
+}
+
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::closeButtonPressed()
 {
     cancelAsyncUpdates();  // 取消 resize 触发的 pending async update，防止引用已删除窗口
     if (onDock_)
-        onDock_(module_, savedBounds_);
+    {
+        // 先拷到本地栈再调用，防止回调释放 FloatingModuleWindow 导致 onDock_ 闭包自毁 UAF
+        auto cb = onDock_;
+        cb (module_, savedBounds_);
+    }
 }
 
 bool Y2KmeterAudioProcessorEditor::FloatingModuleWindow::keyPressed(
     const juce::KeyPress& key) {
+  // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤回与重做：转发给主工作区（TextEditor 聚焦时自动让行）
+  if (editor_ != nullptr && editor_->getWorkspace() != nullptr
+      && editor_->getWorkspace()->handleUndoRedoKeyPress (key))
+    return true;
+
   // 浮动 Milkdrop 有独立的 GLView 本地渲染器（Editor renderer 已被挂起），
   // 键盘事件必须直接路由到本窗口的模块，调用其公开 API 以操作本地渲染器。
   // 不能转发给 Editor::keyPressed，否则会误操作 workspace 中其它嵌入态 Milkdrop。
   if (auto* milk = dynamic_cast<MilkdropModule*>(&module_)) {
+    if (! milk->isKeyboardControlEnabled())
+      return false;
     if (key == juce::KeyPress::leftKey)  { milk->prevPreset();   return true; }
     if (key == juce::KeyPress::rightKey) { milk->nextPreset();   return true; }
     if (key == juce::KeyPress::spaceKey) { milk->randomPreset(); return true; }
@@ -738,6 +1197,7 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::resized()
     if (auto* content = getContentComponent())
     {
         content->setBounds(getLocalBounds());
+        requestGlFrame();
         // resize → 更新持久化 screenBounds；Milkdrop 还会借此触发 GL 重绘更新共享帧。
         if (editor_ != nullptr)
             triggerAsyncUpdate();
@@ -748,9 +1208,12 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::handleAsyncUpdate()
 {
     if (editor_ == nullptr) return;
 
-    // 触发 GL 线程重绘（renderOpenGL → measureMax 重新扫描浮动窗口尺寸 →
-    //   更新 FBO → 捕获新尺寸共享帧 → callAsync 通知浮动窗口 repaint）
-    editor_->repaint();
+    // 仅 Milkdrop 浮窗仍依赖 Editor 共享帧尺寸探测；其余模块已有独立 GL 上下文，
+    //   无需拖动浮窗时多余触发主窗口全屏重绘。
+    if (module_.getModuleType() == ModuleType::milkdrop)
+        editor_->repaint();
+    else
+        requestGlFrame();
 
     // v3.0.1：伪全屏只是临时视图，不写回 workspace 的"浮动窗口尺寸"，
     //   否则用户从全屏直接停靠回工作区时，模块会变成一整屏大小。
@@ -837,13 +1300,83 @@ void Y2KmeterAudioProcessorEditor::toggleFloatingModuleFullScreen (ModulePanel& 
         }
 }
 
+void Y2KmeterAudioProcessorEditor::dockFloatingModule (ModulePanel* panel,
+                                                       juce::Rectangle<int> savedBounds)
+{
+    if (editorBeingDestructed || panel == nullptr)
+        return;
+
+    for (auto it = floatingWindows_.begin(); it != floatingWindows_.end(); ++it)
+    {
+        if ((*it) != nullptr && (*it)->getContentComponent() == panel)
+        {
+            auto wnd = std::move (*it);
+            floatingWindows_.erase (it);
+
+            // 仅 Milkdrop 需要从浮动态本地 GLView 把当前预设写回模块状态；
+            // 其余模块（含 Spectrogram3D）状态本就在 panel 内，避免在即将销毁的浮窗上下文里触发多余快照重建与重绘。
+            if (panel->getModuleType() == ModuleType::milkdrop)
+            {
+                if (auto state = panel->saveModuleSpecificState(); state.isValid())
+                    panel->restoreModuleSpecificState (state);
+                --floating_milkdrop_count_;
+            }
+
+            wnd->detachGlContext();
+            panel->setFloating (false);
+            wnd->clearContentComponent();
+            wnd.reset();
+
+            if (workspace != nullptr)
+                workspace->dockModule (*panel, savedBounds);
+
+            if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (panel))
+                gmod->forceRebuildGlSnapshot();
+            RequestGlFrame();
+            return;
+        }
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::closeFloatingModule (ModulePanel* panel)
+{
+    if (editorBeingDestructed || panel == nullptr)
+        return;
+
+    for (auto it = floatingWindows_.begin(); it != floatingWindows_.end(); ++it)
+    {
+        if ((*it) != nullptr && (*it)->getContentComponent() == panel)
+        {
+            auto wnd = std::move (*it);
+            floatingWindows_.erase (it);
+
+            wnd->detachGlContext();
+            // ★ 先标记回嵌入态，再拆浮动窗口内容：保证 Milkdrop DetachOpenGL 的 should_resume 为真，
+            //   Editor renderer 能正确恢复。
+            panel->setFloating (false);
+            if (workspace != nullptr)
+                workspace->removeFloatingState (panel->getModuleId());
+            if (panel->getModuleType() == ModuleType::milkdrop)
+                --floating_milkdrop_count_;
+
+            wnd->clearContentComponent();
+            wnd.reset();
+            delete panel;
+            return;
+        }
+    }
+}
+
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::refreshThemeColours()
 {
-    setColour (juce::ResizableWindow::backgroundColourId, PinkXP::face);
+    syncBackdropTransparency();
 
     // 让子控件重新读取主题色（ComboBox / Label / TextButton 等），再整体重绘
     sendLookAndFeelChange();
+    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+        gmod->forceRebuildGlSnapshot();
     repaint();
+    requestGlFrame();
 }
 
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setLayoutLocked(bool locked)
@@ -1053,8 +1586,8 @@ public:
         const juce::Font urlFont     = PinkXP::getFont (10.0f, juce::Font::plain);
         const int nameW    = nameFont.getStringWidth (y2k::tr ("Y2Kmeter"));
         // 与 paint() 保持一致：诊断构建的版本号后面还有 " debug"（否则命中矩形偏窄）
-        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.4.5 debug"
-                                                                               : "v3.4.5"));
+        const int versionW = versionFont.getStringWidth (y2k::tr (y2kIsDiagnosticBuild() ? "v3.5.0 debug"
+                                                                               : "v3.5.0"));
         const int urlW     = urlFont.getStringWidth (y2k::tr ("iisaacbeats.cn"));
         constexpr int gap1 = 6;
         constexpr int gap2 = 10;
@@ -1093,10 +1626,15 @@ public:
 
     void paint (juce::Graphics& g) override
     {
+        // 绿幕 / 透明背景模式下未悬停显露 Editor chrome 时完全隐藏浮动抬头文字与关闭按钮，
+        //   保证空画布纯 alpha=0（透明模式）或纯绿（绿幕模式），无半透明残影。
+        if (PinkXP::isChromaKeySkin() && ! PinkXP::isChromaRevealed (owner))
+            return;
+
         // ------- 1) 顶部抬头文字：软件名 + 版本号 + 官网（低对比度，贴在底图上）-------
         //   诊断构建额外追加 " debug"（与标题栏 drawTitleBar 保持一致）。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.4.5";
+        const juce::String versionBase = "v3.5.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -1759,9 +2297,6 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     });
     // ⚠️ 这份列表才是"添加模块"菜单的**唯一事实来源**（会覆盖
     //   ModuleWorkspace::availableTypes 的默认值）。
-    //   v3.0.6：拼豆频谱（ModuleType::eq）因性能问题暂时下线，不在此列表 ——
-    //   加回来时必须同时恢复 stringToModuleType("eq") 的映射（现在它被迁移成
-    //   spectrum，否则菜单里加出来的会是一块普通频谱）。
     workspace->setAvailableModuleTypes({
         // v3.1：响度 / 示波器 / 相位 / 动态四类已合并，旧的细分类型不再出现在菜单里
         //   （旧存档里的细分类型字符串仍能加载，见 resolveRetiredModuleType）。
@@ -1901,12 +2436,22 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 #ifndef Y2KMETER_MILKDROP_ONLY
     loadInitialModules();
 #endif
+    if (workspace != nullptr)
+        workspace->resetUndoHistory();
 
     // 4) 用户布局变更 → 立即写回 Processor state 的"当前活动槽"
     //    （v2.8.5：stick 期间写 stick 槽，绝不污染非 stick 布局）
     workspace->onLayoutChanged = [this]()
     {
         persistCurrentLayoutToProcessor();
+    };
+    workspace->onCaptureHostWindowState = [this]()
+    {
+        return captureHostWindowState();
+    };
+    workspace->onRestoreHostWindowState = [this](const juce::ValueTree& state)
+    {
+        restoreHostWindowState (state);
     };
 
     // 4.0) v3.0.1：浮动态模块抬头双击 → 该浮动窗口伪全屏 / 恢复
@@ -1921,75 +2466,49 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     {
         if (panel == nullptr) return;
 
-        // 设置模块为浮动态前先把当前业务状态回灌到模块自身。
         // Milkdrop 嵌入态的当前预设在 Editor renderer 中，浮动态会新建本地 renderer；
         // 若不先写入 restored state，新 renderer 会从预设 0 启动。
-        auto currentModuleState = panel->saveModuleSpecificState();
-        if (currentModuleState.isValid())
-            panel->restoreModuleSpecificState(currentModuleState);
-
-        // 设置模块为浮动态（按钮图标从 □→←）
-        panel->setFloating(true);
-
-        // ★ 重新绑定 onPopOutClicked：浮动态下点击按钮 → 触发停靠回 workspace
-        panel->onPopOutClicked = [this, panel, savedBounds](ModulePanel&)
+        if (panel->getModuleType() == ModuleType::milkdrop)
         {
-            // 查找包含此模块的浮动窗口并关闭
-            for (auto it = floatingWindows_.begin();
-                 it != floatingWindows_.end(); ++it)
+            auto currentModuleState = panel->saveModuleSpecificState();
+            if (currentModuleState.isValid())
+                panel->restoreModuleSpecificState (currentModuleState);
+        }
+
+        // 模块离开 Editor 上下文前，把 Editor 侧为其创建的 GPU 资源排入延迟回收队列
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (panel))
+            if (glDirectRenderer_ != nullptr)
+                glDirectRenderer_->scheduleReleaseModule (gmod->glResourceKey);
+
+        // 设置模块为浮动态（按钮图标从 □→←，并复位跨上下文 GL 接管态）
+        panel->setFloating (true);
+
+        // ★ 重新绑定 onPopOutClicked：浮动态下点击停靠按钮 → 异步投递至消息队列执行 dockFloatingModule。
+        //   必须异步执行：① 避免在 FloatingModuleWindow 自身 WM_LBUTTONUP / ModulePanel::mouseUp 栈帧内
+        //   同步销毁 HWND peer 与 OpenGLContext；② 避免 workspace->dockModule() → hookPanel() 原地覆写
+        //   panel->onPopOutClicked 导致正在执行的闭包 capture（this/panel）被破坏产生 UAF/类型混淆崩溃。
+        juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> safeEditor (this);
+        juce::Component::SafePointer<ModulePanel> safePanel (panel);
+        panel->onPopOutClicked = [safeEditor, safePanel, savedBounds] (ModulePanel&)
+        {
+            juce::MessageManager::callAsync ([safeEditor, safePanel, savedBounds]()
             {
-                if ((*it) != nullptr && (*it)->getContentComponent() == panel)
-                {
-                    auto wnd = std::move(*it);
-                    floatingWindows_.erase(it);
-                    if (auto state = panel->saveModuleSpecificState(); state.isValid())
-                        panel->restoreModuleSpecificState(state);
-                    panel->setFloating(false);
-                    if (panel->getModuleType() == ModuleType::milkdrop)
-                        --floating_milkdrop_count_;
-                    wnd->setContentNonOwned(panel, false);
-                    wnd.reset();  // 销毁浮动窗口
-
-                    if (workspace != nullptr)
-                        workspace->dockModule(*panel, savedBounds);
-
-                    return;
-                }
-            }
+                if (auto* ed = safeEditor.getComponent())
+                    if (auto* p = safePanel.getComponent())
+                        ed->dockFloatingModule (p, savedBounds);
+            });
         };
 
-        // ★ 重新绑定 onCloseClicked：浮动态下关闭模块 → 销毁浮动窗口 + 删除模块
-        panel->onCloseClicked = [this, panel](ModulePanel&)
+        // ★ 重新绑定 onCloseClicked：浮动态下关闭模块 → 异步销毁浮动窗口并删除模块，
+        //   避免在 ModulePanel::mouseUp / 浮窗 WM_LBUTTONUP 回调栈内直接 delete panel 与销毁 HWND。
+        panel->onCloseClicked = [safeEditor, safePanel] (ModulePanel&)
         {
-            for (auto it = floatingWindows_.begin();
-                 it != floatingWindows_.end(); ++it)
+            juce::MessageManager::callAsync ([safeEditor, safePanel]()
             {
-                if ((*it) != nullptr && (*it)->getContentComponent() == panel)
-                {
-                    // 取消 resize 触发的 pending async update，
-                    // 防止 handleAsyncUpdate 访问即将被删除的窗口
-                    (*it)->cancelAsyncUpdates();
-                    auto wnd = std::move(*it);
-                    floatingWindows_.erase(it);
-                    // ★ 先标记回嵌入态，再拆浮动窗口内容。
-                    // 浮动态创建时 SuspendMilkdropEditorRendererForFloating() 已挂起
-                    // Editor projectM renderer；若此处不先 setFloating(false)，则
-                    // setContentNonOwned → DetachOpenGL 的 should_resume 条件为假，
-                    // Editor renderer 永不恢复 → 后续重新添加 Milkdrop 会黑屏。
-                    panel->setFloating(false);
-                    if (workspace != nullptr)
-                        workspace->removeFloatingState(panel->getModuleId());
-                    if (panel->getModuleType() == ModuleType::milkdrop)
-                        --floating_milkdrop_count_;
-                    wnd->setContentNonOwned(panel, false);
-                    wnd.reset();
-                    // 浮动模块直接 delete（生命周期由调用方管理）
-                    delete panel;
-                    return;
-                }
-            }
-            // 后备：不在浮动列表中（异常情况），直接删除模块
-            delete panel;
+                if (auto* ed = safeEditor.getComponent())
+                    if (auto* p = safePanel.getComponent())
+                        ed->closeFloatingModule (p);
+            });
         };
 
         // 获取模块脱离前在屏幕上的真实位置和大小（savedBounds 是 workspace 相对坐标，
@@ -2015,28 +2534,15 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         auto name = y2k::tr (panel->getTitleText()) + " - Y2Kmeter";
         auto* window = new FloatingModuleWindow(
             name, *panel, savedBounds,
-            [this](ModulePanel& p, juce::Rectangle<int> bounds)
+            [safeEditor] (ModulePanel& p, juce::Rectangle<int> bounds)
             {
-                // 停靠回调：从浮动窗口列表中移除，dock 回 workspace
-                for (auto it = floatingWindows_.begin();
-                     it != floatingWindows_.end(); ++it)
+                juce::Component::SafePointer<ModulePanel> safeP (&p);
+                juce::MessageManager::callAsync ([safeEditor, safeP, bounds]()
                 {
-                    if ((*it) != nullptr && (*it)->getContentComponent() == &p)
-                    {
-                        auto wnd = std::move(*it);
-                        floatingWindows_.erase(it);
-                        if (auto state = p.saveModuleSpecificState(); state.isValid())
-                            p.restoreModuleSpecificState(state);
-                        p.setFloating(false);
-                        wnd->setContentNonOwned(&p, false);
-                        wnd.reset();
-
-                        if (workspace != nullptr)
-                            workspace->dockModule(p, bounds);
-
-                        return;
-                    }
-                }
+                    if (auto* ed = safeEditor.getComponent())
+                        if (auto* mp = safeP.getComponent())
+                            ed->dockFloatingModule (mp, bounds);
+                });
             },
             this);
 
@@ -2060,6 +2566,15 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         window->setLayoutLocked(layoutLocked);
 
         window->addToDesktop();               // 创建 native peer → 触发 resized() → 模块填满窗口
+
+       #if JUCE_WINDOWS
+        // 浮窗同步切回 Software 2D 后端（与主窗口一致，规避 AMD D2D 卸载死锁），
+        //   随后由下方 attachGlContextIfEligible() 挂载独立 OpenGLContext 承担全部 GPU 渲染！
+        if (auto* floatPeer = window->getPeer())
+            if (floatPeer->getAvailableRenderingEngines().size() > 1)
+                floatPeer->setCurrentRenderingEngine (0);
+       #endif
+        window->syncBackdropTransparency();
 
        #if JUCE_WINDOWS
         // 多屏（混合 DPI）落位修正（v2.9.9 经验：跨屏定位必须物理像素——JUCE 的
@@ -2111,6 +2626,9 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
                                               //    addToDesktop() 仅创建 peer 不保证 setVisible(true)
 
         window->setAlwaysOnTop(true);         // native peer 已存在，置顶生效
+
+        // 独立浮窗挂载专属 OpenGLContext + GlDirectRenderer（与主窗口完全一致的 GPU 渲染管线）
+        window->attachGlContextIfEligible();
 
         // screenBounds 不在此处记录：popOutModule 创建的窗口位置尚未被 restore 逻辑
         // 修正（restore 时会在 setBounds 后立即更新），且首个 handleAsyncUpdate 会覆盖。
@@ -2165,11 +2683,15 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             {
                 if (wnd != nullptr)
                 {
+                    wnd->detachGlContext();
                     if (auto* content = dynamic_cast<ModulePanel*>(wnd->getContentComponent()))
                     {
                         const auto savedBounds = wnd->getSavedBounds();
-                        wnd->setContentNonOwned(content, false);
+                        content->setFloating (false);
+                        wnd->clearContentComponent();
                         workspace->dockModule(*content, savedBounds);
+                        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (content))
+                            gmod->forceRebuildGlSnapshot();
                     }
                     wnd.reset();
                 }
@@ -2197,7 +2719,16 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             startTutorial();
         }
 
-        applyLayoutPreset ((int) preset);
+        if (workspace != nullptr)
+        {
+            ModuleWorkspace::ScopedUndoTransaction undoTx (
+                *workspace, y2k::tr ("Switch layout preset"), /*structural=*/true, /*captureWindow=*/true);
+            applyLayoutPreset ((int) preset);
+        }
+        else
+        {
+            applyLayoutPreset ((int) preset);
+        }
     };
 
     // 4.05b) 预设 Save/Load —— 仅做透传：workspace 已经弹完 FileChooser，
@@ -2241,6 +2772,10 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     workspace->onAudioSourceChanged = [this](const juce::String& sourceId, bool isLoopback)
     {
         if (onAudioSourceChanged) onAudioSourceChanged (sourceId, isLoopback);
+    };
+    workspace->onAudioSourceListRequested = [this]()
+    {
+        if (onAudioSourceListRequested) onAudioSourceListRequested();
     };
 
     // 4.3) FPS 限制按钮切换 → 修改 AnalyserHub 的 FrameDispatcher 频率
@@ -2292,14 +2827,70 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     PinkXP::ThemeLibrary::instance().ensureLoadedFromLibraryFile();
 
     // 订阅主题变更 → 切主题后刷新全局重绘
-    // 绿幕风格：Editor 自身（标题栏 / 工具栏 / 空白桌面）是一个悬停显示区域
+    // 绿幕 / 透明背景模式：Editor 自身（标题栏 / 工具栏）是一个悬停显露区域；
+    //   透明模式下通过 markChromaChromeOnlyArea 仅在标题栏 + 工具栏区域显露，
+    //   模块之间的空白画布缝隙保持 100% 透明与点击穿透。
+    if (PinkXP::isTransparentBackdrop())
+        setOpaque (false);
+
     PinkXP::markChromaRegion (*this);
+    PinkXP::markChromaChromeOnlyArea (*this, [this] (juce::Point<int> p) -> bool
+    {
+        if (! PinkXP::isTransparentBackdrop())
+            return true;
+
+        // 1) 顶部标题栏（Hide 态下取顶部 18px 热区）
+        const int topBandH = chromeDim ? PinkXP::ui (18)
+                                       : (getTitleBarBounds().getBottom() + 1);
+        if (p.y >= 0 && p.y < topBandH)
+            return true;
+
+        // 2) 底部工具栏 + 展开中的非模块工作区浮层（More 溢出条 / Gain 滑条 / 内嵌调色工作室）
+        if (workspace != nullptr)
+        {
+            const auto wsLocal = p - workspace->getPosition();
+            const auto tb = workspace->getToolbarArea();
+            if (! tb.isEmpty() && tb.contains (wsLocal))
+                return true;
+
+            for (int i = workspace->getNumChildComponents(); --i >= 0;)
+            {
+                auto* ch = workspace->getChildComponent (i);
+                if (ch == nullptr || ! ch->isVisible())
+                    continue;
+                if (dynamic_cast<ModulePanel*> (ch) != nullptr)
+                    continue;
+                if (ch->getBounds().contains (wsLocal)
+                    && (ch->getWidth() < workspace->getWidth() || ch->getHeight() < workspace->getHeight()))
+                    return true;
+            }
+        }
+
+        return false;
+    });
+
+    chromaRevealSubToken = PinkXP::subscribeChromaRevealChanged ([this] (juce::Component* prev, juce::Component* next)
+    {
+        syncEditorChromeAlpha();
+        if (prev == this || next == this || PinkXP::isTransparentBackdrop())
+            repaint (getTitleBarBounds().withTrimmedBottom (-1));
+    });
 
     themeSubToken = PinkXP::subscribeThemeChanged([this]()
     {
         Y2K_LOG ("[palette] editor theme callback: invalidate desktop cache");
         if (auto* lnf = dynamic_cast<juce::LookAndFeel_V4*>(&getLookAndFeel()))
             juce::ignoreUnused(lnf);
+        if (PinkXP::isTransparentBackdrop())
+        {
+            setOpaque (false);
+           #if ! JUCE_WINDOWS
+            // Windows 通过 DWM 硬件 Alpha 保持 OpenGLContext 持续挂载（60-120 FPS）；
+            //   非 Windows（macOS）走 CoreAnimation 透明层，摘除 GL 由 CPU 路径绘制。
+            setOpenGlEnabledForBackdrop (false);
+           #endif
+        }
+        syncEditorChromeAlpha();
         invalidateDesktopCache();
         repaint();
 
@@ -2635,17 +3226,35 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
 
     // 诊断：attachTo 是"整个窗口进入 GL 合成"的开关，某些驱动在这一步就会
     //   卡住或抛异常。前后各留一行，卡在这里时日志能立刻看出来。
-    Y2K_DIAGC ("GL", juce::String ("openGLContext.attachTo begin | bounds=")
-                          + juce::String (getWidth()) + "x"
-                          + juce::String (getHeight()) + " displayScale="
-                          + juce::String ((double) openGLContext.getRenderingScale(), 2));
+    //   · Windows：即使在 BackdropMode::transparent 下也始终挂载 OpenGLContext，
+    //     借助 DwmEnableBlurBehindWindow + FBO 0 Premultiplied Alpha 实现 60-120 FPS 真透明；
+    //   · 非 Windows（macOS）：透明模式跳过 GL 挂载，走 CoreAnimation 逐像素透明。
+   #if JUCE_WINDOWS
+    const bool attachGlNow = true;
+   #else
+    const bool attachGlNow = ! PinkXP::isTransparentBackdrop();
+   #endif
+    if (attachGlNow)
     {
-        Y2K_DIAG_SLOW ("GL", "openGLContext.attachTo", 500.0);
-        openGLContext.attachTo(*this);
+        Y2K_DIAGC ("GL", juce::String ("openGLContext.attachTo begin | bounds=")
+                              + juce::String (getWidth()) + "x"
+                              + juce::String (getHeight()) + " displayScale="
+                              + juce::String ((double) openGLContext.getRenderingScale(), 2));
+        {
+            Y2K_DIAG_SLOW ("GL", "openGLContext.attachTo", 500.0);
+            openGLContext.attachTo(*this);
+        }
+        Y2K_DIAGC ("GL", juce::String ("openGLContext.attachTo done | isAttached=")
+                              + (openGLContext.isAttached() ? "1" : "0"));
+        y2k::diag::setGlAttached (openGLContext.isAttached());
     }
-    Y2K_DIAGC ("GL", juce::String ("openGLContext.attachTo done | isAttached=")
-                          + (openGLContext.isAttached() ? "1" : "0"));
-    y2k::diag::setGlAttached (true);
+    else
+    {
+        Y2K_DIAGC ("GL", "openGLContext.attachTo skipped (BackdropMode::transparent)");
+        y2k::diag::setGlAttached (false);
+    }
+
+    syncEditorChromeAlpha();
 
     // 悬停提示窗口：以 Editor 为宿主（随 GL 合成绘制；插件宿主内不开原生窗口）
     tooltipWindow = std::make_unique<Y2KTooltipWindow> (this);
@@ -2684,6 +3293,11 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     y2k::diag::setChannelActive (y2k::diag::Channel::GlFrame, false);
     y2k::diag::setChannelActive (y2k::diag::Channel::UiMessage, false);
 
+    // 解绑顶层窗口级 Ctrl+Z 快捷键监听，避免析构后悬垂回调
+    if (auto* host = topLevelUndoKeyHost_.getComponent())
+        host->removeKeyListener (&topLevelUndoKeyListener_);
+    topLevelUndoKeyHost_ = nullptr;
+
     // -3) 先把所有浮动窗口里的模块 dock 回 workspace，并在停靠前后各存一次布局。
     //   关键：dock 前先清零 onLayoutChanged，防止 dockModule → notifyLayoutChanged
     //   把 pending 标志留在 workspace 析构函数里调用 onLayoutChanged → saveLayoutTree
@@ -2704,10 +3318,12 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     {
         if (wnd != nullptr)
         {
+            wnd->detachGlContext();
             if (auto* content = dynamic_cast<ModulePanel*>(wnd->getContentComponent()))
             {
                 const auto savedBounds = wnd->getSavedBounds();
-                wnd->setContentNonOwned(content, false);
+                content->setFloating (false);
+                wnd->clearContentComponent();
                 if (workspace != nullptr)
                     workspace->dockModule(*content, savedBounds);
             }
@@ -2769,6 +3385,13 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     // Phase F：停掉 FrameDispatcher，避免 workspace/模块离场后
     //   还有 UI Timer 回调到已析构的 FrameListener。
     processor.getAnalyserHub().stopFrameDispatcher();
+
+    PinkXP::markChromaChromeOnlyArea (*this, {});
+    if (chromaRevealSubToken != 0)
+    {
+        PinkXP::unsubscribeChromaRevealChanged (chromaRevealSubToken);
+        chromaRevealSubToken = 0;
+    }
 
     if (themeSubToken != 0)
     {
@@ -3121,71 +3744,53 @@ void Y2KmeterAudioProcessorEditor::checkTutorialStep2Condition()
 }
 
 // ----------------------------------------------------------
-// 按默认层叠瀑布布局加载七个默认模块（eq / loudness / oscilloscope /
-// spectrum / phase / dynamics / waveform）。
-//   · 调用方需先清空 workspace（首次启动由构造器保证）
-//   · 每个模块相对前一个偏移 (stepX, stepY)，形成老式"弹出大量窗口"的层叠感
+// 默认工作区布局（v3.5）：干净双行平铺，零重叠，全部使用现行存活模块
 // ----------------------------------------------------------
 void Y2KmeterAudioProcessorEditor::seedDefaultModules()
 {
-    static const ModuleType defaultOrder[] = {
-        ModuleType::eq,
-        ModuleType::loudness,
-        ModuleType::vuMeter,
-        ModuleType::oscilloscope,
-        ModuleType::spectrum,
-        ModuleType::phase,
-        ModuleType::dynamics,
-        ModuleType::waveform,
-        ModuleType::spectrogram,
-        ModuleType::spectrogram3d
+    if (workspace == nullptr) return;
+    auto canvas = workspace->getCanvasArea();
+    if (canvas.getWidth() <= 16 || canvas.getHeight() <= 16)
+        canvas = workspace->getLocalBounds();
+
+    const auto spec = resolvePresetSpec ((int) ModuleWorkspace::LayoutPreset::defaultGrid);
+    constexpr int kGrid = 8;
+    const int xL = ((canvas.getX() + kGrid - 1) / kGrid) * kGrid;
+    const int xR = (canvas.getRight()  / kGrid) * kGrid;
+    const int yT = ((canvas.getY() + kGrid - 1) / kGrid) * kGrid;
+    const int yB = (canvas.getBottom() / kGrid) * kGrid;
+    const int usableW = juce::jmax (kGrid, xR - xL);
+    const int usableH = juce::jmax (kGrid, yB - yT);
+
+    auto mapX = [&] (float u)
+    {
+        const int cells = juce::roundToInt ((double) u * (double) usableW / (double) kGrid);
+        return juce::jlimit (xL, xR, xL + cells * kGrid);
+    };
+    auto mapY = [&] (float v)
+    {
+        const int cells = juce::roundToInt ((double) v * (double) usableH / (double) kGrid);
+        return juce::jlimit (yT, yB, yT + cells * kGrid);
     };
 
-    // workspace 的 canvas 原点（此时 setSize 已触发 resized，canvas 有效）
-    const auto canvas = workspace->getLocalBounds();
-
-    // 瀑布布局的行列偏移 / 起点（与模块默认大小无关，保持固定）
-    constexpr int stepX          = 28;
-    constexpr int stepY          = 28;
-    constexpr int startX         = 16;
-    constexpr int startY         = 16;
-
-    // 当瀑布到达右/下边缘时，换一列重新从顶部开始（像 XP 那样）
-    int x = startX;
-    int y = startY;
-    int column = 0;
-
-    for (auto type : defaultOrder)
+    for (int i = 0; i < spec.count; ++i)
     {
-        auto panel = createModule(type);
+        const auto& t = spec.tiles[i];
+        auto panel = createModule (t.type);
         if (panel == nullptr) continue;
 
-        // 尺寸：优先使用每个模块自己声明的"默认大小"（setDefaultSize），
-        //   再用 minW/minH 做下限保护；这样 EQ / Loudness / Spectrum 等
-        //   各自拿到 384×256 / 320×256 / 384×256 …而不是一刀切 340×240。
-        const int w = juce::jmax(panel->getMinWidth(),  panel->getDefaultWidth());
-        const int h = juce::jmax(panel->getMinHeight(), panel->getDefaultHeight());
+        if (t.p1 != nullptr) panel->setParamValue (t.p1, t.v1);
+        if (t.p2 != nullptr) panel->setParamValue (t.p2, t.v2);
+        if (t.p3 != nullptr) panel->setParamValue (t.p3, t.v3);
+        if (t.p1 != nullptr || t.p2 != nullptr || t.p3 != nullptr)
+            panel->refreshControlPanel();
 
-        // 如果越界，换到下一列的顶部
-        if (x + w > canvas.getRight() - 8 || y + h > canvas.getBottom() - 8)
-        {
-            ++column;
-            x = startX + column * (stepX * 4);
-            y = startY;
-            // 还是越界就截取到边缘以内
-            if (x + w > canvas.getRight() - 8)
-                x = juce::jmax(0, canvas.getRight()  - w - 8);
-            if (y + h > canvas.getBottom() - 8)
-                y = juce::jmax(0, canvas.getBottom() - h - 8);
-        }
-
-        panel->setBounds(x, y, w, h);
-
-        // autoPosition=false 让 workspace 保留我们设定的 bounds
-        workspace->addModule(std::move(panel), /*autoPosition*/ false);
-
-        x += stepX;
-        y += stepY;
+        const int x0 = mapX (t.x0);
+        const int y0 = mapY (t.y0);
+        const int w  = juce::jmax (panel->getMinWidth(),  mapX (t.x1) - x0);
+        const int h  = juce::jmax (panel->getMinHeight(), mapY (t.y1) - y0);
+        panel->setBounds (x0, y0, w, h);
+        workspace->addModule (std::move (panel), /*autoPosition*/ false);
     }
 }
 
@@ -3271,37 +3876,60 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
     // 先清空现有模块 / 拼豆贴画（clearAllModules 不触发 onLayoutChanged）
     workspace->clearAllModules();
 
-    if (presetId == 1)
+    // 统一归一化 8px 网格磁贴铺排器（相邻模块共享同一网格边，零缝隙、零重叠）
+    auto placeNormalizedTiles = [this] (juce::Rectangle<int> canvas, const PresetTile* tiles, int tileCount)
     {
-        // Preset 1: 默认布局 + 默认窗口 960×640
-        //   · 通过 setSize 触发 resized，workspace 会拿到对应的 canvas 尺寸后
-        //     seedDefaultModules 才能正确计算默认瀑布位置。
-        //   · 如果当前已经是 960×640（用户刚刚打开），setSize 不会有副作用。
-        setSize (960, 640);
-        seedDefaultModules();
-    }
-    else if (isHorizontalStripPreset (presetId))
+        if (workspace == nullptr || tiles == nullptr || tileCount <= 0)
+            return;
+
+        constexpr int kGrid = 8;
+        const int xL = ((canvas.getX() + kGrid - 1) / kGrid) * kGrid;
+        const int xR = (canvas.getRight()  / kGrid) * kGrid;
+        const int yT = ((canvas.getY() + kGrid - 1) / kGrid) * kGrid;
+        const int yB = (canvas.getBottom() / kGrid) * kGrid;
+        const int usableW = juce::jmax (kGrid, xR - xL);
+        const int usableH = juce::jmax (kGrid, yB - yT);
+
+        auto mapX = [&] (float u)
+        {
+            const int cells = juce::roundToInt ((double) u * (double) usableW / (double) kGrid);
+            return juce::jlimit (xL, xR, xL + cells * kGrid);
+        };
+        auto mapY = [&] (float v)
+        {
+            const int cells = juce::roundToInt ((double) v * (double) usableH / (double) kGrid);
+            return juce::jlimit (yT, yB, yT + cells * kGrid);
+        };
+
+        for (int i = 0; i < tileCount; ++i)
+        {
+            const auto& t = tiles[i];
+            auto panel = createModule (t.type);
+            if (panel == nullptr) continue;
+
+            if (t.p1 != nullptr) panel->setParamValue (t.p1, t.v1);
+            if (t.p2 != nullptr) panel->setParamValue (t.p2, t.v2);
+            if (t.p3 != nullptr) panel->setParamValue (t.p3, t.v3);
+            if (t.p1 != nullptr || t.p2 != nullptr || t.p3 != nullptr)
+                panel->refreshControlPanel();
+
+            const int x0 = mapX (t.x0);
+            const int y0 = mapY (t.y0);
+            const int x1 = mapX (t.x1);
+            const int y1 = mapY (t.y1);
+            const int maxW = juce::jmax (kGrid, canvas.getRight()  - x0);
+            const int maxH = juce::jmax (kGrid, canvas.getBottom() - y0);
+            const int w  = juce::jmin (maxW, juce::jmax (panel->getMinWidth(),  x1 - x0));
+            const int h  = juce::jmin (maxH, juce::jmax (panel->getMinHeight(), y1 - y0));
+            panel->setBounds (x0, y0, w, h);
+            workspace->addModule (std::move (panel), /*autoPosition*/ false);
+        }
+    };
+
+    if (isHorizontalStripPreset (presetId))
     {
-        // 横向条预设（Preset 2/3 经典 + 11~13 的 stick 变体）：铺满屏幕宽度、固定高 250px
-        //   · Preset 2      = 贴屏幕顶部 (Y = userArea.getY())
-        //   · Preset 3      = 贴屏幕底部 (Y = userArea.getBottom() - targetH)
-        //   · 11/12/13      = stick 条状变体：贴顶/贴底跟随当前 dock 侧（T/B），
-        //                     条高与下面所有尺寸推导和经典条完全一致（不会变大）
-        //
-        //   其余逻辑（宽度取屏幕 userArea 宽、固定高 250、横向等分 7 个模块、
-        //   放开 resizeLimits）完全相同。之前 Preset 2 累积 *2/3 导致高度不断缩水
-        //   的问题已在上一轮改成常量修复。
-        //
-        //   Y 必须基于 userArea 而不是 top->getY()：Editor 被用户拖到副屏后，
-        //   top->getY() 是跨屏绝对坐标（可能是 1440 或负数），而要的是"当前屏的
-        //   顶/底边在屏幕坐标中的 Y"——这正是 userArea.getY() / getBottom()。
-        //
-        //   stick 驻留态：条贴哪一侧以 AppBar 的 T/B 为准（下拉里列的经典条 id
-        //   本来就与当前侧一致，新变体则靠 stickBottomAligned 决定）。
-        //   stickBottomAligned 是 Windows 专属成员（PluginEditor.h 的 #if JUCE_WINDOWS
-        //   块内）；非 Windows 上 stickActive 恒 false，这里用条件编译避免 mac 引用
-        //   未声明的标识符。
-        bool bottomAligned = (presetId == 3);
+        // 横向任务条 / Stick 吸附条预设：铺满屏幕宽度、固定目标高 250px（对齐 8px 网格）
+        bool bottomAligned = (presetId == (int) ModuleWorkspace::LayoutPreset::horizontalBottom);
        #if JUCE_WINDOWS
         if (stickActive)
             bottomAligned = stickBottomAligned;
@@ -3311,9 +3939,6 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         if (top == nullptr) top = this;
 
        #if JUCE_WINDOWS
-        // Windows：目标屏与目标矩形一律用物理像素（MonitorFromWindow + rcWork）。
-        //   混合 DPI 桌面上 JUCE 的 userArea 逻辑原点可能被算错，直接
-        //   setBounds(userArea) 会把横条摆到另一块屏上（"预设跑到上面那块屏"）。
         Y2KMonitorPx monPx;
         const bool usePxTarget = (top != this)
                                  && ! y2kScreenSimulationActive()
@@ -3323,7 +3948,7 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
         const auto display = juce::Desktop::getInstance()
                                  .getDisplays()
-                                 .getDisplayForPoint(top->getScreenBounds().getCentre());
+                                 .getDisplayForPoint (top->getScreenBounds().getCentre());
         const auto userArea = resolveDisplayArea ((display != nullptr) ? display->userArea
                                                                        : juce::Rectangle<int> (1280, 720));
        #if JUCE_WINDOWS
@@ -3333,33 +3958,9 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
         const int screenW = userArea.getWidth();
        #endif
 
-        // ------------------------------------------------------------
-        // 目标高度自动对齐到 8px 网格整数倍 canvas：
-        //   期望高度 kHorizontalStripHeight = 250，但 Editor 内 = Y2K 标题栏(26) +
-        //   workspace；workspace 内 = canvas + 底部 toolbar(36)。因此：
-        //       canvas.height = targetH - 26 - 36 = targetH - 62
-        //   250 - 62 = 188，188 % 8 = 4 → canvas 不是整格，7 个等分模块
-        //   floor 到 8 倍数后底部会留 4px 空白。
-        //
-        //   这里不想硬编码"26+36"这类依赖 ModuleWorkspace 内部常量的数值，
-        //   改为"先试探一次布局，读取实际 canvas 高度，反推 overheadH"——
-        //   这样无论未来 chrome/toolbar 高度怎么变都能自洽。
-        //     1) 先按期望高度 setSize，触发 resized() → workspace 拿到 canvas
-        //     2) overheadH = targetH - canvas.getHeight()（Editor 里非 canvas 的部分）
-        //     3) 调整 targetH 使 (targetH - overheadH) 是 8 的倍数，并尽量靠近 250
-        // ------------------------------------------------------------
-        // 重置预设 = 布局与条高一起回到默认 250（stick 态下用户点下拉的语义）。
         constexpr int kHorizontalStripHeight = 250;
         int targetH = kHorizontalStripHeight;
 
-        // 关键前置：先把 resizeLimits 放到一个足够宽松的区间，确保后面的
-        //   试探 setSize(screenW, 250) 不会被夹回（Editor 默认
-        //   setResizeLimits(640, 420, 1600, 1100)：高度下限 420、宽度上限 1600）。
-        //   如果试探被夹，probeCanvasH 会变成夹后 Editor 高度对应的 canvas，
-        //   反推出来的 overheadH 是错的 → 最终 canvas 高度不是 8 的倍数 →
-        //   模块 floor 后底部留 4~6px 空白。
-        //   · 下限给一个极小值（例如 kHorizontalStripHeight 本身 250），
-        //     上限至少覆盖 screenW × 1200（单屏宽 × 超出极限的高度）。
         if (auto* cbc0 = getConstrainer())
         {
             setResizeLimits (juce::jmin (cbc0->getMinimumWidth(),  screenW),
@@ -3368,14 +3969,6 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
                              juce::jmax (cbc0->getMaximumHeight(), 1200));
         }
 
-        // 第 1 步：试探布局，让 workspace 计算出当前 chrome 状态下的 canvas 高。
-        //   · Standalone 模式（top != this）：直接对顶层窗口 setBounds，
-        //     这样 probe 反推的 overhead 天然包含"ResizableBorder 4px 上下边框"
-        //     （setResizable(true, false) 下 DocumentWindow 会给 content 挖上下各 4px，
-        //     setBoundsInset 压缩 Editor 高度 8px）。若 probe 只对 Editor setSize，
-        //     反推的 overheadH 少算这 8px，最终 top->setBounds 走的才是"扣边框"路径，
-        //     真实 canvas 比预期少 8px → 模块底部出现 8px 空白。
-        //   · 插件模式（top == this）：无法搬动顶层窗口，直接 setSize。
         if (top == this)
         {
             setSize (screenW, targetH);
@@ -3392,24 +3985,16 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
             top->setBounds (userArea.getX(), userArea.getY(), screenW, targetH);
         }
 
-        // 第 2 步：根据试探结果反推"顶层窗口高度里不属于 canvas 的那部分"。
-        //   probeContainerH 是 probe 时真正被我们"占用"的高度：
-        //     · standalone：top 的 height（=250，不被 border 吃掉，因为 border 从
-        //       top 高度里内扣分给 Editor）
-        //     · 插件：Editor 自身 height（=250）
         const int probeContainerH = (top == this) ? getHeight() : top->getHeight();
         const int probeCanvasH    = workspace->getCanvasArea().getHeight();
         const int overheadH       = probeContainerH - probeCanvasH;
 
-        // 第 3 步：取最接近 250-overheadH 的"8 的倍数"作为期望 canvas 高，
-        //          再加回 overheadH 得到对齐后的 targetH
         constexpr int kGridForH = 8;
         const int desiredCanvasRaw = kHorizontalStripHeight - overheadH;
         const int desiredCanvasH   = juce::jmax (kGridForH,
                                                  ((desiredCanvasRaw + kGridForH / 2) / kGridForH) * kGridForH);
         targetH = desiredCanvasH + overheadH;
 
-        // 第 4 步：按最终 targetH 锁定 resizeLimits（上下限收紧到 screenW × targetH）
         if (auto* cbc = getConstrainer())
         {
             setResizeLimits (juce::jmin (cbc->getMinimumWidth(),  screenW),
@@ -3420,12 +4005,10 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
 
         if (top == this)
         {
-            // 插件模式（嵌在宿主里）：无法移动顶层窗口，只调整尺寸
             setSize (screenW, targetH);
         }
         else
         {
-            // Standalone 模式：连同外层窗口一起搬到目标位置（贴顶 / 贴底）
            #if JUCE_WINDOWS
             if (usePxTarget)
             {
@@ -3443,508 +4026,25 @@ void Y2KmeterAudioProcessorEditor::applyLayoutPreset (int presetId)
             }
         }
 
-        // setSize / setBounds 会触发 resized()，workspace 随之拿到新 canvas。
-        //   此时按横向等分的方式铺当前预设的条内模块序列。
-        //
-        //   条状变体只换"模块序列 + 宽度权重"，条高/贴边/网格对齐全部共用，
-        //   所以无论选哪一个，窗口都还是那一条（250px），不会被撑大。
-        static const ModuleType orderClassic[] = {
-            ModuleType::spectrogram3d,
-            ModuleType::lufsRealtime,
-            ModuleType::vuMeter,
-            ModuleType::stereoField,
-            ModuleType::spectrum,
-            ModuleType::oscilloscopeWave,
-            ModuleType::waveform
-        };
-        static constexpr float ratiosClassic[] = { 1.0f, 0.7f, 1.0f, 1.0f, 1.5f, 1.0f, 1.5f };
-        static constexpr float totalClassic     = 7.7f;
+        const auto spec = resolvePresetSpec (presetId);
+        placeNormalizedTiles (workspace->getCanvasArea(), spec.tiles, spec.count);
 
-        // 3D 瀑布 → 2D SPECTROGRAM（更省 GPU；条上高度有限时 2D 更易读）
-        static const ModuleType orderSpectrogram[] = {
-            ModuleType::spectrogram,
-            ModuleType::lufsRealtime,
-            ModuleType::vuMeter,
-            ModuleType::stereoField,
-            ModuleType::spectrum,
-            ModuleType::oscilloscopeWave,
-            ModuleType::waveform
-        };
-        static constexpr float ratiosSpectrogram[] = { 1.0f, 0.7f, 1.0f, 1.0f, 1.5f, 1.0f, 1.5f };
-        static constexpr float totalSpectrogram     = 7.7f;
-
-        // Stereo Field → Milkdrop。条高只有一百多像素，靠加宽槽位才看得清画面，
-        //   因此把 Milkdrop 的权重给到 2.2，其余模块略微收窄。
-        static const ModuleType orderMilkdrop[] = {
-            ModuleType::spectrogram3d,
-            ModuleType::lufsRealtime,
-            ModuleType::vuMeter,
-            ModuleType::milkdrop,
-            ModuleType::spectrum,
-            ModuleType::oscilloscopeWave,
-            ModuleType::waveform
-        };
-        static constexpr float ratiosMilkdrop[] = { 0.9f, 0.6f, 0.9f, 2.2f, 1.3f, 0.9f, 1.3f };
-        static constexpr float totalMilkdrop     = 8.1f;
-
-        // 两者叠加：2D 瀑布 + Milkdrop
-        static const ModuleType orderSpecMilk[] = {
-            ModuleType::spectrogram,
-            ModuleType::lufsRealtime,
-            ModuleType::vuMeter,
-            ModuleType::milkdrop,
-            ModuleType::spectrum,
-            ModuleType::oscilloscopeWave,
-            ModuleType::waveform
-        };
-        static constexpr float ratiosSpecMilk[] = { 1.0f, 0.7f, 0.9f, 2.0f, 1.2f, 0.9f, 1.2f };
-        static constexpr float totalSpecMilk     = 7.9f;
-
-        const ModuleType* order       = orderClassic;
-        const float*      widthRatios = ratiosClassic;
-        float             totalRatio  = totalClassic;
-
-        if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpectrogram)
-        {
-            order = orderSpectrogram; widthRatios = ratiosSpectrogram; totalRatio = totalSpectrogram;
-        }
-        else if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarMilkdrop)
-        {
-            order = orderMilkdrop;    widthRatios = ratiosMilkdrop;    totalRatio = totalMilkdrop;
-        }
-        else if (presetId == (int) ModuleWorkspace::LayoutPreset::stickBarSpecMilk)
-        {
-            order = orderSpecMilk;    widthRatios = ratiosSpecMilk;    totalRatio = totalSpecMilk;
-        }
-
-        // 使用 workspace->getCanvasArea() 而不是 getLocalBounds()，
-        //   后者包含底部 toolbarHeight（36px）与 chrome 控件区。
-        const auto canvas = workspace->getCanvasArea();
-        const int count    = (int) (sizeof (orderClassic) / sizeof (orderClassic[0]));
-
-        // ============================================================
-        // 网格对齐：必须与 ModuleWorkspace::gridSize 保持一致（8 像素）。
-        //   原实现直接用 canvas.getWidth()/count 作为 slotW，不是 8 的倍数，
-        //   canvas 原点也未必对齐 8；模块落点和大小都偏离网格。
-        //   → 一旦用户之后拖动/缩放任意模块，snapToGrid 会把它吸附到最近
-        //     的 8 像素位，立刻与相邻模块拉开空隙或错位，"密排列"被破坏。
-        //
-        //   修复思路：
-        //     1) 起点 x0/y0 按 gridSize 向上取整，保证第一个模块左上角在网格上。
-        //     2) 可用宽度 usableW 从 canvas.getRight() 向下取整到 gridSize
-        //        的倍数后，减去 x0；高度 slotH 同理。
-        //     3) 把 usableW 切成 count 份，每份都是 gridSize 的整倍数：
-        //        · baseCells = usableW / gridSize / count 个小格
-        //        · 剩余 leftoverCells 分摊到前若干个模块各 +1 小格。
-        //        这样 7 个模块宽度之和 == usableW，全部在网格上且密排无缝。
-        // ============================================================
-        constexpr int kGrid = 8;
-        auto ceilToGrid  = [kGrid] (int v) { return ((v + kGrid - 1) / kGrid) * kGrid; };
-        auto floorToGrid = [kGrid] (int v) { return (v / kGrid) * kGrid; };
-
-        const int x0 = ceilToGrid  (canvas.getX());
-        const int y0 = ceilToGrid  (canvas.getY());
-        const int xR = floorToGrid (canvas.getRight());
-        const int yB = floorToGrid (canvas.getBottom());
-
-        const int usableW = juce::jmax (kGrid * count, xR - x0);
-        const int usableH = juce::jmax (kGrid,         yB - y0);
-
-        const int totalCells    = usableW / kGrid;              // 小格数量（8px/格）
-
-        // 加权宽度分配（非均分），权重表由上面按预设选出的 widthRatios / totalRatio 决定。
-        int cellsForModule[7] = {};
-        int cellsAllocated = 0;
-        for (int i = 0; i < count; ++i)
-        {
-            int cells = (int) std::round ((float) totalCells * widthRatios[i] / totalRatio);
-            cells = juce::jmax (1, cells);
-            cellsForModule[i] = cells;
-            cellsAllocated += cells;
-        }
-        // 修正最后一个模块（WAVEFORM）消纳舍入误差
-        cellsForModule[count - 1] += totalCells - cellsAllocated;
-
-        const int slotH = juce::jmax (80, usableH);             // 高度占满 canvas 的整网格
-
-        int curX = x0;
-        for (int i = 0; i < count; ++i)
-        {
-            auto panel = createModule (order[i]);
-            if (panel == nullptr) continue;
-
-            const int cellsForThis = cellsForModule[i];
-            const int slotW        = cellsForThis * kGrid;
-
-            const int w = juce::jmax (panel->getMinWidth(),  slotW);
-            const int h = juce::jmax (panel->getMinHeight(), slotH);
-            panel->setBounds (curX, y0, w, h);
-            workspace->addModule (std::move (panel), /*autoPosition*/ false);
-
-            curX += slotW;
-        }
-
-        // stick 驻留态：把"当前条状预设"的名字回写到下拉 placeholder，
-        //   让用户知道现在用的是哪一种（经典 / SPECTROGRAM / MILKDROP / 叠加）。
         if (stickActive)
             workspace->setStickPresetLabel (stripPresetLabel (presetId));
     }
-    else if (presetId == 5)
-    {
-        // Preset 5 (MV): 全屏 + 上方横向模块条（同 Preset 2） + 下方 Milkdrop 占满
-        //
-        //   布局：
-        //     ┌────────────────────────────────────────────┐
-        //     │  SPECT3D | DYN | VU | OSC(L) | SPEC | ...  │  ← 横向模块条 (180px)
-        //     ├────────────────────────────────────────────┤
-        //     │                                            │
-        //     │              Milkdrop 模块                  │  ← 占满剩余 canvas
-        //     │                                            │
-        //     └────────────────────────────────────────────┘
-        //
-        //   注意：Windows 下顶层窗口不应走 setFullScreen（会创建独立的全屏 HWND
-        //   并改变消息循环，与我们的 auto-hide 边界行为冲突），而是铺满 userArea
-        //   （任务栏之外的可用区），视觉等同全屏但技术上仍是普通顶层窗口，
-        //   避免 PopupMenu 被 Z 序遮挡。
-        //   macOS 下则调用 rw->setFullScreen(true) 进入系统原生全屏（独立 Space、
-        //   自动隐藏菜单栏与 Dock），与双击标题栏行为一致；模块布局仍按
-        //   totalArea（完整显示器尺寸）计算。
-
-        auto* top = getTopLevelComponent();
-        if (top == nullptr) top = this;
-
-       #if JUCE_WINDOWS
-        // Windows：目标屏工作区一律用物理像素（rcWork），避免混合 DPI 下逻辑
-        //   userArea 原点算错导致全屏窗口落到另一块屏。
-        Y2KMonitorPx monPx;
-        const bool usePxTarget = (top != this)
-                                 && ! y2kScreenSimulationActive()
-                                 && y2kGetMonitorPxForWindow (top, monPx)
-                                 && ! monPx.work.isEmpty();
-       #endif
-
-        const auto display = juce::Desktop::getInstance()
-                                 .getDisplays()
-                                 .getDisplayForPoint(top->getScreenBounds().getCentre());
-        // 全屏预设的窗口区域按平台区分：
-        //   · Windows：使用 userArea（任务栏之外的可用区），而非 totalArea。
-        //     totalArea 包含任务栏区域，窗口覆盖整个显示器后 Windows 的
-        //     PopupMenu（添加模块/布局预设/音频源下拉）将不可见——因为
-        //     PopupMenu 窗口是普通 z-order 窗口，被铺满全屏的主窗口遮挡。
-        //     userArea 为任务栏留出空间，确保 PopupMenu 有可见区域。
-        //   · macOS：使用 totalArea（完整显示器尺寸）计算模块布局，并在末尾
-        //     调用 rw->setFullScreen(true) 进入系统原生全屏（覆盖菜单栏/Dock），
-        //     因此这里的 totalArea 仅用于布局，真正隐藏菜单栏/Dock 由原生全屏完成。
-#if JUCE_MAC
-        const auto realArea = (display != nullptr) ? display->totalArea
-                                                  : juce::Rectangle<int>(1280, 720);
-#else
-        const auto realArea = (display != nullptr) ? display->userArea
-                                                  : juce::Rectangle<int>(1280, 720);
-#endif
-        const auto area = resolveDisplayArea (realArea);
-       #if JUCE_WINDOWS
-        const int screenW = usePxTarget ? y2kPxToLogical (monPx.work.getWidth(),  monPx.scale)
-                                        : area.getWidth();
-        const int screenH = usePxTarget ? y2kPxToLogical (monPx.work.getHeight(), monPx.scale)
-                                        : area.getHeight();
-       #else
-        const int screenW = area.getWidth();
-        const int screenH = area.getHeight();
-       #endif
-
-        // -------- 第 1 步：全屏尺寸 ----------
-        // 先放开 resizeLimits 到足够宽松，确保 setBounds 不会被 constriner 夹回
-        if (auto* cbc0 = getConstrainer())
-        {
-            setResizeLimits(640, 420,
-                            juce::jmax(cbc0->getMaximumWidth(),  screenW),
-                            juce::jmax(cbc0->getMaximumHeight(), screenH));
-        }
-
-        if (top == this)
-        {
-            setSize(screenW, screenH);
-        }
-        else
-        {
-           #if JUCE_WINDOWS
-            if (usePxTarget)
-                y2kMoveWindowToRectPx (top, monPx.work);
-            else
-           #endif
-            top->setBounds(area.getX(), area.getY(), screenW, screenH);
-        }
-
-        // -------- 第 2 步：反推 overhead + 分配 canvas ----------
-        const int probeContainerH = (top == this) ? getHeight() : top->getHeight();
-
-        // 试探布局让 workspace 初始化 canvas
-        const int probeCanvasH = workspace->getCanvasArea().getHeight();
-        const int overheadH    = probeContainerH - probeCanvasH;
-
-        // 上方模块条目标高度（与 Horizontal Bar(T) 一致的 250px）
-        // 剩下部分全给 Milkdrop
-        constexpr int kTopStripHeight = 250;
-        const int topStripCanvasH = juce::jmax(80, kTopStripHeight - overheadH);
-
-        // 锁死 resizeLimits 到全屏尺寸（MV 模式下不同尺寸没意义）
-        if (auto* cbc = getConstrainer())
-        {
-            setResizeLimits(screenW, screenH, screenW, screenH);
-        }
-
-        // -------- 第 3 步：上方横向模块条（复用 preset 2 的布局逻辑）---------
-        const auto canvas = workspace->getCanvasArea();
-        constexpr int kGrid = 8;
-
-        static const ModuleType horizOrder[] = {
-            ModuleType::spectrogram3d,
-            ModuleType::lufsRealtime,
-            ModuleType::vuMeter,
-            ModuleType::oscilloscope,
-            ModuleType::spectrum,
-            ModuleType::oscilloscopeWave,
-            ModuleType::waveform
-        };
-        constexpr int kHorizCount = 7;
-
-        static const float kWidthRatios[] = {
-            1.0f, 0.7f, 1.0f, 0.7f, 1.5f, 1.0f, 1.5f
-        };
-        static constexpr float kTotalRatio = 7.4f;
-
-        const int topY   = canvas.getY();
-        const int topH   = (topStripCanvasH / kGrid) * kGrid;  // 向下取整到 8px 网格
-        const int usableW = (canvas.getWidth()  / kGrid) * kGrid;
-        const int x0      = canvas.getX() + (canvas.getWidth() - usableW) / 2;
-
-        const int totalCells = usableW / kGrid;
-        int cellsForModule[kHorizCount] = {};
-        int cellsAllocated = 0;
-        for (int i = 0; i < kHorizCount; ++i)
-        {
-            int cells = (int)std::round((float)totalCells * kWidthRatios[i] / kTotalRatio);
-            cells = juce::jmax(1, cells);
-            cellsForModule[i] = cells;
-            cellsAllocated += cells;
-        }
-        cellsForModule[kHorizCount - 1] += totalCells - cellsAllocated;
-
-        int curX = x0;
-        for (int i = 0; i < kHorizCount; ++i)
-        {
-            auto panel = createModule(horizOrder[i]);
-            if (panel == nullptr) continue;
-
-            if (horizOrder[i] == ModuleType::oscilloscope)
-                if (auto* osc = dynamic_cast<OscilloscopeModule*>(panel.get()))
-                    osc->setDisplayMode(OscilloscopeModule::DisplayMode::lissajous);
-
-            const int cellsForThis = cellsForModule[i];
-            const int slotW = cellsForThis * kGrid;
-
-            const int w = juce::jmax(panel->getMinWidth(),  slotW);
-            const int h = juce::jmax(panel->getMinHeight(), topH);
-            panel->setBounds(curX, topY, w, h);
-            workspace->addModule(std::move(panel), /*autoPosition*/ false);
-
-            curX += slotW;
-        }
-
-        // -------- 第 4 步：下方 Milkdrop 占满剩余空间 ----------
-        const int milkY = topY + topH;
-        const int milkH = juce::jmax(80, (canvas.getBottom() / kGrid) * kGrid - milkY);
-
-        auto milkdrop = createModule(ModuleType::milkdrop);
-        if (milkdrop != nullptr)
-        {
-            milkdrop->setBounds(x0, milkY, usableW, milkH);
-            workspace->addModule(std::move(milkdrop), /*autoPosition*/ false);
-        }
-
-        // -------- 第 5 步（macOS）：进入系统原生全屏 ----------
-        // 与双击标题栏行为一致：调用 setFullScreen(true) 进入独立 Space，
-        // 自动隐藏顶部菜单栏与 Dock。窗口尺寸已在上方按 totalArea 铺满、
-        // 模块布局已就绪；此处的原生全屏切换由系统接管，不影响已完成布局。
-        // 仅在 Standalone 下触发（插件模式窗口由宿主管理，不接管全屏）。
-        // Windows 不进入此分支，保持 userArea 伪最大化。
-#if JUCE_MAC
-        if (juce::JUCEApplicationBase::isStandaloneApp())
-            if (auto* rw = dynamic_cast<juce::ResizableWindow*>(top))
-                rw->setFullScreen(true);
-#endif
-    }
-    else if (presetId == 6)
-    {
-        // Preset 6 (Studio Monitor)：双行监听
-        //   上排（频谱行，宽而扁 ≈1.5:1）：Spectrum | Spectrogram | Waveform
-        //     · 横向频谱/瀑布拉宽，保证各频率信号强度可读
-        //   下排（仪表行 ≈2:1）：VU | StereoField | LUFS RT | TruePeak
-        //     · 半圆仪表保持 2:1 避免区域空白
-        const auto canvas = resizeToTargetCanvas (1440, 720);
-
-        static const ModuleType topOrder[] = {
-            ModuleType::spectrum, ModuleType::spectrogram, ModuleType::waveform
-        };
-        static const float topRatios[] = { 1.5f, 1.5f, 1.0f };
-        constexpr int kTopH = 360;
-        const int rowBottom = placeModuleRow (canvas, canvas.getY(), kTopH,
-                                              topOrder, 3, topRatios);
-
-        static const ModuleType bottomOrder[] = {
-            ModuleType::vuMeter, ModuleType::stereoField,
-            ModuleType::lufsRealtime, ModuleType::truePeak
-        };
-        static const float bottomRatios[] = { 1.0f, 1.0f, 0.8f, 0.8f };
-        placeModuleRow (canvas, rowBottom, canvas.getBottom() - rowBottom,
-                        bottomOrder, 4, bottomRatios);
-    }
-    else if (presetId == 7)
-    {
-        // Preset 7 (Focus + Sidecar)：主视觉 + 右侧仪表列
-        //   左侧 65%：Spectrogram（普通瀑布，帧率友好，避免 3D 拉大掉帧）
-        //   右侧 35%：VU | StereoField | LUFS RT 竖排（每格 ≈2:1 半圆比例）
-        const auto canvas = resizeToTargetCanvas (1280, 720);
-
-        constexpr int kGrid = 8;
-        const int x0 = canvas.getX();
-        const int y0 = canvas.getY();
-        const int xR = (canvas.getRight() / kGrid) * kGrid;
-        const int yB = (canvas.getBottom() / kGrid) * kGrid;
-
-        const int mainW = ((xR - x0) * 65) / 100;
-        const int sideW = (xR - x0) - mainW;
-
-        auto main = createModule (ModuleType::spectrogram);
-        if (main != nullptr)
-        {
-            main->setBounds (x0, y0, mainW, yB - y0);
-            workspace->addModule (std::move (main), false);
-        }
-
-        static const ModuleType sideOrder[] = {
-            ModuleType::vuMeter, ModuleType::stereoField, ModuleType::lufsRealtime
-        };
-        const int sideX = x0 + mainW;
-        const int sideSlotH = (yB - y0) / 3;
-        int curY = y0;
-        for (int i = 0; i < 3; ++i)
-        {
-            auto panel = createModule (sideOrder[i]);
-            if (panel != nullptr)
-            {
-                const int slotH = (i == 2) ? (yB - curY) : sideSlotH;
-                panel->setBounds (sideX, curY, sideW, slotH);
-                workspace->addModule (std::move (panel), false);
-            }
-            curY += sideSlotH;
-        }
-    }
-    else if (presetId == 9)
-    {
-        // Preset 9 (Broadcast Loudness)：广播响度合规
-        //   上排（响度读数主视觉）：LUFS RT | TruePeak | Dynamics DR | Dynamics Crest
-        //   下排（仪表辅助）：VU | StereoField | Dynamics Meters（半圆仪表 2:1）
-        const auto canvas = resizeToTargetCanvas (1280, 620);
-
-        static const ModuleType topOrder[] = {
-            ModuleType::lufsRealtime, ModuleType::truePeak,
-            ModuleType::dynamicsDr, ModuleType::dynamicsCrest
-        };
-        static const float topRatios[] = { 1.5f, 1.0f, 1.0f, 1.0f };
-        constexpr int kTopH = 300;
-        const int rowBottom = placeModuleRow (canvas, canvas.getY(), kTopH,
-                                              topOrder, 4, topRatios);
-
-        static const ModuleType bottomOrder[] = {
-            ModuleType::vuMeter, ModuleType::stereoField, ModuleType::dynamicsMeters
-        };
-        static const float bottomRatios[] = { 1.0f, 1.0f, 0.9f };
-        placeModuleRow (canvas, rowBottom, canvas.getBottom() - rowBottom,
-                        bottomOrder, 3, bottomRatios);
-    }
-    else if (presetId == 10)
-    {
-        // Preset 10 (Only Milkdrop)：全屏 + 单个最大化 Milkdrop
-        //   窗口铺满 userArea（macOS 原生全屏），canvas 内只放一个
-        //   占满整个 canvas 的 Milkdrop 模块。
-        auto* top = getTopLevelComponent();
-        if (top == nullptr) top = this;
-
-       #if JUCE_WINDOWS
-        // Windows：物理口径（rcWork + MoveWindow），理由同 Preset 5。
-        Y2KMonitorPx monPx;
-        const bool usePxTarget = (top != this)
-                                 && ! y2kScreenSimulationActive()
-                                 && y2kGetMonitorPxForWindow (top, monPx)
-                                 && ! monPx.work.isEmpty();
-       #endif
-
-        const auto display = juce::Desktop::getInstance()
-                                 .getDisplays()
-                                 .getDisplayForPoint (top->getScreenBounds().getCentre());
-#if JUCE_MAC
-        const auto realArea = (display != nullptr) ? display->totalArea
-                                                  : juce::Rectangle<int> (1280, 720);
-#else
-        const auto realArea = (display != nullptr) ? display->userArea
-                                                  : juce::Rectangle<int> (1280, 720);
-#endif
-        const auto area = resolveDisplayArea (realArea);
-       #if JUCE_WINDOWS
-        const int screenW = usePxTarget ? y2kPxToLogical (monPx.work.getWidth(),  monPx.scale)
-                                        : area.getWidth();
-        const int screenH = usePxTarget ? y2kPxToLogical (monPx.work.getHeight(), monPx.scale)
-                                        : area.getHeight();
-       #else
-        const int screenW = area.getWidth();
-        const int screenH = area.getHeight();
-       #endif
-
-        if (auto* cbc0 = getConstrainer())
-        {
-            setResizeLimits (640, 420,
-                             juce::jmax (cbc0->getMaximumWidth(),  screenW),
-                             juce::jmax (cbc0->getMaximumHeight(), screenH));
-        }
-
-        if (top == this)
-            setSize (screenW, screenH);
-        else
-        {
-           #if JUCE_WINDOWS
-            if (usePxTarget)
-                y2kMoveWindowToRectPx (top, monPx.work);
-            else
-           #endif
-            top->setBounds (area.getX(), area.getY(), screenW, screenH);
-        }
-
-        if (auto* cbc = getConstrainer())
-            setResizeLimits (screenW, screenH, screenW, screenH);
-
-        const auto canvas = workspace->getCanvasArea();
-
-        auto milk = createModule (ModuleType::milkdrop);
-        if (milk != nullptr)
-        {
-            milk->setBounds (canvas.getX(), canvas.getY(),
-                             canvas.getWidth(), canvas.getHeight());
-            workspace->addModule (std::move (milk), false);
-        }
-
-#if JUCE_MAC
-        if (juce::JUCEApplicationBase::isStandaloneApp())
-            if (auto* rw = dynamic_cast<juce::ResizableWindow*>(top))
-                rw->setFullScreen(true);
-#endif
-    }
     else if (isFullScreenTilePreset (presetId))
     {
-        // 14/15/16 全屏磁贴预设：窗口铺满屏幕，模块只按存档布局摆放，
-        // 全部走 createModule() 的独立默认设置、不带存档里的任何模块内部状态。
         applyFullScreenTilePreset (presetId);
+    }
+    else
+    {
+        // 所有窗口化预设（Default Workspace / Compact Mini Bar / Desktop Companion /
+        //   Mixing Console / Mastering & Broadcast / Vocal & Podcast / DJ & Beat / Stream Overlay）
+        const auto spec = resolvePresetSpec (presetId);
+        const int tgtW = (spec.targetW > 0) ? spec.targetW : 1120;
+        const int tgtH = (spec.targetH > 0) ? spec.targetH : 680;
+        const auto canvas = resizeToTargetCanvas (tgtW, tgtH);
+        placeNormalizedTiles (canvas, spec.tiles, spec.count);
     }
 
     // 重新添加 VirtuPet 模块到 canvas 右下角（切换预设时保留宠物不被清除）
@@ -4010,15 +4110,13 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
 {
     if (workspace == nullptr) return;
 
-    int tileCount = 0;
-    const auto* tiles = fullScreenTilesForPreset (presetId, tileCount);
-    if (tiles == nullptr || tileCount <= 0) return;
+    const auto spec = resolvePresetSpec (presetId);
+    if (spec.tiles == nullptr || spec.count <= 0) return;
 
     auto* top = getTopLevelComponent();
     if (top == nullptr) top = this;
 
    #if JUCE_WINDOWS
-    // Windows：物理口径（rcWork + MoveWindow），理由同 Preset 5 / 10。
     Y2KMonitorPx monPx;
     const bool usePxTarget = (top != this)
                              && ! y2kScreenSimulationActive()
@@ -4045,7 +4143,6 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
     const int screenH = area.getHeight();
    #endif
 
-    // 先放开 resizeLimits，确保试探 setBounds 不会被 constrainer 夹回
     if (auto* cbc0 = getConstrainer())
         setResizeLimits (640, 420,
                          juce::jmax (cbc0->getMaximumWidth(),  screenW),
@@ -4063,15 +4160,15 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
         top->setBounds (area.getX(), area.getY(), screenW, screenH);
     }
 
-    // 全屏预设锁死尺寸（与 Preset 5 / 10 一致）
     if (auto* cbc = getConstrainer())
-        setResizeLimits (screenW, screenH, screenW, screenH);
+    {
+        const int lockW = (top == this) ? screenW : juce::jmax (640, getWidth());
+        const int lockH = (top == this) ? screenH : juce::jmax (420, getHeight());
+        setResizeLimits (lockW, lockH, lockW, lockH);
+    }
 
     const auto canvas = workspace->getCanvasArea();
-
-    constexpr int kRefW  = 2560;   // 存档布局的参考画布宽
-    constexpr int kRefH  = 1328;   // 存档布局的参考画布高
-    constexpr int kGrid  = 8;      // 与 ModuleWorkspace::gridSize 一致
+    constexpr int kGrid = 8;
 
     const int xL = ((canvas.getX() + kGrid - 1) / kGrid) * kGrid;
     const int xR = (canvas.getRight()  / kGrid) * kGrid;
@@ -4080,67 +4177,37 @@ void Y2KmeterAudioProcessorEditor::applyFullScreenTilePreset (int presetId)
     const int usableW = juce::jmax (kGrid, xR - xL);
     const int usableH = juce::jmax (kGrid, yB - yT);
 
-    // 把参考坐标换算成"网格格数"再取整，保证 tile 的两条边都落在 8px 网格上；
-    // 相邻 tile 用同一个函数算边界，因此天然共享边界、不会留缝或重叠。
-    auto mapX = [&] (int refX)
+    auto mapX = [&] (float u)
     {
-        const double cells = (double) refX * usableW / (kRefW * kGrid);
-        return juce::jlimit (xL, xR, xL + juce::roundToInt (cells) * kGrid);
+        const int cells = juce::roundToInt ((double) u * (double) usableW / (double) kGrid);
+        return juce::jlimit (xL, xR, xL + cells * kGrid);
     };
-    auto mapY = [&] (int refY)
+    auto mapY = [&] (float v)
     {
-        const double cells = (double) refY * usableH / (kRefH * kGrid);
-        return juce::jlimit (yT, yB, yT + juce::roundToInt (cells) * kGrid);
+        const int cells = juce::roundToInt ((double) v * (double) usableH / (double) kGrid);
+        return juce::jlimit (yT, yB, yT + cells * kGrid);
     };
 
-    for (int i = 0; i < tileCount; ++i)
+    for (int i = 0; i < spec.count; ++i)
     {
-        const auto& t = tiles[i];
-
-        // 只创建、只定位：不读存档 <state>，模块一律以构造默认值出生；
-        //   唯一例外是静态表里显式写死的显示模式（t.mode >= 0）。
+        const auto& t = spec.tiles[i];
         auto panel = createModule (t.type);
         if (panel == nullptr) continue;
 
-        // 显示模式（波形 / X-Y / 李萨如、左 / 右 / 双声道、PAN / MONO、
-        //   Classic / Sharp / Sharper）：按钮文字由各模块自己的
-        //   refreshModeButton / refreshChannelButton 同步。
-        if (t.mode >= 0)
-        {
-            const int m = t.mode;
+        if (t.p1 != nullptr) panel->setParamValue (t.p1, t.v1);
+        if (t.p2 != nullptr) panel->setParamValue (t.p2, t.v2);
+        if (t.p3 != nullptr) panel->setParamValue (t.p3, t.v3);
+        if (t.p1 != nullptr || t.p2 != nullptr || t.p3 != nullptr)
+            panel->refreshControlPanel();
 
-            switch (t.type)
-            {
-                case ModuleType::oscilloscope:
-                    if (auto* osc = dynamic_cast<OscilloscopeModule*> (panel.get()))
-                        osc->setDisplayMode ((OscilloscopeModule::DisplayMode) juce::jlimit (0, 2, m));
-                    break;
-
-                case ModuleType::oscilloscopeWave:
-                    // 退役类型：createModule 已换成示波器；声道 0 左 / 1 右 / 2 双
-                    if (auto* oscw = dynamic_cast<OscilloscopeModule*> (panel.get()))
-                        oscw->setParamValue ("waveChannel", (double) juce::jlimit (0, 2, m));
-                    break;
-
-                case ModuleType::stereoMap:
-                    if (auto* sm = dynamic_cast<StereoMapModule*> (panel.get()))
-                        sm->setMode ((StereoMapModule::Mode) juce::jlimit (0, 1, m));
-                    break;
-
-                case ModuleType::spectrogram:
-                    if (auto* sg = dynamic_cast<SpectrogramModule*> (panel.get()))
-                        sg->setDisplayMode ((SpectrogramModule::DisplayMode) juce::jlimit (0, 2, m));
-                    break;
-
-                default:
-                    break;
-            }
-        }
-
-        const int x0 = mapX (t.x);
-        const int y0 = mapY (t.y);
-        const int w  = juce::jmax (panel->getMinWidth(),  mapX (t.x + t.w) - x0);
-        const int h  = juce::jmax (panel->getMinHeight(), mapY (t.y + t.h) - y0);
+        const int x0 = mapX (t.x0);
+        const int y0 = mapY (t.y0);
+        const int x1 = mapX (t.x1);
+        const int y1 = mapY (t.y1);
+        const int maxW = juce::jmax (kGrid, canvas.getRight()  - x0);
+        const int maxH = juce::jmax (kGrid, canvas.getBottom() - y0);
+        const int w  = juce::jmin (maxW, juce::jmax (panel->getMinWidth(),  x1 - x0));
+        const int h  = juce::jmin (maxH, juce::jmax (panel->getMinHeight(), y1 - y0));
         panel->setBounds (x0, y0, w, h);
         workspace->addModule (std::move (panel), false);
     }
@@ -4330,38 +4397,55 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
         return panel;
     }
 
+    auto wireGlRequester = [this] (std::unique_ptr<ModulePanel> panel) -> std::unique_ptr<ModulePanel>
+    {
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (panel.get()))
+        {
+            juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> safeEd (this);
+            gmod->setGlFrameRequester ([safeEd]()
+            {
+                if (auto* ed = safeEd.getComponent())
+                    ed->RequestGlFrame();
+            });
+           #if JUCE_WINDOWS
+            gmod->setGlHostAvailable (true);
+           #else
+            gmod->setGlHostAvailable (! PinkXP::isTransparentBackdrop());
+           #endif
+        }
+        return panel;
+    };
+
     switch (type)
     {
-        case ModuleType::eq:
-            return std::make_unique<EqModule>(processor);
         case ModuleType::loudness:
             return std::make_unique<LoudnessModule>(processor.getAnalyserHub());
         case ModuleType::oscilloscope:
-            return std::make_unique<OscilloscopeModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<OscilloscopeModule>(processor.getAnalyserHub()));
         case ModuleType::spectrum:
-            return std::make_unique<SpectrumModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<SpectrumModule>(processor.getAnalyserHub()));
         case ModuleType::phase:
-            return std::make_unique<PhaseModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<PhaseModule>(processor.getAnalyserHub()));
         case ModuleType::dynamics:
             return std::make_unique<DynamicsModule>(processor.getAnalyserHub());
 
         case ModuleType::waveform:
-            return std::make_unique<WaveformModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<WaveformModule>(processor.getAnalyserHub()));
 
         case ModuleType::vuMeter:
             return std::make_unique<VuMeterModule>(processor.getAnalyserHub());
 
         case ModuleType::spectrogram:
-            return std::make_unique<SpectrogramModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<SpectrogramModule>(processor.getAnalyserHub()));
 
         case ModuleType::spectrogram3d:
-            return std::make_unique<Spectrogram3DModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<Spectrogram3DModule>(processor.getAnalyserHub()));
 
         case ModuleType::stereoField:
-            return std::make_unique<StereoFieldModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<StereoFieldModule>(processor.getAnalyserHub()));
 
         case ModuleType::stereoMap:
-            return std::make_unique<StereoMapModule>(processor.getAnalyserHub());
+            return wireGlRequester (std::make_unique<StereoMapModule>(processor.getAnalyserHub()));
 
         case ModuleType::virtuPet:
             return std::make_unique<VirtuPetModule>();
@@ -4583,7 +4667,7 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
     //   Logo 仍由各实例按自己的 logoImage 独立叠加（中心区单次 drawImage，
     //   成本可忽略）。
     const auto bounds = workspace != nullptr ? workspace->getBounds() : getLocalBounds();
-    if (bounds.isEmpty())
+    if (bounds.isEmpty() || PinkXP::isTransparentBackdrop())
     {
         desktopCacheImage = {};
         desktopCacheBounds = {};
@@ -4655,8 +4739,8 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
     return;
 #endif
     // 1) 桌面纹理底图：只在 workspace 矩形范围内绘制
-    //    workspace 是半透明的，纹理会作为模块背后的视觉肌理透出来
-    if (workspace != nullptr)
+    //    透明覆层模式（BackdropMode::transparent）跳过一切不透明背景，保持纯 alpha=0
+    if (workspace != nullptr && ! PinkXP::isTransparentBackdrop())
     {
         const auto wsBounds = workspace->getBounds();
         if (! wsBounds.isEmpty())
@@ -4678,17 +4762,18 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
     }
 
     // 2) 顶部 TitleBar + 右上角按钮组
-    //    · chrome 可见：正常绘制完整标题栏 + 三个按钮
-    //    · chrome 隐藏：整个标题栏消失，只在右上角绘制一个半透明小关闭浮标
-    //      （样式参照底部 Hide 按钮：未悬停时 15%、悬停时 100%）
-    //    · 插件宿主模式（VST3 等）：也画"精简抬头"——只绘制背景 + Logo +
-    //      "Y2Kmeter v1.1 iisaacbeats.cn"文字；不画右侧最小化/固定/关闭按钮
-    //      （宿主窗口已经提供系统级边框/关闭按钮，伪按钮会产生两套 UI 打架）。
-    //    · Hide 态：标题栏不占位；悬停浮层时由 paintOverChildren 画在模块之上。
-    //    · 绿幕风格：鼠标不在 Editor chrome 上时整条标题栏（含下沿分割线）纯绿。
+    //    · 透明模式：未悬停显露 Editor chrome 时完全跳过（零不透明像素、零绿幕填色）；
+    //      悬停显露时按当前视觉风格（SkinId）完整绘制标题栏。
+    //    · 绿幕模式：未悬停显露 Editor chrome 时整条标题栏填纯绿 #00FF00；
+    //      悬停显露时按当前视觉风格（SkinId）完整绘制标题栏。
     if (! chromeDim)
     {
-        if (PinkXP::isChromaKeySkin() && ! PinkXP::isChromaRevealed (*this))
+        if (PinkXP::isTransparentBackdrop())
+        {
+            if (PinkXP::isChromaRevealed (*this))
+                drawTitleBar (g);
+        }
+        else if (PinkXP::isGreenScreenBackdrop() && ! PinkXP::isChromaRevealed (*this))
         {
             const auto tb = getTitleBarBounds();
             g.setColour (PinkXP::chromaKeyGreen());
@@ -4705,7 +4790,8 @@ void Y2KmeterAudioProcessorEditor::paint(juce::Graphics& g)
 void Y2KmeterAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
 {
     // v2.8.2：Hide 悬停浮层 —— 标题栏盖在所有子组件（模块）之上，窗口几何不变
-    if (chromeDim && chromeRevealed)
+    if (chromeDim && chromeRevealed
+        && ! (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (*this)))
         drawTitleBar (g);
 }
 
@@ -4727,7 +4813,7 @@ void Y2KmeterAudioProcessorEditor::drawTitleBar (juce::Graphics& g)
         //   诊断构建（RelWithDebInfo / 显式开启诊断日志）在版本号右侧追加 " debug"，
         //   让用户和客服一眼确认装的是"能出日志"的诊断包。
         const juce::String nameText    = "Y2Kmeter";
-        const juce::String versionBase = "v3.4.5";
+        const juce::String versionBase = "v3.5.0";
         const juce::String versionTag  = y2kIsDiagnosticBuild() ? " debug" : juce::String();
         const juce::String versionText = versionBase + versionTag;
         const juce::String urlText     = "iisaacbeats.cn";
@@ -4976,6 +5062,258 @@ void Y2KmeterAudioProcessorEditor::parentHierarchyChanged()
    #endif
 
     juce::AudioProcessorEditor::parentHierarchyChanged();
+    syncTopLevelUndoKeyListener();
+}
+
+bool Y2KmeterAudioProcessorEditor::TopLevelUndoKeyListener::keyPressed (
+    const juce::KeyPress& key, juce::Component* originatingComponent)
+{
+    if (dynamic_cast<juce::TextEditor*> (originatingComponent) != nullptr)
+        return false;
+    if (editor_.workspace != nullptr && editor_.workspace->handleUndoRedoKeyPress (key))
+        return true;
+    return false;
+}
+
+void Y2KmeterAudioProcessorEditor::syncTopLevelUndoKeyListener()
+{
+    auto* newHost = (! isPluginHost) ? getTopLevelComponent() : nullptr;
+    if (newHost == this)
+        newHost = nullptr;
+
+    auto* oldHost = topLevelUndoKeyHost_.getComponent();
+    if (oldHost == newHost)
+        return;
+
+    if (oldHost != nullptr)
+        oldHost->removeKeyListener (&topLevelUndoKeyListener_);
+    topLevelUndoKeyHost_ = newHost;
+    if (newHost != nullptr)
+        newHost->addKeyListener (&topLevelUndoKeyListener_);
+}
+
+juce::ValueTree Y2KmeterAudioProcessorEditor::captureHostWindowState()
+{
+    juce::ValueTree s ("HostWindowState");
+    s.setProperty ("editorW", getWidth(),  nullptr);
+    s.setProperty ("editorH", getHeight(), nullptr);
+    s.setProperty ("pseudoFullScreen", pseudoFullScreen, nullptr);
+    if (pseudoFullScreen)
+    {
+        s.setProperty ("preFsX", preFullScreenBounds.getX(), nullptr);
+        s.setProperty ("preFsY", preFullScreenBounds.getY(), nullptr);
+        s.setProperty ("preFsW", preFullScreenBounds.getWidth(), nullptr);
+        s.setProperty ("preFsH", preFullScreenBounds.getHeight(), nullptr);
+        s.setProperty ("preFsPxX", preFullScreenRectPx.getX(), nullptr);
+        s.setProperty ("preFsPxY", preFullScreenRectPx.getY(), nullptr);
+        s.setProperty ("preFsPxW", preFullScreenRectPx.getWidth(), nullptr);
+        s.setProperty ("preFsPxH", preFullScreenRectPx.getHeight(), nullptr);
+        s.setProperty ("preFsLimitsValid", preFullScreenLimitsValid, nullptr);
+        s.setProperty ("preFsMinW", preFullScreenMinW, nullptr);
+        s.setProperty ("preFsMinH", preFullScreenMinH, nullptr);
+        s.setProperty ("preFsMaxW", preFullScreenMaxW, nullptr);
+        s.setProperty ("preFsMaxH", preFullScreenMaxH, nullptr);
+        s.setProperty ("preFsEdLimitsValid", preFullScreenEditorLimitsValid, nullptr);
+        s.setProperty ("preFsEdMinW", preFullScreenEditorMinW, nullptr);
+        s.setProperty ("preFsEdMinH", preFullScreenEditorMinH, nullptr);
+        s.setProperty ("preFsEdMaxW", preFullScreenEditorMaxW, nullptr);
+        s.setProperty ("preFsEdMaxH", preFullScreenEditorMaxH, nullptr);
+       #if JUCE_WINDOWS
+        if (! pseudoFullScreenRectPx.isEmpty())
+        {
+            s.setProperty ("pseudoFsPxX", pseudoFullScreenRectPx.getX(),      nullptr);
+            s.setProperty ("pseudoFsPxY", pseudoFullScreenRectPx.getY(),      nullptr);
+            s.setProperty ("pseudoFsPxW", pseudoFullScreenRectPx.getWidth(),  nullptr);
+            s.setProperty ("pseudoFsPxH", pseudoFullScreenRectPx.getHeight(), nullptr);
+        }
+       #endif
+    }
+
+    if (auto* ec = getConstrainer())
+    {
+        s.setProperty ("eMinW", ec->getMinimumWidth(),  nullptr);
+        s.setProperty ("eMinH", ec->getMinimumHeight(), nullptr);
+        s.setProperty ("eMaxW", ec->getMaximumWidth(),  nullptr);
+        s.setProperty ("eMaxH", ec->getMaximumHeight(), nullptr);
+    }
+
+    auto* top = getTopLevelComponent();
+    if (top != nullptr && top != this)
+    {
+        const auto tb = top->getBounds();
+        s.setProperty ("hasTop", true, nullptr);
+        s.setProperty ("winX", tb.getX(),      nullptr);
+        s.setProperty ("winY", tb.getY(),      nullptr);
+        s.setProperty ("winW", tb.getWidth(),  nullptr);
+        s.setProperty ("winH", tb.getHeight(), nullptr);
+
+       #if JUCE_WINDOWS
+        if (! y2kScreenSimulationActive())
+        {
+            const auto px = y2kGetWindowRectPx (top);
+            if (! px.isEmpty())
+            {
+                s.setProperty ("winPxX", px.getX(),      nullptr);
+                s.setProperty ("winPxY", px.getY(),      nullptr);
+                s.setProperty ("winPxW", px.getWidth(),  nullptr);
+                s.setProperty ("winPxH", px.getHeight(), nullptr);
+            }
+        }
+       #endif
+
+        if (auto* rw = dynamic_cast<juce::ResizableWindow*> (top))
+        {
+            if (auto* wc = rw->getConstrainer())
+            {
+                s.setProperty ("wMinW", wc->getMinimumWidth(),  nullptr);
+                s.setProperty ("wMinH", wc->getMinimumHeight(), nullptr);
+                s.setProperty ("wMaxW", wc->getMaximumWidth(),  nullptr);
+                s.setProperty ("wMaxH", wc->getMaximumHeight(), nullptr);
+            }
+           #if JUCE_MAC
+            s.setProperty ("macFullScreen", rw->isFullScreen(), nullptr);
+           #endif
+        }
+    }
+
+    return s;
+}
+
+void Y2KmeterAudioProcessorEditor::restoreHostWindowState (const juce::ValueTree& state)
+{
+    if (! state.hasType ("HostWindowState"))
+        return;
+
+    auto* top = getTopLevelComponent();
+    auto* rw  = (top != nullptr && top != this)
+                    ? dynamic_cast<juce::ResizableWindow*> (top) : nullptr;
+
+    // 1) 先临时放宽 Editor 与顶层窗口的尺寸限制（例如从锁死全屏的磁贴预设撤回回普通窗口时，
+    //    若不先解开 constrainer，setBounds / setSize 会被夹回全屏尺寸）。
+    if (getConstrainer() != nullptr)
+        setResizeLimits (1, 1, 32768, 32768);
+    if (rw != nullptr && rw->getConstrainer() != nullptr)
+        rw->setResizeLimits (1, 1, 32768, 32768);
+
+    // 2) 还原伪全屏与 macOS 原生全屏状态
+    pseudoFullScreen = (bool) state.getProperty ("pseudoFullScreen", false);
+    if (pseudoFullScreen)
+    {
+        preFullScreenBounds = { (int) state.getProperty ("preFsX", 0),
+                                (int) state.getProperty ("preFsY", 0),
+                                (int) state.getProperty ("preFsW", 960),
+                                (int) state.getProperty ("preFsH", 640) };
+        preFullScreenRectPx = { (int) state.getProperty ("preFsPxX", 0),
+                                (int) state.getProperty ("preFsPxY", 0),
+                                (int) state.getProperty ("preFsPxW", 0),
+                                (int) state.getProperty ("preFsPxH", 0) };
+        preFullScreenLimitsValid       = (bool) state.getProperty ("preFsLimitsValid", false);
+        preFullScreenMinW              = (int) state.getProperty ("preFsMinW", 640);
+        preFullScreenMinH              = (int) state.getProperty ("preFsMinH", 420);
+        preFullScreenMaxW              = (int) state.getProperty ("preFsMaxW", 1600);
+        preFullScreenMaxH              = (int) state.getProperty ("preFsMaxH", 1100);
+        preFullScreenEditorLimitsValid = (bool) state.getProperty ("preFsEdLimitsValid", false);
+        preFullScreenEditorMinW        = (int) state.getProperty ("preFsEdMinW", 640);
+        preFullScreenEditorMinH        = (int) state.getProperty ("preFsEdMinH", 420);
+        preFullScreenEditorMaxW        = (int) state.getProperty ("preFsEdMaxW", 1600);
+        preFullScreenEditorMaxH        = (int) state.getProperty ("preFsEdMaxH", 1100);
+       #if JUCE_WINDOWS
+        pseudoFullScreenRectPx = { (int) state.getProperty ("pseudoFsPxX", 0),
+                                   (int) state.getProperty ("pseudoFsPxY", 0),
+                                   (int) state.getProperty ("pseudoFsPxW", 0),
+                                   (int) state.getProperty ("pseudoFsPxH", 0) };
+       #endif
+    }
+    else
+    {
+        preFullScreenBounds = {};
+        preFullScreenRectPx = {};
+        pseudoFullScreenRectPx = {};
+        preFullScreenLimitsValid = false;
+        preFullScreenEditorLimitsValid = false;
+    }
+
+   #if JUCE_MAC
+    if (rw != nullptr && state.hasProperty ("macFullScreen"))
+    {
+        const bool wantFs = (bool) state.getProperty ("macFullScreen", false);
+        if (rw->isFullScreen() != wantFs)
+            rw->setFullScreen (wantFs);
+    }
+   #endif
+
+    // 3) 恢复窗口几何（Standalone 恢复顶层窗口位置与尺寸；插件宿主/无外框恢复 Editor 尺寸）
+    const int targetEdW = juce::jmax (120, (int) state.getProperty ("editorW", getWidth()));
+    const int targetEdH = juce::jmax (80,  (int) state.getProperty ("editorH", getHeight()));
+
+    if (top != nullptr && top != this && (bool) state.getProperty ("hasTop", false))
+    {
+        const juce::Rectangle<int> winRect {
+            (int) state.getProperty ("winX", top->getX()),
+            (int) state.getProperty ("winY", top->getY()),
+            juce::jmax (120, (int) state.getProperty ("winW", top->getWidth())),
+            juce::jmax (80,  (int) state.getProperty ("winH", top->getHeight()))
+        };
+
+       #if JUCE_WINDOWS
+        bool appliedPx = false;
+        if (! y2kScreenSimulationActive() && state.hasProperty ("winPxW") && state.hasProperty ("winPxH"))
+        {
+            const juce::Rectangle<int> pxRect {
+                (int) state.getProperty ("winPxX", 0),
+                (int) state.getProperty ("winPxY", 0),
+                (int) state.getProperty ("winPxW", 0),
+                (int) state.getProperty ("winPxH", 0)
+            };
+            if (pxRect.getWidth() > 0 && pxRect.getHeight() > 0 && y2kIsRectOnAnyMonitorPx (pxRect))
+                appliedPx = y2kMoveWindowToRectPx (top, pxRect);
+        }
+        if (! appliedPx)
+        {
+            top->setBounds (winRect);
+            if (getWidth() != targetEdW || getHeight() != targetEdH)
+                setSize (targetEdW, targetEdH);
+        }
+       #else
+        top->setBounds (winRect);
+        if (getWidth() != targetEdW || getHeight() != targetEdH)
+            setSize (targetEdW, targetEdH);
+       #endif
+    }
+    else
+    {
+        setSize (targetEdW, targetEdH);
+    }
+
+    // 4) 恢复保存的 constrainer 尺寸约束（确保不会把刚刚恢复好的当前尺寸夹掉）
+    if (state.hasProperty ("eMinW") && state.hasProperty ("eMaxW"))
+    {
+        const int minW = juce::jmin (getWidth(),  juce::jmax (1, (int) state.getProperty ("eMinW", 640)));
+        const int minH = juce::jmin (getHeight(), juce::jmax (1, (int) state.getProperty ("eMinH", 420)));
+        const int maxW = juce::jmax (getWidth(),  juce::jmax (minW, (int) state.getProperty ("eMaxW", 1600)));
+        const int maxH = juce::jmax (getHeight(), juce::jmax (minH, (int) state.getProperty ("eMaxH", 1100)));
+        setResizeLimits (minW, minH, maxW, maxH);
+    }
+    if (rw != nullptr && state.hasProperty ("wMinW") && state.hasProperty ("wMaxW"))
+    {
+        const int minW = juce::jmin (rw->getWidth(),  juce::jmax (1, (int) state.getProperty ("wMinW", 640)));
+        const int minH = juce::jmin (rw->getHeight(), juce::jmax (1, (int) state.getProperty ("wMinH", 420)));
+        const int maxW = juce::jmax (rw->getWidth(),  juce::jmax (minW, (int) state.getProperty ("wMaxW", 32768)));
+        const int maxH = juce::jmax (rw->getHeight(), juce::jmax (minH, (int) state.getProperty ("wMaxH", 32768)));
+        rw->setResizeLimits (minW, minH, maxW, maxH);
+    }
+
+    // 5) 立即同步布局 workspace canvas，确保随后的 restoreSnapshotInPlace 拿到准确画布尺寸
+    resized();
+    if (workspace != nullptr)
+        workspace->resized();
+
+   #if JUCE_WINDOWS
+    if (stickActive)
+        redockStickAfterGeometryChange();
+   #endif
+    if (alwaysOnTopActive)
+        setAlwaysOnTopActive (true);
 }
 
 void Y2KmeterAudioProcessorEditor::visibilityChanged()
@@ -5275,6 +5613,78 @@ void Y2KmeterAudioProcessorEditor::setAlwaysOnTopActive (bool shouldBeOnTop)
 
     initialAlwaysOnTopApplied = true;
     repaint (getTitleBarBounds());
+}
+
+void Y2KmeterAudioProcessorEditor::syncEditorChromeAlpha()
+{
+    const bool hideChrome = PinkXP::isChromaKeySkin() && ! PinkXP::isChromaRevealed (*this);
+    if (chromeHiddenOverlay != nullptr)
+        chromeHiddenOverlay->setAlpha (hideChrome ? 0.0f : 1.0f);
+}
+
+void Y2KmeterAudioProcessorEditor::setOpenGlEnabledForBackdrop (bool enabled)
+{
+    if (editorBeingDestructed)
+        return;
+
+    auto syncGlHostFlags = [enabled] (auto& self, juce::Component* root) -> void
+    {
+        if (root == nullptr)
+            return;
+        for (int i = 0; i < root->getNumChildComponents(); ++i)
+        {
+            auto* ch = root->getChildComponent (i);
+            if (ch == nullptr)
+                continue;
+            if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (ch))
+            {
+                gmod->setGlHostAvailable (enabled);
+                if (! enabled)
+                {
+                    if (gmod->glDirectActive.exchange (false, std::memory_order_acq_rel))
+                        gmod->repaint();
+                    gmod->glTexUploadedGen.store (0, std::memory_order_release);
+                }
+                else
+                {
+                    gmod->forceRebuildGlSnapshot();
+                }
+            }
+            else
+            {
+                self (self, ch);
+            }
+        }
+    };
+
+    for (auto& wnd : floatingWindows_)
+        if (wnd != nullptr)
+            wnd->setOpenGlEnabledForBackdrop (enabled);
+
+    if (! enabled)
+    {
+        if (openGLContext.isAttached())
+        {
+            Y2K_DIAGC ("GL", "openGLContext.detach (BackdropMode::transparent)");
+            openGLContext.detach();
+        }
+        y2k::diag::setGlAttached (false);
+
+        syncGlHostFlags (syncGlHostFlags, this);
+        invalidateDesktopCache();
+        repaint();
+        return;
+    }
+
+    if (PinkXP::isTransparentBackdrop() || openGLContext.isAttached())
+        return;
+
+    Y2K_DIAGC ("GL", "openGLContext.attachTo (leaving BackdropMode::transparent)");
+    openGLContext.attachTo (*this);
+    y2k::diag::setGlAttached (openGLContext.isAttached());
+    syncGlHostFlags (syncGlHostFlags, this);
+    invalidateDesktopCache();
+    repaint();
 }
 
 // 最小化：仅在 Standalone 下有意义；调用顶层窗口的 peer 将其最小化
@@ -5614,6 +6024,7 @@ void Y2KmeterAudioProcessorEditor::enterStickMode()
     // 4) 更新 UI（隐藏最小化/置顶按钮；toolbar 切换到 X + T/B）
     repaint();
     workspace->setStickActive (true, stickBottomAligned);
+    workspace->resetUndoHistory();
 }
 
 void Y2KmeterAudioProcessorEditor::exitStickMode()
@@ -5690,7 +6101,10 @@ void Y2KmeterAudioProcessorEditor::exitStickMode()
     // 3) 更新 UI
     repaint();
     if (workspace != nullptr)
+    {
         workspace->setStickActive (false);
+        workspace->resetUndoHistory();
+    }
 }
 
 void Y2KmeterAudioProcessorEditor::toggleStickTopBottom()
@@ -5759,7 +6173,10 @@ void Y2KmeterAudioProcessorEditor::toggleStickTopBottom()
 
     // 预设下拉切到新一侧的形态指示（HORIZONTAL BAR(T) / (B)）
     if (workspace != nullptr)
+    {
         workspace->setStickActive (true, stickBottomAligned);
+        workspace->resetUndoHistory();
+    }
 
     processor.setSavedStickEditorHeight (stickBottomAligned, stickEditorHeightForSave());
 }
@@ -6953,6 +7370,10 @@ void Y2KmeterAudioProcessorEditor::mouseDoubleClick (const juce::MouseEvent& e)
 }
 
 bool Y2KmeterAudioProcessorEditor::keyPressed(const juce::KeyPress& key) {
+  // ---- 全局撤回 / 重做：Ctrl(⌘)+Z / Ctrl(⌘)+Shift+Z / Ctrl+Y ----
+  if (workspace != nullptr && workspace->handleUndoRedoKeyPress (key))
+    return true;
+
   // ---- 诊断快捷键：Ctrl(⌘)+Shift+D ----
   //   导出"当前状态快照"并打开日志目录。用于用户反馈"偶尔卡一下但没卡死"
   //   的场景：让他在卡顿刚发生时按一下，日志里就留下当时的完整状态。
@@ -7011,7 +7432,7 @@ bool Y2KmeterAudioProcessorEditor::keyPressed(const juce::KeyPress& key) {
     }
   }
 
-  if (milk == nullptr)
+  if (milk == nullptr || ! milk->isKeyboardControlEnabled())
     return false;
 
   if (key == juce::KeyPress::leftKey)  { milk->prevPreset();   return true; }
@@ -7105,8 +7526,14 @@ void Y2KmeterAudioProcessorEditor::toggleFakeFullScreen()
             Y2KMonitorPx mon;
             if (y2kGetMonitorPxForWindow (top, mon) && ! mon.work.isEmpty())
             {
-                y2kMoveWindowToRectPx (top, mon.work);
-                pseudoFullScreenRectPx = mon.work;
+                auto targetRect = mon.work;
+                // Windows 11 + NVIDIA 驱动：自动隐藏任务栏导致 rcWork == rcMonitor 时，
+                //   与物理屏严格等大的无边框窗口会被 FSO 接管而关闭 DWM 透明合成变黑，
+                //   透明模式下底边让出 1 物理像素即可彻底规避。
+                if (PinkXP::isTransparentBackdrop() && targetRect == mon.total && targetRect.getHeight() > 2)
+                    targetRect = targetRect.withTrimmedBottom (1);
+                y2kMoveWindowToRectPx (top, targetRect);
+                pseudoFullScreenRectPx = targetRect;
                 pseudoFullScreen = true;
                 return;
             }
@@ -7227,7 +7654,7 @@ void Y2KmeterAudioProcessorEditor::setAudioSourceItems (
     juce::Array<ModuleWorkspace::AudioSourceItem> ws;
     ws.ensureStorageAllocated (items.size());
     for (const auto& it : items)
-        ws.add ({ it.displayName, it.sourceId, it.isLoopback });
+        ws.add ({ it.displayName, it.sourceId, it.isLoopback, it.submenuPath, it.separatorBefore });
 
     workspace->setAudioSourceItems (ws, selectedSourceId);
 }
@@ -8952,6 +9379,18 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   if (diagOn)
     diagMilkdropMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs;
 
+  // 透明覆层模式：在 projectM 离屏渲染（含 FBO 0 降级路径）完成后、直渲染模块与
+  //   JUCE drawComponentBuffer 合成前，把 FBO 0 整幅清成 (0,0,0,0)，确保空背景真透明。
+  if (PinkXP::isTransparentBackdrop())
+  {
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    glViewport (orig_viewport[0], orig_viewport[1], orig_viewport[2], orig_viewport[3]);
+    glDisable (GL_SCISSOR_TEST);
+    glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+    glClear (GL_COLOR_BUFFER_BIT);
+  }
+
   y2k::diag::setPhase ("Editor::renderOpenGL -> zOrder walk");
   renderGlDirectModulesZOrdered(dpi_scale, editor_h,
                                (int)(editor_h * dpi_scale),
@@ -9032,8 +9471,12 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     }
     juce::gl::glBindFramebuffer(juce::gl::GL_READ_FRAMEBUFFER, 0);
 
-    juce::MessageManager::callAsync([this]() {
-        for (auto& wnd : floatingWindows_) {
+    juce::Component::SafePointer<Y2KmeterAudioProcessorEditor> safeEd (this);
+    juce::MessageManager::callAsync([safeEd]() {
+        auto* ed = safeEd.getComponent();
+        if (ed == nullptr || ed->editorBeingDestructed)
+            return;
+        for (auto& wnd : ed->floatingWindows_) {
             if (wnd != nullptr
                 && dynamic_cast<MilkdropModule*>(wnd->getContentComponent()) != nullptr) {
                 wnd->getContentComponent()->repaint();
@@ -9050,6 +9493,17 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     // Milkdrop 未就绪/挂起：仍要画 S3D（glDirectActive 已接管的模块不能变透明）
     if (diagOn)
       diagMilkdropMs = juce::Time::getMillisecondCounterHiRes() - diagFrameStartMs;
+
+    // 透明覆层模式：整幅清空 FBO 0 为 (0,0,0,0)，保证直渲染模块与组件层之下纯透明
+    if (PinkXP::isTransparentBackdrop())
+    {
+      glBindFramebuffer (GL_FRAMEBUFFER, 0);
+      glViewport (orig_viewport[0], orig_viewport[1], orig_viewport[2], orig_viewport[3]);
+      glDisable (GL_SCISSOR_TEST);
+      glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+      glClear (GL_COLOR_BUFFER_BIT);
+    }
 
     y2k::diag::setPhase ("Editor::renderOpenGL -> zOrder walk (no milkdrop)");
     renderGlDirectModulesZOrdered(dpi_scale, editor_h,
@@ -9114,13 +9568,10 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
 }
 
 // ================================================================
-// v2.9.3 GL 直渲染（z 序统一遍历）
-//   在 renderOpenGL（GL 线程、FBO 0 后缓冲）里按组件树顺序统一绘制：
+// v2.9.3 / v3.5 GL 直渲染（z 序统一遍历）
+//   复用共享 GlDirectRenderer（与 FloatingModuleWindow 100% 同源管线）：
 //     · Milkdrop 模块 → projectM 帧 blit；
-//     · Spectrogram3D 模块 → VBO 直画凹陷背景 + 条带 + 顶部轮廓线。
-//   一次遍历保证重叠区域由组件 z 序决定遮挡（聚焦模块覆盖另一个），
-//   而不是固定"Milkdrop 先画、S3D 后画"。
-//   shader 编译失败 → s3dGlReady=false → S3D 模块保持旧软件渲染路径。
+//     · GlDirectModuleBase 模块 → 统一通过 glDirectRenderer_->renderModule(...) 绘制。
 // ================================================================
 void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale, int editorLogicalH,
                                                                   int editorPhysH,
@@ -9129,704 +9580,27 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
 {
   using namespace juce::gl;
 
-  // v2.9.3 诊断开关：Y2K_NO_S3D_GL 非空时禁用 S3D GL 直渲染（模块保持旧路径）
-  static const bool glDisabled = juce::SystemStats::getEnvironmentVariable ("Y2K_NO_S3D_GL", "").isNotEmpty();
-  const bool s3dEnabled = ! glDisabled;
+  if (glDirectRenderer_ == nullptr)
+    glDirectRenderer_ = std::make_unique<GlDirectRenderer>();
 
-  if (s3dEnabled && ! s3dShaderUseChecked)
-  {
-    s3dShaderUseChecked = true;
-
-    const char* vs =
-      "attribute vec2 position;\n"
-      "attribute vec4 colour;\n"
-      "uniform vec4 transform;\n"   // xy = scale, zw = offset（物理像素）
-      "uniform vec4 ndcScale;\n"    // xy = 2/w, 2/h；zw = -1, -1
-      "uniform float snapMode;\n"   // >0.5：顶点对齐物理像素中心（像素风细线防混合闪动）
-      "varying vec4 vColour;\n"
-      "void main()\n"
-      "{\n"
-      "  vec2 px = position * transform.xy + transform.zw;\n"
-      "  if (snapMode > 0.5) px = floor (px) + vec2 (0.5);\n"
-      "  gl_Position = vec4 (px * ndcScale.xy + ndcScale.zw, 0.0, 1.0);\n"
-      "  vColour = colour;\n"
-      "}\n";
-    const char* fs =
-      "varying vec4 vColour;\n"
-      "void main() { gl_FragColor = vColour; }\n";
-
-    s3dShader = std::make_unique<juce::OpenGLShaderProgram> (openGLContext);
-    // v2.9.7：mac 上 Editor GL 强制 Core Profile 3.2（projectM 需要），
-    //   GLSL 100 语法必须经 JUCE 的 V3 转换（GL≥3.2 时翻译成 150，
-    //   否则原样返回，Windows Legacy/低版本驱动不受影响）。
-    if (s3dShader->addVertexShader (juce::OpenGLHelpers::translateVertexShaderToV3 (vs))
-        && s3dShader->addFragmentShader (juce::OpenGLHelpers::translateFragmentShaderToV3 (fs))
-        && s3dShader->link())
-    {
-      s3dShader->use();
-      s3dTransformUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dShader, "transform"));
-      s3dNdcUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dShader, "ndcScale"));
-      s3dSnapUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dShader, "snapMode"));
-      glUseProgram (s3dShader->getProgramID());
-      s3dPosAttrib = (int) glGetAttribLocation (s3dShader->getProgramID(), "position");
-      s3dColAttrib = (int) glGetAttribLocation (s3dShader->getProgramID(), "colour");
-
-      // VAO（attrib 布局容器；VBO 为 per-module 懒创建，避免多模块共享单
-      //   VBO 时"版本化跳过上传"导致画了别的模块的数据）
-      glGenVertexArrays (1, &s3dVao);
-      glBindVertexArray (s3dVao);
-      glBindVertexArray (0);
-      glBindBuffer (GL_ARRAY_BUFFER, 0);
-      // v2.9.5：临时 quad VBO（纹理 quad / trail 衰减 quad 专用，每次上传）
-      glGenBuffers (1, &s3dQuadVbo);
-
-      s3dGlReady = true;
-    }
-    Y2K_LOG (s3dGlReady ? juce::String ("[EditorGL] s3d vertex shader link OK")
-                        : juce::String ("[EditorGL] s3d vertex shader link FAILED"));
-    // 诊断：shader 链接失败 → 所有 GL 直渲染模块回退软件路径（画面"不动"但没卡死）
-    Y2K_DIAGC ("GL", juce::String ("s3d vertex shader link ")
-                          + (s3dGlReady ? "OK" : "FAILED（模块将回退软件绘制）"));
-
-    // ---- v2.9.5：纹理 shader（纹理通道 + trail FBO 合成）----
-    const char* tvs =
-      "attribute vec2 position;\n"
-      "attribute vec2 texCoord;\n"
-      "uniform vec4 transform;\n"
-      "uniform vec4 ndcScale;\n"
-      "varying vec2 vUv;\n"
-      "void main()\n"
-      "{\n"
-      "  vec2 px = position * transform.xy + transform.zw;\n"
-      "  gl_Position = vec4 (px * ndcScale.xy + ndcScale.zw, 0.0, 1.0);\n"
-      "  vUv = texCoord;\n"
-      "}\n";
-    const char* tfs =
-      "varying vec2 vUv;\n"
-      "uniform sampler2D tex;\n"
-      "uniform vec2 texWindow;\n"   // x = uv 窗口起点，y = uv 窗口宽度
-      "void main()\n"
-      "{\n"
-      "  vec2 uv = vec2 (vUv.x * texWindow.y + texWindow.x, vUv.y);\n"
-      "  gl_FragColor = texture2D (tex, uv);\n"
-      "}\n";
-
-    s3dTexShader = std::make_unique<juce::OpenGLShaderProgram> (openGLContext);
-    if (s3dTexShader->addVertexShader (juce::OpenGLHelpers::translateVertexShaderToV3 (tvs))
-        && s3dTexShader->addFragmentShader (juce::OpenGLHelpers::translateFragmentShaderToV3 (tfs))
-        && s3dTexShader->link())
-    {
-      s3dTexShader->use();
-      s3dTexTransformUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dTexShader, "transform"));
-      s3dTexNdcUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dTexShader, "ndcScale"));
-      s3dTexWindowUniform.reset (new juce::OpenGLShaderProgram::Uniform (*s3dTexShader, "texWindow"));
-      glUseProgram (s3dTexShader->getProgramID());
-      s3dTexPosAttrib = (int) glGetAttribLocation (s3dTexShader->getProgramID(), "position");
-      s3dTexUvAttrib = (int) glGetAttribLocation (s3dTexShader->getProgramID(), "texCoord");
-      if (s3dTexPosAttrib < 0 || s3dTexUvAttrib < 0)
-        s3dTexShader.reset();   // 纹理 shader 不可用 → 纹理通道退化（模块走旧路径）
-    }
-    else
-    {
-      s3dTexShader.reset();
-    }
-  }
-
-  const bool s3dOk = s3dEnabled && s3dGlReady;
+  const bool s3dOk  = glDirectRenderer_->ensureInitialised (openGLContext);
   const bool milkOk = milkdropReady;
 
   if (! s3dOk && ! milkOk)
     return;
 
-  // 记下进入前的 sRGB 状态：本函数结束时原样恢复，保证 JUCE 的组件绘制
-  //   （paintComponent 在本函数之后执行）看到的状态与以前完全一致，
-  //   不引入任何 UI 配色变化。我们只在自己的绘制/blit 期间强制关闭。
-  const bool s3dSrgbWasOn = (glIsEnabled (GL_FRAMEBUFFER_SRGB) != GL_FALSE);
-
   const int vw = juce::jmax (1, juce::roundToInt ((float) getWidth() * dpiScale));
   const int vh = juce::jmax (1, editorPhysH);
+  const bool isTransparentBackdrop = PinkXP::isTransparentBackdrop();
 
-  // 固定画到后缓冲 FBO 0（blit 的 READ 绑定由调用方设置）
-  glBindFramebuffer (GL_FRAMEBUFFER, 0);
-  glViewport (0, 0, vw, vh);
-
-  // v2.9.3：projectM 是 3D 渲染，运行后会残留 GL_CULL_FACE /
-  //   GL_SCISSOR_TEST 等状态。Y 翻转后条带三角形绕序变成"背面"，若 cull 未关
-  //   会被全部剔除；scissor 残留则会把绘制裁剪掉。2D 直渲染不需要这些状态。
-  glDisable (GL_CULL_FACE);
-  glDisable (GL_SCISSOR_TEST);
-  glDisable (GL_STENCIL_TEST);
-  glDisable (GL_DEPTH_TEST);
-  // 外网 v3.0.0：默认帧缓冲在部分驱动上是 sRGB-capable，若 GL_FRAMEBUFFER_SRGB
-  //   被（projectM / 驱动）打开，"线性 RGBA8 FBO → 后缓冲"的 glBlitFramebuffer
-  //   会按规范返回 GL_INVALID_OPERATION 并整帧丢弃（现场日志每帧一次 0x502）。
-  //   这里统一关掉：我们的颜色本来就是 8bit 直通，不需要 sRGB 转换。
-  glDisable (GL_FRAMEBUFFER_SRGB);
-  glEnable (GL_BLEND);
-  glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-  if (s3dOk)
-  {
-    s3dShader->use();
-    s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
-    glBindVertexArray (s3dVao);
-  }
-
-  // ==========================================================
-  // 外网 v3.0.0 现场（RTX 3070 / NVIDIA 595.79）的两个兜底
-  // ==========================================================
-
-  // 1) 模块矩形先清成卡片底色。
-  //    组件层在 glDirectActive 后会把 canvas 挖成透明（只透出 GL 内容），
-  //    而 JUCE 的 OpenGL CPE 不会每帧整屏清屏（只清脏区）。因此只要某一帧
-  //    这里没画出像素，用户看到的就是上一帧残留 —— 即外网反馈的"卡死 + 拖影"。
-  //    先铺一层底色后，任何失败最差也只是"空画布"，不会再有残影。
-  auto paintModuleBackdrop = [&] (GlDirectModuleBase& mod)
-  {
-    // 只有"已接管（组件挖洞）"的模块才需要铺底色：
-    //   · 走 CPU 旧路径的模块整块由组件绘制覆盖，清屏纯属浪费；
-    //   · GL 接管后 canvas 是透明的，才需要这层保险。
-    if (! mod.glDirectActive.load (std::memory_order_relaxed))
-      return;
-
-    // 注意：getLocalPoint 的入参是**模块本地坐标**（模块左上角 = (0,0)），
-    //   不能传 getBounds()（那是父容器坐标，会重复叠加偏移）。
-    const auto tl = getLocalPoint (&mod, juce::Point<int> (0, 0));
-    const auto br = getLocalPoint (&mod, juce::Point<int> (mod.getWidth(), mod.getHeight()));
-
-    const int gx = (int) std::floor ((double) tl.x * dpiScale);
-    const int gy = (int) std::floor ((double) (editorLogicalH - br.y) * dpiScale);
-    const int gw = juce::jmax (1, (int) std::ceil ((double) br.x * dpiScale) - gx);
-    const int gh = juce::jmax (1, (int) std::ceil ((double) (editorLogicalH - tl.y) * dpiScale) - gy);
-
-    const auto c = PinkXP::face;
-    glBindFramebuffer (GL_FRAMEBUFFER, 0);
-    glViewport (0, 0, vw, vh);
-    glEnable (GL_SCISSOR_TEST);
-    glScissor (gx, gy, gw, gh);
-    glClearColor (c.getFloatRed(), c.getFloatGreen(), c.getFloatBlue(), 1.0f);
-    glClear (GL_COLOR_BUFFER_BIT);
-    glDisable (GL_SCISSOR_TEST);
-  };
-
-  // 2) 每个模块绘制前把 2D 绘制依赖的状态拉回确定值。
-  //    projectM 是 3D 渲染，可能残留 RASTERIZER_DISCARD / COLOR_MASK /
-  //    BLEND_EQUATION / PBO 绑定 / sRGB 编码等；这些都会让后续 2D 绘制
-  //    "画了但看不见"或整批被驱动拒绝（GL_INVALID_OPERATION）。
-  auto resetModuleGlState = [&] ()
-  {
-    glBindFramebuffer (GL_FRAMEBUFFER, 0);
-    glViewport (0, 0, vw, vh);
-    glDisable (GL_CULL_FACE);
-    glDisable (GL_SCISSOR_TEST);
-    glDisable (GL_STENCIL_TEST);
-    glDisable (GL_DEPTH_TEST);
-    glDisable (GL_RASTERIZER_DISCARD);                 // 开着的话 draw 全被丢弃
-    glDisable (GL_FRAMEBUFFER_SRGB);                   // sRGB 编码不匹配会让 blit 非法
-    glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);  // 写掩码被清 → 画了等于没画
-    glDepthMask (GL_FALSE);
-    glBlendEquation (GL_FUNC_ADD);                     // 残留 SUBTRACT 会让颜色互相抵消
-    glEnable (GL_BLEND);
-    glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glActiveTexture (GL_TEXTURE0);
-    glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);          // 残留 PBO 会让 glTexImage2D 指针被当偏移
-    glBindVertexArray (s3dVao);
-  };
-
-  // v2.9.4：统一 GL 直渲染入口 —— 所有 GlDirectModuleBase 模块共用同一条
-  //   "transform + 版本化上传 + 按 segments 逐段 draw"路径（此前三个模块
-  //   各复制一份 lambda）。
-  //   renderToLogical 模式：先渲染到模块专属的逻辑分辨率 FBO，再线性放大
-  //   blit 到后缓冲 —— 与旧版"CPU 光栅化到逻辑纹理 + 纹理放大"逐像素等效，
-  //   解决 150% DPI 下 1px 柱在物理网格上的交替混合闪动。
-  auto renderOneGlModule = [&] (GlDirectModuleBase& mod)
-  {
-    const bool dOn = y2k::diag::isEnabled();
-    const double dStart = dOn ? juce::Time::getMillisecondCounterHiRes() : 0.0;
-
-    // 诊断：分段检查 GL 错误（仅诊断构建；关闭时整段被 if 短路）
-    auto diagCheckGl = [dOn] (const char* where)
-    {
-      if (! dOn)
-        return;
-      const GLenum e = juce::gl::glGetError();
-      if (e != juce::gl::GL_NO_ERROR)
-        Y2K_DIAG ("GL", juce::String ("module GL error @ ") + where
-                              + " = 0x" + juce::String::toHexString ((int) e));
-    };
-
-    auto snap = mod.getGlSnapshot();
-    if (snap == nullptr || snap->segments.empty())
-    {
-      mod.diagSetVisible (true);
-      return;
-    }
-    if (snap->vertices.empty() && snap->texW <= 0 && ! snap->trailFbo)
-    {
-      mod.diagSetVisible (true);
-      return;
-    }
-
-    // 有内容要画时才重置状态 + 铺底色：
-    //   · 重置保证 clear / draw 不会被 projectM 残留的 colorMask、rasterizer discard、
-    //     blend equation、PBO 绑定、sRGB 编码等状态破坏；
-    //   · 先铺卡片底色，即使下面 blit/FBO 失败，也只有"空画布"而没有上一帧残影。
-    //   （空快照直接 return 的模块不铺底色 —— 避免误擦上层模块的内容。）
-    resetModuleGlState();
-    paintModuleBackdrop (mod);
-    diagCheckGl ("state-reset");
-
-    // 诊断：模块级阶段标记（预生成字符串，热路径零分配）
-    if (dOn)
-      y2k::diag::setPhase (mod.diagRenderPhase.c_str());
-
-    // 渲染结束（含所有提前返回路径）统一记录耗时
-    struct DiagRenderScope
-    {
-        GlDirectModuleBase& m;
-        double startMs;
-        bool   on;
-        ~DiagRenderScope()
-        {
-            if (on)
-                m.diagOnRendered (juce::Time::getMillisecondCounterHiRes() - startMs);
-        }
-    } diagRenderScope { mod, dStart, dOn };
-    juce::ignoreUnused (diagRenderScope);
-
-    // v2.9.5：每个模块开始前恢复默认渲染目标与视口 —— renderToLogical 分支
-    //   结束时 GL_FRAMEBUFFER 仍绑定模块 FBO（blit 只解绑了 READ/DRAW 别名），
-    //   下一个走直接路径的模块若不恢复，会把内容画进上一个模块的 FBO、
-    //   且视口仍是 FBO 尺寸 → "底图画大、盖住所有模块"的根因。
-    glBindFramebuffer (GL_FRAMEBUFFER, 0);
-    glViewport (0, 0, vw, vh);
-
-    // VBO 版本化上传 —— 快照未变时跳过，只复用旧 VBO 内容重画。
-    //   每个模块独立 VBO（懒创建）：共享单 VBO 时，跳过上传的模块会画出
-    //   "别的模块刚上传的数据"。
-    const bool needUpload = snap->version != mod.lastUploadedVersion;
-    if (mod.glVbo == 0)
-      glGenBuffers (1, &mod.glVbo);
-
-    auto setVertexAttribs = [&] ()
-    {
-      glBindBuffer (GL_ARRAY_BUFFER, mod.glVbo);
-      glVertexAttribPointer ((GLuint) s3dPosAttrib, 2, GL_FLOAT, GL_FALSE, 24, nullptr);
-      glEnableVertexAttribArray ((GLuint) s3dPosAttrib);
-      glVertexAttribPointer ((GLuint) s3dColAttrib, 4, GL_FLOAT, GL_FALSE, 24, (void*) 8);
-      glEnableVertexAttribArray ((GLuint) s3dColAttrib);
-    };
-
-    // 纹理 quad 绘制（纹理通道显示 / trail FBO 合成共用）
-    auto drawTexQuad = [&] (GLuint tex, juce::Rectangle<int> target,
-                            float scrollU, float winW)
-    {
-      const auto tl = getLocalPoint (&mod, juce::Point<int>());
-      glActiveTexture (GL_TEXTURE0);
-      glBindTexture (GL_TEXTURE_2D, tex);
-      s3dTexShader->use();
-      s3dTexNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
-      s3dTexTransformUniform->set (dpiScale, -dpiScale,
-                                   (float) tl.x * dpiScale,
-                                   (float) editorPhysH - (float) tl.y * dpiScale);
-      s3dTexWindowUniform->set (scrollU, winW);
-      const float x0 = (float) target.getX(), y0 = (float) target.getY();
-      const float x1 = (float) target.getRight(), y1 = (float) target.getBottom();
-      // v2.9.5 修复：GL 纹理 v=0 是内存第一行（FBO 渲染时为底部）——
-      //   屏幕顶(y0)必须配 uv(0,1)（纹理顶），否则内容上下颠倒
-      //   （StereoField trail 合成实测点云翻转）。
-      const float quad[24] = {
-        x0, y0, 0.0f, 1.0f,  x1, y0, 1.0f, 1.0f,  x0, y1, 0.0f, 0.0f,
-        x1, y0, 1.0f, 1.0f,  x1, y1, 1.0f, 0.0f,  x0, y1, 0.0f, 0.0f,
-      };
-      // v2.9.5：用编辑器级 s3dQuadVbo（不能借模块 glVbo —— 模块 VBO 的
-      //   版本化复用会被 quad 数据覆盖，needUpload=false 帧画错）
-      glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
-      glVertexAttribPointer ((GLuint) s3dTexPosAttrib, 2, GL_FLOAT, GL_FALSE, 16, nullptr);
-      glEnableVertexAttribArray ((GLuint) s3dTexPosAttrib);
-      glVertexAttribPointer ((GLuint) s3dTexUvAttrib, 2, GL_FLOAT, GL_FALSE, 16, (void*) 8);
-      glEnableVertexAttribArray ((GLuint) s3dTexUvAttrib);
-      glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
-      glDrawArrays (GL_TRIANGLES, 0, 6);
-    };
-
-    if (snap->renderToLogical && snap->logicalW > 0 && snap->logicalH > 0)
-    {
-      // 恢复主 shader（上一模块的纹理 quad 可能切到了纹理 shader）
-      s3dShader->use();
-
-      // 2x 超采样（SSAA）：FBO 渲染 2 倍逻辑分辨率，blit 时线性缩小 ——
-      //   缩小滤波天然提供抗锯齿（旧版 JUCE path 渲染带 AA；顶点流是硬边
-      //   三角形，直接渲染会呈现 1px 台阶锯齿）。纯 2D 机制，无 MSAA 的
-      //   驱动兼容性风险（上一版 GL_TEXTURE_2D_MULTISAMPLE 在部分驱动上
-      //   创建失败导致 FBO 不完整 → 全部模块透明）。
-      // v3.0.1：抬头双击最大化后 canvas 可能接近整屏，2x 的 FBO 面积按 4 倍增长
-      //   （4K@150% 会到 48MP ≈ 190MB 显存）。超过 16MP 时退回 1x —— 大模块
-      //   本来就不缺抗锯齿，避免弱显卡上 glTexImage2D 直接失败。
-      const bool needSsaa = (juce::int64) snap->logicalW * (juce::int64) snap->logicalH * 4
-                              <= 16 * 1000 * 1000;
-      const int kSsaa = needSsaa ? 2 : 1;
-      const int fboW = snap->logicalW * kSsaa;
-      const int fboH = snap->logicalH * kSsaa;
-
-      // 懒创建/重建逻辑分辨率 FBO
-      if (mod.glFbo == 0 || mod.glFboW != fboW || mod.glFboH != fboH)
-      {
-        if (mod.glFbo != 0)
-        {
-          glDeleteFramebuffers (1, &mod.glFbo);
-          glDeleteTextures (1, &mod.glFboTex);
-          mod.glFbo = 0;
-          mod.glFboTex = 0;
-        }
-        glGenFramebuffers (1, &mod.glFbo);
-        glGenTextures (1, &mod.glFboTex);
-        glBindTexture (GL_TEXTURE_2D, mod.glFboTex);
-        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
-                      fboW, fboH, 0,
-                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glBindTexture (GL_TEXTURE_2D, 0);
-        glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
-        glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                GL_TEXTURE_2D, mod.glFboTex, 0);
-
-        // 诊断：FBO 不完整是"模块画不出来"的另一种典型原因（纹理分配失败等）
-        if (dOn)
-        {
-          const GLenum st = glCheckFramebufferStatus (GL_FRAMEBUFFER);
-          if (st != GL_FRAMEBUFFER_COMPLETE)
-            Y2K_DIAG ("GL", "module FBO incomplete: status=0x" + juce::String::toHexString ((int) st)
-                                  + " size=" + juce::String (fboW) + "x" + juce::String (fboH));
-        }
-
-        glBindFramebuffer (GL_FRAMEBUFFER, 0);
-        mod.glFboW = fboW;
-        mod.glFboH = fboH;
-      }
-
-      // 渲染到逻辑 FBO（模块本地坐标 → FBO：2x 缩放、x 减 canvas 偏移、
-      //   Y 翻转；背景 quad 每帧全量覆盖，无需 clear）
-      Y2K_DIAG_PHASE ("gl:draw module (logical FBO)");
-      glBindFramebuffer (GL_FRAMEBUFFER, mod.glFbo);
-      glViewport (0, 0, fboW, fboH);
-      s3dNdcUniform->set (2.0f / (float) fboW, 2.0f / (float) fboH, -1.0f, -1.0f);
-      s3dTransformUniform->set ((float) kSsaa, (float) -kSsaa,
-                                -(float) snap->canvasLocal.getX() * (float) kSsaa,
-                                (float) (fboH + snap->canvasLocal.getY() * kSsaa));
-      s3dSnapUniform->set (0.0f);
-
-      // v2.9.5：显式设置 attrib（上一模块若是纹理/trail 路径，drawTexQuad
-      //   会把 attrib 切成"纹理布局（stride 16B、指向 s3dQuadVbo）"，z 序
-      //   变化后本分支若不重设，会用错误布局读 VBO → 顶点/颜色全错（黄斑））
-      setVertexAttribs();
-      if (needUpload)
-        glBufferData (GL_ARRAY_BUFFER,
-                      (GLsizeiptr) (snap->vertices.size() * sizeof (float)),
-                      snap->vertices.data(), GL_DYNAMIC_DRAW);
-      for (const auto& seg : snap->segments)
-        glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
-                      seg.offset, seg.count);
-      diagCheckGl ("logical-draw");
-
-      // 线性缩小 blit 到后缓冲的模块 canvas 物理区域（2x 缩小 = 4 采样 box AA）
-      const auto cPos = getLocalPoint (&mod, snap->canvasLocal.getPosition());
-      const auto cBR  = getLocalPoint (&mod, snap->canvasLocal.getBottomRight());
-
-      if (! s3dBlitBroken)
-      {
-        // 首帧探测：先清空错误队列，再单独检查 blit 是否报错。
-        //   外网（RTX 3070 / NVIDIA 595.79）实测该 blit 每帧返回
-        //   GL_INVALID_OPERATION(0x502) 被整帧丢弃 → 模块永远不更新。
-        const bool probeNow = ! s3dBlitProbed;
-        if (probeNow)
-        {
-          s3dBlitProbed = true;
-          while (juce::gl::glGetError() != juce::gl::GL_NO_ERROR) {}
-        }
-
-        Y2K_DIAG_PHASE ("gl:BlitFramebuffer (module logical->screen)");
-        glBindFramebuffer (GL_READ_FRAMEBUFFER, mod.glFbo);
-        glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
-        glViewport (0, 0, vw, vh);
-        glBlitFramebuffer (0, 0, fboW, fboH,
-                           (int) (cPos.x * dpiScale),
-                           (int) (editorPhysH - cBR.y * dpiScale),
-                           (int) (cBR.x * dpiScale),
-                           (int) (editorPhysH - cPos.y * dpiScale),
-                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
-        glBindFramebuffer (GL_READ_FRAMEBUFFER, 0);
-
-        if (probeNow)
-        {
-          const GLenum e = juce::gl::glGetError();
-          if (e != juce::gl::GL_NO_ERROR)
-          {
-            s3dBlitBroken = true;
-            Y2K_DIAGC ("GL", juce::String ("!! glBlitFramebuffer 失败 (0x")
-                                  + juce::String::toHexString ((int) e)
-                                  + ") → 直渲染模块改用纹理 quad 合成回退");
-          }
-        }
-      }
-
-      if (s3dBlitBroken && s3dTexShader != nullptr)
-      {
-        // 回退：把逻辑 FBO 的纹理直接画到屏幕（完全不走 blit）。
-        //   与 blit 的线性缩放等价，只是多一个纹理采样 pass。
-        glBindFramebuffer (GL_FRAMEBUFFER, 0);
-        glViewport (0, 0, vw, vh);
-        glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        drawTexQuad (mod.glFboTex, snap->canvasLocal, 0.0f, 1.0f);
-        s3dShader->use();
-      }
-      diagCheckGl ("logical-fbo-blit");
-    }
-    else if (snap->trailFbo && snap->texW > 0 && snap->texH > 0 && s3dTexShader != nullptr)
-    {
-      // ============ trail 累积通道（v2.9.5 / v3.1 多层）============
-      //   1) 每层一个持久 FBO（1x 逻辑尺寸，不清 —— 衰减 + 累积）。
-      //      三频段点云各占一层：颜色永远不会互相污染。
-      const int layerCount = juce::jlimit (1, 3, snap->trailLayers);
-
-      if (mod.glTrailW != snap->texW || mod.glTrailH != snap->texH)
-      {
-        for (int li = 0; li < 3; ++li)
-        {
-          if (mod.glTrailFbo[li] != 0)
-          {
-            glDeleteFramebuffers (1, &mod.glTrailFbo[li]);
-            glDeleteTextures (1, &mod.glTrailTex[li]);
-            mod.glTrailFbo[li] = 0;
-            mod.glTrailTex[li] = 0;
-          }
-          mod.glTrailCleared[li] = true;
-        }
-
-        mod.glTrailW = snap->texW;
-        mod.glTrailH = snap->texH;
-      }
-
-      // 逐层补齐 FBO（层数从 1 变 3 时只补后两层，不做全量重建）
-      for (int li = 0; li < layerCount; ++li)
-      {
-        if (mod.glTrailFbo[li] != 0)
-          continue;
-
-        glGenFramebuffers (1, &mod.glTrailFbo[li]);
-        glGenTextures (1, &mod.glTrailTex[li]);
-        glBindTexture (GL_TEXTURE_2D, mod.glTrailTex[li]);
-        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
-                      snap->texW, snap->texH, 0,
-                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glBindTexture (GL_TEXTURE_2D, 0);
-        glBindFramebuffer (GL_FRAMEBUFFER, mod.glTrailFbo[li]);
-        glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                GL_TEXTURE_2D, mod.glTrailTex[li], 0);
-        glBindFramebuffer (GL_FRAMEBUFFER, 0);
-        mod.glTrailCleared[li] = false;
-      }
-
-      Y2K_DIAG_PHASE ("gl:draw module (trail FBO)");
-
-      // 顶点数据只上传一次（逐层绘制共用同一个 VBO）
-      setVertexAttribs();
-      if (needUpload)
-        glBufferData (GL_ARRAY_BUFFER,
-                      (GLsizeiptr) (snap->vertices.size() * sizeof (float)),
-                      snap->vertices.data(), GL_DYNAMIC_DRAW);
-
-      for (int li = 0; li < layerCount; ++li)
-      {
-        glBindFramebuffer (GL_FRAMEBUFFER, mod.glTrailFbo[li]);
-        glViewport (0, 0, snap->texW, snap->texH);
-        if (! mod.glTrailCleared[li] || snap->trailClear)
-        {
-          glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
-          glClear (GL_COLOR_BUFFER_BIT);
-          mod.glTrailCleared[li] = true;
-        }
-
-        //   2) 衰减 pass：覆盖 quad，blend (ZERO, ONE_MINUS_SRC_ALPHA) → dst×decay
-        s3dShader->use();
-        s3dNdcUniform->set (2.0f / (float) snap->texW, 2.0f / (float) snap->texH, -1.0f, -1.0f);
-        s3dTransformUniform->set (1.0f, -1.0f, 0.0f, (float) snap->texH);
-        s3dSnapUniform->set (0.0f);
-        glBlendFunc (GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
-        {
-          const float w = (float) snap->texW, h = (float) snap->texH;
-          const float a = 1.0f - snap->trailDecay;
-          const float quad[36] = {
-            0.0f, 0.0f, 1, 1, 1, a,   w, 0.0f, 1, 1, 1, a,   0.0f, h, 1, 1, 1, a,
-            w, 0.0f, 1, 1, 1, a,      w, h, 1, 1, 1, a,      0.0f, h, 1, 1, 1, a,
-          };
-          // v2.9.5：衰减 quad 用 s3dQuadVbo（勿污染模块 glVbo）
-          glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
-          glVertexAttribPointer ((GLuint) s3dPosAttrib, 2, GL_FLOAT, GL_FALSE, 24, nullptr);
-          glEnableVertexAttribArray ((GLuint) s3dPosAttrib);
-          glVertexAttribPointer ((GLuint) s3dColAttrib, 4, GL_FLOAT, GL_FALSE, 24, (void*) 8);
-          glEnableVertexAttribArray ((GLuint) s3dColAttrib);
-          glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
-          glDrawArrays (GL_TRIANGLES, 0, 6);
-        }
-
-        //   2.b) 残值清零 pass（v3.0.6）：dst -= eps（四通道同减）
-        //     trail FBO 是 8bit RGBA8，衰减 pass 的乘法是"×decay 后四舍五入"，
-        //     于是 alpha/RGB 只要落到 1~3/255 就成了不动点：
-        //         round(3 × 0.92) = 3   round(12 × 0.959@120Hz) = 12 ...
-        //     乘法永远无法把这些量化残值压到 0 —— 表现为雷达里那个永远擦不掉的
-        //     浅灰小点（高刷屏上残值更大，更明显）。
-        //     这里再走一遍减法：blend (REVERSE_SUBTRACT, ONE, ONE) → dst - src，
-        //     src 取 2/255，残值两帧内必归零；对满幅像素只相当于多衰减 0.8%。
-        //     四通道一起减：只减 alpha 会留下 alpha=0 但 RGB≈1 的像素，
-        //     合成（ONE, 1-SRC_ALPHA）时仍会叠出一层极淡的灰色。
-        {
-          constexpr float kFlush = 2.0f / 255.0f;
-          const float w = (float) snap->texW, h = (float) snap->texH;
-          const float quad[36] = {
-            0.0f, 0.0f, kFlush, kFlush, kFlush, kFlush,
-            w, 0.0f, kFlush, kFlush, kFlush, kFlush,
-            0.0f, h, kFlush, kFlush, kFlush, kFlush,
-            w, 0.0f, kFlush, kFlush, kFlush, kFlush,
-            w, h, kFlush, kFlush, kFlush, kFlush,
-            0.0f, h, kFlush, kFlush, kFlush, kFlush,
-          };
-          glBlendEquation (GL_FUNC_REVERSE_SUBTRACT);
-          glBlendFunc (GL_ONE, GL_ONE);
-          glBindBuffer (GL_ARRAY_BUFFER, s3dQuadVbo);
-          glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_DYNAMIC_DRAW);
-          glDrawArrays (GL_TRIANGLES, 0, 6);
-          glBlendEquation (GL_FUNC_ADD);
-        }
-
-        //   3) 点 pass：该层的 trail 段（叠加累积；点顶点为模块本地坐标，
-        //      经 canvasLocal 偏移换算到 trail FBO 坐标）
-        glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        s3dTransformUniform->set (1.0f, -1.0f,
-                                  -(float) snap->canvasLocal.getX(),
-                                  (float) (snap->texH + snap->canvasLocal.getY()));
-        setVertexAttribs();   // 衰减/清零 pass 把 attrib 指向了 s3dQuadVbo，这里必须重设
-        for (size_t si = (size_t) snap->trailSegStart; si < snap->segments.size(); ++si)
-        {
-          const auto& seg = snap->segments[si];
-          if (juce::jlimit (0, layerCount - 1, seg.trailLayer) != li)
-            continue;
-          glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
-                        seg.offset, seg.count);
-        }
-      }
-
-      //   4) 背景段直接画后缓冲
-      glBindFramebuffer (GL_FRAMEBUFFER, 0);
-      glViewport (0, 0, vw, vh);
-      {
-        const auto tl = getLocalPoint (&mod, juce::Point<int>());
-        s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
-        s3dTransformUniform->set (dpiScale, -dpiScale,
-                                  (float) tl.x * dpiScale,
-                                  (float) editorPhysH - (float) tl.y * dpiScale);
-        s3dSnapUniform->set (snap->snapToPixels ? 1.0f : 0.0f);
-        setVertexAttribs();
-        for (size_t si = 0; si < (size_t) snap->trailSegStart && si < snap->segments.size(); ++si)
-        {
-          const auto& seg = snap->segments[si];
-          glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
-                        seg.offset, seg.count);
-        }
-      }
-
-      //   5) 合成：逐层把 trail 纹理 alpha 混合到 texTargetRect
-      //   反馈修复（外网 #9）：trail FBO 内部是预乘 alpha（点绘制用源 alpha
-      //   叠加 + 衰减 pass 连 RGB 一起缩放）。旧代码用直通混合
-      //   (SRC_ALPHA, 1-SRC_ALPHA) 合成，预乘色被二次压暗 → 浅色背景上
-      //   淡出前出现"灰/脏"中间态。改用预乘混合 (ONE, 1-SRC_ALPHA)，
-      //   点保持原色、只降 alpha 直到消失。
-      glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-      for (int li = 0; li < layerCount; ++li)
-        drawTexQuad (mod.glTrailTex[li], snap->texTargetRect, 0.0f, 1.0f);
-      glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // 恢复直通混合，避免污染后续模块
-      diagCheckGl ("trail-compose");
-    }
-    else
-    {
-      // 直接渲染到后缓冲：快照顶点坐标是"模块本地"坐标（含 canvas 偏移），
-      //   transform 原点取模块左上角 (0,0)。
-      // v2.9.5 修复（两处状态残留，都必须在每个分支显式设置）：
-      //   1) use 顺序：Uniform::set 写入"当前绑定的 program"，上一模块（trail/
-      //      纹理路径）结束时当前 program 是纹理 shader —— 先 set 会写到错误
-      //      program，主 shader 的 transform 残留上一模块的 FBO 局部变换；
-      //   2) NDC：上一模块（renderToLogical）留下的是 FBO 尺寸 NDC —— 不重设
-      //      会让背景顶点被错误缩放画飞（四周透底 + 巨大错位底图）。
-      const auto tl = getLocalPoint (&mod, juce::Point<int>());
-      Y2K_DIAG_PHASE ("gl:draw module (direct)");
-      s3dShader->use();
-      s3dNdcUniform->set (2.0f / (float) vw, 2.0f / (float) vh, -1.0f, -1.0f);
-      s3dTransformUniform->set (dpiScale, -dpiScale,
-                                (float) tl.x * dpiScale,
-                                (float) editorPhysH - (float) tl.y * dpiScale);
-      s3dSnapUniform->set (snap->snapToPixels ? 1.0f : 0.0f);
-
-      // 顶点段（背景/边框）先画 —— 背景 9 quad 含全 canvas 底色，若画在纹理
-      //   之后会把瀑布图整个盖住
-      setVertexAttribs();
-      if (needUpload)
-        glBufferData (GL_ARRAY_BUFFER,
-                      (GLsizeiptr) (snap->vertices.size() * sizeof (float)),
-                      snap->vertices.data(), GL_DYNAMIC_DRAW);
-      for (const auto& seg : snap->segments)
-        glDrawArrays (seg.primitive == GlDirectModuleBase::Primitive::Lines ? GL_LINES : GL_TRIANGLES,
-                      seg.offset, seg.count);
-
-      // 纹理通道：上传 + quad（画在背景之后 —— 瀑布图覆盖 content 底色）
-      if (snap->texW > 0 && snap->texH > 0 && s3dTexShader != nullptr
-          && ! snap->texPixels.empty())
-      {
-        if (mod.glTex == 0)
-          glGenTextures (1, &mod.glTex);
-        Y2K_DIAG_PHASE ("gl:TexImage2D (module texture upload)");
-        glBindTexture (GL_TEXTURE_2D, mod.glTex);
-        if (snap->texDirty)
-        {
-          // 像素为 0xAARRGGBB（juce::Colour::getPixelARGB），小端内存字节序
-          //   即 B,G,R,A → GL_BGRA 上传避免字节重排。
-          // 最近邻过滤（与旧版 lowResamplingQuality 一致）：像素风瀑布图
-          //   线性采样会在双拷贝环形窗口边缘混入镜像列 → 边缘 1px"拖影"。
-          glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
-                        snap->texW, snap->texH, 0,
-                        GL_BGRA, GL_UNSIGNED_BYTE, snap->texPixels.data());
-          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-          glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        }
-        glBindTexture (GL_TEXTURE_2D, 0);
-        drawTexQuad (mod.glTex, snap->texTargetRect, snap->texScrollU, snap->texWinW);
-        s3dShader->use();   // 恢复主 shader（下一模块开头也会再设）
-      }
-      diagCheckGl ("direct-draw");
-    }
-
-    if (needUpload)
-      mod.lastUploadedVersion = snap->version;
-
-    // 首次成功绘制后接管组件绘制路径，并强制组件缓存重绘 —— 接管标志
-    //   变化后组件缓存的"软件路径不透明内容"若不同步失效，会盖住 GL 内容
-    //   （dock 回来图像丢失/拖影的根源；repaint 线程安全，GL 线程可调）。
-    if (! mod.glDirectActive.load())
-    {
-      mod.glDirectActive.store (true);
-      mod.repaint();
-    }
-
-    mod.diagSetVisible (true);
-  };
+  const auto frameGuard = glDirectRenderer_->beginFrame (vw, vh);
 
   // 统一 z 序遍历：组件树先序（兄弟按索引序）即 z 从低到高，
   //   重叠区域后画的覆盖先画的 —— 聚焦（toFront）模块自然在上层。
-  //   Milkdrop（FBO 渲染 + blit）与 GlDirectModuleBase（顶点流）在此同权参与。
+  //   Milkdrop（FBO 渲染 + blit）与 GlDirectModuleBase（共享 GlDirectRenderer）在此同权参与。
+  std::vector<juce::uint64> liveGlKeys;
+  liveGlKeys.reserve (24);
+
   auto walk = [&] (auto& self, juce::Component* root) -> void
   {
     for (int i = 0; i < root->getNumChildComponents(); ++i)
@@ -9845,26 +9619,18 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
           int lw = br.x - tl.x, lh = br.y - tl.y;
           if (lw > 0 && lh > 0)
           {
-            // v2.9.9：目标矩形"向下取整起点 + 向上取整终点"，覆盖 content 矩形
-            //   的整个物理像素范围（旧实现全用截断，顶边最多少 1 像素）。
-            //   注意：**不要**向 content 之外多画 —— blit 源矩形按目标尺寸等比
-            //   取自 FBO，向再多覆盖 1~2px 会让源矩形越过 FBO 边界，采到未定义
-            //   内容（表现为视频顶边出现更宽的一条杂色带）。抬头与视频之间的
-            //   AA 缝隙由组件层解决（见 MilkdropModule::paint 的分割线加厚）。
             const double fx0 = (double) tl.x * dpiScale;
             const double fx1 = (double) br.x * dpiScale;
-            const double fy0 = (double) (editorLogicalH - br.y) * dpiScale;   // GL 下原点：content 顶边
-            const double fy1 = (double) (editorLogicalH - tl.y) * dpiScale;   // GL 下原点：content 底边
+            const double fy0 = (double) (editorLogicalH - br.y) * dpiScale;
+            const double fy1 = (double) (editorLogicalH - tl.y) * dpiScale;
 
             int gx = (int) std::floor (fx0);
             int gy = (int) std::floor (fy0);
             int gw = juce::jmax (1, (int) std::ceil (fx1) - gx);
             int gh = juce::jmax (1, (int) std::ceil (fy1) - gy);
 
-            int sw = gw / milkdrop_render_scale_;
-            int sh = gh / milkdrop_render_scale_;
-            sw = std::max (sw, 1);
-            sh = std::max (sh, 1);
+            int sw = std::max (gw / milkdrop_render_scale_, 1);
+            int sh = std::max (gh / milkdrop_render_scale_, 1);
 
             Y2K_DIAG_PHASE ("gl:BlitFramebuffer (milkdrop -> screen)");
             glBindFramebuffer (GL_READ_FRAMEBUFFER, milkdropBlitSourceFbo);
@@ -9872,11 +9638,19 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
             glBlitFramebuffer (0, 0, sw, sh,
                                gx, gy, gx + gw, gy + gh,
                                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            if (isTransparentBackdrop)
+            {
+              glBindFramebuffer (GL_FRAMEBUFFER, 0);
+              glViewport (0, 0, vw, vh);
+              glColorMask (GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+              glEnable (GL_SCISSOR_TEST);
+              glScissor (gx, gy, gw, gh);
+              glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
+              glClear (GL_COLOR_BUFFER_BIT);
+              glDisable (GL_SCISSOR_TEST);
+              glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            }
 
-            // 诊断：搬运到后缓冲这一步。
-            //   ① 目标矩形只在变化时打一行 —— 能看到模块 content 矩形/源 FBO 是否异常；
-            //   ② 每次 blit 后查错误（限流）—— 驱动丢弃 blit 时画面就是黑的，
-            //      而旧日志里没有任何痕迹。
             if (Y2K_DIAG_ENABLED())
             {
               ++gMdDiag.screenBlit;
@@ -9916,8 +9690,9 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
       }
       else if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (child))
       {
+        liveGlKeys.push_back (gmod->glResourceKey);
         if (s3dOk && gmod->isVisible() && gmod->isShowing())
-          renderOneGlModule (*gmod);
+          glDirectRenderer_->renderModule (*this, *gmod, dpiScale, editorLogicalH, editorPhysH, vw, vh);
         else
           gmod->diagSetVisible (false);
       }
@@ -9929,23 +9704,8 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
   };
   walk (walk, this);
 
-  // v2.9.3：恢复 GL 状态。JUCE 组件绘制（paintComponent）在本函数之后执行，
-  //   其状态机假设"干净"的初始状态 —— 残留 program / blend / VAO 会让组件
-  //   绘制命令走错 shader 路径（示波器 paint 实测因此慢 3 倍）。
-  if (s3dOk)
-  {
-    glBindVertexArray (0);
-    glBindBuffer (GL_ARRAY_BUFFER, 0);
-    glUseProgram (0);
-    glEnable (GL_BLEND);
-    glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // JUCE GL 渲染器的预乘约定
-  }
-
-  // 原样恢复进入前的 sRGB 状态：本函数之外（JUCE 组件绘制）行为与改动前一致
-  if (s3dSrgbWasOn)
-    glEnable (GL_FRAMEBUFFER_SRGB);
-  else
-    glDisable (GL_FRAMEBUFFER_SRGB);
+  glDirectRenderer_->retainOnlyKeys (liveGlKeys.data(), liveGlKeys.size());
+  glDirectRenderer_->endFrame (frameGuard);
 }
 
 void Y2KmeterAudioProcessorEditor::destroyMilkdropEditorResources() {
@@ -9999,11 +9759,11 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
   y2k::diag::setPhase ("Editor::openGLContextClosing");
   Y2K_DIAGC ("GL", "openGLContextClosing enter (释放 GL 资源)");
 
-  // v2.9.4：清理 GL 直渲染资源（VAO + 各 GlDirectModuleBase 模块专属 VBO）
-  if (s3dVao != 0) { juce::gl::glDeleteVertexArrays (1, &s3dVao); s3dVao = 0; }
-  if (s3dQuadVbo != 0) { juce::gl::glDeleteBuffers (1, &s3dQuadVbo); s3dQuadVbo = 0; }
+  if (glDirectRenderer_ != nullptr)
+    glDirectRenderer_->releaseAll();
+
   {
-    auto releaseVbos = [&] (auto& self, juce::Component* root) -> void
+    auto resetUploadedGen = [&] (auto& self, juce::Component* root) -> void
     {
       for (int i = 0; i < root->getNumChildComponents(); ++i)
       {
@@ -10011,27 +9771,7 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
         if (child == nullptr) continue;
         if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (child))
         {
-          if (gmod->glVbo != 0) { juce::gl::glDeleteBuffers (1, &gmod->glVbo); gmod->glVbo = 0; }
-          if (gmod->glFbo != 0)
-          {
-            juce::gl::glDeleteFramebuffers (1, &gmod->glFbo);
-            juce::gl::glDeleteTextures (1, &gmod->glFboTex);
-            gmod->glFbo = 0;
-            gmod->glFboTex = 0;
-          }
-          for (int li = 0; li < 3; ++li)
-          {
-            if (gmod->glTrailFbo[li] != 0)
-            {
-              juce::gl::glDeleteFramebuffers (1, &gmod->glTrailFbo[li]);
-              juce::gl::glDeleteTextures (1, &gmod->glTrailTex[li]);
-              gmod->glTrailFbo[li] = 0;
-              gmod->glTrailTex[li] = 0;
-            }
-          }
-          gmod->glTrailW = 0;
-          gmod->glTrailH = 0;
-          if (gmod->glTex != 0) { juce::gl::glDeleteTextures (1, &gmod->glTex); gmod->glTex = 0; }
+          gmod->glTexUploadedGen.store (0, std::memory_order_release);
         }
         else
         {
@@ -10039,22 +9779,8 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
         }
       }
     };
-    releaseVbos (releaseVbos, this);
+    resetUploadedGen (resetUploadedGen, this);
   }
-  s3dShader.reset();
-  s3dTransformUniform.reset();
-  s3dNdcUniform.reset();
-  s3dSnapUniform.reset();
-  s3dTexShader.reset();
-  s3dTexTransformUniform.reset();
-  s3dTexNdcUniform.reset();
-  s3dTexWindowUniform.reset();
-  s3dGlReady = false;
-  // 重置 shader 编译标志：上下文重建后 renderOpenGL 会重新懒编译 shader。
-  s3dShaderUseChecked = false;
-  // blit 能力需要在新上下文里重新探测（换显卡/驱动后结论可能不同）
-  s3dBlitProbed = false;
-  s3dBlitBroken = false;
 
   destroyMilkdropEditorResources();
 }

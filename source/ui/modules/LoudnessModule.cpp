@@ -2,6 +2,7 @@
 #include "source/ui/modules/MeterWidgets.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/steam/Y2KAchievements.h"
@@ -60,14 +61,17 @@ juce::ValueTree LoudnessModule::saveModuleSpecificState() const
     s.setProperty ("itemM",   items.m,   nullptr);
     s.setProperty ("itemS",   items.s,   nullptr);
     s.setProperty ("itemI",   items.i,   nullptr);
-    s.setProperty ("itemTp",  items.tp,  nullptr);
-    s.setProperty ("itemRms", items.rms, nullptr);
+    s.setProperty ("itemTp",       items.tp,  nullptr);
+    s.setProperty ("itemRms",      items.rms, nullptr);
+    s.setProperty ("targetLufs",   targetPreset, nullptr);
+    s.setProperty ("floorDb",      (double) floorDb, nullptr);
+    s.setProperty ("peakHold",     showPeakHold, nullptr);
+    s.setProperty ("peakHoldSec",  (double) peakHoldSec, nullptr);
     return s;
 }
 
 void LoudnessModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
-    // 缺键 = 保持当前值；构造默认 = 旧 Loudness 外观（灯条 + M S I RMS）
     auto getB = [&] (const char* k, bool& dst)
     {
         if (state.hasProperty (k)) dst = (bool) state.getProperty (k);
@@ -81,6 +85,14 @@ void LoudnessModule::restoreModuleSpecificState (const juce::ValueTree& state)
     items = it;
     if (state.hasProperty ("style"))
         style = (int) state.getProperty ("style") == 1 ? Style::readouts : Style::ledBars;
+    if (state.hasProperty ("targetLufs"))
+        targetPreset = juce::jlimit (0, 5, (int) state.getProperty ("targetLufs"));
+    if (state.hasProperty ("floorDb"))
+        floorDb = juce::jlimit (-72.0f, -36.0f, (float) (double) state.getProperty ("floorDb"));
+    if (state.hasProperty ("peakHold"))
+        showPeakHold = (bool) state.getProperty ("peakHold");
+    if (state.hasProperty ("peakHoldSec"))
+        peakHoldSec = juce::jlimit (0.5f, 5.0f, (float) (double) state.getProperty ("peakHoldSec"));
 
     rebuildBarSlots();
     invalidateStaticLayer();
@@ -106,16 +118,41 @@ void LoudnessModule::buildParamDefs (std::vector<ParamDef>& out) const
         "Inter-sample peak (4x oversampled). LED bars show L and R, readouts show the louder one.").in ("Show"));
     out.push_back (ParamDef::toggle ("itemRms", "RMS",
         "Average level of the left and right channel. Readouts show the louder one.").in ("Show"));
+
+    out.push_back (ParamDef::choice ("targetLufs", "Target LUFS",
+        { "Off", "-23 EBU", "-16 Apple", "-14 Stream", "-9 Club", "-6 Loud" },
+        "Draws a mastering loudness target reference line across LUFS meters.")
+        .in ("Scale"));
+    out.push_back (ParamDef::choice ("floorDb", "Meter floor",
+        { "-72 dB", "-60 dB", "-48 dB", "-36 dB" },
+        "Bottom of the meter scale. Higher floor zooms into mastering headroom; lower floor reveals quiet ambience.")
+        .in ("Scale"));
+    out.push_back (ParamDef::toggle ("peakHold", "Peak hold",
+        "Show the slowly falling peak-hold marker on each LED bar.")
+        .in ("Scale").when ([this] { return style == Style::ledBars; }));
+    out.push_back (ParamDef::slider ("peakHoldSec", "Peak hold time", 0.5, 5.0, 0.5, " s",
+        "How long the peak marker stays before falling.")
+        .in ("Scale").when ([this] { return style == Style::ledBars && showPeakHold; }));
 }
 
 double LoudnessModule::getParamValue (const juce::String& id) const
 {
-    if (id == "style")   return (double) (int) style;
-    if (id == "itemM")   return items.m ? 1.0 : 0.0;
-    if (id == "itemS")   return items.s ? 1.0 : 0.0;
-    if (id == "itemI")   return items.i ? 1.0 : 0.0;
-    if (id == "itemTp")  return items.tp ? 1.0 : 0.0;
-    if (id == "itemRms") return items.rms ? 1.0 : 0.0;
+    if (id == "style")       return (double) (int) style;
+    if (id == "itemM")       return items.m ? 1.0 : 0.0;
+    if (id == "itemS")       return items.s ? 1.0 : 0.0;
+    if (id == "itemI")       return items.i ? 1.0 : 0.0;
+    if (id == "itemTp")      return items.tp ? 1.0 : 0.0;
+    if (id == "itemRms")     return items.rms ? 1.0 : 0.0;
+    if (id == "targetLufs")  return (double) targetPreset;
+    if (id == "floorDb")
+    {
+        if (floorDb <= -66.0f) return 0.0;
+        if (floorDb <= -54.0f) return 1.0;
+        if (floorDb <= -42.0f) return 2.0;
+        return 3.0;
+    }
+    if (id == "peakHold")    return showPeakHold ? 1.0 : 0.0;
+    if (id == "peakHoldSec") return (double) peakHoldSec;
     return 0.0;
 }
 
@@ -126,6 +163,32 @@ void LoudnessModule::setParamValue (const juce::String& id, double v)
         style = juce::roundToInt (v) == 1 ? Style::readouts : Style::ledBars;
         layoutContent (getContentBounds());
         repaint();
+        return;
+    }
+    if (id == "targetLufs")
+    {
+        targetPreset = juce::jlimit (0, 5, juce::roundToInt (v));
+        invalidateStaticLayer();
+        repaint();
+        return;
+    }
+    if (id == "floorDb")
+    {
+        static constexpr float kFloors[4] = { -72.0f, -60.0f, -48.0f, -36.0f };
+        floorDb = kFloors[juce::jlimit (0, 3, juce::roundToInt (v))];
+        invalidateStaticLayer();
+        repaint();
+        return;
+    }
+    if (id == "peakHold")
+    {
+        showPeakHold = (v >= 0.5);
+        repaint();
+        return;
+    }
+    if (id == "peakHoldSec")
+    {
+        peakHoldSec = juce::jlimit (0.5f, 5.0f, (float) v);
         return;
     }
 
@@ -183,11 +246,12 @@ void LoudnessModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     if (style == Style::ledBars)
     {
         const float deltaMs = dt * 1000.0f;
-        if (items.m)   barM.update(snap.lufsM, deltaMs);
-        if (items.s)   barS.update(snap.lufsS, deltaMs);
-        if (items.i)   barI.update(snap.lufsI, deltaMs);
-        if (items.tp)  { barTpL.update(snap.truePeakL, deltaMs); barTpR.update(snap.truePeakR, deltaMs); }
-        if (items.rms) { barRmsL.update(snap.rmsL, deltaMs);     barRmsR.update(snap.rmsR, deltaMs); }
+        const float holdMs  = peakHoldSec * 1000.0f;
+        if (items.m)   barM.update(snap.lufsM, deltaMs, holdMs);
+        if (items.s)   barS.update(snap.lufsS, deltaMs, holdMs);
+        if (items.i)   barI.update(snap.lufsI, deltaMs, holdMs);
+        if (items.tp)  { barTpL.update(snap.truePeakL, deltaMs, holdMs); barTpR.update(snap.truePeakR, deltaMs, holdMs); }
+        if (items.rms) { barRmsL.update(snap.rmsL, deltaMs, holdMs);     barRmsR.update(snap.rmsR, deltaMs, holdMs); }
     }
     else
     {
@@ -250,10 +314,15 @@ void LoudnessModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 // ==========================================================
 // 值 → 柱高 / 颜色
 // ==========================================================
-float LoudnessModule::valueToNorm(float val) noexcept
+float LoudnessModule::valueToNorm(float val) const noexcept
 {
-    // LUFS / dBFS 统一映射到 -60 ~ 0 dB
-    return juce::jlimit(0.0f, 1.0f, juce::jmap(val, -60.0f, 0.0f, 0.0f, 1.0f));
+    return juce::jlimit(0.0f, 1.0f, juce::jmap(val, floorDb, 0.0f, 0.0f, 1.0f));
+}
+
+float LoudnessModule::targetLufsDb() const noexcept
+{
+    static constexpr float kTargets[6] = { -999.0f, -23.0f, -16.0f, -14.0f, -9.0f, -6.0f };
+    return kTargets[juce::jlimit (0, 5, targetPreset)];
 }
 
 juce::Colour LoudnessModule::lufsToColour(float lufs) noexcept { return y2k::meter::lufsColour (lufs); }
@@ -267,10 +336,13 @@ void LoudnessModule::drawMeterBar(juce::Graphics& g,
                                    const MeterBar& bar,
                                    bool isLUFS) const
 {
-    // 绿幕：不画凹槽与未点亮格子，只留点亮的电平格 + 峰值线
-    const bool chromaKey = PinkXP::isChromaKeySkin();
-    if (! chromaKey)
-        PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
+    const auto& tokens    = PinkXP::getSkinTokens();
+    const bool  chromaKey = tokens.isChromaKey;
+    const bool  hasStatic = (! chromaKey && staticLayer.isValid());
+
+    // 非静态层路径（无缓冲回退）：绘制凹槽；有静态层时静态层已画完凹槽 + 暗格，避免双画
+    if (! hasStatic)
+        PinkXP::Craft::drawPanelWell (g, barArea, PinkXP::content.darker (0.05f), PinkXP::WellKind::trough);
 
     const int padding = 3;
     auto inner = barArea.reduced(padding);
@@ -280,7 +352,7 @@ void LoudnessModule::drawMeterBar(juce::Graphics& g,
     const int numRows = juce::jmax(1, (inner.getHeight() + cellGap) / step);
 
     const float norm = valueToNorm(bar.smoothed);
-    const int litRows = (int)std::round(norm * (float)numRows);
+    const int litRows = juce::jlimit (0, numRows, (int)std::round(norm * (float)numRows));
 
     const float peakNorm = valueToNorm(bar.peakValue);
     const int peakRow = (int)std::round(peakNorm * (float)numRows);
@@ -291,66 +363,222 @@ void LoudnessModule::drawMeterBar(juce::Graphics& g,
     const int colW = juce::jmax(1, inner.getWidth() - 4);
     const int offsetX = inner.getX() + (inner.getWidth() - colW) / 2;
 
-    const int firstRow = firstVisibleRowForValue(bar.smoothed, numRows);
-    for (int row = firstRow; row < numRows; ++row)
+    if (hasStatic || chromaKey)
     {
-        const int y = offsetY + row * step;
-        const bool lit = (numRows - 1 - row) < litRows;
+        // 静态层已绘制所有暗格，绿幕跳过暗格 → 仅绘制点亮格，零双画
+        const int firstLitRow = juce::jmax (0, numRows - litRows);
+        for (int row = firstLitRow; row < numRows; ++row)
+        {
+            const int y = offsetY + row * step;
+            const float rowNorm = 1.0f - (float)row / (float)juce::jmax(1, numRows - 1);
+            const float rowDb   = juce::jmap(rowNorm, floorDb, 0.0f);
+            const auto base = isLUFS ? lufsToColour(rowDb) : dbToColour(rowDb);
+            PinkXP::Craft::drawMeterCell (g, juce::Rectangle<int> (offsetX, y, colW, cellSize), base, true);
+        }
+    }
+    else
+    {
+        for (int row = 0; row < numRows; ++row)
+        {
+            const int y = offsetY + row * step;
+            const bool lit = (numRows - 1 - row) < litRows;
+            const float rowNorm = 1.0f - (float)row / (float)juce::jmax(1, numRows - 1);
+            const float rowDb   = juce::jmap(rowNorm, floorDb, 0.0f);
+            const auto base = isLUFS ? lufsToColour(rowDb) : dbToColour(rowDb);
+            PinkXP::Craft::drawMeterCell (g, juce::Rectangle<int> (offsetX, y, colW, cellSize), base, lit);
+        }
+    }
 
-        const float rowNorm = 1.0f - (float)row / (float)juce::jmax(1, numRows - 1);
-        const float rowDb   = juce::jmap(rowNorm, -60.0f, 0.0f);
-
-        // 未点亮格子用同色 0.15 alpha：视觉上是"色带随电平从底向上点亮"
-        if (chromaKey && ! lit)
-            continue;
-        const auto base = isLUFS ? lufsToColour(rowDb) : dbToColour(rowDb);
-        g.setColour(lit ? base : base.withAlpha(0.15f));
-        g.fillRect(offsetX, y, colW, cellSize);
+    // 目标响度参考线（仅 LUFS 柱绘制）
+    const float tgt = targetLufsDb();
+    if (isLUFS && tgt >= floorDb && tgt <= 0.0f && ! chromaKey)
+    {
+        const float tgtNorm = valueToNorm (tgt);
+        const int tgtY = offsetY + juce::roundToInt ((1.0f - tgtNorm) * (float) totalH);
+        if ((tokens.frameStyle == PinkXP::FrameStyle::neonTube
+             || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor) && ! PinkXP::isGreenScreenBackdrop())
+        {
+            g.setColour (PinkXP::sel.withAlpha (0.28f));
+            g.fillRect (offsetX - 2, tgtY - 2, colW + 4, 4);
+        }
+        g.setColour (PinkXP::sel.withAlpha (0.90f));
+        if (! tokens.hardPixelSteps && tokens.barCellRadius > 0.5f)
+        {
+            g.fillRoundedRectangle ((float) (offsetX - 2), (float) tgtY - 0.75f, (float) (colW + 4), 1.5f, 0.75f);
+            if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+            {
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f));
+                g.fillRect (offsetX - 1, tgtY, colW + 2, 1);
+            }
+        }
+        else
+        {
+            g.fillRect (offsetX - 2, tgtY - 1, colW + 4, 2);
+            if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome
+                || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+            {
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f));
+                g.fillRect (offsetX - 2, tgtY - 1, colW + 4, 1);
+            }
+        }
     }
 
     // 缓降峰值线
-    if (peakRow > 0 && peakRow <= numRows)
+    if (showPeakHold && peakRow > 0 && peakRow <= numRows)
     {
         const int peakY = offsetY + (numRows - peakRow) * step;
         const auto peakCol = (isLUFS ? lufsToColour(bar.peakValue)
                                      : dbToColour (bar.peakValue)).brighter(0.2f);
-        g.setColour(peakCol);
-        g.fillRect(offsetX - 1, peakY, colW + 2, 2);
+        const juce::Rectangle<int> peakRect (offsetX - 1, peakY, colW + 2, 2);
+        if (tokens.peakCapGlow && ! PinkXP::isGreenScreenBackdrop())
+        {
+            g.setColour (peakCol.withAlpha (0.28f));
+            g.fillRect (peakRect.expanded (1));
+        }
+        g.setColour (peakCol);
+        if (! tokens.hardPixelSteps && tokens.barCellRadius > 0.5f)
+        {
+            g.fillRoundedRectangle (peakRect.toFloat(), juce::jmin (1.0f, tokens.barCellRadius * 0.5f));
+            if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass && ! PinkXP::isGreenScreenBackdrop())
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.48f));
+                g.fillRect ((float) peakRect.getX() + 0.5f, (float) peakRect.getY(),
+                            juce::jmax (1.0f, (float) peakRect.getWidth() - 1.0f), 1.0f);
+            }
+            else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+            {
+                g.setColour (peakCol.interpolatedWith (juce::Colours::white, 0.58f));
+                g.fillRect (peakRect.getX() + 1, peakRect.getY(), juce::jmax (1, peakRect.getWidth() - 2), 1);
+            }
+        }
+        else
+        {
+            g.fillRect (peakRect);
+            if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome
+                || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+            {
+                g.setColour (peakCol.interpolatedWith (juce::Colours::white, 0.55f));
+                g.fillRect (peakRect.getX(), peakRect.getY(), peakRect.getWidth(), 1);
+            }
+        }
     }
+
+    PinkXP::Craft::drawCanvasFinishOverlay (g, barArea.reduced (2));
 }
 
-// ==========================================================
-// drawScale —— 绘制右侧 dB 刻度尺
-// ==========================================================
 void LoudnessModule::drawScale(juce::Graphics& g, juce::Rectangle<int> scaleArea) const
 {
-    if (PinkXP::isChromaKeySkin())
-        return;   // 绿幕：dB 刻度尺不画
+    if (PinkXP::isChromaKeySkin() || scaleArea.getWidth() < 8 || scaleArea.getHeight() < 12)
+        return;
 
     g.setFont(PinkXP::getAxisFont(9.0f));
     g.setColour(PinkXP::ink.withAlpha(0.75f));
 
-    const float top    = (float)scaleArea.getY();
-    const float bottom = (float)scaleArea.getBottom();
-    const float height = bottom - top;
+    // 与 LED 柱体内部（barArea.reduced(3)）对齐，使 0 dB 与底部 floorDb 精准贴齐灯带上下缘
+    const auto aligned = (scaleArea.getHeight() >= 16) ? scaleArea.reduced (0, 3) : scaleArea;
+    const float top    = (float) aligned.getY();
+    const float bottom = (float) aligned.getBottom();
+    const float height = juce::jmax (1.0f, bottom - top);
+    const int   minLabelY = scaleArea.getY();
+    const int   maxLabelY = juce::jmax (minLabelY, scaleArea.getBottom() - 10);
 
-    const int marks[] = { 0, -6, -12, -18, -24, -36, -48, -60 };
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool  modernScale = (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                               || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+    const bool  chromeScale = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+    const bool  neonScale   = (tokens.frameStyle == PinkXP::FrameStyle::neonTube);
+    const bool  crtScale    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const bool  isDarkFace  = PinkXP::face.getPerceivedBrightness() < 0.45f;
+    const float labelAlpha  = modernScale ? 0.68f : (chromeScale ? 0.82f : ((neonScale || crtScale) ? 0.86f : 0.80f));
+
+    if (chromeScale)
+    {
+        // 激光刻蚀垂直刻度导轨（1px 深槽 + 1px 镜面亮沿）
+        g.setColour (PinkXP::dark.withAlpha (isDarkFace ? 0.50f : 0.32f));
+        g.fillRect (scaleArea.getX(), aligned.getY(), 1, aligned.getHeight());
+        g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.50f)
+                               .withAlpha (isDarkFace ? 0.22f : 0.58f));
+        g.fillRect (scaleArea.getX() + 1, aligned.getY(), 1, aligned.getHeight());
+    }
+    else if (neonScale || crtScale)
+    {
+        // 霓虹 / Tektronix CRT 垂直标尺轨
+        g.setColour (PinkXP::sel.withAlpha (crtScale ? 0.48f : 0.36f));
+        g.fillRect (scaleArea.getX(), aligned.getY(), 1, aligned.getHeight());
+    }
+
+    const int marks[] = { 0, -6, -12, -18, -24, -36, -48, -60, -72 };
     for (int db : marks)
     {
-        const float norm = juce::jmap((float)db, -60.0f, 0.0f, 0.0f, 1.0f);
-        const float y    = bottom - norm * height;
+        if ((float) db < floorDb - 0.5f) continue;
+        const float norm = juce::jmap((float)db, floorDb, 0.0f, 0.0f, 1.0f);
+        const int   tickY = juce::jlimit (scaleArea.getY(),
+                                          juce::jmax (scaleArea.getY(), scaleArea.getBottom() - 1),
+                                          juce::roundToInt (bottom - norm * height));
+        const bool major = (db == 0 || db == -12 || db == -24 || db == -36 || db == -48 || db == -60);
 
-        g.setColour(PinkXP::pink600.withAlpha(0.5f));
-        g.drawHorizontalLine((int)y, (float)scaleArea.getX(),
-                             (float)(scaleArea.getX() + 4));
+        if (modernScale)
+        {
+            g.setColour (PinkXP::ink.withAlpha (major ? 0.36f : 0.20f));
+            g.fillRect (scaleArea.getX(), tickY, major ? 4 : 3, 1);
+        }
+        else if (chromeScale)
+        {
+            const int tickW = major ? 5 : 3;
+            g.setColour (PinkXP::ink.withAlpha (major ? 0.68f : 0.38f));
+            g.fillRect (scaleArea.getX(), tickY, tickW, 1);
+            if (tickY + 1 < scaleArea.getBottom())
+            {
+                g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.50f)
+                                       .withAlpha (isDarkFace ? (major ? 0.28f : 0.16f)
+                                                              : (major ? 0.68f : 0.42f)));
+                g.fillRect (scaleArea.getX() + 1, tickY + 1, juce::jmax (1, tickW - 1), 1);
+            }
+        }
+        else if (neonScale || crtScale)
+        {
+            const int tickW = major ? 5 : 3;
+            g.setColour (PinkXP::sel.withAlpha (major ? 0.85f : 0.45f));
+            g.fillRect (scaleArea.getX(), tickY, tickW, 1);
+            if (neonScale && major)
+            {
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f).withAlpha (0.85f));
+                g.fillRect (scaleArea.getX(), tickY, 2, 1);
+            }
+        }
+        else
+        {
+            PinkXP::Craft::drawGridLine (g, (float) scaleArea.getX(), (float) tickY,
+                                         (float) (scaleArea.getX() + 4), (float) tickY,
+                                         major, PinkXP::pink600);
+            g.setColour (PinkXP::pink600.withAlpha (major ? 0.65f : 0.40f));
+            g.fillRect (scaleArea.getX(), tickY, 2, 1);
+        }
 
-        g.setColour(PinkXP::ink.withAlpha(0.8f));
+        g.setColour(PinkXP::ink.withAlpha(labelAlpha));
+        const int labelY = juce::jlimit (minLabelY, maxLabelY, tickY - 5);
         juce::String label = (db == 0) ? "0" : juce::String(db);
         PinkXP::drawCachedText(g, label,
-                               juce::Rectangle<int>(scaleArea.getX() + 5, (int)y - 5,
+                               juce::Rectangle<int>(scaleArea.getX() + 5, labelY,
                                                     scaleArea.getWidth() - 5, 10),
                                juce::Justification::centredLeft, 9.0f, juce::Font::plain,
-                               PinkXP::ink.withAlpha(0.8f), true);
+                               PinkXP::ink.withAlpha(labelAlpha), true);
+    }
+
+    const float tgt = targetLufsDb();
+    if (tgt >= floorDb && tgt <= 0.0f)
+    {
+        const float norm = juce::jmap (tgt, floorDb, 0.0f, 0.0f, 1.0f);
+        const float y    = juce::jlimit ((float) scaleArea.getY() + 1.0f,
+                                         (float) juce::jmax (scaleArea.getY() + 1, scaleArea.getBottom() - 1),
+                                         bottom - norm * height);
+        g.setColour (PinkXP::sel);
+        g.fillRect ((float) scaleArea.getX(), y - 1.0f, 5.0f, 2.0f);
+        if (chromeScale || neonScale || crtScale)
+        {
+            g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f));
+            g.fillRect ((float) scaleArea.getX(), y - 1.0f, 5.0f, 1.0f);
+        }
     }
 }
 
@@ -389,29 +617,21 @@ bool LoudnessModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) const
 
 void LoudnessModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 {
-    float val = 0.0f;
-    juce::String unit;
-    juce::Colour c;
-
     if (style == Style::ledBars)
     {
-        const int i = juce::jlimit (0, juce::jmax (0, (int) slots.size() - 1), hit.kind);
         if (slots.empty()) return;
-        val  = slots[(size_t) i].bar->smoothed;
-        unit = slots[(size_t) i].isLufs ? "LUFS" : "dBFS";
-        c    = slots[(size_t) i].isLufs ? lufsToColour (val) : dbToColour (val);
+        const int i = juce::jlimit (0, (int) slots.size() - 1, hit.kind);
+        const float val = slots[(size_t) i].bar->smoothed;
+        const juce::Colour c = slots[(size_t) i].isLufs ? lufsToColour (val) : dbToColour (val);
+        ctx.addModuleActorCapped (makeMeterBarLaunchActor (hit.rect, hit.pos.y, c), 6);
     }
     else
     {
         const int r = juce::jlimit (0, (int) numReadRows - 1, hit.kind);
-        val  = rdValue[r];
-        unit = (r <= rI) ? "LUFS" : (r == rTp ? "dBTP" : "dBFS");
-        c    = (r <= rI) ? lufsToColour (val) : dbToColour (val);
+        const float val = rdValue[r];
+        const juce::Colour c = (r <= rI) ? lufsToColour (val) : dbToColour (val);
+        ctx.addModuleActorCapped (makePerimeterSweepActor (hit.rect, hit.pos, c), 6);
     }
-
-    ctx.addModuleActor (makeBrickShardsActor (hit.pos, c, 8));
-    ctx.bubble (hit.pos.translated (0.0f, -24.0f),
-                juce::String (val, 1) + " " + unit, ToyRole::Burst);
 }
 
 // ==========================================================
@@ -433,9 +653,9 @@ void LoudnessModule::computeBarGeometry(juce::Rectangle<int> content,
 {
     auto area = barLayoutArea(content);
 
-    scale = area.removeFromRight(22);   // 刻度列：4px 刻度线 + 文本，右边不再留大片空白
-    area.removeFromRight(3);
     area.removeFromBottom(labelH + readoutH);
+    scale = area.removeFromRight(22);   // 刻度列：与 LED 柱体等高对齐，右边不再留大片空白
+    area.removeFromRight(3);
 
     const int barCount = juce::jmax (1, (int) slots.size());
     const int gap = 4;
@@ -484,9 +704,53 @@ void LoudnessModule::layoutContent(juce::Rectangle<int> contentBounds)
 // ==========================================================
 void LoudnessModule::paintContent(juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
-    // 内容区底色（深色主题下也保持浅色；绿幕下纯绿）
-    g.setColour(PinkXP::isChromaKeySkin() ? PinkXP::chromaKeyGreen() : PinkXP::btnFace);
-    g.fillRect(contentBounds);
+    // 内容区底色：绿幕纯绿 / 透明模式跳过不透明填充（保持 alpha=0）/ 正常模式按风格填充
+    const auto& tokens = PinkXP::getSkinTokens();
+    if (PinkXP::isGreenScreenBackdrop())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (contentBounds);
+    }
+    else if (! PinkXP::isTransparentBackdrop())
+    {
+        if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.05f : 0.11f),
+                                       0.0f, (float) contentBounds.getY(),
+                                       PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.06f : 0.04f),
+                                       0.0f, (float) contentBounds.getBottom(), false);
+            grad.addColour (0.38, PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.03f : 0.06f));
+            grad.addColour (0.52, PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.03f : 0.02f));
+            g.setGradientFill (grad);
+            g.fillRect (contentBounds);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.06f : 0.15f),
+                                       0.0f, (float) contentBounds.getY(),
+                                       PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.05f : 0.03f),
+                                       0.0f, (float) contentBounds.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRect (contentBounds);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube
+                 || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            const float darken = (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+                                     ? (isDark ? 0.16f : 0.07f)
+                                     : (isDark ? 0.10f : 0.03f);
+            g.setColour (PinkXP::face.interpolatedWith (juce::Colours::black, darken));
+            g.fillRect (contentBounds);
+        }
+        else
+        {
+            g.setColour (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel ? PinkXP::btnFace : PinkXP::face);
+            g.fillRect (contentBounds);
+        }
+    }
 
     if (style == Style::ledBars) paintLedBars (g, contentBounds);
     else                         paintReadouts (g, contentBounds);
@@ -498,13 +762,28 @@ void LoudnessModule::paintReadouts(juce::Graphics& g, juce::Rectangle<int>)
     static const char* units [numReadRows] = { "LUFS", "LUFS", "LUFS", "dBTP", "dBFS" };
 
     int slot = 0;
+    const float tgt = targetLufsDb();
     for (const auto& rr : readoutRects)
     {
         const int r = rr.first;
         const float v = rdValue[r];
-        const float tNorm = juce::jlimit (0.0f, 1.0f, juce::jmap (v, -40.0f, 0.0f, 0.0f, 1.0f));
+        const float tNorm = juce::jlimit (0.0f, 1.0f, juce::jmap (v, floorDb, 0.0f, 0.0f, 1.0f));
         y2k::meter::drawReadout (g, rr.second, titles[r], v, units[r], tNorm,
                                  rdFlash[r], pulsePhase + 2.0f * (float) slot);
+
+        // 在 LUFS 读数卡片底部进度条位置绘制目标响度参考刻度
+        if (r <= rI && tgt >= floorDb && tgt <= 0.0f && ! PinkXP::isChromaKeySkin())
+        {
+            const float tgtNorm = juce::jlimit (0.0f, 1.0f, juce::jmap (tgt, floorDb, 0.0f, 0.0f, 1.0f));
+            const int x = rr.second.getX() + 6 + juce::roundToInt (tgtNorm * (float) juce::jmax (1, rr.second.getWidth() - 12));
+            g.setColour (PinkXP::sel);
+            g.fillRect (x - 1, rr.second.getBottom() - 12, 2, 9);
+            if (PinkXP::getSkinTokens().frameStyle == PinkXP::FrameStyle::machinedChrome)
+            {
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f));
+                g.fillRect (x - 1, rr.second.getBottom() - 12, 1, 9);
+            }
+        }
         ++slot;
     }
 }
@@ -512,7 +791,8 @@ void LoudnessModule::paintReadouts(juce::Graphics& g, juce::Rectangle<int>)
 void LoudnessModule::paintLedBars(juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
     // 绿幕：静态层（凹槽 + 暗格 + 刻度）整层不画
-    if (! PinkXP::isChromaKeySkin())
+    const bool chromaKey = PinkXP::isChromaKeySkin();
+    if (! chromaKey)
     {
         rebuildStaticLayerIfNeeded(contentBounds);
         drawStaticLayer(g, contentBounds);
@@ -521,7 +801,8 @@ void LoudnessModule::paintLedBars(juce::Graphics& g, juce::Rectangle<int> conten
     for (size_t i = 0; i < slots.size() && i < barAreas.size(); ++i)
         drawMeterBar(g, barAreas[i], *slots[i].bar, slots[i].isLufs);
 
-    drawScale(g, areaScale);
+    if (! chromaKey && ! staticLayer.isValid())
+        drawScale(g, areaScale);
 
     // 底部标签 + 数字读数（与 computeBarGeometry 共用同一份布局区）
     const int bottom = barLayoutArea(contentBounds).getBottom();
@@ -589,7 +870,7 @@ void LoudnessModule::drawMeterBarStaticLayer(juce::Graphics& g,
                                              juce::Rectangle<int> barArea,
                                              bool isLUFS) const
 {
-    PinkXP::drawSunken(g, barArea, PinkXP::content.darker(0.05f));
+    PinkXP::Craft::drawPanelWell (g, barArea, PinkXP::content.darker (0.05f), PinkXP::WellKind::trough);
 
     const int padding = 3;
     auto inner = barArea.reduced(padding);
@@ -603,18 +884,28 @@ void LoudnessModule::drawMeterBarStaticLayer(juce::Graphics& g,
     const int colW = juce::jmax(1, inner.getWidth() - 4);
     const int offsetX = inner.getX() + (inner.getWidth() - colW) / 2;
 
+    // 凹槽内标尺网格线（点阵 / 细线 / 虚线 / 磷光准星，绿幕自动跳过）
+    const int refMarks[] = { -12, -24, -36, -48, -60 };
+    for (int db : refMarks)
+    {
+        if ((float) db <= floorDb + 1.0f) continue;
+        const float norm = valueToNorm ((float) db);
+        const float y    = std::round ((float) offsetY + (1.0f - norm) * (float) totalH);
+        PinkXP::Craft::drawGridLine (g, (float) inner.getX(), y, (float) inner.getRight(), y,
+                                     (db == -12 || db == -24), PinkXP::ink);
+    }
+
     for (int row = 0; row < numRows; ++row)
     {
         const int y = offsetY + row * step;
         const float rowNorm = 1.0f - (float)row / (float)juce::jmax(1, numRows - 1);
-        const float rowDb   = juce::jmap(rowNorm, -60.0f, 0.0f);
+        const float rowDb   = juce::jmap(rowNorm, floorDb, 0.0f);
         const auto base = isLUFS ? lufsToColour(rowDb) : dbToColour(rowDb);
-        g.setColour(base.withAlpha(0.12f));
-        g.fillRect(offsetX, y, colW, cellSize);
+        PinkXP::Craft::drawMeterCell (g, juce::Rectangle<int> (offsetX, y, colW, cellSize), base, false);
     }
 }
 
-int LoudnessModule::firstVisibleRowForValue(float value, int numRows) noexcept
+int LoudnessModule::firstVisibleRowForValue(float value, int numRows) const noexcept
 {
     const float norm = valueToNorm(value);
     const int litRows = (int) std::round(norm * (float) numRows);
@@ -628,12 +919,19 @@ void LoudnessModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBoun
     {
         staticLayer = juce::Image();
         staticLayerContentBounds = {};
+        staticLayerAppearanceGen = 0;
+        staticLayerFontGen       = 0;
         return;
     }
+
+    const auto appGen  = PinkXP::getAppearanceGeneration();
+    const auto fontGen = PinkXP::getFontGeneration();
 
     if (staticLayer.isValid()
         && staticLayerContentBounds == contentBounds
         && staticLayerBarCount == (int) slots.size()
+        && staticLayerAppearanceGen == appGen
+        && staticLayerFontGen == fontGen
         && staticLayer.getWidth() == contentBounds.getWidth()
         && staticLayer.getHeight() == contentBounds.getHeight())
     {
@@ -645,11 +943,62 @@ void LoudnessModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBoun
                               contentBounds.getHeight(),
                               true);
     staticLayerContentBounds = contentBounds;
-    staticLayerBarCount = (int) slots.size();
+    staticLayerBarCount      = (int) slots.size();
+    staticLayerAppearanceGen = appGen;
+    staticLayerFontGen       = fontGen;
+
+    if (PinkXP::isTransparentBackdrop())
+    {
+        staticLayer.clear (staticLayer.getBounds(), juce::Colours::transparentBlack);
+        return;
+    }
 
     juce::Graphics sg(staticLayer);
-    sg.setColour(PinkXP::btnFace);
-    sg.fillRect(staticLayer.getBounds());
+    const auto& tokens = PinkXP::getSkinTokens();
+    if (PinkXP::isGreenScreenBackdrop())
+    {
+        sg.setColour (PinkXP::chromaKeyGreen());
+        sg.fillRect (staticLayer.getBounds());
+    }
+    else if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+    {
+        const auto b = staticLayer.getBounds();
+        const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+        juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.05f : 0.11f),
+                                   0.0f, (float) b.getY(),
+                                   PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.06f : 0.04f),
+                                   0.0f, (float) b.getBottom(), false);
+        grad.addColour (0.38, PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.03f : 0.06f));
+        grad.addColour (0.52, PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.03f : 0.02f));
+        sg.setGradientFill (grad);
+        sg.fillRect (b);
+    }
+    else if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+    {
+        const auto b = staticLayer.getBounds();
+        const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+        juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.06f : 0.15f),
+                                   0.0f, (float) b.getY(),
+                                   PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.05f : 0.03f),
+                                   0.0f, (float) b.getBottom(), false);
+        sg.setGradientFill (grad);
+        sg.fillRect (b);
+    }
+    else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube
+             || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+    {
+        const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+        const float darken = (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+                                 ? (isDark ? 0.16f : 0.07f)
+                                 : (isDark ? 0.10f : 0.03f);
+        sg.setColour (PinkXP::face.interpolatedWith (juce::Colours::black, darken));
+        sg.fillRect (staticLayer.getBounds());
+    }
+    else
+    {
+        sg.setColour (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel ? PinkXP::btnFace : PinkXP::face);
+        sg.fillRect (staticLayer.getBounds());
+    }
 
     std::vector<juce::Rectangle<int>> bars;
     juce::Rectangle<int> scale;
@@ -675,4 +1024,12 @@ void LoudnessModule::invalidateStaticLayer()
     staticLayer = juce::Image();
     staticLayerContentBounds = {};
     staticLayerBarCount = -1;
+    staticLayerAppearanceGen = 0;
+    staticLayerFontGen       = 0;
+    for (int i = 0; i < 7; ++i)
+    {
+        readoutCache_[i] = {};
+        readoutCacheText_[i].clear();
+        readoutCacheTimeMs_[i] = 0.0;
+    }
 }

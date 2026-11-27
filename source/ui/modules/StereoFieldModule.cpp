@@ -47,8 +47,9 @@ StereoFieldModule::StereoFieldModule (AnalyserHub& h)
 
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
-        // 点颜色跟随主题 → 切换主题时清空残影并重绘
+        // 点颜色与视觉风格跟随主题/皮肤 → 清空残影、重建 GL 快照并重绘（静音态也立即刷新）
         invalidateTrail();
+        buildGlSnapshot();
         repaint();
     });
 }
@@ -71,36 +72,63 @@ StereoFieldModule::~StereoFieldModule()
 juce::ValueTree StereoFieldModule::saveModuleSpecificState() const
 {
     juce::ValueTree s ("state");
-    s.setProperty ("dotSize",    (double) dotSize, nullptr);
-    s.setProperty ("fadeSpeed",  (double) fadeSpeed, nullptr);
-    s.setProperty ("bandColour", bandColour, nullptr);
-    s.setProperty ("crossLow",   (double) crossLowHz, nullptr);
-    s.setProperty ("crossHigh",  (double) crossHighHz, nullptr);
+    s.setProperty ("dotSize",      (double) dotSize, nullptr);
+    s.setProperty ("fadeSpeed",    (double) fadeSpeed, nullptr);
+    s.setProperty ("autoGain",     autoGain, nullptr);
+    s.setProperty ("manualGainDb", (double) manualGainDb, nullptr);
+    s.setProperty ("dotShape",     dotShape, nullptr);
+    s.setProperty ("showRings",    showRings, nullptr);
+    s.setProperty ("showLabels",   showLabels, nullptr);
+    s.setProperty ("bandColour",   bandColour, nullptr);
+    s.setProperty ("crossLow",     (double) crossLowHz, nullptr);
+    s.setProperty ("crossHigh",    (double) crossHighHz, nullptr);
     return s;
 }
 
 void StereoFieldModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
     // 缺键 = 保持当前值（构造默认 = 旧外观）
-    if (state.hasProperty ("dotSize"))    dotSize    = juce::jlimit (1.0f, 6.0f, (float) (double) state.getProperty ("dotSize"));
-    if (state.hasProperty ("fadeSpeed"))  fadeSpeed  = juce::jlimit (0.2f, 4.0f, (float) (double) state.getProperty ("fadeSpeed"));
-    if (state.hasProperty ("bandColour")) bandColour = (bool) state.getProperty ("bandColour");
-    if (state.hasProperty ("crossLow"))   crossLowHz  = juce::jlimit (80.0f, 1000.0f, (float) (double) state.getProperty ("crossLow"));
-    if (state.hasProperty ("crossHigh"))  crossHighHz = juce::jlimit (500.0f, 10000.0f, (float) (double) state.getProperty ("crossHigh"));
+    if (state.hasProperty ("dotSize"))      dotSize      = juce::jlimit (1.0f, 6.0f, (float) (double) state.getProperty ("dotSize"));
+    if (state.hasProperty ("fadeSpeed"))    fadeSpeed    = juce::jlimit (0.2f, 4.0f, (float) (double) state.getProperty ("fadeSpeed"));
+    if (state.hasProperty ("autoGain"))     autoGain     = (bool) state.getProperty ("autoGain");
+    if (state.hasProperty ("manualGainDb")) manualGainDb = juce::jlimit (-12.0f, 18.0f, (float) (double) state.getProperty ("manualGainDb"));
+    if (state.hasProperty ("dotShape"))     dotShape     = juce::jlimit (0, 1, (int) state.getProperty ("dotShape"));
+    if (state.hasProperty ("showRings"))    showRings    = (bool) state.getProperty ("showRings");
+    if (state.hasProperty ("showLabels"))   showLabels   = (bool) state.getProperty ("showLabels");
+    if (state.hasProperty ("bandColour"))   bandColour   = (bool) state.getProperty ("bandColour");
+    if (state.hasProperty ("crossLow"))     crossLowHz   = juce::jlimit (80.0f, 1000.0f, (float) (double) state.getProperty ("crossLow"));
+    if (state.hasProperty ("crossHigh"))    crossHighHz  = juce::jlimit (500.0f, 10000.0f, (float) (double) state.getProperty ("crossHigh"));
+
+    if (! autoGain)
+        autoGainFactor = std::pow (10.0f, manualGainDb * 0.05f);
+    periodicMaxAccum         = 0.0f;
+    lastPeriodicGainUpdateMs = autoGain ? juce::Time::getMillisecondCounterHiRes() : 0.0;
     splitter.setCrossover (crossLowHz, crossHighHz);
 
     invalidateTrail();
+    buildGlSnapshot();
     refreshControlPanel();
     repaint();
 }
 
 void StereoFieldModule::buildParamDefs (std::vector<ParamDef>& out) const
 {
+    out.push_back (ParamDef::choice ("dotShape", "Dot style",
+        { "Square", "Glow" },
+        "Square: crisp Y2K pixel dots. Glow: soft luminous halo around each radar point.")
+        .in ("Dots"));
     out.push_back (ParamDef::slider ("dotSize", "Dot size", 1.0, 6.0, 1.0, " px",
         "Side length of each dot.").in ("Dots"));
     out.push_back (ParamDef::slider ("fadeSpeed", "Fade speed", 0.2, 4.0, 0.1, "x",
         "How fast old dots disappear. 1.0 is the classic trail; higher is shorter, lower leaves long tails.")
         .in ("Dots"));
+    out.push_back (ParamDef::toggle ("autoGain", "Auto zoom",
+        "Scales the picture so the loudest point stays inside the screen.")
+        .in ("Dots"));
+    out.push_back (ParamDef::slider ("manualGainDb", "Manual zoom", -12.0, 18.0, 1.0, " dB",
+        "Fixed radar radius zoom when Auto zoom is OFF.")
+        .in ("Dots").when ([this] { return ! autoGain; }));
+
     out.push_back (ParamDef::toggle ("bandColour", "Colour by frequency",
         "Audio is split into three bands and each band's dots are drawn in its own colour: "
         "red for lows, purple-blue for mids, cyan for highs.")
@@ -111,22 +139,59 @@ void StereoFieldModule::buildParamDefs (std::vector<ParamDef>& out) const
     out.push_back (ParamDef::slider ("crossHigh", "Mid / high split", 500.0, 10000.0, 100.0, " Hz",
         "High band: above this frequency (cyan dot cloud).", 2000.0)
         .in ("Colour").when ([this] { return bandColour; }));
+
+    out.push_back (ParamDef::toggle ("showRings", "Level rings",
+        "Show concentric dB rings and 45-degree radial guide lines.")
+        .in ("Radar"));
+    out.push_back (ParamDef::toggle ("showLabels", "Labels",
+        "Show L/C/R pan labels and dB ring readouts.")
+        .in ("Radar"));
 }
 
 double StereoFieldModule::getParamValue (const juce::String& id) const
 {
-    if (id == "dotSize")    return (double) dotSize;
-    if (id == "fadeSpeed")  return (double) fadeSpeed;
-    if (id == "bandColour") return bandColour ? 1.0 : 0.0;
-    if (id == "crossLow")   return (double) crossLowHz;
-    if (id == "crossHigh")  return (double) crossHighHz;
+    if (id == "dotShape")     return (double) dotShape;
+    if (id == "dotSize")      return (double) dotSize;
+    if (id == "fadeSpeed")    return (double) fadeSpeed;
+    if (id == "autoGain")     return autoGain ? 1.0 : 0.0;
+    if (id == "manualGainDb") return (double) manualGainDb;
+    if (id == "bandColour")   return bandColour ? 1.0 : 0.0;
+    if (id == "crossLow")     return (double) crossLowHz;
+    if (id == "crossHigh")    return (double) crossHighHz;
+    if (id == "showRings")    return showRings ? 1.0 : 0.0;
+    if (id == "showLabels")   return showLabels ? 1.0 : 0.0;
     return 0.0;
 }
 
 void StereoFieldModule::setParamValue (const juce::String& id, double v)
 {
-    if      (id == "dotSize")    dotSize    = juce::jlimit (1.0f, 6.0f, (float) v);
+    if      (id == "dotShape")   { dotShape = juce::jlimit (0, 1, juce::roundToInt (v)); invalidateTrail(); buildGlSnapshot(); }
+    else if (id == "dotSize")    dotSize    = juce::jlimit (1.0f, 6.0f, (float) v);
     else if (id == "fadeSpeed")  fadeSpeed  = juce::jlimit (0.2f, 4.0f, (float) v);
+    else if (id == "autoGain")
+    {
+        const bool next = v >= 0.5;
+        if (autoGain != next)
+        {
+            autoGain = next;
+            if (! autoGain)
+                autoGainFactor = std::pow (10.0f, manualGainDb * 0.05f);
+            periodicMaxAccum         = 0.0f;
+            lastPeriodicGainUpdateMs = 0.0;
+            invalidateTrail();
+            buildGlSnapshot();
+        }
+    }
+    else if (id == "manualGainDb")
+    {
+        manualGainDb = juce::jlimit (-12.0f, 18.0f, (float) v);
+        if (! autoGain)
+        {
+            autoGainFactor = std::pow (10.0f, manualGainDb * 0.05f);
+            invalidateTrail();
+            buildGlSnapshot();
+        }
+    }
     else if (id == "bandColour")
     {
         const bool turningOn = (v >= 0.5) && ! bandColour;
@@ -134,7 +199,6 @@ void StereoFieldModule::setParamValue (const juce::String& id, double v)
         trailNeedsClear = true;
         invalidateTrail();
 
-        // 每次开启染色都把两个分频点复位到默认（200 / 2000，与 MiniMeters 一致）
         if (turningOn)
         {
             crossLowHz  = y2k::bands::BandSplitter::kDefaultLowCross;
@@ -144,6 +208,8 @@ void StereoFieldModule::setParamValue (const juce::String& id, double v)
     }
     else if (id == "crossLow")   { crossLowHz  = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); trailNeedsClear = true; invalidateTrail(); }
     else if (id == "crossHigh")  { crossHighHz = (float) v; splitter.setCrossover (crossLowHz, crossHighHz); trailNeedsClear = true; invalidateTrail(); }
+    else if (id == "showRings")  { showRings  = (v >= 0.5); buildGlSnapshot(); }
+    else if (id == "showLabels") { showLabels = (v >= 0.5); }
     else return;
     repaint();
 }
@@ -246,19 +312,21 @@ void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     }
 
     // 自动缩放：累积本帧峰值，每 1 s 结算一次增益（与 XY / Lissajous 同策略）
-    updateAutoGain (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(),
-                    juce::jmin (snapshotL.size(), snapshotR.size()));
+    if (autoGain)
+        updateAutoGain (snapshotL.getRawDataPointer(), snapshotR.getRawDataPointer(),
+                        juce::jmin (snapshotL.size(), snapshotR.size()));
 
     // v2.9.5：GPU trail 累积 —— 衰减在 GPU 每帧执行（decay 按累计 dt 换算，
     //   残影时长与帧率无关）；点云每帧画进 trail FBO（GPU 光栅化，不再需要
     //   旧版"隔帧 + CPU 全图 multiplyAlpha"）。
-    trailDtAccumSec = juce::jmin (0.5f, trailDtAccumSec + frame.dtSec);
+    //   CPU 回退通道保持独立累计 dt，避免 docked + !glDirectActive 时
+    //   buildGlSnapshot() 清零 trailDtAccumSec 导致 CPU 残影停止衰减。
+    trailDtAccumSec    = juce::jmin (0.5f, trailDtAccumSec + frame.dtSec);
+    cpuTrailDtAccumSec = juce::jmin (0.5f, cpuTrailDtAccumSec + frame.dtSec);
 
-    // 浮动窗口没有 Editor 的 GL 渲染通道（wantsGlSnapshot=false），绘制回退
-    //   legacy CPU 路径 —— legacy 的 trail 只在 trailNeedsUpdate 置位时重建，
-    //   而 GL 接管期间该标志从未置位，脱离后 trailImage 停在旧图（画面定格）。
-    //   浮动期间每帧强制重建 CPU trail，恢复动态。
-    if (isFloating())
+    // 仅在 GL 未接管（首帧 / 回退态 / macOS 透明模式）时触发 CPU 残影更新；
+    //   停靠态与独立 GL 浮窗均走 GPU 3 层 trailFbo，零 CPU 光栅化开销。
+    if (! glDirectActive.load (std::memory_order_acquire))
         trailNeedsUpdate = true;
 
     buildGlSnapshot();
@@ -276,7 +344,7 @@ void StereoFieldModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 // ----------------------------------------------------------
 void StereoFieldModule::updateAutoGain (const float* left, const float* right, int numSamples)
 {
-    if (left == nullptr || right == nullptr || numSamples <= 0)
+    if (! autoGain || left == nullptr || right == nullptr || numSamples <= 0)
         return;
 
     float frameMax = 0.0f;
@@ -323,47 +391,51 @@ juce::Rectangle<int> StereoFieldModule::getGlCanvasBounds (juce::Rectangle<int> 
 
 void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas)
 {
-    // 接管时只保留文字：能量 dB 标签 + L/C/R 声像方位标签
     auto plot = canvas.reduced (6);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
 
-    const auto geo = computeRadarGeometry (plot);
-    const int cx = geo.cx, baseY = geo.baseY, R = geo.radius;
-    const float labelFontSize = geo.labelFontSize;
-
-    g.setColour (PinkXP::ink.withAlpha (0.55f));
-    g.setFont (PinkXP::getAxisFont (juce::jmax (6.0f, labelFontSize - 1.5f), juce::Font::plain));
-    const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
-    for (int ri = 0; ri < 4; ++ri)
+    // 绿幕：隐藏所有静态刻度/方位/增益标签，只保留活体散点（悬停标尺仍可用）
+    if (! PinkXP::isChromaKeySkin() && showLabels)
     {
-        // 环的几何固定；标签按当前自动增益换算成真实电平
-        const float rr = (float) R * frac[ri];
-        if (rr < 8.0f || rr > (float) R) continue;
-        g.drawText (y2k::tr (ringDbLabel (frac[ri], autoGainFactor)), cx + 4, baseY - (int) rr - 6, 34, 12,
-                    juce::Justification::centredLeft, false);
-    }
+        const auto geo = computeRadarGeometry (plot);
+        const int cx = geo.cx, baseY = geo.baseY, R = geo.radius;
+        const float labelFontSize = geo.labelFontSize;
 
-    const int actualMargin = plot.getWidth() / 2 - R;
-    const int labelH = juce::jmax (10, (int) std::ceil (labelFontSize) + 4);
-    const int y = baseY - labelH;
-    const auto lcrColour = PinkXP::ink.withAlpha (0.7f);
-    const float lrFontSize = juce::jmin (labelFontSize, 11.0f);
-    PinkXP::drawCachedText (g, "C", juce::Rectangle<int> (cx - 8, y, 16, labelH), juce::Justification::centred,
-                            labelFontSize, juce::Font::bold, lcrColour, true);
-    g.setFont (PinkXP::getAxisFont (lrFontSize, juce::Font::bold));
-    PinkXP::drawCachedText (g, "L", juce::Rectangle<int> (plot.getX(), y, actualMargin, labelH), juce::Justification::centredRight,
-                            lrFontSize, juce::Font::bold, lcrColour, true);
-    PinkXP::drawCachedText (g, "R", juce::Rectangle<int> (plot.getRight() - actualMargin, y, actualMargin, labelH), juce::Justification::centredLeft,
-                            lrFontSize, juce::Font::bold, lcrColour, true);
+        if (showRings)
+        {
+            g.setColour (PinkXP::ink.withAlpha (0.55f));
+            g.setFont (PinkXP::getAxisFont (juce::jmax (6.0f, labelFontSize - 1.5f), juce::Font::plain));
+            const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
+            for (int ri = 0; ri < 4; ++ri)
+            {
+                const float rr = (float) R * frac[ri];
+                if (rr < 8.0f || rr > (float) R) continue;
+                g.drawText (y2k::tr (ringDbLabel (frac[ri], autoGainFactor)), cx + 4, baseY - (int) rr - 6, 34, 12,
+                            juce::Justification::centredLeft, false);
+            }
+        }
 
-    // 当前自动增益（1.0x 是默认比例尺，不显示，避免多余文字）
-    if (std::abs (autoGainFactor - 1.0f) > 0.05f)
-    {
-        g.setColour (PinkXP::ink.withAlpha (0.6f));
-        g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
-        g.drawText (y2k::tr (juce::String (autoGainFactor, 1) + "x"),
-                    canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
-                    juce::Justification::centredRight, false);
+        const int actualMargin = plot.getWidth() / 2 - R;
+        const int labelH = juce::jmax (10, (int) std::ceil (labelFontSize) + 4);
+        const int y = baseY - labelH;
+        const auto lcrColour = PinkXP::ink.withAlpha (0.7f);
+        const float lrFontSize = juce::jmin (labelFontSize, 11.0f);
+        PinkXP::drawCachedText (g, "C", juce::Rectangle<int> (cx - 8, y, 16, labelH), juce::Justification::centred,
+                                labelFontSize, juce::Font::bold, lcrColour, true);
+        g.setFont (PinkXP::getAxisFont (lrFontSize, juce::Font::bold));
+        PinkXP::drawCachedText (g, "L", juce::Rectangle<int> (plot.getX(), y, actualMargin, labelH), juce::Justification::centredRight,
+                                lrFontSize, juce::Font::bold, lcrColour, true);
+        PinkXP::drawCachedText (g, "R", juce::Rectangle<int> (plot.getRight() - actualMargin, y, actualMargin, labelH), juce::Justification::centredLeft,
+                                lrFontSize, juce::Font::bold, lcrColour, true);
+
+        if (std::abs (autoGainFactor - 1.0f) > 0.05f)
+        {
+            g.setColour (PinkXP::ink.withAlpha (0.6f));
+            g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
+            g.drawText (y2k::tr (juce::String (autoGainFactor, 1) + "x"),
+                        canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
+                        juce::Justification::centredRight, false);
+        }
     }
 
     // 悬停十字辅助线（反馈 #10）
@@ -373,10 +445,32 @@ void StereoFieldModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> 
 
 void StereoFieldModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
-    g.setColour (PinkXP::btnFace);
-    g.fillRect (contentBounds);
-
+    const auto& tokens = PinkXP::getSkinTokens();
     auto canvas = contentBounds.reduced (2);
+
+    if (PinkXP::isTransparentBackdrop())
+    {
+        if (PinkXP::isChromaRevealed (*this))
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            g.excludeClipRegion (canvas);
+            g.setColour (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel
+                             ? PinkXP::btnFace
+                             : PinkXP::face);
+            g.fillRect (contentBounds);
+        }
+    }
+    else
+    {
+        const juce::Colour backdrop = PinkXP::isGreenScreenBackdrop()
+                                          ? PinkXP::chromaKeyGreen()
+                                          : (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel
+                                                 ? PinkXP::btnFace
+                                                 : PinkXP::face);
+        g.setColour (backdrop);
+        g.fillRect (contentBounds);
+    }
+
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
@@ -396,6 +490,8 @@ void StereoFieldModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<i
                      canvas.getX(), canvas.getY(), canvas.getWidth(), canvas.getHeight(),
                      0, 0, img.getWidth(), img.getHeight());
     }
+
+    PinkXP::Craft::drawCanvasFinishOverlay (g, canvas);
 
     // 悬停十字辅助线（反馈 #10）
     if (hoverActive)
@@ -481,72 +577,188 @@ void StereoFieldModule::buildGlSnapshot()
     if (canvas.getWidth() <= 8 || canvas.getHeight() <= 8)
         return;
 
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool chromaKey = tokens.isChromaKey;
+
     auto snap = beginGlSnapshot();
-    snap->canvasLocal = canvas;
+    snap->canvasLocal  = canvas;
+    snap->fxRect       = canvas;
+    snap->snapToPixels = false;
 
     // ---- trail 通道参数 ----
     //   三频段染色时每路一条独立轨迹（颜色不互相污染），否则只用一层
     const int layerCount = bandColour ? kTrailLayers : 1;
-    snap->trailFbo = true;
-    snap->trailLayers = layerCount;
-    snap->trailClear = trailNeedsClear;
-    trailNeedsClear = false;
-    snap->trailDecay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f * fadeSpeed);
-    trailDtAccumSec = 0.0f;
-    snap->texW = canvas.getWidth();
-    snap->texH = canvas.getHeight();
+    snap->trailFbo      = true;
+    snap->trailLayers   = layerCount;
+    snap->trailClear    = trailNeedsClear;
+    trailNeedsClear     = false;
+    snap->trailDecay    = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f * fadeSpeed);
+    trailDtAccumSec     = 0.0f;
+    snap->texW          = canvas.getWidth();
+    snap->texH          = canvas.getHeight();
     snap->texTargetRect = canvas;
+    snap->texLinear     = true;
 
     constexpr float kPi = juce::MathConstants<float>::pi;
     auto plot = canvas.reduced (6);
 
-    // ---- 背景段（segments[0]）：凹陷（框架 helper）+ 雷达几何 ----
+    // ---- 背景段（segments[0]）：凹槽 + 平滑反走样雷达几何（绿幕只铺纯绿；透明模式 0 顶点保持 alpha=0）----
+    //   注意：透明模式静音时即使本段 count==0 也保留空段占位，确保 snap->segments 非空，
+    //   从而 Editor 仍执行 trailFbo 的衰减/清零/合成 pass，让残影平滑淡出到 (0,0,0,0)。
     {
-        appendSunkenFrame (snap->vertices, canvas);
+        appendWellFrame (snap->vertices, canvas, PinkXP::content);
 
-        if (plot.getWidth() > 8 && plot.getHeight() > 8)
+        if (! chromaKey && plot.getWidth() > 8 && plot.getHeight() > 8)
         {
             const auto geo = computeRadarGeometry (plot);
             const float cx = (float) geo.cx, baseY = (float) geo.baseY, R = (float) geo.radius;
             const float r45 = R * 0.70710678f;
 
-            // 半圆外轮廓弧（64 段，半宽 0.6）
-            const auto arcC = PinkXP::pink300.withAlpha (0.65f);
+            const bool isChrome = (tokens.dialFinish == PinkXP::DialFinish::brushedMetal);
+            const bool isModern = (tokens.dialFinish == PinkXP::DialFinish::studioSmooth);
+            const bool isGlass  = (tokens.dialFinish == PinkXP::DialFinish::glassDome);
+            const bool isNeon   = (tokens.dialFinish == PinkXP::DialFinish::neonRings);
+            const bool isCrt    = (tokens.dialFinish == PinkXP::DialFinish::crtVector);
+            const bool darkBg   = PinkXP::content.getPerceivedBrightness() < 0.5f;
+
+            // 半圆外轮廓弧 + 直径线（全风格平滑反走样圆弧）
+            const auto arcC = isChrome ? PinkXP::pink300.interpolatedWith (PinkXP::hl, 0.42f).withAlpha (darkBg ? 0.74f : 0.66f)
+                            : isGlass  ? PinkXP::pink300.interpolatedWith (juce::Colours::white, 0.25f).withAlpha (darkBg ? 0.56f : 0.62f)
+                            : isNeon   ? PinkXP::pink300.withAlpha (0.88f)
+                            : isCrt    ? PinkXP::sel.interpolatedWith (PinkXP::pink300, 0.45f).withAlpha (0.86f)
+                            : isModern ? PinkXP::pink300.withAlpha (0.48f)
+                                       : PinkXP::pink300.withAlpha (0.65f);
+            const auto chromeOuterCut  = PinkXP::dark.withAlpha (darkBg ? 0.38f : 0.20f);
+            const auto outerSpecRim    = juce::Colours::white.withAlpha (darkBg ? 0.18f : 0.30f);
+            const auto neonHotCore     = PinkXP::pink200.interpolatedWith (juce::Colours::white, 0.55f).withAlpha (0.88f);
+            const float arcHalf = isModern ? 0.50f : ((isChrome || isGlass) ? 0.58f : 0.60f);
             constexpr int arcSegs = 64;
             for (int s = 0; s < arcSegs; ++s)
             {
                 const float th0 = -kPi * 0.5f + kPi * (float) s / (float) arcSegs;
                 const float th1 = -kPi * 0.5f + kPi * (float) (s + 1) / (float) arcSegs;
-                // addCentredArc：0=顶部、顺时针；屏幕坐标 x = cx + R·sin(th), y = baseY - R·cos(th)
-                const float x0 = cx + R * std::sin (th0), y0 = baseY - R * std::cos (th0);
-                const float x1 = cx + R * std::sin (th1), y1 = baseY - R * std::cos (th1);
-                appendLineSegment (snap->vertices, x0, y0, x1, y1, 0.6f, arcC);
+                const float sn0 = std::sin (th0), cs0 = std::cos (th0);
+                const float sn1 = std::sin (th1), cs1 = std::cos (th1);
+                const float x0 = cx + R * sn0, y0 = baseY - R * cs0;
+                const float x1 = cx + R * sn1, y1 = baseY - R * cs1;
+                if (isChrome)
+                    appendLineSegment (snap->vertices, cx + (R + 1.0f) * sn0, baseY - (R + 1.0f) * cs0,
+                                       cx + (R + 1.0f) * sn1, baseY - (R + 1.0f) * cs1, 0.52f, chromeOuterCut);
+                if (isNeon || (isCrt && tokens.glowIntensity > 0.0f))
+                    appendLineSegment (snap->vertices, x0, y0, x1, y1, isNeon ? 2.0f : 1.55f,
+                                       PinkXP::sel.withAlpha (isNeon ? 0.28f : 0.22f * tokens.glowIntensity));
+                appendLineSegment (snap->vertices, x0, y0, x1, y1, arcHalf, arcC);
+                if (isNeon)
+                    appendLineSegment (snap->vertices, x0, y0, x1, y1, 0.36f, neonHotCore);
+                if (isChrome || isGlass)
+                {
+                    const float rimOff = isGlass ? 1.4f : 1.7f;
+                    appendLineSegment (snap->vertices, cx + (R + rimOff) * sn0, baseY - (R + rimOff) * cs0,
+                                       cx + (R + rimOff) * sn1, baseY - (R + rimOff) * cs1, 0.38f, outerSpecRim);
+                }
             }
 
-            // 直径线
-            appendLineSegment (snap->vertices, cx - R, baseY, cx + R, baseY, 0.5f,
-                               PinkXP::pink300.withAlpha (0.5f));
-
-            // 45° 参考线 ×2 + 顶部中线
-            const auto refC = PinkXP::pink200.withAlpha (0.45f);
-            appendLineSegment (snap->vertices, cx, baseY, cx - r45, baseY - r45, 0.5f, refC);
-            appendLineSegment (snap->vertices, cx, baseY, cx + r45, baseY - r45, 0.5f, refC);
-            appendLineSegment (snap->vertices, cx, baseY, cx, baseY - R, 0.5f, refC);
-
-            // 能量环（4 个半圆，半宽 0.5）
-            const auto ringC = PinkXP::pink200.withAlpha (0.30f);
-            const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
-            for (int ri = 0; ri < 4; ++ri)
+            if ((isChrome || isCrt) && R >= 24.0f)
             {
-                const float rr = R * frac[ri];
-                if (rr < 2.0f || rr > R) continue;
-                for (int s = 0; s < arcSegs; ++s)
+                // Millennium Chrome / CRT Terminal：半圆外沿 15° 精密方位刻度（45° 主刻 + 15° 次刻）
+                const auto majC = isCrt
+                                      ? PinkXP::sel.interpolatedWith (juce::Colours::white, 0.25f).withAlpha (0.76f)
+                                      : PinkXP::ink.interpolatedWith (PinkXP::hl, darkBg ? 0.35f : 0.18f).withAlpha (0.58f);
+                const auto minC = isCrt
+                                      ? PinkXP::sel.withAlpha (0.40f)
+                                      : PinkXP::ink.withAlpha (darkBg ? 0.28f : 0.24f);
+                for (int deg = -75; deg <= 75; deg += 15)
                 {
-                    const float th0 = -kPi * 0.5f + kPi * (float) s / (float) arcSegs;
-                    const float th1 = -kPi * 0.5f + kPi * (float) (s + 1) / (float) arcSegs;
-                    const float x0 = cx + rr * std::sin (th0), y0 = baseY - rr * std::cos (th0);
-                    const float x1 = cx + rr * std::sin (th1), y1 = baseY - rr * std::cos (th1);
-                    appendLineSegment (snap->vertices, x0, y0, x1, y1, 0.5f, ringC);
+                    const bool major = (deg % 45 == 0);
+                    const float th   = (float) deg * (kPi / 180.0f);
+                    const float sn   = std::sin (th), cs = std::cos (th);
+                    const float len  = major ? 4.5f : 2.2f;
+                    appendLineSegment (snap->vertices,
+                                       cx + (R - len) * sn, baseY - (R - len) * cs,
+                                       cx + R * sn,         baseY - R * cs,
+                                       major ? 0.52f : 0.38f, major ? majC : minC);
+                }
+            }
+            else if (isNeon && R >= 24.0f)
+            {
+                // Neon Cyber：45° 发光外沿角标刻度
+                const auto nGlow = PinkXP::sel.withAlpha (0.30f);
+                const auto nCore = PinkXP::sel.interpolatedWith (juce::Colours::white, 0.50f).withAlpha (0.90f);
+                for (int deg : { -45, 0, 45 })
+                {
+                    const float th = (float) deg * (kPi / 180.0f);
+                    const float sn = std::sin (th), cs = std::cos (th);
+                    appendLineSegment (snap->vertices, cx + (R - 4.5f) * sn, baseY - (R - 4.5f) * cs,
+                                       cx + (R + 1.2f) * sn, baseY - (R + 1.2f) * cs, 1.25f, nGlow);
+                    appendLineSegment (snap->vertices, cx + (R - 4.5f) * sn, baseY - (R - 4.5f) * cs,
+                                       cx + (R + 1.2f) * sn, baseY - (R + 1.2f) * cs, 0.48f, nCore);
+                }
+            }
+
+            if (isNeon || (isCrt && tokens.glowIntensity > 0.0f))
+                appendLineSegment (snap->vertices, cx - R, baseY, cx + R, baseY, 1.3f,
+                                   PinkXP::sel.withAlpha (isNeon ? 0.22f : 0.18f * tokens.glowIntensity));
+            appendLineSegment (snap->vertices, cx - R, baseY, cx + R, baseY, isModern ? 0.45f : 0.50f,
+                               isChrome ? PinkXP::pink300.interpolatedWith (PinkXP::hl, 0.36f).withAlpha (darkBg ? 0.56f : 0.50f)
+                             : isGlass  ? PinkXP::pink300.interpolatedWith (juce::Colours::white, 0.22f).withAlpha (darkBg ? 0.46f : 0.52f)
+                             : isNeon   ? PinkXP::pink300.withAlpha (0.76f)
+                             : isCrt    ? PinkXP::sel.interpolatedWith (PinkXP::pink300, 0.45f).withAlpha (0.74f)
+                             : isModern ? PinkXP::pink300.withAlpha (0.36f)
+                                        : PinkXP::pink300.withAlpha (0.50f));
+            if (isChrome || isGlass)
+                appendLineSegment (snap->vertices, cx - R, baseY + 1.0f, cx + R, baseY + 1.0f, 0.36f,
+                                   juce::Colours::white.withAlpha (darkBg ? 0.12f : 0.22f));
+
+            // 45° 参考线 ×2 + 顶部中线 + 同心能量环（受 showRings 控制）
+            if (showRings)
+            {
+                if (tokens.dialFinish == PinkXP::DialFinish::pixelHardware)
+                {
+                    // Pixel XP：干净平滑低对比 45° 射线与中线（避免斜线锯齿）
+                    const auto refC = PinkXP::pink200.withAlpha (0.45f);
+                    appendLineSegment (snap->vertices, cx, baseY, cx - r45, baseY - r45, 0.5f, refC);
+                    appendLineSegment (snap->vertices, cx, baseY, cx + r45, baseY - r45, 0.5f, refC);
+                    appendLineSegment (snap->vertices, cx, baseY, cx, baseY - R, 0.5f, refC);
+                }
+                else
+                {
+                    appendGridLine (snap->vertices, cx, baseY, cx - r45, baseY - r45, false, PinkXP::pink300);
+                    appendGridLine (snap->vertices, cx, baseY, cx + r45, baseY - r45, false, PinkXP::pink300);
+                    appendGridLine (snap->vertices, cx, baseY, cx, baseY - R, true, PinkXP::pink300);
+                }
+
+                const float frac[3] = { 0.25f, 0.50f, 0.75f };
+                const bool dashed = (tokens.gridStyle == PinkXP::GridStyle::dashedTech);
+                const auto ringC = isChrome
+                                       ? PinkXP::pink300.interpolatedWith (PinkXP::hl, 0.38f).withAlpha (darkBg ? 0.30f : 0.25f)
+                                       : isGlass
+                                             ? PinkXP::pink300.interpolatedWith (juce::Colours::white, 0.20f).withAlpha (darkBg ? 0.24f : 0.28f)
+                                             : isNeon
+                                                   ? PinkXP::pink300.withAlpha (0.42f)
+                                                   : isCrt
+                                                         ? PinkXP::sel.interpolatedWith (PinkXP::pink300, 0.45f).withAlpha (0.42f)
+                                                         : isModern
+                                                               ? PinkXP::pink300.withAlpha (juce::jlimit (0.14f, 0.26f, tokens.gridMajorAlpha * 1.10f))
+                                                               : PinkXP::pink200.withAlpha (0.34f);
+                for (int ri = 0; ri < 3; ++ri)
+                {
+                    const float rr = R * frac[ri];
+                    if (rr < 2.0f || rr >= R) continue;
+                    for (int s = 0; s < arcSegs; ++s)
+                    {
+                        if (dashed && (s & 1) != 0) continue;
+                        const float th0 = -kPi * 0.5f + kPi * (float) s / (float) arcSegs;
+                        const float th1 = -kPi * 0.5f + kPi * (float) (s + 1) / (float) arcSegs;
+                        const float x0 = cx + rr * std::sin (th0), y0 = baseY - rr * std::cos (th0);
+                        const float x1 = cx + rr * std::sin (th1), y1 = baseY - rr * std::cos (th1);
+                        if (isCrt && tokens.glowIntensity > 0.0f)
+                            appendLineSegment (snap->vertices, x0, y0, x1, y1, 1.15f,
+                                               ringC.withMultipliedAlpha (0.28f));
+                        else if (isNeon)
+                            appendLineSegment (snap->vertices, x0, y0, x1, y1, 1.15f,
+                                               PinkXP::sel.withAlpha (0.18f));
+                        appendLineSegment (snap->vertices, x0, y0, x1, y1, isModern ? 0.44f : 0.48f, ringC);
+                    }
                 }
             }
         }
@@ -554,13 +766,27 @@ void StereoFieldModule::buildGlSnapshot()
     snap->segments.push_back ({ 0, (int) (snap->vertices.size() / 6), Primitive::Triangles });
     snap->trailSegStart = (int) snap->segments.size();
 
-    // ---- trail 点段（segments[1..]）：当前帧新点 ----
+    // ---- trail 点段（segments[1..]）：当前帧新点（GL / CPU 完全同构）----
     {
         std::vector<Pt> pts;
         collectPoints (plot, pts);
         if (! pts.empty())
         {
-            const float hs = dotSize * 0.5f;   // 点半边长（旧版固定 2×2 → hs = 1）
+            const float hs        = juce::jmax (0.5f, dotSize * 0.5f);
+            const bool greenScreen = PinkXP::isGreenScreenBackdrop();
+            const bool pixelDots  = tokens.pixelSnapped;
+            const bool userGlow   = (dotShape == 1) && ! greenScreen;
+            const bool skinNeon   = (tokens.frameStyle == PinkXP::FrameStyle::neonTube) && ! greenScreen;
+            const bool skinCrt    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor) && ! greenScreen;
+            const bool skinGlass  = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass) && ! greenScreen;
+            const bool chromePin  = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome) && ! greenScreen && dotSize >= 1.5f;
+            const float snapSize  = juce::jmax (1.0f, std::round (dotSize));
+            const float haloR     = hs * (userGlow ? 2.1f : 1.75f) + (userGlow ? 0.8f : 0.6f);
+            const float haloAlphaScale = (userGlow && skinNeon) ? 0.32f
+                                       : (userGlow ? 0.24f : 0.24f * juce::jmax (0.4f, tokens.glowIntensity));
+            const int discSegs = (dotSize >= 3.5f) ? 10 : 8;
+            const float pinR   = juce::jmax (0.42f, hs * 0.42f);
+            const float pinOff = hs * 0.18f;
 
             // 每个残影层一个段：低 / 中 / 高各自累积，颜色不互相污染
             for (int layer = 0; layer < layerCount; ++layer)
@@ -569,17 +795,55 @@ void StereoFieldModule::buildGlSnapshot()
                 for (const auto& p : pts)
                 {
                     if (p.layer != layer) continue;
-                    const float dr = p.col.getFloatRed(), dg = p.col.getFloatGreen(),
-                                db = p.col.getFloatBlue(), da = p.col.getFloatAlpha();
-                    const float q[36] = {
-                        p.x - hs, p.y - hs, dr, dg, db, da,
-                        p.x + hs, p.y - hs, dr, dg, db, da,
-                        p.x - hs, p.y + hs, dr, dg, db, da,
-                        p.x + hs, p.y - hs, dr, dg, db, da,
-                        p.x + hs, p.y + hs, dr, dg, db, da,
-                        p.x - hs, p.y + hs, dr, dg, db, da,
-                    };
-                    snap->vertices.insert (snap->vertices.end(), q, q + 36);
+                    const auto coreCol = greenScreen ? p.col.withAlpha (1.0f) : p.col;
+
+                    if (pixelDots)
+                    {
+                        // Pixel XP / CRT：锐利整数对齐像素方块点（CRT 附加磷光外晕与亮芯）
+                        const float qx = std::floor (p.x - hs);
+                        const float qy = std::floor (p.y - hs);
+                        if (skinCrt || userGlow)
+                        {
+                            const float pad = (skinCrt && userGlow) ? 2.0f : 1.0f;
+                            appendQuad (snap->vertices,
+                                        { qx - pad, qy - pad, snapSize + pad * 2.0f, snapSize + pad * 2.0f },
+                                        coreCol.withMultipliedAlpha (skinCrt ? 0.28f : 0.22f));
+                        }
+                        appendQuad (snap->vertices, { qx, qy, snapSize, snapSize }, coreCol);
+                        if (skinCrt && snapSize >= 2.0f)
+                        {
+                            const float cw = juce::jmax (1.0f, snapSize * 0.5f);
+                            appendQuad (snap->vertices,
+                                        { qx + snapSize * 0.25f, qy + snapSize * 0.25f, cw, cw },
+                                        coreCol.interpolatedWith (juce::Colours::white, 0.52f)
+                                               .withAlpha (coreCol.getFloatAlpha() * 0.60f));
+                        }
+                    }
+                    else
+                    {
+                        // Modern / Chrome / Glass / Neon / Transparent：平滑圆点（Chrome/Glass 镜面高光芯；Neon/Glow 带圆晕；绿幕无外晕）
+                        if ((userGlow || skinNeon) && ! greenScreen)
+                            appendDisc (snap->vertices, p.x, p.y, haloR,
+                                        coreCol.withMultipliedAlpha (haloAlphaScale), 8);
+                        else if (skinGlass)
+                            appendDisc (snap->vertices, p.x, p.y, hs * 1.45f + 0.4f,
+                                        coreCol.withMultipliedAlpha (0.16f), 8);
+
+                        if (dotSize >= 1.5f)
+                            appendDisc (snap->vertices, p.x, p.y, hs, coreCol, discSegs);
+                        else
+                            appendQuad (snap->vertices, { p.x - hs, p.y - hs, dotSize, dotSize }, coreCol);
+
+                        if (chromePin || (skinGlass && dotSize >= 1.5f))
+                            appendDisc (snap->vertices, p.x - pinOff, p.y - pinOff, pinR,
+                                        (skinGlass ? juce::Colours::white
+                                                   : coreCol.interpolatedWith (juce::Colours::white, 0.72f))
+                                            .withAlpha (coreCol.getFloatAlpha() * (skinGlass ? 0.62f : 0.85f)), 6);
+                        else if (skinNeon && dotSize >= 2.0f)
+                            appendDisc (snap->vertices, p.x, p.y, pinR,
+                                        coreCol.interpolatedWith (juce::Colours::white, 0.72f)
+                                               .withAlpha (coreCol.getFloatAlpha() * 0.78f), 6);
+                    }
                 }
                 const int count = (int) snap->vertices.size() / 6 - trailStartIdx;
                 if (count > 0)
@@ -631,22 +895,17 @@ bool StereoFieldModule::toyHitTest (juce::Point<int> panelPos, ToyHit& out) cons
 
 void StereoFieldModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 {
-    ctx.addModuleActor (makeSonarRingActor (hit.pos));
-    ctx.addModuleActor (makeInvaderActor (hit.pos, hit.rect));
+    const auto canvas = getContentBounds().reduced (4);
+    const auto plot   = canvas.reduced (6);
+    if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
+        return;
 
-    // 声像角反算（半圆雷达：角度由点击位置决定，E.4.3）
-    const float cx = hit.rect.getCentreX();
-    const float baseY = hit.rect.getBottom();
-    const float dx = hit.pos.x - cx;
-    const float dy = baseY - hit.pos.y;
-    const float angDeg = std::atan2 (dx, dy) * 180.0f / 3.14159f;
-    const int adeg = juce::roundToInt (std::abs (angDeg));
-
-    // 反馈 A1：文案合理化——接近正上方显示 CENTER，其余只写 "PAN L32"
-    juce::String text = (adeg < 2)
-        ? "PAN CENTER"
-        : "PAN " + juce::String ((angDeg < 0.0f) ? "L" : "R") + juce::String (adeg);
-    ctx.bubble (hit.pos.translated (0.0f, -22.0f), text, ToyRole::Reward);
+    const auto geo = computeRadarGeometry (plot);
+    ctx.addModuleActorCapped (
+        makeStereoRadarSweepActor (hit.pos, canvas,
+                                   { (float) geo.cx, (float) geo.baseY },
+                                   (float) geo.radius),
+        6);
 }
 
 // ----------------------------------------------------------
@@ -654,7 +913,17 @@ void StereoFieldModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 // ----------------------------------------------------------
 void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
-    PinkXP::drawSunken (g, canvas, PinkXP::content);
+    const auto& tokens = PinkXP::getSkinTokens();
+    if (PinkXP::isTransparentBackdrop())
+        return;
+    if (PinkXP::isGreenScreenBackdrop())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (canvas);
+        return;
+    }
+
+    PinkXP::Craft::drawPanelWell (g, canvas, PinkXP::content, PinkXP::WellKind::canvas);
 
     auto plot = canvas.reduced (6);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
@@ -665,66 +934,215 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
     const int  R             = geo.radius;
     const float labelFontSize = geo.labelFontSize;
 
-    constexpr float kPi = juce::MathConstants<float>::pi;
+    constexpr float kPi     = juce::MathConstants<float>::pi;
+    constexpr float kHalfPi = juce::MathConstants<float>::halfPi;
     const float r45 = (float) R * 0.70710678f;  // 45° 处的弦长分量
 
-    // ---- 方位参考（固定半径 R，不随 autoGain 缩放）----
+    // ---- 方位参考（固定半径 R，不随 autoGain 缩放；全风格平滑反走样圆弧）----
+    const bool isChrome = (tokens.dialFinish == PinkXP::DialFinish::brushedMetal);
+    const bool isModern = (tokens.dialFinish == PinkXP::DialFinish::studioSmooth);
+    const bool isGlass  = (tokens.dialFinish == PinkXP::DialFinish::glassDome);
+    const bool isNeon   = (tokens.dialFinish == PinkXP::DialFinish::neonRings);
+    const bool isCrt    = (tokens.dialFinish == PinkXP::DialFinish::crtVector);
+    const bool darkBg   = PinkXP::content.getPerceivedBrightness() < 0.5f;
 
-    // 半圆外轮廓（更亮） + 直径线
     {
         juce::Path arc;
-        arc.addCentredArc ((float) cx, (float) baseY, (float) R, (float) R, 0.0f,
-                           -kPi * 0.5f, kPi * 0.5f, true);
-        g.setColour (PinkXP::pink300.withAlpha (0.65f));
-        g.strokePath (arc, juce::PathStrokeType (1.2f));
-        g.setColour (PinkXP::pink300.withAlpha (0.5f));
-        g.drawLine ((float) (cx - R), (float) baseY, (float) (cx + R), (float) baseY, 1.0f);
-    }
-
-    // 45° 参考线（左 / 右）与顶部中线
-    {
-        g.setColour (PinkXP::pink200.withAlpha (0.45f));
-        g.drawLine ((float) cx, (float) baseY, (float) cx - r45, (float) baseY - r45, 1.0f);
-        g.drawLine ((float) cx, (float) baseY, (float) cx + r45, (float) baseY - r45, 1.0f);
-        g.drawLine ((float) cx, (float) baseY, (float) cx,        (float) baseY - R,   1.0f);
-    }
-
-    // ---- 能量刻度 ----
-    //   环的几何固定（雷达轮廓不跳动）；dB 标签按当前自动增益换算成真实电平：
-    //   gain = 1 时即 -12 / -6 / -2.5 / 0 dB。
-    {
-        const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
-
-        g.setColour (PinkXP::pink200.withAlpha (0.30f));
-        for (int ri = 0; ri < 4; ++ri)
+        arc.addCentredArc ((float) cx, (float) baseY, (float) R, (float) R, 0.0f, -kHalfPi, kHalfPi, true);
+        if (isChrome || isGlass)
         {
-            const float rr = (float) R * frac[ri];
-            if (rr < 2.0f || rr > (float) R) continue;
-            juce::Path arc;
-            // JUCE 角度：0 = 顶部中心，顺时针为正；
-            // 上半圆 = 从左(-π/2) 顺时针经顶部(0) 到右(π/2)。
-            // startAsNewSubPath=true：从圆弧左端点开启新子路径。
-            arc.addCentredArc ((float) cx, (float) baseY, rr, rr, 0.0f,
-                               -kPi * 0.5f, kPi * 0.5f, true);
-            g.strokePath (arc, juce::PathStrokeType (1.0f));
+            if (isChrome)
+            {
+                juce::Path outerCut;
+                outerCut.addCentredArc ((float) cx, (float) baseY, (float) R + 1.0f, (float) R + 1.0f, 0.0f, -kHalfPi, kHalfPi, true);
+                g.setColour (PinkXP::dark.withAlpha (darkBg ? 0.38f : 0.20f));
+                g.strokePath (outerCut, juce::PathStrokeType (1.05f));
+            }
+            g.setColour (isChrome
+                             ? PinkXP::pink300.interpolatedWith (PinkXP::hl, 0.42f).withAlpha (darkBg ? 0.74f : 0.66f)
+                             : PinkXP::pink300.interpolatedWith (juce::Colours::white, 0.25f).withAlpha (darkBg ? 0.56f : 0.62f));
+            g.strokePath (arc, juce::PathStrokeType (1.15f));
+
+            const float rimOff = isGlass ? 1.4f : 1.7f;
+            juce::Path outerRim;
+            outerRim.addCentredArc ((float) cx, (float) baseY, (float) R + rimOff, (float) R + rimOff, 0.0f, -kHalfPi, kHalfPi, true);
+            g.setColour (juce::Colours::white.withAlpha (darkBg ? 0.18f : 0.30f));
+            g.strokePath (outerRim, juce::PathStrokeType (0.75f));
+
+            if (isChrome && R >= 24)
+            {
+                const auto majC = PinkXP::ink.interpolatedWith (PinkXP::hl, darkBg ? 0.35f : 0.18f).withAlpha (0.58f);
+                const auto minC = PinkXP::ink.withAlpha (darkBg ? 0.28f : 0.24f);
+                for (int deg = -75; deg <= 75; deg += 15)
+                {
+                    const bool major = (deg % 45 == 0);
+                    const float th   = (float) deg * (kPi / 180.0f);
+                    const float sn   = std::sin (th), cs = std::cos (th);
+                    const float len  = major ? 4.5f : 2.2f;
+                    g.setColour (major ? majC : minC);
+                    g.drawLine ((float) cx + ((float) R - len) * sn, (float) baseY - ((float) R - len) * cs,
+                                (float) cx + (float) R * sn,         (float) baseY - (float) R * cs,
+                                major ? 1.05f : 0.75f);
+                }
+            }
+        }
+        else
+        {
+            if (isNeon || (isCrt && tokens.glowIntensity > 0.0f))
+            {
+                g.setColour (PinkXP::sel.withAlpha (isNeon ? 0.28f : 0.22f * tokens.glowIntensity));
+                g.strokePath (arc, juce::PathStrokeType (isNeon ? 4.0f : 3.1f));
+            }
+            g.setColour (isNeon   ? PinkXP::pink300.withAlpha (0.88f)
+                       : isCrt    ? PinkXP::sel.interpolatedWith (PinkXP::pink300, 0.45f).withAlpha (0.86f)
+                       : isModern ? PinkXP::pink300.withAlpha (0.48f)
+                                  : PinkXP::pink300.withAlpha (0.65f));
+            g.strokePath (arc, juce::PathStrokeType (isModern ? 1.0f : 1.2f));
+            if (isNeon)
+            {
+                g.setColour (PinkXP::pink200.interpolatedWith (juce::Colours::white, 0.55f).withAlpha (0.88f));
+                g.strokePath (arc, juce::PathStrokeType (0.72f));
+                if (R >= 24)
+                {
+                    const auto nGlow = PinkXP::sel.withAlpha (0.30f);
+                    const auto nCore = PinkXP::sel.interpolatedWith (juce::Colours::white, 0.50f).withAlpha (0.90f);
+                    for (int deg : { -45, 0, 45 })
+                    {
+                        const float th = (float) deg * (kPi / 180.0f);
+                        const float sn = std::sin (th), cs = std::cos (th);
+                        g.setColour (nGlow);
+                        g.drawLine ((float) cx + ((float) R - 4.5f) * sn, (float) baseY - ((float) R - 4.5f) * cs,
+                                    (float) cx + ((float) R + 1.2f) * sn, (float) baseY - ((float) R + 1.2f) * cs, 2.5f);
+                        g.setColour (nCore);
+                        g.drawLine ((float) cx + ((float) R - 4.5f) * sn, (float) baseY - ((float) R - 4.5f) * cs,
+                                    (float) cx + ((float) R + 1.2f) * sn, (float) baseY - ((float) R + 1.2f) * cs, 0.96f);
+                    }
+                }
+            }
+            else if (isCrt && R >= 24)
+            {
+                const auto majC = PinkXP::sel.interpolatedWith (juce::Colours::white, 0.25f).withAlpha (0.76f);
+                const auto minC = PinkXP::sel.withAlpha (0.40f);
+                for (int deg = -75; deg <= 75; deg += 15)
+                {
+                    const bool major = (deg % 45 == 0);
+                    const float th   = (float) deg * (kPi / 180.0f);
+                    const float sn   = std::sin (th), cs = std::cos (th);
+                    const float len  = major ? 4.5f : 2.2f;
+                    g.setColour (major ? majC : minC);
+                    g.drawLine ((float) cx + ((float) R - len) * sn, (float) baseY - ((float) R - len) * cs,
+                                (float) cx + (float) R * sn,         (float) baseY - (float) R * cs,
+                                major ? 1.05f : 0.75f);
+                }
+            }
         }
 
-        g.setColour (PinkXP::ink.withAlpha (0.55f));
-        g.setFont (PinkXP::getAxisFont (juce::jmax (6.0f, labelFontSize - 1.5f),
-                                        juce::Font::plain));
-        for (int ri = 0; ri < 4; ++ri)
+        if (isNeon || (isCrt && tokens.glowIntensity > 0.0f))
         {
-            const float rr = (float) R * frac[ri];
-            if (rr < 8.0f || rr > (float) R) continue;
-            const int ly = baseY - (int) rr - 6;
-            g.drawText (y2k::tr (ringDbLabel (frac[ri], autoGainFactor)), cx + 4, ly, 34, 12,
-                        juce::Justification::centredLeft, false);
+            g.setColour (PinkXP::sel.withAlpha (isNeon ? 0.22f : 0.18f * tokens.glowIntensity));
+            g.drawLine ((float) (cx - R), (float) baseY, (float) (cx + R), (float) baseY, 2.6f);
+        }
+        g.setColour (isChrome ? PinkXP::pink300.interpolatedWith (PinkXP::hl, 0.36f).withAlpha (darkBg ? 0.56f : 0.50f)
+                   : isGlass  ? PinkXP::pink300.interpolatedWith (juce::Colours::white, 0.22f).withAlpha (darkBg ? 0.46f : 0.52f)
+                   : isNeon   ? PinkXP::pink300.withAlpha (0.76f)
+                   : isCrt    ? PinkXP::sel.interpolatedWith (PinkXP::pink300, 0.45f).withAlpha (0.74f)
+                   : isModern ? PinkXP::pink300.withAlpha (0.36f)
+                              : PinkXP::pink300.withAlpha (0.50f));
+        g.drawLine ((float) (cx - R), (float) baseY, (float) (cx + R), (float) baseY, isModern ? 0.9f : 1.0f);
+        if (isChrome || isGlass)
+        {
+            g.setColour (juce::Colours::white.withAlpha (darkBg ? 0.12f : 0.22f));
+            g.drawLine ((float) (cx - R), (float) baseY + 1.0f, (float) (cx + R), (float) baseY + 1.0f, 0.72f);
         }
     }
 
-    // ---- 声像方位刻度：L / C / R（固定，动态字号）----
+    // 45° 参考线（左 / 右）、顶部中线与能量环（受 showRings 控制）
+    if (showRings)
     {
-        const int actualMargin = plot.getWidth() / 2 - R;  // 实际预留的每侧宽度（≥0）
+        if (tokens.dialFinish == PinkXP::DialFinish::pixelHardware)
+        {
+            g.setColour (PinkXP::pink200.withAlpha (0.45f));
+            g.drawLine ((float) cx, (float) baseY, (float) cx - r45, (float) baseY - r45, 1.0f);
+            g.drawLine ((float) cx, (float) baseY, (float) cx + r45, (float) baseY - r45, 1.0f);
+            g.drawLine ((float) cx, (float) baseY, (float) cx, (float) baseY - (float) R, 1.0f);
+        }
+        else
+        {
+            PinkXP::Craft::drawGridLine (g, (float) cx, (float) baseY, (float) cx - r45, (float) baseY - r45, false, PinkXP::pink300);
+            PinkXP::Craft::drawGridLine (g, (float) cx, (float) baseY, (float) cx + r45, (float) baseY - r45, false, PinkXP::pink300);
+            PinkXP::Craft::drawGridLine (g, (float) cx, (float) baseY, (float) cx, (float) baseY - (float) R, true, PinkXP::pink300);
+        }
+
+        const float innerFrac[3] = { 0.25f, 0.50f, 0.75f };
+        const auto ringC = isChrome
+                               ? PinkXP::pink300.interpolatedWith (PinkXP::hl, 0.38f).withAlpha (darkBg ? 0.30f : 0.25f)
+                               : isGlass
+                                     ? PinkXP::pink300.interpolatedWith (juce::Colours::white, 0.20f).withAlpha (darkBg ? 0.24f : 0.28f)
+                                     : isNeon
+                                           ? PinkXP::pink300.withAlpha (0.42f)
+                                           : isCrt
+                                                 ? PinkXP::sel.interpolatedWith (PinkXP::pink300, 0.45f).withAlpha (0.42f)
+                                                 : isModern
+                                                       ? PinkXP::pink300.withAlpha (juce::jlimit (0.14f, 0.26f, tokens.gridMajorAlpha * 1.10f))
+                                                       : PinkXP::pink200.withAlpha (0.34f);
+        for (int ri = 0; ri < 3; ++ri)
+        {
+            const float rr = (float) R * innerFrac[ri];
+            if (rr < 2.0f || rr >= (float) R) continue;
+
+            if (tokens.gridStyle == PinkXP::GridStyle::dashedTech)
+            {
+                constexpr int arcSegs = 64;
+                for (int s = 0; s < arcSegs; s += 2)
+                {
+                    const float th0 = -kHalfPi + kPi * (float) s / (float) arcSegs;
+                    const float th1 = -kHalfPi + kPi * (float) (s + 1) / (float) arcSegs;
+                    const float x0 = (float) cx + rr * std::sin (th0), y0 = (float) baseY - rr * std::cos (th0);
+                    const float x1 = (float) cx + rr * std::sin (th1), y1 = (float) baseY - rr * std::cos (th1);
+                    if (isNeon)
+                    {
+                        g.setColour (PinkXP::sel.withAlpha (0.18f));
+                        g.drawLine (x0, y0, x1, y1, 2.3f);
+                    }
+                    g.setColour (ringC);
+                    g.drawLine (x0, y0, x1, y1, 0.95f);
+                }
+            }
+            else
+            {
+                juce::Path arc;
+                arc.addCentredArc ((float) cx, (float) baseY, rr, rr, 0.0f, -kHalfPi, kHalfPi, true);
+                if (isCrt && tokens.glowIntensity > 0.0f)
+                {
+                    g.setColour (ringC.withMultipliedAlpha (0.28f));
+                    g.strokePath (arc, juce::PathStrokeType (2.3f));
+                }
+                g.setColour (ringC);
+                g.strokePath (arc, juce::PathStrokeType (isModern ? 0.88f : 0.95f));
+            }
+        }
+
+        if (showLabels)
+        {
+            const float frac[4] = { 0.25f, 0.50f, 0.75f, 1.00f };
+            g.setColour (PinkXP::ink.withAlpha (0.55f));
+            g.setFont (PinkXP::getAxisFont (juce::jmax (6.0f, labelFontSize - 1.5f),
+                                            juce::Font::plain));
+            for (int ri = 0; ri < 4; ++ri)
+            {
+                const float rr = (float) R * frac[ri];
+                if (rr < 8.0f || rr > (float) R) continue;
+                const int ly = baseY - (int) rr - 6;
+                g.drawText (y2k::tr (ringDbLabel (frac[ri], autoGainFactor)), cx + 4, ly, 34, 12,
+                            juce::Justification::centredLeft, false);
+            }
+        }
+    }
+
+    // ---- 声像方位刻度：L / C / R 与缩放倍率（受 showLabels 控制）----
+    if (showLabels)
+    {
+        const int actualMargin = plot.getWidth() / 2 - R;
         const int labelH = juce::jmax (10, (int) std::ceil (labelFontSize) + 4);
         const int y      = baseY - labelH;
 
@@ -733,32 +1151,26 @@ void StereoFieldModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> 
         g.drawText (y2k::tr ("C"), cx - 8, y, 16, labelH,
                     juce::Justification::centred, false);
 
-        // L/R 标签位于 10px 侧边间隙内，字号单独收紧，确保单字符完整显示
         g.setFont (PinkXP::getAxisFont (juce::jmin (labelFontSize, 11.0f),
                                         juce::Font::bold));
         g.drawText (y2k::tr ("L"), plot.getX(), y, actualMargin, labelH,
                     juce::Justification::centredRight, false);
         g.drawText (y2k::tr ("R"), plot.getRight() - actualMargin, y, actualMargin, labelH,
                     juce::Justification::centredLeft, false);
-    }
 
-    // 当前自动增益（1.0x 为默认比例尺，不显示）
-    if (std::abs (autoGainFactor - 1.0f) > 0.05f)
-    {
-        g.setColour (PinkXP::ink.withAlpha (0.6f));
-        g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
-        g.drawText (y2k::tr (juce::String (autoGainFactor, 1) + "x"),
-                    canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
-                    juce::Justification::centredRight, false);
+        if (std::abs (autoGainFactor - 1.0f) > 0.05f)
+        {
+            g.setColour (PinkXP::ink.withAlpha (0.6f));
+            g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
+            g.drawText (y2k::tr (juce::String (autoGainFactor, 1) + "x"),
+                        canvas.getRight() - 48, canvas.getY() + 3, 44, 12,
+                        juce::Justification::centredRight, false);
+        }
     }
 }
 
 // ----------------------------------------------------------
 // updateTrail —— 衰减旧点 + 绘制新点
-//
-//   trailImage 为 ARGB（预乘 alpha）离屏图，尺寸按画布对角线动态降采样。
-//   每帧先对所有像素 multiplyAlpha(kDecayPerFrame) 实现渐隐，再用
-//   AffineTransform 把新样本点画到图上（点用主题色，source-over 叠加）。
 // ----------------------------------------------------------
 void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
 {
@@ -766,9 +1178,6 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
     const int ch = canvas.getHeight();
     if (cw <= 0 || ch <= 0) return;
 
-    // 动态分辨率：对角线 ≤ 700px 时 1:1，超出反比降采样（下限 25%）。
-    //   相比旧的 900px/35%，大窗口下离屏图更小，每帧 multiplyAlpha 遍历的
-    //   像素量大幅下降，缓解拖拽/脱离模式下窗口拉大后的卡顿。
     const float diag  = std::sqrt ((float) (cw * cw + ch * ch));
     const float scale = juce::jlimit (0.25f, 1.0f, 700.0f / juce::jmax (700.0f, diag));
     const int   rw    = juce::jmax (8, (int) std::lround ((float) cw * scale));
@@ -776,10 +1185,8 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
 
     const int   layers = bandColour ? kTrailLayers : 1;
 
-    // 1) 每层各自：尺寸变化时重建 + 衰减旧点（alpha *= decay，跳过透明像素）
-    //    v2.9：decay 由累计 dt 换算（60Hz 标定），残影时长与帧率无关
-    const float decay = std::pow (kDecayPerFrame, juce::jmax (0.0f, trailDtAccumSec) * 60.0f * fadeSpeed);
-    trailDtAccumSec = 0.0f;
+    const float decay = std::pow (kDecayPerFrame, juce::jmax (0.0f, cpuTrailDtAccumSec) * 60.0f * fadeSpeed);
+    cpuTrailDtAccumSec = 0.0f;
 
     for (int li = 0; li < kTrailLayers; ++li)
     {
@@ -793,23 +1200,35 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
         if (img.isNull() || img.getWidth() != rw || img.getHeight() != rh)
         {
             img = juce::Image (juce::Image::ARGB, rw, rh, true);
-            img.clear (img.getBounds());
+            img.clear (img.getBounds(), juce::Colours::transparentBlack);
         }
 
-        juce::Image::BitmapData bd (img, juce::Image::BitmapData::readWrite);
-        for (int y = 0; y < bd.height; ++y)
+        if (decay < 0.999f)
         {
-            auto* line = reinterpret_cast<juce::PixelARGB*> (bd.getLinePointer (y));
-            for (int x = 0; x < bd.width; ++x)
+            juce::Image::BitmapData bd (img, juce::Image::BitmapData::readWrite);
+            for (int y = 0; y < bd.height; ++y)
             {
-                auto& p = line[x];
-                if (p.getAlpha() == 0) continue;
-                p.multiplyAlpha (decay);
+                auto* line = reinterpret_cast<juce::PixelARGB*> (bd.getLinePointer (y));
+                for (int x = 0; x < bd.width; ++x)
+                {
+                    auto& p = line[x];
+                    const auto a = p.getAlpha();
+                    if (a == 0) continue;
+                    if (a <= 2)
+                    {
+                        p.setARGB (0, 0, 0, 0);
+                        continue;
+                    }
+                    p.multiplyAlpha (decay);
+                    if (p.getAlpha() == a)
+                        p.multiplyAlpha ((float) (a - 1) / (float) a);
+                    if (p.getAlpha() <= 2)
+                        p.setARGB (0, 0, 0, 0);
+                }
             }
         }
     }
 
-    // 2) 绘制新点（canvas 局部坐标系，经 scale 变换映射到各层图像）
     auto plot = juce::Rectangle<int> (0, 0, cw, ch).reduced (6);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8) return;
 
@@ -817,7 +1236,22 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
     collectPoints (plot, pts);
     if (pts.empty()) return;
 
-    const float ds = dotSize;   // 点边长（旧版固定 2）
+    const auto& tokens     = PinkXP::getSkinTokens();
+    const bool greenScreen = PinkXP::isGreenScreenBackdrop();
+    const bool pixelDots   = tokens.pixelSnapped;
+    const bool userGlow    = (dotShape == 1) && ! greenScreen;
+    const bool skinNeon    = (tokens.frameStyle == PinkXP::FrameStyle::neonTube) && ! greenScreen;
+    const bool skinCrt     = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor) && ! greenScreen;
+    const bool skinGlass   = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass) && ! greenScreen;
+    const bool chromePin   = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome) && ! greenScreen && dotSize >= 1.5f;
+    const float ds         = dotSize;
+    const float hs         = juce::jmax (0.5f, ds * 0.5f);
+    const float snapSize   = juce::jmax (1.0f, std::round (ds));
+    const float haloR      = hs * (userGlow ? 2.1f : 1.75f) + (userGlow ? 0.8f : 0.6f);
+    const float haloAlphaScale = (userGlow && skinNeon) ? 0.32f
+                               : (userGlow ? 0.24f : 0.24f * juce::jmax (0.4f, tokens.glowIntensity));
+    const float pinR       = juce::jmax (0.42f, hs * 0.42f);
+    const float pinOff     = hs * 0.18f;
 
     for (int li = 0; li < layers; ++li)
     {
@@ -826,27 +1260,153 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
         juce::Graphics tg (trailImage[li]);
         tg.addTransform (juce::AffineTransform::scale (scale));
 
-        if (bandColour)
+        if (pixelDots)
         {
-            // 三频段染色：该层只画自己那一路的点（颜色固定）
-            for (const auto& p : pts)
+            const float pad = (skinCrt && userGlow) ? 2.0f : 1.0f;
+            const float cw  = juce::jmax (1.0f, snapSize * 0.5f);
+            if (bandColour)
             {
-                if (p.layer != li) continue;
-                tg.setColour (p.col);
-                tg.fillRect (p.x - ds * 0.5f, p.y - ds * 0.5f, ds, ds);
+                for (const auto& p : pts)
+                {
+                    if (p.layer != li) continue;
+                    const auto coreCol = greenScreen ? p.col.withAlpha (1.0f) : p.col;
+                    const float qx = std::floor (p.x - hs);
+                    const float qy = std::floor (p.y - hs);
+                    if (skinCrt || userGlow)
+                    {
+                        tg.setColour (coreCol.withMultipliedAlpha (skinCrt ? 0.28f : 0.22f));
+                        tg.fillRect (qx - pad, qy - pad, snapSize + pad * 2.0f, snapSize + pad * 2.0f);
+                    }
+                    tg.setColour (coreCol);
+                    tg.fillRect (qx, qy, snapSize, snapSize);
+                    if (skinCrt && snapSize >= 2.0f)
+                    {
+                        tg.setColour (coreCol.interpolatedWith (juce::Colours::white, 0.52f)
+                                             .withAlpha (coreCol.getFloatAlpha() * 0.60f));
+                        tg.fillRect (qx + snapSize * 0.25f, qy + snapSize * 0.25f, cw, cw);
+                    }
+                }
+            }
+            else
+            {
+                const auto baseCol = PinkXP::pink500.withAlpha (greenScreen ? 1.0f : 0.9f);
+                if (skinCrt || userGlow)
+                {
+                    juce::RectangleList<float> halos;
+                    halos.ensureStorageAllocated ((int) pts.size());
+                    for (const auto& p : pts)
+                    {
+                        const float qx = std::floor (p.x - hs), qy = std::floor (p.y - hs);
+                        halos.addWithoutMerging ({ qx - pad, qy - pad, snapSize + pad * 2.0f, snapSize + pad * 2.0f });
+                    }
+                    tg.setColour (baseCol.withMultipliedAlpha (skinCrt ? 0.28f : 0.22f));
+                    tg.fillRectList (halos);
+                }
+                juce::RectangleList<float> rects;
+                rects.ensureStorageAllocated ((int) pts.size());
+                for (const auto& p : pts)
+                    rects.addWithoutMerging ({ std::floor (p.x - hs), std::floor (p.y - hs), snapSize, snapSize });
+                tg.setColour (baseCol);
+                tg.fillRectList (rects);
+                if (skinCrt && snapSize >= 2.0f)
+                {
+                    juce::RectangleList<float> cores;
+                    cores.ensureStorageAllocated ((int) pts.size());
+                    for (const auto& p : pts)
+                        cores.addWithoutMerging ({ std::floor (p.x - hs) + snapSize * 0.25f,
+                                                   std::floor (p.y - hs) + snapSize * 0.25f, cw, cw });
+                    tg.setColour (baseCol.interpolatedWith (juce::Colours::white, 0.52f)
+                                         .withAlpha (baseCol.getFloatAlpha() * 0.60f));
+                    tg.fillRectList (cores);
+                }
             }
             continue;
         }
 
-        // v2.9.2：所有点同色同 alpha —— 收集进 RectangleList 后一次 fillRectList 提交，
-        //   省掉最多 512 次 fillRect 调用 + 软光栅状态切换（每帧确定性的微省）。
-        juce::RectangleList<float> rects;
-        rects.ensureStorageAllocated ((int) pts.size());
-        for (const auto& p : pts)
-            rects.addWithoutMerging ({ p.x - ds * 0.5f, p.y - ds * 0.5f, ds, ds });
-
-        tg.setColour (PinkXP::pink500.withAlpha (0.9f));
-        tg.fillRectList (rects);
+        // 平滑风格（Modern / Chrome / Glass / Neon）：圆形散点（与 GL 同构）
+        if (bandColour)
+        {
+            for (const auto& p : pts)
+            {
+                if (p.layer != li) continue;
+                const auto coreCol = greenScreen ? p.col.withAlpha (1.0f) : p.col;
+                if ((userGlow || skinNeon) && ! greenScreen)
+                {
+                    tg.setColour (coreCol.withMultipliedAlpha (haloAlphaScale));
+                    tg.fillEllipse (p.x - haloR, p.y - haloR, haloR * 2.0f, haloR * 2.0f);
+                }
+                else if (skinGlass)
+                {
+                    const float gh = hs * 1.45f + 0.4f;
+                    tg.setColour (coreCol.withMultipliedAlpha (0.16f));
+                    tg.fillEllipse (p.x - gh, p.y - gh, gh * 2.0f, gh * 2.0f);
+                }
+                tg.setColour (coreCol);
+                if (ds >= 1.5f)
+                    tg.fillEllipse (p.x - hs, p.y - hs, ds, ds);
+                else
+                    tg.fillRect (p.x - hs, p.y - hs, ds, ds);
+                if (chromePin || (skinGlass && ds >= 1.5f))
+                {
+                    tg.setColour ((skinGlass ? juce::Colours::white
+                                             : coreCol.interpolatedWith (juce::Colours::white, 0.72f))
+                                      .withAlpha (coreCol.getFloatAlpha() * (skinGlass ? 0.62f : 0.85f)));
+                    tg.fillEllipse (p.x - pinOff - pinR, p.y - pinOff - pinR, pinR * 2.0f, pinR * 2.0f);
+                }
+                else if (skinNeon && ds >= 2.0f)
+                {
+                    tg.setColour (coreCol.interpolatedWith (juce::Colours::white, 0.72f)
+                                         .withAlpha (coreCol.getFloatAlpha() * 0.78f));
+                    tg.fillEllipse (p.x - pinR, p.y - pinR, pinR * 2.0f, pinR * 2.0f);
+                }
+            }
+        }
+        else
+        {
+            const auto baseCol = PinkXP::pink500.withAlpha (greenScreen ? 1.0f : 0.9f);
+            if ((userGlow || skinNeon) && ! greenScreen)
+            {
+                tg.setColour (baseCol.withMultipliedAlpha (haloAlphaScale));
+                for (const auto& p : pts)
+                    tg.fillEllipse (p.x - haloR, p.y - haloR, haloR * 2.0f, haloR * 2.0f);
+            }
+            else if (skinGlass)
+            {
+                const float gh = hs * 1.45f + 0.4f;
+                tg.setColour (baseCol.withMultipliedAlpha (0.16f));
+                for (const auto& p : pts)
+                    tg.fillEllipse (p.x - gh, p.y - gh, gh * 2.0f, gh * 2.0f);
+            }
+            tg.setColour (baseCol);
+            if (ds >= 1.5f)
+            {
+                for (const auto& p : pts)
+                    tg.fillEllipse (p.x - hs, p.y - hs, ds, ds);
+            }
+            else
+            {
+                juce::RectangleList<float> rects;
+                rects.ensureStorageAllocated ((int) pts.size());
+                for (const auto& p : pts)
+                    rects.addWithoutMerging ({ p.x - hs, p.y - hs, ds, ds });
+                tg.fillRectList (rects);
+            }
+            if (chromePin || (skinGlass && ds >= 1.5f))
+            {
+                tg.setColour ((skinGlass ? juce::Colours::white
+                                         : baseCol.interpolatedWith (juce::Colours::white, 0.72f))
+                                  .withAlpha (baseCol.getFloatAlpha() * (skinGlass ? 0.62f : 0.85f)));
+                for (const auto& p : pts)
+                    tg.fillEllipse (p.x - pinOff - pinR, p.y - pinOff - pinR, pinR * 2.0f, pinR * 2.0f);
+            }
+            else if (skinNeon && ds >= 2.0f)
+            {
+                tg.setColour (baseCol.interpolatedWith (juce::Colours::white, 0.72f)
+                                     .withAlpha (baseCol.getFloatAlpha() * 0.78f));
+                for (const auto& p : pts)
+                    tg.fillEllipse (p.x - pinR, p.y - pinR, pinR * 2.0f, pinR * 2.0f);
+            }
+        }
     }
 }
 
@@ -854,6 +1414,8 @@ void StereoFieldModule::invalidateTrail()
 {
     for (auto& img : trailImage)
         img = juce::Image();
-    trailNeedsUpdate = true;
-    trailNeedsClear  = true;   // GL 侧也要清：读档 / 改染色后不让旧点残留
+    trailNeedsUpdate   = true;
+    trailNeedsClear    = true;   // GL 侧也要清：读档 / 改染色 / 切背景后不让旧点残留
+    cpuTrailDtAccumSec = 0.0f;
+    glForceTrailClear.store (true, std::memory_order_release);
 }

@@ -126,10 +126,22 @@ StereoMapModule::StereoMapModule (AnalyserHub& h)
     setDefaultSize (384, 240);
     setTitleText ("Stereo Map");
     setControlPanelEnabled (true);   // v3.1：PAN/MONO 模式切换与 FFT scale 都在参数面板里
+
+    themeSubToken = PinkXP::subscribeThemeChanged ([this]()
+    {
+        buildGlSnapshot();
+        repaint();
+    });
 }
 
 StereoMapModule::~StereoMapModule()
 {
+    if (themeSubToken >= 0)
+    {
+        PinkXP::unsubscribeThemeChanged (themeSubToken);
+        themeSubToken = -1;
+    }
+
     hub.removeFrameListener (this);
     hub.release (AnalyserHub::Kind::Spectrum);
 }
@@ -162,7 +174,96 @@ void StereoMapModule::setFftScale (y2k::fscale::Scale s)
     strengthByBand.clear();
     levelDbByBand.clear();
     cancelByBand.clear();
+    peakPanByBand.clear();
+    peakCancelByBand.clear();
 
+    buildGlSnapshot();
+    repaint();
+}
+
+float StereoMapModule::activeMinFreqHz() const noexcept
+{
+    switch (freqRange)
+    {
+        case FreqRange::music: return 30.0f;
+        case FreqRange::vocal: return 80.0f;
+        case FreqRange::bass:  return 20.0f;
+        case FreqRange::full:
+        default:               return kMinFreq;
+    }
+}
+
+float StereoMapModule::activeMaxFreqHz() const noexcept
+{
+    switch (freqRange)
+    {
+        case FreqRange::music: return 12000.0f;
+        case FreqRange::vocal: return 8000.0f;
+        case FreqRange::bass:  return 1000.0f;
+        case FreqRange::full:
+        default:               return kMaxFreq;
+    }
+}
+
+void StereoMapModule::setVisualStyle (VisualStyle s)
+{
+    if (visualStyle == s) return;
+    visualStyle = s;
+    buildGlSnapshot();
+    repaint();
+}
+
+void StereoMapModule::setFreqRange (FreqRange r)
+{
+    if (freqRange == r) return;
+    freqRange = r;
+    panByBand.clear();
+    strengthByBand.clear();
+    levelDbByBand.clear();
+    cancelByBand.clear();
+    peakPanByBand.clear();
+    peakCancelByBand.clear();
+    buildGlSnapshot();
+    repaint();
+}
+
+void StereoMapModule::setSmoothing (float mult)
+{
+    smoothingScale = juce::jlimit (0.2f, 3.0f, mult);
+}
+
+void StereoMapModule::setPeakHold (bool on)
+{
+    if (peakHoldEnabled == on) return;
+    peakHoldEnabled = on;
+    if (! peakHoldEnabled)
+    {
+        peakPanByBand.clear();
+        peakCancelByBand.clear();
+    }
+    buildGlSnapshot();
+    repaint();
+}
+
+void StereoMapModule::setCancelScalePct (float pct)
+{
+    cancelFullScale = juce::jlimit (0.20f, 1.00f, pct * 0.01f);
+    buildGlSnapshot();
+    repaint();
+}
+
+void StereoMapModule::setShowGrid (bool on)
+{
+    if (showGrid == on) return;
+    showGrid = on;
+    buildGlSnapshot();
+    repaint();
+}
+
+void StereoMapModule::setShowLabels (bool on)
+{
+    if (showLabels == on) return;
+    showLabels = on;
     buildGlSnapshot();
     repaint();
 }
@@ -172,16 +273,36 @@ juce::ValueTree StereoMapModule::saveModuleSpecificState() const
     juce::ValueTree s ("state");
     s.setProperty ("mode", mode == Mode::cancel ? "cancel" : "pan", nullptr);
     s.setProperty ("fftScale", (int) fftScale, nullptr);
+    s.setProperty ("style", (int) visualStyle, nullptr);
+    s.setProperty ("freqRange", (int) freqRange, nullptr);
+    s.setProperty ("smoothing", (double) smoothingScale, nullptr);
+    s.setProperty ("peakHold", peakHoldEnabled, nullptr);
+    s.setProperty ("cancelScale", (double) (cancelFullScale * 100.0f), nullptr);
+    s.setProperty ("showGrid", showGrid, nullptr);
+    s.setProperty ("showLabels", showLabels, nullptr);
     return s;
 }
 
 void StereoMapModule::restoreModuleSpecificState (const juce::ValueTree& state)
 {
-    // 缺键 = 保持当前值（旧存档只有 mode；没有 fftScale → Log = 旧外观）
     if (state.hasProperty ("mode"))
         setMode (state.getProperty ("mode").toString() == "cancel" ? Mode::cancel : Mode::pan);
     if (state.hasProperty ("fftScale"))
         setFftScale (y2k::fscale::fromIndex ((int) state.getProperty ("fftScale")));
+    if (state.hasProperty ("style"))
+        setVisualStyle ((VisualStyle) juce::jlimit (0, 2, (int) state.getProperty ("style")));
+    if (state.hasProperty ("freqRange"))
+        setFreqRange ((FreqRange) juce::jlimit (0, 3, (int) state.getProperty ("freqRange")));
+    if (state.hasProperty ("smoothing"))
+        setSmoothing ((float) (double) state.getProperty ("smoothing"));
+    if (state.hasProperty ("peakHold"))
+        setPeakHold ((bool) state.getProperty ("peakHold"));
+    if (state.hasProperty ("cancelScale"))
+        setCancelScalePct ((float) (double) state.getProperty ("cancelScale"));
+    if (state.hasProperty ("showGrid"))
+        setShowGrid ((bool) state.getProperty ("showGrid"));
+    if (state.hasProperty ("showLabels"))
+        setShowLabels ((bool) state.getProperty ("showLabels"));
 
     refreshControlPanel();
 }
@@ -193,23 +314,62 @@ void StereoMapModule::buildParamDefs (std::vector<ParamDef>& out) const
         "Pan: where each frequency band sits in the stereo field - up = left, middle = centre, down = right. "
         "Mono check: how much of each band survives when summed to mono - top is safe, bottom is heavy cancellation.")
         .in ("View"));
+    out.push_back (ParamDef::choice ("style", "Visual style",
+        { "Curve", "Fill", "Columns" },
+        "Curve: classic clean stereo line. Fill: translucent ribbon from the baseline. "
+        "Columns: discrete per-band vertical bars.")
+        .in ("View"));
+    out.push_back (ParamDef::slider ("smoothing", "Response speed", 0.2, 3.0, 0.1, " x",
+        "Controls how fast the stereo curve responds. Lower smooths jitter; higher catches fast panning moves.")
+        .in ("View"));
+    out.push_back (ParamDef::toggle ("peakHold", "Peak envelope",
+        "Keep a slowly decaying outline of the widest stereo spread or worst mono cancellation per band.")
+        .in ("View"));
+    out.push_back (ParamDef::slider ("cancelScale", "Mono sensitivity", 20.0, 100.0, 5.0, " %",
+        "Cancellation depth that reaches the bottom of the chart. Lower zooms in on subtle phase loss.")
+        .in ("View").when ([this] { return mode == Mode::cancel; }));
+
     out.push_back (ParamDef::choice ("fftScale", "FFT scale",
         { "Log", "Mel", "Linear" },
         "How frequency is laid out left to right. Log gives every octave equal room, "
-        "Mel follows pitch perception, Linear gives equal Hz per pixel.").in ("View"));
+        "Mel follows pitch perception, Linear gives equal Hz per pixel.").in ("Axis"));
+    out.push_back (ParamDef::choice ("freqRange", "Freq range",
+        { "Full", "Music", "Vocal", "Bass" },
+        "Zooms the frequency view: Full (20-20k Hz), Music (30-12k Hz), Vocal (80-8k Hz), or Bass (20-1k Hz).")
+        .in ("Axis"));
+    out.push_back (ParamDef::toggle ("showGrid", "Grid",
+        "Show horizontal reference baselines and vertical frequency grid lines.")
+        .in ("Axis"));
+    out.push_back (ParamDef::toggle ("showLabels", "Labels",
+        "Show L/C/R, mono %, and frequency labels. Turn OFF for a larger borderless stereo map.")
+        .in ("Axis"));
 }
 
 double StereoMapModule::getParamValue (const juce::String& id) const
 {
-    if (id == "mode")     return mode == Mode::cancel ? 1.0 : 0.0;
-    if (id == "fftScale") return (double) (int) fftScale;
+    if (id == "mode")        return mode == Mode::cancel ? 1.0 : 0.0;
+    if (id == "style")       return (double) (int) visualStyle;
+    if (id == "smoothing")   return (double) smoothingScale;
+    if (id == "peakHold")    return peakHoldEnabled ? 1.0 : 0.0;
+    if (id == "cancelScale") return (double) (cancelFullScale * 100.0f);
+    if (id == "fftScale")    return (double) (int) fftScale;
+    if (id == "freqRange")   return (double) (int) freqRange;
+    if (id == "showGrid")    return showGrid ? 1.0 : 0.0;
+    if (id == "showLabels")  return showLabels ? 1.0 : 0.0;
     return 0.0;
 }
 
 void StereoMapModule::setParamValue (const juce::String& id, double v)
 {
-    if      (id == "mode")     setMode (juce::roundToInt (v) == 1 ? Mode::cancel : Mode::pan);
-    else if (id == "fftScale") setFftScale (y2k::fscale::fromIndex (juce::roundToInt (v)));
+    if      (id == "mode")        setMode (juce::roundToInt (v) == 1 ? Mode::cancel : Mode::pan);
+    else if (id == "style")       setVisualStyle ((VisualStyle) juce::jlimit (0, 2, juce::roundToInt (v)));
+    else if (id == "smoothing")   setSmoothing ((float) v);
+    else if (id == "peakHold")    setPeakHold (v >= 0.5);
+    else if (id == "cancelScale") setCancelScalePct ((float) v);
+    else if (id == "fftScale")    setFftScale (y2k::fscale::fromIndex (juce::roundToInt (v)));
+    else if (id == "freqRange")   setFreqRange ((FreqRange) juce::jlimit (0, 3, juce::roundToInt (v)));
+    else if (id == "showGrid")    setShowGrid (v >= 0.5);
+    else if (id == "showLabels")  setShowLabels (v >= 0.5);
 }
 
 void StereoMapModule::layoutContent (juce::Rectangle<int> contentBounds)
@@ -226,23 +386,23 @@ void StereoMapModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     computeStereoMap (frame.dtSec);
     buildGlSnapshot();
-    repaintFrameContent();
+    if (hoverActive || ! requestGlFrameOnly())
+        repaintFrameContent();
 }
 
 void StereoMapModule::computeStereoMap (float dtSec)
 {
     const int bandCount = juce::jlimit (96, 512, cachedBandCount > 0 ? cachedBandCount : 256);
-    hub.getSpectrumMagnitudesBlendedLR (magsL, magsR, bandCount, kMinFreq, kMaxFreq, false, fftScale);
+    const float fLo = activeMinFreqHz();
+    const float fHi = activeMaxFreqHz();
+    hub.getSpectrumMagnitudesBlendedLR (magsL, magsR, bandCount, fLo, fHi, false, fftScale);
     if (magsL.size() != bandCount || magsR.size() != bandCount)
         return;
 
-    // MONO 模式才需要 mid 路（= (L+R)/2 的单声道 FFT）：
-    //   同一帧、同一窗、同一 hop，所以 |mid|*2 就是该帧的 |L+R|。
-    //   不在 PAN 模式跑这一路，省掉一次逐频段聚合。
     const bool wantCancel = (mode == Mode::cancel);
     if (wantCancel)
     {
-        hub.getSpectrumMagnitudesBlended (magsM, bandCount, kMinFreq, kMaxFreq, false, fftScale);
+        hub.getSpectrumMagnitudesBlended (magsM, bandCount, fLo, fHi, false, fftScale);
         if (magsM.size() != bandCount)
             return;
     }
@@ -353,27 +513,27 @@ void StereoMapModule::computeStereoMap (float dtSec)
     if (sizeMismatch || cancelMismatch)
         return;
 
-    const float dt = juce::jmax (0.0f, dtSec);
-    // 上升沿（attack）走实时；按住时下降沿（release）做 1/50 时间膨胀
-    //   —— 与 SpectrumModule 的子弹时间语义一致：只拖慢回落，不拖慢跟上信号。
+    const float dt = juce::jmax (0.0f, dtSec) * smoothingScale;
     const float dtRelease = bulletTimeActive ? dt / kBulletTimeSlowdown : dt;
-    const float alphaUp   = juce::jlimit (0.10f, 0.58f, dt * 12.0f);
+    const float alphaUp   = juce::jlimit (0.04f, 0.78f, dt * 12.0f);
     const float alphaDown = bulletTimeActive ? juce::jlimit (0.002f, 0.58f, dtRelease * 12.0f) : alphaUp;
-    // 抵消比是"两路比值的比值"，天然比幅度更抖；单独用一条更慢的平滑。
-    const float alphaUpC   = juce::jlimit (0.08f, 0.40f, dt * 8.0f);
+    const float alphaUpC   = juce::jlimit (0.03f, 0.65f, dt * 8.0f);
     const float alphaDownC = bulletTimeActive ? juce::jlimit (0.0015f, 0.40f, dtRelease * 8.0f) : alphaUpC;
 
-    // 幅度类量（强度 / 电平 / 抵消量）：上升快、下降慢 —— 按住时只拖慢回落。
     auto follow = [] (float cur, float target, float aUp, float aDown) noexcept
     {
         return (target > cur) ? cur + (target - cur) * aUp
                               : cur + (target - cur) * aDown;
     };
 
-    // 声像是**有符号**量（-1 左 … +1 右），不能按"值变大 = attack"来分：
-    //   那样向上的移动实时、向下的移动被拖慢 50 倍，曲线会一路往上漂、全挤到中线上方。
-    //   这里两个方向用同一个系数：按住时整体放慢（子弹时间），松手恢复。
     const float alphaPan = bulletTimeActive ? juce::jlimit (0.002f, 0.58f, dtRelease * 12.0f) : alphaUp;
+
+    if (peakHoldEnabled)
+    {
+        if ((int) peakPanByBand.size() != bandCount)    peakPanByBand.assign ((size_t) bandCount, 0.0f);
+        if ((int) peakCancelByBand.size() != bandCount) peakCancelByBand.assign ((size_t) bandCount, 0.0f);
+    }
+    const float peakDecay = std::exp (-juce::jmax (0.0f, dtSec) / (bulletTimeActive ? 40.0f : 1.6f));
 
     for (int i = 0; i < bandCount; ++i)
     {
@@ -382,6 +542,20 @@ void StereoMapModule::computeStereoMap (float dtSec)
         levelDbByBand[(size_t) i]  = follow (levelDbByBand[(size_t) i],  targetLevelDb[(size_t) i],  alphaUp,  alphaDown);
         if (wantCancel)
             cancelByBand[(size_t) i] = follow (cancelByBand[(size_t) i], targetCancel[(size_t) i],   alphaUpC, alphaDownC);
+
+        if (peakHoldEnabled)
+        {
+            const float curP = panByBand[(size_t) i];
+            float& pkP = peakPanByBand[(size_t) i];
+            pkP = (std::abs (curP) >= std::abs (pkP)) ? curP : (pkP * peakDecay);
+
+            if (wantCancel)
+            {
+                const float curC = cancelByBand[(size_t) i];
+                float& pkC = peakCancelByBand[(size_t) i];
+                pkC = (curC >= pkC) ? curC : (pkC * peakDecay);
+            }
+        }
     }
 }
 
@@ -403,6 +577,8 @@ juce::Rectangle<int> StereoMapModule::getGlCanvasBounds (juce::Rectangle<int> co
 
 juce::Rectangle<int> StereoMapModule::getPlotBounds (juce::Rectangle<int> canvas) const
 {
+    if (! showLabels)
+        return canvas.reduced (6, 6);
     return canvas.reduced (26, 12).withTrimmedBottom (14);
 }
 
@@ -415,10 +591,30 @@ void StereoMapModule::buildGlSnapshot()
     if (canvas.getWidth() < 40 || canvas.getHeight() < 30)
         return;
 
-    auto snap = beginGlSnapshot();
-    snap->canvasLocal = canvas;
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool chromaKey   = tokens.isChromaKey;
+    const bool greenScreen = PinkXP::isGreenScreenBackdrop();
+    const bool pixelNodes  = tokens.pixelSnapped;
+    const bool isChrome    = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+    const bool isGlass     = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+    const bool isNeon      = (tokens.frameStyle == PinkXP::FrameStyle::neonTube);
+    const bool isCrt       = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const bool coreSheen   = (isChrome || isGlass || isNeon || isCrt) && ! greenScreen;
+    const float sheenWhMix = isNeon ? 0.62f : (isGlass ? 0.46f : (isCrt ? 0.50f : 0.54f));
+    const float sheenAlpha = isNeon ? 0.72f : (isCrt ? 0.64f : (isGlass ? 0.42f : 0.52f));
+    const bool strokeGlow  = tokens.strokeGlowPass && ! greenScreen && tokens.strokeGlowAlpha > 0.0f;
+    const bool crtGlowNode = isCrt && ! greenScreen && tokens.glowIntensity > 0.0f;
+    const bool neonGlowNode = isNeon && ! greenScreen && tokens.glowIntensity > 0.0f;
+    const float strokeHalf = 0.9f * tokens.strokeWidthScale;
+    const float glowHalf   = strokeHalf * juce::jmax (1.25f, tokens.strokeGlowWidthMul);
+    const float sheenHalf  = juce::jmax (0.30f, strokeHalf * 0.36f);
 
-    appendSunkenFrame (snap->vertices, canvas);
+    auto snap = beginGlSnapshot();
+    snap->canvasLocal  = canvas;
+    snap->fxRect       = canvas;
+    snap->snapToPixels = false;
+
+    appendWellFrame (snap->vertices, canvas, PinkXP::content);
 
     const auto plot = getPlotBounds (canvas);
     cachedBandCount = juce::jmax (64, plot.getWidth());
@@ -431,36 +627,44 @@ void StereoMapModule::buildGlSnapshot()
         const float yMid = (float) plot.getCentreY();
         const float yBot = (float) plot.getBottom();
 
-        // 上下边界线：PAN 模式用对应侧色相（上 = L / 下 = R）；
-        //   MONO 模式已倒置：上 = 兼容（100%）/ 下 = 满幅抵消，所以顶部用色阶低端。
-        if (mode == Mode::pan)
+        if (showGrid && ! chromaKey)
         {
-            const SideRamp edgeL = makeSideRamp (PinkXP::sel);
-            const SideRamp edgeR = makeSideRamp (PinkXP::accent2);
+            if (mode == Mode::pan)
+            {
+                const SideRamp edgeL = makeSideRamp (PinkXP::sel);
+                const SideRamp edgeR = makeSideRamp (PinkXP::accent2);
 
-            appendLineSegment (snap->vertices, x0, yTop, x1, yTop, 0.5f,
-                               sampleRamp (edgeL, 0.62f).withAlpha (0.38f));
-            appendLineSegment (snap->vertices, x0, yMid, x1, yMid, 0.6f, PinkXP::ink.withAlpha (0.35f));
-            appendLineSegment (snap->vertices, x0, yBot, x1, yBot, 0.5f,
-                               sampleRamp (edgeR, 0.62f).withAlpha (0.38f));
-        }
-        else
-        {
-            const SideRamp sev = makeSeverityRamp();
+                appendGridLine (snap->vertices, x0, yTop, x1, yTop, true, sampleRamp (edgeL, 0.62f));
+                appendGridLine (snap->vertices, x0, yMid, x1, yMid, true, PinkXP::ink);
+                appendGridLine (snap->vertices, x0, yBot, x1, yBot, true, sampleRamp (edgeR, 0.62f));
+            }
+            else
+            {
+                const SideRamp sev = makeSeverityRamp();
 
-            appendLineSegment (snap->vertices, x0, yTop, x1, yTop, 0.5f,
-                               sampleRamp (sev, 0.10f).withAlpha (0.42f));
-            appendLineSegment (snap->vertices, x0, yMid, x1, yMid, 0.6f, PinkXP::ink.withAlpha (0.35f));
-            appendLineSegment (snap->vertices, x0, yBot, x1, yBot, 0.5f,
-                               sampleRamp (sev, 0.98f).withAlpha (0.35f));
-        }
+                appendGridLine (snap->vertices, x0, yTop, x1, yTop, true, sampleRamp (sev, 0.10f));
+                appendGridLine (snap->vertices, x0, yMid, x1, yMid, true, PinkXP::ink);
+                appendGridLine (snap->vertices, x0, yBot, x1, yBot, true, sampleRamp (sev, 0.98f));
+            }
 
-        std::vector<float> gridLines, gridLabels;
-        gridFreqs (gridLines, gridLabels);
-        for (const float f : gridLines)
-        {
-            const float x = xForNorm (normFromFreq (f), plot);
-            appendLineSegment (snap->vertices, x, yTop, x, yBot, 0.5f, PinkXP::pink100.withAlpha (0.25f));
+            std::vector<float> gridLines, gridLabels;
+            gridFreqs (gridLines, gridLabels);
+            const bool darkBg = PinkXP::content.getPerceivedBrightness() < 0.5f;
+            const auto etchTickC = PinkXP::hl.interpolatedWith (PinkXP::ink, darkBg ? 0.25f : 0.40f)
+                                       .withAlpha (darkBg ? 0.36f : 0.28f);
+            const auto crtTickC  = PinkXP::sel.interpolatedWith (PinkXP::pink400, 0.40f).withAlpha (0.48f);
+            for (const float f : gridLines)
+            {
+                const float x = xForNorm (normFromFreq (f), plot);
+                appendGridLine (snap->vertices, x, yTop, x, yBot, false, PinkXP::pink300);
+                if (isChrome || isCrt)
+                {
+                    const float halfH = isCrt ? 3.0f : 2.5f;
+                    const float ty = (mode == Mode::pan) ? (yMid - halfH) : yTop;
+                    appendQuad (snap->vertices, { std::floor (x), ty, 1.0f, halfH * 2.0f },
+                                isCrt ? crtTickC : etchTickC);
+                }
+            }
         }
 
         const int bgCount = (int) snap->vertices.size() / 6 - bgStart;
@@ -476,39 +680,150 @@ void StereoMapModule::buildGlSnapshot()
                 const float cy = (float) plot.getCentreY();
                 const float halfH = (float) juce::jmax (1, plot.getHeight() / 2);
 
-                // 颜色梯度：L 侧 = accent（PinkXP::sel），R 侧 = accent2。
-                //   每侧明度随 strength 走色阶；横向由声像决定 accent/accent2 的混合比
-                //   —— 越靠上越接近 accent，越靠下越接近 accent2，中线是两者的混合。
                 const SideRamp leftRamp  = makeSideRamp (PinkXP::sel);
                 const SideRamp rightRamp = makeSideRamp (PinkXP::accent2);
 
-                for (int i = 0; i < n - 1; ++i)
+                if (visualStyle == VisualStyle::bars)
                 {
-                    const float t0 = (float) i / (float) (n - 1);
-                    const float t1 = (float) (i + 1) / (float) (n - 1);
+                    const int step = juce::jmax (2, n / juce::jmax (16, plot.getWidth() / 4));
+                    const float barW = juce::jmax (1.5f, (float) plot.getWidth() / (float) (n / step + 1) - (float) tokens.defaultCellGapPx);
+                    for (int i = 0; i < n; i += step)
+                    {
+                        const float t0  = (float) i / (float) (n - 1);
+                        const float x   = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
+                        const float pan = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
+                        const float s   = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+                        const float a   = std::pow (s, 0.92f);
+                        if (a < 0.02f) continue;
+                        const float y = cy - pan * halfH;
+                        float bx = x - barW * 0.5f;
+                        float bt = juce::jmin (cy, y);
+                        float bw = barW;
+                        float bh = juce::jmax (1.5f, std::abs (y - cy));
+                        if (pixelNodes)
+                        {
+                            bx = std::floor (bx);
+                            bt = std::floor (bt);
+                            bw = juce::jmax (1.0f, std::round (bw));
+                            bh = juce::jmax (2.0f, std::round (bh));
+                        }
+                        appendStyledBarCell (snap->vertices, { bx, bt, bw, bh },
+                                             stereoMapColour (leftRamp, rightRamp, pan, s).withAlpha (chromaKey ? juce::jmin (1.0f, a + 0.25f) : a * 0.88f),
+                                             true, 0.0f);
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < n - 1; ++i)
+                    {
+                        const float t0 = (float) i / (float) (n - 1);
+                        const float t1 = (float) (i + 1) / (float) (n - 1);
 
-                    const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
-                    const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
+                        const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
+                        const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
 
-                    const float panA = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
-                    const float panB = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) (i + 1)]);
-                    const float yA = cy - panA * halfH;
-                    const float yB = cy - panB * halfH;
+                        const float panA = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
+                        const float panB = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) (i + 1)]);
+                        const float yA = cy - panA * halfH;
+                        const float yB = cy - panB * halfH;
 
-                    const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
-                    const float a = std::pow (s, 0.92f);
-                    if (a < 0.02f)
-                        continue;
+                        const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+                        const float a = std::pow (s, 0.92f);
+                        if (a < 0.02f)
+                            continue;
 
-                    const float panSeg = 0.5f * (panA + panB);
-                    appendLineSegment (snap->vertices, xA, yA, xB, yB, 0.9f,
-                                       stereoMapColour (leftRamp, rightRamp, panSeg, s).withAlpha (a));
+                        const float panSeg = 0.5f * (panA + panB);
+                        const auto segCol = stereoMapColour (leftRamp, rightRamp, panSeg, s);
+                        if (visualStyle == VisualStyle::fill)
+                            appendFilledBand (snap->vertices, xA, yA, xB, yB, cy,
+                                              segCol.withAlpha (a * 0.42f * tokens.areaFillAlphaScale));
 
-                    if ((i % 3) == 0)
-                        appendDisc (snap->vertices, xA, yA, 1.15f,
-                                    stereoMapColour (leftRamp, rightRamp, panSeg,
-                                                     juce::jmin (1.0f, s + 0.20f)).withAlpha (a),
-                                    8);
+                        if (strokeGlow)
+                            appendLineSegment (snap->vertices, xA, yA, xB, yB, glowHalf,
+                                               segCol.withAlpha (a * tokens.strokeGlowAlpha));
+
+                        appendLineSegment (snap->vertices, xA, yA, xB, yB, strokeHalf, segCol.withAlpha (a));
+                        if (coreSheen)
+                            appendLineSegment (snap->vertices, xA, yA, xB, yB, sheenHalf,
+                                               segCol.interpolatedWith (juce::Colours::white, sheenWhMix).withAlpha (a * sheenAlpha));
+
+                        if (visualStyle == VisualStyle::curve && (i % 3) == 0)
+                        {
+                            const auto nodeCol = stereoMapColour (leftRamp, rightRamp, panSeg,
+                                                                  juce::jmin (1.0f, s + 0.20f)).withAlpha (chromaKey ? 1.0f : a);
+                            if (pixelNodes)
+                            {
+                                const float nx = std::floor (xA) - 1.0f;
+                                const float ny = std::floor (yA) - 1.0f;
+                                if (crtGlowNode)
+                                {
+                                    appendQuad (snap->vertices, { nx - 1.0f, ny - 1.0f, 5.0f, 5.0f },
+                                                nodeCol.withMultipliedAlpha (0.28f * tokens.glowIntensity));
+                                    appendQuad (snap->vertices, { nx - 1.0f, ny + 1.0f, 5.0f, 1.0f },
+                                                nodeCol.withMultipliedAlpha (0.55f));
+                                    appendQuad (snap->vertices, { nx + 1.0f, ny - 1.0f, 1.0f, 5.0f },
+                                                nodeCol.withMultipliedAlpha (0.55f));
+                                }
+                                appendQuad (snap->vertices, { nx, ny, 3.0f, 3.0f }, nodeCol);
+                                if (crtGlowNode)
+                                    appendQuad (snap->vertices, { nx + 1.0f, ny + 1.0f, 1.0f, 1.0f },
+                                                nodeCol.interpolatedWith (juce::Colours::white, 0.58f));
+                            }
+                            else if (isChrome)
+                            {
+                                // Millennium Chrome：精雕深切金属座圈 + OKLab 宝石芯 + 亮镜面中心销
+                                const float na = nodeCol.getFloatAlpha();
+                                appendDisc (snap->vertices, xA, yA, 2.05f,
+                                            PinkXP::dark.withAlpha (greenScreen ? 1.0f : na * 0.78f), 12);
+                                appendDisc (snap->vertices, xA, yA, 1.55f, nodeCol, 10);
+                                const float pinOff = greenScreen ? 0.0f : -0.25f;
+                                appendDisc (snap->vertices, xA + pinOff, yA + pinOff, 0.62f,
+                                            juce::Colours::white.withAlpha (greenScreen ? 1.0f : na * 0.88f), 8);
+                            }
+                            else if (isGlass)
+                            {
+                                // Frosted Glass：柔和晶莹水晶珠节点（柔光晕 + OKLab 水晶核 + 左上高光点）
+                                const float na = nodeCol.getFloatAlpha();
+                                if (! greenScreen)
+                                    appendDisc (snap->vertices, xA, yA, 2.10f, nodeCol.withAlpha (na * 0.18f), 10);
+                                appendDisc (snap->vertices, xA, yA, 1.48f, nodeCol, 10);
+                                if (! greenScreen)
+                                    appendDisc (snap->vertices, xA - 0.35f, yA - 0.35f, 0.55f,
+                                                juce::Colours::white.withAlpha (na * 0.74f), 8);
+                            }
+                            else if (isNeon)
+                            {
+                                // Neon Cyber：发光霓虹空心环节点 + 炽白中心点
+                                const float na = nodeCol.getFloatAlpha();
+                                if (neonGlowNode)
+                                    appendDisc (snap->vertices, xA, yA, 2.95f,
+                                                nodeCol.withMultipliedAlpha (0.30f * tokens.glowIntensity), 10);
+                                appendDisc (snap->vertices, xA, yA, 1.80f, nodeCol, 10);
+                                if (! greenScreen)
+                                    appendDisc (snap->vertices, xA, yA, 0.98f, PinkXP::dark.withAlpha (na * 0.90f), 8);
+                                appendDisc (snap->vertices, xA, yA, 0.52f,
+                                            nodeCol.interpolatedWith (juce::Colours::white, 0.72f), 8);
+                            }
+                            else
+                            {
+                                appendDisc (snap->vertices, xA, yA, 1.35f, nodeCol, 10);
+                            }
+                        }
+                    }
+                }
+
+                if (peakHoldEnabled && (int) peakPanByBand.size() == n)
+                {
+                    std::vector<juce::Point<float>> pkPts;
+                    pkPts.reserve ((size_t) n);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const float px = juce::jmap ((float) i / (float) (n - 1), (float) plot.getX(), (float) plot.getRight());
+                        const float py = cy - juce::jlimit (-1.0f, 1.0f, peakPanByBand[(size_t) i]) * halfH;
+                        pkPts.push_back ({ px, py });
+                    }
+                    appendStyledPolyline (snap->vertices, pkPts.data(), (int) pkPts.size(),
+                                          PinkXP::ink.withAlpha (0.55f), 1.1f);
                 }
 
                 const int count = (int) snap->vertices.size() / 6 - start;
@@ -518,8 +833,6 @@ void StereoMapModule::buildGlSnapshot()
         }
         else
         {
-            // MONO 模式：面积图（倒置）。基线在**顶部**，曲线越往下 = 抵消越严重，
-            //   顶部贴边 = 完全兼容。颜色仍走抵消色阶（红 = 严重）。
             const int n = (int) cancelByBand.size();
             if (n > 1)
             {
@@ -528,29 +841,81 @@ void StereoMapModule::buildGlSnapshot()
                 const float baseY = (float) plot.getY() + 1.0f;
                 const float spanH = (float) juce::jmax (1, plot.getHeight() - 1);
 
-                for (int i = 0; i < n - 1; ++i)
+                if (visualStyle == VisualStyle::bars)
                 {
-                    const float t0 = (float) i / (float) (n - 1);
-                    const float t1 = (float) (i + 1) / (float) (n - 1);
-                    const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
-                    const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
+                    const int step = juce::jmax (2, n / juce::jmax (16, plot.getWidth() / 4));
+                    const float barW = juce::jmax (1.5f, (float) plot.getWidth() / (float) (n / step + 1) - (float) tokens.defaultCellGapPx);
+                    for (int i = 0; i < n; i += step)
+                    {
+                        const float t0 = (float) i / (float) (n - 1);
+                        const float x  = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
+                        const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
+                        const float s  = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+                        const float a  = std::pow (s, 0.88f);
+                        if (a < 0.02f) continue;
+                        float bx = x - barW * 0.5f;
+                        float by = baseY;
+                        float bw = barW;
+                        float bh = juce::jmax (1.5f, cA * spanH);
+                        if (pixelNodes)
+                        {
+                            bx = std::floor (bx);
+                            by = std::floor (by);
+                            bw = juce::jmax (1.0f, std::round (bw));
+                            bh = juce::jmax (2.0f, std::round (bh));
+                        }
+                        appendStyledBarCell (snap->vertices, { bx, by, bw, bh },
+                                             sampleRamp (sev, cA).withAlpha (chromaKey ? juce::jmin (1.0f, a + 0.25f) : a * 0.82f),
+                                             true, 0.0f);
+                    }
+                }
+                else
+                {
+                    const float fillAlpha = ((visualStyle == VisualStyle::fill) ? 0.68f : 0.45f) * tokens.areaFillAlphaScale;
+                    for (int i = 0; i < n - 1; ++i)
+                    {
+                        const float t0 = (float) i / (float) (n - 1);
+                        const float t1 = (float) (i + 1) / (float) (n - 1);
+                        const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
+                        const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
 
-                    // cancelByBand 存真实值，绘制前换算成显示值（满幅 = 50% 抵消）
-                    const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
-                    const float cB = cancelToDisplay (cancelByBand[(size_t) (i + 1)]);
-                    const float yA = baseY + cA * spanH;
-                    const float yB = baseY + cB * spanH;
+                        const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
+                        const float cB = cancelToDisplay (cancelByBand[(size_t) (i + 1)]);
+                        const float yA = baseY + cA * spanH;
+                        const float yB = baseY + cB * spanH;
 
-                    const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
-                    const float a = std::pow (s, 0.88f);
-                    if (a < 0.02f)
-                        continue;
+                        const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+                        const float a = std::pow (s, 0.88f);
+                        if (a < 0.02f)
+                            continue;
 
-                    const juce::Colour col = sampleRamp (sev, 0.5f * (cA + cB));
-                    appendFilledBand (snap->vertices, xA, yA, xB, yB, baseY,
-                                      col.withAlpha (a * 0.45f));
-                    appendLineSegment (snap->vertices, xA, yA, xB, yB, 0.9f,
-                                       col.withAlpha (juce::jmin (1.0f, a * 1.25f)));
+                        const juce::Colour col = sampleRamp (sev, 0.5f * (cA + cB));
+                        appendFilledBand (snap->vertices, xA, yA, xB, yB, baseY,
+                                          col.withAlpha (a * fillAlpha));
+                        const float lineA = juce::jmin (1.0f, a * 1.25f);
+                        if (strokeGlow)
+                            appendLineSegment (snap->vertices, xA, yA, xB, yB, glowHalf,
+                                               col.withAlpha (lineA * tokens.strokeGlowAlpha));
+                        appendLineSegment (snap->vertices, xA, yA, xB, yB, strokeHalf,
+                                           col.withAlpha (lineA));
+                        if (coreSheen)
+                            appendLineSegment (snap->vertices, xA, yA, xB, yB, sheenHalf,
+                                               col.interpolatedWith (juce::Colours::white, sheenWhMix).withAlpha (lineA * sheenAlpha));
+                    }
+                }
+
+                if (peakHoldEnabled && (int) peakCancelByBand.size() == n)
+                {
+                    std::vector<juce::Point<float>> pkPts;
+                    pkPts.reserve ((size_t) n);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const float px = juce::jmap ((float) i / (float) (n - 1), (float) plot.getX(), (float) plot.getRight());
+                        const float py = baseY + cancelToDisplay (peakCancelByBand[(size_t) i]) * spanH;
+                        pkPts.push_back ({ px, py });
+                    }
+                    appendStyledPolyline (snap->vertices, pkPts.data(), (int) pkPts.size(),
+                                          PinkXP::ink.withAlpha (0.62f), 1.1f);
                 }
 
                 const int count = (int) snap->vertices.size() / 6 - start;
@@ -572,60 +937,66 @@ void StereoMapModule::paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> ca
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
         return;
 
-    if (mode == Mode::pan)
+    // 绿幕：隐藏所有静态坐标轴/频率标签（悬停标尺仍保留）
+    if (! PinkXP::isChromaKeySkin() && showLabels)
     {
-        // L / R 标签沿用曲线的侧向配色（取样色阶靠"亮"端，保证在浅色画布上可读），
-        //   让"哪条颜色代表左/右"不需要图例也能读出来。
-        const juce::Colour labelL = sampleRamp (makeSideRamp (PinkXP::sel),     0.72f);
-        const juce::Colour labelR = sampleRamp (makeSideRamp (PinkXP::accent2), 0.72f);
+        if (mode == Mode::pan)
+        {
+            const juce::Colour labelL = sampleRamp (makeSideRamp (PinkXP::sel),     0.72f);
+            const juce::Colour labelR = sampleRamp (makeSideRamp (PinkXP::accent2), 0.72f);
 
-        g.setFont (PinkXP::getAxisFont (10.0f, juce::Font::bold));
-        g.setColour (labelL.withAlpha (0.85f));
-        g.drawText (y2k::tr ("L"), plot.getX() - 18, plot.getY() - 2, 14, 12, juce::Justification::centredRight, false);
-        g.setColour (PinkXP::ink.withAlpha (0.72f));
-        g.drawText (y2k::tr ("C"), plot.getX() - 18, plot.getCentreY() - 6, 14, 12, juce::Justification::centredRight, false);
-        g.setColour (labelR.withAlpha (0.85f));
-        g.drawText (y2k::tr ("R"), plot.getX() - 18, plot.getBottom() - 10, 14, 12, juce::Justification::centredRight, false);
-    }
-    else
-    {
-        // MONO 模式纵轴已倒置：刻度是"单声道保留量"（= 1 - 真实抵消量），
-        //   顶 = 100%（没有抵消）/ 中 = 75% / 底 = 50%（抵消达到满幅标定）。
-        const SideRamp sev = makeSeverityRamp();
-
-        g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
-
-        g.setColour (sampleRamp (sev, 0.10f).withAlpha (0.80f));
-        g.drawText (y2k::tr ("100%"), plot.getX() - 25, plot.getY() - 5, 24, 11,
-                    juce::Justification::centredRight, false);
-        g.setColour (PinkXP::ink.withAlpha (0.62f));
-        g.drawText (y2k::tr ("75%"), plot.getX() - 25, plot.getCentreY() - 5, 24, 11,
-                    juce::Justification::centredRight, false);
-        g.setColour (sampleRamp (sev, 0.90f).withAlpha (0.85f));
-        g.drawText (y2k::tr ("50%"), plot.getX() - 25, plot.getBottom() - 6, 24, 11,
-                    juce::Justification::centredRight, false);
-    }
-
-    g.setColour (PinkXP::ink.withAlpha (0.58f));
-    g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
-    std::vector<float> gridLines, gridLabels;
-    gridFreqs (gridLines, gridLabels);
-    for (const float f : gridLabels)
-    {
-        const float x = xForNorm (normFromFreq (f), plot);
-        juce::String label;
-        if (f >= 1000.0f)
-            label = juce::String (f / 1000.0f, (f == 1000.0f || f == 20000.0f) ? 0 : 1) + "k";
+            g.setFont (PinkXP::getAxisFont (10.0f, juce::Font::bold));
+            g.setColour (labelL.withAlpha (0.85f));
+            g.drawText (y2k::tr ("L"), plot.getX() - 18, plot.getY() - 2, 14, 12, juce::Justification::centredRight, false);
+            g.setColour (PinkXP::ink.withAlpha (0.72f));
+            g.drawText (y2k::tr ("C"), plot.getX() - 18, plot.getCentreY() - 6, 14, 12, juce::Justification::centredRight, false);
+            g.setColour (labelR.withAlpha (0.85f));
+            g.drawText (y2k::tr ("R"), plot.getX() - 18, plot.getBottom() - 10, 14, 12, juce::Justification::centredRight, false);
+        }
         else
-            label = juce::String ((int) f);
+        {
+            const SideRamp sev = makeSeverityRamp();
+            const int midPct = juce::roundToInt ((1.0f - cancelFullScale * 0.5f) * 100.0f);
+            const int botPct = juce::roundToInt ((1.0f - cancelFullScale) * 100.0f);
 
-        g.drawText (y2k::tr (label),
-                    juce::roundToInt (x) - 14,
-                    plot.getBottom() + 2,
-                    28,
-                    12,
-                    juce::Justification::centred,
-                    false);
+            g.setFont (PinkXP::getAxisFont (8.0f, juce::Font::plain));
+
+            g.setColour (sampleRamp (sev, 0.10f).withAlpha (0.80f));
+            g.drawText (y2k::tr ("100%"), plot.getX() - 25, plot.getY() - 5, 24, 11,
+                        juce::Justification::centredRight, false);
+            g.setColour (PinkXP::ink.withAlpha (0.62f));
+            g.drawText (juce::String (midPct) + "%", plot.getX() - 25, plot.getCentreY() - 5, 24, 11,
+                        juce::Justification::centredRight, false);
+            g.setColour (sampleRamp (sev, 0.90f).withAlpha (0.85f));
+            g.drawText (juce::String (botPct) + "%", plot.getX() - 25, plot.getBottom() - 6, 24, 11,
+                        juce::Justification::centredRight, false);
+        }
+
+        g.setColour (PinkXP::ink.withAlpha (0.58f));
+        g.setFont (PinkXP::getAxisFont (9.0f, juce::Font::plain));
+        std::vector<float> gridLines, gridLabels;
+        gridFreqs (gridLines, gridLabels);
+        int lastDrawnX = -9999;
+        for (const float f : gridLabels)
+        {
+            const float x = xForNorm (normFromFreq (f), plot);
+            const int ix = juce::roundToInt (x);
+            if (ix - lastDrawnX < 24) continue;
+            lastDrawnX = ix;
+            juce::String label;
+            if (f >= 1000.0f)
+                label = juce::String (f / 1000.0f, (std::fmod (f, 1000.0f) < 1.0f) ? 0 : 1) + "k";
+            else
+                label = juce::String ((int) f);
+
+            g.drawText (y2k::tr (label),
+                        ix - 14,
+                        plot.getBottom() + 2,
+                        28,
+                        12,
+                        juce::Justification::centred,
+                        false);
+        }
     }
 
     // 悬停标尺：paintGlOverlay 同时服务 GL 接管态与 CPU 回退态
@@ -735,14 +1106,10 @@ juce::String StereoMapModule::makeCoordReadout (juce::Point<int> pos, juce::Rect
 
     juce::String text = PinkXP::formatFreqHz (freq) + "  " + yText;
 
-    // 按住（子弹时间）时补音名：曲线慢下来，读数才对得上这个频点的音高
-    //   （与 Spectrum 的悬停读数同一套口径）
-    if (bulletTimeActive)
-    {
-        const juce::String note = PinkXP::noteNameForHz (freq);
-        if (note.isNotEmpty())
-            text += "  " + note;
-    }
+    // 悬停即显示当前频率坐标对应的音名
+    const juce::String note = PinkXP::noteNameForHz (freq);
+    if (note.isNotEmpty())
+        text += "  " + note;
 
     return text;
 }
@@ -804,59 +1171,109 @@ void StereoMapModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 {
     const auto canvas = canvasBounds();
     const auto plot   = getPlotBounds (canvas);
-    const juce::String readout = makeDataReadout (hit.pos.x, plot);
-    if (readout.isNotEmpty())
-        ctx.bubble (hit.pos.translated (0.0f, -22.0f), readout, ToyRole::Reward);
+    if (plot.getWidth() < 8 || plot.getHeight() < 8)
+        return;
+
+    juce::Component::SafePointer<StereoMapModule> safe (this);
+    auto isSlowMo = [safe]() -> bool
+    {
+        return safe != nullptr && safe->bulletTimeActive;
+    };
+
+    ctx.addModuleActorCapped (
+        makeStereoMapBeamActor (hit.pos, plot, mode == Mode::cancel, std::move (isSlowMo)),
+        6);
 }
 
 void StereoMapModule::drawBackground (juce::Graphics& g, juce::Rectangle<int> canvas) const
 {
-    PinkXP::drawSunken (g, canvas, PinkXP::content);
+    if (PinkXP::isTransparentBackdrop())
+        return;
+    if (PinkXP::isGreenScreenBackdrop())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (canvas);
+        return;
+    }
+
+    PinkXP::Craft::drawPanelWell (g, canvas, PinkXP::content, PinkXP::WellKind::canvas);
+    if (! showGrid)
+        return;
 
     const auto plot = getPlotBounds (canvas);
     if (plot.getWidth() <= 8 || plot.getHeight() <= 8)
         return;
+
+    const float x0 = (float) plot.getX();
+    const float x1 = (float) plot.getRight();
+    const float yTop = (float) plot.getY();
+    const float yMid = (float) plot.getCentreY();
+    const float yBot = (float) plot.getBottom();
 
     if (mode == Mode::pan)
     {
         const SideRamp edgeL = makeSideRamp (PinkXP::sel);
         const SideRamp edgeR = makeSideRamp (PinkXP::accent2);
 
-        g.setColour (sampleRamp (edgeL, 0.62f).withAlpha (0.38f));
-        g.drawHorizontalLine (plot.getY(), (float) plot.getX(), (float) plot.getRight());
-        g.setColour (sampleRamp (edgeR, 0.62f).withAlpha (0.38f));
-        g.drawHorizontalLine (plot.getBottom(), (float) plot.getX(), (float) plot.getRight());
+        PinkXP::Craft::drawGridLine (g, x0, yTop, x1, yTop, true, sampleRamp (edgeL, 0.62f));
+        PinkXP::Craft::drawGridLine (g, x0, yBot, x1, yBot, true, sampleRamp (edgeR, 0.62f));
     }
     else
     {
         const SideRamp sev = makeSeverityRamp();
 
         // 倒置后：顶 = 兼容（色阶低端）/ 底 = 满幅抵消（色阶高端）
-        g.setColour (sampleRamp (sev, 0.10f).withAlpha (0.42f));
-        g.drawHorizontalLine (plot.getY(), (float) plot.getX(), (float) plot.getRight());
-        g.setColour (sampleRamp (sev, 0.98f).withAlpha (0.35f));
-        g.drawHorizontalLine (plot.getBottom(), (float) plot.getX(), (float) plot.getRight());
+        PinkXP::Craft::drawGridLine (g, x0, yTop, x1, yTop, true, sampleRamp (sev, 0.10f));
+        PinkXP::Craft::drawGridLine (g, x0, yBot, x1, yBot, true, sampleRamp (sev, 0.98f));
     }
 
-    g.setColour (PinkXP::ink.withAlpha (0.35f));
-    g.drawHorizontalLine (plot.getCentreY(), (float) plot.getX(), (float) plot.getRight());
+    PinkXP::Craft::drawGridLine (g, x0, yMid, x1, yMid, true, PinkXP::ink);
 
-    g.setColour (PinkXP::pink100.withAlpha (0.25f));
     std::vector<float> bgLines, bgLabels;
     gridFreqs (bgLines, bgLabels);
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool isChrome = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+    const bool isCrt    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const bool darkBg   = PinkXP::content.getPerceivedBrightness() < 0.5f;
+    const auto etchTickC = PinkXP::hl.interpolatedWith (PinkXP::ink, darkBg ? 0.25f : 0.40f)
+                               .withAlpha (darkBg ? 0.36f : 0.28f);
+    const auto crtTickC  = PinkXP::sel.interpolatedWith (PinkXP::pink400, 0.40f).withAlpha (0.48f);
     for (const float f : bgLines)
     {
         const float x = xForNorm (normFromFreq (f), plot);
-        g.drawVerticalLine (juce::roundToInt (x), (float) plot.getY(), (float) plot.getBottom());
+        PinkXP::Craft::drawGridLine (g, x, yTop, x, yBot, false, PinkXP::pink300);
+        if (isChrome || isCrt)
+        {
+            const float halfH = isCrt ? 3.0f : 2.5f;
+            const float ty = (mode == Mode::pan) ? (yMid - halfH) : yTop;
+            g.setColour (isCrt ? crtTickC : etchTickC);
+            g.fillRect (std::floor (x), ty, 1.0f, halfH * 2.0f);
+        }
     }
 }
 
 void StereoMapModule::drawCurve (juce::Graphics& g, juce::Rectangle<int> plot) const
 {
+    const auto& tokens = PinkXP::getSkinTokens();
+    const bool chromaKey   = tokens.isChromaKey;
+    const bool greenScreen = PinkXP::isGreenScreenBackdrop();
+    const bool pixelNodes  = tokens.pixelSnapped;
+    const bool isChrome    = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+    const bool isGlass     = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+    const bool isNeon      = (tokens.frameStyle == PinkXP::FrameStyle::neonTube);
+    const bool isCrt       = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const bool coreSheen   = (isChrome || isGlass || isNeon || isCrt) && ! greenScreen;
+    const float sheenWhMix = isNeon ? 0.62f : (isGlass ? 0.46f : (isCrt ? 0.50f : 0.54f));
+    const float sheenAlpha = isNeon ? 0.72f : (isCrt ? 0.64f : (isGlass ? 0.42f : 0.52f));
+    const bool strokeGlow  = tokens.strokeGlowPass && ! greenScreen && tokens.strokeGlowAlpha > 0.0f;
+    const bool crtGlowNode = isCrt && ! greenScreen && tokens.glowIntensity > 0.0f;
+    const bool neonGlowNode = isNeon && ! greenScreen && tokens.glowIntensity > 0.0f;
+    const float lineW  = 1.25f * tokens.strokeWidthScale;
+    const float glowW  = lineW * juce::jmax (1.25f, tokens.strokeGlowWidthMul);
+    const float sheenW = juce::jmax (0.55f, lineW * 0.36f);
+
     if (mode == Mode::cancel)
     {
-        // MONO 模式（CPU 回退）：与 GL 路径一致的倒置面积图（基线在顶部，
-        //   曲线越往下 = 抵消越严重）
         const int n = (int) cancelByBand.size();
         if (n <= 1)
             return;
@@ -865,36 +1282,91 @@ void StereoMapModule::drawCurve (juce::Graphics& g, juce::Rectangle<int> plot) c
         const float baseY = (float) plot.getY() + 1.0f;
         const float spanH = (float) juce::jmax (1, plot.getHeight() - 1);
 
-        for (int i = 0; i < n - 1; ++i)
+        if (visualStyle == VisualStyle::bars)
         {
-            const float t0 = (float) i / (float) (n - 1);
-            const float t1 = (float) (i + 1) / (float) (n - 1);
-            const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
-            const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
+            const int step = juce::jmax (2, n / juce::jmax (16, plot.getWidth() / 4));
+            const float barW = juce::jmax (1.5f, (float) plot.getWidth() / (float) (n / step + 1) - (float) tokens.defaultCellGapPx);
+            for (int i = 0; i < n; i += step)
+            {
+                const float x  = juce::jmap ((float) i / (float) (n - 1), (float) plot.getX(), (float) plot.getRight());
+                const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
+                const float s  = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+                const float a  = std::pow (s, 0.88f);
+                if (a < 0.02f) continue;
+                float bx = x - barW * 0.5f;
+                float by = baseY;
+                float bw = barW;
+                float bh = juce::jmax (1.5f, cA * spanH);
+                if (pixelNodes)
+                {
+                    bx = std::floor (bx);
+                    by = std::floor (by);
+                    bw = juce::jmax (1.0f, std::round (bw));
+                    bh = juce::jmax (2.0f, std::round (bh));
+                }
+                PinkXP::Craft::drawMeterCell (g, juce::Rectangle<float> (bx, by, bw, bh),
+                                              sampleRamp (sev, cA).withAlpha (chromaKey ? juce::jmin (1.0f, a + 0.25f) : a * 0.82f),
+                                              true, 0.0f);
+            }
+        }
+        else
+        {
+            const float fillAlpha = ((visualStyle == VisualStyle::fill) ? 0.68f : 0.45f) * tokens.areaFillAlphaScale;
+            for (int i = 0; i < n - 1; ++i)
+            {
+                const float t0 = (float) i / (float) (n - 1);
+                const float t1 = (float) (i + 1) / (float) (n - 1);
+                const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
+                const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
 
-            const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
-            const float cB = cancelToDisplay (cancelByBand[(size_t) (i + 1)]);
-            const float yA = baseY + cA * spanH;
-            const float yB = baseY + cB * spanH;
+                const float cA = cancelToDisplay (cancelByBand[(size_t) i]);
+                const float cB = cancelToDisplay (cancelByBand[(size_t) (i + 1)]);
+                const float yA = baseY + cA * spanH;
+                const float yB = baseY + cB * spanH;
 
-            const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
-            const float a = std::pow (s, 0.88f);
-            if (a < 0.02f)
-                continue;
+                const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+                const float a = std::pow (s, 0.88f);
+                if (a < 0.02f)
+                    continue;
 
-            const juce::Colour col = sampleRamp (sev, 0.5f * (cA + cB));
+                const juce::Colour col = sampleRamp (sev, 0.5f * (cA + cB));
 
-            juce::Path p;
-            p.startNewSubPath (xA, baseY);
-            p.lineTo (xB, baseY);
-            p.lineTo (xB, yB);
-            p.lineTo (xA, yA);
-            p.closeSubPath();
+                juce::Path p;
+                p.startNewSubPath (xA, baseY);
+                p.lineTo (xB, baseY);
+                p.lineTo (xB, yB);
+                p.lineTo (xA, yA);
+                p.closeSubPath();
 
-            g.setColour (col.withAlpha (a * 0.45f));
-            g.fillPath (p);
-            g.setColour (col.withAlpha (juce::jmin (1.0f, a * 1.25f)));
-            g.drawLine (xA, yA, xB, yB, 1.1f);
+                g.setColour (col.withAlpha (a * fillAlpha));
+                g.fillPath (p);
+                const float lineA = juce::jmin (1.0f, a * 1.25f);
+                if (strokeGlow)
+                {
+                    g.setColour (col.withAlpha (lineA * tokens.strokeGlowAlpha));
+                    g.drawLine (xA, yA, xB, yB, glowW);
+                }
+                g.setColour (col.withAlpha (lineA));
+                g.drawLine (xA, yA, xB, yB, lineW);
+                if (coreSheen)
+                {
+                    g.setColour (col.interpolatedWith (juce::Colours::white, sheenWhMix).withAlpha (lineA * sheenAlpha));
+                    g.drawLine (xA, yA, xB, yB, sheenW);
+                }
+            }
+        }
+
+        if (peakHoldEnabled && (int) peakCancelByBand.size() == n)
+        {
+            juce::Path pkPath;
+            for (int i = 0; i < n; ++i)
+            {
+                const float px = juce::jmap ((float) i / (float) (n - 1), (float) plot.getX(), (float) plot.getRight());
+                const float py = baseY + cancelToDisplay (peakCancelByBand[(size_t) i]) * spanH;
+                if (i == 0) pkPath.startNewSubPath (px, py);
+                else        pkPath.lineTo (px, py);
+            }
+            PinkXP::Craft::drawStyledStroke (g, pkPath, PinkXP::ink.withAlpha (0.62f), 1.0f);
         }
         return;
     }
@@ -906,91 +1378,259 @@ void StereoMapModule::drawCurve (juce::Graphics& g, juce::Rectangle<int> plot) c
     const float cy = (float) plot.getCentreY();
     const float halfH = (float) juce::jmax (1, plot.getHeight() / 2);
 
-    // 与 GL 路径同一套颜色梯度（L = accent / R = accent2）。
     const SideRamp leftRamp  = makeSideRamp (PinkXP::sel);
     const SideRamp rightRamp = makeSideRamp (PinkXP::accent2);
 
-    for (int i = 0; i < n - 1; ++i)
+    if (visualStyle == VisualStyle::bars)
     {
-        const float t0 = (float) i / (float) (n - 1);
-        const float t1 = (float) (i + 1) / (float) (n - 1);
-        const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
-        const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
-        const float panA = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
-        const float panB = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) (i + 1)]);
-        const float yA = cy - panA * halfH;
-        const float yB = cy - panB * halfH;
+        const int step = juce::jmax (2, n / juce::jmax (16, plot.getWidth() / 4));
+        const float barW = juce::jmax (1.5f, (float) plot.getWidth() / (float) (n / step + 1) - (float) tokens.defaultCellGapPx);
+        for (int i = 0; i < n; i += step)
+        {
+            const float x   = juce::jmap ((float) i / (float) (n - 1), (float) plot.getX(), (float) plot.getRight());
+            const float pan = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
+            const float s   = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+            const float a   = std::pow (s, 0.92f);
+            if (a < 0.02f) continue;
+            const float y = cy - pan * halfH;
+            float bx = x - barW * 0.5f;
+            float bt = juce::jmin (cy, y);
+            float bw = barW;
+            float bh = juce::jmax (1.5f, std::abs (y - cy));
+            if (pixelNodes)
+            {
+                bx = std::floor (bx);
+                bt = std::floor (bt);
+                bw = juce::jmax (1.0f, std::round (bw));
+                bh = juce::jmax (2.0f, std::round (bh));
+            }
+            PinkXP::Craft::drawMeterCell (g, juce::Rectangle<float> (bx, bt, bw, bh),
+                                          stereoMapColour (leftRamp, rightRamp, pan, s).withAlpha (chromaKey ? juce::jmin (1.0f, a + 0.25f) : a * 0.88f),
+                                          true, 0.0f);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < n - 1; ++i)
+        {
+            const float t0 = (float) i / (float) (n - 1);
+            const float t1 = (float) (i + 1) / (float) (n - 1);
+            const float xA = juce::jmap (t0, (float) plot.getX(), (float) plot.getRight());
+            const float xB = juce::jmap (t1, (float) plot.getX(), (float) plot.getRight());
+            const float panA = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
+            const float panB = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) (i + 1)]);
+            const float yA = cy - panA * halfH;
+            const float yB = cy - panB * halfH;
 
-        const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
-        const float a = std::pow (s, 0.92f);
-        if (a < 0.02f)
-            continue;
+            const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+            const float a = std::pow (s, 0.92f);
+            if (a < 0.02f)
+                continue;
 
-        g.setColour (stereoMapColour (leftRamp, rightRamp, 0.5f * (panA + panB), s).withAlpha (a));
-        g.drawLine (xA, yA, xB, yB, 1.1f);
+            const auto col = stereoMapColour (leftRamp, rightRamp, 0.5f * (panA + panB), s);
+            if (visualStyle == VisualStyle::fill)
+            {
+                juce::Path p;
+                p.startNewSubPath (xA, cy);
+                p.lineTo (xB, cy);
+                p.lineTo (xB, yB);
+                p.lineTo (xA, yA);
+                p.closeSubPath();
+                g.setColour (col.withAlpha (a * 0.42f * tokens.areaFillAlphaScale));
+                g.fillPath (p);
+            }
+            if (strokeGlow)
+            {
+                g.setColour (col.withAlpha (a * tokens.strokeGlowAlpha));
+                g.drawLine (xA, yA, xB, yB, glowW);
+            }
+            g.setColour (col.withAlpha (a));
+            g.drawLine (xA, yA, xB, yB, lineW);
+            if (coreSheen)
+            {
+                g.setColour (col.interpolatedWith (juce::Colours::white, sheenWhMix).withAlpha (a * sheenAlpha));
+                g.drawLine (xA, yA, xB, yB, sheenW);
+            }
+        }
+
+        if (visualStyle == VisualStyle::curve)
+        {
+            for (int i = 0; i < n; i += 3)
+            {
+                const float t = (float) i / (float) (n - 1);
+                const float x = juce::jmap (t, (float) plot.getX(), (float) plot.getRight());
+                const float pan = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
+                const float y = cy - pan * halfH;
+                const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
+                const float a = std::pow (s, 0.92f);
+                if (a < 0.03f)
+                    continue;
+                const auto nodeCol = stereoMapColour (leftRamp, rightRamp, pan,
+                                                      juce::jmin (1.0f, s + 0.20f)).withAlpha (chromaKey ? 1.0f : a);
+                if (pixelNodes)
+                {
+                    const float nx = std::floor (x) - 1.0f;
+                    const float ny = std::floor (y) - 1.0f;
+                    if (crtGlowNode)
+                    {
+                        g.setColour (nodeCol.withMultipliedAlpha (0.28f * tokens.glowIntensity));
+                        g.fillRect (nx - 1.0f, ny - 1.0f, 5.0f, 5.0f);
+                        g.setColour (nodeCol.withMultipliedAlpha (0.55f));
+                        g.fillRect (nx - 1.0f, ny + 1.0f, 5.0f, 1.0f);
+                        g.fillRect (nx + 1.0f, ny - 1.0f, 1.0f, 5.0f);
+                    }
+                    g.setColour (nodeCol);
+                    g.fillRect (nx, ny, 3.0f, 3.0f);
+                    if (crtGlowNode)
+                    {
+                        g.setColour (nodeCol.interpolatedWith (juce::Colours::white, 0.58f));
+                        g.fillRect (nx + 1.0f, ny + 1.0f, 1.0f, 1.0f);
+                    }
+                }
+                else if (isChrome)
+                {
+                    const float na = nodeCol.getFloatAlpha();
+                    g.setColour (PinkXP::dark.withAlpha (greenScreen ? 1.0f : na * 0.78f));
+                    g.fillEllipse (x - 2.05f, y - 2.05f, 4.10f, 4.10f);
+                    g.setColour (nodeCol);
+                    g.fillEllipse (x - 1.55f, y - 1.55f, 3.10f, 3.10f);
+                    const float pinOff = greenScreen ? 0.0f : -0.25f;
+                    g.setColour (juce::Colours::white.withAlpha (greenScreen ? 1.0f : na * 0.88f));
+                    g.fillEllipse (x + pinOff - 0.62f, y + pinOff - 0.62f, 1.24f, 1.24f);
+                }
+                else if (isGlass)
+                {
+                    const float na = nodeCol.getFloatAlpha();
+                    if (! greenScreen)
+                    {
+                        g.setColour (nodeCol.withAlpha (na * 0.18f));
+                        g.fillEllipse (x - 2.10f, y - 2.10f, 4.20f, 4.20f);
+                    }
+                    g.setColour (nodeCol);
+                    g.fillEllipse (x - 1.48f, y - 1.48f, 2.96f, 2.96f);
+                    if (! greenScreen)
+                    {
+                        g.setColour (juce::Colours::white.withAlpha (na * 0.74f));
+                        g.fillEllipse (x - 0.35f - 0.55f, y - 0.35f - 0.55f, 1.10f, 1.10f);
+                    }
+                }
+                else if (isNeon)
+                {
+                    const float na = nodeCol.getFloatAlpha();
+                    if (neonGlowNode)
+                    {
+                        g.setColour (nodeCol.withMultipliedAlpha (0.30f * tokens.glowIntensity));
+                        g.fillEllipse (x - 2.95f, y - 2.95f, 5.90f, 5.90f);
+                    }
+                    g.setColour (nodeCol);
+                    g.fillEllipse (x - 1.80f, y - 1.80f, 3.60f, 3.60f);
+                    if (! greenScreen)
+                    {
+                        g.setColour (PinkXP::dark.withAlpha (na * 0.90f));
+                        g.fillEllipse (x - 0.98f, y - 0.98f, 1.96f, 1.96f);
+                    }
+                    g.setColour (nodeCol.interpolatedWith (juce::Colours::white, 0.72f));
+                    g.fillEllipse (x - 0.52f, y - 0.52f, 1.04f, 1.04f);
+                }
+                else
+                {
+                    g.setColour (nodeCol);
+                    g.fillEllipse (x - 1.35f, y - 1.35f, 2.7f, 2.7f);
+                }
+            }
+        }
     }
 
-    for (int i = 0; i < n; i += 3)
+    if (peakHoldEnabled && (int) peakPanByBand.size() == n)
     {
-        const float t = (float) i / (float) (n - 1);
-        const float x = juce::jmap (t, (float) plot.getX(), (float) plot.getRight());
-        const float pan = juce::jlimit (-1.0f, 1.0f, panByBand[(size_t) i]);
-        const float y = cy - pan * halfH;
-        const float s = juce::jlimit (0.0f, 1.0f, strengthByBand[(size_t) i]);
-        const float a = std::pow (s, 0.92f);
-        if (a < 0.03f)
-            continue;
-        g.setColour (stereoMapColour (leftRamp, rightRamp, pan,
-                                      juce::jmin (1.0f, s + 0.20f)).withAlpha (a));
-        g.fillEllipse (x - 1.5f, y - 1.5f, 3.0f, 3.0f);
+        juce::Path pkPath;
+        for (int i = 0; i < n; ++i)
+        {
+            const float px = juce::jmap ((float) i / (float) (n - 1), (float) plot.getX(), (float) plot.getRight());
+            const float py = cy - juce::jlimit (-1.0f, 1.0f, peakPanByBand[(size_t) i]) * halfH;
+            if (i == 0) pkPath.startNewSubPath (px, py);
+            else        pkPath.lineTo (px, py);
+        }
+        PinkXP::Craft::drawStyledStroke (g, pkPath, PinkXP::ink.withAlpha (0.55f), 1.0f);
     }
 }
 
 void StereoMapModule::paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds)
 {
-    g.setColour (PinkXP::btnFace);
-    g.fillRect (contentBounds);
-
+    const auto& tokens = PinkXP::getSkinTokens();
     const auto canvas = canvasFromContent (contentBounds);
+
+    if (PinkXP::isTransparentBackdrop())
+    {
+        if (PinkXP::isChromaRevealed (*this))
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            g.excludeClipRegion (canvas);
+            g.setColour (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel
+                             ? PinkXP::btnFace
+                             : PinkXP::face);
+            g.fillRect (contentBounds);
+        }
+    }
+    else
+    {
+        const juce::Colour backdrop = PinkXP::isGreenScreenBackdrop()
+                                          ? PinkXP::chromaKeyGreen()
+                                          : (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel
+                                                 ? PinkXP::btnFace
+                                                 : PinkXP::face);
+        g.setColour (backdrop);
+        g.fillRect (contentBounds);
+    }
+
     drawBackground (g, canvas);
 
     const auto plot = getPlotBounds (canvas);
     cachedBandCount = juce::jmax (64, plot.getWidth());
     drawCurve (g, plot);
 
+    PinkXP::Craft::drawCanvasFinishOverlay (g, canvas);
     paintGlOverlay (g, canvas);
 }
 
 float StereoMapModule::freqAt (float norm01) const noexcept
 {
     return (float) y2k::fscale::fromUnit (fftScale, (double) juce::jlimit (0.0f, 1.0f, norm01),
-                                          (double) kMinFreq, (double) kMaxFreq);
+                                          (double) activeMinFreqHz(), (double) activeMaxFreqHz());
 }
 
 float StereoMapModule::normFromFreq (float freqHz) const noexcept
 {
-    return (float) y2k::fscale::toUnit (fftScale, (double) freqHz, (double) kMinFreq, (double) kMaxFreq);
+    return (float) y2k::fscale::toUnit (fftScale, (double) freqHz,
+                                        (double) activeMinFreqHz(), (double) activeMaxFreqHz());
 }
 
-// 纵向网格线 + 底部标签的频率：Log 下与旧版逐项一致（线 100/1k/10k，标签 20/100/1k/10k/20k）
 void StereoMapModule::gridFreqs (std::vector<float>& lines, std::vector<float>& labels) const
 {
-    switch (fftScale)
+    const float fLo = activeMinFreqHz();
+    const float fHi = activeMaxFreqHz();
+    lines.clear();
+    labels.clear();
+
+    auto filterLines = [&] (std::initializer_list<float> src)
     {
-        case y2k::fscale::Scale::mel:
-            lines  = { 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f };
-            labels = { 20.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f };
-            break;
-        case y2k::fscale::Scale::linear:
-            lines  = { 5000.0f, 10000.0f, 15000.0f };
-            labels = { 20.0f, 5000.0f, 10000.0f, 15000.0f, 20000.0f };
-            break;
-        case y2k::fscale::Scale::log:
-        default:
-            lines  = { 100.0f, 1000.0f, 10000.0f };
-            labels = { 20.0f, 100.0f, 1000.0f, 10000.0f, 20000.0f };
-            break;
-    }
+        for (float f : src)
+            if (f > fLo * 1.02f && f < fHi * 0.98f)
+                lines.push_back (f);
+    };
+
+    if (freqRange == FreqRange::bass)
+        filterLines ({ 50.0f, 100.0f, 200.0f, 500.0f });
+    else if (fftScale == y2k::fscale::Scale::mel)
+        filterLines ({ 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f });
+    else if (fftScale == y2k::fscale::Scale::linear)
+        filterLines ({ 2000.0f, 5000.0f, 10000.0f, 15000.0f });
+    else
+        filterLines ({ 100.0f, 1000.0f, 10000.0f });
+
+    labels.push_back (fLo);
+    for (float f : lines) labels.push_back (f);
+    labels.push_back (fHi);
 }
 
 float StereoMapModule::xForNorm (float norm01, juce::Rectangle<int> plot) noexcept
@@ -1020,19 +1660,18 @@ float StereoMapModule::panForY (float y, juce::Rectangle<int> plot) noexcept
 //   轴值 = 单声道保留量 = 1 - 真实抵消量
 //   顶边 = 1.00（没有抵消），底边 = 1 - kCancelFullScale（抵消达到满幅标定）
 //   所以从上到下读数是 100% → 75% → 50%，与曲线高度一致。
-float StereoMapModule::compatForY (float y, juce::Rectangle<int> plot) noexcept
+float StereoMapModule::compatForY (float y, juce::Rectangle<int> plot) const noexcept
 {
     const float h = (float) juce::jmax (1, plot.getHeight() - 1);
     const float display = juce::jlimit (0.0f, 1.0f,
                                         ((float) y - (float) plot.getY() - 1.0f) / h);
 
-    return 1.0f - display * kCancelFullScale;
+    return 1.0f - display * cancelFullScale;
 }
 
-// 真实抵消量 → 显示值：抵消一半（kCancelFullScale）即顶到天花板。
-float StereoMapModule::cancelToDisplay (float cancel) noexcept
+float StereoMapModule::cancelToDisplay (float cancel) const noexcept
 {
-    return juce::jlimit (0.0f, 1.0f, cancel / kCancelFullScale);
+    return juce::jlimit (0.0f, 1.0f, cancel / juce::jmax (0.1f, cancelFullScale));
 }
 
 juce::String StereoMapModule::formatPan (float pan)

@@ -59,7 +59,6 @@ juce::String moduleTypeNameById(int id)
     // ID = ModuleType 枚举序数（顺序必须与 ModuleWorkspace.h 的 enum 完全一致）
     switch (id)
     {
-        case 0:  return "eq";
         case 1:  return "loudness";
         case 2:  return "oscilloscope";
         case 3:  return "spectrum";

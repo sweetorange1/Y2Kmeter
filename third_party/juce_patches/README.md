@@ -18,6 +18,7 @@
 | 0006 | `juce_OpenGLContext.h/.cpp`、`juce_OpenGLRenderer.h` | `OpenGLContext::takeRenderStats()`：渲染线程分段耗时（sleep / 锁等待 / renderOpenGL / paintComponent / 合成 / swap / 重绘面积）；`OpenGLRenderer::renderOpenGLPreLock()`（仅 Windows 调用）：在拿消息锁之前执行，Editor 用它在锁外渲染 projectM，让消息线程与 GL 并行 | Win 性能优化 |
 | 0007 | `juce_OpenGLGraphicsContext.cpp` | 渐变填充的颜色表纹理按"颜色停靠点"复用，并挂在 OpenGLContext 的关联对象上跨帧保留（原实现每次换填充都重新生成并上传 256×1 纹理，每帧还会删光重建）。全平台生效 | v3.4.x（性能） |
 | 0008 | `juce_OpenGLContext.h/.cpp` | 新增 `OpenGLContext::triggerRepaintPacedToDisplay()`：显式出帧请求也走 0005 的按刷新合并（mac）；其它平台等同 `triggerRepaint()`。Milkdrop 嵌入态逐帧出帧请求改用它 | v3.4.x（mac 性能） |
+| 0009 | `juce_OpenGL_windows.h` | 像素格式启用 `PFD_SUPPORT_COMPOSITION` 并在 `wglChoosePixelFormatARB` 中优选带 Alpha 位且支持 DWM 合成的格式，支撑 Windows 真透明模式（`BackdropMode::transparent`）硬件 Alpha 合成 | v3.5.0（Win 透明性能） |
 
 ## 升级 JUCE 时
 

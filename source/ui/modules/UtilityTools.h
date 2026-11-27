@@ -56,6 +56,12 @@ namespace y2k::util
         // 主题 / 语言切换后调用（TextEditor 等缓存了颜色 / 字体的子控件需要刷新）
         virtual void   themeChanged() { repaint(); }
 
+        // 绿幕下可独立保留的数据区（工具本地坐标；空表示未悬停时整体隐入绿幕）
+        virtual juce::Rectangle<int> getChromaKeyRect() const { return {}; }
+
+        // 透明模式未悬停时隐藏交互子控件（按钮/输入框等），悬停或退出透明模式时恢复
+        virtual void setBackdropChromeHidden (bool hidden) { juce::ignoreUnused (hidden); }
+
         std::function<void()> onStateChanged;
 
     protected:

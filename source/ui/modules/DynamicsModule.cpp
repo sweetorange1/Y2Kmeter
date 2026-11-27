@@ -4,6 +4,7 @@
 #include "source/ui/modules/MeterWidgets.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 #include "source/ui/toys/ToyKit.h"
 #include "source/analysis/AnalyserHub.h"
 
@@ -34,10 +35,27 @@ DynamicsModule::DynamicsModule(AnalyserHub& h)
     bRmsR .label = "RMS R";
 
     crestHist.assign ((size_t) crestHistLen, 0.0f);
+
+    themeSubToken = PinkXP::subscribeThemeChanged ([this]()
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            drValueCache_[i] = {};
+            drValueText_[i].clear();
+            drValueTime_[i] = 0.0;
+        }
+        repaint();
+    });
 }
 
 DynamicsModule::~DynamicsModule()
 {
+    if (themeSubToken >= 0)
+    {
+        PinkXP::unsubscribeThemeChanged (themeSubToken);
+        themeSubToken = -1;
+    }
+
     hub.removeFrameListener(this);
     hub.release(AnalyserHub::Kind::Dynamics);
 }
@@ -56,6 +74,10 @@ juce::ValueTree DynamicsModule::saveModuleSpecificState() const
     s.setProperty ("itemHist",    items.hist,    nullptr);
     s.setProperty ("style",       (int) readoutStyle, nullptr);
     s.setProperty ("histSpan",    (double) histSpanSec, nullptr);
+    s.setProperty ("barFloorDb",  (double) barFloorDb, nullptr);
+    s.setProperty ("peakHold",    showPeakHold, nullptr);
+    s.setProperty ("histStyle",   histStyle, nullptr);
+    s.setProperty ("histMaxDb",   (double) histMaxDb, nullptr);
     return s;
 }
 
@@ -87,6 +109,14 @@ void DynamicsModule::restoreModuleSpecificState (const juce::ValueTree& state)
                                                               : ReadoutStyle::bigDigits;
     if (state.hasProperty ("histSpan"))
         histSpanSec = juce::jlimit (1.0f, kMaxSpanSec, (float) (double) state.getProperty ("histSpan"));
+    if (state.hasProperty ("barFloorDb"))
+        barFloorDb = juce::jlimit (-72.0f, -36.0f, (float) (double) state.getProperty ("barFloorDb"));
+    if (state.hasProperty ("peakHold"))
+        showPeakHold = (bool) state.getProperty ("peakHold");
+    if (state.hasProperty ("histStyle"))
+        histStyle = juce::jlimit (0, 1, (int) state.getProperty ("histStyle"));
+    if (state.hasProperty ("histMaxDb"))
+        histMaxDb = juce::jlimit (15.0f, 40.0f, (float) (double) state.getProperty ("histMaxDb"));
 
     layoutContent (getContentBounds());
     refreshControlPanel();
@@ -108,13 +138,29 @@ void DynamicsModule::buildParamDefs (std::vector<ParamDef>& out) const
     out.push_back (ParamDef::toggle ("itemHist", "Crest history graph",
         "Scrolling graph of the crest factor over time.").in ("Show"));
 
+    out.push_back (ParamDef::choice ("barFloorDb", "Meter floor",
+        { "-72 dB", "-60 dB", "-48 dB", "-36 dB" },
+        "Lowest level shown at the bottom of the Peak and RMS bars.")
+        .in ("Level bars").when ([this] { return items.barCount() > 0; }));
+    out.push_back (ParamDef::toggle ("peakHold", "Peak hold line",
+        "Show the slowly falling peak-hold marker on the level bars.")
+        .in ("Level bars").when ([this] { return items.barCount() > 0; }));
+
     out.push_back (ParamDef::choice ("style", "DR readout style",
         { "Big digits", "Bars + digits" },
         "Big digits: large numbers that fill the cell. Bars + digits: smaller numbers with a progress bar.")
         .in ("Style").when ([this] { return items.drCount() > 0; }));
+
     out.push_back (ParamDef::slider ("histSpan", "History span", 1.0, kMaxSpanSec, 1.0, " s",
         "How much time the crest history graph covers.")
-        .in ("Style").when ([this] { return items.hist; }));
+        .in ("History").when ([this] { return items.hist; }));
+    out.push_back (ParamDef::choice ("histStyle", "History style",
+        { "Filled", "Curve" },
+        "Filled: shaded area under the crest curve. Curve: clean line only.")
+        .in ("History").when ([this] { return items.hist; }));
+    out.push_back (ParamDef::slider ("histMaxDb", "Crest max", 15.0, 40.0, 5.0, " dB",
+        "Top of the vertical crest scale. Lower zooms in on squashed masters; higher fits sharp transients.")
+        .in ("History").when ([this] { return items.hist; }));
 }
 
 double DynamicsModule::getParamValue (const juce::String& id) const
@@ -125,8 +171,18 @@ double DynamicsModule::getParamValue (const juce::String& id) const
     if (id == "itemDrInt")   return items.drInteg ? 1.0 : 0.0;
     if (id == "itemCrest")   return items.crest ? 1.0 : 0.0;
     if (id == "itemHist")    return items.hist ? 1.0 : 0.0;
+    if (id == "barFloorDb")
+    {
+        if (barFloorDb <= -66.0f) return 0.0;
+        if (barFloorDb <= -54.0f) return 1.0;
+        if (barFloorDb <= -42.0f) return 2.0;
+        return 3.0;
+    }
+    if (id == "peakHold")    return showPeakHold ? 1.0 : 0.0;
     if (id == "style")       return (double) (int) readoutStyle;
     if (id == "histSpan")    return (double) histSpanSec;
+    if (id == "histStyle")   return (double) histStyle;
+    if (id == "histMaxDb")   return (double) histMaxDb;
     return 0.0;
 }
 
@@ -141,6 +197,19 @@ void DynamicsModule::setParamValue (const juce::String& id, double v)
     else if (id == "itemDrInt")   it.drInteg = on;
     else if (id == "itemCrest")   it.crest = on;
     else if (id == "itemHist")    it.hist = on;
+    else if (id == "barFloorDb")
+    {
+        static constexpr float kFloors[4] = { -72.0f, -60.0f, -48.0f, -36.0f };
+        barFloorDb = kFloors[juce::jlimit (0, 3, juce::roundToInt (v))];
+        repaint();
+        return;
+    }
+    else if (id == "peakHold")
+    {
+        showPeakHold = on;
+        repaint();
+        return;
+    }
     else if (id == "style")
     {
         readoutStyle = juce::roundToInt (v) == 1 ? ReadoutStyle::barReadout : ReadoutStyle::bigDigits;
@@ -150,6 +219,18 @@ void DynamicsModule::setParamValue (const juce::String& id, double v)
     else if (id == "histSpan")
     {
         histSpanSec = juce::jlimit (1.0f, kMaxSpanSec, (float) v);
+        repaint();
+        return;
+    }
+    else if (id == "histStyle")
+    {
+        histStyle = juce::jlimit (0, 1, juce::roundToInt (v));
+        repaint();
+        return;
+    }
+    else if (id == "histMaxDb")
+    {
+        histMaxDb = juce::jlimit (15.0f, 40.0f, (float) v);
         repaint();
         return;
     }
@@ -315,17 +396,89 @@ void DynamicsModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
     switch (hit.kind)
     {
         case 1:
-            ctx.addModuleActor (makeCoinPopActor (hit.pos));
-            ctx.bubble (hit.pos.translated (0.0f, -24.0f), "PK / RMS", ToyRole::Reward);
+        {
+            // 精确定位被点击的单根 Peak / RMS 柱体（与 drawMeterGroup 同口径）
+            const int barCount = items.barCount();
+            if (barCount <= 0 || areaMeters.isEmpty())
+                return;
+            constexpr int gap = 4;
+            constexpr int labelH = 14;
+            const auto barRow = areaMeters.withTrimmedBottom (labelH);
+            const int barW = juce::jmax (8, (barRow.getWidth() - gap * (barCount - 1)) / barCount);
+            int idx = juce::jlimit (0, barCount - 1,
+                (int) std::floor ((hit.pos.x - (float) barRow.getX()) / (float) (barW + gap)));
+            const juce::Rectangle<float> barRect ((float) (barRow.getX() + idx * (barW + gap)),
+                                                  (float) barRow.getY(),
+                                                  (float) barW,
+                                                  (float) barRow.getHeight());
+            const bool isRmsBar = items.rms && (! items.peak || idx >= 2);
+            const juce::Colour col = isRmsBar ? PinkXP::accent2 : PinkXP::sel;
+            ctx.addModuleActorCapped (makeMeterBarLaunchActor (barRect, hit.pos.y, col), 6);
             break;
+        }
         case 2:
-            ctx.addModuleActor (makeSquashActor (hit.pos));
-            ctx.bubble (hit.pos.translated (0.0f, -24.0f), "DYNAMIC RANGE", ToyRole::Reward);
+        {
+            // 精确定位被点击的 DR 读数子框（兼容 bigDigits / barReadout 两种样式）
+            const int n = items.drCount();
+            if (n <= 0 || areaDr.isEmpty())
+                return;
+            juce::Rectangle<int> cell = areaDr;
+            if (readoutStyle == ReadoutStyle::barReadout)
+            {
+                auto a = areaDr;
+                const int h = juce::jmax (44, a.getHeight() / n - 3);
+                for (int slot = 0; slot < n; ++slot)
+                {
+                    const bool last = (slot == n - 1);
+                    auto c = last ? a : a.removeFromTop (h);
+                    if (! last) a.removeFromTop (3);
+                    if (c.contains (hit.pos.toInt()) || last) { cell = c; break; }
+                }
+            }
+            else
+            {
+                const auto inner = areaDr.reduced (6);
+                const int rowH = juce::jmax (1, inner.getHeight() / n);
+                const int slot = juce::jlimit (0, n - 1, (int) ((hit.pos.y - (float) inner.getY()) / (float) rowH));
+                cell = { inner.getX(), inner.getY() + slot * rowH, inner.getWidth(), rowH };
+            }
+            ctx.addModuleActorCapped (makeCompressorClampActor (cell.toFloat(), hit.pos), 6);
             break;
+        }
         default:
-            ctx.addModuleActor (makeCrestBallActor (hit.pos));
-            ctx.bubble (hit.pos.translated (0.0f, -20.0f), "CREST", ToyRole::Orb);
+        {
+            // 采样当前 Crest 历史折线（与 drawCrestBand 同口径）供双荧光光珠冲浪
+            const auto inner = areaCrest.reduced (4);
+            const auto plot  = inner.withTrimmedTop (14);
+            if (plot.getWidth() < 8 || plot.getHeight() < 8)
+                return;
+
+            constexpr int kBins = 96;
+            std::vector<float> curveY ((size_t) kBins, (float) plot.getBottom());
+            const int N = juce::jlimit (8, crestHistLen, juce::roundToInt (histSpanSec * (float) kHistRate));
+            const juce::int64 winStartAbs = (juce::int64) crestHistTotal - (juce::int64) N;
+            auto ringAt = [this] (juce::int64 absIdx) noexcept
+            {
+                if (absIdx < 0) return 0.0f;
+                return crestHist[(size_t) (absIdx % (juce::int64) crestHistLen)];
+            };
+
+            const float h = (float) plot.getHeight();
+            for (int i = 0; i < kBins; ++i)
+            {
+                const juce::int64 s0 = winStartAbs + (juce::int64) std::llround ((double) i / (double) kBins * (double) N);
+                const juce::int64 s1 = juce::jmax (s0 + 1, winStartAbs + (juce::int64) std::llround ((double) (i + 1) / (double) kBins * (double) N));
+                const juce::int64 a0 = juce::jmax (s0, winStartAbs);
+                const juce::int64 a1 = juce::jmin (s1, (juce::int64) crestHistTotal);
+                float v = 0.0f;
+                for (juce::int64 a = a0; a < a1; ++a)
+                    v = juce::jmax (v, ringAt (a));
+                const float norm = juce::jlimit (0.0f, 1.0f, v / histMaxDb);
+                curveY[(size_t) i] = (float) plot.getBottom() - norm * h;
+            }
+            ctx.addModuleActorCapped (makeCrestSurferActor (hit.pos, plot, curveY), 6);
             break;
+        }
     }
 }
 
@@ -334,8 +487,52 @@ void DynamicsModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
 // ----------------------------------------------------------
 void DynamicsModule::paintContent(juce::Graphics& g, juce::Rectangle<int> content)
 {
-    g.setColour(PinkXP::btnFace);
-    g.fillRect(content);
+    const auto& tokens = PinkXP::getSkinTokens();
+    if (PinkXP::isGreenScreenBackdrop())
+    {
+        g.setColour (PinkXP::chromaKeyGreen());
+        g.fillRect (content);
+    }
+    else if (! PinkXP::isTransparentBackdrop())
+    {
+        if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.05f : 0.11f),
+                                       0.0f, (float) content.getY(),
+                                       PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.06f : 0.04f),
+                                       0.0f, (float) content.getBottom(), false);
+            grad.addColour (0.38, PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.03f : 0.06f));
+            grad.addColour (0.52, PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.03f : 0.02f));
+            g.setGradientFill (grad);
+            g.fillRect (content);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            juce::ColourGradient grad (PinkXP::face.interpolatedWith (juce::Colours::white, isDark ? 0.06f : 0.15f),
+                                       0.0f, (float) content.getY(),
+                                       PinkXP::face.interpolatedWith (juce::Colours::black, isDark ? 0.05f : 0.03f),
+                                       0.0f, (float) content.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRect (content);
+        }
+        else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube
+                 || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+        {
+            const bool isDark = PinkXP::face.getPerceivedBrightness() < 0.45f;
+            const float darken = (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+                                     ? (isDark ? 0.16f : 0.07f)
+                                     : (isDark ? 0.10f : 0.03f);
+            g.setColour (PinkXP::face.interpolatedWith (juce::Colours::black, darken));
+            g.fillRect (content);
+        }
+        else
+        {
+            g.setColour (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel ? PinkXP::btnFace : PinkXP::face);
+            g.fillRect (content);
+        }
+    }
 
     drawMeterGroup(g, areaMeters);
     if (readoutStyle == ReadoutStyle::barReadout) drawDrReadouts (g, areaDr);
@@ -388,10 +585,10 @@ void DynamicsModule::drawHoverRuler(juce::Graphics& g)
                   / juce::jmax(1, plot.getWidth());
     const float timeSec = (t - 1.0f) * histSpanSec;
 
-    // Y → crest 值（0 ~ 30 dB）
+    // Y → crest 值（0 ~ histMaxDb dB）
     const float norm = juce::jlimit(0.0f, 1.0f,
         (float)(plot.getBottom() - hoverPos.y) / juce::jmax(1, plot.getHeight()));
-    const float crestDb = norm * 30.0f;
+    const float crestDb = norm * histMaxDb;
 
     const juce::String readout = juce::String(timeSec, 1) + " s  "
                                + juce::String(crestDb, 1) + " dB";
@@ -433,39 +630,75 @@ void DynamicsModule::drawMeterGroup(juce::Graphics& g, juce::Rectangle<int> area
 
 void DynamicsModule::drawSingleBar(juce::Graphics& g, juce::Rectangle<int> r, const MeterBar& bar) const
 {
-    PinkXP::drawSunken(g, r, PinkXP::content.darker(0.05f));
+    const auto& tokens = PinkXP::getSkinTokens();
+    PinkXP::Craft::drawPanelWell (g, r, PinkXP::content.darker (0.05f), PinkXP::WellKind::trough);
     auto inner = r.reduced(3);
     if (inner.getWidth() <= 0 || inner.getHeight() <= 0) return;
 
-    const int cellH = 4;
-    const int cellGap = 1;
-    const int step = cellH + cellGap;
-    const int rows = juce::jmax(1, (inner.getHeight() + cellGap) / step);
+    const int cellH   = 4;
+    const int cellGap = (tokens.defaultCellGapPx > 1 && inner.getHeight() >= 64) ? tokens.defaultCellGapPx : 1;
+    const int step    = cellH + cellGap;
+    const int rows    = juce::jmax(1, (inner.getHeight() + cellGap) / step);
 
     const float norm = dbToNorm(bar.smoothed);
     const int litRows = (int) std::round(norm * rows);
 
     for (int row = 0; row < rows; ++row)
     {
-        // row=0 在屏幕顶部（高电平区）→ 0 dB → 红色；row=rows-1 → -60 dB → 绿色
+        // row=0 在屏幕顶部（高电平区）→ 0 dB → 红色；row=rows-1 → barFloorDb → 绿色
         const float rowNorm = (float) row / (float) juce::jmax(1, rows - 1);
-        const float rowDb   = juce::jmap(rowNorm, 0.0f, 1.0f, 0.0f, -60.0f);
+        const float rowDb   = juce::jmap(rowNorm, 0.0f, 1.0f, 0.0f, barFloorDb);
         const bool  lit     = (rows - 1 - row) < litRows;
 
         const int y = inner.getY() + row * step;
         const auto base = dbToColour(rowDb);
-        g.setColour(lit ? base : base.withAlpha(0.15f));
-        g.fillRect(inner.getX(), y, inner.getWidth(), cellH);
+        PinkXP::Craft::drawMeterCell (g, juce::Rectangle<int> (inner.getX(), y, inner.getWidth(), cellH), base, lit);
     }
 
     // 峰值保持线
-    const float peakNorm = dbToNorm(bar.peakHold);
-    const int   peakY = inner.getBottom() - (int) std::round(peakNorm * inner.getHeight());
-    if (peakY >= inner.getY() && peakY <= inner.getBottom())
+    if (showPeakHold)
     {
-        g.setColour(dbToColour(bar.peakHold).brighter(0.2f));
-        g.fillRect(inner.getX(), peakY - 1, inner.getWidth(), 2);
+        const float peakNorm = dbToNorm(bar.peakHold);
+        const int   peakY = inner.getBottom() - (int) std::round(peakNorm * inner.getHeight());
+        if (peakY >= inner.getY() && peakY <= inner.getBottom())
+        {
+            const auto peakCol = dbToColour(bar.peakHold).brighter(0.2f);
+            const juce::Rectangle<int> peakRect (inner.getX(), peakY - 1, inner.getWidth(), 2);
+            if (tokens.peakCapGlow && ! PinkXP::isGreenScreenBackdrop())
+            {
+                g.setColour (peakCol.withAlpha (0.28f));
+                g.fillRect (peakRect.expanded (1));
+            }
+            g.setColour (peakCol);
+            if (! tokens.hardPixelSteps && tokens.barCellRadius > 0.5f)
+            {
+                g.fillRoundedRectangle (peakRect.toFloat(), juce::jmin (1.0f, tokens.barCellRadius * 0.5f));
+                if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass && ! PinkXP::isGreenScreenBackdrop())
+                {
+                    g.setColour (juce::Colours::white.withAlpha (0.48f));
+                    g.fillRect ((float) peakRect.getX() + 0.5f, (float) peakRect.getY(),
+                                juce::jmax (1.0f, (float) peakRect.getWidth() - 1.0f), 1.0f);
+                }
+                else if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+                {
+                    g.setColour (peakCol.interpolatedWith (juce::Colours::white, 0.58f));
+                    g.fillRect (peakRect.getX() + 1, peakRect.getY(), juce::jmax (1, peakRect.getWidth() - 2), 1);
+                }
+            }
+            else
+            {
+                g.fillRect (peakRect);
+                if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome
+                    || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+                {
+                    g.setColour (peakCol.interpolatedWith (juce::Colours::white, 0.55f));
+                    g.fillRect (peakRect.getX(), peakRect.getY(), peakRect.getWidth(), 1);
+                }
+            }
+        }
     }
+
+    PinkXP::Craft::drawCanvasFinishOverlay (g, r.reduced (2));
 }
 
 // ----------------------------------------------------------
@@ -475,7 +708,7 @@ void DynamicsModule::drawDrBigDigits(juce::Graphics& g, juce::Rectangle<int> are
 {
     if (area.isEmpty() || items.drCount() == 0) return;
 
-    PinkXP::drawSunken(g, area, PinkXP::content);
+    PinkXP::Craft::drawReadoutCard (g, area, PinkXP::content);
 
     auto inner = area.reduced(8);
     if (inner.getWidth() <= 0 || inner.getHeight() <= 0) return;
@@ -511,6 +744,12 @@ void DynamicsModule::drawDrBigDigits(juce::Graphics& g, juce::Rectangle<int> are
                 px *= (float) row.getWidth() / needW;
         }
         px = juce::jmin(px, (float) juce::jmax(6, row.getHeight() - 2));
+        {
+            const auto hProbe = PinkXP::getAxisFont (px, juce::Font::bold);
+            const float maxH  = (float) juce::jmax (6, row.getHeight());
+            if (hProbe.getHeight() > maxH && hProbe.getHeight() > 0.0f)
+                px *= maxH / hProbe.getHeight();
+        }
         px = juce::jmax(6.0f, px);
 
         const juce::String cacheKey = numText + "|" + juce::String(px, 1);
@@ -562,11 +801,63 @@ void DynamicsModule::drawDrBigDigits(juce::Graphics& g, juce::Rectangle<int> are
         }
     };
 
+    const auto& cardTokens = PinkXP::getSkinTokens();
+    const bool modernDividers = (cardTokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                                 || cardTokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+    const bool chromeDividers = (cardTokens.frameStyle == PinkXP::FrameStyle::machinedChrome
+                                 && ! cardTokens.isChromaKey);
+    const bool neonDividers   = (cardTokens.frameStyle == PinkXP::FrameStyle::neonTube
+                                 && ! cardTokens.isChromaKey);
+    const bool crtDividers    = (cardTokens.frameStyle == PinkXP::FrameStyle::crtPhosphor
+                                 && ! cardTokens.isChromaKey);
+    const bool isDarkCard     = PinkXP::content.getPerceivedBrightness() < 0.45f;
+
     static const char* titles[numDrRows] = { "DR SHORT", "DR INTEG", "CREST" };
     int slot = 0;
     for (int r = 0; r < numDrRows; ++r)
-        if (drRowEnabled (r))
-            drawRow (slot++, r, titles[r], drRowValue (r), "dB", 28.0f);
+    {
+        if (! drRowEnabled (r))
+            continue;
+        if (slot > 0)
+        {
+            if (chromeDividers)
+            {
+                const int divY = inner.getY() + slot * rowH - 2;
+                g.setColour (PinkXP::dark.withAlpha (isDarkCard ? 0.52f : 0.30f));
+                g.fillRect (inner.getX(), divY, inner.getWidth(), 1);
+                g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.55f)
+                                       .withAlpha (isDarkCard ? 0.22f : 0.62f));
+                g.fillRect (inner.getX(), divY + 1, inner.getWidth(), 1);
+            }
+            else if (neonDividers)
+            {
+                const int divY = inner.getY() + slot * rowH - 1;
+                if (! PinkXP::isGreenScreenBackdrop())
+                {
+                    g.setColour (PinkXP::sel.withAlpha (0.18f));
+                    g.fillRect (inner.getX(), divY - 1, inner.getWidth(), 3);
+                }
+                g.setColour (PinkXP::sel.withAlpha (0.58f));
+                g.fillRect (inner.getX(), divY, inner.getWidth(), 1);
+            }
+            else if (crtDividers)
+            {
+                const int divY = inner.getY() + slot * rowH - 1;
+                g.setColour (PinkXP::sel.withAlpha (0.44f));
+                g.fillRect (inner.getX(), divY, inner.getWidth(), 1);
+                g.fillRect (inner.getCentreX(), divY - 1, 1, 3);
+            }
+            else if (modernDividers)
+            {
+                const float divY = (float) (inner.getY() + slot * rowH) - 1.0f;
+                PinkXP::Craft::drawGridLine (g, (float) inner.getX(), divY, (float) inner.getRight(), divY,
+                                             false, PinkXP::ink);
+            }
+        }
+        drawRow (slot++, r, titles[r], drRowValue (r), "dB", 28.0f);
+    }
+
+    PinkXP::Craft::drawCanvasFinishOverlay (g, area.reduced (2));
 }
 
 // ----------------------------------------------------------
@@ -602,25 +893,47 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
 {
     if (area.isEmpty() || ! items.hist) return;
 
-    PinkXP::drawSunken(g, area, PinkXP::content);
-    auto inner = area.reduced(4);
+    const auto& tokens = PinkXP::getSkinTokens();
+    const auto wellKind = (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                           || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+                              ? PinkXP::WellKind::card
+                              : PinkXP::WellKind::canvas;
+    PinkXP::Craft::drawPanelWell (g, area, PinkXP::content, wellKind);
+    auto inner = area.reduced(6, 5);
     if (inner.getWidth() <= 4 || inner.getHeight() <= 4) return;
 
-    g.setColour(PinkXP::ink);
-    g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
-    PinkXP::drawCachedText(g, "CREST HISTORY", inner.withHeight(12), juce::Justification::topLeft,
-                           9.0f, juce::Font::bold, PinkXP::ink);
+    if (! tokens.isChromaKey)
+    {
+        const float titleAlpha = (tokens.frameStyle == PinkXP::FrameStyle::modernStudio) ? 0.72f : 0.90f;
+        g.setColour(PinkXP::ink.withAlpha(titleAlpha));
+        g.setFont(PinkXP::getFont(9.0f, juce::Font::bold));
+        PinkXP::drawCachedText(g, "CREST HISTORY", inner.withHeight(12), juce::Justification::topLeft,
+                               9.0f, juce::Font::bold, PinkXP::ink.withAlpha(titleAlpha));
+    }
 
     auto plot = inner.withTrimmedTop(14);
     if (plot.isEmpty()) return;
 
-    // 刻度线：0 / 10 / 20 / 30 dB
-    g.setColour(PinkXP::pink200.withAlpha(0.5f));
-    for (int db = 0; db <= 30; db += 10)
+    // 刻度线：每 10 dB 一条直到 histMaxDb（Pixel XP 像素点阵 / Modern 细线 / Chrome 刻蚀细线 / Neon 虚线 / CRT 准星 / 绿幕跳过）
+    const bool isChrome = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+    const bool isGlass  = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+    const bool isNeon   = (tokens.frameStyle == PinkXP::FrameStyle::neonTube);
+    const bool isCrt    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+    const int maxTick = (int) std::round(histMaxDb);
+    for (int db = 0; db <= maxTick; db += 10)
     {
-        const float t = 1.0f - (float) db / 30.0f;
-        const int y = plot.getY() + (int) std::round(t * plot.getHeight());
-        g.drawHorizontalLine(y, (float) plot.getX(), (float) plot.getRight());
+        const float t = 1.0f - (float) db / histMaxDb;
+        const float y = (float) plot.getY() + std::round(t * (float) plot.getHeight());
+        const bool major = (db == 0 || db == 20 || db == 40);
+        PinkXP::Craft::drawGridLine (g, (float) plot.getX(), y, (float) plot.getRight(), y,
+                                     major, (isNeon || isCrt) ? PinkXP::sel : PinkXP::pink500);
+        if ((isChrome || isCrt) && major && ! tokens.isChromaKey)
+        {
+            g.setColour (isCrt ? PinkXP::sel.withAlpha (0.65f) : PinkXP::ink.withAlpha (0.45f));
+            g.fillRect (plot.getX(), (int) y, 3, 1);
+            if (isCrt)
+                g.fillRect (plot.getRight() - 3, (int) y, 3, 1);
+        }
     }
 
     const int N = juce::jlimit (8, crestHistLen, juce::roundToInt (histSpanSec * (float) kHistRate));
@@ -629,11 +942,6 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
     const float h = (float) plot.getHeight();
 
     // ---- 列的相位锁定（与示波器抽点是同一类问题）----
-    //   旧实现把每列的样本区间钉在"窗口起点"上：窗口每推进 1 个样本，同一列
-    //   统计的样本集合就整体平移，峰值会在相邻列之间来回跳 —— 历史跨度调大
-    //   （每列覆盖十几个样本）时就是肉眼可见的"毛刺 + 闪烁"。
-    //   现在列边界钉在**绝对样本序号**上，整条曲线再按窗口左边缘的小数相位
-    //   平移：画面连续滚动，峰值不会再跳列。
     const float samplesPerCol = (float) N / (float) drawN;
     const juce::int64 winStartAbs = (juce::int64) crestHistTotal - (juce::int64) N;
     const double colPos = (double) winStartAbs / (double) juce::jmax (1.0e-6f, samplesPerCol);
@@ -647,46 +955,82 @@ void DynamicsModule::drawCrestBand(juce::Graphics& g, juce::Rectangle<int> area)
         return crestHist[(size_t) (absIdx % (juce::int64) crestHistLen)];
     };
 
+    // 全风格统一平滑抗锯齿曲线（Pixel XP 保持 0px Win95 卡片与像素网格，曲线自身不强行锯齿化）
     juce::Path path;
     bool started = false;
     for (int j = 0; j <= drawN; ++j)
     {
-        // 该绘制列对应的绝对样本区间 [bin*spc, (bin+1)*spc)
         const juce::int64 bin = firstBin + (juce::int64) j;
         const juce::int64 s0 = (juce::int64) std::llround ((double) bin * (double) samplesPerCol);
         const juce::int64 s1 = juce::jmax (s0 + 1, (juce::int64) std::llround ((double) (bin + 1) * (double) samplesPerCol));
 
-        // 只统计落在显示窗口内、且已经写入的部分
         const juce::int64 a0 = juce::jmax (s0, winStartAbs);
         const juce::int64 a1 = juce::jmin (s1, (juce::int64) crestHistTotal);
-        if (a1 <= a0) continue;   // 该列全部超出写入位置（右边缘的那半列）
+        if (a1 <= a0) continue;
 
         float v = 0.0f;
         for (juce::int64 a = a0; a < a1; ++a)
             v = juce::jmax (v, ringAt (a));
 
         const float x = (float) plot.getX() + ((float) j - frac) * pxPerCol;
-        const float norm = juce::jlimit(0.0f, 1.0f, v / 30.0f);
+        const float norm = juce::jlimit(0.0f, 1.0f, v / histMaxDb);
         const float y = (float) plot.getBottom() - norm * h;
 
         if (! started) { path.startNewSubPath(x, y); started = true; }
         else           path.lineTo(x, y);
     }
-    if (! started) return;
 
-    // 曲线向右会多出一列（子列偏移），统一裁到绘图区内
-    juce::Graphics::ScopedSaveState ss (g);
-    g.reduceClipRegion (plot);
+    if (started)
+    {
+        juce::Graphics::ScopedSaveState ss (g);
+        g.reduceClipRegion (plot);
 
-    juce::Path fill = path;
-    fill.lineTo((float) plot.getRight(),  (float) plot.getBottom());
-    fill.lineTo((float) plot.getX(),      (float) plot.getBottom());
-    fill.closeSubPath();
-    g.setColour(PinkXP::pink300.withAlpha(0.3f));
-    g.fillPath(fill);
+        if (histStyle == 0)
+        {
+            juce::Path fill = path;
+            fill.lineTo((float) plot.getRight(),  (float) plot.getBottom());
+            fill.lineTo((float) plot.getX(),      (float) plot.getBottom());
+            fill.closeSubPath();
 
-    g.setColour(PinkXP::pink500.withAlpha(0.4f));
-    g.strokePath(path, juce::PathStrokeType(2.5f));
-    g.setColour(PinkXP::pink600);
-    g.strokePath(path, juce::PathStrokeType(1.3f));
+            if (! PinkXP::isGreenScreenBackdrop()
+                && (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                    || isGlass || isChrome || isNeon || isCrt))
+            {
+                const auto topCol = isNeon ? PinkXP::sel : (isCrt ? PinkXP::pink500 : PinkXP::pink400);
+                const float topA  = isNeon   ? 0.34f
+                                  : isGlass  ? 0.32f
+                                  : isChrome ? 0.32f
+                                  : isCrt    ? 0.24f
+                                             : 0.28f;
+                juce::ColourGradient grad (topCol.withAlpha (topA * tokens.areaFillAlphaScale),
+                                           0.0f, (float) plot.getY(),
+                                           PinkXP::pink300.withAlpha (0.02f * tokens.areaFillAlphaScale),
+                                           0.0f, (float) plot.getBottom(), false);
+                if (isChrome || isGlass)
+                    grad.addColour (0.45, PinkXP::pink300.withAlpha (0.15f * tokens.areaFillAlphaScale));
+                else if (isNeon)
+                    grad.addColour (0.45, PinkXP::pink400.withAlpha (0.12f * tokens.areaFillAlphaScale));
+                g.setGradientFill (grad);
+            }
+            else
+            {
+                g.setColour(PinkXP::pink300.withAlpha(0.28f * tokens.areaFillAlphaScale));
+            }
+            g.fillPath(fill);
+        }
+
+        PinkXP::Craft::drawStyledStroke (g, path, PinkXP::pink600, (isChrome || isGlass) ? 1.6f : 1.5f);
+        if (isChrome || (isGlass && ! PinkXP::isGreenScreenBackdrop()))
+        {
+            const auto glintCol = PinkXP::pink600.interpolatedWith (juce::Colours::white, isGlass ? 0.68f : 0.62f)
+                                                 .withAlpha (PinkXP::isGreenScreenBackdrop() ? 0.60f : (isGlass ? 0.42f : 0.44f));
+            g.setColour (glintCol);
+            g.strokePath (path, juce::PathStrokeType (0.85f,
+                                                      juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded),
+                          juce::AffineTransform::translation (0.0f, -0.75f));
+        }
+    }
+
+    PinkXP::Craft::drawCanvasFinishOverlay (g, area.reduced (2));
 }

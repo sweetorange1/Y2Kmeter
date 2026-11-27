@@ -3,6 +3,7 @@
 #include "source/ui/modules/ScreenColourSampler.h"
 #include "source/i18n/Localisation.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 #include "source/ui/HoverHelp.h"
 
 #include <array>
@@ -43,7 +44,8 @@ namespace
         if (r.isEmpty() || text.isEmpty())
             return;
 
-        g.setFont (fitFont (text, (float) r.getWidth() - 2.0f, maxH, minH, flags));
+        g.setFont (PinkXP::fitFontToHeight (fitFont (text, (float) r.getWidth() - 2.0f, maxH, minH, flags),
+                                            (float) juce::jmax (1, r.getHeight())));
         g.drawText (text, r, j, true);
     }
 
@@ -52,14 +54,81 @@ namespace
         return PinkXP::readableInkOn (PinkXP::content);
     }
 
+    // 工具内嵌显示框：Modern / Glass 圆角卡片，Chrome 拉丝金属面板，CRT 0px 磷光终端卡片；Pixel XP / Neon 为凹槽
+    PinkXP::WellKind displayWellKind() noexcept
+    {
+        const auto fs = PinkXP::getSkinTokens().frameStyle;
+        return (fs == PinkXP::FrameStyle::modernStudio
+                || fs == PinkXP::FrameStyle::frostedGlass
+                || fs == PinkXP::FrameStyle::machinedChrome
+                || fs == PinkXP::FrameStyle::crtPhosphor)
+                   ? PinkXP::WellKind::card
+                   : PinkXP::WellKind::canvas;
+    }
+
+    // 仪器内水平分割线：Chrome 刻蚀 2px 金属沟槽 / Glass 柔透双细线 / Neon 发光激光线 / CRT 磷光线 / 其余走 Craft::drawGridLine
+    void drawInstrumentDivider (juce::Graphics& g, float x0, float y, float x1, juce::Colour fallbackInk)
+    {
+        const auto& tokens = PinkXP::getSkinTokens();
+        if (tokens.isChromaKey)
+            return;
+        const bool isDark = PinkXP::content.getPerceivedBrightness() < 0.45f;
+        if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+        {
+            g.setColour (PinkXP::dark.withAlpha (isDark ? 0.52f : 0.32f));
+            g.fillRect (x0, y, x1 - x0, 1.0f);
+            g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.55f)
+                                   .withAlpha (isDark ? 0.22f : 0.64f));
+            g.fillRect (x0, y + 1.0f, x1 - x0, 1.0f);
+            return;
+        }
+        if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+        {
+            g.setColour (isDark ? juce::Colours::white.withAlpha (0.16f)
+                                : juce::Colours::black.withAlpha (0.10f));
+            g.fillRect (x0, y, x1 - x0, 1.0f);
+            g.setColour (juce::Colours::white.withAlpha (isDark ? 0.05f : 0.45f));
+            g.fillRect (x0, y + 1.0f, x1 - x0, 1.0f);
+            return;
+        }
+        if (tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+        {
+            if (! PinkXP::isGreenScreenBackdrop())
+            {
+                g.setColour (PinkXP::sel.withAlpha (0.18f));
+                g.fillRect (x0, y - 1.0f, x1 - x0, 3.0f);
+            }
+            g.setColour (PinkXP::sel.withAlpha (0.62f));
+            g.fillRect (x0, y, x1 - x0, 1.0f);
+            return;
+        }
+        if (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+        {
+            g.setColour (PinkXP::sel.withAlpha (0.48f));
+            g.fillRect (x0, y, x1 - x0, 1.0f);
+            return;
+        }
+        PinkXP::Craft::drawGridLine (g, x0, y, x1, y, false, fallbackInk);
+    }
+
     void styleEditor (juce::TextEditor& ed, const juce::Font& font)
     {
         const auto fg = inkOnContent();
+        const auto& tokens = PinkXP::getSkinTokens();
+        const auto outline = (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                              || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+                                 ? PinkXP::skinHairlineOn (PinkXP::content, 0.24f)
+                             : (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome)
+                                 ? PinkXP::dark.withAlpha (0.68f)
+                             : (tokens.frameStyle == PinkXP::FrameStyle::neonTube
+                                || tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+                                 ? PinkXP::sel.withAlpha (0.58f)
+                                 : PinkXP::shdw;
 
         ed.setColour (juce::TextEditor::backgroundColourId, PinkXP::content);
         ed.setColour (juce::TextEditor::textColourId, fg);
         ed.setColour (juce::CaretComponent::caretColourId, fg);
-        ed.setColour (juce::TextEditor::outlineColourId, PinkXP::shdw);
+        ed.setColour (juce::TextEditor::outlineColourId, outline);
         ed.setColour (juce::TextEditor::focusedOutlineColourId, PinkXP::sel);
         ed.setColour (juce::TextEditor::highlightColourId, PinkXP::sel.withAlpha (0.45f));
         ed.setColour (juce::TextEditor::highlightedTextColourId, fg);
@@ -339,9 +408,19 @@ public:
         }
     }
 
+    juce::Rectangle<int> getChromaKeyRect() const override { return displayRect; }
+
+    void setBackdropChromeHidden (bool hidden) override
+    {
+        const float a = hidden ? 0.0f : 1.0f;
+        for (auto& b : buttons)
+            if (b != nullptr && std::abs (b->getAlpha() - a) > 0.001f)
+                b->setAlpha (a);
+    }
+
     void paint (juce::Graphics& g) override
     {
-        PinkXP::drawSunken (g, displayRect, PinkXP::content);
+        PinkXP::Craft::drawPanelWell (g, displayRect, PinkXP::content, displayWellKind());
         auto inner = displayRect.reduced (6, 4);
         const auto ink = inkOnContent();
 
@@ -360,8 +439,8 @@ public:
                 y -= lineH;
             }
 
-            g.setColour (ink.withAlpha (0.12f));
-            g.fillRect (inner.getX(), inner.getY() - 1, inner.getWidth(), 1);
+            drawInstrumentDivider (g, (float) inner.getX(), (float) (inner.getY() - 1),
+                                   (float) inner.getRight(), ink);
         }
 
         const int exprH = juce::jlimit (8, 13, inner.getHeight() / 3);
@@ -379,6 +458,8 @@ public:
         g.setColour (error ? PinkXP::danger : ink);
         drawFitted (g, error ? y2k::tr (errorText) : entry, inner, juce::Justification::centredRight,
                     (float) inner.getHeight() * 0.92f, 8.0f, juce::Font::bold);
+
+        PinkXP::Craft::drawCanvasFinishOverlay (g, displayRect.reduced (2));
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -592,8 +673,11 @@ public:
     void paint (juce::Graphics& g) override
     {
         const auto r = getLocalBounds();
-        if (active) PinkXP::drawPressed (g, r, PinkXP::btnFace);
-        else        PinkXP::drawRaised  (g, r, isMouseOver() ? PinkXP::btnFace.brighter (0.06f) : PinkXP::btnFace);
+        const auto state = ! isEnabled() ? PinkXP::ControlState::disabled
+                         : active        ? PinkXP::ControlState::pressed
+                         : isMouseOver() ? PinkXP::ControlState::hover
+                                         : PinkXP::ControlState::normal;
+        PinkXP::Craft::drawControlChrome (g, r, PinkXP::btnFace, state);
 
         auto inner = r.reduced (4, 2);
         if (active) inner.translate (1, 1);
@@ -727,12 +811,33 @@ public:
         infoRect = r;
     }
 
+    void setBackdropChromeHidden (bool hidden) override
+    {
+        if (chromeHidden == hidden)
+            return;
+        chromeHidden = hidden;
+        const float a = hidden ? 0.0f : 1.0f;
+        pickBtn.setAlpha (a);
+        copyBtn.setAlpha (a);
+        editBtn.setAlpha (a);
+        repaint();
+    }
+
     void paint (juce::Graphics& g) override
     {
+        if (chromeHidden)
+            return;
+
+        const auto& tokens   = PinkXP::getSkinTokens();
+        const bool chromaKey = tokens.isChromaKey;
+
+        const bool roundedSwatch = (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
+                                    || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+
         // ---- 色块 / 放大镜 ----
         if (picking && loupeValid)
         {
-            PinkXP::drawSunken (g, swatchRect, PinkXP::content);
+            PinkXP::Craft::drawPanelWell (g, swatchRect, PinkXP::content, displayWellKind());
             auto inner = swatchRect.reduced (2);
             const int n = kLoupeSize;
             const float cw = (float) inner.getWidth() / (float) n;
@@ -755,9 +860,25 @@ public:
             g.setColour (juce::Colours::white);
             g.drawRect (centre, 1.0f);
         }
+        else if (chromaKey)
+        {
+            g.setColour (current);
+            g.fillRect (swatchRect);
+        }
+        else if (roundedSwatch)
+        {
+            const auto rf  = swatchRect.toFloat();
+            const float rad = juce::jmin (tokens.cardRadius, juce::jmin (rf.getWidth(), rf.getHeight()) * 0.25f);
+            g.setColour (current);
+            g.fillRoundedRectangle (rf, rad);
+            g.setColour (PinkXP::skinHairlineOn (current, 0.24f));
+            g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+        }
         else
         {
-            PinkXP::drawSunken (g, swatchRect, current);
+            PinkXP::Craft::drawPanelWell (g, swatchRect, PinkXP::content, PinkXP::WellKind::recessed);
+            g.setColour (current);
+            g.fillRect (swatchRect.reduced (2));
         }
 
         // ---- 文本读数（点击任意一行复制该格式）----
@@ -774,10 +895,38 @@ public:
             lineRects[i] = { info.getX(), top + i * lineH, info.getWidth(), lineH };
             auto line = lineRects[i];
 
-            if (i == format)
+            if (i == format && ! chromaKey)
             {
-                g.setColour (PinkXP::pink500.withAlpha (0.14f));
-                g.fillRect (line);
+                if (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome
+                    || tokens.frameStyle == PinkXP::FrameStyle::neonTube)
+                {
+                    g.setColour (PinkXP::pink500.withAlpha (tokens.frameStyle == PinkXP::FrameStyle::neonTube ? 0.18f : 0.14f));
+                    g.fillRect (line);
+                    g.setColour (PinkXP::sel);
+                    g.fillRect (line.getX(), line.getY() + 1, 2, juce::jmax (1, line.getHeight() - 2));
+                }
+                else if (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor)
+                {
+                    g.setColour (PinkXP::sel.withAlpha (0.20f));
+                    g.fillRect (line);
+                    g.setColour (PinkXP::sel.withAlpha (0.58f));
+                    g.drawRect (line, 1);
+                }
+                else if (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass)
+                {
+                    const float rad = juce::jmin (4.0f, (float) line.getHeight() * 0.35f);
+                    g.setColour (PinkXP::pink500.withAlpha (0.16f));
+                    g.fillRoundedRectangle (line.toFloat(), rad);
+                    g.setColour (juce::Colours::white.withAlpha (0.30f));
+                    g.drawRoundedRectangle (line.toFloat().reduced (0.5f), juce::jmax (0.5f, rad - 0.5f), 0.8f);
+                }
+                else
+                {
+                    g.setColour (PinkXP::pink500.withAlpha (0.14f));
+                    const float rad = juce::jmin (tokens.badgeRadius, (float) line.getHeight() * 0.35f);
+                    if (rad > 0.5f) g.fillRoundedRectangle (line.toFloat(), rad);
+                    else            g.fillRect (line);
+                }
             }
 
             const int labelW = juce::jlimit (22, 40, line.getWidth() / 4);
@@ -814,7 +963,26 @@ public:
             for (int i = 0; i < history.size() && x + s <= historyRow.getRight(); ++i)
             {
                 const juce::Rectangle<int> sq (x, historyRow.getY(), s, s);
-                PinkXP::drawSunken (g, sq, history[i]);
+                if (chromaKey)
+                {
+                    g.setColour (history[i]);
+                    g.fillRect (sq);
+                }
+                else if (roundedSwatch)
+                {
+                    const auto rf   = sq.toFloat();
+                    const float rad = juce::jmin (3.5f, (float) s * 0.25f);
+                    g.setColour (history[i]);
+                    g.fillRoundedRectangle (rf, rad);
+                    g.setColour (PinkXP::skinHairlineOn (history[i], 0.25f));
+                    g.drawRoundedRectangle (rf.reduced (0.5f), rad, 1.0f);
+                }
+                else
+                {
+                    PinkXP::Craft::drawPanelWell (g, sq, PinkXP::content, PinkXP::WellKind::recessed);
+                    g.setColour (history[i]);
+                    g.fillRect (s >= 6 ? sq.reduced (2) : sq.reduced (1));
+                }
                 historyRects.add (sq);
                 x += s + 3;
             }
@@ -1038,6 +1206,7 @@ private:
     juce::Component::SafePointer<juce::ColourSelector> editorSel;
     juce::Colour editStartColour;
     bool editing = false;
+    bool chromeHidden = false;
 };
 
 // ==========================================================
@@ -1123,15 +1292,41 @@ public:
         lapsRect = r;
     }
 
+    juce::Rectangle<int> getChromaKeyRect() const override { return displayRect; }
+
+    void setBackdropChromeHidden (bool hidden) override
+    {
+        if (chromeHidden == hidden)
+            return;
+        chromeHidden = hidden;
+        const float a = hidden ? 0.0f : 1.0f;
+        startBtn.setAlpha (a);
+        lapBtn.setAlpha (a);
+        repaint();
+    }
+
     void paint (juce::Graphics& g) override
     {
-        PinkXP::drawSunken (g, displayRect, PinkXP::content);
+        PinkXP::Craft::drawReadoutCard (g, displayRect, PinkXP::content);
         g.setColour (inkOnContent());
         drawFitted (g, formatDuration (elapsedMs(), hundredths), displayRect.reduced (6, 4),
                     juce::Justification::centred, (float) displayRect.getHeight() * 0.7f, 8.0f, juce::Font::bold);
+        PinkXP::Craft::drawCanvasFinishOverlay (g, displayRect.reduced (2));
 
-        if (lapsRect.getHeight() < 10 || laps.empty())
+        if (chromeHidden || lapsRect.getHeight() < 10 || laps.empty())
             return;
+
+        {
+            const auto fs = PinkXP::getSkinTokens().frameStyle;
+            if (fs == PinkXP::FrameStyle::machinedChrome
+                || fs == PinkXP::FrameStyle::frostedGlass
+                || fs == PinkXP::FrameStyle::neonTube
+                || fs == PinkXP::FrameStyle::crtPhosphor)
+            {
+                drawInstrumentDivider (g, (float) lapsRect.getX(), (float) (lapsRect.getY() - 2),
+                                       (float) lapsRect.getRight(), PinkXP::ink);
+            }
+        }
 
         const int lineH = juce::jlimit (10, 16, lapsRect.getHeight() / 5);
         int y = lapsRect.getY();
@@ -1233,6 +1428,7 @@ private:
     double accumulated = 0.0;
     std::vector<double> laps;
     bool hundredths = true;
+    bool chromeHidden = false;
 };
 
 // ==========================================================
@@ -1340,24 +1536,136 @@ public:
         }
     }
 
+    juce::Rectangle<int> getChromaKeyRect() const override { return displayRect; }
+
+    void setBackdropChromeHidden (bool hidden) override
+    {
+        const float a = hidden ? 0.0f : 1.0f;
+        for (auto& b : presetBtns)
+            if (b != nullptr && std::abs (b->getAlpha() - a) > 0.001f)
+                b->setAlpha (a);
+        if (std::abs (startBtn.getAlpha() - a) > 0.001f) startBtn.setAlpha (a);
+        if (std::abs (resetBtn.getAlpha() - a) > 0.001f) resetBtn.setAlpha (a);
+    }
+
     void paint (juce::Graphics& g) override
     {
+        const auto& tokens = PinkXP::getSkinTokens();
         const bool flashOn = finished && flash && ((juce::Time::getMillisecondCounter() / 400) % 2 == 0);
         const auto bg = flashOn ? PinkXP::pink500 : PinkXP::content;
-        PinkXP::drawSunken (g, displayRect, bg);
+        PinkXP::Craft::drawReadoutCard (g, displayRect, bg);
 
         auto inner = displayRect.reduced (6, 4);
-        const auto ink = PinkXP::readableInkOn (bg);
+        const auto ink = tokens.isChromaKey ? inkOnContent() : PinkXP::readableInkOn (bg);
 
-        // 进度条（剩余比例）
-        const int barH = juce::jlimit (2, 5, inner.getHeight() / 14);
+        // 进度条（剩余比例）：走 Craft::drawContinuousBar（Pixel XP / Chrome / Glass / Neon / CRT / Modern / 绿幕跳过底槽）
+        const bool isChrome = (tokens.frameStyle == PinkXP::FrameStyle::machinedChrome);
+        const bool isGlass  = (tokens.frameStyle == PinkXP::FrameStyle::frostedGlass);
+        const bool isNeon   = (tokens.frameStyle == PinkXP::FrameStyle::neonTube);
+        const bool isCrt    = (tokens.frameStyle == PinkXP::FrameStyle::crtPhosphor);
+        const int barH = (isChrome || isGlass || isNeon || isCrt)
+                             ? juce::jlimit (4, 7, inner.getHeight() / 12)
+                             : juce::jlimit (2, 5, inner.getHeight() / 14);
         auto bar = inner.removeFromBottom (barH);
         inner.removeFromBottom (2);
-        g.setColour (ink.withAlpha (0.12f));
-        g.fillRect (bar);
-        const float frac = durationMs > 0.0 ? (float) (remaining() / durationMs) : 0.0f;
-        g.setColour (finished ? PinkXP::danger : PinkXP::pink500);
-        g.fillRect (bar.withWidth ((int) std::lround ((float) bar.getWidth() * juce::jlimit (0.0f, 1.0f, frac))));
+        const float frac = juce::jlimit (0.0f, 1.0f, durationMs > 0.0 ? (float) (remaining() / durationMs) : 0.0f);
+        const auto barCol = finished ? PinkXP::danger : PinkXP::pink500;
+        if (isChrome)
+        {
+            const bool isDark = bg.getPerceivedBrightness() < 0.45f;
+            const bool useWell = (bar.getHeight() >= 6);
+            if (! tokens.isChromaKey)
+            {
+                if (useWell)
+                {
+                    PinkXP::Craft::drawPanelWell (g, bar, bg.darker (0.06f), PinkXP::WellKind::trough);
+                }
+                else
+                {
+                    g.setColour (PinkXP::dark.withAlpha (isDark ? 0.50f : 0.24f));
+                    g.fillRect (bar);
+                    g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.50f)
+                                           .withAlpha (isDark ? 0.22f : 0.58f));
+                    g.fillRect (bar.getX(), bar.getBottom() - 1, bar.getWidth(), 1);
+                }
+            }
+            const auto innerBar = (useWell && ! tokens.isChromaKey) ? bar.reduced (1) : bar;
+            const float fillW = (float) innerBar.getWidth() * frac;
+            if (fillW > 0.25f)
+            {
+                const auto fillR = innerBar.toFloat().withWidth (fillW);
+                PinkXP::Craft::drawContinuousBar (g, innerBar.toFloat(), fillR, barCol, false, false);
+                if (fillR.getHeight() >= 2.0f)
+                {
+                    g.setColour (barCol.interpolatedWith (juce::Colours::white, 0.52f).withAlpha (0.65f));
+                    g.fillRect (fillR.getX(), fillR.getY(), fillR.getWidth(), 1.0f);
+                }
+            }
+        }
+        else if (isGlass)
+        {
+            const bool isDark = bg.getPerceivedBrightness() < 0.45f;
+            const auto bf     = bar.toFloat();
+            const float rad   = juce::jmin (3.5f, bf.getHeight() * 0.5f);
+            if (! tokens.isChromaKey)
+            {
+                g.setColour (isDark ? juce::Colours::white.withAlpha (0.10f)
+                                    : juce::Colours::black.withAlpha (0.09f));
+                g.fillRoundedRectangle (bf, rad);
+                g.setColour (juce::Colours::white.withAlpha (isDark ? 0.18f : 0.55f));
+                g.drawRoundedRectangle (bf.reduced (0.5f), juce::jmax (0.5f, rad - 0.5f), 0.8f);
+            }
+            const float fillW = bf.getWidth() * frac;
+            if (fillW > 0.25f)
+                PinkXP::Craft::drawContinuousBar (g, bf, bf.withWidth (fillW), barCol, false, false);
+        }
+        else if (isNeon)
+        {
+            if (! tokens.isChromaKey)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.45f));
+                g.fillRect (bar);
+                g.setColour (PinkXP::sel.withAlpha (0.38f));
+                g.drawRect (bar, 1);
+            }
+            const auto innerBar = (! tokens.isChromaKey && bar.getHeight() >= 4) ? bar.reduced (1) : bar;
+            const float fillW = (float) innerBar.getWidth() * frac;
+            if (fillW > 0.25f)
+                PinkXP::Craft::drawContinuousBar (g, innerBar.toFloat(), innerBar.toFloat().withWidth (fillW),
+                                                  barCol, false, false);
+        }
+        else if (isCrt)
+        {
+            if (! tokens.isChromaKey)
+            {
+                g.setColour (PinkXP::sel.withAlpha (0.14f));
+                g.fillRect (bar);
+                g.setColour (PinkXP::sel.withAlpha (0.48f));
+                g.drawRect (bar, 1);
+            }
+            const auto innerBar = (! tokens.isChromaKey && bar.getHeight() >= 4) ? bar.reduced (1) : bar;
+            const float fillW = (float) innerBar.getWidth() * frac;
+            if (fillW > 0.25f)
+                PinkXP::Craft::drawContinuousBar (g, innerBar.toFloat(), innerBar.toFloat().withWidth (fillW),
+                                                  barCol, false, false);
+        }
+        else
+        {
+            const bool drawBarTrough = (bar.getHeight() >= 6);
+            if (! drawBarTrough && ! tokens.isChromaKey)
+            {
+                g.setColour (ink.withAlpha (0.12f));
+                const float rad = juce::jmin (tokens.barCellRadius, (float) bar.getHeight() * 0.45f);
+                if (rad > 0.5f) g.fillRoundedRectangle (bar.toFloat(), rad);
+                else            g.fillRect (bar);
+            }
+            const float fillW = (float) bar.getWidth() * frac;
+            if (fillW > 0.25f)
+                PinkXP::Craft::drawContinuousBar (g, bar.toFloat(), bar.toFloat().withWidth (fillW),
+                                                  barCol, false, drawBarTrough);
+            else if (drawBarTrough)
+                PinkXP::Craft::drawPanelWell (g, bar, PinkXP::content.darker (0.04f), PinkXP::WellKind::trough);
+        }
 
         juce::Rectangle<int> labelRow;
         if (inner.getHeight() >= 40)
@@ -1368,9 +1676,11 @@ public:
                                 : (running ? y2k::tr ("RUNNING") : y2k::tr ("Scroll here to adjust")),
                     labelRow, juce::Justification::centred, (float) labelRow.getHeight());
 
-        g.setColour (finished ? (flashOn ? ink : PinkXP::danger) : ink);
+        g.setColour (finished ? (flashOn ? (tokens.isChromaKey ? PinkXP::pink500 : ink) : PinkXP::danger) : ink);
         drawFitted (g, formatDuration (std::ceil (remaining() / 1000.0) * 1000.0, false), inner,
                     juce::Justification::centred, (float) inner.getHeight() * 0.85f, 8.0f, juce::Font::bold);
+
+        PinkXP::Craft::drawCanvasFinishOverlay (g, displayRect.reduced (2));
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -1616,8 +1926,24 @@ public:
         resultRect = r;
     }
 
+    void setBackdropChromeHidden (bool hidden) override
+    {
+        if (chromeHidden == hidden)
+            return;
+        chromeHidden = hidden;
+        const float a = hidden ? 0.0f : 1.0f;
+        for (auto& t : tabs)
+            if (t != nullptr) t->setAlpha (a);
+        input.setAlpha (a);
+        tapBtn.setAlpha (a);
+        repaint();
+    }
+
     void paint (juce::Graphics& g) override
     {
+        if (chromeHidden)
+            return;
+
         static const char* inputLabels[] = { "BPM", "NOTE / Hz", "dB", "SAMPLES" };
         g.setColour (PinkXP::ink.withAlpha (0.65f));
         drawFitted (g, y2k::tr (inputLabels[mode]), inputLabelRect, juce::Justification::centredLeft,
@@ -1626,7 +1952,7 @@ public:
         if (resultRect.getHeight() < 14)
             return;
 
-        PinkXP::drawSunken (g, resultRect, PinkXP::content);
+        PinkXP::Craft::drawPanelWell (g, resultRect, PinkXP::content, displayWellKind());
         auto area = resultRect.reduced (6, 4);
 
         std::vector<std::array<juce::String, 4>> rows;
@@ -1637,6 +1963,7 @@ public:
         {
             g.setColour (inkOnContent().withAlpha (0.5f));
             drawFitted (g, y2k::tr ("Type a value above"), area, juce::Justification::centred, 12.0f);
+            PinkXP::Craft::drawCanvasFinishOverlay (g, resultRect.reduced (2));
             return;
         }
 
@@ -1673,8 +2000,13 @@ public:
                                 (float) lineH * (header ? 0.65f : 0.8f), 6.0f,
                                 (header || c == 0) ? juce::Font::plain : juce::Font::bold);
                 }
+                if (header)
+                    drawInstrumentDivider (g, (float) area.getX(), (float) (area.getY() + (i + 1) * lineH - 1),
+                                           (float) area.getRight(), ink);
             }
         }
+
+        PinkXP::Craft::drawCanvasFinishOverlay (g, resultRect.reduced (2));
     }
 
 private:
@@ -1871,6 +2203,7 @@ private:
     std::array<juce::String, 4> inputs;
     double a4 = 440.0;
     std::vector<double> taps;
+    bool chromeHidden = false;
 };
 
 // ==========================================================
@@ -1921,11 +2254,14 @@ public:
         repaint();
     }
 
+    juce::Rectangle<int> getChromaKeyRect() const override { return getLocalBounds(); }
+
     void paint (juce::Graphics& g) override
     {
         const auto now = juce::Time::getCurrentTime();
-        auto r = getLocalBounds();
-        PinkXP::drawSunken (g, r, PinkXP::content);
+        const auto fullBounds = getLocalBounds();
+        auto r = fullBounds;
+        PinkXP::Craft::drawPanelWell (g, r, PinkXP::content, displayWellKind());
         r = r.reduced (6, 4);
         const auto ink = inkOnContent();
 
@@ -1944,6 +2280,8 @@ public:
             g.setColour (ink.withAlpha (0.6f));
             drawFitted (g, text, dateRow, juce::Justification::centred, (float) dateRow.getHeight());
         }
+
+        PinkXP::Craft::drawCanvasFinishOverlay (g, fullBounds.reduced (2));
     }
 
 private:
@@ -1985,39 +2323,514 @@ private:
         if (d < 20.0f)
             return;
 
-        const auto c = r.toFloat().getCentre();
-        const float rad = d * 0.5f - 2.0f;
-        const float px = juce::jmax (2.0f, std::round (d / 40.0f));
+        const auto& tokens = PinkXP::getSkinTokens();
+        constexpr float twoPi = juce::MathConstants<float>::twoPi;
 
-        // 像素刻度：12 个方块，3 / 6 / 9 / 12 点加大
-        for (int i = 0; i < 12; ++i)
+        const float sec  = (float) now.getSeconds();
+        const float min  = (float) now.getMinutes() + sec / 60.0f;
+        const float hr   = (float) (now.getHours() % 12) + min / 60.0f;
+        const float hrA  = twoPi * (hr / 12.0f);
+        const float minA = twoPi * (min / 60.0f);
+        const float secA = twoPi * (sec / 60.0f);
+
+        const auto  c    = r.toFloat().getCentre();
+        const float rad  = d * 0.5f - 2.0f;
+        const float unit = juce::jmax (1.5f, d / 44.0f);
+        const auto  dialRect = juce::Rectangle<float> (rad * 2.0f, rad * 2.0f).withCentre (c);
+
+        const bool isPixelXP   = (tokens.frameStyle == PinkXP::FrameStyle::pixelBevel);
+        const bool isChrome    = (tokens.dialFinish == PinkXP::DialFinish::brushedMetal);
+        const bool isGlass     = (tokens.dialFinish == PinkXP::DialFinish::glassDome);
+        const bool isNeon      = (tokens.dialFinish == PinkXP::DialFinish::neonRings);
+        const bool isCrt       = (tokens.dialFinish == PinkXP::DialFinish::crtVector);
+        const bool isModern    = (tokens.frameStyle == PinkXP::FrameStyle::modernStudio);
+        const bool isDarkDial  = PinkXP::content.getPerceivedBrightness() < 0.45f;
+        const bool greenScreen = PinkXP::isGreenScreenBackdrop();
+        const float chromeBezelW = isChrome ? juce::jlimit (2.4f, 5.2f, rad * 0.105f) : 0.0f;
+        const float glassBezelW  = isGlass  ? juce::jlimit (2.4f, 4.8f, rad * 0.095f) : 0.0f;
+        const float ringInset    = isChrome ? chromeBezelW : (isGlass ? glassBezelW : (isNeon ? 3.5f : 0.0f));
+
+        // ---- 1. 表盘外圈（全风格统一平滑抗锯齿圆环，完整继承当前视觉风格；透明模式内盘严格保持 alpha=0）----
+        if (! greenScreen)
         {
-            const float a = juce::MathConstants<float>::twoPi * (float) i / 12.0f;
-            const float s = (i % 3 == 0) ? px * 2.0f : px;
-            const float x = c.x + std::sin (a) * (rad - s);
-            const float y = c.y - std::cos (a) * (rad - s);
-            g.setColour (i % 3 == 0 ? ink : ink.withAlpha (0.45f));
-            g.fillRect (juce::Rectangle<float> (s, s).withCentre ({ x, y }));
+            if (isGlass)
+            {
+                // Frutiger Aero 磨砂晶莹表圈 + 上 40% 球面玻璃穹顶反光（透明模式仅描晶环，中心 alpha=0）
+                g.setColour (juce::Colours::black.withAlpha (isDarkDial ? 0.30f : 0.13f));
+                g.drawEllipse (dialRect.reduced (glassBezelW * 0.45f).translated (0.0f, 1.5f),
+                               glassBezelW * 0.90f);
+
+                juce::ColourGradient ringGrad (juce::Colours::white.withAlpha (isDarkDial ? 0.28f : 0.78f),
+                                               c.x, dialRect.getY(),
+                                               PinkXP::face.interpolatedWith (juce::Colours::white, isDarkDial ? 0.10f : 0.22f)
+                                                           .withAlpha (isDarkDial ? 0.36f : 0.54f),
+                                               c.x, dialRect.getBottom(), false);
+                const auto faceRect = dialRect.reduced (glassBezelW);
+                if (! tokens.isChromaKey)
+                {
+                    g.setGradientFill (ringGrad);
+                    g.fillEllipse (dialRect);
+
+                    juce::ColourGradient faceGrad (PinkXP::content.interpolatedWith (juce::Colours::white, isDarkDial ? 0.05f : 0.14f),
+                                                   c.x, faceRect.getY(),
+                                                   PinkXP::content.interpolatedWith (juce::Colours::black, isDarkDial ? 0.06f : 0.02f),
+                                                   c.x, faceRect.getBottom(), false);
+                    g.setGradientFill (faceGrad);
+                    g.fillEllipse (faceRect);
+
+                    // 上 40% 弯曲玻璃穹顶镜面高光
+                    {
+                        juce::Graphics::ScopedSaveState ss (g);
+                        juce::Path clipCircle;
+                        clipCircle.addEllipse (faceRect);
+                        g.reduceClipRegion (clipCircle);
+                        const auto domeBox = faceRect.withHeight (faceRect.getHeight() * 0.44f)
+                                                     .expanded (faceRect.getWidth() * 0.12f, 0.0f);
+                        juce::ColourGradient dome (juce::Colours::white.withAlpha (isDarkDial ? 0.22f : 0.42f),
+                                                   c.x, faceRect.getY(),
+                                                   juce::Colours::white.withAlpha (0.0f),
+                                                   c.x, faceRect.getY() + faceRect.getHeight() * 0.44f, false);
+                        g.setGradientFill (dome);
+                        g.fillEllipse (domeBox);
+                    }
+                }
+                else
+                {
+                    g.setGradientFill (ringGrad);
+                    g.drawEllipse (dialRect.reduced (glassBezelW * 0.5f), glassBezelW);
+                }
+
+                g.setColour (PinkXP::dark.withAlpha (0.30f));
+                g.drawEllipse (dialRect.reduced (0.5f), 1.0f);
+                g.setColour (juce::Colours::white.withAlpha (isDarkDial ? 0.45f : 0.88f));
+                g.drawEllipse (dialRect.reduced (1.4f), 0.9f);
+                g.setColour (PinkXP::dark.withAlpha (isDarkDial ? 0.34f : 0.18f));
+                g.drawEllipse (faceRect, 0.85f);
+            }
+            else if (isNeon)
+            {
+                // Neon Cyber 同心双发光霓虹表环 + 暗烟熏盘底（透明模式盘底不填，保持 alpha=0）
+                if (! tokens.isChromaKey)
+                {
+                    g.setColour (PinkXP::content.interpolatedWith (juce::Colours::black, isDarkDial ? 0.22f : 0.10f));
+                    g.fillEllipse (dialRect.reduced (1.0f));
+                }
+                g.setColour (PinkXP::sel.withAlpha (0.26f));
+                g.drawEllipse (dialRect.reduced (0.8f), 3.8f);
+                g.setColour (PinkXP::sel.withAlpha (0.86f));
+                g.drawEllipse (dialRect.reduced (0.8f), 1.45f);
+                g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.55f).withAlpha (0.82f));
+                g.drawEllipse (dialRect.reduced (0.8f), 0.7f);
+
+                if (rad >= 20.0f)
+                {
+                    g.setColour (PinkXP::accent2.withAlpha (0.48f));
+                    g.drawEllipse (dialRect.reduced (4.0f), 0.85f);
+                }
+            }
+            else if (isCrt)
+            {
+                // Tektronix CRT 矢量示波器磷光表盘：平滑磷光外环 + 内同心微刻度环 + 暗十字准星
+                g.setColour (PinkXP::sel.withAlpha (0.22f));
+                g.drawEllipse (dialRect.reduced (0.6f), 3.2f);
+                g.setColour (PinkXP::sel.withAlpha (0.86f));
+                g.drawEllipse (dialRect.reduced (0.6f), 1.25f);
+
+                if (! tokens.isChromaKey && rad >= 24.0f)
+                {
+                    g.setColour (PinkXP::sel.withAlpha (0.18f));
+                    g.drawEllipse (dialRect.reduced (rad * 0.24f), 0.7f);
+                    g.setColour (PinkXP::sel.withAlpha (0.13f));
+                    g.drawLine (c.x - rad * 0.78f, c.y, c.x + rad * 0.78f, c.y, 0.7f);
+                    g.drawLine (c.x, c.y - rad * 0.78f, c.x, c.y + rad * 0.78f, 0.7f);
+                }
+            }
+            else if (isChrome)
+            {
+                // CNC 拉丝金属时钟外圈（金属对角拉丝渐变环 + 镜面倒角 + 内凹表盘沿；透明模式下内盘严格保持 alpha=0）
+                g.setColour (juce::Colours::black.withAlpha (isDarkDial ? 0.36f : 0.16f));
+                g.drawEllipse (dialRect.reduced (chromeBezelW * 0.45f).translated (0.0f, 1.4f),
+                               chromeBezelW * 0.92f);
+
+                const auto hiChrome  = PinkXP::hl.interpolatedWith (juce::Colours::white, isDarkDial ? 0.56f : 0.84f);
+                const auto midChrome = PinkXP::face.interpolatedWith (PinkXP::shdw, isDarkDial ? 0.16f : 0.24f);
+                const auto loChrome  = PinkXP::shdw.interpolatedWith (PinkXP::dark, isDarkDial ? 0.50f : 0.38f);
+                juce::ColourGradient bezelGrad (hiChrome, dialRect.getX(), dialRect.getY(),
+                                                loChrome, dialRect.getRight(), dialRect.getBottom(), false);
+                bezelGrad.addColour (0.38, midChrome.interpolatedWith (juce::Colours::white, isDarkDial ? 0.16f : 0.34f));
+                bezelGrad.addColour (0.62, midChrome.interpolatedWith (juce::Colours::black, isDarkDial ? 0.14f : 0.08f));
+                bezelGrad.addColour (0.92, PinkXP::hl.interpolatedWith (juce::Colours::white, 0.30f));
+
+                const auto faceRect = dialRect.reduced (chromeBezelW);
+                if (! tokens.isChromaKey)
+                {
+                    g.setGradientFill (bezelGrad);
+                    g.fillEllipse (dialRect);
+
+                    // 表盘内面：克制拉丝纵向金属渐变 + 内凹顶沿阴影
+                    juce::ColourGradient faceGrad (PinkXP::content.interpolatedWith (juce::Colours::white, isDarkDial ? 0.04f : 0.10f),
+                                                   c.x, faceRect.getY(),
+                                                   PinkXP::content.interpolatedWith (juce::Colours::black, isDarkDial ? 0.07f : 0.04f),
+                                                   c.x, faceRect.getBottom(), false);
+                    g.setGradientFill (faceGrad);
+                    g.fillEllipse (faceRect);
+
+                    g.setColour (PinkXP::dark.withAlpha (isDarkDial ? 0.46f : 0.22f));
+                    g.drawEllipse (faceRect.reduced (0.5f), 1.3f);
+                }
+                else
+                {
+                    // 透明叠加模式：仅描拉丝外环，表盘中心保持 alpha=0 透出桌面
+                    g.setGradientFill (bezelGrad);
+                    g.drawEllipse (dialRect.reduced (chromeBezelW * 0.5f), chromeBezelW);
+                }
+
+                // 外切暗边 + 镜面倒角高光 + 内壁切边
+                g.setColour (PinkXP::dark.withAlpha (0.78f));
+                g.drawEllipse (dialRect.reduced (0.5f), 1.05f);
+
+                juce::ColourGradient bevelRim (juce::Colours::white.withAlpha (isDarkDial ? 0.50f : 0.85f),
+                                               dialRect.getX(), dialRect.getY(),
+                                               PinkXP::dark.withAlpha (isDarkDial ? 0.56f : 0.34f),
+                                               dialRect.getRight(), dialRect.getBottom(), false);
+                g.setGradientFill (bevelRim);
+                g.drawEllipse (dialRect.reduced (1.45f), 0.95f);
+
+                g.setColour (PinkXP::dark.withAlpha (0.56f));
+                g.drawEllipse (faceRect, 0.95f);
+            }
+            else if (isModern)
+            {
+                g.setColour (tokens.isChromaKey ? ink.withAlpha (0.36f)
+                                                : PinkXP::skinHairlineOn (PinkXP::content, 0.22f));
+                g.drawEllipse (dialRect, 1.0f);
+            }
+            else
+            {
+                // Pixel XP：干净平滑的抗锯齿外圈（保留 0px Win95 框与方形小时刻度作像素标识）
+                g.setColour (ink.withAlpha (0.42f));
+                g.drawEllipse (dialRect, 1.25f);
+            }
+        }
+        else
+        {
+            if (isChrome || isGlass)
+            {
+                const float ringW = juce::jmax (1.8f, ringInset * 0.68f);
+                g.setColour (PinkXP::hl.interpolatedWith (ink, 0.35f));
+                g.drawEllipse (dialRect.reduced (ringW * 0.5f), ringW);
+                g.setColour (PinkXP::dark.withAlpha (0.72f));
+                g.drawEllipse (dialRect.reduced (0.5f), 1.0f);
+            }
+            else
+            {
+                g.setColour ((isNeon || isCrt) ? PinkXP::sel : ink.withAlpha (0.55f));
+                g.drawEllipse (dialRect, isModern ? 1.0f : 1.25f);
+            }
         }
 
-        auto hand = [&] (float frac, float len, float thickness, juce::Colour col)
+        // ---- 2. 刻度：Pixel XP 方形整点块；Chrome 刻蚀条；Glass 纤细圆头刻度；Neon 发光刻度；CRT Tektronix 标尺刻度 ----
+        if (isPixelXP)
         {
-            const float a = juce::MathConstants<float>::twoPi * frac;
+            const int px = juce::jmax (2, juce::roundToInt (d / 42.0f));
+            for (int i = 0; i < 12; ++i)
+            {
+                const float a = twoPi * (float) i / 12.0f;
+                const bool cardinal = (i % 3 == 0);
+                const int s = cardinal ? juce::jmax (3, px * 2) : juce::jmax (2, px);
+                const float tickR = juce::jmax (4.0f, rad - (float) s * 0.85f - 2.0f);
+                const int tx = juce::roundToInt (c.x + std::sin (a) * tickR);
+                const int ty = juce::roundToInt (c.y - std::cos (a) * tickR);
+                g.setColour (cardinal ? ink : ink.withAlpha (0.55f));
+                g.fillRect (tx - s / 2, ty - s / 2, s, s);
+            }
+        }
+        else
+        {
+            const float tickOuterR = (ringInset > 0.0f) ? (rad - ringInset - 1.8f) : (rad - 2.4f);
+
+            // 60 分钟细微短刻度（Modern / Chrome / Glass / Neon / CRT；正常与透明模式完整继承）
+            if (! greenScreen && ((isModern && rad >= 34.0f)
+                                  || (isGlass && rad >= 30.0f)
+                                  || ((isChrome || isNeon || isCrt) && rad >= 26.0f)))
+            {
+                const auto minCol = isCrt  ? PinkXP::sel.withAlpha (0.34f)
+                                  : isNeon ? PinkXP::sel.withAlpha (0.28f)
+                                  : isChrome ? ink.withAlpha (isDarkDial ? 0.28f : 0.22f)
+                                             : ink.withAlpha (0.18f);
+                g.setColour (minCol);
+                const float outerR = tickOuterR;
+                const float innerR = outerR - juce::jmax (1.8f, rad * ((isChrome || isCrt) ? 0.052f : 0.045f));
+                for (int m = 0; m < 60; ++m)
+                {
+                    if (m % 5 == 0) continue;
+                    const float a = twoPi * (float) m / 60.0f;
+                    const float sx = std::sin (a), cyCos = std::cos (a);
+                    g.drawLine (c.x + sx * innerR, c.y - cyCos * innerR,
+                                c.x + sx * outerR, c.y - cyCos * outerR, 0.75f);
+                }
+            }
+
+            for (int i = 0; i < 12; ++i)
+            {
+                const float a = twoPi * (float) i / 12.0f;
+                const bool cardinal = (i % 3 == 0);
+                const float outerR = tickOuterR;
+                const float innerR = outerR - (cardinal ? juce::jmax (4.5f, rad * ((isChrome || isCrt) ? 0.15f : 0.14f))
+                                                        : juce::jmax (2.5f, rad * ((isChrome || isCrt) ? 0.095f : 0.085f)));
+                const float sx = std::sin (a), cyCos = std::cos (a);
+
+                juce::Path tick;
+                tick.startNewSubPath (c.x + sx * innerR, c.y - cyCos * innerR);
+                tick.lineTo          (c.x + sx * outerR, c.y - cyCos * outerR);
+                const float tickW = (isChrome || isNeon)
+                                        ? (cardinal ? juce::jmax (1.8f, unit * 0.95f) : juce::jmax (1.1f, unit * 0.56f))
+                                    : isCrt
+                                        ? (cardinal ? juce::jmax (1.5f, unit * 0.80f) : juce::jmax (0.95f, unit * 0.50f))
+                                    : (isModern || isGlass)
+                                        ? (cardinal ? juce::jmax (1.4f, unit * 0.78f) : juce::jmax (0.9f, unit * 0.45f))
+                                        : (cardinal ? juce::jmax (1.6f, unit * 0.90f) : juce::jmax (1.0f, unit * 0.55f));
+                const auto cap = (isChrome || isNeon || isCrt) ? juce::PathStrokeType::butt : juce::PathStrokeType::rounded;
+
+                if (isChrome && ! greenScreen)
+                {
+                    // 刻蚀金属反光沿（轻微偏移营造 CNC 切槽感）
+                    g.setColour (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.52f)
+                                           .withAlpha (isDarkDial ? 0.24f : 0.56f));
+                    g.strokePath (tick, juce::PathStrokeType (tickW, juce::PathStrokeType::mitered, cap),
+                                  juce::AffineTransform::translation (0.55f, 0.70f));
+                }
+                else if (isNeon && cardinal && ! greenScreen)
+                {
+                    g.setColour (PinkXP::sel.withAlpha (0.34f));
+                    g.strokePath (tick, juce::PathStrokeType (tickW * 2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                }
+
+                const auto tickCol = ((isNeon || isCrt) && cardinal)
+                                         ? PinkXP::sel
+                                         : (cardinal ? ink.withAlpha (isChrome ? 0.92f : 0.88f)
+                                                     : ink.withAlpha ((isChrome || isNeon || isCrt) ? 0.62f : 0.42f));
+                g.setColour (tickCol);
+                g.strokePath (tick, juce::PathStrokeType (tickW, juce::PathStrokeType::curved, cap));
+
+                if (isNeon && cardinal)
+                {
+                    g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.60f));
+                    g.strokePath (tick, juce::PathStrokeType (juce::jmax (0.75f, tickW * 0.36f),
+                                                              juce::PathStrokeType::mitered, cap));
+                }
+            }
+        }
+
+        // ---- 3. 时针 / 分针 / 秒针（全风格平滑抗锯齿指针）----
+        auto drawTaperedHand = [&] (float angle, float len, float tail, float baseW, float tipW, juce::Colour col)
+        {
+            const float dx = std::sin (angle), dy = -std::cos (angle);
+            const float nx = -dy, ny = dx;
+
+            juce::Path p;
+            p.startNewSubPath (c.x - dx * tail + nx * baseW * 0.5f, c.y - dy * tail + ny * baseW * 0.5f);
+            p.lineTo          (c.x + dx * len  + nx * tipW  * 0.5f, c.y + dy * len  + ny * tipW  * 0.5f);
+            p.lineTo          (c.x + dx * len  - nx * tipW  * 0.5f, c.y + dy * len  - ny * tipW  * 0.5f);
+            p.lineTo          (c.x - dx * tail - nx * baseW * 0.5f, c.y - dy * tail - ny * baseW * 0.5f);
+            p.closeSubPath();
+
+            if (tokens.needleShadow && ! greenScreen)
+            {
+                g.setColour (juce::Colours::black.withAlpha (isChrome ? 0.24f : (isPixelXP ? 0.24f : 0.18f)));
+                g.fillPath (p, juce::AffineTransform::translation (isChrome ? 1.15f : 1.0f,
+                                                                   isPixelXP ? 1.0f : 1.55f));
+            }
+            if (tokens.needleGlow && ! greenScreen)
+            {
+                g.setColour ((isNeon ? PinkXP::sel : col).withAlpha (isNeon ? 0.34f : 0.26f));
+                g.strokePath (p, juce::PathStrokeType (baseW * (isNeon ? 1.75f : 1.45f),
+                                                       juce::PathStrokeType::curved,
+                                                       juce::PathStrokeType::rounded));
+            }
             g.setColour (col);
-            g.drawLine (c.x, c.y, c.x + std::sin (a) * len, c.y - std::cos (a) * len, thickness);
+            g.fillPath (p);
+
+            if (isChrome)
+            {
+                // 抛光钢指针中脊高光切面（半侧镜面反光）
+                juce::Path facet;
+                facet.startNewSubPath (c.x - dx * tail,                      c.y - dy * tail);
+                facet.lineTo          (c.x + dx * len,                       c.y + dy * len);
+                facet.lineTo          (c.x + dx * len  - nx * tipW  * 0.5f,  c.y + dy * len  - ny * tipW  * 0.5f);
+                facet.lineTo          (c.x - dx * tail - nx * baseW * 0.5f,  c.y - dy * tail - ny * baseW * 0.5f);
+                facet.closeSubPath();
+                g.setColour (col.interpolatedWith (juce::Colours::white, isDarkDial ? 0.44f : 0.54f)
+                                .withAlpha (greenScreen ? 0.50f : 0.58f));
+                g.fillPath (facet);
+            }
+            else if (isNeon || isCrt)
+            {
+                // 霓虹 / 磷光指针高亮白芯中轴
+                g.setColour (col.interpolatedWith (juce::Colours::white, isNeon ? 0.68f : 0.48f)
+                                .withAlpha (0.88f));
+                g.drawLine (c.x - dx * tail * 0.6f, c.y - dy * tail * 0.6f,
+                            c.x + dx * len  * 0.94f, c.y + dy * len  * 0.94f,
+                            juce::jmax (0.75f, tipW * 0.70f));
+            }
+            else if (isGlass && ! greenScreen)
+            {
+                // 玻璃指针纤细晶亮反光丝
+                g.setColour (juce::Colours::white.withAlpha (0.42f));
+                g.drawLine (c.x, c.y, c.x + dx * len * 0.86f, c.y + dy * len * 0.86f,
+                            juce::jmax (0.7f, tipW * 0.55f));
+            }
         };
 
-        const float sec = (float) now.getSeconds();
-        const float min = (float) now.getMinutes() + sec / 60.0f;
-        const float hr  = (float) (now.getHours() % 12) + min / 60.0f;
+        const float handReach = (ringInset > 0.0f) ? (rad - ringInset * 0.85f) : rad;
+        if (isPixelXP)
+        {
+            // Pixel XP：干净抗锯齿直边指针 + 清晰微影（不锯齿、保持复古硬件利落感）
+            drawTaperedHand (hrA,  rad * 0.48f, rad * 0.08f, juce::jmax (2.4f, unit * 1.40f), juce::jmax (1.8f, unit * 1.05f), ink);
+            drawTaperedHand (minA, rad * 0.72f, rad * 0.10f, juce::jmax (1.8f, unit * 1.05f), juce::jmax (1.3f, unit * 0.75f), ink);
+        }
+        else if (isChrome)
+        {
+            drawTaperedHand (hrA,  handReach * 0.52f, handReach * 0.12f, juce::jmax (2.8f, unit * 1.65f), juce::jmax (1.0f, unit * 0.55f), ink);
+            drawTaperedHand (minA, handReach * 0.76f, handReach * 0.14f, juce::jmax (2.1f, unit * 1.22f), juce::jmax (0.8f, unit * 0.42f), ink);
+        }
+        else
+        {
+            drawTaperedHand (hrA,  handReach * 0.50f, handReach * 0.10f, juce::jmax (2.5f, unit * 1.50f), juce::jmax (1.2f, unit * 0.65f), ink);
+            drawTaperedHand (minA, handReach * 0.74f, handReach * 0.12f, juce::jmax (1.9f, unit * 1.10f), juce::jmax (0.9f, unit * 0.50f), ink);
+        }
 
-        hand (hr / 12.0f,  rad * 0.5f,  px * 1.6f, ink);
-        hand (min / 60.0f, rad * 0.75f, px * 1.1f, ink);
         if (seconds)
-            hand (sec / 60.0f, rad * 0.85f, juce::jmax (1.0f, px * 0.5f), PinkXP::pink500);
+        {
+            juce::Path secPath;
+            secPath.startNewSubPath (c.x - std::sin (secA) * (handReach * 0.18f), c.y + std::cos (secA) * (handReach * 0.18f));
+            secPath.lineTo          (c.x + std::sin (secA) * (handReach * 0.82f), c.y - std::cos (secA) * (handReach * 0.82f));
+            if ((isChrome || isGlass) && ! greenScreen)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.20f));
+                g.strokePath (secPath, juce::PathStrokeType (juce::jmax (1.0f, unit * 0.50f)),
+                              juce::AffineTransform::translation (0.9f, 1.2f));
+            }
+            PinkXP::Craft::drawStyledStroke (g, secPath,
+                                             (isChrome || isNeon || isCrt) ? PinkXP::sel : PinkXP::pink500,
+                                             juce::jmax (1.0f, unit * 0.48f));
+        }
 
-        g.setColour (PinkXP::pink500);
-        g.fillRect (juce::Rectangle<float> (px * 2.0f, px * 2.0f).withCentre (c));
+        // ---- 4. 轴心：Pixel XP 方形 / Chrome CNC 金属帽 / Glass 晶珠 / Neon 发光环 / CRT 矢量空心环 / Modern 圆轴心 ----
+        if (isPixelXP)
+        {
+            const int px    = juce::jmax (2, juce::roundToInt (d / 42.0f));
+            const int pivSz = juce::jmax (4, px * 2);
+            const juce::Rectangle<int> piv (juce::roundToInt (c.x) - pivSz / 2,
+                                            juce::roundToInt (c.y) - pivSz / 2,
+                                            pivSz, pivSz);
+            g.setColour (PinkXP::pink500);
+            g.fillRect (piv);
+            g.setColour (PinkXP::dark.withAlpha (0.75f));
+            g.drawRect (piv, 1);
+            if (pivSz >= 4)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.65f));
+                g.fillRect (piv.getX() + 1, piv.getY() + 1, 1, 1);
+            }
+        }
+        else if (isChrome)
+        {
+            const float hubR = juce::jmax (3.2f, unit * 1.55f);
+            const auto hubRect = juce::Rectangle<float> (hubR * 2.0f, hubR * 2.0f).withCentre (c);
+            if (! greenScreen)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.28f));
+                g.fillEllipse (hubRect.translated (0.6f, 1.0f));
+            }
+            juce::ColourGradient hubGrad (PinkXP::hl.interpolatedWith (juce::Colours::white, 0.72f),
+                                          hubRect.getX(), hubRect.getY(),
+                                          PinkXP::shdw.interpolatedWith (PinkXP::dark, 0.42f),
+                                          hubRect.getRight(), hubRect.getBottom(), false);
+            g.setGradientFill (hubGrad);
+            g.fillEllipse (hubRect);
+
+            g.setColour (PinkXP::dark.withAlpha (0.78f));
+            g.drawEllipse (hubRect.reduced (0.4f), 0.95f);
+
+            if (hubR >= 3.4f)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.55f));
+                g.drawEllipse (hubRect.reduced (1.25f), 0.75f);
+            }
+
+            const auto pinRect = hubRect.reduced (hubR * 0.54f);
+            g.setColour (PinkXP::sel);
+            g.fillEllipse (pinRect);
+            if (pinRect.getWidth() >= 2.2f)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.68f));
+                g.fillEllipse (pinRect.getX() + 0.5f, pinRect.getY() + 0.4f,
+                               juce::jmax (1.0f, pinRect.getWidth() * 0.36f),
+                               juce::jmax (1.0f, pinRect.getHeight() * 0.36f));
+            }
+        }
+        else if (isGlass)
+        {
+            // 晶莹宝石玻璃中心帽
+            const float hubR = juce::jmax (3.2f, unit * 1.50f);
+            const auto hubRect = juce::Rectangle<float> (hubR * 2.0f, hubR * 2.0f).withCentre (c);
+            if (! greenScreen)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.20f));
+                g.fillEllipse (hubRect.translated (0.0f, 1.0f));
+            }
+            juce::ColourGradient jewel (PinkXP::sel.darker (0.22f), hubRect.getCentreX(), hubRect.getY(),
+                                        PinkXP::sel.interpolatedWith (juce::Colours::white, 0.52f),
+                                        hubRect.getCentreX(), hubRect.getBottom(), false);
+            g.setGradientFill (jewel);
+            g.fillEllipse (hubRect);
+            g.setColour (juce::Colours::white.withAlpha (0.76f));
+            g.fillEllipse (hubRect.getX() + hubR * 0.35f, hubRect.getY() + hubR * 0.25f,
+                           hubR * 0.85f, hubR * 0.50f);
+            g.setColour (juce::Colours::white.withAlpha (0.55f));
+            g.drawEllipse (hubRect.reduced (0.5f), 0.85f);
+        }
+        else if (isNeon)
+        {
+            // 赛博霓虹发光轴环
+            const float hubR = juce::jmax (3.0f, unit * 1.45f);
+            const auto hubRect = juce::Rectangle<float> (hubR * 2.0f, hubR * 2.0f).withCentre (c);
+            if (! greenScreen)
+            {
+                g.setColour (PinkXP::sel.withAlpha (0.36f));
+                g.drawEllipse (hubRect, 3.0f);
+            }
+            g.setColour (PinkXP::dark.darker (0.45f));
+            g.fillEllipse (hubRect);
+            g.setColour (PinkXP::sel);
+            g.drawEllipse (hubRect.reduced (0.3f), 1.35f);
+            g.setColour (PinkXP::sel.interpolatedWith (juce::Colours::white, 0.65f));
+            g.drawEllipse (hubRect.reduced (0.3f), 0.65f);
+        }
+        else if (isCrt)
+        {
+            // Tektronix 极简空心矢量环 + 中心准星点
+            const float hubR = juce::jmax (3.0f, unit * 1.45f);
+            const auto hubRect = juce::Rectangle<float> (hubR * 2.0f, hubR * 2.0f).withCentre (c);
+            if (! greenScreen)
+            {
+                g.setColour (PinkXP::sel.withAlpha (0.28f));
+                g.drawEllipse (hubRect, 2.6f);
+            }
+            g.setColour (PinkXP::sel);
+            g.drawEllipse (hubRect, 1.25f);
+            g.fillEllipse (c.x - 1.0f, c.y - 1.0f, 2.0f, 2.0f);
+        }
+        else
+        {
+            const float hubR = juce::jmax (2.5f, unit * 1.35f);
+            const auto hubRect = juce::Rectangle<float> (hubR * 2.0f, hubR * 2.0f).withCentre (c);
+            g.setColour (PinkXP::pink500);
+            g.fillEllipse (hubRect);
+            g.setColour (PinkXP::content);
+            g.fillEllipse (hubRect.reduced (hubR * 0.52f));
+        }
     }
 
     void timerCallback() override
@@ -2091,11 +2904,30 @@ public:
     {
         // 便签可能含中文等字符：用系统字体，而不是只有拉丁字形的像素字体
         styleEditor (editor, juce::Font (juce::FontOptions (fontSize)));
+        editor.setColour (juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
         editor.setTextToShowWhenEmpty (y2k::tr ("Type a note..."), inkOnContent().withAlpha (0.35f));
+        resized();
         repaint();
     }
 
-    void resized() override { editor.setBounds (getLocalBounds()); }
+    void setBackdropChromeHidden (bool hidden) override
+    {
+        const float a = hidden ? 0.0f : 1.0f;
+        if (std::abs (editor.getAlpha() - a) > 0.001f)
+            editor.setAlpha (a);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        PinkXP::Craft::drawPanelWell (g, getLocalBounds(), PinkXP::content, displayWellKind());
+    }
+
+    void resized() override
+    {
+        const auto fs = PinkXP::getSkinTokens().frameStyle;
+        const int inset = (fs == PinkXP::FrameStyle::modernStudio || fs == PinkXP::FrameStyle::frostedGlass) ? 3 : 2;
+        editor.setBounds (getLocalBounds().reduced (inset));
+    }
 
 private:
     void timerCallback() override

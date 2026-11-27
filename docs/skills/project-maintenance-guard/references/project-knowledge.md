@@ -7,9 +7,9 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | `Y2Kmeter` |
-| 当前版本 | `3.4.3`（版本号同步点见 SKILL.md §6） |
+| 当前版本 | `3.5.0`（版本号同步点见 SKILL.md §6） |
 | 形态 | VST3 / AU / Standalone（纯分析，不产生音频输出） |
-| 技术栈 | C++17、JUCE 8.0.12（vendored + 0001~0008 补丁）、CMake ≥ 3.22 |
+| 技术栈 | C++17、JUCE 8.0.12（vendored + 0001~0009 补丁）、CMake ≥ 3.22 |
 | 平台 | Windows（静态 CRT）/ macOS |
 | Bundle ID | `cn.iisaacbeats.Y2Kmeter`（**不要改**，会丢宿主里的插件实例） |
 
@@ -20,9 +20,9 @@
 | 插件入口 | `PluginProcessor.*` | 音频回调、参数、状态持久化 |
 | UI 壳 | `PluginEditor.*` | 标题栏、窗口交互、GL 合成、工作区承载 |
 | 分析层 | `source/analysis/**` | `AnalyserHub`（6 路分析、引用计数、帧分发）；FFT / RMS / LUFS / 调性 / 录音等 |
-| UI 框架 | `source/ui/**` | `ModuleWorkspace`（容器 + 布局持久化）、`ModulePanel`（外壳 + 参数面板 + 悬停帮助）、`GlDirectModuleBase`（GL 直渲染基类）、`PinkXPStyle`（主题 / LookAndFeel / 悬停标尺） |
-| 模块层 | `source/ui/modules/**` | 各分析模块的绘制与交互 |
-| Standalone | `source/standalone/**` | Loopback 采集、平台差异、独立窗口 |
+| UI 框架 | `source/ui/**` | `ModuleWorkspace`（容器 + 布局持久化）、`ModulePanel`（外壳 + 外部弹出参数抽屉 + 悬停帮助）、`GlDirectModuleBase` / `GlDirectRenderer`（嵌入+浮动统一 GL 管线）、`PinkXPStyle` / `SkinCraft`（配色主题 / 6 套耦合皮肤 / 正交背景模式 / LookAndFeel） |
+| 模块层 | `source/ui/modules/**` | 各分析模块的绘制与交互（含 VU 指针/条形双渲染器 `.inl`） |
+| Standalone | `source/standalone/**` | Loopback 与定向程序采集（`AppAudioTargets`）、平台差异、独立窗口 |
 
 ## 3. 重要架构事实
 
@@ -40,8 +40,8 @@
 
 | 路径 | 入口 | 何时走 |
 |---|---|---|
-| GL 直渲染 | `buildGlSnapshot()` / `paintGlOverlay()` | 编辑器 GL 合成可用时（绝大多数情况） |
-| CPU 回退 | `paintLegacyContent()` | GL 不可用 / 浮动态降级 |
+| GL 直渲染 | `buildGlSnapshot()` / `paintGlOverlay()` | 主窗口 Editor 与浮动窗口 `FloatingModuleWindow` 的 `GlDirectRenderer` 均走此路径 |
+| CPU 回退 | `paintLegacyContent()` | GL 不可用降级 / 悬停预览截图（离屏缓存固定用 `SoftwareImageType`，禁用 `OpenGLImageType`） |
 
 两份实现必须视觉一致。改颜色、边距、刻度都要**两边都改**。
 

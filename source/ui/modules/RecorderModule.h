@@ -56,6 +56,7 @@ public:
 
 protected:
     void layoutContent (juce::Rectangle<int> contentBounds) override;
+    juce::Rectangle<int> getChromaKeyCanvas() override;
 
 private:
     // 所有行切片的唯一来源（paint / layout / 命中测试共用，避免位置漂移）
@@ -74,6 +75,7 @@ private:
     void saveNow();
     void toggleTake();
     void updateButtonText();
+    void syncChildChromeVisibility();
 
     // 纯像素圆点（没有底座），三种状态全靠圆点自身表达：
     //   · 未录制     ：发光（像素阶梯光晕）、正常亮度、不下沉
@@ -92,7 +94,9 @@ private:
     juce::String lastStatus;
     bool         lastTaking      = false;
 
-    bool dotPressed = false;
+    bool dotPressed        = false;
+    int  themeSubToken     = -1;
+    int  chromaRevealToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RecorderModule)
 };

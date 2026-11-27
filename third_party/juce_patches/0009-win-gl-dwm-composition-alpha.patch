@@ -1,0 +1,50 @@
+diff --git a/modules/juce_opengl/native/juce_OpenGL_windows.h b/modules/juce_opengl/native/juce_OpenGL_windows.h
+index 93aec582..6daefce4 100644
+--- a/modules/juce_opengl/native/juce_OpenGL_windows.h
++++ b/modules/juce_opengl/native/juce_OpenGL_windows.h
+@@ -234,7 +234,12 @@ private:
+         zerostruct (pfd);
+         pfd.nSize           = sizeof (pfd);
+         pfd.nVersion        = 1;
+-        pfd.dwFlags         = PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER;
++       #ifndef PFD_SUPPORT_COMPOSITION
++        constexpr DWORD kPfdSupportComposition = 0x00008000;
++       #else
++        constexpr DWORD kPfdSupportComposition = PFD_SUPPORT_COMPOSITION;
++       #endif
++        pfd.dwFlags         = PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER | kPfdSupportComposition;
+         pfd.iPixelType      = PFD_TYPE_RGBA;
+         pfd.iLayerType      = PFD_MAIN_PLANE;
+         pfd.cColorBits      = (BYTE) (pixelFormat.redBits + pixelFormat.greenBits + pixelFormat.blueBits);
+@@ -391,8 +396,30 @@ private:
+             atts[n++] = 0;
+             jassert (n <= numElementsInArray (atts));
+ 
++            int formats[32] = {};
+             UINT formatsCount = 0;
+-            wglChoosePixelFormatARB (dc.get(), atts, nullptr, 1, &format, &formatsCount);
++            if (wglChoosePixelFormatARB (dc.get(), atts, nullptr, (UINT) numElementsInArray (formats), formats, &formatsCount)
++                && formatsCount > 0)
++            {
++               #ifndef PFD_SUPPORT_COMPOSITION
++                constexpr DWORD kPfdSupportComposition = 0x00008000;
++               #else
++                constexpr DWORD kPfdSupportComposition = PFD_SUPPORT_COMPOSITION;
++               #endif
++                format = formats[0];
++                for (UINT i = 0; i < formatsCount; ++i)
++                {
++                    PIXELFORMATDESCRIPTOR cand {};
++                    cand.nSize = sizeof (cand);
++                    if (DescribePixelFormat (dc.get(), formats[i], sizeof (cand), &cand) != 0
++                        && (cand.dwFlags & kPfdSupportComposition) != 0
++                        && cand.cAlphaBits >= pixelFormat.alphaBits)
++                    {
++                        format = formats[i];
++                        break;
++                    }
++                }
++            }
+         }
+ 
+         return format;

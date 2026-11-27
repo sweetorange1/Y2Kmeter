@@ -6,6 +6,7 @@
 #include <string>
 #include "source/ui/ModuleWorkspace.h"
 #include "source/ui/PinkXPStyle.h"
+#include "source/ui/SkinCraft.h"
 
 // ==========================================================
 // GlDirectModuleBase —— 每帧动态图形的 GL 直渲染统一框架（v2.9.4）
@@ -62,16 +63,29 @@ public:
         bool renderToLogical = false;
         int  logicalW = 0, logicalH = 0;
         juce::Rectangle<int> canvasLocal;   // 逻辑渲染的画布矩形（blit 目标）
+        juce::Rectangle<int> fxRect;        // 可选后处理区域（模块本地坐标；空时默认取 canvasLocal 或 texTargetRect）
 
         // 纹理通道
+        struct TexRowPatch
+        {
+            int rowStart = 0;
+            int rowCount = 0;
+            std::vector<juce::uint32> pixels;
+        };
         int  texW = 0, texH = 0;
         bool texDirty = false;
-        float texScrollU = 0.0f;            // uv 子区窗口起点（0..1）
-        float texWinW = 1.0f;               // uv 子区窗口宽度（0..1]
+        bool texLinear = false;             // true = GL_LINEAR 平滑过滤，false = GL_NEAREST 像素风
+        bool texTransposed = false;         // true = 列主序转置纹理（u=Y，v=X 环形列，单行连续 glTexSubImage2D）
+        bool texPremultiplied = false;      // true = 纹理已预乘 Alpha（GL_ONE, GL_ONE_MINUS_SRC_ALPHA 无暗边）
+        bool texWrapRepeatT = false;        // true = GL_TEXTURE_WRAP_T 设 GL_REPEAT（环形滚动零接缝）
+        juce::uint64 texDataGen = 0;        // 纹理内容/过滤/尺寸代次（0 表示未编号，非零与 glTexUploadedGen 配对）
+        float texScrollU = 0.0f;            // uv 子区窗口起点（0..1；transposed 时为 v 起点）
+        float texWinW = 1.0f;               // uv 子区窗口宽度（0..1]；transposed 时可为负以实现反向滚动）
         juce::Rectangle<int> texTargetRect; // 模块本地目标矩形
         // ARGB 字节序（0xAARRGGBB = juce::Colour::getARGB，小端内存即 B,G,R,A），
-        //   Editor 以 GL_BGRA 上传避免字节重排；dirty 时全量上传
+        //   Editor 以 GL_BGRA 上传避免字节重排；dirty 时全量上传，增量更新走 texRowPatches
         std::vector<juce::uint32> texPixels;
+        std::vector<TexRowPatch>  texRowPatches;
 
         // trail 累积通道
         bool  trailFbo = false;
@@ -95,31 +109,52 @@ public:
 
     // ---- UI 线程 ----
     virtual void buildGlSnapshot() = 0;      // 构建本帧顶点流（无内容则发布空流）
+    void setGlFrameRequester (std::function<void()> fn) { glFrameRequester_ = std::move (fn); }
+    void setGlHostAvailable (bool available) noexcept { glHostAvailable_.store (available, std::memory_order_release); }
+    bool isGlHostAvailable() const noexcept { return glHostAvailable_.load (std::memory_order_acquire); }
 
-    // ---- GL 线程 ----
+    // 切换宿主 GL 上下文（停靠 ↔ 脱离 / 恢复 GL）后强制立即重建一帧快照
+    void forceRebuildGlSnapshot()
+    {
+        lastGlCanvasW_ = 0;
+        lastGlCanvasH_ = 0;
+        if (wantsGlSnapshot())
+            buildGlSnapshot();
+    }
+
+    // 仅唤醒当前宿主 GL 线程出帧、不标脏软件 CachedImage（停靠态与独立 GL 浮窗通用，
+    //   避免大尺寸模块每帧触发数 MB 的软件组件缓存重绘与纹理上传）。
+    bool requestGlFrameOnly()
+    {
+        if (glDirectActive.load (std::memory_order_acquire) && glFrameRequester_)
+        {
+            glFrameRequester_();
+            return true;
+        }
+        return false;
+    }
+
+    // ---- GL 线程（与 GlDirectRenderer 交互）----
+    // 单调递增唯一键：GlDirectRenderer 在各自上下文中按此键隔离 VBO/FBO/纹理，
+    //   停靠 ↔ 脱离跨 HGLRC 迁移时零句柄串扰、零 ABA 复用风险。
+    const juce::uint64 glResourceKey;
     std::shared_ptr<VertexStream> getGlSnapshot() const;   // SpinLock 内取 shared_ptr
     std::atomic<bool> glDirectActive { false };            // 首帧绘制成功后接管
-    unsigned     glVbo = 0;                                // 本模块专属 VBO（Editor 懒创建）
-    unsigned     glFbo = 0, glFboTex = 0;                  // 逻辑分辨率渲染 FBO（懒创建）
-    int          glFboW = 0, glFboH = 0;
-    unsigned     glTex = 0;                                // 纹理通道纹理（懒创建）
-    // 残影通道：最多 3 层，每层独立 FBO（三频段点云各自一条轨迹，颜色不互相污染）
-    unsigned     glTrailFbo[3] { 0, 0, 0 }, glTrailTex[3] { 0, 0, 0 };
-    int          glTrailW = 0, glTrailH = 0;
-    bool         glTrailCleared[3] { true, true, true };   // 该层是否已清透明
-    juce::uint64 lastUploadedVersion = 0;                  // 已上传版本（GL 线程写）
+    std::atomic<juce::uint64> glTexUploadedGen { 0 };      // 最近一次成功上传的 texDataGen（GL 线程 release 写，UI 线程 acquire 读）
+    std::atomic<bool> glForceTrailClear { false };         // 主题/皮肤切换或跨上下文迁移时置位，由 GL 线程消费清空旧残影
 
-    // 浮动态（脱离到独立窗口）时模块移出 Editor 组件树，Editor 不再渲染它的
-    //   GL 内容 —— 复位接管标志回退软件路径，避免画布区域纯透明（v2.9.4）。
-    //   dock 回来：保持未接管，由 Editor 下一帧渲染成功后重新置位（不能在此
-    //   主动置 true，否则"挖洞透明"先行、GL 内容还没画 → 内部透明）。
-    //   两个方向都 repaint：接管标志变化后组件缓存若不立即重绘，会残留
-    //   另一条路径的内容（dock 回来"内部透明 + 拖影"的根源）。
-    void setFloating (bool floating) noexcept override
+    // 停靠 ↔ 浮动态切换时模块更换 GL 宿主上下文（Editor ↔ FloatingModuleWindow）：
+    //   先复位接管标志与纹理上传代次，待新宿主首帧 GL 渲染成功后再置回 glDirectActive=true，
+    //   避免跨上下文切换瞬间出现透明洞或漏传全量纹理。
+    void setFloating (bool floating) override
     {
         ModulePanel::setFloating (floating);
-        if (floating && glDirectActive.load())
-            glDirectActive.store (false);
+        if (glDirectActive.load (std::memory_order_acquire))
+            glDirectActive.store (false, std::memory_order_release);
+        glTexUploadedGen.store (0, std::memory_order_release);
+        glForceTrailClear.store (true, std::memory_order_release);
+        lastGlCanvasW_ = 0;
+        lastGlCanvasH_ = 0;
         diagSetFloating (floating);
         repaint();
     }
@@ -155,16 +190,21 @@ protected:
         return true;
     }
 
-    // 浮动态（脱离到独立窗口）没有 GL 渲染目标 —— 应跳过快照构建。
-    //   拖动浮动窗口 resize 每帧触发 layoutContent，若仍全量重建快照
-    //   （S3D ~2ms 等），消息线程被打满 → 浮动窗口交互卡死（v2.9.5 实测）。
-    //   各模块 buildGlSnapshot 开头调用本函数守卫。
-    bool wantsGlSnapshot() const noexcept { return ! isFloating(); }
+    // 只要当前宿主（Editor 或带独立 OpenGLContext 的 FloatingModuleWindow）存在 GL 管线，
+    //   就持续构建快照，实现停靠态与脱离态 100% 统一的 GPU 直渲染。
+    bool wantsGlSnapshot() const noexcept { return glHostAvailable_.load (std::memory_order_acquire); }
 
-    // 接管后外壳填充透明（透出 FBO 0 的 GL 内容）
+    // 接管后外壳填充透明（透出 FBO 0 的 GL 内容）；
+    //   未接管时同步遵循透明/绿幕背景模式（透明模式未悬停时保持 alpha=0，不刷绿或 face）
     juce::Colour getShellFillColour() const override
     {
-        return glDirectActive.load() ? juce::Colours::transparentBlack : PinkXP::face;
+        if (glDirectActive.load())
+            return juce::Colours::transparentBlack;
+        if (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (*this))
+            return juce::Colours::transparentBlack;
+        if (PinkXP::isGreenScreenBackdrop() && ! PinkXP::isChromaRevealed (*this))
+            return PinkXP::chromaKeyGreen();
+        return PinkXP::face;
     }
 
     // 统一 paintContent：接管时挖洞填充 + overlay 文字；否则旧路径
@@ -198,9 +238,11 @@ protected:
     std::shared_ptr<VertexStream> beginGlSnapshot();
     // 发布快照（SpinLock 保护）
     void publishGlSnapshot (std::shared_ptr<VertexStream> snap);
+
+public:
     // 把一个矩形 quad（2 三角形 × 6 floats/顶点）追加进顶点流
     static void appendQuad (std::vector<float>& v, juce::Rectangle<float> r, juce::Colour c);
-    // 追加一条 1px 粗折线段（两端点连线的细 quad，用于网格线/圆环）
+    // 追加一条粗折线段（两端点连线的细 quad，用于网格线/圆环）
     static void appendLineSegment (std::vector<float>& v,
                                    float x0, float y0, float x1, float y1,
                                    float halfWidth, juce::Colour c);
@@ -208,15 +250,47 @@ protected:
     static void appendDisc (std::vector<float>& v,
                             float cx, float cy, float radius,
                             juce::Colour c, int segments = 16);
-    // 追加凹陷背景（与 PinkXP::drawSunken 逐笔对应的 9 矩形，v2.9.5 收敛
-    //   此前 8 个模块各自复制的样板）
+    // 令牌驱动的画布凹槽底板（按 PinkXP::getSkinTokens() 统一分派全部 7 种视觉风格，
+    //   与 CPU 侧 PinkXP::Craft::drawPanelWell / drawSunken 严格一致）
+    static void appendWellFrame (std::vector<float>& v, juce::Rectangle<int> canvas, juce::Colour fill);
+    // 向后兼容转发包装：直接转发至 appendWellFrame(v, canvas, PinkXP::content)
     static void appendSunkenFrame (std::vector<float>& v, juce::Rectangle<int> canvas);
+    // 圆角矩形 quad（radius <= 0.5 或 tokens.pixelSnapped 时直接退化为 2 三角形锐利直角）
+    static void appendRoundedQuad (std::vector<float>& v, juce::Rectangle<float> rect,
+                                   juce::Colour col, float radius, int cornerSegs = 4);
+    // 风格化电平灯格（Pixel XP 锐利方块+1px 左上高光；平滑/霓虹/CRT 风格按 CellFinish 绘制；
+    //   Green Screen 自动跳过未点亮格）
+    static void appendStyledBarCell (std::vector<float>& v, juce::Rectangle<float> rect,
+                                     juce::Colour col, bool lit, float pulse = 0.0f);
+    // 风格化折线（tokens.strokeGlowPass 为 true 时先叠宽柔光底带，再画平滑抗锯齿主线条；
+    //   不做像素阶梯吸附，确保斜线/曲线/圆弧在所有风格下柔滑无锯齿）
+    static void appendStyledPolyline (std::vector<float>& v, const juce::Point<float>* pts,
+                                      int count, juce::Colour col, float width);
+    // 风格化坐标网格线（Pixel XP 像素点阵 / Modern 细实线 / Neon 科技虚线 /
+    //   CRT 磷光标尺 / Green Screen 自动跳过）
+    static void appendGridLine (std::vector<float>& v, float x0, float y0,
+                                float x1, float y1, bool major, juce::Colour col);
 
 private:
+    struct GlAppearanceRefreshAsync final : juce::AsyncUpdater
+    {
+        explicit GlAppearanceRefreshAsync (GlDirectModuleBase& o) : owner (o) {}
+        void handleAsyncUpdate() override { owner.syncGlAppearanceIfStale (true); }
+        GlDirectModuleBase& owner;
+    };
+
+    void syncGlAppearanceIfStale (bool requestRepaint);
+
     mutable juce::SpinLock glSnapshotLock;
     std::shared_ptr<VertexStream> glSnapshot;
     juce::uint64 glSnapshotVersion = 0;
     int          lastGlCanvasW_ = 0, lastGlCanvasH_ = 0;   // 尺寸守卫缓存
+    int          glThemeSubToken_ = -1;
+    juce::uint32 lastGlAppearanceGen_ = 0;
+    juce::uint32 lastGlFontGen_ = 0;
+    GlAppearanceRefreshAsync glRefreshAsync_ { *this };
+    std::function<void()>    glFrameRequester_;
+    std::atomic<bool>        glHostAvailable_ { true };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlDirectModuleBase)
 };

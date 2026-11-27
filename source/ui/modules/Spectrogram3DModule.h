@@ -5,6 +5,7 @@
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
+#include "source/analysis/FreqScale.h"
 
 // ==========================================================
 // Spectrogram3DModule —— Pink XP 像素风"3D 频谱瀑布图"
@@ -125,12 +126,31 @@ private:
     double lastPushMs       = 0.0;    // v2.9.2：滚动更新门控（~30Hz）
     float  columnAccumulator = 0.0f;
 
-    // ---- 控制面板参数（v3.1，构造默认 = 旧外观：Theme 着色 / 向右后方退远）----
-    //   colourMode: 0 Theme（旧 TINT 按下）/ 1 Heat（旧 TINT 弹起）/ 2 Grey / 3 Ice
-    //   depthDir  : 0 Back-right（旧外观）/ 1 Back-left（切片向左后方退远，投影镜像）
-    int  colourMode = 0;
-    int  depthDir   = 0;
+    // ---- 控制面板参数（v3.1 / v3.5 扩展）----
+    //   colourMode : 0 Theme / 1 Heat / 2 Grey / 3 Ice / 4 Magma / 5 Inferno / 6 Plasma / 7 Viridis
+    //   depthDir   : 0 Back-right / 1 Back-left
+    //   shaper     : 0 Classic / 1 Sharp / 2 Sharper
+    //   freqRange  : 0 Full (20-20k) / 1 Music (30-12k) / 2 Vocal (80-8k) / 3 Bass (20-1k)
+    int  colourMode   = 0;
+    int  depthDir     = 0;
+    int  shaperMode   = 0;
+    int  freqRange    = 0;
+    y2k::fscale::Scale fftScale = y2k::fscale::Scale::log;
+    float floorDb     = -90.0f;
+    float ceilDb      =   0.0f;
+    float slopeDbPerOct = 0.0f;
+    float depthFadePct  = 65.0f;
+    float heightScale   = 1.0f;
+    bool  showRidges    = true;
+    bool  showLabels    = true;
+
     bool useThemeColours() const noexcept { return colourMode == 0; }
+    float activeMinFreqHz() const noexcept;
+    float activeMaxFreqHz() const noexcept;
+    void  rebuildBinTiltGain();
+    std::vector<float> binTiltGain_;
+    double tiltSampleRate_ = 0.0;
+    juce::Array<float> classicMagBuf;
     static constexpr int sliderPanelW = 0;   // v3.1：右侧控制条取消，画布 = 整个内容区
 
     int themeSubToken = -1;
@@ -160,6 +180,9 @@ private:
     float       cachedRenderScale = 0.0f;
     int         cachedCanvasW = -1;
     int         cachedCanvasH = -1;
+    juce::uint32 cachedAppearanceGen_  = 0;
+    juce::uint32 cachedFontGen_        = 0;
+    juce::uint32 paletteAppearanceGen_ = 0;
 
     // ---- P3 预计算加速表 ----
     // magToIdx: 4096 级线性幅度 → 256 级色板下标 (uint8_t)。

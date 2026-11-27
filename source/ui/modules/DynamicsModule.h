@@ -57,6 +57,7 @@ public:
 protected:
     void layoutContent(juce::Rectangle<int> contentBounds) override;
     void paintContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getContentBounds(); }
 
 private:
     // ---- 柱状表 ----
@@ -114,9 +115,9 @@ private:
     float drRowValue (int row) const noexcept;
 
     // dBFS → [0,1] 条高
-    static float dbToNorm(float db)
+    float dbToNorm(float db) const noexcept
     {
-        return juce::jlimit(0.0f, 1.0f, juce::jmap(db, -60.0f, 0.0f, 0.0f, 1.0f));
+        return juce::jlimit(0.0f, 1.0f, juce::jmap(db, barFloorDb, 0.0f, 0.0f, 1.0f));
     }
     static juce::Colour dbToColour(float db);
 
@@ -126,6 +127,10 @@ private:
     Items items;
     ReadoutStyle readoutStyle = ReadoutStyle::bigDigits;
     float histSpanSec = 1.0f;     // 默认 1 s = 旧 Dynamics 的实际窗口（120 格 × 1/120 s）
+    float barFloorDb  = -60.0f;   // 柱状表底噪（-72 / -60 / -48 / -36 dB）
+    bool  showPeakHold = true;    // 柱状表峰值保持线
+    int   histStyle   = 0;        // 0=Filled, 1=Line
+    float histMaxDb   = 30.0f;    // Crest 历史纵轴上限（15~40 dB）
 
     // 4 柱：PeakL, PeakR, RmsL, RmsR
     MeterBar bPeakL, bPeakR, bRmsL, bRmsR;
@@ -165,6 +170,8 @@ private:
     void drawHoverRuler(juce::Graphics& g);
     juce::Point<int> hoverPos;
     bool             hoverActive = false;
+
+    int themeSubToken = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DynamicsModule)
 };

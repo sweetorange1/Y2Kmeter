@@ -97,7 +97,7 @@ void drawEmoji (juce::Graphics& g, const juce::Image& img,
 enum class ToyRole : int
 {
     Reward = 0,   // 奖励（LUFS 命中、Meters 顶砖、贴纸）
-    Burst,        // 爆裂（碎片、点爆、EQ 弹豆、通用兜底）
+    Burst,        // 爆裂（碎片、点爆、通用兜底）
     Orb,          // 小球（弹珠、Line Rider 球）
     Foe,          // 入侵者
     Cheer,        // 欢呼（人浪）
@@ -187,73 +187,122 @@ std::unique_ptr<ToyActor> makeConfettiRainParticle (juce::Point<float> at,
                                                     juce::Point<float> velocity,
                                                     ToyDirector& dir, bool rainbow,
                                                     juce::Rectangle<int> clipBounds);
-// Oscilloscope 拍电视（模块内 actor，§8.3 / E.4.3 带真实读数）
-std::unique_ptr<ToyActor> makeTvStaticActor (juce::Point<float> at, juce::Rectangle<int> canvas,
-                                             const juce::String& readout = {});
+// Oscilloscope 双态荧光电子玩法（模块内 actor，实现见 fx/ToyFx_Oscilloscope.cpp）：
+//   · Waveform 模式：两颗荧光光珠贴着真实波形向两侧冲浪（波峰起跳、撞边溅火花）
+//   · X-Y / Lissajous 模式：中心引力轨道荧光电子（椭圆/玫瑰余辉轨迹，轻度响应音频能量）
+//   两者均为极细透明矢量、零遮挡块，并在用户按住慢放期间自动降速至子弹时间并柔淡退让。
+std::unique_ptr<ToyActor> makeOscWaveSurferActor (juce::Point<float> clickPos,
+                                                  juce::Rectangle<int> canvas,
+                                                  const juce::Array<float>& waveSamples,
+                                                  std::function<bool()> isSlowMo = {});
+std::unique_ptr<ToyActor> makeOscOrbitElectronActor (juce::Point<float> clickPos,
+                                                     juce::Rectangle<int> canvas,
+                                                     std::function<bool()> isSlowMo = {});
 
 // ==========================================================
-// 模块专属玩法 actor 工厂（§8.2 / §8.3，实现见 ToyModuleFx.cpp）
+// 模块专属玩法 actor 工厂（v3.5 全模块统一荧光矢量物理重构，实现见 ToyModuleFx.cpp）
 // ==========================================================
 // 频率 → 音名（A4=440Hz，纯函数）
 juce::String toyFreqToNoteName (float freq);
-// Spectrum：拨弦涟漪（同心环 + 竖向余振线）
-std::unique_ptr<ToyActor> makeSonarRingActor (juce::Point<float> at);
-// Spectrum：点击瞬间的频谱残影（模块局部坐标）
-std::unique_ptr<ToyActor> makeSpectrumGhostActor (const std::vector<juce::Point<float>>& points);
-// Spectrum：频率/音名气泡
-std::unique_ptr<ToyActor> makeNoteBubbleActor (juce::Point<float> at, const juce::String& note);
-// Waveform：人浪（以点击处向两侧传播的高亮带 + 🙌）
-std::unique_ptr<ToyActor> makeWaveBandActor (juce::Point<float> at, juce::Rectangle<float> canvas);
-// StereoField：入侵者（Foe 角色四向随机漫步，可点击击落）
-std::unique_ptr<ToyActor> makeInvaderActor (juce::Point<float> at, juce::Rectangle<float> area);
-// OscilloscopeWave：拍立得（📸 闪光 + 相纸掉出，不读回 GL，带图注）
-//   scatter=true：XY/Lissajous 模式 —— 画 (L→x, R→y) 李萨如散点图，而不是波形折线。
-std::unique_ptr<ToyActor> makePolaroidActor (juce::Point<float> at,
-                                             const juce::Array<float>& waveL,
-                                             const juce::Array<float>& waveR,
-                                             const juce::String& caption = {},
-                                             bool scatter = false);
-// Spectrogram：emoji 贴纸（随瀑布向左滚动）
-std::unique_ptr<ToyActor> makeStickerActor (EmojiId id, juce::Point<float> at, float scrollPxPerSec);
-// Spectrogram3D：火山（🌋 + 🔥 粒子 + 🚩）
-std::unique_ptr<ToyActor> makeVolcanoActor (juce::Point<float> at, juce::Point<float> slantDir);
-// 指针虚影（叠加在真实指针上，不改变真实指针）：
-//   theta 为数学角度（0=最左，π/2=正上，π=最右），与 Phase/VU 真实指针同约定。
-std::unique_ptr<ToyActor> makeGhostNeedleActor (juce::Point<float> pivot, float radius, float thetaRad);
-// VU 横向刻度条：弹簧游标（幽灵游标从点击处带过冲弹回真实电平，拖一根弹簧 + 残影）
+
+// Spectrum：拨弦驻波 + 真实泛音节点（2f/3f/4f）+ 沿真实频谱轮廓冲浪的双微火花（按住子弹时间自动退让）
+std::unique_ptr<ToyActor> makeSpectrumPluckActor (juce::Point<float> clickPos,
+                                                  juce::Rectangle<int> canvas,
+                                                  const std::vector<float>& curveY,
+                                                  const std::vector<juce::Point<float>>& harmonics,
+                                                  std::function<bool()> isSlowMo = {});
+
+// Waveform：贴合真实波形上下包络的双磷光扫描波前（单/双声道自适应，按住冻结时柔淡降速退让）
+std::unique_ptr<ToyActor> makeWaveformShockActor (juce::Point<float> clickPos,
+                                                  juce::Rectangle<int> laneRect,
+                                                  const std::vector<float>& envTopY,
+                                                  const std::vector<float>& envBotY,
+                                                  std::function<bool()> isSlowMo = {});
+
+// Spectrogram：四方向真实跟随瀑布流的十字声呐浮标（按住冻结时完全静止 0x 并柔淡退让）
+std::unique_ptr<ToyActor> makeSpectrogramBuoyActor (juce::Point<float> clickPos,
+                                                    juce::Rectangle<int> canvas,
+                                                    juce::Point<float> driftVelPxPerSec,
+                                                    std::function<bool()> isFrozen = {});
+
+// Spectrogram3D：随投影斜向（Back-right / Back-left）对齐的透视激光雷达脉冲 + 沿深度轴漂移的磷光微粒
+std::unique_ptr<ToyActor> makeSpec3DPulseActor (juce::Point<float> clickPos,
+                                                juce::Rectangle<int> canvas,
+                                                juce::Point<float> depthDirUnit);
+
+// StereoField：半圆雷达扫描光束 + 极坐标弧形涟漪 + 沿等电平弧往复摆动的阻尼荧光光珠
+std::unique_ptr<ToyActor> makeStereoRadarSweepActor (juce::Point<float> clickPos,
+                                                     juce::Rectangle<int> canvas,
+                                                     juce::Point<float> origin,
+                                                     float radarRadius);
+
+// StereoMap：PAN 模式弹性中线拨弦 + 对称双光珠 / MONO 模式相干干涉波纹（按住子弹时间自动退让）
+std::unique_ptr<ToyActor> makeStereoMapBeamActor (juce::Point<float> clickPos,
+                                                  juce::Rectangle<int> plot,
+                                                  bool isMonoMode,
+                                                  std::function<bool()> isSlowMo = {});
+
+// Phase Gonio：限制在 M/S 菱形内的荧光引力电子（四壁菱形反射 + 微火花）
+std::unique_ptr<ToyActor> makePhaseGonioOrbiterActor (juce::Point<float> clickPos,
+                                                      juce::Rectangle<int> gonioArea);
+
+// Phase WIDTH / BAL 条形槽：纯矢量荧光弹珠（渐变拖尾 + 撞壁微火花）
+std::unique_ptr<ToyActor> makeTrackOrbActor (juce::Rectangle<float> track,
+                                             juce::Point<float> clickPos,
+                                             bool useAccent2 = false);
+
+// 指针弹拨虚影（Phase Corr / VU 指针式共用，叠加在真实指针上）：
+//   theta 为数学角度（0=最左，π/2=正上，π=最右）；startThetaRad < 0 时默认以 restThetaRad 为基点轻拨。
+std::unique_ptr<ToyActor> makeGhostNeedleActor (juce::Point<float> pivot,
+                                                float radius,
+                                                float restThetaRad,
+                                                float startThetaRad = -1.0f);
+
+// 纵向 LED 柱体（Loudness LED 柱 / Dynamics Peak-RMS 柱）：自底向上荧光扫光柱 + 弹跳顶帽 + 微火花
+std::unique_ptr<ToyActor> makeMeterBarLaunchActor (juce::Rectangle<float> barRect,
+                                                   float clickY,
+                                                   juce::Colour accentColour);
+
+// 数字读数框（Loudness Readouts）：沿框体四周双向疾驰的双霓虹光束（零遮挡中央数字）
+std::unique_ptr<ToyActor> makePerimeterSweepActor (juce::Rectangle<float> boxRect,
+                                                   juce::Point<float> clickPos,
+                                                   juce::Colour accentColour);
+
+// Dynamics DR 框：左右对称荧光压缩括号 [ ] 弹性收紧再回弹（零遮挡中央数字）
+std::unique_ptr<ToyActor> makeCompressorClampActor (juce::Rectangle<float> cellRect,
+                                                    juce::Point<float> clickPos);
+
+// Dynamics Crest 历史带：沿真实 Crest 历史折线向两侧冲浪的双荧光光珠
+std::unique_ptr<ToyActor> makeCrestSurferActor (juce::Point<float> clickPos,
+                                                juce::Rectangle<int> plotRect,
+                                                const std::vector<float>& curveY);
+
+// TempoKey BPM 列：严格按真实 BPM 节拍周期律动的节拍脉冲环 + 底边摆动节拍光点
+std::unique_ptr<ToyActor> makeBpmMetronomePulseActor (juce::Rectangle<int> colRect,
+                                                      juce::Point<float> clickPos,
+                                                      float bpm);
+
+// TempoKey KEY 列：12 音高星座环，点亮当前调式真实 7 个音级并以极细星轨连线
+std::unique_ptr<ToyActor> makeKeyConstellationActor (juce::Rectangle<int> colRect,
+                                                     juce::Point<float> clickPos,
+                                                     int keyRoot, int keyMode);
+
+// SystemMonitor：PCB 电路板 90°/45° 信号走线脉冲 + 发光焊盘端点
+std::unique_ptr<ToyActor> makeSysCircuitPulseActor (juce::Point<float> clickPos,
+                                                    juce::Rectangle<int> tileRect,
+                                                    juce::Colour accentColour);
+
+// VU 横向刻度条：弹簧游标（幽灵游标从点击处带过冲弹回真实电平，拖一根弹簧 + 荧光残影）
 std::unique_ptr<ToyActor> makeSliderFlickActor (float top, float bottom, float clickX, float restX);
-// VU LED 梯柱：跑马冲顶（从左逐格点亮到点击格，顶帽弹飞后落回；capDir -1 向上 / +1 向下）
+// VU LED 梯柱：跑马冲顶（从左逐格点亮到点击格，顶帽弹飞溅微火花后落回；capDir -1 向上 / +1 向下）
 std::unique_ptr<ToyActor> makeLedChaseActor (std::vector<juce::Rectangle<float>> cols,
                                              std::vector<juce::Colour> colours, float capDir);
 // VU 极简游标：卷尺（从当前游标量到点击处，标出 dB 差值后卷回）
 std::unique_ptr<ToyActor> makeMeasureTapeActor (float lineY, float fromX, float toX, const juce::String& label);
 // VU 镜像刻度：水滴涟漪（以中脊为水面上下对称荡开三圈，限制在 top..bottom / xMin..xMax 内）
 std::unique_ptr<ToyActor> makeMirrorRippleActor (float x, float spineY, float top, float bottom, float xMin, float xMax);
-// Loudness：打砖块碎片（彩色方块下落 + 弹跳）
-std::unique_ptr<ToyActor> makeBrickShardsActor (juce::Point<float> at, juce::Colour colour, int count);
-// VU：玻璃裂（放射裂纹，4 秒淡出）
-std::unique_ptr<ToyActor> makeCrackActor (juce::Point<float> at, float radius);
-// VU：迪斯科灯（LED 换色 + 环绕 ✨）
+// VU 削波灯：霓虹光晕脉冲环
 std::unique_ptr<ToyActor> makeDiscoLedActor (juce::Rectangle<float> ledArea);
-// LUFS：老虎机滚轮（🎰 + 逐位滚轮数字）
-std::unique_ptr<ToyActor> makeSlotRollerActor (juce::Point<float> at, const juce::String& digits);
-// LUFS：萤火虫（灯飞离）
-std::unique_ptr<ToyActor> makeFireflyActor (juce::Point<float> at);
-// TruePeak：Win95 风格弹窗（如实文案 + 可点 OK，E.4.2）
-std::unique_ptr<ToyActor> makePopUpWindowActor (juce::Point<float> at,
-                                                const juce::String& text, EmojiId icon);
-// Dynamics DR：压缩器压扁（阻尼弹簧过冲 + "SQUISH"）
-std::unique_ptr<ToyActor> makeSquashActor (juce::Point<float> at);
-// PhaseBalance：弹珠（🔴 沿槽滚动，撞壁反弹）
-std::unique_ptr<ToyActor> makeBallActor (juce::Rectangle<float> track, juce::Point<float> click);
-// PhaseBalance：橡皮筋（填充条拉到点击处再弹回）
-std::unique_ptr<ToyActor> makeRubberBandActor (juce::Rectangle<float> track, juce::Point<float> click);
-// DynamicsMeters：幸运方块（💰 弹起 + "x3"）
-std::unique_ptr<ToyActor> makeCoinPopActor (juce::Point<float> at);
-// Dynamics Crest：Line Rider（⚽ 沿曲线滚动左移）
-std::unique_ptr<ToyActor> makeCrestBallActor (juce::Point<float> at);
-// EQ：拼豆爆米花（🍿 弹起 + 邻近豆晃动）
-std::unique_ptr<ToyActor> makeBeadPopActor (juce::Point<float> at);
 
 // ==========================================================
 // EmojiAtlas —— 系统 emoji 字体烘焙成软件图集（§5 / E.3.2）
@@ -373,6 +422,7 @@ struct ToyContext
     void spawnEmoji (EmojiId id, juce::Point<float> at,
                      juce::Point<float> v, int sizeTier = 1);
     void addModuleActor (std::unique_ptr<ToyActor> a);
+    void addModuleActorCapped (std::unique_ptr<ToyActor> a, size_t maxActors = 6);
     void promoteToFree (std::unique_ptr<ToyActor> a);
 
     juce::Rectangle<int> contentBounds() const;

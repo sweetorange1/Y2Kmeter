@@ -68,6 +68,8 @@ protected:
     juce::Rectangle<int> getGlCanvasBounds (juce::Rectangle<int> contentBounds) override;
     void paintGlOverlay (juce::Graphics& g, juce::Rectangle<int> canvas) override;
     void paintLegacyContent (juce::Graphics& g, juce::Rectangle<int> contentBounds) override;
+    // 绿幕：保留声相雷达画布（散点残影），半圆框 / 能量环 / 45°线 / 刻度标签不画
+    juce::Rectangle<int> getChromaKeyCanvas() override { return getContentBounds().reduced (2); }
 
 private:
     // 雷达几何参数（圆心X / 底线Y / 半径 / 侧边留白 / 动态字号）
@@ -129,11 +131,17 @@ private:
     //   = pow(kDecayPerFrame, 累计 dt × 60)，残影时长与帧率无关。
     //   v3.1：再乘 fadeSpeed 作指数（pow(0.92, dt×60×fadeSpeed)），fadeSpeed=1 即旧行为。
     static constexpr float kDecayPerFrame = 0.92f;
-    float trailDtAccumSec = 0.0f;
+    float trailDtAccumSec    = 0.0f;
+    float cpuTrailDtAccumSec = 0.0f;
 
     // ---- 控制面板参数（构造默认 = 旧外观）----
     float dotSize    = 2.0f;     // 点边长（px），旧版固定 2×2
     float fadeSpeed  = 1.0f;     // 点消失速度倍率
+    bool  autoGain   = true;     // 自动缩放开关（关闭后按 manualGainDb 固定）
+    float manualGainDb = 0.0f;   // 手动缩放增益（-12..+18 dB，仅 autoGain=OFF）
+    int   dotShape   = 0;        // 0 Square（像素方块）/ 1 Glow（核心+柔光晕）
+    bool  showRings  = true;     // 同心能量环与 45° 参考线
+    bool  showLabels = true;     // L/C/R 与能量环 dB 文字标签
     bool  bandColour = false;    // 频段染色：低 / 中 / 高 = 红 / 蓝紫 / 青（各一层轨迹）
     float crossLowHz  = y2k::bands::BandSplitter::kDefaultLowCross;    // 200 Hz
     float crossHighHz = y2k::bands::BandSplitter::kDefaultHighCross;   // 2 kHz

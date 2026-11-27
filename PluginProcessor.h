@@ -252,7 +252,7 @@ public:
     //   · UI 线程调用，读原子字段，无锁安全。
     HostPlayheadSnapshot getHostPlayheadSnapshot() const noexcept;
 
-    // ---- 兼容旧接口（供 EqModule 使用，内部转发到 AnalyserHub）----
+    // ---- 兼容旧接口（内部转发到 AnalyserHub）----
     double getCurrentSampleRate() const noexcept;
     void getOscilloscopeSnapshot(juce::Array<float>& dest);   // 返回 L 声道
     void getSpectrumSnapshot(juce::Array<float>& dest);

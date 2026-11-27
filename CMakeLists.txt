@@ -68,7 +68,7 @@ if (APPLE)
   message(STATUS "[macOS] Architectures    : ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-project(Y2Kmeter VERSION 3.4.5 LANGUAGES C CXX)
+project(Y2Kmeter VERSION 3.5.0 LANGUAGES C CXX)
 
 # ==========================================================
 # Steam 构建开关（默认 OFF，绝不影响官网 / Inno Setup 流水线）
@@ -427,14 +427,14 @@ Y2Kmeter
         # 反写域名作为 bundle ID / VST3 Plug Identifier，保证在 DAW 里稳定识别
         # （升级版本或改 COMPANY_NAME 都不会换 ID，用户工程里的插件实例不会丢）
         BUNDLE_ID "cn.iisaacbeats.Y2Kmeter"
-        VERSION 3.4.5
+        VERSION 3.5.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Km
         FORMATS ${Y2KM_PLUGIN_FORMATS}
         # macOS 下 Y2KM_ICON_PLUGIN_ARGS 展开为 ICON_BIG/ICON_SMALL，其它平台为空，不影响 Windows。
         ${Y2KM_ICON_PLUGIN_ARGS}
-        # 本插件是纯分析表（EQ 分析仪 / LUFS / 示波器 / 频谱 / 相位 / 动态等），
+        # 本插件是纯分析表（频谱 / LUFS / 示波器 / 相位 / 动态等），
         # 对应 VST3 SDK 的 Analyzer 类别，让 DAW 的 FX 分类浏览器正确归类。
         VST3_CATEGORIES "Analyzer" "Fx"
         IS_SYNTH FALSE
@@ -480,7 +480,7 @@ Y2Kmeter_milkdrop
         PLUGIN_NAME "Y2Kmeter_milkdrop"
         # 独立 bundle ID，避免与完整版 Y2Kmeter 冲突（宿主内可同时加载两个插件）
         BUNDLE_ID "cn.iisaacbeats.Y2KmeterMilkdrop"
-        VERSION 3.4.5
+        VERSION 3.5.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Y2KM
         PLUGIN_CODE Y2Kd
@@ -571,7 +571,6 @@ set(Y2KM_SKIN_FONT_FILES
   "${Y2KM_SKIN_FONT_DIR}/Orbitron.ttf"
   "${Y2KM_SKIN_FONT_DIR}/Exo2.ttf"
   "${Y2KM_SKIN_FONT_DIR}/VT323.ttf"
-  "${Y2KM_SKIN_FONT_DIR}/OpenSans.ttf"
   "${Y2KM_SKIN_FONT_DIR}/NotoSansSC.otf"
 )
 foreach(_y2k_font IN LISTS Y2KM_SKIN_FONT_FILES)
@@ -701,6 +700,8 @@ set(Y2KM_PLUGIN_SOURCES
 
   source/ui/PinkXPStyle.h
   source/ui/PinkXPStyle.cpp
+  source/ui/SkinCraft.h
+  source/ui/SkinCraft.cpp
   source/ui/ModulePanel.h
   source/ui/ModulePanel.cpp
   # 模块控制面板（v3.1 参数系统）：齿轮按钮展开的覆盖式参数抽屉
@@ -752,8 +753,6 @@ set(Y2KM_PLUGIN_SOURCES
   source/ui/UpdateDialog.cpp
 
   # === 分析模块 ===
-  source/ui/modules/EqModule.h
-  source/ui/modules/EqModule.cpp
   source/ui/modules/LoudnessModule.h
   source/ui/modules/LoudnessModule.cpp
   source/ui/modules/MeterWidgets.h
@@ -813,6 +812,10 @@ source/ui/modules/OscilloscopeModule.cpp
   source/standalone/Y2KStandaloneApp.cpp
   source/standalone/WasapiLoopbackCapture.h
   source/standalone/WasapiLoopbackCapture.cpp
+  # 定向程序音频采集（Application Audio Capture）的目标枚举：
+  #   音频会话 + 顶层窗口 → Source 下拉里的程序列表；非 Windows 为空实现
+  source/standalone/AppAudioTargets.h
+  source/standalone/AppAudioTargets.cpp
 
   source/network/Version.h
   source/network/Version.cpp
@@ -892,9 +895,13 @@ target_link_libraries(Y2Kmeter_milkdrop PRIVATE ${Y2KM_COMMON_LINK_LIBS})
 #   · ole32 / uuid —— CoCreateInstance / IID_IMMDeviceEnumerator 等 COM 符号
 #   · avrt         —— AvSetMmThreadCharacteristics（把采集线程提升为 Pro Audio 优先级，
 #                      减少 loopback 丢帧；未启用 loopback 时不会调用，纯开销 0）
+#   · mmdevapi     —— ActivateAudioInterfaceAsync（定向程序采集 = 进程级回环的激活入口）
+#   · version      —— GetFileVersionInfo（读 exe 的 FileDescription 作为程序显示名，
+#                      见 source/standalone/AppAudioTargets.cpp）
+#   两者都是系统自带 DLL（Win8+ / 全版本），不引入新的分发依赖。
 if (WIN32)
-  target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt)
-  target_link_libraries(Y2Kmeter_milkdrop PRIVATE ole32 uuid avrt)
+  target_link_libraries(Y2Kmeter PRIVATE ole32 uuid avrt mmdevapi version)
+  target_link_libraries(Y2Kmeter_milkdrop PRIVATE ole32 uuid avrt mmdevapi version)
   # v3.3 电脑状态模块：PDH 性能计数器 / DXGI 显卡枚举 / WMI（读取用户自行运行的
   #   LibreHardwareMonitor 温度）。源文件里也有 #pragma comment，这里显式列出便于审阅。
   target_link_libraries(Y2Kmeter PRIVATE pdh dxgi wbemuuid oleaut32)

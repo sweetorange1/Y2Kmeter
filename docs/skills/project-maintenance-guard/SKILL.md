@@ -47,10 +47,10 @@ Y2Kmeter 项目的通用工程维护 Skill。它不绑定某一个模块，而�
 - 发版：升版本号、写文档、提交推送。
 - 处理编译缓存导致的“代码改了但行为没变”、MSVC / CMake / JUCE 工具链问题。
 
-## 2. 前置检查（v3.2 现状）
+## 2. 前置检查（v3.5 现状）
 
-1. **版本**：当前 `3.4.5`；C++17；JUCE 8.0.12 vendored（`third_party/JUCE`，带 0001~0008 补丁）。
-2. **模块形态**：分析模块 = `ModulePanel` 子类；多数同时继承 `GlDirectModuleBase` + `AnalyserHub::FrameListener`。**GL 与 CPU 回退是两条绘制路径，改外观必须两边都改**（`buildGlSnapshot` / `paintGlOverlay` 与 `paintLegacyContent`）。
+1. **版本**：当前 `3.5.0`；C++17；JUCE 8.0.12 vendored（`third_party/JUCE`，带 0001~0009 补丁）。
+2. **模块形态**：分析模块 = `ModulePanel` 子类；多数同时继承 `GlDirectModuleBase` + `AnalyserHub::FrameListener`。**GL（主窗口与浮动窗口共享 `GlDirectRenderer`）与 CPU 回退是两条绘制路径，改外观与 `SkinCraft` 工艺必须两边都改**（`buildGlSnapshot` / `paintGlOverlay` 与 `paintLegacyContent`）；模块离屏回退缓存一律用 `SoftwareImageType`（严禁 `OpenGLImageType`）。
 3. **参数系统（v3.1+）**：抽屉由 `ModulePanel::buildParamDefs` 生成，值走 `getParamValue / setParamValue`，持久化走 `save / restoreModuleSpecificState`。
 4. **i18n**：界面上出现的英文都是**翻译键**，必须在 `i18n/zh-CN.lang` 补中文（逐行键，非整段）。
 5. **头文件合并约定**：`AnalyserHub.h`、`ModuleWorkspace.h` 是多类合并头，**不要拆**（MSVC include-guard 串扰历史原因）。
@@ -75,7 +75,7 @@ Y2Kmeter 项目的通用工程维护 Skill。它不绑定某一个模块，而�
 - `Y2KmeterAudioProcessor` 是分析入口；`Y2KmeterAudioProcessorEditor` 是 UI 壳；`AnalyserHub` 是分析调度中心（6 路分析、按引用计数启用）；`ModuleWorkspace` 是模块容器 + 布局持久化。
 - 新增模块类型：`ModuleType` **只追加不重排**；同步枚举、字符串映射、工厂、默认布局、持久化、`CMakeLists.txt` 源文件列表、性能计数映射。
 - 旧类型（`lufs_realtime` / `true_peak` / `oscilloscope_wave` / `phase_correlation` / `phase_balance` / `dynamics_meters` / `dynamics_dr` / `dynamics_crest`）已合并到新模块，**字符串映射必须保留**，否则旧存档模块会静默丢失。
-- Standalone 采集走 `WasapiLoopbackCapture` / `MacDesktopAudioCapture`，不经过宿主 `processBlock`。
+- Standalone 采集走 `WasapiLoopbackCapture` / `MacDesktopAudioCapture`，不经过宿主 `processBlock`。Windows 的定向程序采集（`app:<exe>`）是同一个采集器的进程级回环模式，约定见 PROJECT_OVERVIEW §5.2.1。
 
 ### 4.2 参数与存档（最容易踩）
 
@@ -165,4 +165,4 @@ Y2Kmeter 项目的通用工程维护 Skill。它不绑定某一个模块，而�
 
 ---
 
-**最后更新**：2026-11-13（v1.1.0：对齐 v3.2.0 —— 补参数系统 / i18n / GL 绘制硬约束 / 发版流程；把事实性细节统一指向 `PROJECT_OVERVIEW.md` 与 `docs/`，避免 Skill 与文档两套说法）
+**最后更新**：2026-11-27（v1.2.0：对齐 v3.5.0 —— 同步版本号 3.5.0、JUCE 补丁 0009、SkinCraft 6 风格与正交 BackdropMode、浮动态统一 GL 管线 `GlDirectRenderer` 与跨上下文 `SoftwareImageType` 铁律）

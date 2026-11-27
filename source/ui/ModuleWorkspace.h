@@ -20,12 +20,8 @@ class ModuleToyState;
 
 enum class ModuleType
 {
-    // v3.0.6：拼豆频谱（Spectrum Perlerbeads）暂时下线 —— 性能不达标。
-    //   · 不进 availableTypes（添加模块菜单里看不到）；
-    //   · 旧存档里的 "eq" 由 stringToModuleType() 迁移成 spectrum（同位同尺寸）；
-    //   · 枚举值 / EqModule 实现保留（枚举只追加不重排，也方便日后重新上线）。
-    eq,
-    loudness,
+    // 枚举序数从 1 起（保持既有各模块枚举值 1..25 不变，兼容性能计数表）。
+    loudness = 1,
     oscilloscope,
     spectrum,
     phase,
@@ -286,6 +282,9 @@ public:
     bool isControlPanelOpen() const noexcept { return controlPanelOpen_; }
     void setControlPanelOpen (bool open);
     void refreshControlPanel();
+    // v3.5：撤回 / 重做定位反馈 —— 当撤回/重做作用于本模块内部设置或控制器，
+    //       且对应选项面板当前未展开/未聚焦时，自动打开让用户一眼看到改回了什么。
+    virtual void revealUndoTarget (const juce::String& focusHint);
 
     // 点空白处自动收起：关闭所有打开的抽屉。
     //   source / posInSource 是这次鼠标按下落在哪个组件、组件内坐标
@@ -293,9 +292,36 @@ public:
     static void closeOpenControlDrawers (const juce::Component* source,
                                          juce::Point<int>       posInSource);
 
-    // 抽屉当前占用的区域（模块本地坐标；收起时为空）。
-    //   public：ToyOverlay 绘制全窗口 emoji 时需要排除它（否则 emoji 会盖住设置界面）。
+    // 抽屉当前遮挡本面板的区域（模块本地坐标；外部展开或收起时为空）。
     juce::Rectangle<int> getControlDrawerBounds() const;
+
+    // 供外部点击关闭判定：组件 c 是否就是本模块的设置面板或其子控件
+    bool isComponentInControlDrawer (const juce::Component* c) const noexcept;
+
+    // 外部弹出式设置面板的 3 级智能落位纯几何算法（工作区外部 → 桌面临时窗口 → 全屏角落兜底）
+    struct ControlDrawerPlacement
+    {
+        enum class Host { workspace, desktop, insideOwner };
+        Host                 host = Host::insideOwner;
+        juce::Rectangle<int> bounds;   // workspace 本地 / 屏幕 / owner 本地坐标
+    };
+
+    static ControlDrawerPlacement computeControlDrawerPlacement (
+        bool isFloating,
+        juce::Rectangle<int> ownerInWorkspace,
+        juce::Rectangle<int> workspaceCanvas,
+        const std::vector<juce::Rectangle<int>>& otherModulesInWorkspace,
+        juce::Rectangle<int> ownerOnScreen,
+        juce::Rectangle<int> screenWorkArea,
+        juce::Rectangle<int> ownerContentLocal,
+        int prefW, int minW, int maxW, int gap, int minH,
+        const std::function<int(int)>& heightForWidth);
+
+    // 窗口/工作区尺寸变化时，重新定位所有已打开的外部设置面板
+    static void relayoutOpenControlDrawers();
+
+    // 返回当前打开的窗口内设置面板在 target 坐标系下的矩形（用于 ToyOverlay 避让裁剪）
+    static juce::Rectangle<int> getOpenInWindowDrawerBoundsIn (const juce::Component& target);
 
     virtual void   buildParamDefs (std::vector<ParamDef>& out) const { juce::ignoreUnused (out); }
     virtual double getParamValue  (const juce::String& id) const     { juce::ignoreUnused (id); return 0.0; }
@@ -388,8 +414,10 @@ public:
 
     // 弹出/停靠状态管理（由 ModuleWorkspace / FloatingModuleWindow 调用）
     // v2.9.4：改为 virtual —— GlDirectModuleBase 浮动态需复位 GL 接管标志
-    virtual void setFloating(bool floating) noexcept;
+    virtual void setFloating(bool floating);
     bool isFloating() const noexcept { return isFloating_; }
+    void setFloatingGlHosted(bool hosted) noexcept { floatingGlHosted_ = hosted; }
+    bool isFloatingGlHosted() const noexcept { return floatingGlHosted_; }
     void setFloatingLayoutLocked(bool locked) noexcept;
     bool isFloatingLayoutLocked() const noexcept { return floatingLayoutLocked_; }
     void setPopOutEnabled(bool enabled) noexcept;
@@ -431,8 +459,18 @@ public:
     std::function<void(ModulePanel&)> onBoundsChangedByUser;
     std::function<void(ModulePanel&)> onBoundsDragging;   // 拖拽过程中持续回调（吸附预览用）
     std::function<void(ModulePanel&)> onCloseClicked;
-    // v3.1：用户通过控制面板改了某个参数（workspace 订阅 → 触发布局存档）
+    // v3.5：模块即将改变外部/异步状态（如 MilkDrop 预设/着色/效果）前调用，供 workspace 捕获精确的变更前快照
+    std::function<void(ModulePanel&)> onWillChangeParamByUser;
+    // v3.1：用户通过控制面板改了某个参数（workspace 订阅 → 触发布局存档与撤回记录）
     std::function<void(ModulePanel&)> onParamChangedByUser;
+    // v3.5：连续滑块拖拽结束 → 通知 workspace 断开撤回合并窗口，确保下一次拖动单独成步
+    std::function<void(ModulePanel&)> onParamGestureEnded;
+    void setLastChangedParamCoalesceKey (const juce::String& key) { lastChangedParamCoalesceKey_ = key; }
+    const juce::String& getLastChangedParamCoalesceKey() const noexcept { return lastChangedParamCoalesceKey_; }
+    void setLastChangedParamActionLabel (const juce::String& label) { lastChangedParamActionLabel_ = label; }
+    const juce::String& getLastChangedParamActionLabel() const noexcept { return lastChangedParamActionLabel_; }
+    void setLastChangedParamFocusHint (const juce::String& hint) { lastChangedParamFocusHint_ = hint; }
+    const juce::String& getLastChangedParamFocusHint() const noexcept { return lastChangedParamFocusHint_; }
     std::function<void(ModulePanel&)> onBroughtToFront;
     std::function<void(ModulePanel&, juce::Point<int> localPos)> onRightClick;  // 右键模块任意位置 → 弹出添加菜单
     std::function<void(ModulePanel&)> onPopOutClicked;  // 弹出/停靠按钮被点击
@@ -442,10 +480,11 @@ public:
     std::function<void(ModulePanel&)> onTitleDoubleClicked;
 
     void paint(juce::Graphics& g) override;
-    // CPU 小字绘制在所有子组件之上（子组件如 EQ 的 PixelEqGraph 会填满整个
+    // CPU 小字绘制在所有子组件之上（部分模块的子组件会填满整个
     // 内容区，paint() 里绘制的文本会被子组件后续绘制覆盖）。
     void paintOverChildren(juce::Graphics& g) override;
     void resized() override;
+    void moved() override;
     void mouseEnter(const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
     void mouseMove (const juce::MouseEvent& e) override;
@@ -526,6 +565,9 @@ private:
 
     bool controlPanelEnabled_ = false;
     bool controlPanelOpen_    = false;
+    juce::String lastChangedParamCoalesceKey_;
+    juce::String lastChangedParamActionLabel_;
+    juce::String lastChangedParamFocusHint_;
     std::unique_ptr<ModuleControlDrawer> controlDrawer_;
 
     ModuleType   moduleType;
@@ -576,8 +618,9 @@ private:
     //   压在所有组件之上"，且表现为永久性。见 ModulePanel::repaint()。
     juce::uint32 pendingRepaintStampMs = 0;
 
-    // 浮动态重绘限流时间戳（见 floatingRepaintHz / floatingRepaintThrottled）
+    // 浮动态重绘限流时间戳（仅无 GL 回退态生效；独立 GL 浮窗由 floatingGlHosted_ 解除 30Hz 限流）
     juce::uint32 lastFloatingRepaintMs = 0;
+    bool floatingGlHosted_ = false;
     bool floatingRepaintThrottled() noexcept;
 
     // 悬停重绘被限流时的"补齐"状态：快速拖拽停下后必须在节流窗口结束时补一次，
@@ -846,8 +889,13 @@ public:
     struct AudioSourceItem
     {
         juce::String displayName;    // 显示给用户看的名字
-        juce::String sourceId;       // 稳定 ID（回调携带，用于宿主 App 识别）
-        bool         isLoopback = false; // 是否"系统输出 Loopback"占位项
+        juce::String sourceId;       // 稳定 ID（回调携带，用于宿主 App 识别）；
+                                     //   空串 = 不可选的提示行（灰显，如 "No apps are playing audio"）
+        bool         isLoopback = false; // 走回环采集（整机输出 / 定向程序）；false = 硬件输入设备
+        juce::StringArray submenuPath;   // 所在子菜单的路径，逐级一个名字；空 = 顶层条目。
+                                         //   如 { "App Audio Capture" } 或 { "App Audio Capture", "All Apps" }。
+                                         //   同一个子菜单的条目必须相邻
+        bool         separatorBefore = false; // 在该条目（或该子菜单首项）之前插一条分隔线
     };
 
     // 由 Editor/Standalone App 调用来填充下拉项
@@ -860,6 +908,10 @@ public:
 
     // 用户在下拉里选择后的回调（sourceId 为 setAudioSourceItems 时提供的 ID）
     std::function<void(const juce::String& sourceId, bool isLoopback)> onAudioSourceChanged;
+
+    // 下拉菜单即将弹出：宿主 App 借此刷新动态条目（当前正在运行 / 发声的程序列表），
+    //   在回调里直接调 setAudioSourceItems() 即可，菜单会按新内容弹出。
+    std::function<void()> onAudioSourceListRequested;
 
     // 控制"信号源"下拉 + 前缀标签 + 其左侧分隔线的可见性。
     //   · 用于 VST3 / AU 等插件模式：宿主 DAW 直接给音频，不需要选择信号源，
@@ -934,55 +986,44 @@ public:
     std::function<void(float db)> onInputGainChanged;
 
     // ======================================================
-    // 布局预设下拉（toolbar 上 Grid 按钮左侧）
-    //   · Preset 1  = 默认布局（十个默认模块 + 默认窗口大小）
-    //   · Preset 2  = 上方横向铺满屏幕宽度（默认模块横向等分 canvas）
-    //   · Preset 3  = 下方横向铺满屏幕宽度（同 Preset 2 但窗口贴屏幕底部）
-    //   · Preset 4  = 已废弃（原 Tiled 预设从未实现，编号保留以兼容历史存档）
-    //   · Preset 5  = MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
-    //   · Preset 6  = Studio Monitor：双行监听（仪表行 + 波形行）
-    //   · Preset 7  = Focus + Sidecar：主视觉 + 右侧仪表列
-    //   · Preset 8  = 已废弃（原 Mastering Chain 已删除，编号保留以兼容历史存档）
-    //   · Preset 9  = Broadcast Loudness：广播响度合规
-    //   · Preset 10 = Only Milkdrop：全屏 + 单个最大化 Milkdrop
-    //   · Preset 11~13 = stick 条状变体（SPECTROGRAM / MILKDROP / 两者叠加），
-    //     只在 stick 模式下拉里出现，条高与贴边逻辑同 Preset 2/3
-    //   · 选中某项时调用 onLayoutPresetChanged(index)，由 Editor
-    //     负责真正的布局/窗口尺寸变更（ModuleWorkspace 本身不持有
-    //     顶层窗口的引用，也不了解模块工厂细节，故把具体策略委托给 Editor）
+    // 布局预设下拉（v3.5 全新多场景布局预设，全部基于现行 17 套存活模块设计）
+    //   · 日常与桌面：Default Workspace / Compact Mini Bar / Desktop Companion /
+    //                 Top Dock Bar / Bottom Dock Bar
+    //   · 混音与音频分析：Mixing Console / Mastering & Broadcast /
+    //                    Vocal & Podcast / DJ & Beat Analysis
+    //   · 视觉与直播：Stream / OBS Overlay / Music Visualizer (MV) / Pure MilkDrop
+    //   · 全屏指挥台：Full: Deep Analysis / Full: All-in-One Studio
+    //   · Windows Stick 吸附专用条状预设：Bar: Classic / Bar: Mixing /
+    //                                     Bar: Visuals / Bar: Desk Companion
     // ======================================================
     enum class LayoutPreset
     {
-        defaultGrid       = 1,  // 默认布局（十个默认模块 + 默认窗口大小）
-        horizontalFull    = 2,  // 横向铺满屏幕宽度（贴屏幕顶部）
-        horizontalBottom  = 3,  // 横向铺满屏幕宽度（贴屏幕底部）
-        // 4 = 已废弃（原 tiled，从未实现，保留编号空洞）
-        mv                = 5,  // MV：全屏 + 上方横向模块条 + 下方 Milkdrop 占满
-        studioMonitor     = 6,  // Studio Monitor：双行监听
-        focusSidecar      = 7,  // Focus + Sidecar：主视觉 + 右侧仪表列
-        // 8 = 已废弃（原 masteringChain，已删除，保留编号空洞）
-        broadcastLoudness = 9,  // Broadcast Loudness：广播响度合规
-        onlyMilkdrop      = 10, // Only Milkdrop：全屏 + 单个最大化 Milkdrop
+        // ---- 日常与桌面 ----
+        defaultGrid        = 1,  // 默认工作区（干净无重叠双行平铺，独立版 & DAW 通用）
+        horizontalFull     = 2,  // 顶部任务条（铺满屏幕宽 × 250px，贴顶）
+        horizontalBottom   = 3,  // 底部任务条（铺满屏幕宽 × 250px，贴底）
+        compactMiniBar     = 4,  // 紧凑迷你条（960×248 精简浮动条）
+        desktopCompanion   = 5,  // 桌面状态伴侣（系统监控 + 时钟 + 便签 + 频谱/VU/波形 + MilkDrop）
 
-        // ---- stick 驻留态专用"条状"变体（11~13）----
-        //   · 只在 stick 模式的下拉里出现：窗口必须保持「屏幕宽 × 条高」，
-        //     上面那些会改窗口形状的预设会破坏 AppBar 占位，故不列出；
-        //   · 与经典 Horizontal Bar 共用同一套条高（250）/ 贴边 / redock 流程，
-        //     区别只在条内的模块序列与宽度权重（条高不变，不会把窗口搞大）；
-        //   · 贴顶还是贴底由当前 dock 侧（T/B 按钮）决定，不写进 id。
-        stickBarSpectrogram = 11, // 3D 瀑布 → SPECTROGRAM（2D 瀑布，更省 GPU）
-        stickBarMilkdrop    = 12, // Stereo Field → Milkdrop（多一块可视化）
-        stickBarSpecMilk    = 13, // SPECTROGRAM + Milkdrop 同时替换
+        // ---- 混音与音频分析 ----
+        mixingConsole      = 6,  // 混音工作台（双行均衡监听：频谱/语谱/波形 + 响度/VU/相位/声像/动态）
+        masteringBroadcast = 7,  // 母带与广播响度（LUFS 大字 + 动态 DR/Crest + VU 条 + 相位 + 单声道兼容）
+        vocalPodcast       = 8,  // 人声与播客录制（齿音波形 + 频谱 + 录音机 + 响度 + 复古 VU + 调性 + 秒表）
+        djBeatLive         = 9,  // DJ 节拍与调性（BPM/调性 + 双声道波形 + 双针 VU + 柱状频谱 + 雷达 + 3D 语谱）
 
-        // ---- 全屏磁贴预设（14~16）：由用户三个自定义存档提炼 ----
-        //   · 只复刻"模块类型 + 位置/尺寸"（按 2560×1328 参考画布归一化后
-        //     映射到当前 canvas），不含 VirtuPet、不带任何模块内部 state；
-        //   · 应用时窗口铺满屏幕（Windows userArea / macOS 原生全屏），
-        //     与 mv(5) / onlyMilkdrop(10) 一样锁死尺寸；
-        //   · 编号只追加不重排，保护旧存档里记录的 preset id。
-        fullSpectrumFocus = 14, // FULL: SPECTRUM    —— 频谱为主（三块大图 + 右侧仪表列）
-        fullAllModules    = 15, // FULL: ALL MODULES —— 所有模块全部放到屏幕里（26 块密排）
-        fullMultiCombo    = 16  // FULL: MULTI COMBO —— 多功能集合（顶部通栏波形 + 分区）
+        // ---- 视觉与直播 ----
+        streamOverlay      = 10, // 直播 / OBS 挂件（1200×280 极简横排，适配绿幕 / 透明模式）
+        musicVisualizerMv  = 11, // 音乐视觉 MV（全屏：顶部精简仪表条 + 下方超大 MilkDrop 舞台）
+        onlyMilkdrop       = 12, // 沉浸 MilkDrop（全屏单模块最大化 MilkDrop）
+
+        // ---- 全屏指挥台 ----
+        fullDeepAnalysis   = 13, // 全屏：频谱与声场精析（10 模块工程级声学分析墙）
+        fullAllInOne       = 14, // 全屏：全模块工作台（17 块无缝密排覆盖全部 16 类功能模块）
+
+        // ---- stick 驻留态专用条状变体（15~17，与 Classic 共同构成 4 套吸附条）----
+        stickBarMixing     = 15, // 条：混音分析（语谱 + 响度 + VU + 相位 + 频谱 + 声像 + 波形）
+        stickBarVisuals    = 16, // 条：视觉律动（语谱 + VU + 宽幅 MilkDrop + 频谱 + 调性 + 波形）
+        stickBarDesk       = 17  // 条：桌面伴侣（系统监控 + 时钟 + VU + 频谱 + 调性 + 波形）
     };
     std::function<void(LayoutPreset)> onLayoutPresetChanged;
 
@@ -1184,8 +1225,23 @@ private:
     // 调色面板（点击预览方块/"+"时在左下角展开；调色板重构，替换旧双色取色器）
     std::unique_ptr<PalettePanel> palettePanel;
 
+    // 弹出前给一次"刷新条目"机会的 ComboBox（JUCE 的 ComboBox 没有 about-to-show 回调；
+    //   鼠标 / 键盘两条触发路径最终都走 showPopup()，在这里拦一次最稳）。
+    class RefreshingComboBox : public juce::ComboBox
+    {
+    public:
+        std::function<void()> onAboutToShowPopup;
+
+        void showPopup() override
+        {
+            if (onAboutToShowPopup)
+                onAboutToShowPopup();
+            juce::ComboBox::showPopup();
+        }
+    };
+
     // 底部工具栏里的音频信号源下拉（位于主题栏与 Hide 按钮之间）
-    juce::ComboBox                 audioSourceBox;
+    RefreshingComboBox             audioSourceBox;
     juce::Array<AudioSourceItem>   audioSourceItems;
     juce::Label                    audioSourceLabel;    // "Source:" 前缀标签
 
@@ -1308,6 +1364,8 @@ private:
     //     表现为整个界面不再响应鼠标（Hide 态下 30Hz 悬停轮询收起浮层时
     //     正好会触发这条路径，是"拖 gain 卡死"的根因）。
     bool             gainSliderDragging = false;
+    bool             gainDragDirty_     = false;
+    juce::ValueTree  gainDragPreChangeTree_;
 
     // gain 弹出控制条的底板：凸起面板 + 0dB 参考线 + 右侧 dB 数值。
     //   · 用独立子组件承载，而不是在 paintOverChildren() 里手绘：
@@ -1407,7 +1465,7 @@ private:
     int              overflowDividerXLayout = -1;
 
     // stick 驻留态下拉的 placeholder 文本（= 当前条状预设名，由 Editor 回写）
-    juce::String     stickPresetLabel { "BAR: CLASSIC" };
+    juce::String     stickPresetLabel { "Bar: Classic" };
 
     // 重建预设下拉条目：
     //   · 普通态 = 全部预设
@@ -1442,7 +1500,6 @@ private:
     //   · 一旦菜单关闭（用户选中 / 取消）就清空，不残留在画面上。
     bool          hoverPreviewActive = false;
     // 兜底类型（菜单刚弹出、还没 hover 任何一项时用它算预览框尺寸）。
-    //   v3.0.6：拼豆频谱下线后改用 spectrum。
     ModuleType    hoverPreviewType   = ModuleType::spectrum;
     juce::Point<int> hoverPreviewPos { 0, 0 };
 
@@ -1498,12 +1555,6 @@ private:
     //
     //   ⚠️ 本表默认是空的，真正的清单由 Editor 在构造时用
     //   setAvailableModuleTypes() 下发（见 PluginEditor.cpp，那里是唯一事实来源）。
-    //   v3.0.6 教训：此前这里存了一份"默认清单"，Editor 又下发了一份 —— 拼豆
-    //   频谱下线时只改了其中一份，结果右键菜单里照样能加出来。现在只保留一份。
-    //
-    //   拼豆频谱（ModuleType::eq / "Spectrum Perlerbeads"）v3.0.6 起因性能问题
-    //   暂时下线：不进菜单；旧存档里的 "eq" 节点由 stringToModuleType() 统一迁移
-    //   成 spectrum（同位同尺寸）。枚举值与 EqModule 实现保留，方便日后重新上线。
     juce::Array<ModuleType> availableTypes;
 
     int nextIdCounter = 1;
@@ -1549,7 +1600,111 @@ public:
     // 窗口关闭/关键同步（如 Editor 在保存状态前）时：若有待决通知，立即 flush
     void flushPendingLayoutChange();
 
+    // ======================================================
+    // v3.5 全局撤回 / 重做（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y）
+    //   · 覆盖：删除/添加模块、移动/缩放/最大化、所有模块设置修改（连续滑块自动合并为 1 步）、
+    //           切换布局预设、网格开关、输入增益、贴画增删移动缩放编辑。
+    //   · 就地智能差量恢复：仍存活的同 ID 模块不销毁重建（保持实时缓冲与已打开设置面板不关），
+    //     只补建被删模块、移除新增模块，并仅对发生变化的模块调用 restoreModuleSpecificState。
+    // ======================================================
+    bool canUndo() const noexcept { return ! undoStack_.empty(); }
+    bool canRedo() const noexcept { return ! redoStack_.empty(); }
+    int  getUndoDepth() const noexcept { return (int) undoStack_.size(); }
+    int  getRedoDepth() const noexcept { return (int) redoStack_.size(); }
+    bool undo();
+    bool redo();
+    void resetUndoHistory();
+    void breakUndoCoalesce() noexcept;
+    void beginUndoTransaction (const juce::String& description,
+                               bool structural = true,
+                               bool captureWindow = false);
+    void endUndoTransaction();
+
+    // 可选：由宿主 Editor 挂载，在涉及窗口几何变更的撤回事务（如切换布局预设）里
+    //       一并保存并恢复主窗口尺寸/位置/全屏状态与尺寸约束。
+    std::function<juce::ValueTree()>            onCaptureHostWindowState;
+    std::function<void(const juce::ValueTree&)> onRestoreHostWindowState;
+
+    struct ScopedUndoTransaction
+    {
+        ScopedUndoTransaction (ModuleWorkspace& ws,
+                               const juce::String& desc,
+                               bool structural = true,
+                               bool captureWindow = false)
+            : workspace (ws) { workspace.beginUndoTransaction (desc, structural, captureWindow); }
+        ~ScopedUndoTransaction() { workspace.endUndoTransaction(); }
+        ModuleWorkspace& workspace;
+        JUCE_DECLARE_NON_COPYABLE (ScopedUndoTransaction)
+    };
+
+    // 统一键盘路由：若焦点在 TextEditor 上则让行；否则识别 Ctrl/Cmd+Z（撤回）与 Ctrl/Cmd+Shift+Z / Ctrl+Y（重做）
+    bool handleUndoRedoKeyPress (const juce::KeyPress& key);
+
+    // 顶部居中短暂浮层提示（Pink XP 风格，自动淡出；0 空闲开销）
+    void showStatusToast (const juce::String& text);
+    juce::String getLastToastText() const noexcept { return toastText_; }
+    bool isGainPopupVisible() const noexcept { return gainPopupVisible; }
+
 private:
+    struct UndoEntry
+    {
+        juce::ValueTree beforeTree;
+        juce::ValueTree afterTree;
+        juce::ValueTree beforeWindowState;
+        juce::ValueTree afterWindowState;
+        juce::String    description;
+        juce::String    coalesceKey;
+        juce::String    targetModuleId;   // 非空 = 作用于单个模块的内容/参数改动（撤回/重做时自动定位展开）
+        juce::String    targetFocusHint;  // 选项/子面板定位提示（如 "drawer:..."、"effects"、"workspace:inputGain"）
+        juce::uint32    timestampMs = 0;
+        bool            structural  = true;
+    };
+
+    static constexpr size_t kMaxUndoSteps = 64;
+    std::vector<UndoEntry>  undoStack_;
+    std::vector<UndoEntry>  redoStack_;
+    juce::ValueTree         undoBaselineTree_;
+    juce::ValueTree         pendingPreChangeTree_;
+    bool                    undoSuspended_ = false;
+    int                     undoTransactionDepth_ = 0;
+    juce::ValueTree         undoTransactionBefore_;
+    juce::ValueTree         undoTransactionBeforeWindow_;
+    juce::String            undoTransactionDesc_;
+    bool                    undoTransactionStructural_ = true;
+    bool                    undoTransactionCaptureWindow_ = false;
+
+    void recordUndoStep (const juce::ValueTree& before,
+                         const juce::ValueTree& after,
+                         const juce::String& description,
+                         const juce::String& coalesceKey,
+                         bool structural,
+                         const juce::ValueTree& beforeWindow = {},
+                         const juce::ValueTree& afterWindow  = {},
+                         const juce::String& targetModuleId  = {},
+                         const juce::String& targetFocusHint = {});
+    void commitUndoFromBaseline (const juce::String& description,
+                                 const juce::String& coalesceKey = {},
+                                 bool structural = true,
+                                 const juce::String& targetModuleId  = {},
+                                 const juce::String& targetFocusHint = {});
+    void syncUndoBaseline();
+    void restoreSnapshotInPlace (const juce::ValueTree& targetTree);
+    void revealUndoTarget (const UndoEntry& entry);
+
+    // 短暂浮层提示状态（撤回 / 重做反馈）
+    juce::String         toastText_;
+    juce::uint32         toastStartMs_ = 0;
+    juce::Rectangle<int> lastToastBounds_;
+    static constexpr juce::uint32 kToastHoldMs = 1200;
+    static constexpr juce::uint32 kToastFadeMs = 350;
+    struct ToastTimer : public juce::Timer
+    {
+        explicit ToastTimer (ModuleWorkspace& o) : owner (o) {}
+        void timerCallback() override;
+        ModuleWorkspace& owner;
+    };
+    ToastTimer toastTimer_ { *this };
+    void drawStatusToast (juce::Graphics& g);
     // Editor 在 chrome 隐藏态下指定的 hit-test 挖洞矩形（workspace 坐标系）
     //   · 落在这些矩形内的鼠标事件会被忽略（本组件 hitTest 返回 false），
     //     从而冒泡到父组件（Editor）去处理"浮动关闭按钮/标题文字点击"等顶部交互。
@@ -1582,7 +1737,7 @@ private:
 
         // "PerlerBeads" 渲染模式开关：
         //   · false（默认）→ 按原样绘制 pixelImage（实心方块贴画）
-        //   · true          → 把每个像素块渲染为一个小圆环（仿 EQ 模块的
+        //   · true          → 把每个像素块渲染为一个小圆环（镂空
         //                    "珠子"视觉；颜色仍取 pixelImage 的 cell 颜色）
         //   该 flag 会被序列化到布局存档中，跨会话保留。
         bool           perlerBeadsMode = false;
@@ -1712,7 +1867,7 @@ private:
 
     // 把一张拼豆贴画按 "圆环模式" 渲染到画布（替代 drawImageAt）：
     //   · 每个 cell 读取 pixelImage 的中心像素颜色作为该圆环颜色
-    //   · 圆环外径 ≈ cellSize/2，内径 ≈ cellSize * 0.2（复用 EqModule 的"珠子"比例）
+    //   · 圆环外径 ≈ cellSize/2，内径 ≈ cellSize * 0.2（中空珠子比例）
     //   · alpha==0 的 cell 跳过，保留贴画原始透明区域
     void drawPerlerImageAsBeads (juce::Graphics& g, const PerlerImage& img, float opacity = 1.0f) const;
 
