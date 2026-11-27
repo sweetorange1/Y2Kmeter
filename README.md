@@ -127,6 +127,14 @@ Y2Kmeter 本体以 **GPL-3.0** 开源。
 
 > 详细许可文本见根目录 `LICENSE` 文件。
 
+## 赞助支持 / Support
+
+全系插件永久免费开源，无付费墙、无功能阉割。如果它帮到了你的音乐制作，欢迎自愿支持开发：
+All plugins are 100% free and open source. If this tool helped your music, voluntary support is always appreciated:
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20on%20Ko--fi-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/iisaacbeats)
+[![Website](https://img.shields.io/badge/Donate-WeChat%20%2F%20Alipay%20%2F%20TRC20-111111?style=flat-square)](https://iisaacbeats.cn/about.html)
+
 ---
 
 <p align="center">
