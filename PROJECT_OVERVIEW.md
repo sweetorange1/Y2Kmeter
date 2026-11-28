@@ -105,6 +105,12 @@
 > · **场景化布局预设重构**：删除历史旧预设，重构为 4 分组 14 套常规预设 + 4 套 Stick 吸附条（全覆盖 16 类存活模块、零重叠、含 `Stereo Map` 正式入组）。
 > · **浮动态（pop-out 窗口）全量迁移 OpenGL（`GlDirectRenderer.h`）**：16 类非 MilkDrop 浮动态模块与主窗口共享 `GlDirectRenderer` + 独立 `OpenGLContext` + Windows DWM 硬件透明，解除 30Hz 浮动态限流，达成脱离/嵌入外观与帧率 100% 统一；并彻底修复 `Spectrogram 3D` 脱离↔回停偶发 `0xc0000409 / abort()` 闪退（回调栈拷贝 + `callAsync` 异步毁窗、`clearContentComponent()`、禁跨上下文 `OpenGLImageType`、GL detach 原子守卫）。
 
+> **v3.5.0 性能与启动专项补充**（不升版本号；细节见 §6.6、[docs/rendering-gl.md](docs/rendering-gl.md) §1.3–§1.4 / §3、[docs/ui-features.md](docs/ui-features.md) §1–§2）：
+> · **60Hz 稳态帧节奏 + ToyBox GPU 批渲染**：新增 JUCE 补丁 **0010**（Windows 外部 VBlank 帧合并 `setExternalFramePacing`/`flushPacedRepaint`、跳过受控非连续上下文 2ms 固定 sleep、独立 `RenderThread` 隔离多窗口 VSync swap、`renderOpenGLPostComponentBuffer()` 锁外合成后钩子）+ `VBlankPacer.h`（1ms 抖动容差相位累加器，消除 60Hz 屏 VSync 量化掉至 30fps 悬崖）+ `GlToyRenderer.h`/`ToyGlTypes.h`（单次 GL draw call 批绘全部自由 emoji/光晕，4K 400 emoji 仅 `0.024ms` GPU / `0.030ms` CPU，60Hz 4K 压测稳锁 `60.0/s`、`degraded=0`）；配合 `LayoutChangeCoalescer`（200ms 合并）消除 `mouseDown` 同步 XML 序列化。
+> · **脱离/停靠零闪屏**：`FloatingModuleWindow` 引入子级 `GlHostComponent` + Windows `DWMWA_CLOAK`/`CloakRevealTimer` 首帧遮罩 + `glPreserveActiveOnClose_` + `ModuleZOrder.h`。
+> · **启动顺滑度优化（不触碰音频启动）**：`EmojiAtlas` 迁移至低优先级后台 `PrebakeWorker` + 3 套按字号复用的 Win32 D2D/WIC COM 靶（291 字形烘焙 `1250ms → 402ms` 且 UI 线程 `0ms` 阻塞）；MilkDrop 9,921 预设改后台异步扫描 + `<0.5ms` 单步首帧 + `MilkdropPresetIndex.h` 索引对账 + 无嵌入模块时按需懒初始化 `projectM` + 嵌入态跳过无效 30Hz `repaint()`；全量离屏位图与静态 `1280px` 预缩 `sCachedLogo` 统一 `SoftwareImageType`；`ModuleWorkspace` 懒建 `PalettePanel` + `BitmapData` 画布点阵绘制；`VirtuPetModule::ScopedDeferInitialRoleLoad` 消除存档恢复双次 PNG 解码；`SystemMonitorModule` 首帧采样直接 snap；`TelemetryClient` 后台化 `SystemStats` 采集与 `PluginProcessor` Standalone `t=5s` 重复遥测去重。
+> · **单元测试与离线压测**：新增 `tests/perf_pacing_test.cpp`（`VBlankPacer` / `MilkdropPresetIndex` / `DegradationController`）与 `tests/toybox_bench.cpp`（RTX 4K GPU 批渲染 / D2D 复用对比 / 布局 XML 合并基准），CTest 扩至 5 套全绿。
+
 > **v3.4.2 本轮变更**（调色工作室 × 视觉风格；细节见 §4.6）：
 > · **官方预设下只改桌面纹理 / 标题图标不再跳色**：旧逻辑任何改动都会走 `applyThemeFromSpec`（双色反推 + OKLCH 生成器 + 护栏）→ 整套手工配色被近似色替换。现在预设起步时面板处于"只改装饰"模式，纹理 / 图标经 `PinkXP::applyPresetDecor` 写成**预设装饰覆盖**（`PresetDecor`，只换 `desktopPattern` / `titleIconText`，配色原样）；一旦改了色相 / 明暗 / 滑条 / 和谐 / 角色 / 随机 / 粘贴等配色参数才转为生成器主题。对比 / 还原会连同打开时的装饰覆盖一起恢复。持久化：Standalone `ui.presetPattern` / `ui.presetIcon`、插件态 `presetPattern` / `presetIcon`（-1 / 缺键 = 预设原样）。
 > · **桌面纹理在所有风格下生效**（绿幕除外）：`drawDesktop` 把纹理抽成 `drawDesktopPatternLayer`，各风格先画自己的底色 / 氛围，再按风格质感叠加用户选择的纹理（千禧金属 = 蚀刻、现代 / Fluent = 低对比压纹、玻璃 = 光团下的透出纹理、霓虹 = 地平线以上的灯管色图案（替代旧固定星点）、CRT = 扫描线下的磷光余辉）。像素复古与旧版逐像素一致；`kDesktopPatternVersion` 升到 4。
@@ -344,6 +350,8 @@
 | [ModulePanel.cpp](/I:/Y2KMeter/source/ui/ModulePanel.cpp) | 各模块统一的像素窗口：标题栏 + 齿轮（控制面板）/ 弹出 / 关闭按钮 + 边缘/角拖拽缩放 + 右下 CPU 小字 |
 | [ModuleControlDrawer.h/.cpp](/I:/Y2KMeter/source/ui/ModuleControlDrawer.h) | **v3.1 / v3.5 外部弹出**模块控制面板抽屉：3 级智能外部落位（工作区侧边 → 临时独立窗口 → 兜底内嵌），由 `ModulePanel::buildParamDefs()` 参数表动态生成控件，自己不存状态 |
 | [GlDirectModule.h/.cpp](/I:/Y2KMeter/source/ui/GlDirectModule.h) + [GlDirectRenderer.h](/I:/Y2KMeter/source/ui/GlDirectRenderer.h) | **v2.9.4 / v3.5 统一嵌入+浮动 GL 管线**：`GlDirectModuleBase` 供模块产出 GL 快照与增量纹理补丁；`GlDirectRenderer` 按 GL 上下文实例化，由 `Editor` 与 `FloatingModuleWindow` 共用，实现脱离/嵌入外观与帧率 100% 统一 |
+| [VBlankPacer.h](/I:/Y2KMeter/source/ui/VBlankPacer.h) + [ModuleZOrder.h](/I:/Y2KMeter/source/ui/ModuleZOrder.h) + [MilkdropPresetIndex.h](/I:/Y2KMeter/source/ui/MilkdropPresetIndex.h) | **v3.5.0 性能与框架纯 C++17 辅助头**（零 JUCE 依赖，供单测直接覆盖）：1ms 抖动容差 60Hz VBlank 相位累加节拍器、多模块/浮窗 Z-order 协调、Milkdrop 后台异步扫描预设索引对账 |
+| [toys/GlToyRenderer.h](/I:/Y2KMeter/source/ui/toys/GlToyRenderer.h) + [toys/ToyGlTypes.h](/I:/Y2KMeter/source/ui/toys/ToyGlTypes.h) | **v3.5.0 ToyBox GPU 批渲染**：在 JUCE 补丁 0010 `renderOpenGLPostComponentBuffer()`（组件层合成后、锁外、swap 前）以单次 draw call 批绘全部自由 emoji/光晕，与 `ToyKit.*` 通过无锁 POD 解耦 |
 | [SkinCraft.h/.cpp](/I:/Y2KMeter/source/ui/SkinCraft.h) | **v3.5** 跨模块视觉风格工艺引擎：`SkinTokens`（纯数据工艺令牌表，CPU + GL 共用）与 `Craft::*` 原语，将 6 套视觉皮肤与全部 16 类模块的表盘/灯块/网格/凹槽质感深度耦合 |
 | [HoldSlowMo.h](/I:/Y2KMeter/source/ui/HoldSlowMo.h) | **v3.1** 按住交互共享状态机（示波器 = 慢放 50 倍 / 波形历史、语谱图 = 完全冻结，松手回实时；频谱保留自己的实现） |
 | [ModulePanel.h](/I:/Y2KMeter/source/ui/ModulePanel.h) | **只是一个兼容 shim**，内部只 `#include "source/ui/ModuleWorkspace.h"` |
@@ -646,7 +654,8 @@ main
 - Editor 实现 `juce::OpenGLRenderer`，在 `renderOpenGL()` 中完成所有 GPU 模块渲染。
 - projectM 使用 `openglRenderFrameFbo(fbo_id)` 渲染到独立 offscreen FBO，再跨 FBO `glBlitFramebuffer` 搬运到各模块在 FBO 0（CachedImage）上的正确位置。
 - ★ **永远不在非透明模式 clear FBO 0**（CachedImage 合成面）——clear 会破坏 JUCE 已合成的所有组件 UI；仅在 `BackdropMode::transparent` 真透明模式下于合成前清 `glClearColor(0, 0, 0, 0)`，配合 Windows DWM 硬件透明（`DwmEnableBlurBehindWindow` + 补丁 0009 `PFD_SUPPORT_COMPOSITION`）实现全速每像素 Alpha 合成。
-- **浮动态全量 GL 化（v3.5.0）**：`GlDirectRenderer`（`source/ui/GlDirectRenderer.h`）从 Editor 抽离为按上下文独立实例，`FloatingModuleWindow` 与主窗口共用同一套 GL 直渲染管线与 DWM 真透明，脱离/停靠外观与帧率完全一致；所有模块离屏回退缓存一律使用 `SoftwareImageType`（严禁 `OpenGLImageType`），浮动窗口停靠/关闭一律经 `MessageManager::callAsync` + `SafePointer` + `clearContentComponent()` 异步安全收尾。
+- **浮动态全量 GL 化与零闪屏（v3.5.0）**：`GlDirectRenderer`（`source/ui/GlDirectRenderer.h`）从 Editor 抽离为按上下文独立实例，`FloatingModuleWindow` 经子级 `GlHostComponent` 挂载独立 `OpenGLContext`（`setUseDedicatedRenderThread(true)`）+ Windows `DWMWA_CLOAK`/`CloakRevealTimer` 首帧遮罩 + `glPreserveActiveOnClose_`，与主窗口共用统一 GL 管线与 DWM 真透明；所有离屏位图缓存（含 `sCachedLogo`、`desktopCacheImage`、`getSharedDesktopTexture` 及各模块）一律显式使用 `SoftwareImageType`（严禁 `OpenGLImageType`），停靠/关闭一律经 `MessageManager::callAsync` + `SafePointer` + `clearContentComponent()` 异步安全收尾。
+- **ToyBox GPU 批渲染与 Windows 帧合并（v3.5.0 补丁 0010）**：主 Editor 启用 `setExternalFramePacing(true)` 并由 `VBlankPacer` 统一 `flushPacedRepaint()`；`GlToyRenderer` 在 `renderOpenGLPostComponentBuffer()`（组件层之后、锁外、swap 之前）单次批绘全部 ToyBox 粒子。
 - 插件宿主与 Standalone **共用**，宿主下 JUCE 会为 Editor 创建 GL 子层不影响宿主窗口其余部分。
 - 坐标系统：`getLocalPoint(milk, point)` 纯组件树遍历 + `openGLContext.getRenderingScale()` DPI 缩放 + Y-flip。
 - ★ **vendored JUCE 有本地补丁**（含 mac GL 的 VBO orphaning、repaint 按显示器刷新合并、Font 比较快速路径、渐变纹理跨帧复用等），补丁清单 / 升级流程见 [third_party/juce_patches/README.md](third_party/juce_patches/README.md)；改 JUCE 源码必须同步导出补丁并补配置期校验标记（否则 CMake 配置会报错）。
@@ -702,11 +711,13 @@ main
 - 各模块静态层/离屏 Image 缓存：Loudness、Oscilloscope、Spectrogram、Spectrogram3D（P2/P3）等。
 - Spectrogram3D `magToIdx` LUT、`depthPalettes` 预计算、`cached3DImage.clear()` 复用。
 
+**60Hz 帧节奏、ToyBox GPU 化与启动顺滑度（v3.5.0 专项轮）**
+- **60Hz 稳态锁帧**：JUCE 补丁 **0010**（Windows 外部 VBlank 帧合并、跳过受控非连续上下文 2ms 固定 sleep、独立 `RenderThread` 隔离浮窗/MilkDrop VSync、`renderOpenGLPostComponentBuffer()` 锁外后合成钩子）+ `VBlankPacer.h`（1ms 抖动容差相位累加），彻底消除 60Hz 屏 VSync 量化掉帧（4K@60Hz 实测 399 颗活跃 emoji 稳锁 `60.0/s`、`degraded=0`）。
+- **ToyBox GPU 批渲染与零主线程预烘**：`GlToyRenderer` 单次 draw call 替代 `ToyOverlay` 软件重绘（4K@400 emoji `0.024ms` GPU / `0.030ms` CPU）；`EmojiAtlas::PrebakeWorker`（低优先级后台线程 + 3 套复用 D2D/WIC 靶）将 291 字形预烘从 `1250ms` 压至 `402ms` 且主线程阻塞 `0ms`。
+- **启动关键路径去阻塞**：MilkDrop 9,921 预设改后台异步扫描 + `<0.5ms` 首帧快速加载 + `MilkdropPresetIndex.h` 索引对账 + 无嵌入模块时懒初始化 `projectM` + 嵌入态跳过 30Hz 无效 `repaint()`；`sCachedLogo` 静态预缩至 `1280px`；`ModuleWorkspace` 懒建 `PalettePanel` + `BitmapData` 画布点阵 + `LayoutChangeCoalescer` 200ms 合并；`VirtuPetModule::ScopedDeferInitialRoleLoad` 单次解码；`SystemMonitorModule` 首帧 snap；`TelemetryClient` 后台化采集 + Standalone `t=5s` 去重。
+
 **已知边界（后续可继续优化）**
-- JUCE GL 渲染线程在组件需要重绘时**持锁执行** `renderOpenGL()`（projectM 的 CPU 逐顶点求值在锁内），
-  消息线程会随之停顿；Milkdrop 可见且 120Hz 时这是最大的单点。彻底解法需 patch 内嵌 JUCE，
-  把 `renderOpenGL` 移出 MessageManager 锁（出锁后仅允许 FBO 渲染 + 合成，禁止触碰组件树）。
-- JUCE 2D GL 渲染器的路径/描边在 CPU 光栅化，复杂 Path（波形、频谱虚线峰值）仍是每帧成本主体。
+- 补丁 0006 + 0010 已将 projectM 预渲染/预设切换与 ToyBox GPU 批渲染迁出 `MessageManager::Lock`，主线程仅在组件层脏区光栅化与 `GlDirectModule` 快照拷贝时持锁；JUCE 2D 路径/描边在 CPU 软件光栅化，复杂动态 Path 仍是组件重绘成本主体。
 
 **组件层（v3.4.3 mac 性能轮）**
 - 认清了一条容易被忽略的成本：JUCE 组件层是**按脏区重画区域内的所有组件**，不是"只画发起 repaint 的那个模块"。密排全屏布局里，低频模块叠在每帧刷新的模块上就会每帧整块重画。对策（详见 [docs/rendering-gl.md](docs/rendering-gl.md) §1.1）：
@@ -785,8 +796,8 @@ Y2Kmeter/
 ├── ttf/                           ─ 打包用像素字体（Silkscreen）
 ├── i18n/                          ─ 语言包（*.lang，中英文）
 ├── scripts/                       ─ macOS 图标流水线等辅助脚本
-├── tests/                         ─ 分析算法单元测试（RealFft / Tempo / Key）
-├── third_party/                   ─ vendored JUCE 8.0.12 + juce_patches/（本地补丁 0001~0008）
+├── tests/                         ─ 单元测试与离线基准（RealFft / Tempo / Key / Palette / Toy / Param / perf_pacing / toybox_bench）
+├── third_party/                   ─ vendored JUCE 8.0.12 + juce_patches/（本地补丁 0001~0010）
 └── source/
     ├── Y2KLogging.h               ─ 编译期日志开关宏 Y2K_LOG（§1.4）
     ├── analysis/                  ─ AnalyserHub + 6 路分析器 + music/（BPM / 调性）

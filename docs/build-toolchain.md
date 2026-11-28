@@ -8,7 +8,7 @@
 | 正式安装包 | 同上 | `build_installer.bat` | `dist/Y2Kmeter_Setup_<ver>_x64.exe` |
 | 诊断包（带日志） | `cmake-build-relwithdebinfo-visual-studio-ninja` | `build_installer_diag.bat`（需 `-DY2K_DIAG_LOG_DEFAULT_ON=ON`） | `dist/Y2Kmeter_Setup_<ver>_Diag_x64.exe`（带 PDB） |
 
-- 语言 C++17；CMake ≥ 3.22；JUCE 8.0.12 vendored（见下）。
+- 语言 C++17；CMake ≥ 3.22；JUCE 8.0.12 vendored（见下）；CTest 包含 5 套测试（`palette` / `toy` / `music` / `param` / `perf_pacing`，另含离线 GPU/D2D 基准 `Y2Kmeter_toybox_bench`）。
 - 诊断包 `.dmp` 只能用同一次构建的 PDB 解析；打包后不要再重编译。
 - 版本号改动后，增量构建**不会**重写 JUCE 生成的 `*_resources.rc`（EXE/VST3 版本信息仍是旧值）——删 `build/*/JuceLibraryCode/*_resources.rc` 或重新 configure。
 
@@ -17,7 +17,7 @@
 - `third_party/JUCE` 源码直接入库、构建优先（`FETCHCONTENT_SOURCE_DIR_JUCE` 指向它）；`build/msvc` 曾错误指向 `D:/Code/_deps/JUCE`（缺补丁 0005/0006，配置期校验会失败），勿用。
 - 补丁流程（改 JUCE 源码时）：
   1. 在 `third_party/JUCE` 源码处加 `[Y2K patch]` 注释（说明原因 + 替代方案）；
-  2. 导出 diff 到 `third_party/juce_patches/`（0001~0009）；
+  2. 导出 diff 到 `third_party/juce_patches/`（0001~0010）；
   3. 补 `Y2KJucePatches.cmake` 的配置期校验标记；
   4. 更新 `third_party/juce_patches/README.md` 表格。
 - 升级 JUCE：按源码内 `[Y2K patch]` 注释逐条回贴补丁。

@@ -9,7 +9,7 @@
 | 产品名 | `Y2Kmeter` |
 | 当前版本 | `3.5.0`（版本号同步点见 SKILL.md §6） |
 | 形态 | VST3 / AU / Standalone（纯分析，不产生音频输出） |
-| 技术栈 | C++17、JUCE 8.0.12（vendored + 0001~0009 补丁）、CMake ≥ 3.22 |
+| 技术栈 | C++17、JUCE 8.0.12（vendored + 0001~0010 补丁）、CMake ≥ 3.22 |
 | 平台 | Windows（静态 CRT）/ macOS |
 | Bundle ID | `cn.iisaacbeats.Y2Kmeter`（**不要改**，会丢宿主里的插件实例） |
 
@@ -59,9 +59,9 @@
 
 ### 3.6 GL 与顶层窗口
 
-- `PluginEditor` 的 `juce::OpenGLContext` 有生命周期约束：构造后挂载、析构前分离。
+- `PluginEditor` 的 `juce::OpenGLContext` 有生命周期约束：构造后挂载、析构前分离；Windows 下主 Editor 走补丁 0010 外部帧合并 + `VBlankPacer` 与 `renderOpenGLPostComponentBuffer()`（`GlToyRenderer` 批绘 ToyBox），浮窗经子级 `GlHostComponent` + `DWMWA_CLOAK` + 独立 `RenderThread` 隔离 VSync 并消除首帧闪屏。
 - Standalone 与插件态的标题栏 / 全屏 / 拖拽行为不同，不能混为一谈。
-- GL 直渲染**没有 scissor**：画布外几何会画到邻居模块，必须自己裁（analysis-modules §7.14）。
+- GL 直渲染**没有 scissor**：画布外几何会画到邻居模块，必须自己裁（analysis-modules §7.14）；所有离屏 CPU 位图缓存一律显式使用 `SoftwareImageType`。
 
 ## 4. 常见维护点
 

@@ -12,11 +12,16 @@
 - **瞬时状态机入口必须对称排除 egg/hatching**（carried/falling 等）。
 - `roleName` 由文件名（`getFileNameWithoutExtension`）提取，资源目录命名变化要同步。
 - `onBroughtToFront` 回调里不可操作已删除的 VirtuPet（异步删除需防护）。
+- **布局恢复单次 PNG 解码（v3.5.0）**：`VirtuPetModule(bool deferInitialRoleLoad = false)` 与 RAII 守卫 `VirtuPetModule::ScopedDeferInitialRoleLoad` 供 `ModuleWorkspace::loadLayoutFromTree()` 包裹 `factory(ModuleType::virtuPet)` 使用，跳过构造期随机角色 ~134 张 PNG 解码，由紧随其后的 `restorePersistentState()` 直接解码目标存档角色一次；新建添加、存档角色为空或历史角色缺失时均自动回退 `loadRandomRoleAnimations()`。
 
 ## 2. Toybox（玩具盒，`source/ui/toys/`）
 
 - 独立子系统，约 30 文件。
 - **档位已是"连续互动自动升级"**（v3.0.1 起），不再是 OFF/CHILL/NORMAL/PARTY 手动四档循环。
+- **`EmojiAtlas` 后台预烘焙（v3.5.0）**：Windows 启用低优先级后台线程 `PrebakeWorker`（`Priority::low`，启动延后 150ms 避开首帧初始化）配合每尺寸 1 套共 3 套复用 D2D/WIC 软目标（S/M/L = 38/50/70px；291 字形 + 描边约 3.1× 提速，UI 线程阻塞 0ms）。通过值拷贝 `ThemeBakeParams` + `themeEpoch_` 无锁应对主题切换，优先烘焙当前主题池并单趟产出 duotone 描边与 GL 预乘 RGBA；热路径全原子无锁读取，冷启动极早期点击走单槽按需回退，并提供 `prebakeDone()` / `prebakeMs()` 查询。
+- **`GlToyRenderer` GPU 批渲染路径（v3.5.0）**：`ToyKit.*` 保持零 OpenGL 头文件依赖并产出 `ToyGlTypes.h` 纯 POD 快照，由 `GlToyRenderer` 在 `renderOpenGLPostComponentBuffer()` 中基于单张 `1024×1024` 图集以单次批绘制叠加到组件缓冲之上（零 `ToyOverlay` 重绘），shader 内按排除矩形列表遮挡调色板/抽屉/弹窗等浮层；GL 脱离时自动回退 `ToyOverlay`；诊断快照新增 `ToyClock::DiagSnapshot::degradedFreeActors`，准确区分真正降级粒子与飞出画布上边缘视野外的粒子。
+- **目标帧率相对迟滞降级（`DegradationController`，v3.5.0）**：按目标刷新率比例做迟滞判定，支持可逆平滑恢复；GL 批渲染路径下满载 400 粒子仍可维持全量高细节（`degradedFreeActors == 0`）。
+- **工作区调色板懒创建与画布点阵优化（v3.5.0）**：`ModuleWorkspace::palettePanel` 推迟至首次点击主题栏预览块 / `"+"` 时经 `ensurePalettePanel()` 按需构造（所有引用点均已空指针防护）；`rebuildCanvasBgCacheIfNeeded()` 改用 `BitmapData` + `PixelARGB::blend` 直接写入网格点阵，消除 26,000+ 次逐点 `fillRect`。
 
 ## 3. 新手引导（Tutorial Overlay）
 

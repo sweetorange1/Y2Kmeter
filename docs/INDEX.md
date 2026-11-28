@@ -15,7 +15,7 @@
 | 文件 | 内容 | 何时读 |
 | --- | --- | --- |
 | [build-toolchain.md](build-toolchain.md) | 构建目录/命令、vendored JUCE 补丁管理、版本号同步、`ModuleType` 枚举规则、全量构建触发条件、MSVC 特有坑、CRT | 加/删文件、改枚举、升级版本、升级 JUCE、遇链接/增量编译问题 |
-| [rendering-gl.md](rendering-gl.md) | GL/OpenGL 渲染架构、**组件层性能规则（低频组件位图缓存 / 渐变复用 / drawRect 代价）**、GL Image 消费规则、Milkdrop(projectM) 避坑、shader 文本、文本绘制坑 | 改任何模块绘制、GL 上下文、Milkdrop、Spectrogram3D、着色器 |
+| [rendering-gl.md](rendering-gl.md) | GL/OpenGL 渲染架构、**Windows 60Hz 帧节奏（补丁 0010 + `VBlankPacer`）/ ToyBox GPU 批渲染 / 浮窗零闪屏**、组件层性能与 `SoftwareImageType` 规则、Milkdrop 异步扫描避坑、shader 与文本绘制 | 改任何模块绘制、GL 上下文、帧节奏、ToyBox、Milkdrop、Spectrogram3D、着色器 |
 | [window-layout.md](window-layout.md) | 窗口行为模型（L/Hide/Stick）、布局锁定、auto-hide 机制、多屏混合 DPI、窗口恢复、**全屏与布局预设的联动** | 改窗口几何、拖拽、全屏、预设、多显示器 |
 | [analysis-modules.md](analysis-modules.md) | 分析后端、计量口径、新模块注册清单、Tempo/Key/Recorder/StereoMap 关键设计与已知限制/待办；**§7 v3.1 模块控制面板 / 参数系统 / 模块合并映射 / 存档迁移 / 按住慢放 / FFT scale / 已知偏差** | 动分析后端、新增模块、给模块加参数、改存档键、改计量口径、续做 Stereo Map |
 | [ui-features.md](ui-features.md) | VirtuPet / Toybox / 新手引导 / **底部主题栏（宽度让位规则）** / 悬停提示 / i18n 的约定与注意点 | 改这些子系统的行为 |
@@ -25,5 +25,5 @@
 
 - 当前版本：`3.5.0`（CMakeLists `project(Y2Kmeter VERSION 3.5.0)`）。
 - 构建目录：Release = `cmake-build-release-visual-studio`；诊断包 RelWithDebInfo = `cmake-build-relwithdebinfo-visual-studio-ninja`。
-- vendored JUCE：`third_party/JUCE`（补丁 0001~0009 已打入源码，diff 在 `third_party/juce_patches/`）。
+- vendored JUCE：`third_party/JUCE`（补丁 0001~0010 已打入源码，diff 在 `third_party/juce_patches/`）。
 - 全量 16 类存活模块（含 `Stereo Map`）已全面接入 v3.5.0 场景化布局预设与全风格耦合工艺。
