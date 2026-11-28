@@ -55,7 +55,10 @@ TelemetryClient::TelemetryClient() {
 }
 
 TelemetryClient::~TelemetryClient() {
-  stopWorker_.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    stopWorker_.store(true, std::memory_order_release);
+  }
   queueCv_.notify_all();
   if (workerThread_.joinable())
     workerThread_.join();
@@ -127,17 +130,15 @@ juce::String TelemetryClient::GetOrCreateClientId(
 }
 
 // --------------------------------------------------
-// 收集系统信息
+// 收集系统信息（后台线程安全：所有 SystemStats OS/CPU 查询在此执行）
 // --------------------------------------------------
-juce::var TelemetryClient::CollectSystemInfo(
-    juce::PropertiesFile* settings,
-    bool isPlugin) {
+juce::var TelemetryClient::BuildSystemInfoPayload(const UiSnapshot& snap) {
   using juce::SystemStats;
 
   juce::DynamicObject::Ptr obj = new juce::DynamicObject();
 
   // 匿名 client_id
-  obj->setProperty("client_id", GetOrCreateClientId(settings));
+  obj->setProperty("client_id", snap.clientId);
 
   // 软件版本
   obj->setProperty("version", juce::String(JucePlugin_VersionString));
@@ -186,28 +187,15 @@ juce::var TelemetryClient::CollectSystemInfo(
   obj->setProperty("ram_mb",
     static_cast<int>(SystemStats::getMemorySizeInMegabytes()));
 
-  // 运行模式
-  obj->setProperty("plugin_mode", isPlugin ? "plugin" : "standalone");
+  // 运行模式与宿主名称
+  obj->setProperty("plugin_mode", snap.isPlugin ? "plugin" : "standalone");
+  obj->setProperty("host_name", snap.hostName);
 
-  // 宿主名称（仅插件模式下有意义；Standalone 下为空）
-  if (isPlugin) {
-    // PluginHostType::getHostDescription() 是非静态方法，需要实例
-    obj->setProperty("host_name",
-      juce::PluginHostType{}.getHostDescription());
-  } else {
-    obj->setProperty("host_name", "Standalone");
-  }
-
-  // 显示器数量与主屏分辨率
-  {
-    const auto& displays =
-        juce::Desktop::getInstance().getDisplays();
-    obj->setProperty("display_count", displays.displays.size());
-    if (displays.getPrimaryDisplay() != nullptr) {
-      const auto area = displays.getPrimaryDisplay()->userArea;
-      obj->setProperty("primary_display_w", area.getWidth());
-      obj->setProperty("primary_display_h", area.getHeight());
-    }
+  // 显示器数量与主屏分辨率（由 UI 线程轻量快照传入）
+  obj->setProperty("display_count", snap.displayCount);
+  if (snap.primaryDisplayW > 0 && snap.primaryDisplayH > 0) {
+    obj->setProperty("primary_display_w", snap.primaryDisplayW);
+    obj->setProperty("primary_display_h", snap.primaryDisplayH);
   }
 
   // 安装来源标记
@@ -225,39 +213,54 @@ juce::var TelemetryClient::CollectSystemInfo(
   return juce::var(obj.get());
 }
 
+juce::var TelemetryClient::CollectSystemInfo(
+    juce::PropertiesFile* settings,
+    bool isPlugin) {
+  UiSnapshot snap;
+  snap.clientId = GetOrCreateClientId(settings);
+  snap.isPlugin = isPlugin;
+  snap.hostName = isPlugin ? juce::PluginHostType{}.getHostDescription()
+                           : juce::String("Standalone");
+  {
+    const auto& displays = juce::Desktop::getInstance().getDisplays();
+    snap.displayCount = displays.displays.size();
+    if (displays.getPrimaryDisplay() != nullptr) {
+      const auto area = displays.getPrimaryDisplay()->userArea;
+      snap.primaryDisplayW = area.getWidth();
+      snap.primaryDisplayH = area.getHeight();
+    }
+  }
+  return BuildSystemInfoPayload(snap);
+}
+
+void TelemetryClient::SendSerializedPost(const juce::URL& url,
+                                         const juce::String& body) {
+  const auto postUrl = url.withPOSTData(body);
+
+  auto opts = juce::URL::InputStreamOptions(
+                juce::URL::ParameterHandling::inPostData)
+                .withConnectionTimeoutMs(5000)
+                .withExtraHeaders(
+                    "Content-Type: application/json\r\n"
+                    "Accept: application/json\r\n")
+                .withHttpRequestCmd("POST");
+
+  if (auto stream = postUrl.createInputStream(opts)) {
+    stream->readEntireStreamAsString();
+  }
+}
+
 // --------------------------------------------------
 // 异步 POST JSON
-//
-// 只在主调线程做 JSON 序列化并投递任务到队列；真正的网络 I/O 由常驻
-// worker 线程串行执行。POST 数据通过 URL::withPOSTData() 挂载，配合
-// InputStreamOptions(ParameterHandling::inPostData) 发出。
 // --------------------------------------------------
 void TelemetryClient::PostJsonAsync(const juce::URL& url,
                                      const juce::var& json) {
-  // 在主调线程先把 JSON 序列化为字符串（避免跨线程引用临时对象）
   const auto body = juce::JSON::toString(json, false);
 
   {
     std::lock_guard<std::mutex> lock(queueMutex_);
     tasks_.emplace_back([url, body]() {
-      // 将 POST 数据挂到 URL 上
-      const auto postUrl = url.withPOSTData(body);
-
-      // 创建带 POST 数据的 stream options
-      auto opts = juce::URL::InputStreamOptions(
-                    juce::URL::ParameterHandling::inPostData)
-                    .withConnectionTimeoutMs(5000)
-                    .withExtraHeaders(
-                        "Content-Type: application/json\r\n"
-                        "Accept: application/json\r\n")
-                    .withHttpRequestCmd("POST");
-
-      // 尝试发送，任何错误直接吞掉
-      if (auto stream = postUrl.createInputStream(opts)) {
-        // 读取响应体以触发完整 HTTP 事务（即使我们不需要响应内容）
-        stream->readEntireStreamAsString();
-      }
-      // 静默忽略所有错误（网络不通、DNS 失败、超时等）
+      SendSerializedPost(url, body);
     });
   }
   queueCv_.notify_one();
@@ -284,18 +287,37 @@ void TelemetryClient::WorkerLoop() {
 }
 
 // --------------------------------------------------
-// 发送启动心跳
+// 发送启动心跳（UI 线程只拍轻量快照，OS/CPU 采集 + JSON + HTTP 全在后台执行）
 // --------------------------------------------------
 void TelemetryClient::SendStartupPing(juce::PropertiesFile* settings,
                                        bool isPlugin) {
   if (!IsEnabled()) return;
 
-  // 采集阶段在主调线程完成，避免在后台线程触碰 juce API
-  const auto payload = CollectSystemInfo(settings, isPlugin);
+  UiSnapshot snap;
+  snap.clientId = GetOrCreateClientId(settings);
+  snap.isPlugin = isPlugin;
+  snap.hostName = isPlugin ? juce::PluginHostType{}.getHostDescription()
+                           : juce::String("Standalone");
+  {
+    const auto& displays = juce::Desktop::getInstance().getDisplays();
+    snap.displayCount = displays.displays.size();
+    if (displays.getPrimaryDisplay() != nullptr) {
+      const auto area = displays.getPrimaryDisplay()->userArea;
+      snap.primaryDisplayW = area.getWidth();
+      snap.primaryDisplayH = area.getHeight();
+    }
+  }
 
-  const auto url = juce::URL(
-    "https://iisaacbeats.cn/api/telemetry/ping");
-  PostJsonAsync(url, payload);
+  const auto url = juce::URL("https://iisaacbeats.cn/api/telemetry/ping");
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    tasks_.emplace_back([url, snap = std::move(snap)]() {
+      const auto payload = BuildSystemInfoPayload(snap);
+      const auto body = juce::JSON::toString(payload, false);
+      SendSerializedPost(url, body);
+    });
+  }
+  queueCv_.notify_one();
 }
 
 }  // namespace network

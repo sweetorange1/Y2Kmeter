@@ -370,6 +370,9 @@ public:
     // 统一拦截模块 repaint 请求（用于性能计数）
     void repaint();
     void repaint(juce::Rectangle<int> area);
+    // 清除跨父容器迁移 / GL 接管切换时的待重绘合并守卫，避免 repaint 被吞 120ms
+    void resetRepaintCoalescing() noexcept;
+    void forceRepaintImmediate();
 
     // 逐帧数据刷新专用重绘（onFrame / 弹道推进等高频路径使用）：
     //   只失效 getFrameRepaintBounds() 返回的"随帧变化"区域，外壳 / 标题栏 /
@@ -485,6 +488,7 @@ public:
     void paintOverChildren(juce::Graphics& g) override;
     void resized() override;
     void moved() override;
+    void parentHierarchyChanged() override;
     void mouseEnter(const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
     void mouseMove (const juce::MouseEvent& e) override;
@@ -622,6 +626,10 @@ private:
     juce::uint32 lastFloatingRepaintMs = 0;
     bool floatingGlHosted_ = false;
     bool floatingRepaintThrottled() noexcept;
+
+    // 悬停标尺局部重绘限流（与 floatingRepaintThrottled 解耦，避免影响逐帧刷新）
+    juce::uint32 lastHoverRepaintMs_ = 0;
+    bool hoverRepaintThrottled() noexcept;
 
     // 悬停重绘被限流时的"补齐"状态：快速拖拽停下后必须在节流窗口结束时补一次，
     //   否则十字线/读数会停在上一帧的位置（最后一次鼠标事件被丢弃）。
@@ -1164,6 +1172,14 @@ public:
     // Editor 下发的 ToyDirector（供 hookPanel 在几何变化时取消 actor）。
     void setToyDirector (ToyDirector* d) noexcept { toyDirector = d; }
 
+    // 点击已置顶模块时的无操作 z-order 守卫与聚焦视觉清理
+    bool isModuleTopmostAmongModules (const ModulePanel& panel) const noexcept;
+    void clearOtherFocusVisuals (const ModulePanel& except);
+
+    // 收集工作区内需要遮挡 GL ToyBox 粒子的覆盖层矩形（映射到 targetSpace 坐标系）
+    void collectToyExclusionRects (const juce::Component& targetSpace,
+                                   std::vector<juce::Rectangle<int>>& out) const;
+
 private:
     static constexpr int gridSize       = 8;
     static constexpr int margin         = 0;   // 0 = 模块可以紧贴窗口边框
@@ -1188,7 +1204,8 @@ private:
 
     void notifyLayoutChanged();
 
-    // 调色面板定位（调色板超出窗口时提升为独立桌面窗口，允许延展到软件外）
+    // 调色面板定位（懒创建：首次点击调色板预览方块时才构造；超出窗口时提升为独立桌面窗口）
+    void ensurePalettePanel();
     void updatePalettePanelPlacement();
 
     juce::Rectangle<int> findNextSlot(int w, int h) const;

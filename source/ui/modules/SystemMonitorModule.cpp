@@ -486,6 +486,7 @@ void SystemMonitorModule::timerCallback()
     updateSubscription();
 
     bool dirty = false;
+    bool firstSampleArrived = false;
 
     if (subscribed)
     {
@@ -493,6 +494,7 @@ void SystemMonitorModule::timerCallback()
 
         if (serial != lastSerial)
         {
+            firstSampleArrived = (lastSerial == 0);
             lastSerial = serial;
             snap = sampler->getLatest();
             dirty = true;
@@ -525,6 +527,14 @@ void SystemMonitorModule::timerCallback()
         if (target < 0.0f)
         {
             if (shown != 0.0f) { shown = 0.0f; dirty = true; }
+            continue;
+        }
+
+        // 启动首帧有效样本直接到位，避免 W1 期间连续 15 次 20Hz 全模块弧环重绘风暴
+        if (firstSampleArrived)
+        {
+            shown = target;
+            dirty = true;
             continue;
         }
 

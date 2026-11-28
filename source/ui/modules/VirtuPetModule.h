@@ -45,8 +45,18 @@ class VirtuPetModule : public ModulePanel,
                          private juce::Timer
 {
 public:
-    VirtuPetModule();
+    explicit VirtuPetModule (bool deferInitialRoleLoad = false);
     ~VirtuPetModule() override;
+
+    // 供布局加载（ModuleWorkspace::loadLayoutFromTree）在调用 factory 期间延迟随机角色 PNG 解码，
+    // 紧随其后的 restorePersistentState() 只解码目标存档角色一次（避免启动双倍 ~260 张 PNG 解码）。
+    struct ScopedDeferInitialRoleLoad
+    {
+        ScopedDeferInitialRoleLoad() noexcept;
+        ~ScopedDeferInitialRoleLoad() noexcept;
+        bool prev = false;
+        JUCE_DECLARE_NON_COPYABLE (ScopedDeferInitialRoleLoad)
+    };
 
     void paint (juce::Graphics& g) override;
     void resized() override;

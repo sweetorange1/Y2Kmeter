@@ -323,10 +323,10 @@ public:
             if (isTransparentBackdrop)
             {
                 gpu.lastUploadedVersion = snap->version;
-                if (! mod.glDirectActive.load())
+                if (! mod.glDirectActive.load (std::memory_order_acquire))
                 {
-                    mod.glDirectActive.store (true);
-                    mod.repaint();
+                    mod.glDirectActive.store (true, std::memory_order_release);
+                    mod.forceRepaintImmediate();
                 }
             }
             mod.diagSetVisible (true);
@@ -351,8 +351,8 @@ public:
         glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
         glBindVertexArray (vao_);
 
-        // 已接管模块先清底色，防止 FBO/blit 异常产生上一帧拖影（透明模式跳过）
-        if (! isTransparentBackdrop && mod.glDirectActive.load (std::memory_order_relaxed))
+        // 先清底色，防止 FBO/blit 异常或跨上下文首帧未清底产生上一帧拖影（透明模式跳过）
+        if (! isTransparentBackdrop)
         {
             const auto tl = hostComponent.getLocalPoint (&mod, juce::Point<int> (0, 0));
             const auto br = hostComponent.getLocalPoint (&mod, juce::Point<int> (mod.getWidth(), mod.getHeight()));
@@ -904,7 +904,7 @@ public:
         if (! mod.glDirectActive.load (std::memory_order_acquire))
         {
             mod.glDirectActive.store (true, std::memory_order_release);
-            mod.repaint();
+            mod.forceRepaintImmediate();
         }
 
         mod.diagSetVisible (true);

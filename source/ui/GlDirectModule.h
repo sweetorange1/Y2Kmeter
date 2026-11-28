@@ -144,19 +144,36 @@ public:
     std::atomic<bool> glForceTrailClear { false };         // 主题/皮肤切换或跨上下文迁移时置位，由 GL 线程消费清空旧残影
 
     // 停靠 ↔ 浮动态切换时模块更换 GL 宿主上下文（Editor ↔ FloatingModuleWindow）：
-    //   先复位接管标志与纹理上传代次，待新宿主首帧 GL 渲染成功后再置回 glDirectActive=true，
-    //   避免跨上下文切换瞬间出现透明洞或漏传全量纹理。
-    void setFloating (bool floating) override
+    //   · 当目标宿主同样拥有活跃 GL 管线（targetHostHasGl == true）时，保持 glDirectActive 原值，
+    //     避免迁移瞬间回落到 paintLegacyContent() 闪出若干帧旧软件画面；
+    //   · 无论目标是否支持 GL，都强制清零 glTexUploadedGen（促使新宿主全量上传纹理）、置位
+    //     glForceTrailClear（清空新上下文残影 FBO）、重置尺寸守卫与重绘合并状态；
+    //   · 若目标宿主无 GL（如 macOS 透明模式、禁用 GL 或 attach 失败），复位 glDirectActive = false
+    //     以平滑回退至软件绘制路径。
+    void prepareForHostTransfer (bool floating, bool targetHostHasGl)
     {
+        const bool modeChanged = (isFloating() != floating);
         ModulePanel::setFloating (floating);
-        if (glDirectActive.load (std::memory_order_acquire))
+        resetRepaintCoalescing();
+
+        if (! targetHostHasGl)
             glDirectActive.store (false, std::memory_order_release);
+
         glTexUploadedGen.store (0, std::memory_order_release);
         glForceTrailClear.store (true, std::memory_order_release);
         lastGlCanvasW_ = 0;
         lastGlCanvasH_ = 0;
         diagSetFloating (floating);
-        repaint();
+
+        if (modeChanged || ! targetHostHasGl)
+            forceRepaintImmediate();
+    }
+
+    void setFloating (bool floating) override
+    {
+        if (isFloating() == floating)
+            return;
+        prepareForHostTransfer (floating, isGlHostAvailable());
     }
 
     // ---- 诊断状态镜像（v3.0.x）----
@@ -291,6 +308,7 @@ private:
     GlAppearanceRefreshAsync glRefreshAsync_ { *this };
     std::function<void()>    glFrameRequester_;
     std::atomic<bool>        glHostAvailable_ { true };
+    juce::uint32             diagLegacyPaintCount_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlDirectModuleBase)
 };

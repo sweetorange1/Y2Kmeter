@@ -5,7 +5,9 @@
 #include "PluginProcessor.h"
 #include "BinaryData.h"
 #include "projectM-4/types.h"  // projectm_handle
+#include "source/ui/VBlankPacer.h"
 #include <memory>
+#include <thread>
 
 // 前向声明（把 ModuleWorkspace/ModulePanel/ModuleType 的头文件下沉到 .cpp，
 // 以规避 MSVC 多文件编译时 include guard 串扰的问题）
@@ -16,6 +18,7 @@ class MilkdropTintPass;  // 整体染色后处理着色器，完整定义在 Mil
 class GlDirectRenderer;  // 跨宿主共享 GL 直渲染管线，完整定义在 source/ui/GlDirectRenderer.h
 class ToyDirector;       // Toybox 点击互动主管（完整定义在 source/ui/toys/ToyKit.h）
 class Y2KTooltipWindow;  // 悬停提示窗口（完整定义在 source/ui/HoverHelp.h）
+namespace y2ktoy { class GlToyRenderer; }  // Direct OpenGL 批渲染 ToyBox（source/ui/toys/GlToyRenderer.h）
 
 // ==========================================================
 // Y2KmeterAudioProcessorEditor —— 多模块框架版
@@ -48,8 +51,10 @@ public:
     // ==============================================================
     void newOpenGLContextCreated() override;
     void renderOpenGL() override;
-    // Win 性能优化（JUCE 补丁，仅 Windows）：持消息锁之前调用，锁外完成 projectM 渲染
+    // Win 性能优化（JUCE 补丁，仅 Windows）：持消息锁之前调用，锁外完成 projectM 预渲染与预设切换
     void renderOpenGLPreLock() override;
+    // ToyBox GPU 批渲染钩子（JUCE 补丁 0010）：在 drawComponentBuffer() 之后、锁外、swap() 之前执行
+    void renderOpenGLPostComponentBuffer() override;
     void openGLContextClosing() override;
 
     // 只销毁 Editor 侧 Milkdrop 渲染资源（projectM handle + FBO + 染色后处理），
@@ -621,7 +626,7 @@ private:
     // Editor 析构流程已启动——用于在 resized() 中拒绝把析构末端
     //   宿主/JUCE 塞来的极小尺寸（实测 FL Studio 关闭插件窗口时曾传入 ~175×85）
     //   回写到 Processor.savedEditorSize，从而避免下次打开窗口恢复到异常小尺寸。
-    bool editorBeingDestructed = false;
+    std::atomic<bool> editorBeingDestructed { false };
     bool titleTextHovered     = false; // 左侧标题文字 hover 态（hover 时显示下划线 + 手型光标）
 
     // 标题文字实际绘制的总像素宽度（由 paint() 计算后回写，供 mouseMove / mouseDown
@@ -730,30 +735,32 @@ private:
     juce::int64 diagLastGlCounter         = -1;
     double      diagGlCounterChangeWallMs = 0.0;
 
-    // —— v2.9.1 vblank 对齐的帧时钟（wall-clock 判据 + 兜底 Timer）——
-    //   VBlankAttachment 在 UI 线程按显示器 vblank 回调，只用来"对齐相位"；
-    //   分发频率由墙钟判据保证：
-    //     · vblank 入口：距上次分发 ≥ 0.85×目标间隔才分发（错过一个 vblank 后
-    //       下一个回调立即追帧，不会因 JUCE AsyncUpdater 的合并语义被永久吞掉）；
-    //     · 兜底 Timer：距上次分发 ≥ 1.0×目标间隔即补帧 —— vblank 回调被 GL
-    //       持锁阻塞而大量丢弃时（JUCE Windows VBlankThread 在消息线程没处理完
-    //       上一个回调时会丢事件），仍能维持用户设定的分发频率。
-    //   vblank 停摆（显示器休眠/远程桌面）由 10Hz 看门狗切回 Hub 内部 Timer。
+    // —— v3.5 VBlankPacer 帧时钟（自适应刷新率识别 + 1:1 透传 + 兜底 Timer）——
+    //   VBlankAttachment 在 UI 线程按显示器 vblank 回调；
+    //   由 y2k::pacing::VBlankPacer 统一完成：
+    //     · 中位数平滑检测实际显示器刷新率（59.95Hz / 60Hz / 120Hz / 144Hz / 32Hz RDP）；
+    //     · userCap >= monitorHz - 1.5Hz 或 userCap == 0 时 1:1 原生 VBlank 透传（零拍频）；
+    //     · userCap < monitorHz 时用无漂移分数信用累加器实现任意比例分频（如 144→60/120）；
+    //     · 兜底 Timer 在任何模式（含无上限）均以 1.35× 宽限在 VBlank 被吞时补帧；
+    //     · 每次帧分发末尾统一 flushPacedRepaint()，把帧内所有 repaint 合并为 1 次 GL 唤醒。
     void onDisplayVBlank (double timestampSec);
     void updateFrameClockWatchdog();
-    void performFrameDispatch (double timestampSec);
+    void performFrameDispatch (bool fromVBlank, double vblankSec, double nowWallMs);
     void tryDispatchFromVBlank (double nowWallMs, double timestampSec);
     void tryDispatchFromFallbackTimer (double nowWallMs);
     void updateFramePacingFallbackTimer();
+    void syncExternalFramePacing (bool active);
+    void syncToyExpectedFps();
     std::unique_ptr<juce::VBlankAttachment> vblankAttachment;
 
     class FramePacingFallbackTimer;
     std::unique_ptr<FramePacingFallbackTimer> framePacingFallback;
 
-    double vblankLastWallMs     = 0.0;   // 上一次 vblank 回调的墙钟（看门狗用）
-    double lastDispatchWallMs   = 0.0;   // 上一次实际分发的墙钟（vblank 与兜底共用去重）
-    double vblankLastSec        = 0.0;   // 上一次 vblank 事件时间戳（credit 累加用）
-    double vblankCreditMs       = 0.0;   // vblank 时间信用累加器（分数倍率节流）
+    double                   vblankLastWallMs       = 0.0;   // 上一次 vblank 回调的墙钟（250ms 看门狗用）
+    double                   vblankLastSec          = 0.0;   // 上一次 vblank 事件时间戳（计算 dtMs 用）
+    y2k::pacing::VBlankPacer vblankPacer_;
+    double                   lastSyncedExpectedFps_ = 0.0;
+    int                      activeFallbackTimerMs_ = 0;
 
     // FPS 上限控制状态：
     //   · userRequestedFpsLimit —— 用户通过 UI 按钮设定的目标上限
@@ -782,6 +789,10 @@ private:
     //   · 完整类型只在 .cpp 中可见（pimpl，避免把 AnalyserHub 拖进本头）。
     // ================================================================
     std::unique_ptr<ToyDirector> toyDirector;
+
+    // Direct OpenGL 批渲染 ToyBox（声明在 openGLContext 之前：反向析构时先 detach GL
+    //   并执行 openGLContextClosing() → glToyRenderer_->releaseResources()，再销毁本对象）
+    std::unique_ptr<y2ktoy::GlToyRenderer> glToyRenderer_;
 
     //   · 本成员**必须**在类的末尾（所有子组件之后）声明，保证析构时最先执行
     //     （反向声明顺序），而我们在 ~Editor 起始处已显式 detach 一次兜底。
@@ -828,6 +839,10 @@ private:
         ModulePanel& getModulePanel() const noexcept { return module_; }
         void setLayoutLocked(bool locked);
 
+        void attachHostedModule();
+        void detachHostedModule();
+        ModulePanel* getHostedModule() const noexcept { return moduleAttached_ ? &module_ : nullptr; }
+
         // OpenGLRenderer（独立浮窗 GPU 合成 + GlDirectRenderer 直绘）
         void newOpenGLContextCreated() override;
         void renderOpenGL() override;
@@ -835,10 +850,15 @@ private:
 
         // 浮窗 GL 生命周期与背景模式同步
         void attachGlContextIfEligible();
-        void detachGlContext();
+        void detachGlContext (bool targetHostHasGl = false, bool hideNativeWindow = true);
         void requestGlFrame();
+        void setExternalFramePacing (bool shouldPace);
+        void flushPacedRepaint();
         void syncBackdropTransparency();
         void setOpenGlEnabledForBackdrop (bool enabled);
+        void beginCloakUntilFirstGlFrame();
+        void cancelCloakReveal (bool uncloakNow = true);
+        void setGlHostVisible (bool visible) { glHost_.setVisible (visible); }
         bool isGlAttached() const noexcept { return glContext_.isAttached(); }
         juce::int64 getGlFrameCount() const noexcept { return glFrameCounter_.load (std::memory_order_relaxed); }
 
@@ -866,7 +886,32 @@ private:
         void cancelAsyncUpdates() { cancelPendingUpdate(); }
 
     private:
+        // 子级 GL 宿主容器（与 Y2KMainWindow → Editor 同构）：
+        //   OpenGLContext 必须挂在 DocumentWindow 的子组件而非顶层 peer 自身；
+        //   否则 Windows WM_PAINT 进入 ComponentPeer::handlePaint → paintEntireComponent
+        //   会直接绕过 CachedComponentImage，把 module_ 经软件 GDI 画出 paintLegacyContent()！
+        class GlHostComponent final : public juce::Component
+        {
+        public:
+            explicit GlHostComponent (FloatingModuleWindow& owner) : owner_ (owner)
+            {
+                setOpaque (false);
+            }
+            void resized() override;
+        private:
+            FloatingModuleWindow& owner_;
+        };
+
+        struct CloakRevealTimer final : public juce::Timer
+        {
+            explicit CloakRevealTimer (FloatingModuleWindow& owner) : owner_ (owner) {}
+            void timerCallback() override { owner_.tryRevealAfterFirstGlFrame (true); }
+            FloatingModuleWindow& owner_;
+        };
+
         void handleAsyncUpdate() override;
+        void tryRevealAfterFirstGlFrame (bool fromTimer = false);
+
         ModulePanel& module_;
         juce::Rectangle<int> savedBounds_;
         std::function<void(ModulePanel&, juce::Rectangle<int>)> onDock_;
@@ -881,15 +926,28 @@ private:
         bool                 pseudoFullScreen_ = false;
         juce::Rectangle<int> preFullScreenBounds_;
 
+        // 子级 GL 宿主容器（先于 tooltip_ 与 glContext_ 声明，保证反向析构时最后销毁）
+        GlHostComponent      glHost_ { *this };
+        bool                 moduleAttached_ = false;
+
         // 浮动窗口是独立的顶层 peer，Editor 的提示窗口管不到这里 —— 每个浮动窗口
-        //   自带一个（以窗口自身为宿主）。
+        //   自带一个（挂在 glHost_ 内，随浮窗 OpenGL 管线一并合成，不被子 GL HWND 遮挡）。
         std::unique_ptr<Y2KTooltipWindow> tooltip_;
+
+        // Windows DWM 首帧遮罩：在首帧 GL SwapBuffers + 子 GL HWND 可见前隐身，消除弹出瞬间闪屏
+        CloakRevealTimer     cloakRevealTimer_ { *this };
+        bool                 cloakedUntilFirstGl_ = false;
+        juce::uint32         cloakStartMs_ = 0;
+        int                  cloakRetryCount_ = 0;
+        int                  cloakTimerTicks_ = 0;
 
         // 浮窗专属 GL 直渲染管线与 OpenGLContext（glContext_ 声明在末尾以保证反向析构优先销毁）
         std::unique_ptr<GlDirectRenderer> glDirectRenderer_;
         bool                              glEnabledForModule_    = false;
         bool                              transparentDwmApplied_ = false;
         std::atomic<bool>                 glClosing_ { false };
+        std::atomic<bool>                 glPreserveActiveOnClose_ { false };
+        std::atomic<bool>                 firstGlFrameRendered_ { false };
         std::atomic<juce::int64>          glFrameCounter_ { 0 };
         juce::OpenGLContext               glContext_;
     };
@@ -1007,8 +1065,34 @@ private:
     //     milkdrop_current_preset_ui_（原子）。
     mutable std::mutex     milkdrop_state_mutex_;
     juce::StringArray      milkdrop_preset_paths_;
+    bool                   milkdrop_scanned_use_like_ = false;
+    juce::String           milkdrop_loaded_preset_path_;
     int                    milkdrop_current_preset_ = -1;
     std::atomic<int>       milkdrop_current_preset_ui_{ -1 };
+
+    // 异步预设扫描 + 按需 projectM 懒初始化（消除启动首帧 ~80-155ms GL 线程阻塞）
+    std::atomic<bool>      milkdrop_gl_context_ready_{ false };
+    std::atomic<bool>      milkdrop_has_module_in_editor_{ false };
+    std::atomic<bool>      milkdrop_presets_ready_{ false };
+    std::atomic<bool>      milkdrop_needs_reconcile_{ false };
+    std::atomic<bool>      milkdrop_scan_shutdown_{ false };
+    std::atomic<bool>      milkdrop_scan_cancel_{ false };
+    std::atomic<uint64_t>  milkdrop_scan_generation_{ 0 };
+    // 仅由 startMilkdropPresetScanAsync / stopMilkdropPresetScanThread 持有（worker 线程绝不获取），
+    // 因此持锁 join() 绝不会死锁，且彻底消除跨线程并发 assign joinable std::thread 的竞态。
+    std::mutex             milkdrop_scan_lifecycle_mutex_;
+    std::thread            milkdrop_scan_thread_;
+    std::atomic<bool>      milkdrop_scan_in_flight_{ false };
+    bool                   milkdrop_scan_target_like_ = false;
+    // GL 线程私有：首帧快速路径下暂存的启动保存预设索引（仅在扫描期间无用户切换操作时兜底恢复）
+    int                    milkdrop_startup_jump_fallback_ = -1;
+
+    bool         hasEmbeddedMilkdropModule() const;
+    void         startMilkdropPresetScanAsync (bool useLike, bool forceRestart = false);
+    void         stopMilkdropPresetScanThread();
+    void         initMilkdropEditorResources();
+    juce::String findFastInitialMilkdropPresetPath (bool useLike, int preferredIndex) const;
+    bool         loadMilkdropPresetPathInternal (const juce::String& path, int displayIdx, int displayTotal);
 
     // 预设表的加锁访问（禁止在持锁期间调用 projectM / 做磁盘 IO）
     int          MilkdropPresetCount() const;
@@ -1047,6 +1131,8 @@ private:
     // shader 编译失败回退 Idle）。挂起期间跳过创建，dock 回来时再恢复。
     std::atomic<bool>      milkdrop_renderer_suspended_{ false };
     void LoadMilkdropPresetInternal();
+    // 消费所有 Milkdrop 预设/库切换请求（GL 线程调用，无 MessageManager::Lock 依赖，可在 renderOpenGLPreLock 锁外执行）
+    bool processPendingMilkdropPresetRequests();
     // 黑帧自愈（GL 线程，renderMilkdropFrameCore 尾部调用）。
     //   返回 true = 本帧应改用 projectM 原始 render FBO（染色后处理已作废）。
     bool milkdropTickBlackFrameSelfHeal (unsigned int blitSourceFbo, int fboW, int fboH);

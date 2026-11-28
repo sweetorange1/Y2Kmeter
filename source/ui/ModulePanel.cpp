@@ -456,6 +456,18 @@ void ModulePanel::bringToFrontFromChildClick()
     if (! isVisible())
         return;
 
+    if (! isFloating_)
+    {
+        if (auto* ws = dynamic_cast<ModuleWorkspace*> (getParentComponent()))
+        {
+            if (ws->isModuleTopmostAmongModules (*this))
+            {
+                ws->clearOtherFocusVisuals (*this);
+                return;
+            }
+        }
+    }
+
     // 不抢键盘焦点：内部控件（便签 TextEditor / 计算器按钮）需要保留自己的焦点
     toFront (false);
 
@@ -1152,6 +1164,7 @@ void ModulePanel::setFloating(bool floating)
     isFloating_ = floating;
     if (!isFloating_)
         floatingLayoutLocked_ = false;
+    resetRepaintCoalescing();
     repaint(getTitleBarBounds());
 }
 
@@ -1578,6 +1591,20 @@ ModulePanel::DiagPaintCounters ModulePanel::diagTakePaintCounters() noexcept
     return c;
 }
 
+void ModulePanel::resetRepaintCoalescing() noexcept
+{
+    pendingFullRepaint = false;
+    pendingAreaRepaint = false;
+    pendingRepaintArea = {};
+    pendingRepaintStampMs = 0;
+}
+
+void ModulePanel::forceRepaintImmediate()
+{
+    resetRepaintCoalescing();
+    juce::Component::repaint();
+}
+
 void ModulePanel::repaint()
 {
     if (! isVisuallyActiveInWorkspace())
@@ -1693,9 +1720,10 @@ void ModulePanel::repaintHover (juce::Rectangle<int> area)
     if (area.isEmpty())
         return;
 
-    // 浮动态：鼠标事件（尤其按住拖拽）频率远高于刷新率，限流后可省掉大量
-    //   重复的整区软件光栅化；嵌入态（GL 直渲染）保持逐事件即时刷新。
-    if (! floatingRepaintThrottled())
+    // 鼠标事件（高回报率鼠标悬停 / 拖拽）频率远高于显示器刷新率：
+    //   软件浮动态按 floatingRepaintHz 限流，嵌入态 / GL 浮动态按 16ms (~60Hz) 限流并补齐尾帧，
+    //   与 floatingRepaintThrottled() 完全解耦，不干扰逐帧内容刷新。
+    if (! hoverRepaintThrottled())
     {
         repaint (area);
         return;
@@ -1709,7 +1737,10 @@ void ModulePanel::repaintHover (juce::Rectangle<int> area)
 
     hoverCatchUpScheduled_ = true;
     juce::Component::SafePointer<ModulePanel> safeThis (this);
-    const int delayMs = juce::jmax (1, 1000 / juce::jmax (1, floatingRepaintHz));
+    const bool softFloating = isFloating_ && ! floatingGlHosted_;
+    const int delayMs = softFloating
+        ? juce::jmax (1, 1000 / juce::jmax (1, floatingRepaintHz))
+        : 16;
 
     juce::Timer::callAfterDelay (delayMs, [safeThis]() mutable
     {
@@ -1722,6 +1753,21 @@ void ModulePanel::repaintHover (juce::Rectangle<int> area)
                 p->repaint (pending);
         }
     });
+}
+
+bool ModulePanel::hoverRepaintThrottled() noexcept
+{
+    const bool softFloating = isFloating_ && ! floatingGlHosted_;
+    const auto minGapMs = (juce::uint32) (softFloating
+        ? juce::jmax (1, 1000 / juce::jmax (1, floatingRepaintHz))
+        : 16);
+
+    const auto now = juce::Time::getMillisecondCounter();
+    if (lastHoverRepaintMs_ != 0 && now - lastHoverRepaintMs_ < minGapMs)
+        return true;
+
+    lastHoverRepaintMs_ = juce::jmax ((juce::uint32) 1, now);
+    return false;
 }
 
 bool ModulePanel::floatingRepaintThrottled() noexcept
@@ -1749,6 +1795,14 @@ void ModulePanel::moved()
 {
     if (controlPanelOpen_ && controlDrawer_ != nullptr && ! controlDrawer_->hasUserMoved())
         layoutControlDrawer();
+}
+
+void ModulePanel::parentHierarchyChanged()
+{
+    // 面板在 workspace ↔ FloatingModuleWindow 间重新挂载时，旧父容器上记录的
+    //   pendingFullRepaint 永远不会被旧父容器的 paintOverChildren 消费；
+    //   若不清零，接下来 120ms（~7 帧）内所有 repaint 都会被合并守卫静默吞掉。
+    resetRepaintCoalescing();
 }
 
 // ----------------------------------------------------------
@@ -1870,10 +1924,27 @@ void ModulePanel::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
-    // 抹到顶层
-    toFront(true);
-    if (onBroughtToFront)
-        onBroughtToFront(*this);
+    // 抹到顶层（若在工作区内已是最上层普通模块，则跳过无谓的 z-order 重排与整块重绘）
+    bool alreadyTopmost = false;
+    if (! isFloating_)
+    {
+        if (auto* ws = dynamic_cast<ModuleWorkspace*> (getParentComponent()))
+        {
+            if (ws->isModuleTopmostAmongModules (*this))
+            {
+                alreadyTopmost = true;
+                ws->clearOtherFocusVisuals (*this);
+                if (getWantsKeyboardFocus() && ! hasKeyboardFocus (true))
+                    grabKeyboardFocus();
+            }
+        }
+    }
+    if (! alreadyTopmost)
+    {
+        toFront(true);
+        if (onBroughtToFront)
+            onBroughtToFront(*this);
+    }
 
     const auto pos = e.getPosition();
 

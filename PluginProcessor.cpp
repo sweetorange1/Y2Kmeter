@@ -51,7 +51,10 @@ Y2KmeterAudioProcessor::Y2KmeterAudioProcessor()
     //     （callback / ShowUpdateDialog 中的 settings 指针不会悬空）。
     // ================================================================
     static std::atomic<bool> telemetryOnceFlag{false};
-    if (!telemetryOnceFlag.exchange(true, std::memory_order_acquire))
+    // 仅插件宿主形态（VST3/AU 等）触发本 5s 定时器；Standalone 由 Y2KStandaloneApp::initialise()
+    // 自行在 3s 后统一执行一次遥测与更新检查，避免重复打开 Y2Kmeter.telemetry 磁盘文件与重复上报。
+    if (wrapperType != wrapperType_Standalone
+        && !telemetryOnceFlag.exchange(true, std::memory_order_acquire))
     {
         // ApplicationProperties 必须为 static，否则 callAfterDelay
         // lambda 返回后被析构，导致 background thread / dialog

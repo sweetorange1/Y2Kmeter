@@ -643,9 +643,21 @@ juce::String randomIdleSpeech()
     return lines[juce::Random::getSystemRandom().nextInt (lines.size())];
 }
 
+    thread_local bool sDeferInitialVirtuPetRoleLoad = false;
 } // namespace
 
-VirtuPetModule::VirtuPetModule()
+VirtuPetModule::ScopedDeferInitialRoleLoad::ScopedDeferInitialRoleLoad() noexcept
+    : prev (sDeferInitialVirtuPetRoleLoad)
+{
+    sDeferInitialVirtuPetRoleLoad = true;
+}
+
+VirtuPetModule::ScopedDeferInitialRoleLoad::~ScopedDeferInitialRoleLoad() noexcept
+{
+    sDeferInitialVirtuPetRoleLoad = prev;
+}
+
+VirtuPetModule::VirtuPetModule (bool deferInitialRoleLoad)
     : ModulePanel (ModuleType::virtuPet)
 {
     setDefaultSize (128, 128);
@@ -681,7 +693,8 @@ VirtuPetModule::VirtuPetModule()
     showSpeechBubble = false;
     jumpFightActive = false;
 
-    loadRandomRoleAnimations();
+    if (! deferInitialRoleLoad && ! sDeferInitialVirtuPetRoleLoad)
+        loadRandomRoleAnimations();
 
     currentVisualHz = getTargetVisualHzForMode (motionMode);
     currentTickDtSec = 1.0f / (float) juce::jmax (1, currentVisualHz);
@@ -2714,7 +2727,9 @@ void VirtuPetModule::restorePersistentState (const juce::String& savedRoleName,
 
     if (savedRoleName.isEmpty())
     {
-        // 新建模块：保留构造阶段已初始化的随机角色与蛋状态，仅恢复数值
+        // 新建模块（或延迟构造且无存档角色）：确保角色帧已加载
+        if (availableAnimIds.isEmpty() && eggFrames.isEmpty())
+            loadRandomRoleAnimations();
         repaintSelfAndParent();
         return;
     }
@@ -2748,7 +2763,9 @@ void VirtuPetModule::restorePersistentState (const juce::String& savedRoleName,
         }
     }
 
-    // 如果找不到历史角色，保留当前随机角色，仅恢复数值
+    // 如果找不到历史角色：若之前延迟加载则补载随机角色，否则保留当前随机角色
+    if (availableAnimIds.isEmpty() && eggFrames.isEmpty())
+        loadRandomRoleAnimations();
     beginPatrolCycle();
     repaintSelfAndParent();
 }

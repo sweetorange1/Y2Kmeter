@@ -3495,7 +3495,8 @@ namespace PinkXP
         Y2K_LOG ("[palette] bake desktop texture: theme=" + juce::String ((int) currentTheme)
                  + " desktopGlobal=" + desktop.toString()
                  + " cacheEntries=" + juce::String ((int) cache.size()));
-        juce::Image img (isTransparentBackdrop() ? juce::Image::ARGB : juce::Image::RGB, width, height, true);
+        juce::Image img (isTransparentBackdrop() ? juce::Image::ARGB : juce::Image::RGB,
+                         width, height, true, juce::SoftwareImageType{});
         if (! isTransparentBackdrop())
         {
             juce::Graphics gg (img);

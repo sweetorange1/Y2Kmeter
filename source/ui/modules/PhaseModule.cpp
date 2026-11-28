@@ -1861,7 +1861,8 @@ void PhaseModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBounds)
     staticLayer = juce::Image(juce::Image::ARGB,
                               contentBounds.getWidth(),
                               contentBounds.getHeight(),
-                              true);
+                              true,
+                              juce::SoftwareImageType());
     staticLayer.clear(staticLayer.getBounds(), juce::Colours::transparentBlack);
     staticLayerContentBounds = contentBounds;
     staticLayerAppearanceGen = curAppGen;

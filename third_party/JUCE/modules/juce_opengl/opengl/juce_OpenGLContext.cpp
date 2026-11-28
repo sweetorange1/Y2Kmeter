@@ -152,6 +152,17 @@ public:
         : context (c),
           component (comp)
     {
+        if (c.useDedicatedRenderThread)
+        {
+            ownedRenderThread = std::make_unique<RenderThread>();
+            renderThread = ownedRenderThread.get();
+        }
+        else
+        {
+            sharedRenderThread.emplace();
+            renderThread = &sharedRenderThread->get();
+        }
+
         nativeContext.reset (new NativeContext (component, pixFormat, contextToShare,
                                                 c.useMultisampling, c.versionRequired));
 
@@ -255,7 +266,7 @@ public:
     }
 
     // Y2Kmeter patch: component invalidations may be coalesced to the next display
-    //   link tick (see OpenGLContext::setComponentRepaintsPacedToDisplay).
+    //   link tick (macOS) or external VBlank flush (non-macOS).
     void requestComponentRepaint()
     {
        #if JUCE_MAC
@@ -273,9 +284,40 @@ public:
                 return;
             }
         }
+       #else
+        if (context.externalFramePacing.load (std::memory_order_acquire)
+            && ! context.continuousRepaint.load (std::memory_order_acquire))
+        {
+            // Watchdog: if flushPacedRepaint() has not been called recently
+            //   (startup, modal loop, sleep, hidden tab...), render immediately.
+            const auto now = Time::getMillisecondCounter();
+            const auto lastTick = lastExternalPaceMs.load (std::memory_order_acquire);
+
+            if (lastTick != 0 && now - lastTick < 100)
+            {
+                externalPacedRepaintPending.store (true, std::memory_order_release);
+                return;
+            }
+        }
+        externalPacedRepaintPending.store (false, std::memory_order_release);
        #endif
 
         triggerRepaint();
+    }
+
+    void flushPacedRepaint (bool refreshWatchdog = true)
+    {
+       #if ! JUCE_MAC
+        if (refreshWatchdog)
+            lastExternalPaceMs.store (jmax ((uint32) 1, Time::getMillisecondCounter()), std::memory_order_release);
+        else
+            lastExternalPaceMs.store (0, std::memory_order_release);
+
+        if (externalPacedRepaintPending.exchange (false, std::memory_order_acq_rel))
+            triggerRepaint();
+       #else
+        ignoreUnused (refreshWatchdog);
+       #endif
     }
 
     void releaseResources() override
@@ -433,7 +475,22 @@ public:
            #endif
 
             // This avoids hogging the message thread when doing intensive rendering.
-            std::this_thread::sleep_until (lastMMLockReleaseTime + std::chrono::milliseconds { 2 });
+            // Y2Kmeter patch: paced non-continuous contexts are already bounded by
+            //   the display VBlank cadence; skip the hardcoded 2ms sleep (yield only
+            //   if <250us since lock release) so burst/recovery frames stay inside 16.67ms.
+            const bool isPacedNonContinuous = ! context.continuousRepaint.load (std::memory_order_acquire)
+                && (context.componentRepaintsPacedToDisplay.load (std::memory_order_acquire)
+                    || context.externalFramePacing.load (std::memory_order_acquire));
+
+            if (isPacedNonContinuous)
+            {
+                if (std::chrono::steady_clock::now() < lastMMLockReleaseTime + std::chrono::microseconds { 250 })
+                    std::this_thread::yield();
+            }
+            else
+            {
+                std::this_thread::sleep_until (lastMMLockReleaseTime + std::chrono::milliseconds { 2 });
+            }
 
             {
                 const auto tNow = StatsClock::now();
@@ -513,6 +570,19 @@ public:
 
                 glViewport (0, 0, viewportArea.getWidth(), viewportArea.getHeight());
                 drawComponentBuffer();
+            }
+
+            // Y2Kmeter patch: post-component overlay hook (e.g. GL-batched ToyBox).
+            // Runs AFTER drawComponentBuffer() and AFTER MessageManager lock release,
+            // BEFORE bufferSwapper.swap(), even when isUpdating == false.
+            if (context.renderer != nullptr)
+            {
+                OpenGLRendering::SavedBinding<OpenGLRendering::TraitsVAO> vaoBinding;
+
+                glViewport (0, 0, viewportArea.getWidth(), viewportArea.getHeight());
+                context.currentRenderScale = currentAreaAndScale.scale;
+                context.renderer->renderOpenGLPostComponentBuffer();
+                clearGLError();
             }
 
             {
@@ -1082,7 +1152,10 @@ public:
     OpenGLContext& context;
     Component& component;
 
-    SharedResourcePointer<RenderThread> renderThread;
+    // Y2Kmeter patch: optional dedicated RenderThread per context
+    std::optional<SharedResourcePointer<RenderThread>> sharedRenderThread;
+    std::unique_ptr<RenderThread> ownedRenderThread;
+    RenderThread* renderThread = nullptr;
 
     OpenGLFrameBuffer cachedImageFrameBuffer;
     RectangleList<int> validArea;
@@ -1175,6 +1248,10 @@ public:
     // On macOS, rather than letting swapBuffers block as appropriate, we use a display link
     // callback to mark the view as needing to repaint.
     std::optional<PerScreenDisplayLinks::Connection> connection;
+   #else
+    // Y2Kmeter patch: external display-paced component/GL repaints (Windows/Linux)
+    std::atomic<bool> externalPacedRepaintPending { false };
+    std::atomic<uint32> lastExternalPaceMs { 0 };
    #endif
 
     enum StateFlags
@@ -1415,6 +1492,28 @@ void OpenGLContext::triggerRepaintPacedToDisplay()
 {
     if (auto* cachedImage = getCachedImage())
         cachedImage->requestComponentRepaint();
+}
+
+void OpenGLContext::setExternalFramePacing (bool shouldPace)
+{
+    externalFramePacing.store (shouldPace, std::memory_order_release);
+
+    if (! shouldPace)
+        if (auto* cachedImage = getCachedImage())
+            cachedImage->flushPacedRepaint (false);
+}
+
+void OpenGLContext::flushPacedRepaint()
+{
+    if (auto* cachedImage = getCachedImage())
+        cachedImage->flushPacedRepaint();
+}
+
+void OpenGLContext::setUseDedicatedRenderThread (bool shouldUseDedicated) noexcept
+{
+    // This method must not be called when the context has already been attached!
+    jassert (nativeContext == nullptr);
+    useDedicatedRenderThread = shouldUseDedicated;
 }
 
 OpenGLContext::RenderStats OpenGLContext::takeRenderStats() noexcept

@@ -58,6 +58,40 @@ namespace
         g.drawEllipse (cx - r, cy - r, r * 2.0f, r * 2.0f, stroke);
     }
 
+    struct BoundsAccum
+    {
+        float minX = 1.0e9f, minY = 1.0e9f;
+        float maxX = -1.0e9f, maxY = -1.0e9f;
+        bool  hasAny = false;
+
+        void includePoint (float x, float y, float pad = 0.0f) noexcept
+        {
+            if (! std::isfinite (x) || ! std::isfinite (y))
+                return;
+            minX = juce::jmin (minX, x - pad);
+            minY = juce::jmin (minY, y - pad);
+            maxX = juce::jmax (maxX, x + pad);
+            maxY = juce::jmax (maxY, y + pad);
+            hasAny = true;
+        }
+
+        void includeRect (float x0, float y0, float x1, float y1, float pad = 0.0f) noexcept
+        {
+            includePoint (x0, y0, pad);
+            includePoint (x1, y1, pad);
+        }
+
+        juce::Rectangle<float> finish (const juce::Rectangle<int>& clipRect, float extraPad = 8.0f) const noexcept
+        {
+            if (! hasAny)
+                return {};
+            const juce::Rectangle<float> raw (minX - extraPad, minY - extraPad,
+                                              (maxX - minX) + extraPad * 2.0f,
+                                              (maxY - minY) + extraPad * 2.0f);
+            return raw.getIntersection (clipRect.toFloat());
+        }
+    };
+
     // 频率 → 音名（A4=440Hz，纯函数换算）
     juce::String freqToNoteName (float freq)
     {
@@ -358,7 +392,34 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return canvas.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            if (std::exp (-4.2f * age) > 0.02f)
+                b.includeRect (pluckX - 15.0f, inner.getY(), pluckX + 15.0f, inner.getBottom());
+            if (age < 0.42f)
+                b.includePoint (pluckX, pluckCurveY, 26.0f);
+            for (int h = 0; h < harmonicCount; ++h)
+            {
+                const float ha = age - 0.06f * (float) (h + 1);
+                if (ha > 0.0f && ha < 0.85f)
+                {
+                    const auto& pt = harmonics[(size_t) h];
+                    b.includeRect (pt.x - 18.0f, pt.y - 18.0f, pt.x + 18.0f, inner.getBottom());
+                }
+            }
+            for (const auto& s : surfers)
+            {
+                for (int i = 0; i < s.trailCount; ++i)
+                    b.includePoint (s.trail[(size_t) i].x, s.trail[(size_t) i].y, 4.0f);
+                if (! s.finished)
+                    b.includePoint (s.x, s.y, 4.5f);
+            }
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (canvas, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -619,7 +680,29 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return lane.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            if (age < 0.35f)
+                b.includeRect (originX - 24.0f, inner.getY(), originX + 24.0f, inner.getBottom());
+            for (const auto& fr : fronts)
+            {
+                for (int i = 0; i < fr.trailCount; ++i)
+                {
+                    b.includePoint (fr.topTrail[(size_t) i].x, fr.topTrail[(size_t) i].y, 4.0f);
+                    b.includePoint (fr.botTrail[(size_t) i].x, fr.botTrail[(size_t) i].y, 4.0f);
+                }
+                if (! fr.finished)
+                {
+                    b.includePoint (fr.x, fr.yTop, 4.5f);
+                    b.includePoint (fr.x, fr.yBot, 4.5f);
+                }
+            }
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (lane, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -735,7 +818,14 @@ namespace
             drawGlowDot (g, pos.x, pos.y, col, masterA, 3.0f, 1.3f);
         }
 
-        juce::Rectangle<float> getBounds() const override { return canvas.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            for (int i = 0; i < wakeCount; ++i)
+                b.includePoint (wake[(size_t) i].x, wake[(size_t) i].y, 2.0f);
+            b.includePoint (pos.x, pos.y, age < 0.45f ? 29.0f : 10.0f);
+            return b.finish (canvas, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -871,7 +961,31 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return canvas.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            const float vx = depthDir.x * 0.65f, vy = depthDir.y * 0.65f;
+            for (int r = 0; r < 2; ++r)
+            {
+                const float t = (age - (float) r * 0.14f) / 0.78f;
+                if (t <= 0.0f || t >= 1.0f) continue;
+                const float ease = 1.0f - (1.0f - t) * (1.0f - t);
+                const float radX = 6.0f + ease * 42.0f;
+                const float radD = 4.0f + ease * 26.0f;
+                const float cx = origin.x + depthDir.x * ease * 14.0f;
+                const float cy = origin.y + depthDir.y * ease * 14.0f;
+                b.includePoint (cx - radX - vx * radD, cy - vy * radD, 2.0f);
+                b.includePoint (cx + radX - vx * radD, cy - vy * radD, 2.0f);
+                b.includePoint (cx + radX + vx * radD, cy + vy * radD, 2.0f);
+                b.includePoint (cx - radX + vx * radD, cy + vy * radD, 2.0f);
+            }
+            if (age < 0.28f)
+                b.includeRect (origin.x - 4.0f, origin.y - 24.0f, origin.x + 4.0f, origin.y + 4.0f);
+            for (const auto& e : embers)
+                if (e.life < e.maxLife)
+                    b.includePoint (e.x, e.y, 2.0f);
+            return b.finish (canvas, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -1049,7 +1163,39 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return canvas.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            if (age < 0.55f)
+            {
+                const float t = age / 0.55f;
+                b.includePoint (origin.x, origin.y, 2.0f);
+                const auto tip = polarToScreen (radarR, startPhi);
+                b.includePoint (tip.x, tip.y, 2.0f);
+                const float rExp = juce::jmin (radarR, orbR + t * 28.0f);
+                const float halfSpan = juce::jlimit (0.15f, kPi * 0.48f, 0.22f + t * 0.65f);
+                const float a0 = juce::jmax (-kPi * 0.5f, startPhi - halfSpan);
+                const float a1 = juce::jmin ( kPi * 0.5f, startPhi + halfSpan);
+                constexpr int kArcSamples = 12;
+                for (int s = 0; s <= kArcSamples; ++s)
+                {
+                    const float a = a0 + (a1 - a0) * ((float) s / (float) kArcSamples);
+                    const auto pt = polarToScreen (rExp, a);
+                    b.includePoint (pt.x, pt.y, 2.0f);
+                }
+                if (a0 < 0.0f && a1 > 0.0f)
+                {
+                    const auto apex = polarToScreen (rExp, 0.0f);
+                    b.includePoint (apex.x, apex.y, 2.0f);
+                }
+            }
+            for (int i = 0; i < trailCount; ++i)
+                b.includePoint (trail[(size_t) i].x, trail[(size_t) i].y, 4.5f);
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (canvas, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -1292,7 +1438,47 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return plot.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            if (! monoMode)
+            {
+                const float midY = inner.getCentreY();
+                float pull = origin.y - midY;
+                if (std::abs (pull) < 10.0f)
+                    pull = (pull >= 0.0f ? 1.0f : -1.0f) * 14.0f;
+                const float decay = std::exp (-4.2f * age);
+                if (decay > 0.02f)
+                {
+                    const float halfSpan = juce::jmin (inner.getWidth() * 0.42f, 95.0f);
+                    const float x0 = juce::jmax (inner.getX(), origin.x - halfSpan);
+                    const float x1 = juce::jmin (inner.getRight(), origin.x + halfSpan);
+                    const float maxDisp = std::abs (pull) * decay + 2.0f;
+                    b.includeRect (x0, midY - maxDisp, x1, midY + maxDisp);
+                }
+                for (const auto& bd : beads)
+                {
+                    for (int i = 0; i < bd.trailCount; ++i)
+                        b.includePoint (bd.trail[(size_t) i].x, bd.trail[(size_t) i].y, 4.0f);
+                    if (! bd.finished)
+                        b.includePoint (bd.x, bd.y, 4.5f);
+                }
+            }
+            else
+            {
+                const float spread = 16.0f + age * inner.getWidth() * 0.72f;
+                const float x0 = juce::jmax (inner.getX(), origin.x - spread);
+                const float x1 = juce::jmin (inner.getRight(), origin.x + spread);
+                const float maxAmp = juce::jlimit (5.0f, 16.0f, inner.getHeight() * 0.16f) + 4.0f;
+                b.includeRect (x0 - 4.0f, origin.y - maxAmp, x1 + 4.0f, origin.y + maxAmp);
+            }
+            if (age < 0.36f)
+                b.includePoint (origin.x, origin.y, 22.0f);
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (plot, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -1484,7 +1670,19 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return area.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            if (age < 0.34f)
+                b.includePoint (origin.x, origin.y, 22.0f);
+            for (int i = 0; i < trailCount; ++i)
+                b.includePoint (trail[(size_t) i].x, trail[(size_t) i].y, 4.0f);
+            b.includePoint (x, y, 4.5f);
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (area, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -2262,7 +2460,23 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return plot.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            if (age < 0.34f)
+                b.includePoint (origin.x, origin.y, 20.0f);
+            for (const auto& rd : riders)
+            {
+                for (int i = 0; i < rd.trailCount; ++i)
+                    b.includePoint (rd.trail[(size_t) i].x, rd.trail[(size_t) i].y, 4.0f);
+                if (! rd.finished)
+                    b.includePoint (rd.x, rd.y, 4.5f);
+            }
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (plot, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -2328,7 +2542,20 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return col.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            const float maxR = juce::jmin (inner.getWidth(), inner.getHeight()) * 0.46f;
+            for (int i = 0; i < 3; ++i)
+            {
+                const float bt = (age - (float) i * beatSec) / juce::jmax (0.28f, beatSec * 0.92f);
+                if (bt >= 0.0f && bt < 1.0f)
+                    b.includePoint (center.x, center.y, 6.0f + bt * maxR + 2.0f);
+            }
+            const float barY = inner.getBottom() - 2.0f;
+            b.includeRect (inner.getX() + 4.0f, barY - 6.0f, inner.getRight() - 4.0f, barY + 6.0f);
+            return b.finish (col, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -2446,7 +2673,12 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return col.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            b.includePoint (center.x, center.y, ringR + 15.0f);
+            return b.finish (col, 8.0f);
+        }
     };
 
     // ------------------------------------------------------
@@ -2589,7 +2821,18 @@ namespace
             }
         }
 
-        juce::Rectangle<float> getBounds() const override { return tile.toFloat(); }
+        juce::Rectangle<float> getBounds() const override
+        {
+            BoundsAccum b;
+            b.includePoint (origin.x, origin.y, 12.0f);
+            for (const auto& tr : traces)
+            {
+                b.includePoint (tr.pts[0].x, tr.pts[0].y, 4.0f);
+                b.includePoint (tr.pts[1].x, tr.pts[1].y, 4.0f);
+                b.includePoint (tr.pts[2].x, tr.pts[2].y, 11.0f);
+            }
+            return b.finish (tile, 8.0f);
+        }
     };
 
     // ======================================================
@@ -2921,10 +3164,19 @@ namespace
         EmojiId              icon;
         juce::Colour         accentColour;
         juce::Rectangle<int> clampRect;
+        int                  cachedWidth = 120;
 
         ReadoutBubbleActor (juce::Point<float> p, const juce::String& t, EmojiId ic, juce::Colour c,
                             juce::Rectangle<int> clamp)
-            : at (p), text (t), icon (ic), accentColour (c), clampRect (clamp) { ttl = 1.6f; }
+            : at (p), text (t), icon (ic), accentColour (c), clampRect (clamp)
+        {
+            ttl = 1.6f;
+            const int iconW = (icon != EmojiId::Count) ? 22 : 0;
+            const juce::Font f = PinkXP::getFont (11.0f, juce::Font::bold);
+            cachedWidth = juce::jmax (40, iconW + juce::roundToInt (f.getStringWidthFloat (y2k::tr (text))) + 12);
+        }
+
+        bool isReadoutBubble() const noexcept override { return true; }
 
         void step (float dt, ToyDirector&) override
         {
@@ -2965,9 +3217,14 @@ namespace
 
         juce::Rectangle<float> getBounds() const override
         {
+            constexpr int h = 22;
+            auto b = juce::Rectangle<int> ((int) at.x - cachedWidth / 2, (int) at.y - h - 8, cachedWidth, h);
             if (! clampRect.isEmpty())
-                return clampRect.toFloat();
-            return { at.x - 140.0f, at.y - 40.0f, 280.0f, 60.0f };
+                b = b.constrainedWithin (clampRect);
+            auto expanded = b.toFloat().expanded (12.0f, 8.0f);
+            if (! clampRect.isEmpty())
+                expanded = expanded.getIntersection (clampRect.toFloat());
+            return expanded;
         }
     };
 }

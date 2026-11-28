@@ -33,9 +33,11 @@
 #include "source/ui/modules/ProjectMApi.h"
 #include "source/analysis/AnalyserHub.h"
 #include "source/ui/MilkdropParamIds.h"
+#include "source/ui/MilkdropPresetIndex.h"
 #include "source/ui/GlDirectModule.h"
 #include "source/ui/GlDirectRenderer.h"
 #include "source/ui/toys/ToyKit.h"
+#include "source/ui/toys/GlToyRenderer.h"
 #include "source/perf/FramePerfLog.h"
 #include "source/diag/Y2KDiagLog.h"
 #include "source/steam/Y2KAchievements.h"
@@ -155,6 +157,50 @@ namespace {
             const DWORD borderCol = enable ? kDwmwaColorNone : kDwmwaColorDefault;
             fns.setAttr (topHwnd, kDwmwaBorderColor, &borderCol, sizeof (borderCol));
         }
+    }
+
+    // Windows DWMWA_CLOAK：让窗口在逻辑/消息/GL 层面均已可见，但在首帧 OpenGL SwapBuffers
+    //   且嵌入式子 GL HWND 显示前由 DWM 隐藏合成，根治浮窗创建首帧闪黑 / 闪底色 / 闪旧软件帧。
+    bool y2kSetWindowsDwmCloak (HWND topHwnd, bool cloak) noexcept
+    {
+        if (topHwnd == nullptr)
+            return false;
+
+        using FnSetAttr = HRESULT (WINAPI*) (HWND, DWORD, LPCVOID, DWORD);
+        static const FnSetAttr setAttr = []() -> FnSetAttr
+        {
+            HMODULE mod = GetModuleHandleW (L"dwmapi.dll");
+            if (mod == nullptr)
+                mod = LoadLibraryW (L"dwmapi.dll");
+            return mod != nullptr
+                       ? reinterpret_cast<FnSetAttr> (GetProcAddress (mod, "DwmSetWindowAttribute"))
+                       : nullptr;
+        }();
+
+        if (setAttr == nullptr)
+            return false;
+
+        constexpr DWORD kDwmwaCloak = 13; // DWMWA_CLOAK (Win8+)
+        const BOOL val = cloak ? TRUE : FALSE;
+        return SUCCEEDED (setAttr (topHwnd, kDwmwaCloak, &val, sizeof (val)));
+    }
+
+    bool y2kHasVisibleChildHwnd (HWND topHwnd) noexcept
+    {
+        if (topHwnd == nullptr)
+            return false;
+
+        BOOL found = FALSE;
+        EnumChildWindows (topHwnd, [] (HWND child, LPARAM lp) -> BOOL
+        {
+            if (IsWindowVisible (child) != FALSE)
+            {
+                *reinterpret_cast<BOOL*> (lp) = TRUE;
+                return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM> (&found));
+        return found != FALSE;
     }
 
     // 把窗口注册成 AppBar 并驻留到工作区顶/底边。
@@ -898,35 +944,164 @@ Y2KmeterAudioProcessorEditor::FloatingModuleWindow::FloatingModuleWindow(
     , onDock_(std::move(onDock))
     , editor_(editor)
 {
+    // 子级 GL 宿主容器作为 DocumentWindow 内容，镜像 Y2KMainWindow → Editor 结构，
+    //   避免 OpenGLContext 挂到顶层 peer 自身导致 Windows WM_PAINT 绕过 CachedImage 走软件绘制。
+    setContentNonOwned (&glHost_, false);
+
     // Toybox：浮动态模块脱离 Editor 组件树，Editor 级全局监听器收不到它的
     //   鼠标事件，需把 director 作为 MouseListener 直接挂到面板上（§11.2）。
     if (editor_ != nullptr && editor_->toyDirector != nullptr)
         module_.addMouseListener (editor_->toyDirector.get(), true);
 
-    // 悬停提示：浮动窗口是独立 peer，挂一个以本窗口为宿主的提示窗口
-    tooltip_ = std::make_unique<Y2KTooltipWindow> (this);
+    // 悬停提示：挂到 glHost_ 内，与模块共享浮窗 OpenGL 合成层，不会被子 GL HWND 遮挡
+    tooltip_ = std::make_unique<Y2KTooltipWindow> (&glHost_);
 }
 
 Y2KmeterAudioProcessorEditor::FloatingModuleWindow::~FloatingModuleWindow()
 {
     // 最先解绑 GL 上下文：保证 GL 线程彻底退出并释放本上下文 VBO/FBO/纹理，
     //   再销毁子组件/监听器，杜绝悬垂引用或跨上下文资源泄漏。
-    detachGlContext();
+    detachGlContext (false, true);
+    cancelCloakReveal (false);
 
     tooltip_.reset();
+    detachHostedModule();
+    clearContentComponent();
 
     if (editor_ != nullptr && editor_->toyDirector != nullptr)
         module_.removeMouseListener (editor_->toyDirector.get());
 }
 
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::GlHostComponent::resized()
+{
+    if (owner_.moduleAttached_)
+        owner_.module_.setBounds (getLocalBounds());
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::attachHostedModule()
+{
+    if (moduleAttached_)
+        return;
+
+    glHost_.addAndMakeVisible (module_);
+    moduleAttached_ = true;
+    module_.setBounds (glHost_.getLocalBounds());
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::detachHostedModule()
+{
+    if (! moduleAttached_)
+        return;
+
+    moduleAttached_ = false;
+    glHost_.removeChildComponent (&module_);
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::beginCloakUntilFirstGlFrame()
+{
+   #if JUCE_WINDOWS
+    auto* hwnd = reinterpret_cast<HWND> (getWindowHandle());
+    if (hwnd == nullptr)
+        return;
+
+    firstGlFrameRendered_.store (false, std::memory_order_release);
+    cloakRetryCount_ = 0;
+    cloakTimerTicks_ = 0;
+    if (y2kSetWindowsDwmCloak (hwnd, true))
+    {
+        cloakedUntilFirstGl_ = true;
+        cloakStartMs_ = juce::Time::getMillisecondCounter();
+        cloakRevealTimer_.startTimer (8);
+    }
+   #endif
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::cancelCloakReveal (bool uncloakNow)
+{
+    cloakRevealTimer_.stopTimer();
+    if (! cloakedUntilFirstGl_)
+        return;
+
+    cloakedUntilFirstGl_ = false;
+    cloakRetryCount_ = 0;
+    cloakTimerTicks_ = 0;
+   #if JUCE_WINDOWS
+    if (uncloakNow)
+        if (auto* hwnd = reinterpret_cast<HWND> (getWindowHandle()))
+            y2kSetWindowsDwmCloak (hwnd, false);
+   #else
+    juce::ignoreUnused (uncloakNow);
+   #endif
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::tryRevealAfterFirstGlFrame (bool fromTimer)
+{
+    if (! cloakedUntilFirstGl_)
+        return;
+
+   #if JUCE_WINDOWS
+    auto* hwnd = reinterpret_cast<HWND> (getWindowHandle());
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    const bool firstGlDone = firstGlFrameRendered_.load (std::memory_order_acquire);
+
+    // 冷启动恢复浮窗时，Editor::ctor 与 WASAPI 初始化可能先阻塞消息循环数百毫秒；
+    //   首个真正进入消息循环的定时器滴答才开始计 250ms 超时预算，防止尚未跑首帧就被误超时揭幕。
+    if (fromTimer)
+    {
+        if (cloakTimerTicks_ == 0 && ! firstGlDone)
+            cloakStartMs_ = nowMs;
+        ++cloakTimerTicks_;
+    }
+
+    const bool timedOut = (cloakTimerTicks_ >= 4) && (nowMs - cloakStartMs_ >= 250);
+    const bool ready = firstGlDone && y2kHasVisibleChildHwnd (hwnd);
+    if (ready || timedOut || hwnd == nullptr)
+    {
+        if (Y2K_DIAG_ENABLED())
+        {
+            const auto elapsed = nowMs - cloakStartMs_;
+            Y2K_DIAG ("GL", "floating uncloak: " + moduleTypeToString (module_.getModuleType())
+                                  + " elapsed=" + juce::String ((int) elapsed) + "ms"
+                                  + " ready=" + juce::String (ready ? 1 : 0)
+                                  + " timedOut=" + juce::String (timedOut ? 1 : 0)
+                                  + " retries=" + juce::String (cloakRetryCount_));
+        }
+        cancelCloakReveal (true);
+        return;
+    }
+
+    // 首帧 GL 已完成但 NativeContext::handleAsyncUpdate 仍在消息队列后方排队时，
+    //   紧跟下一轮消息循环立即复检，做到子 GL HWND 显露后亚毫秒级揭幕。
+    if (firstGlDone && cloakRetryCount_ < 6)
+    {
+        ++cloakRetryCount_;
+        juce::Component::SafePointer<FloatingModuleWindow> safeWin (this);
+        juce::MessageManager::callAsync ([safeWin]()
+        {
+            if (auto* w = safeWin.getComponent())
+                w->tryRevealAfterFirstGlFrame (false);
+        });
+    }
+   #else
+    juce::ignoreUnused (fromTimer);
+    cancelCloakReveal (true);
+   #endif
+}
+
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::paint (juce::Graphics& g)
 {
-    // 模块填满整个独立浮窗：GL 渲染 / 透明覆层 / 桌宠模式下必须跳过 DocumentWindow 的
-    //   fillAll，否则不透明背景会盖住 FBO 0 的 GL 直绘画面或破坏逐像素透明！
-    if (glEnabledForModule_
-        || PinkXP::isTransparentBackdrop()
+    // 透明覆层 / 桌宠模式下跳过 DocumentWindow 的不透明底色填充，保持逐像素透明；
+    //   其余模式下（因 OpenGLContext 挂在子组件 glHost_ 上，WM_PAINT 不会进入 module_）
+    //   用卡片底色或绿幕色兜底，避免未覆盖区域透出未初始化黑底。
+    if (PinkXP::isTransparentBackdrop()
         || module_.getModuleType() == ModuleType::virtuPet)
         return;
+
+    if (glEnabledForModule_)
+    {
+        g.fillAll (PinkXP::isGreenScreenBackdrop() ? PinkXP::chromaKeyGreen() : PinkXP::face);
+        return;
+    }
 
     juce::DocumentWindow::paint (g);
 }
@@ -952,8 +1127,8 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::renderOpenGL()
     glGetIntegerv (GL_VIEWPORT, origViewport);
 
     const float dpiScale = static_cast<float> (glContext_.getRenderingScale());
-    const int   logicalH = getHeight();
-    const int   vw       = juce::jmax (1, juce::roundToInt ((float) getWidth() * dpiScale));
+    const int   logicalH = glHost_.getHeight();
+    const int   vw       = juce::jmax (1, juce::roundToInt ((float) glHost_.getWidth() * dpiScale));
     const int   vh       = juce::jmax (1, juce::roundToInt ((float) logicalH * dpiScale));
 
     // 清空 FBO 0 后缓冲（透明覆层清为纯 alpha=0；绿幕清为纯绿；正常态清为卡片底色）
@@ -972,23 +1147,42 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::renderOpenGL()
     }
     glClear (GL_COLOR_BUFFER_BIT);
 
-    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+    if (moduleAttached_)
     {
-        if (gmod->isVisible() && gmod->isShowing()
-            && glDirectRenderer_ != nullptr
-            && glDirectRenderer_->ensureInitialised (glContext_))
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
         {
-            auto guard = glDirectRenderer_->beginFrame (vw, vh);
-            glDirectRenderer_->renderModule (*this, *gmod, dpiScale, logicalH, vh, vw, vh);
-            glDirectRenderer_->endFrame (guard);
-        }
-        else
-        {
-            gmod->diagSetVisible (false);
+            if (gmod->isVisible() && gmod->isShowing()
+                && glDirectRenderer_ != nullptr
+                && glDirectRenderer_->ensureInitialised (glContext_))
+            {
+                auto guard = glDirectRenderer_->beginFrame (vw, vh);
+                glDirectRenderer_->renderModule (glHost_, *gmod, dpiScale, logicalH, vh, vw, vh);
+                glDirectRenderer_->endFrame (guard);
+            }
+            else
+            {
+                if (glDirectRenderer_ != nullptr && ! glDirectRenderer_->isReady())
+                {
+                    gmod->setGlHostAvailable (false);
+                    if (gmod->glDirectActive.exchange (false, std::memory_order_acq_rel))
+                        gmod->forceRepaintImmediate();
+                }
+                gmod->diagSetVisible (false);
+            }
         }
     }
 
     glViewport (origViewport[0], origViewport[1], origViewport[2], origViewport[3]);
+
+    if (! firstGlFrameRendered_.exchange (true, std::memory_order_acq_rel))
+    {
+        juce::Component::SafePointer<FloatingModuleWindow> safeWin (this);
+        juce::MessageManager::callAsync ([safeWin]()
+        {
+            if (auto* w = safeWin.getComponent())
+                w->tryRevealAfterFirstGlFrame();
+        });
+    }
 }
 
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::openGLContextClosing()
@@ -996,10 +1190,14 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::openGLContextClosing()
     if (glDirectRenderer_ != nullptr)
         glDirectRenderer_->releaseAll();
 
-    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+    if (moduleAttached_)
     {
-        gmod->glDirectActive.store (false, std::memory_order_release);
-        gmod->glTexUploadedGen.store (0, std::memory_order_release);
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+        {
+            if (! glPreserveActiveOnClose_.load (std::memory_order_acquire))
+                gmod->glDirectActive.store (false, std::memory_order_release);
+            gmod->glTexUploadedGen.store (0, std::memory_order_release);
+        }
     }
 }
 
@@ -1028,6 +1226,7 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::attachGlContextIfEligib
     if (module_.getModuleType() == ModuleType::milkdrop)
     {
         glEnabledForModule_ = false;
+        cancelCloakReveal (true);
         return;
     }
 
@@ -1035,20 +1234,41 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::attachGlContextIfEligib
     syncBackdropTransparency();
 
    #if JUCE_WINDOWS
-    const bool attachNow = true;
+    const bool attachNow = ! GlDirectRenderer::isGloballyDisabled();
    #else
-    const bool attachNow = ! PinkXP::isTransparentBackdrop();
+    const bool attachNow = ! PinkXP::isTransparentBackdrop() && ! GlDirectRenderer::isGloballyDisabled();
    #endif
 
     if (! attachNow)
     {
+        cancelCloakReveal (true);
         module_.setFloatingGlHosted (false);
         if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+        {
             gmod->setGlHostAvailable (false);
+            if (gmod->glDirectActive.exchange (false, std::memory_order_acq_rel))
+                gmod->forceRepaintImmediate();
+        }
         return;
     }
 
     glClosing_.store (false, std::memory_order_release);
+    glPreserveActiveOnClose_.store (false, std::memory_order_release);
+    firstGlFrameRendered_.store (false, std::memory_order_release);
+
+    // 先把模块切换到浮窗 GL 宿主并同步重建一帧全量快照，再 attach OpenGLContext，
+    //   确保独立 GL 线程首帧一定拿到当前浮窗尺寸与完整纹理数据（零首帧空白 / 错尺）。
+    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+    {
+        gmod->setGlHostAvailable (true);
+        juce::Component::SafePointer<FloatingModuleWindow> safeWin (this);
+        gmod->setGlFrameRequester ([safeWin]()
+        {
+            if (auto* w = safeWin.getComponent())
+                w->requestGlFrame();
+        });
+        gmod->forceRebuildGlSnapshot();
+    }
 
     if (! glContext_.isAttached())
     {
@@ -1058,40 +1278,57 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::attachGlContextIfEligib
         glContext_.setRenderer (this);
         glContext_.setContinuousRepainting (false);
         glContext_.setComponentPaintingEnabled (true);
+        // 独立 RenderThread（JUCE 补丁 0010）：避免多浮窗与主窗口在同一进程级
+        //   RenderThread 上串行等待 SwapBuffers VSync，保持全窗口 VSync 且各自满帧。
+        glContext_.setUseDedicatedRenderThread (true);
        #if JUCE_MAC
         glContext_.setComponentRepaintsPacedToDisplay (true);
+       #else
+        glContext_.setExternalFramePacing (
+            editor_ != nullptr && editor_->processor.getAnalyserHub().isUsingExternalFrameClock());
        #endif
-        glContext_.attachTo (*this);
+        // 挂载到子容器 glHost_（而非顶层 FloatingModuleWindow），保证 WM_PAINT
+        //   经 glHost_::paintWithinParentContext 命中 CachedImage，绝不退回软件 GDI 绘模块！
+        glContext_.attachTo (glHost_);
     }
 
     const bool attached = glContext_.isAttached();
     module_.setFloatingGlHosted (attached);
 
-    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
+    if (! attached)
     {
-        gmod->setGlHostAvailable (attached);
-        if (attached)
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_))
         {
-            juce::Component::SafePointer<FloatingModuleWindow> safeWin (this);
-            gmod->setGlFrameRequester ([safeWin]()
-            {
-                if (auto* w = safeWin.getComponent())
-                    w->requestGlFrame();
-            });
-            gmod->forceRebuildGlSnapshot();
+            gmod->setGlFrameRequester (nullptr);
+            gmod->setGlHostAvailable (false);
+            if (gmod->glDirectActive.exchange (false, std::memory_order_acq_rel))
+                gmod->forceRepaintImmediate();
         }
+        cancelCloakReveal (true);
+        return;
     }
 
-    if (attached)
-        requestGlFrame();
+    requestGlFrame();
 }
 
-void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::detachGlContext()
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::detachGlContext (bool targetHostHasGl, bool hideNativeWindow)
 {
     glClosing_.store (true, std::memory_order_release);
+    glPreserveActiveOnClose_.store (targetHostHasGl, std::memory_order_release);
     cancelAsyncUpdates();
+    cancelCloakReveal (false);
 
-    auto* gmod = dynamic_cast<GlDirectModuleBase*> (&module_);
+   #if JUCE_WINDOWS
+    // 先在 Win32 层即时隐藏顶层窗口，避免 glContext_.detach() 销毁子 GL HWND 时
+    //   把底层父 HWND 暴露闪一帧；不走 JUCE setVisible(false) 以避免提前重入 releaseResources。
+    if (hideNativeWindow)
+        if (auto* hwnd = reinterpret_cast<HWND> (getWindowHandle()))
+            ShowWindow (hwnd, SW_HIDE);
+   #else
+    juce::ignoreUnused (hideNativeWindow);
+   #endif
+
+    auto* gmod = moduleAttached_ ? dynamic_cast<GlDirectModuleBase*> (&module_) : nullptr;
     if (gmod != nullptr)
         gmod->setGlFrameRequester (nullptr);
 
@@ -1101,11 +1338,15 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::detachGlContext()
     glContext_.setRenderer (nullptr);
     glDirectRenderer_.reset();
 
+    if (! moduleAttached_)
+        return;
+
     module_.setFloatingGlHosted (false);
 
     if (gmod != nullptr)
     {
-        gmod->glDirectActive.store (false, std::memory_order_release);
+        if (! targetHostHasGl)
+            gmod->glDirectActive.store (false, std::memory_order_release);
         gmod->glTexUploadedGen.store (0, std::memory_order_release);
         gmod->glForceTrailClear.store (true, std::memory_order_release);
 
@@ -1117,7 +1358,8 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::detachGlContext()
                 if (auto* ed = safeEd.getComponent())
                     ed->RequestGlFrame();
             });
-            gmod->setGlHostAvailable (editor_->openGLContext.isAttached());
+            gmod->setGlHostAvailable (editor_->openGLContext.isAttached()
+                                      && ! GlDirectRenderer::isGloballyDisabled());
         }
         else
         {
@@ -1130,7 +1372,28 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::detachGlContext()
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::requestGlFrame()
 {
     if (! glClosing_.load (std::memory_order_acquire) && glContext_.isAttached())
-        glContext_.triggerRepaintPacedToDisplay();
+    {
+        // 首帧尚未落屏（Windows DWMWA_CLOAK 遮罩等待首帧揭幕）时直接唤醒渲染，避免延迟揭幕
+        if (! firstGlFrameRendered_.load (std::memory_order_acquire))
+            glContext_.triggerRepaint();
+        else
+            glContext_.triggerRepaintPacedToDisplay();
+    }
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setExternalFramePacing (bool shouldPace)
+{
+   #if ! JUCE_MAC
+    glContext_.setExternalFramePacing (shouldPace);
+   #else
+    juce::ignoreUnused (shouldPace);
+   #endif
+}
+
+void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::flushPacedRepaint()
+{
+    if (! glClosing_.load (std::memory_order_acquire) && glContext_.isAttached())
+        glContext_.flushPacedRepaint();
 }
 
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setOpenGlEnabledForBackdrop (bool enabled)
@@ -1141,6 +1404,8 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setOpenGlEnabledForBack
     if (! enabled)
     {
         glClosing_.store (true, std::memory_order_release);
+        glPreserveActiveOnClose_.store (false, std::memory_order_release);
+        cancelCloakReveal (true);
         glContext_.detach();
         glContext_.setRenderer (nullptr);
         glDirectRenderer_.reset();
@@ -1149,7 +1414,7 @@ void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::setOpenGlEnabledForBack
         {
             gmod->setGlHostAvailable (false);
             if (gmod->glDirectActive.exchange (false, std::memory_order_acq_rel))
-                gmod->repaint();
+                gmod->forceRepaintImmediate();
             gmod->glTexUploadedGen.store (0, std::memory_order_release);
         }
         repaint();
@@ -1194,9 +1459,10 @@ bool Y2KmeterAudioProcessorEditor::FloatingModuleWindow::keyPressed(
 void Y2KmeterAudioProcessorEditor::FloatingModuleWindow::resized()
 {
     DocumentWindow::resized();
-    if (auto* content = getContentComponent())
+    glHost_.setBounds (getLocalBounds());
+    if (moduleAttached_)
     {
-        content->setBounds(getLocalBounds());
+        module_.setBounds (glHost_.getLocalBounds());
         requestGlFrame();
         // resize → 更新持久化 screenBounds；Milkdrop 还会借此触发 GL 重绘更新共享帧。
         if (editor_ != nullptr)
@@ -1306,9 +1572,12 @@ void Y2KmeterAudioProcessorEditor::dockFloatingModule (ModulePanel* panel,
     if (editorBeingDestructed || panel == nullptr)
         return;
 
+    const bool editorHasGl = openGLContext.isAttached()
+                             && ! GlDirectRenderer::isGloballyDisabled();
+
     for (auto it = floatingWindows_.begin(); it != floatingWindows_.end(); ++it)
     {
-        if ((*it) != nullptr && (*it)->getContentComponent() == panel)
+        if ((*it) != nullptr && (*it)->getHostedModule() == panel)
         {
             auto wnd = std::move (*it);
             floatingWindows_.erase (it);
@@ -1322,16 +1591,32 @@ void Y2KmeterAudioProcessorEditor::dockFloatingModule (ModulePanel* panel,
                 --floating_milkdrop_count_;
             }
 
-            wnd->detachGlContext();
-            panel->setFloating (false);
-            wnd->clearContentComponent();
+            // 目标宿主（Editor）同样有活跃 GL 时，在隐藏并释放浮窗 GL 的过程中保持 glDirectActive，
+            //   避免停靠瞬间回退到 paintLegacyContent() 闪出旧软件帧。
+            wnd->detachGlContext (editorHasGl, true);
+            wnd->detachHostedModule();
+
+            if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (panel))
+                gmod->prepareForHostTransfer (false, editorHasGl);
+            else
+                panel->setFloating (false);
+
             wnd.reset();
 
             if (workspace != nullptr)
                 workspace->dockModule (*panel, savedBounds);
 
             if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (panel))
+            {
                 gmod->forceRebuildGlSnapshot();
+                if (Y2K_DIAG_ENABLED())
+                {
+                    const auto edBounds = getLocalArea (workspace.get(), panel->getBounds());
+                    Y2K_DIAG ("GL", "dockFloatingModule: " + moduleTypeToString (panel->getModuleType())
+                                          + " editorBounds=" + edBounds.toString()
+                                          + " glActive=" + juce::String (gmod->glDirectActive.load (std::memory_order_acquire) ? 1 : 0));
+                }
+            }
             RequestGlFrame();
             return;
         }
@@ -1345,12 +1630,12 @@ void Y2KmeterAudioProcessorEditor::closeFloatingModule (ModulePanel* panel)
 
     for (auto it = floatingWindows_.begin(); it != floatingWindows_.end(); ++it)
     {
-        if ((*it) != nullptr && (*it)->getContentComponent() == panel)
+        if ((*it) != nullptr && (*it)->getHostedModule() == panel)
         {
             auto wnd = std::move (*it);
             floatingWindows_.erase (it);
 
-            wnd->detachGlContext();
+            wnd->detachGlContext (false, true);
             // ★ 先标记回嵌入态，再拆浮动窗口内容：保证 Milkdrop DetachOpenGL 的 should_resume 为真，
             //   Editor renderer 能正确恢复。
             panel->setFloating (false);
@@ -1359,7 +1644,7 @@ void Y2KmeterAudioProcessorEditor::closeFloatingModule (ModulePanel* panel)
             if (panel->getModuleType() == ModuleType::milkdrop)
                 --floating_milkdrop_count_;
 
-            wnd->clearContentComponent();
+            wnd->detachHostedModule();
             wnd.reset();
             delete panel;
             return;
@@ -1422,7 +1707,7 @@ void Y2KmeterAudioProcessorEditor::syncFloatingWindowStatesToWorkspace()
     for (auto& wnd : floatingWindows_)
     {
         if (wnd == nullptr) continue;
-        auto* panel = dynamic_cast<ModulePanel*>(wnd->getContentComponent());
+        auto* panel = wnd->getHostedModule();
         if (panel == nullptr) continue;
         workspace->updateFloatingStateScreenBounds(panel->getModuleId(), wnd->getScreenBounds());
         workspace->updateFloatingStateModuleState(panel->getModuleId(), wnd->saveModuleSpecificState());
@@ -1441,72 +1726,86 @@ void Y2KmeterAudioProcessorEditor::reloadFloatingModuleRecordsFromProcessor()
 //   · 先把"存活但不在记录里"的窗口补登记回去，保证记录与真实窗口一致。
 void Y2KmeterAudioProcessorEditor::restoreFloatingWindowsFromWorkspace()
 {
-    if (isPluginHost || workspace == nullptr)
+    if (workspace == nullptr)
         return;
 
-    // 先补登记"存活但不在记录里"的浮动窗口（stick 期间新脱离的模块不在备份里），
-    // 否则运行期的 dock 回位信息会缺失。
-    for (auto& wnd : floatingWindows_)
+    if (! isPluginHost)
     {
-        if (wnd == nullptr) continue;
-        auto* c = dynamic_cast<ModulePanel*> (wnd->getContentComponent());
-        if (c == nullptr || c->getModuleId().isEmpty()) continue;
-
-        const auto& statesNow = workspace->getFloatingModuleStatesRaw();
-        if (statesNow.find (c->getModuleId()) == statesNow.end())
-            workspace->addFloatingState (c->getModuleId(), c->getModuleType(),
-                                         c->getBounds(), wnd->getScreenBounds(),
-                                         c->saveModuleSpecificState());
-    }
-
-    const auto floatingStates = workspace->getFloatingModuleStatesRaw();
-    if (floatingStates.empty())
-        return;
-
-    // popOutModule 会修改 workspace 内部 map，不能边遍历引用边修改 → 使用上面的副本
-    for (const auto& [id, state] : floatingStates)
-    {
-        // 已经有同 id 的浮动窗口（例如 stick 期间一直保持浮动的模块）→ 跳过，
-        // 否则会重复实例化出第二个窗口。
-        bool alreadyOpen = false;
+        // 先补登记"存活但不在记录里"的浮动窗口（stick 期间新脱离的模块不在备份里），
+        // 否则运行期的 dock 回位信息会缺失。
         for (auto& wnd : floatingWindows_)
         {
             if (wnd == nullptr) continue;
-            if (auto* c = dynamic_cast<ModulePanel*> (wnd->getContentComponent()))
-                if (c->getModuleId() == id) { alreadyOpen = true; break; }
+            auto* c = wnd->getHostedModule();
+            if (c == nullptr || c->getModuleId().isEmpty()) continue;
+
+            const auto& statesNow = workspace->getFloatingModuleStatesRaw();
+            if (statesNow.find (c->getModuleId()) == statesNow.end())
+                workspace->addFloatingState (c->getModuleId(), c->getModuleType(),
+                                             c->getBounds(), wnd->getScreenBounds(),
+                                             c->saveModuleSpecificState());
         }
-        if (alreadyOpen)
-            continue;
 
-        auto panel = createModule (state.type);
-        if (panel == nullptr)
-            continue;
-
-        panel->setModuleId (id);
-        if (state.moduleState.isValid())
-            panel->restoreModuleSpecificState (state.moduleState);
-        panel->setBounds (state.bounds);
-        auto* raw = panel.get();
-
-        // addModule 接管所有权；popOutModule 再把它交给 Editor 创建浮动窗口
-        workspace->addModule (std::move (panel), false);
-        workspace->popOutModule (*raw);
-
-        // popOutModule 会用当前状态重写脱离记录，这里写回备份里的业务状态
-        if (state.moduleState.isValid())
-            workspace->updateFloatingStateModuleState (id, state.moduleState);
-
-        if (! state.screenBounds.isEmpty() && ! floatingWindows_.empty())
+        const auto floatingStates = workspace->getFloatingModuleStatesRaw();
+        if (! floatingStates.empty())
         {
-            auto* wnd = floatingWindows_.back().get();
-            wnd->setLayoutLocked (false);
-            wnd->setBounds (state.screenBounds);
-            wnd->setLayoutLocked (layoutLocked);
-        }
+            // popOutModule 会修改 workspace 内部 map，不能边遍历引用边修改 → 使用上面的副本
+            for (const auto& [id, state] : floatingStates)
+            {
+                // 已经有同 id 的浮动窗口（例如 stick 期间一直保持浮动的模块）→ 跳过，
+                // 否则会重复实例化出第二个窗口。
+                bool alreadyOpen = false;
+                for (auto& wnd : floatingWindows_)
+                {
+                    if (wnd == nullptr) continue;
+                    if (auto* c = wnd->getHostedModule())
+                        if (c->getModuleId() == id) { alreadyOpen = true; break; }
+                }
+                if (alreadyOpen)
+                    continue;
 
-        if (! floatingWindows_.empty())
-            workspace->updateFloatingStateScreenBounds (id, floatingWindows_.back()->getScreenBounds());
+                auto panel = createModule (state.type);
+                if (panel == nullptr)
+                    continue;
+
+                panel->setModuleId (id);
+                if (state.moduleState.isValid())
+                    panel->restoreModuleSpecificState (state.moduleState);
+                panel->setBounds (state.bounds);
+                auto* raw = panel.get();
+
+                // addModule 接管所有权；popOutModule 再把它交给 Editor 创建浮动窗口
+                workspace->addModule (std::move (panel), false);
+                workspace->popOutModule (*raw);
+
+                // popOutModule 会用当前状态重写脱离记录，这里写回备份里的业务状态
+                if (state.moduleState.isValid())
+                    workspace->updateFloatingStateModuleState (id, state.moduleState);
+
+                if (! state.screenBounds.isEmpty() && ! floatingWindows_.empty())
+                {
+                    auto* wnd = floatingWindows_.back().get();
+                    wnd->setLayoutLocked (false);
+                    wnd->setBounds (state.screenBounds);
+                    wnd->setLayoutLocked (layoutLocked);
+                    if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (wnd->getHostedModule()))
+                        gmod->forceRebuildGlSnapshot();
+                    wnd->requestGlFrame();
+                }
+
+                if (! floatingWindows_.empty())
+                    workspace->updateFloatingStateScreenBounds (id, floatingWindows_.back()->getScreenBounds());
+            }
+        }
     }
+
+    // 同步工作区中是否存在嵌入态 Milkdrop：
+    //   · 存在时立即启动后台线程预扫 9,921 个预设，与窗口创建 / WGL 初始化并行完成；
+    //   · 不存在（或全部在浮动态）时延后 projectM 初始化至真正需要时。
+    const bool hasMilkdropNow = hasEmbeddedMilkdropModule();
+    milkdrop_has_module_in_editor_.store (hasMilkdropNow, std::memory_order_release);
+    if (hasMilkdropNow && ! milkdrop_presets_ready_.load (std::memory_order_acquire))
+        startMilkdropPresetScanAsync (milkdrop_use_like_library_.load (std::memory_order_acquire));
 }
 
 
@@ -2239,18 +2538,46 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         self->repaint();
     });
 
-    // Logo 加载不受 DWrite 影响，保持同步加载。
-    // 防御性 try-catch：3000×3000 RGBA 解码需 ~36MB 连续内存，
-    // 在内存碎片化或堆损坏场景可能失败，此时降级为空 Image 并记日志。
-    try {
-      logoImage = juce::ImageFileFormat::loadFrom(BinaryData::logo_png,
-                                                   (size_t)BinaryData::logo_pngSize);
-    } catch (const std::exception& e) {
-      DBG("!! Logo load failed (exception): " << e.what());
-      logoImage = juce::Image();
-    } catch (...) {
-      DBG("!! Logo load failed (unknown exception)");
-      logoImage = juce::Image();
+    // Logo 进程级静态软件位图缓存（SoftwareImageType，预缩至最大水印边长 1280px）：
+    //   · 原始 logo.png 为 3000×3000 RGBA（解码需 ~36MB），而 PinkXP::drawLogo()
+    //     按工作区短边 80% 绘制（4K@150% DPI 最大约 1093px）；预缩至 1280px
+    //     画质 100% 等价且峰值内存降 5.8×，多开/重开编辑器零重复 PNG 解码；
+    //   · 显式使用 SoftwareImageType 避免静态对象持有任何 Direct2D/COM 资源
+    //     （VST3 DLL 卸载安全）。
+    {
+      static const juce::Image sCachedLogo = []() -> juce::Image {
+        try {
+          juce::Image decoded = juce::ImageFileFormat::loadFrom (
+              BinaryData::logo_png, (size_t) BinaryData::logo_pngSize);
+          if (decoded.isNull())
+            return {};
+
+          constexpr int kMaxLogoSide = 1280;
+          const int srcW = decoded.getWidth();
+          const int srcH = decoded.getHeight();
+          int dstW = srcW;
+          int dstH = srcH;
+          if (srcW > kMaxLogoSide || srcH > kMaxLogoSide)
+          {
+            const float scale = (float) kMaxLogoSide / (float) juce::jmax (srcW, srcH);
+            dstW = juce::jmax (1, juce::roundToInt ((float) srcW * scale));
+            dstH = juce::jmax (1, juce::roundToInt ((float) srcH * scale));
+          }
+
+          juce::Image soft (juce::Image::ARGB, dstW, dstH, true, juce::SoftwareImageType{});
+          juce::Graphics gg (soft);
+          gg.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+          gg.drawImage (decoded, 0, 0, dstW, dstH, 0, 0, srcW, srcH);
+          return soft;
+        } catch (const std::exception& e) {
+          DBG ("!! Logo load failed (exception): " << e.what());
+          return {};
+        } catch (...) {
+          DBG ("!! Logo load failed (unknown exception)");
+          return {};
+        }
+      }();
+      logoImage = sCachedLogo;
     }
     if (logoImage.isNull()) {
       DBG("!! Logo image is null after load: size="
@@ -2480,8 +2807,12 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             if (glDirectRenderer_ != nullptr)
                 glDirectRenderer_->scheduleReleaseModule (gmod->glResourceKey);
 
-        // 设置模块为浮动态（按钮图标从 □→←，并复位跨上下文 GL 接管态）
-        panel->setFloating (true);
+        const bool willUseFloatingGl = (panel->getModuleType() != ModuleType::milkdrop)
+                                       && ! GlDirectRenderer::isGloballyDisabled()
+                                      #if ! JUCE_WINDOWS
+                                       && ! PinkXP::isTransparentBackdrop()
+                                      #endif
+                                       ;
 
         // ★ 重新绑定 onPopOutClicked：浮动态下点击停靠按钮 → 异步投递至消息队列执行 dockFloatingModule。
         //   必须异步执行：① 避免在 FloatingModuleWindow 自身 WM_LBUTTONUP / ModulePanel::mouseUp 栈帧内
@@ -2557,7 +2888,16 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         window->setResizable(true, false);
         window->setDropShadowEnabled(false);
         window->setLookAndFeel(&getPinkXPLookAndFeel()); // Bug 修复：防止脱离后 LookAndFeel 链断裂导致子控件回退为系统默认样式
-        window->setContentNonOwned(panel, false);
+
+        // 先把 panel 从 workspace 移入浮窗子级 glHost_，再切换浮动态并保留 GL 接管态：
+        //   ① 避免在旧父容器 workspace 中误置 pendingFullRepaint 导致后续 120ms 重绘被吞；
+        //   ② 目标浮窗具备独立 GL 时不复位 glDirectActive，杜绝弹出瞬间回退旧软件路径闪错帧。
+        window->attachHostedModule();
+        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (panel))
+            gmod->prepareForHostTransfer (true, willUseFloatingGl);
+        else
+            panel->setFloating (true);
+
         // 模块脱离 tree 后 bounds 可能被清零，显式恢复到脱离前尺寸
         panel->setBounds(savedBounds.withPosition(0, 0));
         window->setBounds(screenBounds);
@@ -2622,13 +2962,40 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         }
        #endif
 
-        window->setVisible(true);             // ★ DocumentWindow ctor addToDesktop=false 时 isVisible=false，
-                                              //    addToDesktop() 仅创建 peer 不保证 setVisible(true)
+        // Windows 独立 GL 浮窗：
+        //   ① setVisible(true) 前先开启 DWMWA_CLOAK 并暂隐子容器 glHost_，防止 Windows 在
+        //      ShowWindow/SetWindowPos 同步发送 WM_PAINT 时（此时 glHost_ 尚未挂 CachedImage）
+        //      直接以软件 GDI 绘出 module_::paintLegacyContent()；
+        //   ② setAlwaysOnTop + setVisible 完成后立即恢复 glHost_ 可见并同步 attachGlContextIfEligible()，
+        //      确保任何后续 WM_PAINT 均命中 glHost_::cachedImage，且等首帧 GL SwapBuffers +
+        //      子 GL HWND 显示后再瞬间揭幕。
+        if (willUseFloatingGl)
+        {
+            window->beginCloakUntilFirstGlFrame();
+            window->setGlHostVisible (false);
+        }
 
         window->setAlwaysOnTop(true);         // native peer 已存在，置顶生效
+        window->setVisible(true);             // ★ DocumentWindow ctor addToDesktop=false 时 isVisible=false，
+                                              //    addToDesktop() 仅创建 peer 不保证 setVisible(true)
+        if (willUseFloatingGl)
+            window->setGlHostVisible (true);
 
         // 独立浮窗挂载专属 OpenGLContext + GlDirectRenderer（与主窗口完全一致的 GPU 渲染管线）
         window->attachGlContextIfEligible();
+        if (Y2K_DIAG_ENABLED())
+        {
+            const auto* gmod = dynamic_cast<const GlDirectModuleBase*> (panel);
+            Y2K_DIAG ("GL", "popOutModule: " + moduleTypeToString (panel->getModuleType())
+                                  + " screenBounds=" + window->getScreenBounds().toString()
+                                  + " glAttached=" + juce::String (window->isGlAttached() ? 1 : 0)
+                                  + " glActive=" + juce::String (gmod != nullptr && gmod->glDirectActive.load (std::memory_order_acquire) ? 1 : 0));
+        }
+
+        // 主窗口立刻刷清已脱离模块的旧占位区域
+        if (workspace != nullptr)
+            workspace->repaint();
+        RequestGlFrame();
 
         // screenBounds 不在此处记录：popOutModule 创建的窗口位置尚未被 restore 逻辑
         // 修正（restore 时会在 setBounds 后立即更新），且首个 handleAsyncUpdate 会覆盖。
@@ -2679,16 +3046,21 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
             // 先保存当前布局（包含浮动模块的干净布局，写入当前活动槽）
             persistCurrentLayoutToProcessor();
 
+            const bool editorHasGl = openGLContext.isAttached()
+                                     && ! GlDirectRenderer::isGloballyDisabled();
             for (auto& wnd : floatingWindows_)
             {
                 if (wnd != nullptr)
                 {
-                    wnd->detachGlContext();
-                    if (auto* content = dynamic_cast<ModulePanel*>(wnd->getContentComponent()))
+                    wnd->detachGlContext (editorHasGl, true);
+                    if (auto* content = wnd->getHostedModule())
                     {
                         const auto savedBounds = wnd->getSavedBounds();
-                        content->setFloating (false);
-                        wnd->clearContentComponent();
+                        wnd->detachHostedModule();
+                        if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (content))
+                            gmod->prepareForHostTransfer (false, editorHasGl);
+                        else
+                            content->setFloating (false);
                         workspace->dockModule(*content, savedBounds);
                         if (auto* gmod = dynamic_cast<GlDirectModuleBase*> (content))
                             gmod->forceRebuildGlSnapshot();
@@ -2799,8 +3171,8 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         frameCounter.store (0, std::memory_order_relaxed);
         lastFrameCounterSample = 0;
         lastGlFrameCounterSample = glFrameCounter.load (std::memory_order_relaxed);
-        lastDispatchWallMs = 0.0;
-        vblankCreditMs     = 0.0;
+        vblankPacer_.reset (true);   // 保留已测得的显示器刷新率估计
+        syncToyExpectedFps();
         updateFramePacingFallbackTimer();
         lastFpsTimeMs = juce::Time::getMillisecondCounterHiRes();
     };
@@ -2963,6 +3335,7 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     // ------------------------------------------------------
     Y2K_LOG ("[boot] ToyDirector create begin");
     toyDirector = std::make_unique<ToyDirector> (*this, *workspace, processor.getAnalyserHub());
+    glToyRenderer_ = std::make_unique<y2ktoy::GlToyRenderer>();
     Y2K_LOG ("[boot] ToyDirector created");
 
     // Toybox 档位改为「连续互动自动升级」：启动时恒为 Chill，
@@ -2971,6 +3344,29 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     workspace->setToyDirector (toyDirector.get());
     workspace->setToyLevel (initialToy);
     toyDirector->setLevel ((ToyLevel) initialToy);
+    toyDirector->setGlFrameRequester ([this]()
+    {
+        RequestGlFrame();
+    });
+    toyDirector->setExternalExclusionRectsProvider ([this] (std::vector<juce::Rectangle<int>>& out)
+    {
+        // workspace->collectToyExclusionRects(*this, out) 已由 ToyDirector::collectExclusionRects() 直接调用，
+        //   这里只追加 Editor 顶层自持的可见浮层矩形。
+        if (tooltipWindow != nullptr && tooltipWindow->isVisible() && ! tooltipWindow->getBounds().isEmpty())
+            out.push_back (tooltipWindow->getBounds());
+
+        if (tutorialOverlay != nullptr && tutorialOverlay->isVisible() && ! tutorialOverlay->getBounds().isEmpty())
+            out.push_back (tutorialOverlay->getBounds());
+
+        if (chromeDim && chromeRevealed
+            && ! (PinkXP::isTransparentBackdrop() && ! PinkXP::isChromaRevealed (*this)))
+        {
+            const auto tb = getTitleBarBounds();
+            if (! tb.isEmpty())
+                out.push_back (tb);
+        }
+    });
+    syncToyExpectedFps();
     toyDirector->onLevelChanged = [this] (int level)
     {
         if (workspace) workspace->setToyLevel (level);
@@ -3222,6 +3618,11 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
     //   周期内只画一帧，GL 帧率与屏幕刷新率对齐（此前约 90~100 帧/秒 @60Hz）。
     //   JUCE 补丁，见 OpenGLContext::setComponentRepaintsPacedToDisplay。
     openGLContext.setComponentRepaintsPacedToDisplay(true);
+#else
+    // Win/非 macOS 性能（JUCE 补丁 0010）：仅在外部 VBlank 帧时钟接管期间合并组件 repaint
+    //   与 RequestGlFrame（并在 performFrameDispatch 末尾统一 flushPacedRepaint）；
+    //   启动尚未进入外部时钟或看门狗回退内部 Timer 时保持关闭，避免任何帧被延迟或丢失。
+    openGLContext.setExternalFramePacing (processor.getAnalyserHub().isUsingExternalFrameClock());
 #endif
 
     // 诊断：attachTo 是"整个窗口进入 GL 合成"的开关，某些驱动在这一步就会
@@ -3247,11 +3648,15 @@ Y2KmeterAudioProcessorEditor::Y2KmeterAudioProcessorEditor(Y2KmeterAudioProcesso
         Y2K_DIAGC ("GL", juce::String ("openGLContext.attachTo done | isAttached=")
                               + (openGLContext.isAttached() ? "1" : "0"));
         y2k::diag::setGlAttached (openGLContext.isAttached());
+        if (toyDirector != nullptr)
+            toyDirector->setGlToyHostActive (openGLContext.isAttached());
     }
     else
     {
         Y2K_DIAGC ("GL", "openGLContext.attachTo skipped (BackdropMode::transparent)");
         y2k::diag::setGlAttached (false);
+        if (toyDirector != nullptr)
+            toyDirector->setGlToyHostActive (false);
     }
 
     syncEditorChromeAlpha();
@@ -3277,7 +3682,11 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     // 进入析构：后续宿主/JUCE 对 Editor 的任何 resize（包括 FL Studio 关闭
     //   嵌入子窗口时塞给我们的 ~175×85 极小中间态）都不应被 resized() 回写到
     //   Processor.savedEditorSize，否则下次打开窗口会恢复成异常小尺寸。
-    editorBeingDestructed = true;
+    editorBeingDestructed.store (true, std::memory_order_release);
+
+    // 停掉并回收 Milkdrop 后台预设扫描线程（先置 shutdown 再获锁 join，确保之后任何线程都无法重启）
+    milkdrop_scan_shutdown_.store (true, std::memory_order_release);
+    stopMilkdropPresetScanThread();
 
     // 悬停提示窗口最先拆：停掉它的轮询 Timer / 全局鼠标监听，
     //   避免后续 dock / workspace 析构过程中再去查询正在销毁的模块。
@@ -3318,12 +3727,12 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     {
         if (wnd != nullptr)
         {
-            wnd->detachGlContext();
-            if (auto* content = dynamic_cast<ModulePanel*>(wnd->getContentComponent()))
+            wnd->detachGlContext (false, true);
+            if (auto* content = wnd->getHostedModule())
             {
                 const auto savedBounds = wnd->getSavedBounds();
                 content->setFloating (false);
-                wnd->clearContentComponent();
+                wnd->detachHostedModule();
                 if (workspace != nullptr)
                     workspace->dockModule(*content, savedBounds);
             }
@@ -3361,6 +3770,9 @@ Y2KmeterAudioProcessorEditor::~Y2KmeterAudioProcessorEditor()
     }
     y2k::diag::setGlAttached (false);
     Y2K_DIAGC ("GL", "openGLContext.detach done");
+
+    // GL 线程已完全退出：再次回收扫描线程，消除析构竞态窗口
+    stopMilkdropPresetScanThread();
 
     // 0) 先停掉 Editor 自身的 timer，避免 workspace.reset() 中途被调
     stopTimer();
@@ -4408,9 +4820,10 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
                     ed->RequestGlFrame();
             });
            #if JUCE_WINDOWS
-            gmod->setGlHostAvailable (true);
+            gmod->setGlHostAvailable (! GlDirectRenderer::isGloballyDisabled());
            #else
-            gmod->setGlHostAvailable (! PinkXP::isTransparentBackdrop());
+            gmod->setGlHostAvailable (! PinkXP::isTransparentBackdrop()
+                                      && ! GlDirectRenderer::isGloballyDisabled());
            #endif
         }
         return panel;
@@ -4451,6 +4864,10 @@ std::unique_ptr<ModulePanel> Y2KmeterAudioProcessorEditor::createModule(ModuleTy
             return std::make_unique<VirtuPetModule>();
 
         case ModuleType::milkdrop:
+            milkdrop_has_module_in_editor_.store (true, std::memory_order_release);
+            if (! milkdrop_presets_ready_.load (std::memory_order_acquire))
+                startMilkdropPresetScanAsync (milkdrop_use_like_library_.load (std::memory_order_acquire));
+            RequestGlFrame();
             return std::make_unique<MilkdropModule>(&processor.getAnalyserHub(), this);
 
         case ModuleType::tempoKey:
@@ -4708,7 +5125,8 @@ void Y2KmeterAudioProcessorEditor::rebuildDesktopCacheIfNeeded()
     desktopCacheImage = juce::Image (juce::Image::RGB,
                                      bounds.getWidth(),
                                      bounds.getHeight(),
-                                     false);
+                                     false,
+                                     juce::SoftwareImageType{});
     desktopCacheBounds = bounds;
     desktopCacheDirty = false;
 
@@ -5642,7 +6060,7 @@ void Y2KmeterAudioProcessorEditor::setOpenGlEnabledForBackdrop (bool enabled)
                 if (! enabled)
                 {
                     if (gmod->glDirectActive.exchange (false, std::memory_order_acq_rel))
-                        gmod->repaint();
+                        gmod->forceRepaintImmediate();
                     gmod->glTexUploadedGen.store (0, std::memory_order_release);
                 }
                 else
@@ -5669,6 +6087,8 @@ void Y2KmeterAudioProcessorEditor::setOpenGlEnabledForBackdrop (bool enabled)
             openGLContext.detach();
         }
         y2k::diag::setGlAttached (false);
+        if (toyDirector != nullptr)
+            toyDirector->setGlToyHostActive (false);
 
         syncGlHostFlags (syncGlHostFlags, this);
         invalidateDesktopCache();
@@ -5682,6 +6102,8 @@ void Y2KmeterAudioProcessorEditor::setOpenGlEnabledForBackdrop (bool enabled)
     Y2K_DIAGC ("GL", "openGLContext.attachTo (leaving BackdropMode::transparent)");
     openGLContext.attachTo (*this);
     y2k::diag::setGlAttached (openGLContext.isAttached());
+    if (toyDirector != nullptr)
+        toyDirector->setGlToyHostActive (openGLContext.isAttached());
     syncGlHostFlags (syncGlHostFlags, this);
     invalidateDesktopCache();
     repaint();
@@ -7839,7 +8261,9 @@ void Y2KmeterAudioProcessorEditor::timerCallback()
                                << juce::String (ts.smoothedFps, 1)
                                << " | overlay paints=" << ts.overlayPaints
                                << " actors=" << ts.overlayActorsPainted
-                               << " ms=" << juce::String (ts.overlayPaintMs, 1);
+                               << " ms=" << juce::String (ts.overlayPaintMs, 1)
+                               << " glToy=" << (toyDirector->isGlToyActive() ? 1 : 0)
+                               << " degraded=" << ts.degradedFreeActors;
                             Y2K_DIAG ("TOY", tl);
                         }
                     }
@@ -8086,6 +8510,31 @@ void Y2KmeterAudioProcessorEditor::applyAdaptiveFrameRate (float /*measuredFps*/
 //       两个入口共用 lastDispatchWallMs 去重（vblank 正常时兜底不触发）。
 //   · 无上限模式（userRequestedFpsLimit==0）每个 vblank 都分发 = 跟随刷新率。
 // ==========================================================
+void Y2KmeterAudioProcessorEditor::syncExternalFramePacing (bool active)
+{
+#if ! JUCE_MAC
+    openGLContext.setExternalFramePacing (active);
+    for (auto& wnd : floatingWindows_)
+        if (wnd != nullptr)
+            wnd->setExternalFramePacing (active);
+#else
+    juce::ignoreUnused (active);
+#endif
+}
+
+void Y2KmeterAudioProcessorEditor::syncToyExpectedFps()
+{
+    if (toyDirector == nullptr)
+        return;
+
+    const double target = vblankPacer_.effectiveTargetHz (userRequestedFpsLimit);
+    if (std::abs (target - lastSyncedExpectedFps_) > 0.25)
+    {
+        lastSyncedExpectedFps_ = target;
+        toyDirector->setExpectedFps (target);
+    }
+}
+
 void Y2KmeterAudioProcessorEditor::onDisplayVBlank (double timestampSec)
 {
     const double nowWallMs = juce::Time::getMillisecondCounterHiRes();
@@ -8095,68 +8544,55 @@ void Y2KmeterAudioProcessorEditor::onDisplayVBlank (double timestampSec)
     if (! processor.getAnalyserHub().isUsingExternalFrameClock())
     {
         processor.getAnalyserHub().setExternalFrameClock (true);
+        syncExternalFramePacing (true);
+        vblankPacer_.reset (false);
+        vblankLastSec = timestampSec;
+        syncToyExpectedFps();
         updateFramePacingFallbackTimer();
-        vblankLastSec  = timestampSec;
-        vblankCreditMs = 0.0;
-        performFrameDispatch (timestampSec);
+        if (vblankPacer_.shouldDispatchOnVBlank (userRequestedFpsLimit, 0.0, nowWallMs))
+            performFrameDispatch (true, timestampSec, nowWallMs);
         return;
     }
 
     tryDispatchFromVBlank (nowWallMs, timestampSec);
 }
 
-void Y2KmeterAudioProcessorEditor::performFrameDispatch (double timestampSec)
+void Y2KmeterAudioProcessorEditor::performFrameDispatch (bool fromVBlank, double vblankSec, double nowWallMs)
 {
-    // 双入口去重：vblank 与兜底 Timer 在 ~1ms 内竞争时只分发一次
-    const double nowWallMs = juce::Time::getMillisecondCounterHiRes();
-    if (lastDispatchWallMs > 0.0 && nowWallMs - lastDispatchWallMs < 1.0)
-        return;
+    const double dispatchSec = vblankPacer_.nextMonotonicTimeSec (fromVBlank, vblankSec, nowWallMs);
+    processor.getAnalyserHub().dispatchFrameNow (dispatchSec);
 
-    lastDispatchWallMs = nowWallMs;
-    processor.getAnalyserHub().dispatchFrameNow (timestampSec);
+    // Win/非 macOS（JUCE 补丁 0010）：将本帧分发期间各模块与 ToyBox 产生的 repaint /
+    //   RequestGlFrame 合并为一次统一唤醒，保持 1:1 VBlank 节奏并消除中途争锁。
+    if (openGLContext.isAttached())
+        openGLContext.flushPacedRepaint();
+    for (auto& wnd : floatingWindows_)
+        if (wnd != nullptr)
+            wnd->flushPacedRepaint();
 }
 
 void Y2KmeterAudioProcessorEditor::tryDispatchFromVBlank (double nowWallMs, double timestampSec)
 {
-    juce::ignoreUnused (nowWallMs);
-
-    // 无上限：每个 vblank 分发一次（跟随显示器刷新率）
-    if (userRequestedFpsLimit <= 0)
-    {
-        performFrameDispatch (timestampSec);
-        return;
-    }
-
-    // credit 累加：两次回调之间的真实 vblank 时间（回调被吞时一次补齐多个周期）
+    double dtMs = 0.0;
     if (vblankLastSec > 0.0)
-    {
-        const double dtSec = timestampSec - vblankLastSec;
-        if (dtSec > 0.0 && dtSec < 0.25)
-            vblankCreditMs += dtSec * 1000.0;
-    }
+        dtMs = (timestampSec - vblankLastSec) * 1000.0;
     vblankLastSec = timestampSec;
 
-    const double intervalMs = 1000.0 / (double) userRequestedFpsLimit;
+    const bool shouldDispatch =
+        vblankPacer_.shouldDispatchOnVBlank (userRequestedFpsLimit, dtMs, nowWallMs);
 
-    // 追赶保护：credit 超额过多（长停顿）时清空，避免连续补帧风暴
-    if (vblankCreditMs > intervalMs * 2.0)
-        vblankCreditMs = intervalMs * 2.0;
+    // 显示器刷新率首次锁定或跨屏切换后，同步期望帧率与兜底 Timer 周期
+    syncToyExpectedFps();
+    updateFramePacingFallbackTimer();
 
-    if (vblankCreditMs >= intervalMs - 0.5)   // 0.5ms 容差吸收浮点/舍入抖动
-    {
-        vblankCreditMs = juce::jmin (vblankCreditMs - intervalMs, intervalMs); // 保留余量供 6/5 分频
-        performFrameDispatch (timestampSec);
-    }
+    if (shouldDispatch)
+        performFrameDispatch (true, timestampSec, nowWallMs);
 }
 
 void Y2KmeterAudioProcessorEditor::tryDispatchFromFallbackTimer (double nowWallMs)
 {
-    if (userRequestedFpsLimit <= 0)
-        return; // 无上限：由 vblank 独占驱动，兜底不介入
-
-    const double intervalMs = 1000.0 / (double) userRequestedFpsLimit;
-    if (lastDispatchWallMs <= 0.0 || nowWallMs - lastDispatchWallMs >= intervalMs)
-        performFrameDispatch (juce::Time::getMillisecondCounterHiRes() * 0.001);
+    if (vblankPacer_.shouldDispatchOnFallback (userRequestedFpsLimit, nowWallMs))
+        performFrameDispatch (false, 0.0, nowWallMs);
 }
 
 void Y2KmeterAudioProcessorEditor::updateFramePacingFallbackTimer()
@@ -8164,16 +8600,22 @@ void Y2KmeterAudioProcessorEditor::updateFramePacingFallbackTimer()
     if (framePacingFallback == nullptr)
         return;
 
-    if (userRequestedFpsLimit > 0
-        && processor.getAnalyserHub().isUsingExternalFrameClock())
+    if (processor.getAnalyserHub().isUsingExternalFrameClock())
     {
-        // 兜底周期取目标间隔（1000/hz 整数除法 = 8ms@120Hz），实际出帧由
-        // 判据（≥ intervalMs）限制在 120Hz；仅在 vblank 被吞时承担分发。
-        framePacingFallback->startTimer (1000 / userRequestedFpsLimit);
+        // 所有模式（含无上限 userRequestedFpsLimit==0）均挂兜底 Timer；
+        //   仅当推荐周期改变时才重启定时器，避免每次 VBlank 重置倒计时。
+        const int intervalMs = vblankPacer_.recommendedFallbackTimerMs (userRequestedFpsLimit);
+        if (intervalMs != activeFallbackTimerMs_ || ! framePacingFallback->isTimerRunning())
+        {
+            activeFallbackTimerMs_ = intervalMs;
+            framePacingFallback->startTimer (intervalMs);
+        }
     }
     else
     {
-        framePacingFallback->stopTimer();
+        if (framePacingFallback->isTimerRunning())
+            framePacingFallback->stopTimer();
+        activeFallbackTimerMs_ = 0;
     }
 }
 
@@ -8187,10 +8629,13 @@ void Y2KmeterAudioProcessorEditor::updateFrameClockWatchdog()
     if (juce::Time::getMillisecondCounterHiRes() - vblankLastWallMs > 250.0)
     {
         hub.setExternalFrameClock (false);
+        // 立即关闭外部合并并 flush 任意挂起的重绘，避免 fallback timer 刚刚刷新过
+        //   lastExternalPaceMs 导致切回内部 Timer 后 ~100ms 内的重绘被暂存丢失。
+        syncExternalFramePacing (false);
+        vblankPacer_.reset (false);
+        vblankLastSec = 0.0;
+        syncToyExpectedFps();
         updateFramePacingFallbackTimer();
-        lastDispatchWallMs = 0.0;
-        vblankLastSec      = 0.0;
-        vblankCreditMs     = 0.0;
     }
 }
 
@@ -8452,72 +8897,153 @@ static juce::File FindMilkdropLikeDir()
       .getChildFile("milkdrop_presets_like");
 }
 
-void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
-  Y2K_LOG("[EditorGL] newOpenGLContextCreated fired");
+bool Y2KmeterAudioProcessorEditor::hasEmbeddedMilkdropModule() const
+{
+  if (workspace == nullptr)
+    return false;
+  for (int i = 0; i < workspace->getNumModules(); ++i)
+    if (auto* m = workspace->getModule (i))
+      if (m->getModuleType() == ModuleType::milkdrop)
+        return true;
+  return false;
+}
 
-  // ---- 诊断：GL 线程身份 + 驱动能力 ----
-  //   现场"所有 GL 模块卡死"最常见的两类根因：
-  //     ① 落到软件渲染器（GDI Generic / Microsoft Basic Render / llvmpipe），
-  //        FBO + blit 路径极慢甚至假死；
-  //     ② 驱动版本 / GL 版本过低或 Core/Compat profile 不匹配。
-  //   这里把 vendor/renderer/version 一次性落盘，拿到日志就能排除。
-  y2k::diag::setThreadTag ("GL");
-  y2k::diag::setPhase ("Editor::newOpenGLContextCreated");
-  y2k::diag::markGlContextCreated();
+void Y2KmeterAudioProcessorEditor::stopMilkdropPresetScanThread()
+{
+  std::lock_guard<std::mutex> lock (milkdrop_scan_lifecycle_mutex_);
+  milkdrop_scan_cancel_.store (true, std::memory_order_release);
+  milkdrop_scan_generation_.fetch_add (1, std::memory_order_acq_rel);
+
+  if (milkdrop_scan_thread_.joinable())
+    milkdrop_scan_thread_.join();
+  milkdrop_scan_in_flight_.store (false, std::memory_order_release);
+}
+
+void Y2KmeterAudioProcessorEditor::startMilkdropPresetScanAsync (bool useLike, bool forceRestart)
+{
+  std::lock_guard<std::mutex> lock (milkdrop_scan_lifecycle_mutex_);
+  if (milkdrop_scan_shutdown_.load (std::memory_order_acquire)
+      || editorBeingDestructed.load (std::memory_order_acquire))
+    return;
+
+  if (! forceRestart)
   {
-    using namespace juce::gl;
-    const auto glString = [] (GLenum e) -> juce::String
+    // 若用户刚刚切换了目标库，丢弃持有旧 useLike 的非强制请求，避免覆盖新库状态
+    if (milkdrop_use_like_library_.load (std::memory_order_acquire) != useLike)
+      return;
+
+    // 若同库列表已经扫描完成，直接早退（防止 Message/GL 并发调用把 ready 误清为 false）
+    if (milkdrop_presets_ready_.load (std::memory_order_acquire))
     {
-      const auto* s = reinterpret_cast<const char*> (glGetString (e));
-      return s != nullptr ? juce::String (s) : juce::String ("(null)");
-    };
-
-    GLint maxTex = 0, maxViewport[2] = { 0, 0 };
-    juce::gl::glGetIntegerv (GL_MAX_TEXTURE_SIZE, &maxTex);
-    juce::gl::glGetIntegerv (GL_MAX_VIEWPORT_DIMS, maxViewport);
-
-    const juce::String info =
-        "vendor=" + glString (GL_VENDOR)
-      + " | renderer=" + glString (GL_RENDERER)
-      + " | version=" + glString (GL_VERSION)
-      + " | glsl=" + glString (GL_SHADING_LANGUAGE_VERSION)
-      + " | maxTex=" + juce::String (maxTex)
-      + " | maxViewport=" + juce::String ((int) maxViewport[0]) + "x" + juce::String ((int) maxViewport[1])
-      + " | renderScale=" + juce::String ((double) openGLContext.getRenderingScale(), 2)
-      + " | editor=" + juce::String (getWidth()) + "x" + juce::String (getHeight())
-      + " | imageCacheMB=96";
-
-    y2k::diag::setGlInfo (info);
-
-    // 软件渲染器 / 远程桌面是"GL 模块整体卡死"的高危环境，单独提升可见度
-    const juce::String rendererLower = glString (GL_RENDERER).toLowerCase();
-    if (rendererLower.contains ("gdi generic")
-        || rendererLower.contains ("basic render")
-        || rendererLower.contains ("llvmpipe")
-        || rendererLower.contains ("swiftshader")
-        || rendererLower.contains ("software"))
-    {
-      Y2K_DIAGC ("GL", "!! SOFTWARE RENDERER DETECTED -> GL 直渲染可能极慢或卡死");
+      const std::lock_guard<std::mutex> stateLock (milkdrop_state_mutex_);
+      if (milkdrop_scanned_use_like_ == useLike)
+        return;
     }
+
+    if (milkdrop_scan_in_flight_.load (std::memory_order_acquire)
+        && milkdrop_scan_target_like_ == useLike)
+      return;
   }
 
-  Y2K_DIAGC ("GL", "newOpenGLContextCreated enter");
+  // 严格持 milkdrop_scan_lifecycle_mutex_ 回收旧线程（worker 绝不碰该锁，不会死锁），
+  // 杜绝对 joinable std::thread 做并发 move-assign 触发 std::terminate()。
+  milkdrop_scan_cancel_.store (true, std::memory_order_release);
+  milkdrop_scan_generation_.fetch_add (1, std::memory_order_acq_rel);
+  if (milkdrop_scan_thread_.joinable())
+    milkdrop_scan_thread_.join();
+  milkdrop_scan_in_flight_.store (false, std::memory_order_release);
+
+  const auto presetsDir = useLike
+                              ? FindMilkdropLikeDir()
+                              : FindMilkdropAssetsDir ("milkdrop_presets");
+
+  milkdrop_scan_cancel_.store (false, std::memory_order_release);
+  milkdrop_presets_ready_.store (false, std::memory_order_release);
+  const uint64_t gen = milkdrop_scan_generation_.fetch_add (1, std::memory_order_acq_rel) + 1;
+
+  milkdrop_scan_target_like_ = useLike;
+  milkdrop_scan_in_flight_.store (true, std::memory_order_release);
+  milkdrop_scan_thread_ = std::thread ([this, presetsDir, useLike, gen]()
   {
-    Y2K_DIAG_SLOW ("GL", "newOpenGLContextCreated (projectM init total)", 300.0);
+    const double t0 = y2k::diag::isEnabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+    juce::StringArray newPaths;
+    if (presetsDir.isDirectory())
+    {
+      newPaths.ensureStorageAllocated (useLike ? 128 : 10240);
+      for (const auto& entry : juce::RangedDirectoryIterator (
+               presetsDir, false, "*.milk", juce::File::findFiles))
+      {
+        if (milkdrop_scan_cancel_.load (std::memory_order_acquire)
+            || milkdrop_scan_generation_.load (std::memory_order_acquire) != gen)
+          break;
+        newPaths.add (entry.getFile().getFullPathName());
+      }
+      if (! milkdrop_scan_cancel_.load (std::memory_order_acquire)
+          && milkdrop_scan_generation_.load (std::memory_order_acquire) == gen)
+        newPaths.sort (false);
+    }
 
-  // v2.9.3：调大 GL 图片纹理缓存（JUCE 默认仅 8MB）。
-  //   workspace 画布背景（~5.8MB）+ 二十个模块的静态/动态图层纹理总量远超 8MB，
-  //   默认缓存下每帧互相挤占 LRU —— workspace 背景纹理被逐出后整图重传
-  //   （实测 10.9ms/帧，占全场景帧预算的三分之一以上）。96MB 足以容纳全部
-  //   常驻图层，且只在实际用到时分配。
-  openGLContext.setImageCacheSize (96 * 1024 * 1024);
+    const bool cancelled = milkdrop_scan_cancel_.load (std::memory_order_acquire)
+                           || milkdrop_scan_generation_.load (std::memory_order_acquire) != gen;
+    if (! cancelled)
+    {
+      int count = 0;
+      {
+        const std::lock_guard<std::mutex> stateLock (milkdrop_state_mutex_);
+        milkdrop_preset_paths_.swapWith (newPaths);
+        milkdrop_scanned_use_like_ = useLike;
+        count = milkdrop_preset_paths_.size();
+      }
+      milkdrop_presets_ready_.store (true, std::memory_order_release);
+      milkdrop_needs_reconcile_.store (true, std::memory_order_release);
 
-  // 脱离态期间 Editor renderer 被挂起，跳过创建，避免与 GLView 的本地
-  // projectM handle 共存（Windows libprojectM/GLEW 全局指针表冲突）。
-  // v2.9.7：mac 已启用 Editor GL + 重编 libprojectM（含 FBO API），嵌入态
-  //   Milkdrop 也走 Editor 渲染（z 序合成），与 Windows 统一。
-  if (milkdrop_renderer_suspended_)
+      if (t0 > 0.0)
+      {
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        Y2K_DIAG ("MD", juce::String ("async rescan done useLike=")
+                              + (useLike ? "1" : "0")
+                              + " count=" + juce::String (count)
+                              + " ms=" + juce::String (ms, 1));
+      }
+    }
+
+    if (milkdrop_scan_generation_.load (std::memory_order_acquire) == gen)
+      milkdrop_scan_in_flight_.store (false, std::memory_order_release);
+  });
+}
+
+juce::String Y2KmeterAudioProcessorEditor::findFastInitialMilkdropPresetPath (
+    bool useLike, int preferredIndex) const
+{
+  const auto presetsDir = useLike
+                              ? FindMilkdropLikeDir()
+                              : FindMilkdropAssetsDir ("milkdrop_presets");
+  if (! presetsDir.isDirectory())
+    return {};
+
+  // 1) 若存在已保存的预设序号（内置库按 4 位数字前缀 0001_... 命名），单步通配符命中 (<0.5ms)
+  if (! useLike && preferredIndex >= 0)
+  {
+    const auto pattern = juce::String::formatted ("%04d_*.milk", preferredIndex + 1);
+    for (const auto& entry : juce::RangedDirectoryIterator (
+             presetsDir, false, pattern, juce::File::findFiles))
+      return entry.getFile().getFullPathName();
+  }
+
+  // 2) 兜底：单步目录迭代取首个 .milk 文件 (<0.5ms)，不扫描剩余 9,920 个文件
+  for (const auto& entry : juce::RangedDirectoryIterator (
+           presetsDir, false, "*.milk", juce::File::findFiles))
+    return entry.getFile().getFullPathName();
+
+  return {};
+}
+
+void Y2KmeterAudioProcessorEditor::initMilkdropEditorResources() {
+  if (milkdrop_renderer_suspended_.load (std::memory_order_acquire)
+      || milkdrop_pm_handle_ != nullptr)
     return;
+
+  Y2K_DIAG_SLOW ("GL", "initMilkdropEditorResources (projectM init total)", 300.0);
 
   auto& api = projectm_api::Api::instance();
   if (!api.isAvailable()) {
@@ -8563,34 +9089,61 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
     api.setTextureSearchPaths(milkdrop_pm_handle_, paths);
   }
 
-  // 扫描预设。newOpenGLContextCreated() 在脱离态 dock 回嵌入态时会再次执行，
-  // 因此每次扫描前必须清空旧列表，避免总预设数被重复追加成 2N、3N。
-  RescanMilkdropPresetPaths();
-
-  // 检查是否有待处理的预设跳转请求（Standalone 启动恢复等）。
-  //   时序说明：GL 上下文可能异步创建，此时 4.5 恢复代码可能
-  //   已通过 RequestMilkdropPresetJump() 入队了跳转索引。
-  //   这里 atomically 取出并清零，避免后续 renderOpenGL() 重复处理。
-  int pending = milkdrop_requested_preset_jump_.exchange(-1);
-  if (pending >= 0 && pending < MilkdropPresetCount()) {
-    milkdrop_current_preset_ = pending;
-  } else {
-    milkdrop_current_preset_ = 0;
+  // 快速首帧预设加载（禁止在 GL 线程首帧同步遍历/排序 9,921 个 .milk 文件）：
+  //   · 若后台线程已完成同库的完整扫描 → 直接按索引加载（0ms 扫描开销）；
+  //   · 否则单步 <0.5ms 命中首个/目标预设立刻渲染首帧，后台扫描完成后在
+  //     renderOpenGLPreLock() 中无锁对账真实索引并消费在途切换请求。
+  const bool useLike = milkdrop_use_like_library_.load (std::memory_order_acquire);
+  bool fullListReadyForLib = false;
+  int totalCount = 0;
+  if (milkdrop_presets_ready_.load (std::memory_order_acquire))
+  {
+    const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+    fullListReadyForLib = (milkdrop_scanned_use_like_ == useLike);
+    totalCount = milkdrop_preset_paths_.size();
   }
-  LoadMilkdropPresetInternal();
-  milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+
+  if (fullListReadyForLib)
+  {
+    milkdrop_startup_jump_fallback_ = -1;
+    const int pending = milkdrop_requested_preset_jump_.exchange (-1);
+    if (pending >= 0 && pending < totalCount)
+      milkdrop_current_preset_ = pending;
+    else
+      milkdrop_current_preset_ = (totalCount > 0) ? 0 : -1;
+
+    if (milkdrop_current_preset_ >= 0)
+      LoadMilkdropPresetInternal();
+    milkdrop_current_preset_ui_.store (milkdrop_current_preset_);
+    milkdrop_needs_reconcile_.store (false, std::memory_order_release);
+  }
+  else
+  {
+    startMilkdropPresetScanAsync (useLike);
+    // 立即消费启动阶段队列中的保存预设序号（避免后续对账时用旧 startup jump 吞掉用户期间的 Next/Prev/Random），
+    // 仅在扫描期间无用户切换操作时用 milkdrop_startup_jump_fallback_ 兜底恢复精确索引。
+    const int preferred = milkdrop_requested_preset_jump_.exchange (-1);
+    milkdrop_startup_jump_fallback_ = preferred;
+    const juce::String fastPath = findFastInitialMilkdropPresetPath (useLike, preferred);
+    if (fastPath.isNotEmpty())
+    {
+      loadMilkdropPresetPathInternal (fastPath, preferred >= 0 ? preferred : 0, 1);
+      milkdrop_current_preset_ = (preferred >= 0) ? preferred : 0;
+      milkdrop_current_preset_ui_.store (milkdrop_current_preset_);
+    }
+    else
+    {
+      milkdrop_current_preset_ = -1;
+      milkdrop_current_preset_ui_.store (-1);
+    }
+    milkdrop_needs_reconcile_.store (true, std::memory_order_release);
+  }
 
   // 创建 projectM 独立 offscreen FBO + 纹理附件。
-  // 配合 openglRenderFrameFbo(fbo_id) 使用，projectM 渲染到此 FBO
-  // 而非 FBO 0，随后 glBlitFramebuffer 跨 FBO 搬运到各模块位置，
-  // 彻底消除同 FBO 上 blit 源/目重叠的未定义行为。
   juce::gl::glGenFramebuffers(1, &milkdrop_render_fbo_);
   juce::gl::glGenTextures(1, &milkdrop_render_tex_);
 
   // 创建整体染色后处理着色器（master output colors）。
-  // 编译失败不致命，仅关闭染色能力；post FBO 纹理在 renderOpenGL 里按需分配。
-  //   ⚠ 失败时所有 Milkdrop 自定义后处理（染色/亮度/效果/tweak 偏移）都会静默
-  //     失效，因此这里必须留日志（v2.9.7 的 #version 重复 bug 就是这样隐身的）。
   milkdrop_tint_pass_.reset(new MilkdropTintPass(openGLContext));
   if (!milkdrop_tint_pass_->init())
   {
@@ -8605,26 +9158,81 @@ void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
 
   milkdrop_render_ready_.store (true, std::memory_order_release);
 
-  // 诊断：Editor 侧 projectM 的"底账" —— 一次就能看出是否走了降级路径、
-  //   扫的是内置库还是收藏库、预设总数、首个预设索引。
-  //   fboAPI=0 即 Windows 随包的 4.1.4 DLL（无 projectm_opengl_render_frame_fbo），
-  //   每帧都要 "projectM→FBO 0 → blit → 离屏 FBO → blit → 后缓冲"。
   Y2K_DIAGC ("MD", juce::String ("editor projectM init | fboAPI=")
                         + (api.hasOpenglRenderFrameFbo() ? "1" : "0")
                         + " loadPresetData=" + (api.hasLoadPresetData() ? "1" : "0")
-                        + " likeLib=" + (milkdrop_use_like_library_.load() ? "1" : "0")
+                        + " likeLib=" + (useLike ? "1" : "0")
                         + " presets=" + juce::String (MilkdropPresetCount())
+                        + " presetsReady=" + (fullListReadyForLib ? "1" : "0")
                         + " idx=" + juce::String (milkdrop_current_preset_)
                         + " tintPass=" + (milkdrop_tint_pass_ != nullptr ? "1" : "0")
                         + " mesh=" + juce::String (kMilkdropDefaultMeshW) + "x"
                                    + juce::String (kMilkdropDefaultMeshH)
                         + " fps=" + juce::String (kMilkdropTargetFps));
+}
 
-  } // 诊断计时作用域
+void Y2KmeterAudioProcessorEditor::newOpenGLContextCreated() {
+  Y2K_LOG("[EditorGL] newOpenGLContextCreated fired");
+
+  // ---- 诊断：GL 线程身份 + 驱动能力 ----
+  y2k::diag::setThreadTag ("GL");
+  y2k::diag::setPhase ("Editor::newOpenGLContextCreated");
+  y2k::diag::markGlContextCreated();
+  milkdrop_gl_context_ready_.store (true, std::memory_order_release);
+  // GL 上下文异步创建完成（例如 Standalone 窗口首次上屏）后，激活 ToyBox GL 批渲染宿主
+  if (toyDirector != nullptr && glToyRenderer_ != nullptr)
+    toyDirector->setGlToyHostActive (true);
+  {
+    using namespace juce::gl;
+    const auto glString = [] (GLenum e) -> juce::String
+    {
+      const auto* s = reinterpret_cast<const char*> (glGetString (e));
+      return s != nullptr ? juce::String (s) : juce::String ("(null)");
+    };
+
+    GLint maxTex = 0, maxViewport[2] = { 0, 0 };
+    juce::gl::glGetIntegerv (GL_MAX_TEXTURE_SIZE, &maxTex);
+    juce::gl::glGetIntegerv (GL_MAX_VIEWPORT_DIMS, maxViewport);
+
+    const juce::String info =
+        "vendor=" + glString (GL_VENDOR)
+      + " | renderer=" + glString (GL_RENDERER)
+      + " | version=" + glString (GL_VERSION)
+      + " | glsl=" + glString (GL_SHADING_LANGUAGE_VERSION)
+      + " | maxTex=" + juce::String (maxTex)
+      + " | maxViewport=" + juce::String ((int) maxViewport[0]) + "x" + juce::String ((int) maxViewport[1])
+      + " | renderScale=" + juce::String ((double) openGLContext.getRenderingScale(), 2)
+      + " | editor=" + juce::String (getWidth()) + "x" + juce::String (getHeight())
+      + " | imageCacheMB=96";
+
+    y2k::diag::setGlInfo (info);
+
+    const juce::String rendererLower = glString (GL_RENDERER).toLowerCase();
+    if (rendererLower.contains ("gdi generic")
+        || rendererLower.contains ("basic render")
+        || rendererLower.contains ("llvmpipe")
+        || rendererLower.contains ("swiftshader")
+        || rendererLower.contains ("software"))
+    {
+      Y2K_DIAGC ("GL", "!! SOFTWARE RENDERER DETECTED -> GL 直渲染可能极慢或卡死");
+    }
+  }
+
+  Y2K_DIAGC ("GL", "newOpenGLContextCreated enter");
+  // v2.9.3：调大 GL 图片纹理缓存（JUCE 默认仅 8MB → 96MB，避免多模块 LRU 逐出）
+  openGLContext.setImageCacheSize (96 * 1024 * 1024);
+
+  // 仅当工作区实际存在嵌入态 Milkdrop 时才在首帧初始化 projectM；
+  // 无 Milkdrop 模块时零 DLL / 零扫描 / 零着色器开销，后续用户添加时由 renderOpenGLPreLock 锁外懒创建。
+  if (! milkdrop_renderer_suspended_.load (std::memory_order_acquire)
+      && milkdrop_has_module_in_editor_.load (std::memory_order_acquire))
+  {
+    initMilkdropEditorResources();
+  }
 
   Y2K_DIAGC ("GL", juce::String ("newOpenGLContextCreated done | milkdropRenderReady=")
                         + (milkdrop_render_ready_.load() ? "1" : "0")
-                        + " projectM=" + (milkdrop_pm_handle_ != nullptr ? "ok" : "null")
+                        + " projectM=" + (milkdrop_pm_handle_ != nullptr ? "ok" : "deferred")
                         + " presets=" + juce::String (MilkdropPresetCount()));
 }
 
@@ -9104,29 +9712,237 @@ bool Y2KmeterAudioProcessorEditor::milkdropTickBlackFrameSelfHeal (unsigned int 
 }
 
 // ================================================================
+// 消费 Milkdrop 预设/库切换请求（GL 线程专用，无 MessageManager::Lock 依赖）
+//   · Windows 上由 renderOpenGLPreLock() 在锁外优先消费，避免 50~150ms 的
+//     磁盘读与 shader 编译阻塞消息线程；
+//   · macOS 或恰好在 preLock 之后到达的请求由 renderOpenGL() 兜底消费。
+// ================================================================
+bool Y2KmeterAudioProcessorEditor::processPendingMilkdropPresetRequests()
+{
+  bool anySwitched = false;
+
+  // 消费收藏库切换请求：在扫描生命周期锁内停掉在途异步扫描并完成同步重扫，
+  // 消除 Message 线程并发 startMilkdropPresetScanAsync 与 GL 线程同步重扫之间的窗口竞态。
+  if (milkdrop_requested_library_toggle_.exchange(false)) {
+    const bool now_like = milkdrop_use_like_library_.load();
+    if (now_like)
+      milkdrop_builtin_preset_index_ = milkdrop_current_preset_;
+    else
+      milkdrop_like_preset_index_ = milkdrop_current_preset_;
+
+    {
+      std::lock_guard<std::mutex> lock (milkdrop_scan_lifecycle_mutex_);
+      milkdrop_scan_cancel_.store (true, std::memory_order_release);
+      milkdrop_scan_generation_.fetch_add (1, std::memory_order_acq_rel);
+      if (milkdrop_scan_thread_.joinable())
+        milkdrop_scan_thread_.join();
+      milkdrop_scan_in_flight_.store (false, std::memory_order_release);
+      milkdrop_startup_jump_fallback_ = -1;
+
+      RescanMilkdropPresetPaths();
+      milkdrop_presets_ready_.store (true, std::memory_order_release);
+      milkdrop_needs_reconcile_.store (false, std::memory_order_release);
+    }
+
+    int target = now_like ? milkdrop_like_preset_index_
+                          : milkdrop_builtin_preset_index_;
+    if (target < 0 || target >= MilkdropPresetCount())
+      target = 0;
+    milkdrop_current_preset_ = (MilkdropPresetCount() == 0) ? -1 : target;
+
+    if (milkdrop_current_preset_ >= 0) {
+      LoadMilkdropPresetInternal();
+      milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+      milkdrop_last_preset_switch_ms_.store(
+          static_cast<int64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count()));
+      anySwitched = true;
+    }
+  }
+
+  // 消费取消收藏触发的重扫请求：同上，在扫描生命周期锁内停掉异步扫描并完成同步重扫（此时位于 preLock 锁外）。
+  if (milkdrop_requested_rescan_.exchange(false)) {
+    {
+      std::lock_guard<std::mutex> lock (milkdrop_scan_lifecycle_mutex_);
+      milkdrop_scan_cancel_.store (true, std::memory_order_release);
+      milkdrop_scan_generation_.fetch_add (1, std::memory_order_acq_rel);
+      if (milkdrop_scan_thread_.joinable())
+        milkdrop_scan_thread_.join();
+      milkdrop_scan_in_flight_.store (false, std::memory_order_release);
+      milkdrop_startup_jump_fallback_ = -1;
+
+      RescanMilkdropPresetPaths();
+      milkdrop_presets_ready_.store (true, std::memory_order_release);
+      milkdrop_needs_reconcile_.store (false, std::memory_order_release);
+    }
+
+    if (MilkdropPresetCount() == 0) {
+      SetMilkdropUseLikeLibrary(false);
+      {
+        std::lock_guard<std::mutex> lock (milkdrop_scan_lifecycle_mutex_);
+        milkdrop_scan_cancel_.store (true, std::memory_order_release);
+        milkdrop_scan_generation_.fetch_add (1, std::memory_order_acq_rel);
+        if (milkdrop_scan_thread_.joinable())
+          milkdrop_scan_thread_.join();
+        milkdrop_scan_in_flight_.store (false, std::memory_order_release);
+
+        RescanMilkdropPresetPaths();
+        milkdrop_presets_ready_.store (true, std::memory_order_release);
+        milkdrop_needs_reconcile_.store (false, std::memory_order_release);
+      }
+      int target = milkdrop_builtin_preset_index_;
+      if (target < 0 || target >= MilkdropPresetCount())
+        target = 0;
+      milkdrop_current_preset_ = (MilkdropPresetCount() == 0) ? -1 : target;
+    } else if (milkdrop_current_preset_ >= MilkdropPresetCount()) {
+      milkdrop_current_preset_ = 0;
+    }
+
+    if (milkdrop_current_preset_ >= 0) {
+      LoadMilkdropPresetInternal();
+      milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+      milkdrop_last_preset_switch_ms_.store(
+          static_cast<int64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count()));
+      anySwitched = true;
+    }
+  }
+
+  // 后台 9,921 预设扫描仍在途中（<80ms）：保留 jump/delta/random 原子不消费，等扫描就绪后一并精确对账
+  if (! milkdrop_presets_ready_.load (std::memory_order_acquire))
+    return anySwitched;
+
+  // 后台扫描刚刚完成：将首帧快速加载的预设路径对账到完整有序表中的真实索引，
+  // 并一并消费在途期间积累的 jump/delta/random 请求。
+  if (milkdrop_needs_reconcile_.exchange (false, std::memory_order_acq_rel)) {
+    const int  userJump     = milkdrop_requested_preset_jump_.exchange (-1);
+    const int  delta        = milkdrop_requested_preset_delta_.exchange (0);
+    const bool random       = milkdrop_requested_preset_random_.exchange (false);
+    const int  fallbackJump = milkdrop_startup_jump_fallback_;
+    milkdrop_startup_jump_fallback_ = -1;
+
+    // 仅当用户在扫描期间没有发过任何 jump/delta/random 时，才用启动保存索引兜底，
+    // 防止旧 startup jump 吞掉用户的 Next/Prev/Random 点击。
+    const int effectiveJump = (userJump >= 0)
+                                  ? userJump
+                                  : ((! random && delta == 0) ? fallbackJump : -1);
+
+    std::vector<std::string> sortedUtf8;
+    std::string loadedUtf8;
+    {
+      const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+      sortedUtf8.reserve ((size_t) milkdrop_preset_paths_.size());
+      for (const auto& s : milkdrop_preset_paths_)
+        sortedUtf8.push_back (s.toStdString());
+      loadedUtf8 = milkdrop_loaded_preset_path_.toStdString();
+    }
+
+    const std::size_t seed = sortedUtf8.empty()
+                                 ? 0u
+                                 : (std::size_t) juce::Random::getSystemRandom().nextInt (
+                                       juce::jmax (1, (int) sortedUtf8.size()));
+    const auto rec = y2k::milkdrop::reconcileLoadedPresetIndex (
+        sortedUtf8, loadedUtf8, effectiveJump, delta, random, seed);
+
+    milkdrop_current_preset_ = rec.index;
+    milkdrop_current_preset_ui_.store (rec.index);
+
+    if (rec.shouldReload && rec.index >= 0) {
+      LoadMilkdropPresetInternal();
+      milkdrop_last_preset_switch_ms_.store (
+          static_cast<int64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count()));
+      anySwitched = true;
+    }
+    return anySwitched;
+  }
+
+  // 稳态消费预设切换请求
+  const int  jump_idx = milkdrop_requested_preset_jump_.exchange(-1);
+  const int  delta    = milkdrop_requested_preset_delta_.exchange(0);
+  const bool random   = milkdrop_requested_preset_random_.exchange(false);
+  bool switched = false;
+
+  if (jump_idx >= 0 && jump_idx < MilkdropPresetCount()) {
+    milkdrop_current_preset_ = jump_idx;
+    switched = true;
+  } else if (random) {
+    const int n = MilkdropPresetCount();
+    if (n <= 1) {
+      if (milkdrop_current_preset_ < 0 || milkdrop_current_preset_ >= n)
+        milkdrop_current_preset_ = 0;
+      switched = true;
+    } else {
+      const int cur = (milkdrop_current_preset_ >= 0 && milkdrop_current_preset_ < n)
+                          ? milkdrop_current_preset_ : -1;
+      if (cur < 0) {
+        milkdrop_current_preset_ = juce::Random::getSystemRandom().nextInt(n);
+      } else {
+        int next = juce::Random::getSystemRandom().nextInt(n - 1);
+        if (next >= cur)
+          ++next;
+        milkdrop_current_preset_ = next;
+      }
+      switched = true;
+    }
+  } else if (delta != 0 && MilkdropPresetCount() > 0) {
+    milkdrop_current_preset_ = y2k::milkdrop::wrapPresetIndex (
+        milkdrop_current_preset_, delta, MilkdropPresetCount());
+    switched = true;
+  }
+
+  if (switched) {
+    LoadMilkdropPresetInternal();
+    milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
+    milkdrop_last_preset_switch_ms_.store(
+        static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()));
+    anySwitched = true;
+  }
+
+  return anySwitched;
+}
+
+// ================================================================
 // JUCE 补丁 renderOpenGLPreLock()（仅 Windows 调用）：未持消息锁时提前完成
-//   projectM 渲染 + 染色后处理。原先这 ~3ms 在持锁的 renderOpenGL() 里执行，
-//   整段时间消息线程（数据分发 / onFrame / 定时器）被迫停转；挪到锁外后
+//   projectM 按需懒初始化 + 预设切换 + 渲染 + 染色后处理。原先这 ~3ms（切预设时可达 128ms）
+//   在持锁的 renderOpenGL() 里执行，整段时间消息线程被迫停转；挪到锁外后
 //   两者并行，帧周期不再是"消息线程耗时 + GL 持锁耗时"的串行叠加。
 //   FBO 尺寸取自上一帧持锁阶段的测量结果（milkdrop_pre_w_/h_）；
 //   首帧或尺寸变化时由 renderOpenGL() 持锁阶段补渲染。
 // ================================================================
 void Y2KmeterAudioProcessorEditor::renderOpenGLPreLock()
 {
-  if (! milkdrop_render_ready_.load() || milkdrop_pm_handle_ == nullptr
-      || milkdrop_pre_w_ <= 0 || milkdrop_pre_h_ <= 0)
-    return;
+  // 工作区运行时首次添加 Milkdrop 模块时，在锁外完成 projectM 懒初始化（零消息线程阻塞）
+  if (! milkdrop_render_ready_.load (std::memory_order_acquire)
+      && milkdrop_pm_handle_ == nullptr
+      && ! milkdrop_renderer_suspended_.load (std::memory_order_acquire)
+      && milkdrop_has_module_in_editor_.load (std::memory_order_acquire)
+      && milkdrop_gl_context_ready_.load (std::memory_order_acquire))
+  {
+    initMilkdropEditorResources();
+  }
 
-  auto& api = projectm_api::Api::instance();
+  if (! milkdrop_render_ready_.load() || milkdrop_pm_handle_ == nullptr)
+    return;
 
   y2k::diag::setThreadTag ("GL");
   y2k::diag::setPhase ("Editor::renderOpenGLPreLock");
 
   const double t0 = y2k::diag::isEnabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
 
-  milkdrop_pre_blit_fbo_ = renderMilkdropFrameCore (milkdrop_pre_w_, milkdrop_pre_h_, false);
-  milkdrop_pre_done_ = true;
-  juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+  const bool presetSwitched = processPendingMilkdropPresetRequests();
+
+  if (milkdrop_pre_w_ > 0 && milkdrop_pre_h_ > 0)
+  {
+    milkdrop_pre_blit_fbo_ = renderMilkdropFrameCore (milkdrop_pre_w_, milkdrop_pre_h_, presetSwitched);
+    milkdrop_pre_done_ = true;
+    juce::gl::glBindFramebuffer (juce::gl::GL_FRAMEBUFFER, 0);
+  }
 
   // 诊断：必须在返回前查一次 GL 错误。
   //   JUCE 补丁 0006 在本函数返回后立刻 clearGLError()（避免旧错误拖到下一帧），
@@ -9150,6 +9966,24 @@ void Y2KmeterAudioProcessorEditor::renderOpenGLPreLock()
 
   if (t0 > 0.0)
     milkdrop_pre_ms_ += juce::Time::getMillisecondCounterHiRes() - t0;
+}
+
+// ================================================================
+// JUCE 补丁 0010 renderOpenGLPostComponentBuffer()：
+//   在 drawComponentBuffer() 合成完所有 JUCE 组件层之后、已释放 MessageManager::Lock、
+//   紧贴 SwapBuffers() 之前执行。用于单次 draw call 批渲染全部 ToyBox 粒子与光晕，
+//   零消息线程持锁阻塞、零 ToyOverlay 组件重绘放大。
+// ================================================================
+void Y2KmeterAudioProcessorEditor::renderOpenGLPostComponentBuffer()
+{
+  if (toyDirector == nullptr || glToyRenderer_ == nullptr)
+    return;
+
+  if (! toyDirector->isGlToyActive() || ! toyDirector->hasActiveGlToyFrame())
+    return;
+
+  if (! glToyRenderer_->render (*toyDirector, openGLContext))
+    toyDirector->setGlToyHostActive (false);
 }
 
 void Y2KmeterAudioProcessorEditor::renderOpenGL() {
@@ -9193,6 +10027,16 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
   float dpi_scale = static_cast<float>(openGLContext.getRenderingScale());
   int   editor_h  = getHeight();
 
+  // macOS 兜底（不走 renderOpenGLPreLock）：有嵌入态 Milkdrop 时按需懒初始化 projectM
+  if (! milkdrop_render_ready_.load (std::memory_order_acquire)
+      && milkdrop_pm_handle_ == nullptr
+      && ! milkdrop_renderer_suspended_.load (std::memory_order_acquire)
+      && milkdrop_has_module_in_editor_.load (std::memory_order_acquire)
+      && milkdrop_gl_context_ready_.load (std::memory_order_acquire))
+  {
+    initMilkdropEditorResources();
+  }
+
   if (milkdrop_render_ready_.load() && milkdrop_pm_handle_ != nullptr) {
 
   static bool editorMilkdropRenderLogged = false;
@@ -9204,107 +10048,11 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
 
   auto& api = projectm_api::Api::instance();
 
-  // 消费收藏库切换请求：重扫预设列表并恢复到切换后库之前记录的预设。
-  if (milkdrop_requested_library_toggle_.exchange(false)) {
-    // 切换前 milkdrop_use_like_library_ 已被 RequestMilkdropToggleLibrary 翻转成新值，
-    // 因此按新值反推"旧库"，把当前索引（仍指向旧库）存入旧库的记忆。
-    const bool now_like = milkdrop_use_like_library_.load();
-    if (now_like)
-      milkdrop_builtin_preset_index_ = milkdrop_current_preset_;
-    else
-      milkdrop_like_preset_index_ = milkdrop_current_preset_;
-
-    RescanMilkdropPresetPaths();
-
-    // 恢复到目标库（当前库）之前记录的索引，未记录或越界则用 0。
-    int target = now_like ? milkdrop_like_preset_index_
-                          : milkdrop_builtin_preset_index_;
-    if (target < 0 || target >= MilkdropPresetCount())
-      target = 0;
-    milkdrop_current_preset_ = (MilkdropPresetCount() == 0) ? -1 : target;
-
-    if (milkdrop_current_preset_ >= 0) {
-      LoadMilkdropPresetInternal();
-      milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
-      milkdrop_last_preset_switch_ms_.store(
-          static_cast<int64_t>(
-              std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now().time_since_epoch()).count()));
-    }
-  }
-
-  // 消费取消收藏触发的重扫请求：预设列表少一项，保持当前索引（后续预设顶上来），
-  // 越界则回绕到 0；若收藏库因此被删空，则回退到内置库。
-  if (milkdrop_requested_rescan_.exchange(false)) {
-    RescanMilkdropPresetPaths();
-    if ((MilkdropPresetCount() == 0)) {
-      SetMilkdropUseLikeLibrary(false);
-      RescanMilkdropPresetPaths();
-      int target = milkdrop_builtin_preset_index_;
-      if (target < 0 || target >= MilkdropPresetCount())
-        target = 0;
-      milkdrop_current_preset_ = (MilkdropPresetCount() == 0) ? -1 : target;
-    } else if (milkdrop_current_preset_ >= MilkdropPresetCount()) {
-      milkdrop_current_preset_ = 0;
-    }
-
-    if (milkdrop_current_preset_ >= 0) {
-      LoadMilkdropPresetInternal();
-      milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
-      milkdrop_last_preset_switch_ms_.store(
-          static_cast<int64_t>(
-              std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now().time_since_epoch()).count()));
-    }
-  }
-
-  // 消费预设切换请求
-  int jump_idx = milkdrop_requested_preset_jump_.exchange(-1);
-  int delta    = milkdrop_requested_preset_delta_.exchange(0);
-  bool random  = milkdrop_requested_preset_random_.exchange(false);
-  bool switched = false;
-
-  if (jump_idx >= 0 && jump_idx < MilkdropPresetCount()) {
-    milkdrop_current_preset_ = jump_idx;
-    switched = true;
-  } else if (random) {
-    const int n = MilkdropPresetCount();
-    if (n <= 1) {
-      // 特殊处理：目录里只有一个预设，无法排除当前，重新加载当前预设
-      // （软切换刷新），给用户一次"有反馈"的随机点击。
-      if (milkdrop_current_preset_ < 0 || milkdrop_current_preset_ >= n)
-        milkdrop_current_preset_ = 0;
-      switched = true;
-    } else {
-      // 排除当前预设：从 n-1 个候选中均匀随机，选中 >= 当前索引则 +1 跳过。
-      const int cur = (milkdrop_current_preset_ >= 0 && milkdrop_current_preset_ < n)
-                          ? milkdrop_current_preset_ : -1;
-      if (cur < 0) {
-        milkdrop_current_preset_ = juce::Random::getSystemRandom().nextInt(n);
-      } else {
-        int next = juce::Random::getSystemRandom().nextInt(n - 1);
-        if (next >= cur)
-          ++next;
-        milkdrop_current_preset_ = next;
-      }
-      switched = true;
-    }
-  } else if (delta != 0 && !(MilkdropPresetCount() == 0)) {
-    milkdrop_current_preset_ = (milkdrop_current_preset_ + delta)
-        % MilkdropPresetCount();
-    if (milkdrop_current_preset_ < 0)
-      milkdrop_current_preset_ += MilkdropPresetCount();
-    switched = true;
-  }
-
-  if (switched) {
-    LoadMilkdropPresetInternal();
-    milkdrop_current_preset_ui_.store(milkdrop_current_preset_);
-    milkdrop_last_preset_switch_ms_.store(
-        static_cast<int64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count()));
-  }
+  // 兜底消费预设切换请求（Windows 上已在 renderOpenGLPreLock 锁外消费，此处为快路径空操作；
+  //   macOS 或恰好在 preLock 之后到达的请求在此即时生效）
+  const bool latePresetSwitch = processPendingMilkdropPresetRequests();
+  if (latePresetSwitch)
+    milkdrop_pre_done_ = false;
 
   // 收集最大模块尺寸 → projectM 窗口和 offscreen FBO 大小
   int max_w = 256, max_h = 256;
@@ -9334,7 +10082,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     {
         if (wnd != nullptr)
         {
-            if (auto* content = dynamic_cast<MilkdropModule*>(wnd->getContentComponent()))
+            if (auto* content = dynamic_cast<MilkdropModule*>(wnd->getHostedModule()))
             {
                 auto cl = content->GetContentLocalBounds();
                 if (cl.getWidth() > 0 && cl.getHeight() > 0)
@@ -9365,7 +10113,7 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
     if (reusePre)
       blit_source_fbo = milkdrop_pre_blit_fbo_;
     else
-      blit_source_fbo = renderMilkdropFrameCore (fbo_w, fbo_h, milkdrop_pre_done_);
+      blit_source_fbo = renderMilkdropFrameCore (fbo_w, fbo_h, milkdrop_pre_done_ || latePresetSwitch);
     milkdrop_pre_done_ = false;
     milkdrop_pre_w_ = fbo_w;
     milkdrop_pre_h_ = fbo_h;
@@ -9477,9 +10225,10 @@ void Y2KmeterAudioProcessorEditor::renderOpenGL() {
         if (ed == nullptr || ed->editorBeingDestructed)
             return;
         for (auto& wnd : ed->floatingWindows_) {
-            if (wnd != nullptr
-                && dynamic_cast<MilkdropModule*>(wnd->getContentComponent()) != nullptr) {
-                wnd->getContentComponent()->repaint();
+            if (wnd != nullptr) {
+                if (auto* milk = dynamic_cast<MilkdropModule*>(wnd->getHostedModule())) {
+                    milk->repaint();
+                }
             }
         }
     });
@@ -9611,6 +10360,8 @@ void Y2KmeterAudioProcessorEditor::renderGlDirectModulesZOrdered (float dpiScale
 
       if (auto* milk = dynamic_cast<MilkdropModule*> (child))
       {
+        if (! milkOk && ! milkdrop_renderer_suspended_.load (std::memory_order_acquire))
+          milkdrop_has_module_in_editor_.store (true, std::memory_order_release);
         if (milkOk && milk->isVisible() && milk->isShowing())
         {
           auto cl = milk->GetContentLocalBounds();
@@ -9744,10 +10495,11 @@ void Y2KmeterAudioProcessorEditor::destroyMilkdropEditorResources() {
   }
   {
     const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
-    milkdrop_preset_paths_.clear();
+    milkdrop_loaded_preset_path_.clear();
   }
   milkdrop_current_preset_ = 0;
   milkdrop_current_preset_ui_.store(-1);
+  milkdrop_startup_jump_fallback_ = -1;
   milkdrop_last_fbo_w_ = 0;
   milkdrop_last_fbo_h_ = 0;
   milkdrop_render_ready_.store (false, std::memory_order_release);
@@ -9758,6 +10510,13 @@ void Y2KmeterAudioProcessorEditor::openGLContextClosing() {
   y2k::diag::setThreadTag ("GL");
   y2k::diag::setPhase ("Editor::openGLContextClosing");
   Y2K_DIAGC ("GL", "openGLContextClosing enter (释放 GL 资源)");
+  milkdrop_gl_context_ready_.store (false, std::memory_order_release);
+
+  if (glToyRenderer_ != nullptr)
+    glToyRenderer_->releaseResources();
+
+  if (toyDirector != nullptr)
+    toyDirector->setGlToyHostActive (false);
 
   if (glDirectRenderer_ != nullptr)
     glDirectRenderer_->releaseAll();
@@ -9814,12 +10573,13 @@ void Y2KmeterAudioProcessorEditor::SuspendMilkdropEditorRendererForFloating() {
 void Y2KmeterAudioProcessorEditor::ResumeMilkdropEditorRendererAfterFloating() {
   // 解除挂起：dock 回嵌入态后允许恢复 Editor renderer（可能重新创建 handle）。
   milkdrop_renderer_suspended_ = false;
+  milkdrop_has_module_in_editor_.store (true, std::memory_order_release);
 
   if (editorBeingDestructed || !openGLContext.isAttached()) return;
 
   openGLContext.executeOnGLThread([this](juce::OpenGLContext&) {
     if (!milkdrop_render_ready_.load() && milkdrop_pm_handle_ == nullptr)
-      newOpenGLContextCreated();
+      initMilkdropEditorResources();
   }, false);
 }
 
@@ -9838,9 +10598,8 @@ void Y2KmeterAudioProcessorEditor::RequestGlFrame()
   if (editorBeingDestructed || !openGLContext.isAttached())
     return;
 
-  // mac：与组件重绘一起合并到下一个显示器刷新再出帧（JUCE 补丁 0005）。
-  //   直接 triggerRepaint 会立即唤醒 GL 线程，与随后到来的组件重绘各出一帧，
-  //   60Hz 屏上 GL 跑到 ~80 帧/秒，多出来的帧全是浪费。Windows 上等同 triggerRepaint。
+  // 全平台（macOS 补丁 0005/0008 + 非 macOS 补丁 0010）：与组件重绘合并到下一次
+  //   显示器刷新（macOS CVDisplayLink / Win performFrameDispatch flush）统一出帧。
   openGLContext.triggerRepaintPacedToDisplay();
 }
 
@@ -9857,11 +10616,11 @@ void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {
   //   旧写法是"先 clear 再逐个 add"，而消息线程此刻可能正在读这张表
   //   （预设名 / 总数 / 收藏按钮）→ 读到"清空到一半"的 StringArray。
   juce::StringArray newPaths;
-  if (presetsDir.exists()) {
-    auto files = presetsDir.findChildFiles(juce::File::findFiles,
-                                           false, "*.milk");
-    for (auto& f : files)
-      newPaths.add(f.getFullPathName());
+  if (presetsDir.isDirectory()) {
+    newPaths.ensureStorageAllocated (useLike ? 128 : 10240);
+    for (const auto& entry : juce::RangedDirectoryIterator (
+             presetsDir, false, "*.milk", juce::File::findFiles))
+      newPaths.add (entry.getFile().getFullPathName());
     newPaths.sort(false);
   }
 
@@ -9869,6 +10628,7 @@ void Y2KmeterAudioProcessorEditor::RescanMilkdropPresetPaths() {
   {
     const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
     milkdrop_preset_paths_.swapWith (newPaths);
+    milkdrop_scanned_use_like_ = useLike;
     count = milkdrop_preset_paths_.size();
   }
 
@@ -9897,15 +10657,17 @@ void Y2KmeterAudioProcessorEditor::ToggleMilkdropLibraryState() {
 }
 
 void Y2KmeterAudioProcessorEditor::RequestMilkdropToggleLibrary() {
-  // UI 线程：翻转收藏库状态，然后入队异步切换请求，由 renderOpenGL 在 GL 线程
-  // 消费（重扫 + 恢复到切换后库之前记录的预设）。
+  // UI 线程：翻转收藏库状态，然后入队异步切换请求，由 GL 线程消费
+  // （重扫 + 恢复到切换后库之前记录的预设）。
   ToggleMilkdropLibraryState();
   milkdrop_requested_library_toggle_.store(true);
+  RequestGlFrame();
 }
 
 void Y2KmeterAudioProcessorEditor::RequestMilkdropUnlinkReload() {
-  // UI 线程：取消收藏后入队重扫请求，由 renderOpenGL 在 GL 线程消费。
+  // UI 线程：取消收藏后入队重扫请求，由 GL 线程消费。
   milkdrop_requested_rescan_.store(true);
+  RequestGlFrame();
 }
 
 bool Y2KmeterAudioProcessorEditor::HasMilkdropLikedPresets() const {
@@ -9917,7 +10679,69 @@ bool Y2KmeterAudioProcessorEditor::HasMilkdropLikedPresets() const {
 
 juce::String Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetFilePath() const {
   // UI 线程：索引取原子镜像，路径走加锁访问器（GL 线程可能正在重扫）。
-  return MilkdropPresetPathAt (milkdrop_current_preset_ui_.load());
+  // 若异步全量扫描尚未落盘，兜底返回首帧快速加载的预设路径。
+  const juce::String p = MilkdropPresetPathAt (milkdrop_current_preset_ui_.load());
+  if (p.isNotEmpty())
+    return p;
+  const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+  return milkdrop_loaded_preset_path_;
+}
+
+bool Y2KmeterAudioProcessorEditor::loadMilkdropPresetPathInternal (
+    const juce::String& path, int displayIdx, int displayTotal) {
+  const bool dOn = Y2K_DIAG_ENABLED();
+
+  if (milkdrop_pm_handle_ == nullptr) {
+    if (dOn)
+      Y2K_DIAG ("MD", "loadPreset SKIP: handle=null（projectM 未创建）");
+    return false;
+  }
+  if (path.isEmpty()) {
+    if (dOn)
+      Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: path empty idx=")
+                            + juce::String (displayIdx));
+    return false;
+  }
+
+  auto& api = projectm_api::Api::instance();
+  if (api.hasLoadPresetData()) {
+    juce::File f(path);
+    if (f.existsAsFile()) {
+      auto data = f.loadFileAsString().toStdString();
+      const auto rawBytes = data.size();
+      // 注入 wave 样式覆盖（wave_mode/x/y/r/g/b/a/...），启用时才生效。
+      data = ApplyWaveParamsToPresetText(data, GetMilkdropWaveState());
+      if (dOn)
+        Y2K_DIAG ("MD", juce::String ("loadPreset data idx=")
+                              + juce::String (displayIdx) + "/"
+                              + juce::String (displayTotal)
+                              + " bytes=" + juce::String ((int) rawBytes)
+                              + " injected=" + juce::String ((int) data.size() - (int) rawBytes)
+                              + " file=" + f.getFileName());
+      api.loadPresetData(milkdrop_pm_handle_, data, true);
+      {
+        const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+        milkdrop_loaded_preset_path_ = path;
+      }
+      return true;
+    } else if (dOn) {
+      // 文件不见了：projectM 保持旧预设（或黑），但界面上仍然显示这个名字
+      Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: file missing → ") + path);
+    }
+    return false;
+  }
+
+  if (dOn)
+    Y2K_DIAG ("MD", juce::String ("loadPreset file idx=")
+                          + juce::String (displayIdx) + "/"
+                          + juce::String (displayTotal)
+                          + " file=" + path.fromLastOccurrenceOf("/", false, false));
+  api.loadPresetFile(milkdrop_pm_handle_, path.toRawUTF8(), true);
+  {
+    const std::lock_guard<std::mutex> lock (milkdrop_state_mutex_);
+    milkdrop_loaded_preset_path_ = path;
+  }
+  return true;
 }
 
 void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {
@@ -9928,57 +10752,19 @@ void Y2KmeterAudioProcessorEditor::LoadMilkdropPresetInternal() {
       Y2K_DIAG ("MD", "loadPreset SKIP: handle=null（projectM 未创建）");
     return;
   }
-  if (milkdrop_current_preset_ < 0
-      || milkdrop_current_preset_ >= MilkdropPresetCount()) {
-    // 这里早退 = projectM 手里没有任何有效预设 → 渲染出来必然全黑，
-    //   而且因为没有给 projectM playlist，它永远不会自己换预设（不会自愈）。
+  const int total = MilkdropPresetCount();
+  if (milkdrop_current_preset_ < 0 || milkdrop_current_preset_ >= total) {
     if (dOn)
       Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: idx=")
                             + juce::String (milkdrop_current_preset_)
-                            + " total=" + juce::String (MilkdropPresetCount())
+                            + " total=" + juce::String (total)
                             + " likeLib=" + (milkdrop_use_like_library_.load() ? "1" : "0")
                             + y2k::diag::u8 (" → 无有效预设（projectM 会渲染纯黑且不会自愈）"));
     return;
   }
 
-  auto& api = projectm_api::Api::instance();
-  // 锁内取一份路径拷贝，随后在锁外做 (可能很慢的) 预设加载 ——
-  //   实测某些预设编译要 128ms，绝不能占着 UI 也要用的锁。
   const juce::String path = MilkdropPresetPathAt (milkdrop_current_preset_);
-  if (path.isEmpty()) {
-    if (dOn)
-      Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: path empty idx=")
-                            + juce::String (milkdrop_current_preset_));
-    return;
-  }
-
-  if (api.hasLoadPresetData()) {
-    juce::File f(path);
-    if (f.existsAsFile()) {
-      auto data = f.loadFileAsString().toStdString();
-      const auto rawBytes = data.size();
-      // 注入 wave 样式覆盖（wave_mode/x/y/r/g/b/a/...），启用时才生效。
-      data = ApplyWaveParamsToPresetText(data, GetMilkdropWaveState());
-      if (dOn)
-        Y2K_DIAG ("MD", juce::String ("loadPreset data idx=")
-                              + juce::String (milkdrop_current_preset_) + "/"
-                              + juce::String (MilkdropPresetCount())
-                              + " bytes=" + juce::String ((int) rawBytes)
-                              + " injected=" + juce::String ((int) data.size() - (int) rawBytes)
-                              + " file=" + f.getFileName());
-      api.loadPresetData(milkdrop_pm_handle_, data, true);
-    } else if (dOn) {
-      // 文件不见了：projectM 保持旧预设（或黑），但界面上仍然显示这个名字
-      Y2K_DIAG ("MD", juce::String ("loadPreset SKIP: file missing → ") + path);
-    }
-  } else {
-    if (dOn)
-      Y2K_DIAG ("MD", juce::String ("loadPreset file idx=")
-                            + juce::String (milkdrop_current_preset_) + "/"
-                            + juce::String (MilkdropPresetCount())
-                            + " file=" + path.fromLastOccurrenceOf("/", false, false));
-    api.loadPresetFile(milkdrop_pm_handle_, path.toRawUTF8(), true);
-  }
+  loadMilkdropPresetPathInternal (path, milkdrop_current_preset_, total);
 }
 
 // ---- Bridge APIs（供 MilkdropModule 调用）----
@@ -9993,14 +10779,17 @@ void Y2KmeterAudioProcessorEditor::PushMilkdropPcm(
 
 void Y2KmeterAudioProcessorEditor::RequestMilkdropPresetDelta(int delta) {
   milkdrop_requested_preset_delta_.fetch_add(delta);
+  RequestGlFrame();
 }
 
 void Y2KmeterAudioProcessorEditor::RequestMilkdropPresetJump(int index) {
   milkdrop_requested_preset_jump_.store(index);
+  RequestGlFrame();
 }
 
 void Y2KmeterAudioProcessorEditor::RequestMilkdropPresetRandom() {
   milkdrop_requested_preset_random_.store(true);
+  RequestGlFrame();
 }
 
 juce::String Y2KmeterAudioProcessorEditor::GetMilkdropError() const {
@@ -10044,7 +10833,7 @@ int Y2KmeterAudioProcessorEditor::GetMilkdropTotalPresets() const noexcept {
 
 juce::String Y2KmeterAudioProcessorEditor::GetMilkdropCurrentPresetName()
     const {
-  const juce::String path = MilkdropPresetPathAt (milkdrop_current_preset_ui_.load());
+  const juce::String path = GetMilkdropCurrentPresetFilePath();
   if (path.isEmpty())
     return {};
   return path.fromLastOccurrenceOf("/", false, false)

@@ -218,10 +218,12 @@ TempoKeyModule::TempoKeyModule (AnalyserHub& h)
     latest = hub.getMusicAnalysisResult();
     refreshButtons();
     syncChildChromeVisibility();
+    y2k::ui::setGlSafeImageCache (*this, ! PinkXP::isTransparentBackdrop());
 
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
         syncChildChromeVisibility();
+        y2k::ui::setGlSafeImageCache (*this, ! PinkXP::isTransparentBackdrop());
         repaint();
     });
 

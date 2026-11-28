@@ -1,0 +1,232 @@
+diff --git a/modules/juce_opengl/opengl/juce_OpenGLContext.cpp b/modules/juce_opengl/opengl/juce_OpenGLContext.cpp
+index 2188ca88..4d2d6f99 100644
+--- a/modules/juce_opengl/opengl/juce_OpenGLContext.cpp
++++ b/modules/juce_opengl/opengl/juce_OpenGLContext.cpp
+@@ -152,6 +152,17 @@ public:
+         : context (c),
+           component (comp)
+     {
++        if (c.useDedicatedRenderThread)
++        {
++            ownedRenderThread = std::make_unique<RenderThread>();
++            renderThread = ownedRenderThread.get();
++        }
++        else
++        {
++            sharedRenderThread.emplace();
++            renderThread = &sharedRenderThread->get();
++        }
++
+         nativeContext.reset (new NativeContext (component, pixFormat, contextToShare,
+                                                 c.useMultisampling, c.versionRequired));
+ 
+@@ -255,7 +266,7 @@ public:
+     }
+ 
+     // Y2Kmeter patch: component invalidations may be coalesced to the next display
+-    //   link tick (see OpenGLContext::setComponentRepaintsPacedToDisplay).
++    //   link tick (macOS) or external VBlank flush (non-macOS).
+     void requestComponentRepaint()
+     {
+        #if JUCE_MAC
+@@ -273,11 +284,42 @@ public:
+                 return;
+             }
+         }
++       #else
++        if (context.externalFramePacing.load (std::memory_order_acquire)
++            && ! context.continuousRepaint.load (std::memory_order_acquire))
++        {
++            // Watchdog: if flushPacedRepaint() has not been called recently
++            //   (startup, modal loop, sleep, hidden tab...), render immediately.
++            const auto now = Time::getMillisecondCounter();
++            const auto lastTick = lastExternalPaceMs.load (std::memory_order_acquire);
++
++            if (lastTick != 0 && now - lastTick < 100)
++            {
++                externalPacedRepaintPending.store (true, std::memory_order_release);
++                return;
++            }
++        }
++        externalPacedRepaintPending.store (false, std::memory_order_release);
+        #endif
+ 
+         triggerRepaint();
+     }
+ 
++    void flushPacedRepaint (bool refreshWatchdog = true)
++    {
++       #if ! JUCE_MAC
++        if (refreshWatchdog)
++            lastExternalPaceMs.store (jmax ((uint32) 1, Time::getMillisecondCounter()), std::memory_order_release);
++        else
++            lastExternalPaceMs.store (0, std::memory_order_release);
++
++        if (externalPacedRepaintPending.exchange (false, std::memory_order_acq_rel))
++            triggerRepaint();
++       #else
++        ignoreUnused (refreshWatchdog);
++       #endif
++    }
++
+     void releaseResources() override
+     {
+         stop();
+@@ -433,7 +475,22 @@ public:
+            #endif
+ 
+             // This avoids hogging the message thread when doing intensive rendering.
+-            std::this_thread::sleep_until (lastMMLockReleaseTime + std::chrono::milliseconds { 2 });
++            // Y2Kmeter patch: paced non-continuous contexts are already bounded by
++            //   the display VBlank cadence; skip the hardcoded 2ms sleep (yield only
++            //   if <250us since lock release) so burst/recovery frames stay inside 16.67ms.
++            const bool isPacedNonContinuous = ! context.continuousRepaint.load (std::memory_order_acquire)
++                && (context.componentRepaintsPacedToDisplay.load (std::memory_order_acquire)
++                    || context.externalFramePacing.load (std::memory_order_acquire));
++
++            if (isPacedNonContinuous)
++            {
++                if (std::chrono::steady_clock::now() < lastMMLockReleaseTime + std::chrono::microseconds { 250 })
++                    std::this_thread::yield();
++            }
++            else
++            {
++                std::this_thread::sleep_until (lastMMLockReleaseTime + std::chrono::milliseconds { 2 });
++            }
+ 
+             {
+                 const auto tNow = StatsClock::now();
+@@ -515,6 +572,19 @@ public:
+                 drawComponentBuffer();
+             }
+ 
++            // Y2Kmeter patch: post-component overlay hook (e.g. GL-batched ToyBox).
++            // Runs AFTER drawComponentBuffer() and AFTER MessageManager lock release,
++            // BEFORE bufferSwapper.swap(), even when isUpdating == false.
++            if (context.renderer != nullptr)
++            {
++                OpenGLRendering::SavedBinding<OpenGLRendering::TraitsVAO> vaoBinding;
++
++                glViewport (0, 0, viewportArea.getWidth(), viewportArea.getHeight());
++                context.currentRenderScale = currentAreaAndScale.scale;
++                context.renderer->renderOpenGLPostComponentBuffer();
++                clearGLError();
++            }
++
+             {
+                 const auto tNow = StatsClock::now();
+                 stats.drawUs += usBetween (tMark, tNow);
+@@ -1082,7 +1152,10 @@ public:
+     OpenGLContext& context;
+     Component& component;
+ 
+-    SharedResourcePointer<RenderThread> renderThread;
++    // Y2Kmeter patch: optional dedicated RenderThread per context
++    std::optional<SharedResourcePointer<RenderThread>> sharedRenderThread;
++    std::unique_ptr<RenderThread> ownedRenderThread;
++    RenderThread* renderThread = nullptr;
+ 
+     OpenGLFrameBuffer cachedImageFrameBuffer;
+     RectangleList<int> validArea;
+@@ -1175,6 +1248,10 @@ public:
+     // On macOS, rather than letting swapBuffers block as appropriate, we use a display link
+     // callback to mark the view as needing to repaint.
+     std::optional<PerScreenDisplayLinks::Connection> connection;
++   #else
++    // Y2Kmeter patch: external display-paced component/GL repaints (Windows/Linux)
++    std::atomic<bool> externalPacedRepaintPending { false };
++    std::atomic<uint32> lastExternalPaceMs { 0 };
+    #endif
+ 
+     enum StateFlags
+@@ -1417,6 +1494,28 @@ void OpenGLContext::triggerRepaintPacedToDisplay()
+         cachedImage->requestComponentRepaint();
+ }
+ 
++void OpenGLContext::setExternalFramePacing (bool shouldPace)
++{
++    externalFramePacing.store (shouldPace, std::memory_order_release);
++
++    if (! shouldPace)
++        if (auto* cachedImage = getCachedImage())
++            cachedImage->flushPacedRepaint (false);
++}
++
++void OpenGLContext::flushPacedRepaint()
++{
++    if (auto* cachedImage = getCachedImage())
++        cachedImage->flushPacedRepaint();
++}
++
++void OpenGLContext::setUseDedicatedRenderThread (bool shouldUseDedicated) noexcept
++{
++    // This method must not be called when the context has already been attached!
++    jassert (nativeContext == nullptr);
++    useDedicatedRenderThread = shouldUseDedicated;
++}
++
+ OpenGLContext::RenderStats OpenGLContext::takeRenderStats() noexcept
+ {
+     RenderStats s;
+diff --git a/modules/juce_opengl/opengl/juce_OpenGLContext.h b/modules/juce_opengl/opengl/juce_OpenGLContext.h
+index 90cd9d3a..3c976f1d 100644
+--- a/modules/juce_opengl/opengl/juce_OpenGLContext.h
++++ b/modules/juce_opengl/opengl/juce_OpenGLContext.h
+@@ -206,6 +206,27 @@ public:
+     */
+     void triggerRepaintPacedToDisplay();
+ 
++    /** (Y2Kmeter patch, non-macOS) When continuous repainting is disabled, coalesces
++        component invalidations and triggerRepaintPacedToDisplay() calls until
++        flushPacedRepaint() is invoked (e.g. at the end of an external VBlank frame
++        dispatch). Falls back to immediate triggerRepaint() if flushPacedRepaint()
++        has not been called within 100ms (watchdog for startup, modal loops, sleep,
++        or hidden tabs). Has no effect on macOS or when continuous repainting is on.
++    */
++    void setExternalFramePacing (bool shouldPace);
++
++    /** (Y2Kmeter patch, non-macOS) Refreshes the external pacing watchdog and
++        wakes the render thread once if any paced component or GL repaint is pending.
++    */
++    void flushPacedRepaint();
++
++    /** (Y2Kmeter patch) When enabled before attachTo(), gives this context its own
++        dedicated RenderThread instead of sharing the process-wide RenderThread.
++        Prevents multiple VSync-locked windows from serializing SwapBuffers() waits.
++        Call this before attachTo(). Default: false.
++    */
++    void setUseDedicatedRenderThread (bool shouldUseDedicated) noexcept;
++
+     /** (Y2Kmeter patch) Per-phase timing of the render thread, accumulated since the last
+         call to takeRenderStats(). All times are in milliseconds, summed over `frames`.
+     */
+@@ -410,6 +431,8 @@ private:
+     bool renderComponents = true, useMultisampling = false, overrideCanAttach = false;
+     std::atomic<bool> continuousRepaint { false };
+     std::atomic<bool> componentRepaintsPacedToDisplay { false };
++    std::atomic<bool> externalFramePacing { false };
++    bool useDedicatedRenderThread = false;
+ 
+     // Y2Kmeter patch: render thread phase timing (microseconds, written by the GL thread)
+     struct RenderStatsAccum
+diff --git a/modules/juce_opengl/opengl/juce_OpenGLRenderer.h b/modules/juce_opengl/opengl/juce_OpenGLRenderer.h
+index 812851da..0ff7a6bf 100644
+--- a/modules/juce_opengl/opengl/juce_OpenGLRenderer.h
++++ b/modules/juce_opengl/opengl/juce_OpenGLRenderer.h
+@@ -91,6 +91,16 @@ public:
+         renderOpenGL() will composite afterwards). Default: does nothing.
+     */
+     virtual void renderOpenGLPreLock() {}
++
++    /** (Y2Kmeter patch) Optional hook called on the render thread after
++        drawComponentBuffer() has composited the JUCE component layer onto FBO 0,
++        and after the MessageManager lock has been released, immediately before
++        swapBuffers(). The GL context is active and the viewport is set to the
++        physical framebuffer area; NEVER touch the JUCE component tree here.
++        Runs even when no JUCE component was repainted (pendingRender-only frames).
++        Default: does nothing.
++    */
++    virtual void renderOpenGLPostComponentBuffer() {}
+     /** Called when the current openGL context is about to close.
+         You can use this opportunity to release any GL resources that you may have
+         created.

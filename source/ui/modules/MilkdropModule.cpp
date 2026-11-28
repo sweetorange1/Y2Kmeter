@@ -30,6 +30,7 @@
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #if JUCE_MAC
@@ -2365,8 +2366,31 @@ void MilkdropModule::jumpToPresetIndex(int index)
 // ==========================================================
 // GLView
 // ==========================================================
+namespace
+{
+struct DockedMilkdropRepaintState
+{
+  bool    ready              = false;
+  bool    focused            = false;
+  bool    loadingActive      = false;
+  bool    transparentHidden  = false;
+  bool    inLikeLib          = false;
+  int64_t lastSwitchMs       = 0;
+  int     presetIndex        = -1;
+  int     presetTotal        = -1;
+};
+
+std::unordered_map<const void*, DockedMilkdropRepaintState>&
+dockedMilkdropRepaintStates()
+{
+  static std::unordered_map<const void*, DockedMilkdropRepaintState> states;
+  return states;
+}
+} // namespace
+
 MilkdropModule::GLView::GLView(MilkdropModule& owner)
     : owner_(owner) {
+  dockedMilkdropRepaintStates().erase (this);
 #if JUCE_MAC
   // projectM 4 的 GLSL shader 需要 OpenGL Core Profile 3.2+。
   // 不设置此项时 macOS 默认给 Legacy Profile（NSOpenGLProfileVersionLegacy），
@@ -2383,11 +2407,13 @@ MilkdropModule::GLView::GLView(MilkdropModule& owner)
   // Windows 下 JUCE 依旧能正确混合 CPU/GL 层，也保持开启。
   open_gl_context_.setComponentPaintingEnabled(true);
   open_gl_context_.setContinuousRepainting(true);
+  open_gl_context_.setUseDedicatedRenderThread(true);
   startTimerHz(30);
 }
 
 MilkdropModule::GLView::~GLView() {
   stopTimer();
+  dockedMilkdropRepaintStates().erase (this);
   DetachOpenGL();
 }
 
@@ -3247,7 +3273,10 @@ int64_t MilkdropModule::GLView::GetLastPresetSwitchTimeMs() const {
 void MilkdropModule::GLView::timerCallback() {
   ++diagTimerTicks;
   UpdateOpenGLAttachment();
-  if (!IsRenderReady()) return;
+  if (!IsRenderReady()) {
+    dockedMilkdropRepaintStates().erase (this);
+    return;
+  }
 
   // ---- 首次自动激活焦点（仅一次）----
   if (!first_focus_done_) {
@@ -3261,10 +3290,58 @@ void MilkdropModule::GLView::timerCallback() {
   // ---- Auto-hide / Auto 轮播检测 ----
   owner_.checkOverlayAutoHide();
   owner_.checkAutoMode();
-  owner_.repaint();
-  // 脱离态下控制栏由 GLView::paint 覆盖绘制，必须显式触发 GLView 重绘，
-  // 否则自动隐藏 / hover / auto 展开等状态变化不会刷新到画面。
-  repaint();
+
+  // 嵌入态（Windows Editor GL 合成，!isFloating && !attached）：
+  //   projectM 动画帧由 MilkdropModule::onFrame() → RequestGlFrame() 按显示器刷新率驱动，
+  //   paintContent() 仅在首次就绪、控制栏聚焦态变更/预设文案变更、或 1.2s 切预设提示条可见时
+  //   才需要 CPU 重绘。跳过无变化的 30Hz 盲目 repaint()，消除每 5 秒 ~150 次无效组件标脏。
+  if (! owner_.isFloating() && ! attached_) {
+    auto& st = dockedMilkdropRepaintStates()[this];
+    const bool curFocused = owner_.focused_;
+    const bool curTransparentHidden = PinkXP::isTransparentBackdrop()
+                                      && ! PinkXP::isChromaRevealed (owner_);
+    const bool curInLikeLib = (owner_.editor_ != nullptr)
+                              && owner_.editor_->IsMilkdropUseLikeLibrary();
+    const int64_t curLastSwitch = GetLastPresetSwitchTimeMs();
+    bool curLoading = false;
+    if (! owner_.isAutoMode_ && curLastSwitch != 0) {
+      const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      curLoading = (nowMs - curLastSwitch) <= 1200;
+    }
+    const int curIdx   = curFocused ? GetCurrentPresetIndex() : st.presetIndex;
+    const int curTotal = curFocused ? GetTotalPresetCount()   : st.presetTotal;
+
+    const bool needRepaint = (! st.ready)
+                          || (curFocused != st.focused)
+                          || (curTransparentHidden != st.transparentHidden)
+                          || (curInLikeLib != st.inLikeLib)
+                          || (curLastSwitch != st.lastSwitchMs)
+                          || curLoading
+                          || (curLoading != st.loadingActive)
+                          || (curFocused && (curIdx != st.presetIndex
+                                             || curTotal != st.presetTotal));
+
+    st.ready             = true;
+    st.focused           = curFocused;
+    st.loadingActive     = curLoading;
+    st.transparentHidden = curTransparentHidden;
+    st.inLikeLib         = curInLikeLib;
+    st.lastSwitchMs      = curLastSwitch;
+    if (curFocused) {
+      st.presetIndex = curIdx;
+      st.presetTotal = curTotal;
+    }
+
+    if (needRepaint)
+      owner_.repaint();
+  } else {
+    dockedMilkdropRepaintStates().erase (this);
+    owner_.repaint();
+    // 脱离态下控制栏由 GLView::paint 覆盖绘制，必须显式触发 GLView 重绘，
+    // 否则自动隐藏 / hover / auto 展开等状态变化不会刷新到画面。
+    repaint();
+  }
 #if JUCE_MAC
   // macOS：顶层控制栏悬浮窗需要跟随模块屏幕位置、可见性、hover/press 高亮实时刷新。
   // 与主 UI 重绘 30Hz 同步，既能跟踪窗口拖动/resize，又保证 hover 反馈及时。
@@ -3950,6 +4027,15 @@ void MilkdropModule::mouseMove(const juce::MouseEvent& e)
         }
         else
             ModulePanel::mouseMove(e); // 基类处理边缘光标
+
+        // 5 个子面板（Auto / Color / Effects / Wave / Tweak）的按钮/标签 hover 高亮
+        // 在 paint* 中按 getMouseXYRelative() 实时判定；嵌入态跳过 30Hz 盲目 repaint 后，
+        // 仅在子面板展开且鼠标移动时按需重绘，既保证 60Hz+ 顺滑 hover 反馈又零空闲开销。
+        if (isAutoRowExpanded_ || isColorPanelOpen_ || isEffectsPanelOpen_
+            || isWavePanelOpen_ || isTweakPanelOpen_)
+        {
+            repaint();
+        }
     }
     else
     {
@@ -4328,11 +4414,22 @@ void MilkdropModule::mouseDrag(const juce::MouseEvent& e)
 
 void MilkdropModule::mouseExit(const juce::MouseEvent& e)
 {
+    bool needRepaint = false;
     if (hoveredOverlayBtn_ != OverlayButton::kNone)
     {
         hoveredOverlayBtn_ = OverlayButton::kNone;
+        needRepaint = true;
+    }
+    if (focused_ && (isAutoRowExpanded_ || isColorPanelOpen_ || isEffectsPanelOpen_
+                     || isWavePanelOpen_ || isTweakPanelOpen_))
+    {
+        needRepaint = true;
+    }
+    if (needRepaint)
+    {
         repaint();
-        glView->repaint();
+        if (glView != nullptr)
+            glView->repaint();
     }
     ModulePanel::mouseExit(e);
 }

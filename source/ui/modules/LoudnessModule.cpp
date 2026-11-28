@@ -941,7 +941,8 @@ void LoudnessModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> contentBoun
     staticLayer = juce::Image(juce::Image::ARGB,
                               contentBounds.getWidth(),
                               contentBounds.getHeight(),
-                              true);
+                              true,
+                              juce::SoftwareImageType());
     staticLayerContentBounds = contentBounds;
     staticLayerBarCount      = (int) slots.size();
     staticLayerAppearanceGen = appGen;

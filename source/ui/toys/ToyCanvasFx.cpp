@@ -135,6 +135,66 @@ struct EmojiParticle : public ToyActor
         performanceSimplified = true;
         return true;
     }
+    bool restoreDetailForPerformance() override
+    {
+        if (! performanceSimplified)
+            return false;
+        performanceSimplified = false;
+        return true;
+    }
+    bool extractGlSprite (y2ktoy::GlToySprite& out, const ToyDirector& dir) const override
+    {
+        out = {};
+        out.cx       = pos.x;
+        out.cy       = pos.y;
+        out.drawSize = (float) drawSize;
+        out.angleRad = spin;
+        out.scaleY   = 1.0f - squash * 0.35f;
+        out.alpha    = alpha;
+
+        if (! rainClipBounds.isEmpty())
+        {
+            out.hasClip = 1;
+            out.clipX0  = (float) rainClipBounds.getX();
+            out.clipY0  = (float) rainClipBounds.getY();
+            out.clipX1  = (float) rainClipBounds.getRight();
+            out.clipY1  = (float) rainClipBounds.getBottom();
+        }
+
+        if (performanceSimplified)
+        {
+            out.isDot   = 1;
+            out.dotSize = 4.0f + (float) juce::jmin (sizeTier, 2);
+            const auto c = rainbow ? juce::Colour::fromHSV (hue, 0.7f, 1.0f, 1.0f)
+                                   : (sizeTier == 0 ? ToyPalette::accent() : ToyPalette::accent2());
+            out.dotR = c.getFloatRed();
+            out.dotG = c.getFloatGreen();
+            out.dotB = c.getFloatBlue();
+            return true;
+        }
+
+        y2ktoy::AtlasSlot slot;
+        if (dir.atlas == nullptr || ! dir.atlas->resolveGlSlot (id, (EmojiAtlas::Size) sizeTier, slot))
+        {
+            out.alpha = 0.0f;
+            return true;
+        }
+
+        out.u0 = slot.u0;
+        out.v0 = slot.v0;
+        out.u1 = slot.u1;
+        out.v1 = slot.v1;
+
+        if (rainbow)
+        {
+            const auto hc = juce::Colour::fromHSV (hue, 0.7f, 1.0f, 1.0f);
+            out.haloR = hc.getFloatRed();
+            out.haloG = hc.getFloatGreen();
+            out.haloB = hc.getFloatBlue();
+            out.haloA = 0.25f * alpha;
+        }
+        return true;
+    }
     void impulse (juce::Point<float> from, float strength) override
     {
         auto d = pos - from;
@@ -172,13 +232,17 @@ struct EmojiParticle : public ToyActor
 
         spin += spinVel * dt;
         squash = juce::jmax (0.0f, squash - 5.0f * dt);   // C-7：约 0.2 秒回弹
+        if (rainbow)
+            hue = std::fmod (hue + 1.2f * dt, 1.0f);
 
-        // 性能优化 P1 + P14：step 阶段预热旋转分桶（烘焙不进 paint 回调）；
-        //   bucket 未变化时零调用，省掉每帧每粒子的锁 + hash 查找。
-        //   Win 性能优化：fit 模式（物理缩放 1.0）下不旋转的粒子也走分桶图（bucket 0 = 屏幕尺寸直贴），
-        //   并且只有烘焙真正成功（或已存在）才记录 bucket —— 此前被节流/原图未就绪时也会记录，
-        //   导致该 bucket 永不重试。
-        if (std::abs (spin) > 0.02f || dir.atlas->fitsDrawSize())
+        // GL 批渲染路径：零 CPU 旋转图烘焙，仅确保 (id, size) 槽位已烘焙进单图集；
+        // CPU 回退路径：按物理像素尺寸预热旋转分桶缓存，避免 paint 内重采样。
+        if (dir.isGlToyActive())
+        {
+            if (! performanceSimplified && dir.atlas != nullptr)
+                dir.atlas->ensureBakedForGl (id, (EmojiAtlas::Size) sizeTier);
+        }
+        else if (std::abs (spin) > 0.02f || dir.atlas->fitsDrawSize())
         {
             const int b = EmojiAtlas::bucketOf (spin);
             if (b != lastRotBucket_
@@ -261,32 +325,60 @@ struct EmojiParticle : public ToyActor
 
         const float s = (float) drawSize;
 
-        // 彩虹着色（Y2K MODE）：叠加一层随时间旋转的色相光晕
+        // 彩虹着色（Y2K MODE）：CPU 回退路径用预烘焙径向光晕贴图替代逐粒子 fillEllipse
         if (rainbow)
         {
-            hue = std::fmod (hue + 0.02f, 1.0f);
-            g.setColour (juce::Colour::fromHSV (hue, 0.7f, 1.0f, 0.25f));
-            g.fillEllipse (pos.x - s * 0.6f, pos.y - s * 0.6f, s * 1.2f, s * 1.2f);
+            const auto& glow = dir.atlas->partyGlowSprite();
+            if (glow.isValid())
+            {
+                g.setColour (juce::Colour::fromHSV (hue, 0.7f, 1.0f, 0.25f * alpha));
+                const int gs = juce::jmax (2, juce::roundToInt (s * 1.2f));
+                g.drawImage (glow,
+                             juce::roundToInt (pos.x - s * 0.6f),
+                             juce::roundToInt (pos.y - s * 0.6f),
+                             gs, gs, 0, 0, glow.getWidth(), glow.getHeight(), true);
+            }
+            else
+            {
+                g.setColour (juce::Colour::fromHSV (hue, 0.7f, 1.0f, 0.25f * alpha));
+                g.fillEllipse (pos.x - s * 0.6f, pos.y - s * 0.6f, s * 1.2f, s * 1.2f);
+            }
         }
 
         const float scaleY = 1.0f - squash * 0.35f;
 
         // 性能优化 P1：旋转且无挤压 → 查预烘焙角度分桶图（paint 内零烘焙、零风险），
-        //   命中则整数坐标 blit；未命中走慢路径（step 阶段已预热，最多首帧 miss 一次）
+        //   命中则按物理像素 1:1 整数坐标 blit；未命中走慢路径（step 阶段已预热，最多首帧 miss 一次）
         if (scaleY > 0.99f && (std::abs (spin) > 0.02f || dir.atlas->fitsDrawSize()))
         {
             const juce::Image rimg = dir.atlas->rotatedCached (id, (EmojiAtlas::Size) sizeTier, spin);
             if (rimg.isValid())
             {
                 g.setOpacity (alpha);
-                const int px = juce::roundToInt (pos.x - s * 0.5f);
-                const int py = juce::roundToInt (pos.y - s * 0.5f);
-                // P15：目标尺寸 == 源图尺寸时走 drawImageAt（1:1 无缩放快路径）
-                if (juce::roundToInt (s) == rimg.getWidth())
-                    g.drawImageAt (rimg, px, py, false);
+                const float physScale = dir.atlas->physicalScale();
+                const int expectedPhys = juce::roundToInt (s * physScale);
+                if (std::abs (physScale - 1.0f) < 0.01f && juce::roundToInt (s) == rimg.getWidth())
+                {
+                    g.drawImageAt (rimg,
+                                   juce::roundToInt (pos.x - s * 0.5f),
+                                   juce::roundToInt (pos.y - s * 0.5f), false);
+                }
+                else if (std::abs (expectedPhys - rimg.getWidth()) <= 1 && physScale > 0.1f)
+                {
+                    juce::Graphics::ScopedSaveState ss (g);
+                    g.addTransform (juce::AffineTransform::scale (1.0f / physScale));
+                    g.drawImageAt (rimg,
+                                   juce::roundToInt ((pos.x - s * 0.5f) * physScale),
+                                   juce::roundToInt ((pos.y - s * 0.5f) * physScale), false);
+                }
                 else
-                    g.drawImage (rimg, px, py, (int) s, (int) s,
+                {
+                    g.drawImage (rimg,
+                                 juce::roundToInt (pos.x - s * 0.5f),
+                                 juce::roundToInt (pos.y - s * 0.5f),
+                                 (int) s, (int) s,
                                  0, 0, rimg.getWidth(), rimg.getHeight(), false);
+                }
                 g.setOpacity (1.0f);
                 return;
             }
@@ -419,7 +511,10 @@ void ToyDirector::spawnSmallBurst (juce::Point<float> at, float speedBoost)
         p->drawSize = atlas->drawSize (EmojiAtlas::Size::S);
         clock->freeActors.push_back (std::move (p));
     }
-    ensureOverlay();
+    if (isGlToyActive())
+        requestGlToyFrame();
+    else
+        ensureOverlay();
 }
 
 void ToyDirector::spawnCanvasFountain (juce::Point<float> editorPos, float charge)

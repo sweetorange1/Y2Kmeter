@@ -195,6 +195,24 @@ void ToyContext::promoteToFree (std::unique_ptr<ToyActor> a)
 
 void ToyContext::bubble (juce::Point<float> at, const juce::String& text, ToyRole r)
 {
+    if (! state)
+        return;
+
+    // 单面板最多保留 2 个并发读数气泡，防止连点时气泡叠加放大面板重绘区域
+    int bubbleCount = 0;
+    for (const auto& a : state->actors)
+        if (a != nullptr && a->isReadoutBubble())
+            ++bubbleCount;
+    while (bubbleCount >= 2)
+    {
+        auto it = std::find_if (state->actors.begin(), state->actors.end(),
+                                [] (const auto& a) { return a != nullptr && a->isReadoutBubble(); });
+        if (it == state->actors.end())
+            break;
+        state->actors.erase (it);
+        --bubbleCount;
+    }
+
     // clamp 到模块内容区（反馈：气泡超出模块边界的部分不显示）
     const auto clamp = panel ? panel->getContentBounds() : juce::Rectangle<int>();
     addModuleActor (makeReadoutBubble (at, text, toyRoleEmoji (r), ToyPalette::accent(), clamp));
@@ -209,7 +227,10 @@ void ToyContext::spawnEmoji (EmojiId id, juce::Point<float> at,
         const auto editorPos = director->editor.getLocalPoint (panel, at.toInt()).toFloat();
         director->clock->freeActors.push_back (
             makeEmojiParticle (id, editorPos, v, sizeTier, *director));
-        director->ensureOverlay();
+        if (director->isGlToyActive())
+            director->requestGlToyFrame();
+        else
+            director->ensureOverlay();
     }
     else
     {
@@ -221,6 +242,24 @@ void ToyContext::spawnEmoji (EmojiId id, juce::Point<float> at,
 // ToyClock
 // ==========================================================
 ToyClock::ToyClock (ToyDirector& dir) : director (dir) {}
+
+ToyClock::DiagSnapshot ToyClock::takeDiagSnapshot() noexcept
+{
+    DiagSnapshot s;
+    s.freeActors           = (int) freeActors.size();
+    s.fullEmoji            = highDetailFreeActorCount_;
+    s.degradedFreeActors   = degradedFreeActorCount_;
+    s.emojiTarget          = degradation_.targetFullEmojiCount();
+    s.smoothedFps          = degradation_.smoothedFps();
+    s.overlayPaintMs       = overlayPaintTotalMs_;
+    s.overlayPaints        = overlayPaintCalls_;
+    s.overlayActorsPainted = overlayActorsPainted_;
+    s.glToyActive          = director.isGlToyActive();
+    overlayPaintTotalMs_   = 0.0;
+    overlayPaintCalls_     = 0;
+    overlayActorsPainted_  = 0;
+    return s;
+}
 
 void ToyClock::trackPanel (ModulePanel& p)
 {
@@ -255,17 +294,8 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
                          ? juce::jmax (0.0, frame.timeSec - lastFrameTime_)
                          : (double) frame.dtSec;
     lastFrameTime_ = frame.timeSec;
-    if (elapsed > 0.0001)
-    {
-        const double instantaneousFps = juce::jlimit (1.0, 240.0, 1.0 / elapsed);
-        // Win 性能优化：下降响应 0.35 → 0.12。0.35 时单次 20~30ms 的偶发卡顿就能把平滑值
-        //   拽到 58 以下，触发粒子永久降级为小像素点；持续掉帧仍会在数帧内触发降级。
-        const double response = instantaneousFps < smoothedFps_ ? 0.12 : 0.06;
-        smoothedFps_ += (instantaneousFps - smoothedFps_) * response;
-    }
 
     const float dt = frame.dtSec;
-    bool any = false;
     const double t0 = juce::Time::getMillisecondCounterHiRes();
 
     // C-2：按住持续喷（花洒）
@@ -274,6 +304,10 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         director.sprayTick (frame.timeSec);
         director.tickConfettiRain (frame.timeSec);
     }
+
+    const bool glActive = director.isGlToyActive();
+    degradation_.setGlBatched (glActive);
+    degradation_.update (elapsed, (int) freeActors.size());
 
     // 刷新平台上沿（Editor 坐标，带 x 范围）。
     // FIX-4 / B-13：仅当存在活动自由 actor 时才遍历模块，空闲零开销。
@@ -296,9 +330,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
 
     // 性能优化 P12v2：FIFO 硬上限（400）——超过时淘汰"最先创建"（age 最大）的粒子，
     //   保证每次点击喷发量恒定、屏上始终是最新的粒子。
-    //   用 nth_element（O(n)）按 age 升序分区：前 limit 个是最年轻的，删除其余。
-    //   注意：上一版 sort 降序 + 删尾部实际是"删最新留最老"，与预期相反，已修正。
-    constexpr int kFreeActorLimit = 400;
+    constexpr int kFreeActorLimit = y2ktoy::kMaxToySprites;
     if ((int) freeActors.size() > kFreeActorLimit)
     {
         std::nth_element (freeActors.begin(), freeActors.begin() + kFreeActorLimit, freeActors.end(),
@@ -307,47 +339,210 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
     }
 
     const auto visibleBounds = director.editor.getLocalBounds().toFloat();
-    // 自由 actor
+    bool anyCpuOverlay = false;
+
+    // 1) 推进所有自由 actor（swap-and-pop 删除失效粒子，避免 O(N^2) vector 中间搬移）
+    juce::RectangleList<int> cpuDirtyRl;
     if (! freeActors.empty())
     {
         const float actorDt = (float) elapsed;
-
-        // 性能优化 P10：tile 分块 repaint（128px 块，只重绘粒子实际覆盖的块）。
-        //   union 单次大 dirty 在粒子散布全屏时每帧重绘大半窗口的底层组件
-        //   （日志实测 60Hz 段 48~150 粒子仅 22~30fps），tile 化后重绘面积
-        //   只与粒子总覆盖成正比。
-        juce::RectangleList<int> rl;
-        for (auto it = freeActors.begin(); it != freeActors.end();)
+        for (size_t i = 0; i < freeActors.size();)
         {
-            auto& a = *it;
-            a->prevBounds = a->getBounds();
-            a->hasPrevBounds = true;
+            auto& a = freeActors[i];
+            if (! glActive)
+            {
+                a->prevBounds = a->getBounds();
+                a->hasPrevBounds = true;
+            }
             a->step (actorDt, director);
 
-            const auto cur = a->getBounds().getSmallestIntegerContainer();
             if (! a->alive)
             {
-                rl.add (cur);
-                it = freeActors.erase (it);
+                if (! glActive)
+                {
+                    cpuDirtyRl.add (a->getBounds().getSmallestIntegerContainer());
+                    if (a->hasPrevBounds)
+                        cpuDirtyRl.add (a->prevBounds.getSmallestIntegerContainer());
+                }
+                if (i + 1 < freeActors.size())
+                    freeActors[i] = std::move (freeActors.back());
+                freeActors.pop_back();
                 continue;
             }
-            rl.add (cur);
-            if (a->hasPrevBounds)
-                rl.add (a->prevBounds.getSmallestIntegerContainer());
-            ++it;
+            if (! glActive)
+            {
+                cpuDirtyRl.add (a->getBounds().getSmallestIntegerContainer());
+                if (a->hasPrevBounds)
+                    cpuDirtyRl.add (a->prevBounds.getSmallestIntegerContainer());
+            }
+            ++i;
+        }
+    }
+
+    // 2) 目标 FPS 相对迟滞降级与可逆恢复（先于 GL 快照提取，确保本帧即生效）
+    visibleFreeActorCount_ = 0;
+    highDetailFreeActorCount_ = 0;
+    degradedFreeActorCount_ = 0;
+    for (const auto& actor : freeActors)
+    {
+        if (actor != nullptr && actor->alive)
+        {
+            if (actor->isPoppable() && ! actor->isHighDetailForPerformance())
+                ++degradedFreeActorCount_;
+            if (actor->getBounds().intersects (visibleBounds))
+            {
+                ++visibleFreeActorCount_;
+                if (actor->isHighDetailForPerformance())
+                    ++highDetailFreeActorCount_;
+            }
+        }
+    }
+
+    const int targetFull = degradation_.targetFullEmojiCount();
+    if (highDetailFreeActorCount_ > targetFull)
+    {
+        std::vector<ToyActor*> oldestFirst;
+        oldestFirst.reserve ((size_t) highDetailFreeActorCount_);
+        for (auto& actor : freeActors)
+            if (actor != nullptr && actor->alive
+                && actor->getBounds().intersects (visibleBounds)
+                && actor->isHighDetailForPerformance())
+                oldestFirst.push_back (actor.get());
+
+        std::sort (oldestFirst.begin(), oldestFirst.end(), [] (const ToyActor* a, const ToyActor* b)
+        {
+            return a->age > b->age;
+        });
+
+        const int simplifyCount = juce::jmin (degradation_.degradeBudgetPerFrame(),
+            highDetailFreeActorCount_ - targetFull);
+        for (int i = 0; i < simplifyCount && i < (int) oldestFirst.size(); ++i)
+            if (oldestFirst[(size_t) i]->simplifyForPerformance())
+            {
+                --highDetailFreeActorCount_;
+                ++degradedFreeActorCount_;
+            }
+    }
+    else if (highDetailFreeActorCount_ < targetFull
+             && highDetailFreeActorCount_ < visibleFreeActorCount_)
+    {
+        std::vector<ToyActor*> youngestFirst;
+        youngestFirst.reserve ((size_t) (visibleFreeActorCount_ - highDetailFreeActorCount_));
+        for (auto& actor : freeActors)
+            if (actor != nullptr && actor->alive
+                && actor->getBounds().intersects (visibleBounds)
+                && ! actor->isHighDetailForPerformance())
+                youngestFirst.push_back (actor.get());
+
+        std::sort (youngestFirst.begin(), youngestFirst.end(), [] (const ToyActor* a, const ToyActor* b)
+        {
+            return a->age < b->age;
+        });
+
+        const int restoreCount = juce::jmin (degradation_.restoreBudgetPerFrame(),
+            targetFull - highDetailFreeActorCount_);
+        for (int i = 0; i < restoreCount && i < (int) youngestFirst.size(); ++i)
+            if (youngestFirst[(size_t) i]->restoreDetailForPerformance())
+            {
+                ++highDetailFreeActorCount_;
+                if (degradedFreeActorCount_ > 0)
+                    --degradedFreeActorCount_;
+            }
+    }
+
+    // 3) 分流：GL 批渲染（零 ToyOverlay 重绘） vs CPU ToyOverlay 回退
+    if (glActive)
+    {
+        bool hasNonGlFreeActor = false;
+        std::vector<y2ktoy::GlToySprite> sprites;
+        if (! freeActors.empty())
+        {
+            sprites.reserve (freeActors.size());
+            y2ktoy::GlToySprite sp;
+            for (const auto& actor : freeActors)
+            {
+                if (actor == nullptr || ! actor->alive)
+                    continue;
+                if (! actor->extractGlSprite (sp, director))
+                {
+                    hasNonGlFreeActor = true;
+                    break;
+                }
+                if (sp.alpha > 0.002f)
+                    sprites.push_back (sp);
+            }
+        }
+
+        if (! hasNonGlFreeActor)
+        {
+            if (! sprites.empty())
+            {
+                auto snap = std::make_shared<y2ktoy::GlToySnapshot>();
+                snap->version        = ++glSnapshotVersion_;
+                snap->editorLogicalW = director.editor.getWidth();
+                snap->editorLogicalH = director.editor.getHeight();
+                snap->atlasGen       = director.atlas != nullptr ? director.atlas->glAtlasGeneration() : 0u;
+                snap->sprites        = std::move (sprites);
+
+                director.collectExclusionRects (exclusionScratch_);
+                int exCount = 0;
+                for (const auto& r : exclusionScratch_)
+                {
+                    if (r.isEmpty() || exCount >= y2ktoy::kMaxExclusionRects)
+                        continue;
+                    snap->exclusions[(size_t) exCount++] = {
+                        (float) r.getX(), (float) r.getY(),
+                        (float) r.getRight(), (float) r.getBottom()
+                    };
+                }
+                snap->exclusionCount = exCount;
+
+                director.publishGlToySnapshot (std::move (snap), true, false);
+                director.requestGlToyFrame();
+                hadGlSpritesLastFrame_ = true;
+                lastActivityTime = frame.timeSec;
+            }
+            else if (hadGlSpritesLastFrame_)
+            {
+                director.publishGlToySnapshot (nullptr, false, true);
+                director.requestGlToyFrame();
+                hadGlSpritesLastFrame_ = false;
+            }
+
+            director.hideOverlayIfUnused();
+        }
+        else
+        {
+            // 含非 GL 自由 actor（如 promoteToFree）：本帧回退 CPU ToyOverlay，清空 GL 快照防重影
+            if (hadGlSpritesLastFrame_)
+            {
+                director.publishGlToySnapshot (nullptr, false, true);
+                director.requestGlToyFrame();
+                hadGlSpritesLastFrame_ = false;
+            }
+            anyCpuOverlay = true;
+            director.ensureOverlay();
+            if (director.overlay && director.overlay->isVisible())
+                director.overlay->repaint();
+        }
+    }
+    else
+    {
+        if (hadGlSpritesLastFrame_)
+        {
+            director.publishGlToySnapshot (nullptr, false, false);
+            hadGlSpritesLastFrame_ = false;
         }
         if (! freeActors.empty())
-            any = true;
+            anyCpuOverlay = true;
 
-        if (director.overlay && director.overlay->isVisible() && ! rl.isEmpty())
+        if (director.overlay && director.overlay->isVisible() && ! cpuDirtyRl.isEmpty())
         {
             constexpr int kTile = 128;
-            const auto bounds = rl.getBounds();
+            const auto bounds = cpuDirtyRl.getBounds();
             const int cols = (bounds.getWidth()  + kTile - 1) / kTile;
             const int rows = (bounds.getHeight() + kTile - 1) / kTile;
 
-            // 性能优化 P13：粒子遍布全屏时 tile 数爆炸（2560×1366 → 220 块，
-            //   数百次 repaint 又重蹈 P5 覆辙）→ 回退 union 单次 repaint
             if (cols * rows > 80)
             {
                 director.overlay->repaint (bounds);
@@ -359,7 +554,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
                     for (int tx = bounds.getX(); tx < bounds.getRight(); tx += kTile)
                     {
                         const juce::Rectangle<int> tileRect (tx, ty, kTile, kTile);
-                        if (rl.intersectsRectangle (tileRect))
+                        if (cpuDirtyRl.intersectsRectangle (tileRect))
                             director.overlay->repaint (tileRect);
                     }
                 }
@@ -367,11 +562,7 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         }
     }
 
-    // 粒子仍活跃时保持 overlay 存活。
-    if (! freeActors.empty())
-        any = true;
-
-    // 模块 actor
+    // 4) 模块内 actor（仅重绘该面板的紧凑脏区，绝不挂载全窗 ToyOverlay）
     for (auto it = panels.begin(); it != panels.end();)
     {
         auto& sp = *it;
@@ -389,77 +580,18 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
         const auto dirty = p->toyState->step (dt);
         if (! dirty.isEmpty())
             p->repaint (dirty);
-        any = true;
         ++it;
     }
 
-    if (any)
+    if (anyCpuOverlay)
     {
         lastActivityTime = frame.timeSec;
         director.ensureOverlay();
     }
-    else if (director.overlay && director.overlay->isVisible())
+    else if (! glActive && director.overlay && director.overlay->isVisible())
     {
         if (frame.timeSec - lastActivityTime > 3.0)
-        {
-            director.overlay->setVisible (false);
-            if (auto* parent = director.overlay->getParentComponent())
-                parent->removeChildComponent (director.overlay.get());
-        }
-    }
-
-    visibleFreeActorCount_ = 0;
-    highDetailFreeActorCount_ = 0;
-    for (const auto& actor : freeActors)
-    {
-        if (actor != nullptr && actor->alive
-            && actor->getBounds().intersects (visibleBounds))
-        {
-            ++visibleFreeActorCount_;
-            if (actor->isHighDetailForPerformance())
-                ++highDetailFreeActorCount_;
-        }
-    }
-
-    const double fps = smoothedFps_;
-    if (fps >= 58.0)
-        targetFullEmojiCount_ = 220;
-    else if (fps >= 55.0)
-        targetFullEmojiCount_ = 24;
-    else if (fps >= 50.0)
-        targetFullEmojiCount_ = 12;
-    else if (fps >= 45.0)
-        targetFullEmojiCount_ = 6;
-    else
-        targetFullEmojiCount_ = 0;
-
-    // Reduce detail quickly under load. Simplification is permanent for the
-    // particle's lifetime, preventing visible emoji/dot toggling as FPS varies.
-    const int transitionBudget = fps < 30.0 ? 16
-                              : fps < 40.0 ? 10
-                              : fps < 50.0 ? 5
-                              : fps < 58.0 ? 2
-                                           : 1;
-    if (highDetailFreeActorCount_ > targetFullEmojiCount_)
-    {
-        std::vector<ToyActor*> oldestFirst;
-        oldestFirst.reserve ((size_t) highDetailFreeActorCount_);
-        for (auto& actor : freeActors)
-            if (actor != nullptr && actor->alive
-                && actor->getBounds().intersects (visibleBounds)
-                && actor->isHighDetailForPerformance())
-                oldestFirst.push_back (actor.get());
-
-        std::sort (oldestFirst.begin(), oldestFirst.end(), [] (const ToyActor* a, const ToyActor* b)
-        {
-            return a->age > b->age;
-        });
-
-        const int simplifyCount = juce::jmin (transitionBudget,
-            highDetailFreeActorCount_ - targetFullEmojiCount_);
-        for (int i = 0; i < simplifyCount && i < (int) oldestFirst.size(); ++i)
-            if (oldestFirst[(size_t) i]->simplifyForPerformance())
-                --highDetailFreeActorCount_;
+            director.hideOverlayIfUnused();
     }
 
     // ---- 性能日志：每秒一行（帧率 / actor 数 / 单帧处理耗时）----
@@ -483,8 +615,10 @@ void ToyClock::onFrame (const AnalyserHub::FrameSnapshot& frame)
                           + " freeActors=" + juce::String ((int) freeActors.size())
                           + " visibleFreeActors=" + juce::String (visibleFreeActorCount_)
                           + " fullEmoji=" + juce::String (highDetailFreeActorCount_)
-                          + " emojiTarget=" + juce::String (targetFullEmojiCount_)
-                          + " smoothedFps=" + juce::String (smoothedFps_, 1)
+                          + " degraded=" + juce::String (degradedFreeActorCount_)
+                          + " emojiTarget=" + juce::String (degradation_.targetFullEmojiCount())
+                          + " smoothedFps=" + juce::String (degradation_.smoothedFps(), 1)
+                          + " glToy=" + juce::String (glActive ? 1 : 0)
                           + " moduleActors=" + juce::String (moduleActors)
                           + " frameMsAvg=" + juce::String (frameTotalMs_ / (double) perfFrames_, 2)
                           + " frameMsMax=" + juce::String (frameMaxMs_, 2)
@@ -691,6 +825,123 @@ void ToyDirector::ensureOverlay()
     overlay->setVisible (true);
 }
 
+void ToyDirector::hideOverlayIfUnused()
+{
+    if (overlay && overlay->isVisible())
+    {
+        overlay->setVisible (false);
+        if (auto* parent = overlay->getParentComponent())
+            parent->removeChildComponent (overlay.get());
+    }
+}
+
+void ToyDirector::setGlToyHostActive (bool active) noexcept
+{
+    const bool prev = glToyHostActive_.exchange (active, std::memory_order_acq_rel);
+    if (prev && ! active)
+    {
+        glToyHasSprites_.store (false, std::memory_order_release);
+        glToyClearPending_.store (false, std::memory_order_release);
+        const juce::SpinLock::ScopedLockType sl (glSnapshotLock_);
+        glSnapshot_.reset();
+    }
+}
+
+void ToyDirector::setExpectedFps (double targetFps) noexcept
+{
+    if (clock)
+        clock->setExpectedFps (targetFps);
+}
+
+bool ToyDirector::hasActiveGlToyFrame() const noexcept
+{
+    return glToyHostActive_.load (std::memory_order_acquire)
+        && (glToyHasSprites_.load (std::memory_order_acquire)
+            || glToyClearPending_.load (std::memory_order_acquire));
+}
+
+std::shared_ptr<const y2ktoy::GlToySnapshot> ToyDirector::getGlToySnapshot() const noexcept
+{
+    const juce::SpinLock::ScopedLockType sl (glSnapshotLock_);
+    return glSnapshot_;
+}
+
+void ToyDirector::publishGlToySnapshot (std::shared_ptr<y2ktoy::GlToySnapshot> snap,
+                                        bool hasSprites,
+                                        bool needsClearFrame)
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (glSnapshotLock_);
+        glSnapshot_ = std::move (snap);
+    }
+    glToyHasSprites_.store (hasSprites, std::memory_order_release);
+    if (needsClearFrame)
+        glToyClearPending_.store (true, std::memory_order_release);
+    else if (! hasSprites)
+        glToyClearPending_.store (false, std::memory_order_release);
+}
+
+void ToyDirector::consumeGlToyClearPending() noexcept
+{
+    glToyClearPending_.store (false, std::memory_order_release);
+}
+
+void ToyDirector::requestGlToyFrame()
+{
+    if (glFrameRequester_)
+        glFrameRequester_();
+}
+
+void ToyDirector::collectExclusionRects (std::vector<juce::Rectangle<int>>& out) const
+{
+    out.clear();
+
+    const auto openDrawer = ModulePanel::getOpenInWindowDrawerBoundsIn (editor);
+    if (! openDrawer.isEmpty())
+        out.push_back (openDrawer);
+
+    if (clock)
+    {
+        for (const auto& sp : clock->panels)
+        {
+            if (auto* p = sp.getComponent())
+            {
+                const auto drawer = p->getControlDrawerBounds();
+                if (! drawer.isEmpty())
+                {
+                    const auto tl = editor.getLocalPoint (p, drawer.getTopLeft());
+                    out.emplace_back (tl.x, tl.y, drawer.getWidth(), drawer.getHeight());
+                }
+            }
+        }
+    }
+
+    workspace.collectToyExclusionRects (editor, out);
+
+    if (externalExclusionsProvider_)
+        externalExclusionsProvider_ (out);
+
+    // Deduplicate identical rects (e.g. if external provider also forwards workspace exclusions)
+    size_t writeIdx = 0;
+    for (size_t i = 0; i < out.size(); ++i)
+    {
+        if (out[i].isEmpty())
+            continue;
+        bool dup = false;
+        for (size_t j = 0; j < writeIdx; ++j)
+        {
+            if (out[j] == out[i])
+            {
+                dup = true;
+                break;
+            }
+        }
+        if (! dup)
+            out[writeIdx++] = out[i];
+    }
+    out.resize (writeIdx);
+}
+
 bool ToyDirector::gateAllows (const juce::MouseEvent& e) const
 {
     if (level_ == ToyLevel::Off)
@@ -786,7 +1037,10 @@ void ToyDirector::spawnBurst (juce::Point<float> at)
                                { std::cos (ang) * spd, std::sin (ang) * spd },
                                0, *this, 0.9f, 500.0f * uiScale()));
     }
-    ensureOverlay();
+    if (isGlToyActive())
+        requestGlToyFrame();
+    else
+        ensureOverlay();
 }
 
 void ToyDirector::routeModule (ModulePanel& panel, const juce::MouseEvent& e)
@@ -914,7 +1168,10 @@ void ToyDirector::tickConfettiRain (double timeSec)
 
     --confettiRainRemaining_;
     nextConfettiRainTime_ = timeSec + spawnInterval;
-    ensureOverlay();
+    if (isGlToyActive())
+        requestGlToyFrame();
+    else
+        ensureOverlay();
 }
 
 // C-3：鼠标力场 —— 只在存在自由 actor 时处理，冲量正比于鼠标速度
@@ -985,7 +1242,10 @@ bool ToyDirector::tryPopEmoji (juce::Point<float> editorPos)
                                    0, *this, 0.9f, 500.0f * uiScale()));
         }
 
-        ensureOverlay();
+        if (isGlToyActive())
+            requestGlToyFrame();
+        else
+            ensureOverlay();
         return true;
     }
     return false;
@@ -1057,7 +1317,10 @@ void ToyDirector::onComboMilestone (int count, juce::Point<float> pos)
         nextConfettiRainTime_ = 0.0;
         // 后续喷发走彩虹着色（通过 spawnCanvasFountain 的 Party 判断实现）
     }
-    ensureOverlay();
+    if (isGlToyActive())
+        requestGlToyFrame();
+    else
+        ensureOverlay();
 }
 
 void ToyDirector::notifyPetReaction (int animId)

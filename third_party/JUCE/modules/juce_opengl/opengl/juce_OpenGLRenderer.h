@@ -91,6 +91,16 @@ public:
         renderOpenGL() will composite afterwards). Default: does nothing.
     */
     virtual void renderOpenGLPreLock() {}
+
+    /** (Y2Kmeter patch) Optional hook called on the render thread after
+        drawComponentBuffer() has composited the JUCE component layer onto FBO 0,
+        and after the MessageManager lock has been released, immediately before
+        swapBuffers(). The GL context is active and the viewport is set to the
+        physical framebuffer area; NEVER touch the JUCE component tree here.
+        Runs even when no JUCE component was repainted (pendingRender-only frames).
+        Default: does nothing.
+    */
+    virtual void renderOpenGLPostComponentBuffer() {}
     /** Called when the current openGL context is about to close.
         You can use this opportunity to release any GL resources that you may have
         created.

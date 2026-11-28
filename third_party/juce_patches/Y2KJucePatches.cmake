@@ -33,6 +33,13 @@ set(Y2K_JUCE_PATCH_MARKERS
   "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|triggerRepaintPacedToDisplay"
   # 0009 Win GL 启用 PFD_SUPPORT_COMPOSITION 支撑 DWM 硬件 Alpha 真透明（v3.5.0）
   "modules/juce_opengl/native/juce_OpenGL_windows.h|kPfdSupportComposition"
+  # 0010 Win GL 外部 VBlank 合并 + 独立 RenderThread + 跳过固定 2ms sleep + renderOpenGLPostComponentBuffer
+  "modules/juce_opengl/opengl/juce_OpenGLRenderer.h|renderOpenGLPostComponentBuffer"
+  "modules/juce_opengl/opengl/juce_OpenGLContext.h|setExternalFramePacing"
+  "modules/juce_opengl/opengl/juce_OpenGLContext.h|setUseDedicatedRenderThread"
+  "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|renderOpenGLPostComponentBuffer"
+  "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|externalPacedRepaintPending"
+  "modules/juce_opengl/opengl/juce_OpenGLContext.cpp|ownedRenderThread"
 )
 
 function(y2k_verify_juce_patches juce_dir)

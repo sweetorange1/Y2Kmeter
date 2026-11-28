@@ -830,11 +830,16 @@ float SpectrumModule::toyReadDbAtX (float x) const
     if (freqAxis)
     {
         const float freq = xToFreq (x, canvas);
-        float best = std::numeric_limits<float>::max();
-        for (int i = 0; i < N; ++i)
+        auto it = std::lower_bound (smoothedHz.begin(), smoothedHz.end(), freq);
+        if (it == smoothedHz.begin())
+            col = 0;
+        else if (it == smoothedHz.end())
+            col = N - 1;
+        else
         {
-            const float d = std::abs (smoothedHz[(size_t) i] - freq);
-            if (d < best) { best = d; col = i; }
+            const int hi = (int) (it - smoothedHz.begin());
+            const int lo = hi - 1;
+            col = (std::abs (smoothedHz[(size_t) lo] - freq) <= std::abs (smoothedHz[(size_t) hi] - freq)) ? lo : hi;
         }
         slopeDb = slopeDbPerOct * std::log2 (juce::jmax (20.0f, smoothedHz[(size_t) col]) / 1000.0f);
     }
@@ -890,11 +895,16 @@ void SpectrumModule::toyPoke (const ToyHit& hit, ToyContext& ctx)
         if (freqAxis)
         {
             const float f = xToFreq (x, canvas);
-            float best = std::numeric_limits<float>::max();
-            for (int i = 0; i < N; ++i)
+            auto it = std::lower_bound (smoothedHz.begin(), smoothedHz.end(), f);
+            if (it == smoothedHz.begin())
+                col = 0;
+            else if (it == smoothedHz.end())
+                col = N - 1;
+            else
             {
-                const float d = std::abs (smoothedHz[(size_t) i] - f);
-                if (d < best) { best = d; col = i; }
+                const int hi = (int) (it - smoothedHz.begin());
+                const int lo = hi - 1;
+                col = (std::abs (smoothedHz[(size_t) lo] - f) <= std::abs (smoothedHz[(size_t) hi] - f)) ? lo : hi;
             }
         }
         else
@@ -2551,9 +2561,9 @@ void SpectrumModule::mouseDown (const juce::MouseEvent& e)
         bulletTimeActive = true;
         ghostMix = 1.0f;          // 曲线立即切换为残影色
 
-        // 立刻重建快照并重绘，不等下一帧（按住瞬间就要看到变色）
+        // 立刻重建快照并重绘画布内容，不等下一帧（按住瞬间就要看到变色）
         buildGlSnapshot();
-        repaint();
+        repaintFrameContent();
     }
 }
 
@@ -2629,7 +2639,7 @@ void SpectrumModule::renderStaticLayer (juce::Rectangle<int> contentBounds, floa
     const int ph = juce::jmax (1, juce::roundToInt ((float) contentBounds.getHeight() * physicalScale));
 
     if (! staticLayer_.isValid() || staticLayer_.getWidth() != pw || staticLayer_.getHeight() != ph)
-        staticLayer_ = juce::Image (juce::Image::ARGB, pw, ph, true);
+        staticLayer_ = juce::Image (juce::Image::ARGB, pw, ph, true, juce::SoftwareImageType());
     else
         staticLayer_.clear (staticLayer_.getBounds(), juce::Colours::transparentBlack);
 

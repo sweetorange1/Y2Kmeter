@@ -372,7 +372,7 @@ void OscilloscopeModule::mouseDown (const juce::MouseEvent& e)
         holdPendingStart = true;   // 下一帧到达时用当前帧窗口作为历史起点
         invalidateDynamicLayer();
         buildGlSnapshot();
-        repaint();
+        repaintFrameContent();
     }
 }
 
@@ -1655,7 +1655,8 @@ void OscilloscopeModule::rebuildStaticLayerIfNeeded(juce::Rectangle<int> content
     staticLayer = juce::Image(juce::Image::ARGB,
                               contentBounds.getWidth(),
                               contentBounds.getHeight(),
-                              true);
+                              true,
+                              juce::SoftwareImageType());
     staticLayer.clear(staticLayer.getBounds(), juce::Colours::transparentBlack);
     staticLayerContentBounds = contentBounds;
     staticLayerAppearanceGen = curAppGen;
@@ -1763,7 +1764,8 @@ void OscilloscopeModule::redrawDynamicLayerIfNeeded(juce::Rectangle<int> canvas)
         dynamicLayer = juce::Image(juce::Image::ARGB,
                                    canvas.getWidth(),
                                    canvas.getHeight(),
-                                   true);
+                                   true,
+                                   juce::SoftwareImageType());
         dynamicLayerDirty = true;
     }
 

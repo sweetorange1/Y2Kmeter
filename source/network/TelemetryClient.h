@@ -71,17 +71,32 @@ private:
   // 内部设置开关（仅供 LoadFromRegistry 等初始化逻辑调用）
   void SetEnabled(bool enabled) noexcept;
 
+  // UI 线程轻量快照（仅采集必须在消息线程访问的 Displays / PropertiesFile / hostName，
+  // 其余 SystemStats OS/CPU 查询与 JSON 序列化全部在 workerThread_ 后台完成）
+  struct UiSnapshot {
+    juce::String clientId;
+    juce::String hostName;
+    int          displayCount    = 0;
+    int          primaryDisplayW = 0;
+    int          primaryDisplayH = 0;
+    bool         isPlugin        = false;
+  };
+
   // 读取或首次生成匿名 client_id（存到 settings 的 "telemetry.clientId" key）
   static juce::String GetOrCreateClientId(juce::PropertiesFile* settings);
+
+  // 在后台线程基于轻量 UI 快照组装系统信息 JSON（避免阻塞消息线程）
+  static juce::var BuildSystemInfoPayload(const UiSnapshot& snap);
 
   // 收集当前环境的系统信息，组装为 juce::var (DynamicObject)
   static juce::var CollectSystemInfo(juce::PropertiesFile* settings,
                                      bool isPlugin);
 
   // 异步执行 HTTP POST，失败静默。
-  //   · 只做 JSON 序列化 + 入队，实际网络 I/O 交给 workerThread_ 串行执行，
-  //     避免每次请求都 detach 一个不可控的后台线程。
   void PostJsonAsync(const juce::URL& url, const juce::var& json);
+
+  // 后台发送已序列化的 JSON（在 workerThread_ 上调用）
+  static void SendSerializedPost(const juce::URL& url, const juce::String& body);
 
   // 后台 worker 主循环：从任务队列取任务执行，直到 stopWorker_ 置位。
   void WorkerLoop();

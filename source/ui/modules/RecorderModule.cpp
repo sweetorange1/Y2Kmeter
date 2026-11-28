@@ -72,10 +72,12 @@ RecorderModule::RecorderModule (AnalyserHub& hub)
 
     startTimerHz (kTimerHz);
     syncChildChromeVisibility();
+    y2k::ui::setGlSafeImageCache (*this, ! PinkXP::isTransparentBackdrop());
 
     themeSubToken = PinkXP::subscribeThemeChanged ([this]()
     {
         syncChildChromeVisibility();
+        y2k::ui::setGlSafeImageCache (*this, ! PinkXP::isTransparentBackdrop());
         repaint();
     });
 

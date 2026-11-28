@@ -1180,5 +1180,18 @@ void GlDirectModuleBase::paintContent (juce::Graphics& g, juce::Rectangle<int> c
     }
 
     // 未接管（GL 不可用 / 回退态）：完整旧路径
+    if (Y2K_DIAG_ENABLED())
+    {
+        ++diagLegacyPaintCount_;
+        if (diagLegacyPaintCount_ <= 8 || (diagLegacyPaintCount_ % 120) == 0)
+        {
+            Y2K_DIAG ("GL", "paintLegacyContent: " + moduleTypeToString (getModuleType())
+                                  + " count=" + juce::String ((int) diagLegacyPaintCount_)
+                                  + " floating=" + juce::String (isFloating() ? 1 : 0)
+                                  + " glHost=" + juce::String (isGlHostAvailable() ? 1 : 0)
+                                  + " glActive=" + juce::String (glDirectActive.load (std::memory_order_acquire) ? 1 : 0)
+                                  + " canvas=" + juce::String (canvas.getWidth()) + "x" + juce::String (canvas.getHeight()));
+        }
+    }
     paintLegacyContent (g, contentBounds);
 }

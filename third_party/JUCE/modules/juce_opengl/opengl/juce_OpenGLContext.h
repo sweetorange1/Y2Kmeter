@@ -206,6 +206,27 @@ public:
     */
     void triggerRepaintPacedToDisplay();
 
+    /** (Y2Kmeter patch, non-macOS) When continuous repainting is disabled, coalesces
+        component invalidations and triggerRepaintPacedToDisplay() calls until
+        flushPacedRepaint() is invoked (e.g. at the end of an external VBlank frame
+        dispatch). Falls back to immediate triggerRepaint() if flushPacedRepaint()
+        has not been called within 100ms (watchdog for startup, modal loops, sleep,
+        or hidden tabs). Has no effect on macOS or when continuous repainting is on.
+    */
+    void setExternalFramePacing (bool shouldPace);
+
+    /** (Y2Kmeter patch, non-macOS) Refreshes the external pacing watchdog and
+        wakes the render thread once if any paced component or GL repaint is pending.
+    */
+    void flushPacedRepaint();
+
+    /** (Y2Kmeter patch) When enabled before attachTo(), gives this context its own
+        dedicated RenderThread instead of sharing the process-wide RenderThread.
+        Prevents multiple VSync-locked windows from serializing SwapBuffers() waits.
+        Call this before attachTo(). Default: false.
+    */
+    void setUseDedicatedRenderThread (bool shouldUseDedicated) noexcept;
+
     /** (Y2Kmeter patch) Per-phase timing of the render thread, accumulated since the last
         call to takeRenderStats(). All times are in milliseconds, summed over `frames`.
     */
@@ -410,6 +431,8 @@ private:
     bool renderComponents = true, useMultisampling = false, overrideCanAttach = false;
     std::atomic<bool> continuousRepaint { false };
     std::atomic<bool> componentRepaintsPacedToDisplay { false };
+    std::atomic<bool> externalFramePacing { false };
+    bool useDedicatedRenderThread = false;
 
     // Y2Kmeter patch: render thread phase timing (microseconds, written by the GL thread)
     struct RenderStatsAccum

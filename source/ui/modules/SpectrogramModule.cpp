@@ -906,6 +906,7 @@ void SpectrogramModule::onFrame (const AnalyserHub::FrameSnapshot& frame)
     // Right / Up / Down 方向无子列连续滚动，nCols==0 且外观未变、GPU 纹理已同步时免去全图重传
     if (glActive && ! appearanceChanged && direction != Direction::Left && nCols == 0
         && texCacheValid_ && lastBuiltDir_ == direction && lastBuiltWriteCol_ == writeCol
+        && texDataGen_ != 0
         && glTexUploadedGen.load (std::memory_order_acquire) == texDataGen_
         && smoothPixels == lastUploadedLinear_)
         return;
@@ -1025,14 +1026,16 @@ void SpectrogramModule::buildGlSnapshot()
 
     auto finalizeTexUpload = [&] (bool pixelsOrFilterChanged)
     {
-        if (pixelsOrFilterChanged)
+        if (pixelsOrFilterChanged || texDataGen_ == 0)
         {
             if (++texDataGen_ == 0)
                 texDataGen_ = 1;
         }
 
+        const juce::uint64 uploadedGen = glTexUploadedGen.load (std::memory_order_acquire);
         const bool gpuUpToDate = glDirectActive.load (std::memory_order_acquire)
-                              && (glTexUploadedGen.load (std::memory_order_acquire) == texDataGen_)
+                              && (uploadedGen != 0)
+                              && (uploadedGen == texDataGen_)
                               && (smoothPixels == lastUploadedLinear_);
         snap->texDataGen = texDataGen_;
         if (gpuUpToDate)
@@ -1362,7 +1365,7 @@ void SpectrogramModule::ensureImage()
         || imageBuf.getWidth()  != desiredW
         || imageBuf.getHeight() != rows)
     {
-        imageBuf = juce::Image (juce::Image::ARGB, desiredW, rows, true);
+        imageBuf = juce::Image (juce::Image::ARGB, desiredW, rows, true, juce::SoftwareImageType());
         imageBufDirty_ = true;
     }
     if (imageBufDirty_)

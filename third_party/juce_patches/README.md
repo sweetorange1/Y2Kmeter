@@ -19,6 +19,7 @@
 | 0007 | `juce_OpenGLGraphicsContext.cpp` | 渐变填充的颜色表纹理按"颜色停靠点"复用，并挂在 OpenGLContext 的关联对象上跨帧保留（原实现每次换填充都重新生成并上传 256×1 纹理，每帧还会删光重建）。全平台生效 | v3.4.x（性能） |
 | 0008 | `juce_OpenGLContext.h/.cpp` | 新增 `OpenGLContext::triggerRepaintPacedToDisplay()`：显式出帧请求也走 0005 的按刷新合并（mac）；其它平台等同 `triggerRepaint()`。Milkdrop 嵌入态逐帧出帧请求改用它 | v3.4.x（mac 性能） |
 | 0009 | `juce_OpenGL_windows.h` | 像素格式启用 `PFD_SUPPORT_COMPOSITION` 并在 `wglChoosePixelFormatARB` 中优选带 Alpha 位且支持 DWM 合成的格式，支撑 Windows 真透明模式（`BackdropMode::transparent`）硬件 Alpha 合成 | v3.5.0（Win 透明性能） |
+| 0010 | `juce_OpenGLRenderer.h`、`juce_OpenGLContext.h/.cpp` | Windows/非 macOS 外部 VBlank 帧合并（`setExternalFramePacing` / `flushPacedRepaint`，含 100ms 看门狗）；独立 `RenderThread` 选项（`setUseDedicatedRenderThread`，消除多窗口 VSync `SwapBuffers` 串行排队）；受控非连续上下文跳过 `renderFrame()` 固定 2ms sleep；组件层合成之后、锁外且 `swap()` 之前新增 `renderOpenGLPostComponentBuffer()` 钩子供 GL 批渲染 ToyBox 使用 | v3.5.0（60Hz 帧节奏与 ToyBox GPU 化） |
 
 ## 升级 JUCE 时
 

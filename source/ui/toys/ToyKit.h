@@ -6,18 +6,22 @@
 //   按需求案 §11.1 合并为单头，规避 MSVC 多文件 include guard 串扰。
 //   实现分布在 ToyKit.cpp / ToyEmoji.cpp / ToyCanvasFx.cpp / fx/ToyFx_*.cpp。
 //
-//   GL 约束（§4.3）：本头及实现一律不出现 juce::gl / gl 调用 / shader / FBO，
-//   全部效果都画在 JUCE 组件层（恒叠在 GL 内容之上）。
+//   GL 分层架构（v3.5.0）：ToyKit.* 自身仍保持零 juce::gl / OpenGL 头文件依赖，
+//   只产出纯 POD 渲染快照（ToyGlTypes.h）；GL 激活时由 GlToyRenderer（GlToyRenderer.h）
+//   在 renderOpenGLPostComponentBuffer() 中单次批绘制叠加到组件层之上，
+//   GL 脱离时自动回退到 JUCE 组件层 ToyOverlay。
 // ==========================================================
 
 #include <JuceHeader.h>
 #include <memory>
 #include <vector>
+#include <atomic>
 #include <functional>
 #include <unordered_map>
 
 #include "source/ui/toys/ToyPerf.h"
 #include "source/ui/toys/ToyPhysics.h"
+#include "source/ui/toys/ToyGlTypes.h"
 #include "source/ui/ModuleWorkspace.h"   // ModulePanel / ModuleType / ModuleWorkspace
 #include "source/ui/PinkXPStyle.h"
 #include "source/analysis/AnalyserHub.h"
@@ -29,6 +33,12 @@ class ToyOverlay;
 class EmojiAtlas;
 class ModuleToyState;
 struct ToyActor;
+
+namespace y2ktoy
+{
+    using ToyDirector = ::ToyDirector;
+    class GlToyRenderer;
+}
 
 // ==========================================================
 // 档位
@@ -159,6 +169,13 @@ struct ToyActor
     virtual juce::Rectangle<float> getBounds() const = 0;
     virtual bool isHighDetailForPerformance() const { return false; }
     virtual bool simplifyForPerformance() { return false; }
+    virtual bool restoreDetailForPerformance() { return false; }
+    virtual bool extractGlSprite (y2ktoy::GlToySprite& out, const ToyDirector& dir) const
+    {
+        juce::ignoreUnused (out, dir);
+        return false;
+    }
+    virtual bool isReadoutBubble() const noexcept { return false; }
 
     // 可点击元素（TruePeak 的 OK、Invader、Clippo 等，E.5）。
     //   返回 true 表示本次点击被消费（不再路由到模块玩法/画布喷发）。
@@ -317,10 +334,12 @@ public:
     EmojiAtlas();
     ~EmojiAtlas() override;
 
-    const juce::Image& image (EmojiId id, Size size);        // 原图，只读
-    const juce::Image& themedImage (EmojiId id, Size size);  // 主题版本（无则回退原图）
-    bool has (EmojiId id) const;
-    bool isBaked (EmojiId id, Size size) const;              // 是否已烘焙（不触发烘焙，纯查）
+    juce::Image image (EmojiId id, Size size);        // 原图（值返回引用计数句柄，线程安全）
+    juce::Image themedImage (EmojiId id, Size size);  // 主题版本（无则回退原图，线程安全）
+    bool has (EmojiId id) const noexcept;
+    bool isBaked (EmojiId id, Size size) const noexcept;     // 是否已烘焙（无锁原子查）
+    bool prebakeDone() const noexcept { return prebakeDone_.load (std::memory_order_acquire); }
+    double prebakeMs() const noexcept { return prebakeMs_.load (std::memory_order_acquire); }
 
     // 旋转分桶（性能优化 P1）：angleRad 量化到 kRotBuckets 个角度，
     //   首次按需烘焙（主题 duotone 版），之后返回缓存图。
@@ -334,13 +353,43 @@ public:
     //   false = 被烘焙节流 / 原图未就绪，调用方应在后续帧重试。
     bool ensureRotated (EmojiId id, Size size, float angleRad);
 
-    // Win 性能优化：物理像素缩放恰为 1.0（Windows 100% 缩放）时，旋转分桶图直接烘焙成
-    //   drawSize×drawSize，paint 走 1:1 drawImageAt。原先图集是 2x+2 px、绘制尺寸
-    //   18/24/34，每个 emoji 都走 drawImageTransformed —— JUCE GL 后端对非平移
-    //   变换要建 Path→EdgeTable 光栅化（实测 0.07~0.5ms/个），是点击喷 emoji 掉帧主因。
-    //   缩放 != 1 时保持旧行为（图集 2x 分辨率，避免模糊）。由 ToyOverlay::paint 回写。
-    void setPhysicalScale (float s) noexcept { fitDrawSize_ = std::abs (s - 1.0f) < 0.01f; }
-    bool fitsDrawSize() const noexcept       { return fitDrawSize_; }
+    // Win 性能优化：物理像素缩放记录（CPU 回退路径下支持任意 DPI 100%/125%/150%/200%
+    //   按物理像素尺寸烘焙旋转缓存，避免非平移变换走 EdgeTable 光栅化）。由 ToyOverlay::paint 回写。
+    void setPhysicalScale (float s) noexcept
+    {
+        if (s > 0.1f && std::isfinite (s))
+        {
+            physicalScale_ = s;
+            fitDrawSize_   = true;
+        }
+    }
+    bool  fitsDrawSize()  const noexcept { return fitDrawSize_; }
+    float physicalScale() const noexcept { return physicalScale_; }
+
+    // ==========================================================
+    // GL 单图集增量上传接口（GlToyRenderer 在 GL 线程消费，消息线程生产）
+    // ==========================================================
+    struct GlAtlasUpload
+    {
+        int emojiIndex = 0;
+        int sizeIndex  = 0;
+        int width      = 0;
+        int height     = 0;
+        std::vector<uint8_t> premulRgba;
+    };
+
+    uint32_t glAtlasGeneration() const noexcept { return glAtlasGen_.load (std::memory_order_acquire); }
+    // 消息线程调用：确保 (id, size) 及其主题版已烘焙并排入 GL 上传队列（零空白 quad 保障）。
+    bool ensureBakedForGl (EmojiId id, Size size);
+    // 消息线程调用：解析实际可用于 GL 采样的槽位（若原字形探测失败则自动回退一层）。
+    bool resolveGlSlot (EmojiId id, Size size, y2ktoy::AtlasSlot& outSlot) const noexcept;
+    // GL 线程调用：上下文重建或 atlasGen 变更后，把全部已就绪槽位重新排入上传队列。
+    void requestFullGlAtlasReupload();
+    // GL 线程调用：取出待上传的 premultiplied RGBA 槽位批次。
+    void drainGlAtlasUploads (std::vector<GlAtlasUpload>& out, uint32_t& outGen);
+
+    // CPU 回退路径专用：预烘焙 32×32 白色径向光晕掩模（替代 Party 模式每粒子 fillEllipse）。
+    const juce::Image& partyGlowSprite();
 
     static int logicalSize (Size s);
     int drawSize (Size s) const;
@@ -360,29 +409,83 @@ private:
     struct ThemedEntry
     {
         juce::Image img;
+        uint32_t    epoch = 0;
         bool        baked = false;
         bool        ok    = false;
     };
     ThemedEntry themed_[(int) EmojiId::Count][(int) Size::Count];
 
-    juce::String emojiFamily;
-    int          prebakeCursor_ = 0;     // 预烘焙游标（id*3+size 展平）
-    int          themedCursor_  = 0;     // 主题版本游标
-    double       prebakeStartDelay_ = 0.0;  // 启动约 1 秒后再开始
-    bool         prebakeScheduled_ = false;
+    struct ThemeBakeParams
+    {
+        PinkXP::ThemeId themeId = PinkXP::ThemeId::blackPink;
+        float           duotoneStrength = 0.55f;
+        juce::Colour    darkC;
+        juce::Colour    midC;
+        juce::Colour    lightC;
+        juce::Colour    stroke;
+        int             strokeRadius = 1;
+        uint32_t        epoch = 1;
+    };
 
-    // 旋转分桶缓存（性能优化 P1）：key = id*12 + size*4 + bucket
+    mutable juce::CriticalSection bakeLock_;
+    std::atomic<uint8_t>  baseState_[(int) EmojiId::Count][(int) Size::Count] {};        // 0=unbaked, 1=failed, 2=ok
+    std::atomic<uint32_t> themedReadyEpoch_[(int) EmojiId::Count][(int) Size::Count] {}; // 0=unbaked
+    std::atomic<uint32_t> themeEpoch_ { 1 };
+    std::atomic<bool>     prebakeDone_ { false };
+    std::atomic<double>   prebakeMs_   { 0.0 };
+
+    juce::CriticalSection workConfigLock_;
+    ThemeBakeParams       pendingParams_;
+    std::vector<int>      pendingPriorityOrder_;
+
+    struct WinEmojiRenderer;
+    class  PrebakeWorker;
+    std::unique_ptr<WinEmojiRenderer> onDemandWinRenderer_;
+    std::unique_ptr<PrebakeWorker>    worker_;
+
+    juce::String emojiFamily;
+    int          prebakeCursor_ = 0;     // 非 Windows 回退游标（id*3+size 展平）
+    int          themedCursor_  = 0;     // 非 Windows 回退主题游标
+    double       prebakeStartDelay_ = 0.0;
+    bool         prebakeScheduled_ = false;
+    std::vector<int> priorityOrder_;     // 当前主题池优先队列
+    size_t       priorityBaseCursor_   = 0;
+    size_t       priorityThemedCursor_ = 0;
+
+    // 旋转分桶缓存（CPU 回退路径，按 physicalScaleBucket 分桶）
     juce::CriticalSection rotLock_;
     std::unordered_map<size_t, juce::Image> rotCache_;
-    bool fitDrawSize_ = false;
+    bool  fitDrawSize_   = true;
+    float physicalScale_ = 1.0f;
 
-    void timerCallback() override;      // 分帧预烘焙（每 tick ≤ 8 个）
+    // GL 单图集增量上传状态（后台/消息线程写入，GL 线程按 dirty 位图去重 drain）
+    juce::CriticalSection glAtlasLock_;
+    std::atomic<uint32_t> glAtlasGen_ { 1 };
+    std::vector<uint8_t> glSlotPixels_[(int) EmojiId::Count][(int) Size::Count];
+    int  glSlotW_[(int) EmojiId::Count][(int) Size::Count] {};
+    int  glSlotH_[(int) EmojiId::Count][(int) Size::Count] {};
+    bool glSlotHasThemed_[(int) EmojiId::Count][(int) Size::Count] {};
+    bool glSlotDirty_[(int) EmojiId::Count][(int) Size::Count] {};
+
+    juce::Image partyGlowSprite_;
+
+    void timerCallback() override;      // 非 Windows 分帧预烘焙（Windows 使用后台低优先级 worker_）
+    void rebuildPriorityOrder();
+    ThemeBakeParams captureCurrentThemeParams (uint32_t epoch) const;
+    WinEmojiRenderer* getOrCreateOnDemandWinRenderer();
     void bakeOne (EmojiId id, Size size);
     void bakeThemedOne (EmojiId id, Size size);
+    void bakeBaseSlot (EmojiId id, Size size, WinEmojiRenderer* winRenderer, bool allowJuceFallback, bool publishBaseToGl);
+    void bakeThemedSlot (EmojiId id, Size size, const ThemeBakeParams& params);
+    void enqueueGlSlotLocked (int emojiIndex, int sizeIndex, const juce::Image& src, bool isThemed);
+    void publishGlSlotPremul (int emojiIndex, int sizeIndex, int w, int h,
+                              std::vector<uint8_t>&& premulRgba, bool isThemed, uint32_t expectedEpoch);
     bool probe  (const juce::Image& white, const juce::Image& black, float coverageThreshold);
 
+    static float duotoneStrengthFor (PinkXP::ThemeId themeId) noexcept;
     static float duotoneStrength();     // E.3.2 强度表
 
+    friend class PrebakeWorker;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EmojiAtlas)
 };
 
@@ -460,29 +563,19 @@ public:
 
     ToyDirector& director;
 
+    void setExpectedFps (double targetFps) noexcept { degradation_.setExpectedFps (targetFps); }
+    void setGlBatched (bool glBatched) noexcept     { degradation_.setGlBatched (glBatched); }
+
     /** 诊断快照（取走并清零窗口累计量；消息线程 / 持消息锁时调用）。 */
     struct DiagSnapshot
     {
-        int    freeActors = 0, fullEmoji = 0, emojiTarget = 0;
+        int    freeActors = 0, fullEmoji = 0, degradedFreeActors = 0, emojiTarget = 0;
         double smoothedFps = 0.0;
         double overlayPaintMs = 0.0;
         int    overlayPaints = 0, overlayActorsPainted = 0;
+        bool   glToyActive = false;
     };
-    DiagSnapshot takeDiagSnapshot() noexcept
-    {
-        DiagSnapshot s;
-        s.freeActors = (int) freeActors.size();
-        s.fullEmoji = highDetailFreeActorCount_;
-        s.emojiTarget = targetFullEmojiCount_;
-        s.smoothedFps = smoothedFps_;
-        s.overlayPaintMs = overlayPaintTotalMs_;
-        s.overlayPaints = overlayPaintCalls_;
-        s.overlayActorsPainted = overlayActorsPainted_;
-        overlayPaintTotalMs_ = 0.0;
-        overlayPaintCalls_ = 0;
-        overlayActorsPainted_ = 0;
-        return s;
-    }
+    DiagSnapshot takeDiagSnapshot() noexcept;
 private:
     std::vector<juce::Component::SafePointer<ModulePanel>> panels;
 
@@ -497,12 +590,16 @@ private:
     int    overlayActorsPainted_ = 0;
     int    visibleFreeActorCount_ = 0;
     int    highDetailFreeActorCount_ = 0;
+    int    degradedFreeActorCount_ = 0;
     double lastFrameTime_ = 0.0;
-    double smoothedFps_ = 60.0;
-    int    targetFullEmojiCount_ = 160;
+    y2ktoy::DegradationController degradation_;
     double platformCacheTime_ = -1.0;  // 平台几何缓存时间戳（0.5s 刷新，模块移动不改每帧遍历）
+    bool   hadGlSpritesLastFrame_ = false;
+    uint64_t glSnapshotVersion_   = 0;
+    std::vector<juce::Rectangle<int>> exclusionScratch_;
 
     friend class ToyOverlay;
+    friend class ToyDirector;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ToyClock)
 };
 
@@ -562,8 +659,27 @@ public:
     float audioEnergy() const;
     float uiScale() const noexcept { return PinkXP::uiScale(); }
 
-    // 确保叠加层已挂载并可见（供 clock 调用）
+    // 确保叠加层已挂载并可见（供 clock 调用，仅 CPU 回退或非 GL actor 使用）
     void ensureOverlay();
+    void hideOverlayIfUnused();
+
+    // ==========================================================
+    // GL 批渲染宿主桥接接口（与 PluginEditor / GlToyRenderer 对齐）
+    // ==========================================================
+    void setGlToyHostActive (bool active) noexcept;
+    bool isGlToyActive() const noexcept { return glToyHostActive_.load (std::memory_order_acquire); }
+    void setGlFrameRequester (std::function<void()> fn) { glFrameRequester_ = std::move (fn); }
+    void setExpectedFps (double targetFps) noexcept;
+    void setExternalExclusionRectsProvider (std::function<void(std::vector<juce::Rectangle<int>>&)> fn)
+    {
+        externalExclusionsProvider_ = std::move (fn);
+    }
+    bool hasActiveGlToyFrame() const noexcept;
+    std::shared_ptr<const y2ktoy::GlToySnapshot> getGlToySnapshot() const noexcept;
+    void publishGlToySnapshot (std::shared_ptr<y2ktoy::GlToySnapshot> snap, bool hasSprites, bool needsClearFrame);
+    void consumeGlToyClearPending() noexcept;
+    void requestGlToyFrame();
+    void collectExclusionRects (std::vector<juce::Rectangle<int>>& out) const;
 
     // 平台上沿（Editor 坐标，FIX-3 / B-03）：带 x 范围，命中需 x∈[x0,x1]
     struct Platform { float x0 = 0.0f, x1 = 0.0f, y = 0.0f; };
@@ -606,6 +722,15 @@ private:
     // C-3 鼠标力场
     juce::Point<float> lastMousePos_;
     bool   hasLastMousePos_ = false;
+
+    // GL 批渲染状态与跨线程快照（消息线程发布，GL 线程在 renderOpenGLPostComponentBuffer 消费）
+    std::atomic<bool> glToyHostActive_ { false };
+    std::atomic<bool> glToyHasSprites_ { false };
+    std::atomic<bool> glToyClearPending_ { false };
+    mutable juce::SpinLock glSnapshotLock_;
+    std::shared_ptr<const y2ktoy::GlToySnapshot> glSnapshot_;
+    std::function<void()> glFrameRequester_;
+    std::function<void(std::vector<juce::Rectangle<int>>&)> externalExclusionsProvider_;
 
     void routeGlobal   (juce::Component* orig, const juce::MouseEvent& e);
     void routeModule   (ModulePanel& panel, const juce::MouseEvent& e);

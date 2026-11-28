@@ -37,6 +37,34 @@ namespace
         bool  useAccent2 = false;
     };
 
+    struct OscBoundsAccum
+    {
+        float minX = 1.0e9f, minY = 1.0e9f;
+        float maxX = -1.0e9f, maxY = -1.0e9f;
+        bool  hasAny = false;
+
+        void includePoint (float x, float y, float pad = 0.0f) noexcept
+        {
+            if (! std::isfinite (x) || ! std::isfinite (y))
+                return;
+            minX = juce::jmin (minX, x - pad);
+            minY = juce::jmin (minY, y - pad);
+            maxX = juce::jmax (maxX, x + pad);
+            maxY = juce::jmax (maxY, y + pad);
+            hasAny = true;
+        }
+
+        juce::Rectangle<float> finish (const juce::Rectangle<int>& clipRect, float extraPad = 8.0f) const noexcept
+        {
+            if (! hasAny)
+                return {};
+            const juce::Rectangle<float> raw (minX - extraPad, minY - extraPad,
+                                              (maxX - minX) + extraPad * 2.0f,
+                                              (maxY - minY) + extraPad * 2.0f);
+            return raw.getIntersection (clipRect.toFloat());
+        }
+    };
+
     // ------------------------------------------------------
     // 1) Waveform 模式：电子冲浪珠
     // ------------------------------------------------------
@@ -313,7 +341,20 @@ namespace
 
         juce::Rectangle<float> getBounds() const override
         {
-            return canvas.toFloat();
+            OscBoundsAccum b;
+            if (age < 0.36f)
+                b.includePoint (origin.x, origin.y, 26.0f);
+            for (const auto& rd : riders)
+            {
+                for (int i = 0; i < rd.trailCount; ++i)
+                    b.includePoint (rd.trail[(size_t) i].x, rd.trail[(size_t) i].y, 4.5f);
+                if (! rd.finished)
+                    b.includePoint (rd.x, rd.y, 4.5f);
+            }
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (canvas, 8.0f);
         }
     };
 
@@ -543,7 +584,16 @@ namespace
 
         juce::Rectangle<float> getBounds() const override
         {
-            return canvas.toFloat();
+            OscBoundsAccum b;
+            if (age < 0.32f)
+                b.includePoint (origin.x, origin.y, 22.0f);
+            for (int i = 0; i < trailCount; ++i)
+                b.includePoint (trail[(size_t) i].x, trail[(size_t) i].y, 4.0f);
+            b.includePoint (x, y, 6.5f);
+            for (int i = 0; i < sparkCount; ++i)
+                if (sparks[(size_t) i].life < sparks[(size_t) i].maxLife)
+                    b.includePoint (sparks[(size_t) i].x, sparks[(size_t) i].y, 2.0f);
+            return b.finish (canvas, 8.0f);
         }
     };
 }

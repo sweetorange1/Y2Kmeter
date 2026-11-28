@@ -1199,7 +1199,7 @@ void StereoFieldModule::updateTrail (juce::Rectangle<int> canvas)
         auto& img = trailImage[li];
         if (img.isNull() || img.getWidth() != rw || img.getHeight() != rh)
         {
-            img = juce::Image (juce::Image::ARGB, rw, rh, true);
+            img = juce::Image (juce::Image::ARGB, rw, rh, true, juce::SoftwareImageType());
             img.clear (img.getBounds(), juce::Colours::transparentBlack);
         }
 

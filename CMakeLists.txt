@@ -709,6 +709,9 @@ set(Y2KM_PLUGIN_SOURCES
   source/ui/ModuleControlDrawer.cpp
   source/ui/ModuleWorkspace.h
   source/ui/ModuleWorkspace.cpp
+  source/ui/ModuleZOrder.h
+  source/ui/VBlankPacer.h
+  source/ui/MilkdropPresetIndex.h
   # 悬停提示（HoverHelp）：按钮 / 仪表模块详细说明 + Pink XP 风格提示窗口
   source/ui/HoverHelp.h
   source/ui/HoverHelp.cpp
@@ -723,6 +726,8 @@ set(Y2KM_PLUGIN_SOURCES
   source/ui/GlDirectModule.cpp
   # === Toybox 点击解压互动（v3.0.0）===
   source/ui/toys/ToyPhysics.h
+  source/ui/toys/ToyGlTypes.h
+  source/ui/toys/GlToyRenderer.h
   source/ui/toys/ToyKit.h
   source/ui/toys/ToyKit.cpp
   source/ui/toys/ToyEmoji.cpp
@@ -1618,9 +1623,30 @@ endif()
 add_test(NAME Y2Kmeter_param_test COMMAND Y2Kmeter_param_test)
 
 # ==========================================================
-# emoji 渲染诊断（Windows only，仅本地排查用）
+# 60Hz 帧率步调 / ToyBox 降级状态机 / 图集布局 / Z 序单测（纯 C++17，不链接 JUCE）
+# ==========================================================
+add_executable(Y2Kmeter_perf_pacing_test
+  tests/perf_pacing_test.cpp
+)
+target_compile_features(Y2Kmeter_perf_pacing_test PRIVATE cxx_std_17)
+target_include_directories(Y2Kmeter_perf_pacing_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if (MSVC)
+  target_compile_options(Y2Kmeter_perf_pacing_test PRIVATE /utf-8)
+endif()
+add_test(NAME Y2Kmeter_perf_pacing_test COMMAND Y2Kmeter_perf_pacing_test)
+
+# ==========================================================
+# emoji 渲染诊断 & ToyBox RTX/GL 离屏微基准（Windows only，仅本地排查用）
 # ==========================================================
 if (WIN32)
   add_executable(Y2Kmeter_emoji_diag tests/emoji_diag.cpp)
   target_compile_features(Y2Kmeter_emoji_diag PRIVATE cxx_std_17)
+
+  add_executable(Y2Kmeter_toybox_bench tests/toybox_bench.cpp)
+  target_compile_features(Y2Kmeter_toybox_bench PRIVATE cxx_std_17)
+  target_include_directories(Y2Kmeter_toybox_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(Y2Kmeter_toybox_bench PRIVATE opengl32 gdi32 user32 dwrite d2d1 windowscodecs ole32)
+  if (MSVC)
+    target_compile_options(Y2Kmeter_toybox_bench PRIVATE /utf-8)
+  endif()
 endif()

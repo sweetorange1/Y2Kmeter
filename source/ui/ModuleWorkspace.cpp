@@ -1,4 +1,5 @@
 #include "source/ui/ModuleWorkspace.h"
+#include "source/ui/ModuleZOrder.h"
 #include "source/ui/PinkXPStyle.h"
 #include "source/ui/SkinCraft.h"
 #include "source/ui/toys/ToyKit.h"
@@ -550,29 +551,19 @@ ModuleWorkspace::ModuleWorkspace()
     addAndMakeVisible(themeBar);
     Y2K_LOG ("[boot] themeBar added");
 
-    // 调色面板（点击预览方块/"+"时在左下角展开；调色板重构，替换旧双色取色器）
-    palettePanel = std::make_unique<PalettePanel>();
-    Y2K_LOG ("[boot] palettePanel created");
-    addChildComponent(*palettePanel);
-
+    // 调色面板：懒创建（首次点击预览方块 / "+" 时才构造 ~50 个内部控件，缩短启动耗时）
     themeBar.onPreviewClicked = [this]()
     {
-        if (palettePanel == nullptr)
-            return;
-        if (palettePanel->isShowing())
+        if (palettePanel != nullptr && palettePanel->isShowing())
         {
             palettePanel->dismiss();
             return;
         }
+        ensurePalettePanel();
+        if (palettePanel == nullptr)
+            return;
         palettePanel->show();
         updatePalettePanelPlacement();
-    };
-
-    palettePanel->onHeightChanged = [this]() { updatePalettePanelPlacement(); };
-    palettePanel->onClosed = [this]()
-    {
-        if (palettePanel != nullptr)
-            palettePanel->setVisible(false);
     };
 
     // 底部工具栏中部：音频信号源下拉（默认只放一个占位项 "System Output (Loopback)"，
@@ -1437,6 +1428,21 @@ juce::Rectangle<int> ModuleWorkspace::getToolbarArea() const
 //     ③ 展开方向按屏幕空间决定：上方空间够就向上（底边贴住工具栏上沿），
 //        否则向下挂在软件窗口下沿之外 —— 软件放在屏幕上半部时也能完整打开。
 // ----------------------------------------------------------
+void ModuleWorkspace::ensurePalettePanel()
+{
+    if (palettePanel != nullptr)
+        return;
+
+    palettePanel = std::make_unique<PalettePanel>();
+    addChildComponent (*palettePanel);
+    palettePanel->onHeightChanged = [this]() { updatePalettePanelPlacement(); };
+    palettePanel->onClosed = [this]()
+    {
+        if (palettePanel != nullptr)
+            palettePanel->setVisible (false);
+    };
+}
+
 void ModuleWorkspace::updatePalettePanelPlacement()
 {
     if (palettePanel == nullptr)
@@ -1944,10 +1950,18 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
         updateDragPreview(p);
     };
     panel.onCloseClicked   = [this](ModulePanel& p) { removeModule(p); };
-    panel.onWillChangeParamByUser = [this](ModulePanel&)
+    panel.onWillChangeParamByUser = [this](ModulePanel& p)
     {
-        if (! undoSuspended_ && ! suspendNotifications)
-            pendingPreChangeTree_ = saveLayoutTree();
+        if (undoSuspended_ || suspendNotifications)
+            return;
+        // 非 Milkdrop 模块的状态已实时同步在 undoBaselineTree_ 中，直接复用，
+        // 避免高频点击设置控件时每步两次全量 saveLayoutTree() 遍历 25 个模块。
+        if (undoBaselineTree_.isValid() && p.getModuleType() != ModuleType::milkdrop)
+        {
+            pendingPreChangeTree_ = undoBaselineTree_;
+            return;
+        }
+        pendingPreChangeTree_ = saveLayoutTree();
     };
     panel.onParamChangedByUser = [this](ModulePanel& p)
     {
@@ -2006,27 +2020,7 @@ void ModuleWorkspace::hookPanel(ModulePanel& panel)
     //   · 仅在 focusedPerlerIdx 有效时执行 repaint，避免无聚焦时的无谓刷新
     panel.onBroughtToFront = [this](ModulePanel& p)
     {
-        // 只收"别人"的聚焦视觉：被点击的这块（含点子组件触发的置顶）必须保留
-        // 自己刚打开的 HUD / 控制台，否则会出现"点一下就消失"。
-        clearVirtuPetFocusVisuals (modules, &p);
-        clearMilkdropFocus (modules, &p);
-
-        if (focusedPerlerIdx >= 0)
-        {
-            const int oldFocus = focusedPerlerIdx;
-            focusedPerlerIdx    = -1;
-            draggingPerlerIdx   = -1;
-            resizingPerlerIdx   = -1;
-            cellSizeDraggingIdx = -1;
-            pendingCellSize     = -1;
-            opacityDraggingIdx  = -1;
-            activeResizeHandle  = ResizeHandle::none;
-            deleteBtnHovered    = false;
-            deleteBtnPressed    = false;
-            // 收回旧聚焦 layer 的 bounds（从装饰外包框收回到图片本体矩形）
-            syncPerlerLayerBounds (oldFocus);
-            repaint();
-        }
+        clearOtherFocusVisuals (p);
 
         // 图片层 / VirtuPet 始终在模块之上：
         //   · 图片：模块是"不透明洞"（见 raisePerlerLayersAboveModules 的注释），
@@ -2076,6 +2070,124 @@ void ModuleWorkspace::raisePerlerLayersAboveModules()
     for (auto* m : modules)
         if (m != nullptr && m->getModuleType() == ModuleType::virtuPet)
             m->toFront (false);
+}
+
+void ModuleWorkspace::clearOtherFocusVisuals (const ModulePanel& except)
+{
+    // 只收"别人"的聚焦视觉：被点击的这块（含点子组件触发的置顶）必须保留
+    // 自己刚打开的 HUD / 控制台，否则会出现"点一下就消失"。
+    clearVirtuPetFocusVisuals (modules, &except);
+    clearMilkdropFocus (modules, &except);
+
+    if (focusedPerlerIdx >= 0)
+    {
+        const int oldFocus  = focusedPerlerIdx;
+        focusedPerlerIdx    = -1;
+        draggingPerlerIdx   = -1;
+        resizingPerlerIdx   = -1;
+        cellSizeDraggingIdx = -1;
+        pendingCellSize     = -1;
+        opacityDraggingIdx  = -1;
+        activeResizeHandle  = ResizeHandle::none;
+        deleteBtnHovered    = false;
+        deleteBtnPressed    = false;
+        syncPerlerLayerBounds (oldFocus);
+        repaint();
+    }
+}
+
+bool ModuleWorkspace::isModuleTopmostAmongModules (const ModulePanel& panel) const noexcept
+{
+    if (panel.getModuleType() == ModuleType::virtuPet)
+        return false;
+
+    const int n = getNumChildComponents();
+    if (n <= 0)
+        return false;
+
+    std::vector<y2k::ui::WorkspaceChildRole> roles ((size_t) n, y2k::ui::WorkspaceChildRole::other);
+    int targetIdx = -1;
+
+    for (int i = 0; i < n; ++i)
+    {
+        const auto* child = getChildComponent (i);
+        if (child == &panel)
+            targetIdx = i;
+
+        if (const auto* mp = dynamic_cast<const ModulePanel*> (child))
+        {
+            roles[(size_t) i] = (mp->getModuleType() == ModuleType::virtuPet)
+                                    ? y2k::ui::WorkspaceChildRole::overlayOrTopmost
+                                    : y2k::ui::WorkspaceChildRole::regularModule;
+        }
+        else if ((palettePanel != nullptr && child == palettePanel.get())
+                 || child == toolbarBackdrop.get()
+                 || child == toolbarOverflowBackdrop.get()
+                 || child == gainPopupBackdrop.get()
+                 || child == &gainSlider
+                 || child == &hideBtn
+                 || dynamic_cast<const VirtuPetConfirmOverlay*> (child) != nullptr)
+        {
+            roles[(size_t) i] = y2k::ui::WorkspaceChildRole::overlayOrTopmost;
+        }
+        else
+        {
+            for (const auto* pl : perlerLayers)
+            {
+                if (child == pl)
+                {
+                    roles[(size_t) i] = y2k::ui::WorkspaceChildRole::overlayOrTopmost;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (targetIdx < 0)
+        return false;
+
+    return ! y2k::ui::regularModuleNeedsRaise (roles.data(), n, targetIdx);
+}
+
+void ModuleWorkspace::collectToyExclusionRects (const juce::Component& targetSpace,
+                                                std::vector<juce::Rectangle<int>>& out) const
+{
+    auto pushLocal = [&] (const juce::Rectangle<int>& localRect)
+    {
+        if (localRect.isEmpty())
+            return;
+        const auto mapped = targetSpace.getLocalArea (this, localRect);
+        if (! mapped.isEmpty())
+            out.push_back (mapped);
+    };
+
+    if (palettePanel != nullptr && palettePanel->isVisible()
+        && ! palettePanel->isFloating()
+        && palettePanel->getParentComponent() == this)
+    {
+        pushLocal (palettePanel->getBounds());
+    }
+
+    if (toolbarBackdrop != nullptr && toolbarBackdrop->isVisible())
+        pushLocal (toolbarBackdrop->getBounds());
+
+    if (toolbarOverflowBackdrop != nullptr && toolbarOverflowBackdrop->isVisible())
+        pushLocal (toolbarOverflowBackdrop->getBounds());
+
+    if (gainPopupBackdrop != nullptr && gainPopupBackdrop->isVisible())
+        pushLocal (gainPopupBackdrop->getBounds());
+    else if (gainSlider.isVisible())
+        pushLocal (gainSlider.getBounds());
+
+    for (int i = 0; i < getNumChildComponents(); ++i)
+    {
+        const auto* child = getChildComponent (i);
+        if (child != nullptr && child->isVisible()
+            && dynamic_cast<const VirtuPetConfirmOverlay*> (child) != nullptr)
+        {
+            pushLocal (child->getBounds());
+        }
+    }
 }
 
 ModulePanel& ModuleWorkspace::addModule(std::unique_ptr<ModulePanel> panel, bool autoPosition)
@@ -3000,8 +3112,7 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
         && canvasBgCacheKey == themeKey)
         return;
 
-    canvasBgCache = juce::Image (juce::Image::ARGB, w, h, true);
-    juce::Graphics cg (canvasBgCache);
+    canvasBgCache = juce::Image (juce::Image::ARGB, w, h, true, juce::SoftwareImageType());
 
     // 背景模式：
     //   · 绿幕（greenScreen）：整块纯绿（不画凹槽 / 网格点阵）；
@@ -3011,19 +3122,22 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
     const bool greenScreen = PinkXP::isGreenScreenBackdrop();
     const bool transparent = PinkXP::isTransparentBackdrop();
     const bool chromaKey   = greenScreen || transparent;
-    if (greenScreen)
     {
-        cg.setColour (PinkXP::chromaKeyGreen());
-        cg.fillAll();
-    }
-    else if (! transparent)
-    {
-        // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
-        PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
-                            PinkXP::content.withAlpha (0.70f));
+        juce::Graphics cg (canvasBgCache);
+        if (greenScreen)
+        {
+            cg.setColour (PinkXP::chromaKeyGreen());
+            cg.fillAll();
+        }
+        else if (! transparent)
+        {
+            // 1) drawSunken —— Image-local 坐标 (0,0,w,h)
+            PinkXP::drawSunken (cg, juce::Rectangle<int>(0, 0, w, h),
+                                PinkXP::content.withAlpha (0.70f));
+        }
     }
 
-    // 2) 网格点阵 —— 转换为 Image-local 坐标
+    // 2) 网格点阵 —— 直接 BitmapData 像素混合（与 cg.fillRect(x,y,1,1) 逐像素等价，消除 26,000+ 次 fillRect 调用）
     auto canvas = getCanvasArea();
     auto localCanvas = juce::Rectangle<int>(
         canvas.getX() - canvasOuter.getX(),
@@ -3038,17 +3152,31 @@ void ModuleWorkspace::rebuildCanvasBgCacheIfNeeded()
                              : (tokens.frameStyle == PinkXP::FrameStyle::modernStudio
                                 || tokens.frameStyle == PinkXP::FrameStyle::frostedGlass) ? 0.20f
                              : 0.28f;
-        cg.setColour (PinkXP::pink200.withAlpha (dotAlpha));
-        for (int y = localCanvas.getY(); y < localCanvas.getBottom(); y += gridSize)
+        const juce::Colour dotCol = PinkXP::pink200.withAlpha (dotAlpha);
+        juce::PixelARGB dotPx (dotCol.getAlpha(), dotCol.getRed(), dotCol.getGreen(), dotCol.getBlue());
+        dotPx.premultiply();
+
+        const int xStart = juce::jmax (0, localCanvas.getX());
+        const int xEnd   = juce::jmin (w, localCanvas.getRight());
+        const int yStart = juce::jmax (0, localCanvas.getY());
+        const int yEnd   = juce::jmin (h, localCanvas.getBottom());
+        const int xStep  = gridSize * 2;
+        if (xStart < xEnd && yStart < yEnd)
         {
-            for (int x = localCanvas.getX(); x < localCanvas.getRight(); x += gridSize * 2)
-                cg.fillRect (x, y, 1, 1);
+            juce::Image::BitmapData bd (canvasBgCache, juce::Image::BitmapData::readWrite);
+            for (int y = yStart; y < yEnd; y += gridSize)
+            {
+                auto* row = reinterpret_cast<juce::PixelARGB*> (bd.getLinePointer (y));
+                for (int x = xStart; x < xEnd; x += xStep)
+                    row[x].blend (dotPx);
+            }
         }
     }
 
     // 3) Grid 叠加线
     if (gridOverlayVisible)
     {
+        juce::Graphics cg (canvasBgCache);
         const int major = gridSize * 8;
 
         cg.setColour (PinkXP::pink300.withAlpha (0.22f));
@@ -4956,7 +5084,7 @@ void ModuleWorkspace::notifyLayoutChanged()
     //   · 这样拖动过程中连续调的 notify 会被压成"最后一次 +16ms"派发一次，
     //     避免在 10+ 模块场景下每次 saveLayoutAsXml 的毫秒级开销堆积。
     layoutChangePending = true;
-    layoutChangeCoalescer.startTimer (16);
+    layoutChangeCoalescer.startTimer (200);
 }
 
 void ModuleWorkspace::dispatchLayoutChangeNow()
@@ -5262,7 +5390,17 @@ bool ModuleWorkspace::loadLayoutFromTree(const juce::ValueTree& tree, bool impor
         const auto type    = stringToModuleType(typeStr, &ok);
         if (! ok) continue;
 
-        auto panel = factory(type);
+        std::unique_ptr<ModulePanel> panel;
+        if (type == ModuleType::virtuPet)
+        {
+            // 紧随其后的 restorePersistentState() 会按存档角色加载一次，避免构造期多解码 ~134 张随机 PNG
+            const VirtuPetModule::ScopedDeferInitialRoleLoad deferPetLoad;
+            panel = factory (type);
+        }
+        else
+        {
+            panel = factory (type);
+        }
         if (panel == nullptr) continue;
 
         const auto idStr = node.getProperty(kPropId).toString();

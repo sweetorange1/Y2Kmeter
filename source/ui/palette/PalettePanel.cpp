@@ -73,7 +73,7 @@ void HueRing::rebuildRing(int w, int h, float scale)
     const int pw = juce::jmax(2, (int) std::lroundf((float) w * scale));
     const int ph = juce::jmax(2, (int) std::lroundf((float) h * scale));
 
-    ringImage_ = juce::Image(juce::Image::ARGB, pw, ph, true);
+    ringImage_ = juce::Image(juce::Image::ARGB, pw, ph, true, juce::SoftwareImageType());
     juce::Image::BitmapData bd(ringImage_, juce::Image::BitmapData::writeOnly);
 
     const float cx = (float) pw * 0.5f;
